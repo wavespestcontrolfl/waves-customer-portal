@@ -1172,7 +1172,14 @@ describe('round-10 P2 :1682: LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY carri
     expect(res.body.lead.has_address).toBe(true);
   });
 
-  test('an ordinary slot-taken 409 (no address race) carries neither address_changed nor lead', async () => {
+  // With the funnel off (GATE_SOUTH_ZONE_DAY_FUNNEL) the 409 carries fresh times at the customer's own pin, as before
+  // the far-south rule: the switch restores that answer (pre-push P1 on 7cdf34198a). With it on, no times are built
+  // and the page reloads its own list (nextCommitRefresh).
+  test.each([
+    ['the funnel off: fresh times at the customer\'s pin', false, [[27.4, -82.5], [27.4, -82.5]]],
+    ['the funnel on: no times, the page reloads its list', true, [[27.4, -82.5]]],
+  ])('an ordinary slot-taken 409 (no address race) carries neither address_changed nor lead (%s)', async (_label, funnel, builtPins) => {
+    mockFarSouthGates.funnel = funnel;
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
     firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     listResults.scheduled_services = [];
@@ -1189,6 +1196,8 @@ describe('round-10 P2 :1682: LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY carri
     expect(res.body.code).toBe('SLOT_TAKEN');
     expect(res.body.address_changed).toBeUndefined();
     expect(res.body.lead).toBeUndefined();
+    expect(mockBuildAvailability.mock.calls.map(([args]) => [args.lat, args.lng])).toEqual(builtPins);
+    expect(res.body.availability === null).toBe(funnel);
   });
 });
 
@@ -2144,11 +2153,13 @@ describe('POST /:token commit', () => {
     });
 
     // Pre-push P1s on 903ecc5ff0, 910b741125 and 0cdae8374e: with an address typed, a booking that moved to a matched
-    // profile's other stored location goes there. That profile is the trusted customer the next commit loads, so the
-    // refusal says the address changed and builds no times: the page drops the typed address and reloads its list
-    // (GET) from that profile's stored location and address, where the retry's own checks run. A time open there but
-    // not at the typed pin is offered and books (nextCommitRefresh).
+    // profile's other stored location goes there. That profile is the trusted customer the next commit loads, so with
+    // the funnel on the refusal says the address changed and builds no times: the page drops the typed address and
+    // reloads its list (GET) from that profile's stored location and address, where the retry's own checks run. A time
+    // open there but not at the typed pin is offered and books (nextCommitRefresh). With the funnel off the refusal
+    // answers fresh times at that location, as before (the coords-mismatch test below).
     test('a typed address and a profile at another stored location: the 409 drops the typed address, the reload offers the profile\'s times, and the retry books there', async () => {
+      mockFarSouthGates.funnel = true;
       firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -2205,6 +2216,7 @@ describe('POST /:token commit', () => {
         firstResults.leads = () => { throw new Error('leads unreadable'); };
       }],
     ])('a typed address whose booking moved, with %s: the refusal keeps the typed address', async (_label, seed) => {
+      mockFarSouthGates.funnel = true;
       seed();
       const { nextCommitRefresh } = inspectionPublicRouter._test;
       const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
@@ -3234,7 +3246,15 @@ describe('POST /:token commit', () => {
         });
       });
 
-      test('coords mismatch on the matched row → re-validates the slot against ITS stored location and fails closed (SLOT_TAKEN), never books', async () => {
+      // The refusal: with the funnel off (GATE_SOUTH_ZONE_DAY_FUNNEL) fresh times at the matched row's own location,
+      // as before the far-south rule (pre-push P1 on 7cdf34198a). With it on, no times: phase 1 linked the lead to the
+      // matched row, so the page drops the typed address and reloads its own list there, where its next commit books
+      // (nextCommitRefresh).
+      test.each([
+        ['the funnel off: fresh times at ITS location', false, [[27.4, -82.5], [27.1, -82.2], [27.1, -82.2]], undefined],
+        ['the funnel on: no times, the typed address dropped', true, [[27.4, -82.5], [27.1, -82.2]], true],
+      ])('coords mismatch on the matched row → re-validates the slot against ITS stored location and fails closed (SLOT_TAKEN), never books (%s)', async (_label, funnel, builtPins, addressChanged) => {
+        mockFarSouthGates.funnel = funnel;
         firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot(); // satisfies the pre-lock anti-forgery day check only
@@ -3258,14 +3278,12 @@ describe('POST /:token commit', () => {
         expect(mockCreateSelfBooking).not.toHaveBeenCalled();
         expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
         // buildAvailabilityForLead: [0] the pre-lock day check at the lead's
-        // OWN resolved location and [1] phase 1's re-validation at the MATCHED
-        // row's own (far-away) location — not the pre-lock one. The refusal
-        // builds no fresh times. Phase 1 linked the lead to the matched row,
-        // so the page drops the typed address and reloads its own list there,
-        // where its next commit books (nextCommitRefresh).
-        expect(mockBuildAvailability).toHaveBeenCalledTimes(2);
-        expect(mockBuildAvailability.mock.calls[1][0]).toEqual(expect.objectContaining({ lat: 27.1, lng: -82.2 }));
-        expect(res.body).toMatchObject({ availability: null, address_changed: true });
+        // OWN resolved location, [1] phase 1's re-validation at the MATCHED
+        // row's own (far-away) location — not the pre-lock one — and, with
+        // the funnel off, [2] the refusal's fresh times there.
+        expect(mockBuildAvailability.mock.calls.map(([args]) => [args.lat, args.lng])).toEqual(builtPins);
+        expect(res.body.address_changed).toBe(addressChanged);
+        expect(res.body.availability === null).toBe(funnel);
       });
     });
 

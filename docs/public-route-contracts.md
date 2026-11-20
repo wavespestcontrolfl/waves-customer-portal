@@ -7674,16 +7674,20 @@ the booking resolves its zone from the same address the same way
 (`callbackVisit.zoneAddress`; off, from the customer's city as before), so its
 stamp and its check match the list. An address that resolves to no zone takes
 the customer's city on file, as a visit with no zone stamp is read later by its
-customer's city. Every list that knows the trusted customer (GET,
+customer's city. With the funnel on, the booking transaction also refuses with
+`CUSTOMER_CHANGED_RETRY` when that city changed after its zone read it, and the
+page gets the answer an account change under the booking fence already gets:
+`SLOT_TAKEN` with `address_changed: true`, the address on file and no times, or
+`422 address_unresolved` when the token no longer reaches that customer. Every list that knows the trusted customer (GET,
 `POST /:token/availability`, `POST /:token/find-slots`, the new_lead email
 times and a refused booking's list) reads the same fallback, so a list never
 offers an hour that zone refuses. A matched profile at another stored location books with its
 own address (the slot is checked again with it); at the same pin the booking
 keeps the typed address, as the list read it. When the customer's city decides
 the zone, the slot is checked again per truck (both far-south gates on). A
-refused booking's `SLOT_TAKEN` answer carries fresh times only when the page's
-next commit reads this one's inputs: an address typed (the page sends it again)
-at the same pin. They are built there with the booking's zone address. Any other
+refused booking's `SLOT_TAKEN` answer, with the funnel on, carries fresh times
+only when the page's next commit reads this one's inputs: an address typed (the
+page sends it again) at the same pin. They are built there with the booking's zone address. Any other
 refusal answers `availability: null`, and the page reloads its own list (GET, or
 `POST /:token/availability` with the address it holds), which reads the same
 resolver and trusted customer as its next commit. A booking moved to a matched
@@ -7691,7 +7695,9 @@ profile's other stored location also answers `address_changed: true` when that
 profile is the trusted customer the next commit loads: the page drops the typed
 address, so its reload and its retry read that profile's stored location and
 address. When the next commit would load another profile, or that read fails,
-the typed address stays. A failed build answers with no times too. No field,
+the typed address stays. A failed build answers with no times too. With the
+funnel off, every refusal carries fresh times at the booking location, as
+before. No field,
 status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than

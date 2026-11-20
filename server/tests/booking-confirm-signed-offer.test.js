@@ -869,6 +869,39 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(slotGuard.mock.calls[0][1]).toEqual({ zone: CITY_ZONE });
       expect(capturedScheduledInsert).toMatchObject({ zone: 'sarasota' });
     });
+
+    // Pre-push P1 on 7cdf34198a: the zone reads the customer's city before the fence's snapshot, so a city edit
+    // between the two reads leaves the snapshot and the locked row agreeing, and the fingerprint passes. With the
+    // funnel on the locked row's city must be the one the zone read: the booking refuses as a changed account before
+    // the guard and the insert. With the funnel off the zone is only its stamp, and the booking goes on as before.
+    test.each([
+      ['the funnel on: refused as a changed account', true, expect.objectContaining({ ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY' }), 0, undefined],
+      ['the funnel off: booked as before', false, SENTINEL, 1, 'sarasota'],
+    ])('a city edit after the zone read (%s)', async (_label, funnel, outcome, guardCalls, stamped) => {
+      const EDITED = { ...CUST, city: 'Venice' };
+      fencedCustomer = EDITED;
+      const tables = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const builder = tables(table);
+        if (table !== 'customers') return builder;
+        const first = builder.first;
+        // The pre-fence snapshot names its columns; the zone's read (the whole row) still sees the old city.
+        builder.first = jest.fn((...cols) => (cols.length ? Promise.resolve(EDITED) : first()));
+        return builder;
+      });
+      const slotGuard = jest.fn().mockResolvedValue(true);
+      const funnelGate = gates.southZoneDayFunnel;
+      gates.southZoneDayFunnel = funnel;
+      let result;
+      try {
+        result = await createSelfBooking(assessment(slotGuard)).catch((err) => err.message);
+      } finally {
+        gates.southZoneDayFunnel = funnelGate;
+      }
+      expect(result).toEqual(outcome);
+      expect(slotGuard).toHaveBeenCalledTimes(guardCalls);
+      expect(capturedScheduledInsert?.zone).toBe(stamped);
+    });
   });
 
   test("someone ELSE's estimate UUID books UNLINKED (no source_estimate_id stamp) with a warn", async () => {

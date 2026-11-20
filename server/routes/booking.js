@@ -3994,7 +3994,12 @@ async function createSelfBooking(payload = {}) {
         const freshBookingCustomer = await trx('customers')
           .where({ id: custId }).forShare()
           .first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude');
-        if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)) {
+        // The zone (the far-south truck check below and the visit's stamp) read the customer's city before the
+        // pre-fence snapshot, and the fingerprint cannot see an edit between those two reads. With the funnel on
+        // (GATE_SOUTH_ZONE_DAY_FUNNEL) the locked row's city must be the city the zone read (owner rule B, pre-push
+        // P1 on 7cdf34198a); with it off the zone is only the stamp it always was.
+        if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)
+          || (funnelOn() && freshBookingCustomer.city !== customer.city)) {
           throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
             statusCode: 409,
             isOperational: true,

@@ -637,10 +637,13 @@ function storedAddressCandidates(lead, custRow) {
 // next commit loads: the page drops the typed address, so its reload and its
 // next commit read that profile, where this booking was going. Otherwise the
 // typed address stays: without it, the next commit would reach another
-// profile. A failed read keeps it too.
+// profile. A failed read keeps it too. With the funnel off
+// (GATE_SOUTH_ZONE_DAY_FUNNEL) no list or commit reads a zone, so every
+// refusal carries fresh times at the booking location, the answer the switch
+// restores (pre-push P1 on 7cdf34198a).
 async function nextCommitRefresh({ lead, verified, resolved, custRow, zoneSource, bookingLocation, locationMoved }) {
   const typed = resolved.source === 'supplied';
-  if (typed && !locationMoved) return { location: bookingLocation, address: zoneSource };
+  if (!funnelOn() || (typed && !locationMoved)) return { location: bookingLocation, address: zoneSource };
   if (!typed) return { location: null };
   const nextCust = await loadLead(db, lead.id)
     .then((nextLead) => (nextLead ? loadTrustedCustomer(db, nextLead, verified) : null))
@@ -2606,8 +2609,8 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, nex
   if (result.code === 'ADDRESS_UNVERIFIED') {
     return res.status(409).json({ error: result.error, code: 'ADDRESS_UNVERIFIED' });
   }
-  // Fresh times only where the page's next commit reads this one's inputs, else none and the page reloads its own
-  // list (nextCommitRefresh), so the times it shows are times that commit admits (owner rule B per truck).
+  // With the funnel on, fresh times only where the page's next commit reads this one's inputs, else none and the page
+  // reloads its own list (nextCommitRefresh), so the times it shows are times that commit admits (owner rule B per truck).
   if (result.status === 409) {
     return sendSlotTaken(res, { ...(await nextCommitRefresh(nextCommit)), range, config, catalog, leadId: lead.id, error: result.error });
   }
