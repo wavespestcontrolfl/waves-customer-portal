@@ -143,6 +143,15 @@ function buttonsOf(name, sure, block, card = {}) {
   return { kind: BUTTON_KIND, items };
 }
 
+// What a confirm does, in words: the credits at the first plan visit and the thank-you email. Under GATE_REFERRAL_STEP2
+// the rule comes from the card's terms, and a member at the yearly limit gets no credit, so no thank-you email follows.
+function confirmCredits(card, first) {
+  const step2 = step2Live();
+  const credits = step2 ? `${termsText(card)}, at ${first}'s first completed plan visit` : `Both accounts get the $25 credit at ${first}'s first completed plan visit`;
+  const thanks = step2 && card.terms?.atCap ? '' : ', and the referrer then gets one thank-you email at the next 9:00 AM ET';
+  return `${credits}${thanks}`;
+}
+
 // The full text behind "Show full text": the card as the Queue shows it, and what each answer does.
 function detailOf(card, name, sure, block) {
   const evidence = card.evidence || {};
@@ -157,10 +166,7 @@ function detailOf(card, name, sure, block) {
   else if (sure) lines.push(`Likely referrer: ${tidyName(sure.name)}, ${sure.viaCode ? 'the owner of the link code' : 'the one customer with that first and last name'}.`);
   else lines.push('No single customer matches, so pick the referrer in Referrals → Queue.');
   if (!block) {
-    const credits = step2Live() ? `${termsText(card)}, at ${first}'s first completed plan visit` : `Both accounts get the $25 credit at ${first}'s first completed plan visit`;
-    // A member at the yearly limit gets no credit, so no thank-you email follows.
-    const thanks = step2Live() && card.terms?.atCap ? '' : ', and the referrer then gets one thank-you email at the next 9:00 AM ET';
-    lines.push(`Confirm makes ${tidyName(sure.name)} the referrer. ${credits}${thanks}. Nothing is sent and no money moves at the tap.`);
+    lines.push(`Confirm makes ${tidyName(sure.name)} the referrer. ${confirmCredits(card, first)}. Nothing is sent and no money moves at the tap.`);
   } else if (block === 'reward_not_deferred') {
     lines.push('The referral program pays rewards at once now, so a confirm pays and sends the reward text and email. Confirm in Referrals → Queue.');
   } else if (block === 'first_visit_done') {

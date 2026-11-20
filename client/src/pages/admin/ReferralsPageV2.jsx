@@ -401,6 +401,23 @@ function inboundConfirmedMessage(result) {
   return "Referral confirmed. The credit step posted nothing; check the referral in the queue below.";
 }
 
+// The line under the Queue's inbound heading: the flat $25 words with Step 2 off, no amount with it on.
+const inboundIntro = (step2) => `Plan customers who came in through a referral link or named a referrer. Confirm the referrer to pay the ${step2 ? "" : "$25 "}rewards.`;
+
+// What a confirm does, in words. Gate off: the flat $25 words. Under Step 2 the rule comes from the card's terms, which
+// were computed for the suggested member: when staff picked someone else the standing is not known, so the line says the
+// limit may apply; a member at the yearly limit gets no credit, so no thank-you email follows.
+function inboundConfirmWords(item, step2, chosen, firstName) {
+  const when = item.creditsNow ? "now" : `at ${firstName}'s next completed plan visit`;
+  const mail = " The referrer gets one thank-you email at the next 9:00 AM ET, and no text.";
+  if (!step2) {
+    return `Both accounts get the $25 credit ${when}. The referrer ${item.creditsNow ? "" : "then "}gets one thank-you email at the next 9:00 AM ET, and no text.`;
+  }
+  const own = chosen && item.terms && String(item.terms.forCustomerId) === String(chosen.customerId);
+  const rule = own ? item.terms.text : item.terms?.conditional || "Credits follow the program settings";
+  return `${rule} ${when}.${own && item.terms.atCap ? "" : mail}`;
+}
+
 // One plan customer who came in through a
 // referral link or named a referrer. The office picks the referrer (a
 // suggestion or a search result), then confirms; or marks "not a referral".
@@ -429,13 +446,6 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
       setResults([]);
     }
   };
-
-  // The card's rule and cap standing were computed for the suggested member. When staff picked someone else, the
-  // standing is not known, so the line says the limit may apply instead of showing the suggested member's.
-  const termsMatch = Boolean(chosen && item.terms && String(item.terms.forCustomerId) === String(chosen.customerId));
-  const termsLine = termsMatch
-    ? item.terms.text
-    : item.terms?.conditional || "Credits follow the program settings";
 
   const confirm = async () => {
     if (!chosen || busy) return;
@@ -547,11 +557,7 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
         >
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
-            {step2
-              ? `${termsLine} ${item.creditsNow ? "now" : `at ${firstName}'s next completed plan visit`}.${termsMatch && item.terms.atCap ? "" : " The referrer gets one thank-you email at the next 9:00 AM ET, and no text."}`
-              : item.creditsNow
-                ? "Both accounts get the $25 credit now. The referrer gets one thank-you email at the next 9:00 AM ET, and no text."
-                : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text.`}{" "}
+            {inboundConfirmWords(item, step2, chosen, firstName)}{" "}
             A referrer's 3rd, 5th or 10th referral also sends the usual milestone text.
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -796,7 +802,7 @@ export default function ReferralsPageV2() {
       searchSeen.current = "";
       setQueue(q === FAILED ? [] : q.referrals || []);
       setPayouts(pay === FAILED ? [] : pay.payouts || []);
-      setInbound({ items: inb === FAILED ? [] : inb.items || [], step2: inb !== FAILED && inb.step2 === true });
+      setInbound({ items: inb === FAILED ? [] : inb.items || [], step2: inb.step2 === true });
       setLoading(false);
     });
   }, []);
@@ -1331,8 +1337,7 @@ export default function ReferralsPageV2() {
                   Needs confirmation ({inbound.items.length})
                 </div>
                 <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
-                  Plan customers who came in through a referral link or named
-                  a referrer. Confirm the referrer to pay the {inbound.step2 ? "" : "$25 "}rewards.
+                  {inboundIntro(inbound.step2)}
                 </div>
               </div>
               {inbound.items.map((item) => (

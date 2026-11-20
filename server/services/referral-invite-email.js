@@ -49,6 +49,7 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
     // reward in admin REQUIRES editing the referral_nudge step copy to
     // match — same as any other fact baked into an editable automation.
     // Copy verified in sync at wiring time ($25, #2621).
+    const { referralOfferDecision } = require('./referral-engine');
     const customer = await db('customers')
       .where({ id: customerId })
       .first('id', 'first_name', 'email');
@@ -90,12 +91,10 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
 
       // GATE_REFERRAL_STEP2: a member at the yearly limit is not enrolled (the sequence's copy promises a reward the
       // settlement would post as $0); no new copy, the invite is just not sent.
-      if (((require('../config/feature-gates').gates) || {}).referralStep2 === true) {
-        const offer = await require('./referral-engine').step2OfferStrict(db, customerId);
-        if (!offer || offer.capReached || offer.programPaused) {
-          logger.info(`[referral-invite-email] customer ${customerId}: ${offer ? (offer.programPaused ? 'program paused' : 'at the yearly limit') : 'settings unavailable'}; referral_nudge not enrolled`);
-          return null;
-        }
+      const nudge = await referralOfferDecision(db, customerId);
+      if (nudge.reason) {
+        logger.info(`[referral-invite-email] customer ${customerId}: ${nudge.reason}; referral_nudge not enrolled`);
+        return null;
       }
 
       const { enrollSequenceFromEvent } = require('./automation-enroll');
@@ -107,36 +106,22 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
       });
     }
 
-    const { getSettings } = require('./referral-engine');
-    const settings = await getSettings();
-    // The friend's number: under the gate it comes from the same strict offer as the member's (set below).
-    let refereeCents = Number(settings.referee_discount_cents || 0);
-    // GATE_REFERRAL_STEP2: the member's number is the Step 2 standard credit, and a member at the yearly limit is
-    // promised nothing: the member-reward part is dropped (no new copy), leaving only the friend's discount.
-    let memberCents = settings.referrer_reward_cents;
-    let atYearlyLimit = false;
-    if (((require('../config/feature-gates').gates) || {}).referralStep2 === true) {
-      // The live settings row only: if it cannot be read, no amount is promised and no email goes.
-      const offer = await require('./referral-engine').step2OfferStrict(db, customerId);
-      if (!offer || offer.programPaused) {
-        logger.info(`[referral-invite-email] customer ${customerId}: program settings unavailable or paused; invite skipped`);
-        return null;
-      }
-      memberCents = Math.round(offer.standardReward * 100);
-      refereeCents = Math.round(offer.friendReward * 100);
-      atYearlyLimit = offer.capReached;
+    // Both amounts come from one read: the live settings row under the gate (if it cannot be read, no amount is
+    // promised and no email goes), the flat legacy settings with it off. A member at the yearly limit is promised
+    // nothing: the member-reward part is dropped (no new copy), leaving only the friend's discount.
+    const offer = await referralOfferDecision(db, customerId, { legacyAmounts: true });
+    if (offer.skip) {
+      logger.info(`[referral-invite-email] customer ${customerId}: ${offer.reason}; invite skipped`);
+      return null;
     }
-    const referrer = dollars(memberCents);
-    let rewardLine = refereeCents > 0
-      ? `you get a ${referrer} referral reward and they get ${dollars(refereeCents)} off their first service.`
-      : `you get a ${referrer} referral reward.`;
-    if (atYearlyLimit) {
-      if (!(refereeCents > 0)) {
-        logger.info(`[referral-invite-email] customer ${customerId} is at the yearly limit and no friend discount is set; invite skipped`);
-        return null;
-      }
-      rewardLine = `they get ${dollars(refereeCents)} off their first service.`;
+    const parts = [];
+    if (!offer.atLimit) parts.push(`you get a ${dollars(offer.memberCents)} referral reward`);
+    if (offer.refereeCents > 0) parts.push(`they get ${dollars(offer.refereeCents)} off their first service`);
+    if (!parts.length) {
+      logger.info(`[referral-invite-email] customer ${customerId} is at the yearly limit and no friend discount is set; invite skipped`);
+      return null;
     }
+    const rewardLine = `${parts.join(' and ')}.`;
 
     const EmailTemplateLibrary = require('./email-template-library');
     const result = await EmailTemplateLibrary.sendTemplate({

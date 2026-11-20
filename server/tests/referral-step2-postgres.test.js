@@ -919,6 +919,39 @@ const DAY = 86400000;
       expect(await engine.referralAcquisitionCost(db, [], 40)).toBe(0);
     });
 
+    // The customer merge (customer-dedupe's repoint) moves every customer_id / *_customer_id column and the ledger rows
+    // of the loser onto the survivor. Its executor reads the public schema, so these tests apply the same repoint here.
+    async function mergeIntoMember(member, friend) {
+      await db('referrals').where({ referrer_customer_id: friend.id }).update({ referrer_customer_id: member.id });
+      await db('referrals').where({ referee_customer_id: friend.id }).update({ referee_customer_id: member.id });
+      await db('customer_credit_ledger').where({ customer_id: friend.id }).update({ customer_id: member.id });
+    }
+
+    test('member and friend profiles merged after a $25 / $25 settlement: the cost stays $50', async () => {
+      const { member, friend, visit } = await performed({ memberFields: HOME });
+      await firstService(friend, visit);
+      expect(await engine.referralAcquisitionCost(db, [friend.id], 40)).toBe(50);
+      await mergeIntoMember(member, friend);
+      expect(await engine.referralAcquisitionCost(db, [member.id], 40)).toBe(50);
+    });
+
+    test('merged after a capped $0 / $25 settlement: the cost stays $25 (the friend credit), not $0', async () => {
+      const { member, friend, visit } = await performed({ memberFields: HOME });
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: member.id, referee_name: `Prior ${i}`, referee_phone: `+1941567${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      await firstService(friend, visit);
+      expect(await engine.referralAcquisitionCost(db, [friend.id], 40)).toBe(25);
+      await mergeIntoMember(member, friend);
+      expect(await engine.referralAcquisitionCost(db, [member.id], 40)).toBe(25);
+    });
+
     test('a $0 friend credit still costs the member amount (the friend is found by referee_customer_id)', async () => {
       await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 0 });
       const ctx = await performed({ memberFields: HOME });
