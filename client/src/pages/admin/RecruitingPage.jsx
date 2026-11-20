@@ -1125,15 +1125,22 @@ export default function RecruitingPage() {
     if (refresh && detailIdRef.current !== id) return;
     const inPlace = refresh || detailIdRef.current === id;
     const seq = refresh ? detailSeq.current : ++detailSeq.current;
-    const fresh = inPlace ? ++refreshSeq.current : 0;
-    // Whether this read still decides what the page shows: no other open, no close, and for the applicant on screen no
-    // newer answer (a stage move's, a later re-read).
-    const newest = () => seq === detailSeq.current && (!inPlace || (detailIdRef.current === id && fresh === refreshSeq.current));
+    // Whether the page still wants this read: no other open, no close, and an in-place read's applicant still on screen.
+    const wanted = () => seq === detailSeq.current && (!inPlace || detailIdRef.current === id);
+    // An in-place read takes its version when its request starts: an answer that reaches the applicant after that (a
+    // stage move's, a later re-read) outranks it.
+    let fresh = 0;
+    const newest = () => wanted() && (!inPlace || fresh === refreshSeq.current);
     try {
       // An explicit open of the applicant on screen re-reads the offer card first: a date request or an answer changes
       // the offer without changing the stage. The offer, then the application, as after an offer action, so the stage
       // shown is never older than the offer. Another applicant's offer is read when it opens.
-      if (inPlace && !refresh) await reloadOfferFor(id);
+      if (inPlace && !refresh) {
+        await reloadOfferFor(id);
+        // The application read below marks replies read: never for an open the owner closed or left meanwhile.
+        if (!wanted()) return;
+      }
+      if (inPlace) fresh = ++refreshSeq.current;
       // The page's own re-reads (after an offer action, or a Try again) acknowledge no
       // replies: one that arrived meanwhile may sit behind a dialog. An open reads them.
       const data = await adminFetch(`/admin/careers/${id}${refresh ? "?peek=1" : ""}`);

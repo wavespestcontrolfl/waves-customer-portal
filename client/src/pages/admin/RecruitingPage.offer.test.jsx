@@ -1032,6 +1032,48 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(screen.queryByRole('button', { name: 'Reviewed' })).toBeNull(); // the detail still reads Reviewed
   });
 
+  // A bell link for the applicant on screen reads the offer first, then the application, and that application read marks
+  // replies read. An owner who leaves for another applicant before the offer read lands has not opened this one.
+  it('a bell link for the applicant on screen that the owner leaves before its offer read lands marks no replies read', async () => {
+    let holdOffer = false;
+    let releaseOffer;
+    const { calls } = setupFetch(
+      {
+        'GET /admin/careers/app-2': () => res(200, { application: detailFixture({ id: 'app-2', contact_snapshot: { name: 'Casey Morgan', phone: '9415550199' } }) }),
+        'GET /admin/careers/app-2/offer': () => res(200, offerPayload()),
+      },
+      {
+        offer: () => {
+          if (!holdOffer) return res(200, offerPayload({ current: sent }));
+          holdOffer = false;
+          return new Promise((resolve) => { releaseOffer = () => resolve(res(200, offerPayload({ current: sent }))); });
+        },
+        detail: detailFixture({ status: 'offer' }),
+      },
+    );
+    function Nav() {
+      const navigate = useNavigate();
+      return (
+        <>
+          <button type="button" onClick={() => navigate('/?application=app-1')}>bell-a</button>
+          <button type="button" onClick={() => navigate('/?application=app-2')}>go-b</button>
+        </>
+      );
+    }
+    render(<MemoryRouter><Nav /><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByTestId('offer-card');
+    holdOffer = true;
+    fireEvent.click(screen.getByText('bell-a'));
+    await waitFor(() => expect(releaseOffer).toBeDefined());
+    const from = calls.length;
+    fireEvent.click(screen.getByText('go-b'));
+    expect(await screen.findByRole('heading', { name: /Casey Morgan — / })).toBeInTheDocument();
+    releaseOffer();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls.slice(from).filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1')).toEqual([]);
+  });
+
   it('a stage dialog opened while the re-read after an offer action is out holds Confirm when that re-read fails, until Try again reads', async () => {
     let current = offerRecord({ status: 'sent', timeline: [] });
     let holdRead = false;
@@ -1861,6 +1903,18 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
     expect(await screen.findByText('The send got no answer. The offer still reads as a draft, but it may still go out. If it did, sending again is refused, so it cannot go out twice.')).toBeInTheDocument();
     expect(screen.queryByText('The offer is open.')).toBeNull();
+    expect(screen.queryByText(/Offer sent to/)).toBeNull();
+  });
+
+  // The send's answer says what both channels did. One that names only the text cannot say whether the email went out.
+  it('a send answered 200 that names only the text outcome is a lost answer: the form re-reads and claims no result', async () => {
+    await openDraftForm({
+      'POST /admin/careers/app-1/offer/offer-1/send': () => res(200, { offer: offerRecord({ status: 'sent' }), comms: { sms: { outcome: 'sent', code: null } } }),
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText('The send got no answer. The offer still reads as a draft, but it may still go out. If it did, sending again is refused, so it cannot go out twice.')).toBeInTheDocument();
     expect(screen.queryByText(/Offer sent to/)).toBeNull();
   });
 

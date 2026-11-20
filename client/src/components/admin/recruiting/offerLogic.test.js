@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   describeSend,
+  isSendComms,
   shownOffer,
   stageMoveOfferNote,
   expiryLabel,
@@ -163,5 +164,16 @@ describe('stageMoveOfferNote', () => {
       .toBe('This application has a job offer out. Only the owner account can move it out of Offer.');
     expect(stageMoveOfferNote({ held: false, draft: false, owner_only: false }, name)).toBeNull();
     expect(stageMoveOfferNote(undefined, name)).toBeNull(); // a server from before the field says nothing
+  });
+});
+
+describe('isSendComms', () => {
+  it('needs both channels, each with an outcome the server sends', () => {
+    expect(isSendComms({ sms: { outcome: 'sent', code: null }, email: { outcome: 'not_requested', code: null } })).toBe(true);
+    expect(isSendComms({ sms: { outcome: 'uncertain', code: 'comms_threw' }, email: { outcome: 'stale', code: null } })).toBe(true);
+    expect(isSendComms({ sms: { outcome: 'sent', code: null } })).toBe(false);
+    expect(isSendComms({ sms: { outcome: 'sent' }, email: { outcome: 'delivered' } })).toBe(false);
+    expect(isSendComms({ sms: 'sent', email: 'sent' })).toBe(false);
+    expect(isSendComms(null)).toBe(false);
   });
 });

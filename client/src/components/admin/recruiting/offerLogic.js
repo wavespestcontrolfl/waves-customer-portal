@@ -193,6 +193,18 @@ export function offerErrorMessage(err) {
   return ERROR_TEXT[code] || err?.message || "Something went wrong. Try again.";
 }
 
+// Every outcome the server's send gives a channel: the recruiting-comms legs ('sent', 'deferred', 'uncertain', 'failed',
+// 'blocked'; 'stale' when the application moved before the leg; 'skipped' when the leg had nothing to send), and
+// sendStageComms itself ('not_requested' for a channel with no phone or email on file, 'disabled' with the gate off).
+// 'handoff' is the ledger's in-flight state, worded as went out.
+const SEND_OUTCOMES = ["sent", "handoff", "deferred", "uncertain", "failed", "blocked", "stale", "skipped", "not_requested", "disabled"];
+
+// Whether a send's answer says what each channel did: both channels, each with an outcome above. An answer that does
+// not (offerApi sendOffer) cannot be worded, so it is a lost answer: the form re-reads and claims no result.
+export function isSendComms(comms) {
+  return ["sms", "email"].every((channel) => SEND_OUTCOMES.includes(comms?.[channel]?.outcome));
+}
+
 // What a send outcome means for the owner. 'sent' and 'handoff' went out;
 // 'deferred' is queued for the send window; 'uncertain' or no outcome may not
 // have gone out; anything else did not go out.

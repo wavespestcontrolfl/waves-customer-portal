@@ -5,7 +5,7 @@
  * the page keeps today's status-only Offer button.
  */
 import { adminFetch } from "../../../lib/adminFetch";
-import { isGateOffAnswer } from "./offerLogic";
+import { isGateOffAnswer, isSendComms } from "./offerLogic";
 
 // Every offer answer is JSON, and a call that uses its answer names what that answer must carry (`accepts`). A
 // success whose body cannot be read, or does not carry it, says nothing sure about what the server did, so it throws
@@ -59,12 +59,12 @@ export function saveOfferDraft(applicationId, fields) {
 // expectedOut = that read's outStamp: the offers out then (an answer or a date
 // request since then refuses the send with OFFERS_CHANGED).
 // The answer is the offer this send sent, read after delivery (it can already be
-// withdrawn or replaced, never still a draft), and what each channel did.
+// withdrawn or replaced, never still a draft), and what each of the two channels did.
 export function sendOffer(applicationId, offerId, draftHash, expectedOut) {
   return offerRequest(
     `/admin/careers/${applicationId}/offer/${offerId}/send`,
     { method: "POST", body: JSON.stringify({ draftHash, expectedOut }) },
-    (b) => b?.offer?.id === offerId && typeof b.offer.status === "string" && b.offer.status !== "draft" && typeof b.comms === "object" && b.comms !== null,
+    (b) => b?.offer?.id === offerId && typeof b.offer.status === "string" && b.offer.status !== "draft" && isSendComms(b.comms),
   );
 }
 
