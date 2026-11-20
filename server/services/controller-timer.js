@@ -44,8 +44,9 @@ function controllerTimerKey(row) {
 
 // The timers a form says the row may hold, as controllerTimerKey values: the one it showed when its timer change was
 // made, and any its own failed saves sent (they may have landed). `controller_timer_seen` from the customer's page,
-// `controllerTimerSeen` from the staff form; one key or a list, each key counted once. There are 20 timers that can
-// exist, so a list of more than 32 keys is not one a form built. null when the request carries none.
+// `controllerTimerSeen` from the staff form; one key or a list, each key counted once. There are 28 timers that can
+// exist (controller-timer.test.js counts them), so a list of more than 32 keys is not one a form built. null when the
+// request carries none.
 function controllerTimerSeen(body) {
   const raw = body || {};
   const seen = raw.controller_timer_seen ?? raw.controllerTimerSeen;
