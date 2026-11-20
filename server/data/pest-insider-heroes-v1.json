@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "notes": "Pest Insider top pictures (pest-insider/heroes.js): one per lead fact. The title is the fact's own title and the tag its card's, both drawn by code; art = the first 16 hex of the sha256 of ops/agents/pest-insider-art/<fact>-<art>.webp, the wordless picture ChatGPT drew for the fact (checked by a person before use), or null for the title on navy with no art. New art: node ops/agents/pest-insider-art-import.js <dir> --execute. After any change, draw the new pictures: node ops/agents/pest-insider-heroes.js --execute",
+  "heroes": {
+    "L01": { "art": "9bf4199395eeb2b1" },
+    "L02": { "art": "70bc19534301e9e3" },
+    "L03": { "art": "21e94e36fb9c51b1" },
+    "L04": { "art": "e5c025de9f86e6a6" },
+    "L05": { "art": "5e7606e213d44fb6" },
+    "L09": { "art": "526db6f115ee3893" },
+    "L10": { "art": "69470536b4c4a18e" },
+    "O01": { "art": "c7e7b06cd04c5cdf" },
+    "O02": { "art": "cb8313216507c00b" },
+    "O03": { "art": "fd0e3a43c46dc750" },
+    "O04": { "art": "c6940edaf8552d12" },
+    "P02": { "art": "12f373c2ace1882a" },
+    "P04": { "art": "45aeca36a52f1e65" },
+    "M01": { "art": "797cbdbbc0a7c8cf" },
+    "T01": { "art": "378dd4ad42f9abd5" },
+    "T02": { "art": "4f3c1fc9832ad001" },
+    "T03": { "art": "2416cf2ea340b077" },
+    "A01": { "art": "c25a6565134e597b" },
+    "A02": { "art": "5f471958801f33c0" },
+    "R01": { "art": "c282dd84e2e37c1b" },
+    "R02": { "art": "ca71199f301c6f91" },
+    "R03": { "art": "2b6cda6969bf6356" },
+    "D01": { "art": "50e8dc4aea5efcd4" },
+    "D02": { "art": "cb5fab90c2e3bad2" },
+    "D03": { "art": "4c01b2a8a811bcfa" },
+    "S01": { "art": "b15b0276c41dc718" },
+    "S02": { "art": "dd7f9bf4fd8d5cbf" }
+  }
+}
