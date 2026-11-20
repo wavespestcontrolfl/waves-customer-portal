@@ -1120,17 +1120,22 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(getCalls).toBe(2);
   });
 
-  // Pre-push P1s on b91bb3768f and 6d7d98d317: "Show all open times" starts
-  // a new page view, so it is off while a booking runs. A reset then would
-  // drop the booking's refusal, and a reset that failed would leave the
-  // refused time picked with no message. The refusal shows its own times.
-  it('"Show all open times" is off while a booking runs, so the booking\'s refusal still shows', async () => {
+  // Pre-push P1s on b91bb3768f, 6d7d98d317 and 833e0337bd: "Show all open
+  // times" and a search each start a new request generation, so both are off
+  // while a booking runs. Either would drop the booking's refusal, and one
+  // that then failed would leave the refused time picked with no message.
+  // The refusal shows its own times.
+  it('"Show all open times" and the search are off while a booking runs, so the booking\'s refusal still shows', async () => {
     let resolveCommit = null;
     let getCalls = 0;
+    let searches = 0;
     const fetchMock = vi.fn((url, opts = {}) => {
       const u = String(url);
       if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
-      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+      if (u.includes('/find-slots')) {
+        searches += 1;
+        return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+      }
       if (opts.method === 'POST') return new Promise((resolve) => { resolveCommit = resolve; });
       getCalls += 1;
       return Promise.resolve(jsonResponse(getCalls === 1 ? okPayload() : okPayload({ availability: mondayAvailability('09:00', '9:00 AM') })));
@@ -1148,6 +1153,12 @@ describe('InspectionPage: an address race without availability refreshes at the 
     const showAll = screen.getByRole('button', { name: 'Show all open times' });
     expect(showAll).toBeDisabled();
     fireEvent.click(showAll);
+    const prompt = screen.getByRole('button', { name: 'Tomorrow morning' });
+    expect(prompt).toBeDisabled();
+    fireEvent.click(prompt);
+    const input = screen.getByLabelText('Search for a service date or time');
+    fireEvent.change(input, { target: { value: 'monday morning' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
     const freshTimes = okPayload().availability;
     freshTimes.days[0].slots = [{ start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' }];
     await act(async () => {
@@ -1157,6 +1168,78 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(screen.getByRole('button', { name: /Choose 3:00 PM on Sunday, July 12/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).not.toBeInTheDocument();
     expect(getCalls).toBe(1);
+    expect(searches).toBe(1);
+  });
+
+  // Pre-push P1 on 833e0337bd: a search started while "Show all open times"
+  // runs is the newest request, so it wins even when it lands first.
+  it('a search started while "Show all open times" runs wins, even when it lands first', async () => {
+    let searches = 0;
+    let finishReset = null;
+    let getCalls = 0;
+    const fetchMock = vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) {
+        searches += 1;
+        if (searches === 1) return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+        const sundayAtThree = okPayload().availability;
+        sundayAtThree.days[0].slots = [{ start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' }];
+        return Promise.resolve(jsonResponse({ availability: sundayAtThree, summary: 'Open Sunday at 3.' }));
+      }
+      getCalls += 1;
+      if (getCalls === 1) return Promise.resolve(jsonResponse(okPayload()));
+      return new Promise((resolve) => { finishReset = resolve; });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show all open times' }));
+    await waitFor(() => expect(finishReset).not.toBeNull());
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'sunday at 3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText('Open Sunday at 3.')).toBeInTheDocument();
+    await act(async () => {
+      finishReset(jsonResponse(okPayload({ availability: mondayAvailability('09:00', '9:00 AM') })));
+    });
+    await new Promise((r) => { setTimeout(r, 20); });
+    expect(screen.getByRole('button', { name: /Choose 3:00 PM on Sunday, July 12/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).not.toBeInTheDocument();
+    expect(screen.getByText('Open Sunday at 3.')).toBeInTheDocument();
+  });
+
+  // Pre-push P1 on 833e0337bd (the same rule): a booking's failure
+  // supersedes a search still running, whose late times would clear the
+  // failure message.
+  it('a booking failure drops a search still running, so its message stays', async () => {
+    let finishSearch = null;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return new Promise((resolve) => { finishSearch = resolve; });
+      if (opts.method === 'POST') return Promise.reject(new TypeError('Failed to fetch'));
+      return Promise.resolve(jsonResponse(okPayload()));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'sunday at 3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(finishSearch).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    expect(await screen.findByText(/Something went wrong/i)).toBeInTheDocument();
+    const lateTimes = okPayload().availability;
+    lateTimes.days[0].slots = [{ start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' }];
+    await act(async () => {
+      finishSearch(jsonResponse({ availability: lateTimes, summary: 'Open Sunday at 3.' }));
+    });
+    await new Promise((r) => { setTimeout(r, 20); });
+    expect(screen.getByText(/Something went wrong/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose 3:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
   });
 
   // Pre-push P1 on b91bb3768f: a search still running when "Show all open

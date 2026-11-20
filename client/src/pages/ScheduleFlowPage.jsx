@@ -331,10 +331,12 @@ function AskCard({ onSearch, aiFiltered, onShowAll, closed, busy }) {
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
   const [notice, setNotice] = useState(null); // { text, isError }
+  // No search starts while one runs or while the page books a time.
+  const off = asking || busy;
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
-    if (!q || asking) return;
+    if (!q || off) return;
     setAsking(true);
     setNotice(null);
     try {
@@ -383,7 +385,7 @@ function AskCard({ onSearch, aiFiltered, onShowAll, closed, busy }) {
           data-glass-accent=""
           type="button"
           onClick={() => ask()}
-          disabled={asking || !question.trim()}
+          disabled={off || !question.trim()}
           style={{ minHeight: 48, padding: '0 20px', border: 0, borderRadius: 10, background: COLORS.yellow, color: S.text, font: 'inherit', fontSize: 16, fontWeight: 700, cursor: 'pointer' }}
         >
           {asking ? 'Checking…' : 'Search'}
@@ -397,13 +399,13 @@ function AskCard({ onSearch, aiFiltered, onShowAll, closed, busy }) {
               className="waves-ask-row"
               data-first={i === 0 ? '' : undefined}
               onClick={() => ask(prompt)}
-              disabled={asking}
+              disabled={off}
               style={{
                 display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'center', gap: 12,
                 width: '100%', minHeight: 44, padding: '10px 0', border: 0,
                 borderTop: i === 0 ? 0 : '1px solid rgba(4, 57, 94, 0.12)', borderRadius: 0,
                 background: 'transparent', color: S.text, font: 'inherit', fontSize: 14, fontWeight: 500,
-                lineHeight: 1.35, textAlign: 'left', cursor: asking ? 'not-allowed' : 'pointer', opacity: asking ? 0.65 : 1,
+                lineHeight: 1.35, textAlign: 'left', cursor: off ? 'not-allowed' : 'pointer', opacity: off ? 0.65 : 1,
               }}
             >
               <span>{prompt}</span>
@@ -2044,6 +2046,11 @@ function ScheduleFlowPage({ flow }) {
   // Drops every search still running (AI search, "Show all open times"):
   // each reads loadAbortRef's signal when it starts and ignores a late
   // answer. Requests made after this take the fresh controller.
+  // The page's rule: each search, reset or change of address supersedes
+  // when it starts, so the latest one wins. A booking never does at its
+  // start: its success or terminal state always shows, and any other answer
+  // or failure supersedes what is still running. While a booking runs, no
+  // search or reset starts (AskCard `busy`) (pre-push P1 on 833e0337bd).
   const supersedeSearches = () => {
     loadAbortRef.current?.abort();
     loadAbortRef.current = new AbortController();
@@ -2189,7 +2196,10 @@ function ScheduleFlowPage({ flow }) {
   // (same shape the GET returns) and hands the summary line back to the
   // card. Throwing lets the card show its own call-us fallback line.
   const runAiSearch = async (query) => {
-    const signal = loadAbortRef.current?.signal;
+    // The newest list request: a reset or an older search still running
+    // must not land over this one (see supersedeSearches).
+    supersedeSearches();
+    const { signal } = loadAbortRef.current;
     const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}/find-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2206,7 +2216,7 @@ function ScheduleFlowPage({ flow }) {
     });
     const body = await res.json().catch(() => ({}));
     // A superseded search fails as the browser's own abort does (AskCard).
-    if (signal?.aborted) throw new DOMException('search superseded', 'AbortError');
+    if (signal.aborted) throw new DOMException('search superseded', 'AbortError');
     if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
       showReserviceLocationReview();
       return { summary: null };
@@ -2431,6 +2441,8 @@ function ScheduleFlowPage({ flow }) {
       // A failure after the page moved on is the old page's, as a refusal is
       // (pre-push P1 on f49f71aa78).
       if (pageRequests.signal.aborted) return;
+      // An older search landing after this would clear the message.
+      supersedeSearches();
       setSubmitError('Something went wrong. Please try again, or text us and we\'ll help.');
     } finally {
       setSubmitting(false);
