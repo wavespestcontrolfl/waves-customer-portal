@@ -345,6 +345,10 @@ async function upsertRecords(records) {
   return n;
 }
 
+// The only inspection a page read answers: a stored first visit (visit number 1) with a violation-35 citation (a count
+// above 0, compared as a JSON number). pendingInspections picks only these, and saveReport saves for no other.
+const ANSWERABLE_SQL = "detail->>'visitNumber' = '1' AND detail->'violation35' > '0'::jsonb";
+
 // The unanswered first visits to read, newest first, at most `limit`: inspections of the window (event_date on or
 // after `cutoff`) under the attempt cap, whose key is in `keys`. `keys` holds the visits the run's own good read of
 // the inspection file lists as first visits with a violation-35 citation, so a visit a later file corrected, dropped
@@ -357,11 +361,11 @@ async function pendingInspections({ cutoff, limit, keys }) {
     .whereNull('pest_evidence')
     .where('detail_attempts', '<', REPORT_MAX_ATTEMPTS)
     .where('event_date', '>=', cutoff)
-    // First visits only: the report parser (the next part) answers for no other. A row stored before the visit number
-    // was kept waits until a re-read of the file fills it. The stored visit number is the files' word and only saves
+    // First visits with a citation only (ANSWERABLE_SQL): the report parser (the next part) answers for no other. A row
+    // stored before the count and the visit number were kept waits until a re-read of the file fills them. The stored visit number is the files' word and only saves
     // page reads: the state can relabel a visit between files. The page has the last word: saveReport saves no answer
     // whose page's own inspection type is missing or names a callback, follow-up or re-inspection.
-    .whereRaw("detail->>'visitNumber' = '1'")
+    .whereRaw(ANSWERABLE_SQL)
     .orderBy('event_date', 'desc')
     .limit(limit)
     .select(
@@ -375,8 +379,8 @@ async function pendingInspections({ cutoff, limit, keys }) {
 }
 
 // Saves a page's answer for the read it came from (a pendingInspections row: id, violation35, visitNumber), only while
-// the row is unanswered and still holds that count and visit number: a file re-read in between (a higher count)
-// leaves the row for a later read. The answer carries the page's own inspection type (report.inspectionType) and is
+// the row is an unanswered first visit with a citation (ANSWERABLE_SQL, as the reads pick them) and still holds that
+// count and visit number: a file re-read in between (a higher count, a later visit) leaves the row for a later read. The answer carries the page's own inspection type (report.inspectionType) and is
 // saved only when that type names a first visit (namesFirstVisit). The stored visit number is the files' word and
 // the state can relabel a visit between files, so this is the one rule that keeps a callback page from ever being
 // saved as a first visit's answer, whatever any file said. Returns whether the answer was saved.
@@ -384,8 +388,9 @@ async function saveReport(read, report) {
   if (!report || !namesFirstVisit(report.inspectionType)) return false;
   const asText = (value) => (value === null || value === undefined ? null : String(value));
   const saved = await db('restaurant_prospects')
-    .where({ id: read.id })
+    .where({ id: read.id, kind: 'inspection' })
     .whereNull('pest_evidence')
+    .whereRaw(ANSWERABLE_SQL)
     .whereRaw("detail->>'violation35' IS NOT DISTINCT FROM ?", [asText(read.violation35)])
     .whereRaw("detail->>'visitNumber' IS NOT DISTINCT FROM ?", [asText(read.visitNumber)])
     .update({

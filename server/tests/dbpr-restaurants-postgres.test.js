@@ -11,6 +11,8 @@ const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 // The inspection type a first visit's report page gives: saveReport saves no answer without one.
 const ROUTINE = 'Routine - Food';
+// A stored first visit with a citation: the only inspection a page read answers.
+const FIRST = { disposition: 'Warning Issued', violation35: 1, visitNumber: 1 };
 
 afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
 
@@ -106,14 +108,14 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   });
 
   test('a re-read refreshes last_seen_at and never touches an answer, findings or attempts', async () => {
-    await svc.upsertRecords([rec(2)]);
+    await svc.upsertRecords([rec(2, { detail: FIRST })]);
     const [row] = await rows().where({ source_key: key(2) });
     await svc.saveReport(readOf(row), { inspectionType: ROUTINE, pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
     await db('restaurant_prospects').where({ id: row.id }).update({ detail_attempts: 2, last_seen_at: '2026-01-01T00:00:00Z' });
     await svc.upsertRecords([rec(2, { detail: { disposition: 'changed' } })]);
     const [after] = await rows().where({ id: row.id });
     expect(after.pest_evidence).toBe(true);
-    expect(after.detail).toEqual({ disposition: 'Warning Issued', findings: [{ code: '35A-02-8', text: 'Flies' }] });
+    expect(after.detail).toEqual({ ...FIRST, findings: [{ code: '35A-02-8', text: 'Flies' }] });
     expect(after.detail_attempts).toBe(2);
     expect(new Date(after.last_seen_at).getTime()).toBeGreaterThan(new Date('2026-01-01T00:00:00Z').getTime());
   });
@@ -121,7 +123,12 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   test('a re-read fills the count and the visit number; on an unanswered row each only rises', async () => {
     await svc.upsertRecords([rec(20), rec(21)]);
     const [answered] = await rows().where({ source_key: key(21) });
-    await svc.saveReport(readOf(answered), { inspectionType: ROUTINE, pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
+    // An answer saved before the count and the visit number were kept, set here directly: saveReport now answers only
+    // a stored first visit with a citation.
+    await db('restaurant_prospects').where({ id: answered.id }).update({
+      pest_evidence: true,
+      detail: JSON.stringify({ disposition: 'Warning Issued', findings: [{ code: '35A-02-8', text: 'Flies' }] }),
+    });
     await svc.upsertRecords([
       rec(20, { detail: { disposition: 'changed', violation35: 2, visitNumber: 1 } }),
       rec(21, { detail: { disposition: 'changed', violation35: 1, visitNumber: 2 } }),
@@ -215,8 +222,23 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect((await rows().where({ source_key: key(50) }))[0].pest_evidence).toBe(true);
   });
 
+  test('saveReport answers only a stored first visit with a citation, as the reads pick them, even read with its own values', async () => {
+    await svc.upsertRecords([
+      rec(60), // stored before the count and the visit number were kept
+      rec(61, { detail: { ...FIRST, visitNumber: 2 } }), // a callback
+      rec(62, { detail: { ...FIRST, visitNumber: null } }), // a blank visit number
+      rec(63, { detail: { ...FIRST, violation35: 0 } }), // a first visit with no citation
+      rec(64, { kind: 'new_license', detail: FIRST }), // not an inspection
+    ]);
+    const mine = await rows().whereIn('source_key', [60, 61, 62, 63, 64].map(key)).orderBy('source_key');
+    for (const row of mine) {
+      expect(await svc.saveReport(readOf(row), { inspectionType: ROUTINE, pestEvidence: true, findings: [] })).toBe(false);
+    }
+    expect((await rows().whereIn('source_key', [60, 61, 62, 63, 64].map(key))).map((r) => r.pest_evidence)).toEqual([null, null, null, null, null]);
+  });
+
   test('saveReport does not overwrite an answer already written', async () => {
-    await svc.upsertRecords([rec(3)]);
+    await svc.upsertRecords([rec(3, { detail: FIRST })]);
     const [row] = await rows().where({ source_key: key(3) });
     expect(await svc.saveReport(readOf(row), { inspectionType: ROUTINE, pestEvidence: false, findings: [] })).toBe(true);
     expect(await svc.saveReport(readOf(row), { inspectionType: ROUTINE, pestEvidence: true, findings: [{ code: '35A-01-8', text: 'x' }] })).toBe(false);
@@ -242,13 +264,15 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
       // A callback, and a row stored before the visit number was kept: the parser answers for neither.
       rec(15, { event_date: '2026-11-18', detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 2 } }),
       rec(16, { event_date: '2026-11-19' }),
+      // A first visit with no citation (count 0): nothing to read.
+      rec(17, { event_date: '2026-11-14', detail: first(0) }),
     ]);
     const stored = await rows();
     const id = (n) => stored.find((r) => r.source_key === key(n)).id;
     await db('restaurant_prospects').where({ id: id(13) }).update({ detail_attempts: 3 });
     await svc.bumpAttempts(id(10));
     // The keys of the run's own good read: every visit above.
-    const keys = [10, 11, 12, 13, 14, 15, 16].map(key);
+    const keys = [10, 11, 12, 13, 14, 15, 16, 17].map(key);
     const pending = async (given = keys) => svc.pendingInspections({ cutoff: '2026-10-05', limit: 100, keys: given });
     const mine = await pending();
     expect(mine.map((p) => p.id)).toEqual([id(11), id(10)]);
