@@ -7698,7 +7698,8 @@ commit gives the hour to the truck its list offered. A matched profile at anothe
 own address (the slot is checked again with it); at the same pin the booking
 keeps the typed address, as the list read it. When the customer's city decides
 a far-south zone (one the funnel covers) and the commit's first build read
-another city (phase one linked or changed the profile), the slot is checked
+another city, or none (phase one linked or changed the profile, or booked a
+sibling's street), the slot is checked
 again per truck (both far-south gates on). When the commit's first check,
 before phase one provisions the customer, no longer has the time, its
 `SLOT_TAKEN` answer carries fresh times at the resolved location, built with
