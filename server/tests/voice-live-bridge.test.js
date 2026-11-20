@@ -724,6 +724,20 @@ describe('reservation admission', () => {
     expect(summaryOf(t)).toMatchObject({ close_reason: 'start_timeout', openai_contacted: false });
   });
 
+  test('once shutdown begins (session.close sent), caller audio and a late greeting are no longer sent', async () => {
+    const t = setup({ closeReply: false, deps: { closeWaitMs: 50 } });
+    await t.ready();
+    const done = t.bridge.finalize('cap');
+    const closeAt = t.openai.sent.findIndex((m) => m.type === 'session.close');
+    expect(closeAt).toBeGreaterThanOrEqual(0);
+    t.twilioMedia('BBBB');
+    t.openai.receive({ type: 'session.started', session: { id: 's1' } });
+    const after = t.openai.sent.slice(closeAt + 1).map((m) => m.type);
+    expect(after).not.toContain('session.input_audio.append');
+    expect(after).not.toContain('session.commentary.append');
+    await done;
+  });
+
   test('a stalled admission ends the call at the start deadline; OpenAI never opens and the ledger is left alone', async () => {
     const t = setup({ deps: { admit: () => new Promise(() => {}), startDeadlineMs: 20, closeWaitMs: 20 } });
     await t.twilioStart();

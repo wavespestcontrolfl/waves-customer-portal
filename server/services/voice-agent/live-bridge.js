@@ -273,8 +273,10 @@ class LiveBridge {
   }
 
   onTwilioMedia(media) {
-    // Caller audio is dropped until the model session is confirmed.
-    if (!this.ready || typeof media.payload !== 'string' || (media.track && media.track !== 'inbound')) return;
+    // Caller audio is dropped until the model session is confirmed, and from
+    // the moment shutdown begins (session.close sent; only the final usage is
+    // still awaited).
+    if (!this.ready || this._finalizing || typeof media.payload !== 'string' || (media.track && media.track !== 'inbound')) return;
     this.toOpenAi({ type: 'session.input_audio.append', audio: media.payload });
   }
 
@@ -340,6 +342,7 @@ class LiveBridge {
     this.ready = true;
     this.sessionStartWall = this.deps.now();
     clearTimeout(this.startTimer);
+    if (this._finalizing) return; // shutting down: no greeting
     this.toOpenAi({ type: 'session.commentary.append', delegation_id: null, content: this.deps.greeting() });
   }
 

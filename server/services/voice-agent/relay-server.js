@@ -105,8 +105,11 @@ function resumedSessionBudgetMs(row, { now = Date.now() } = {}) {
 // and fail-closed: past the deadline the socket is destroyed, Twilio takes the
 // call to the fallback, and nobody waits on a database that is not answering.
 const TOKEN_BURN_DEADLINE_MS = 2500;
+// The live upgrade's whole database budget (stamp read + burn): under
+// Engine.IO's 1000 ms destroyUpgradeTimeout (sockets/index.js keeps the default).
+const LIVE_UPGRADE_AUTH_MS = 800;
 
-async function burnCallToken(token, callSid) {
+async function burnCallToken(token, callSid, deadlineMs = TOKEN_BURN_DEADLINE_MS) {
   const tokenHash = require('crypto').createHash('sha256').update(String(token)).digest('hex');
   try {
     const db = require('../../models/db');
@@ -124,8 +127,8 @@ async function burnCallToken(token, callSid) {
     let deadlineTimer;
     const deadline = new Promise((_, reject) => {
       deadlineTimer = setTimeout(
-        () => reject(new Error(`token burn exceeded ${TOKEN_BURN_DEADLINE_MS}ms`)),
-        TOKEN_BURN_DEADLINE_MS,
+        () => reject(new Error(`token burn exceeded ${deadlineMs}ms`)),
+        deadlineMs,
       );
       deadlineTimer.unref?.();
     });
@@ -181,16 +184,16 @@ function parseLivePath(pathname) {
 }
 
 // The stamp the cell route wrote on a sandbox-sourced row, or null.
-// The stamp read has the burn's deadline: a stalled pool must not leave the
-// handshake pending (the bridge's own start deadline only begins once the
-// socket is accepted). Past it the upgrade is refused before any token burn.
-async function readLiveStamp(callSid) {
+// The stamp read is bounded: a stalled pool must not leave the handshake
+// pending (the bridge's own start deadline only begins once the socket is
+// accepted). Past it the upgrade is refused before any token burn.
+async function readLiveStamp(callSid, deadlineMs) {
   const db = require('../../models/db');
   // Materialized once (a Knex builder re-runs on every .then()).
   const read = Promise.resolve(db('call_log').where({ twilio_call_sid: callSid }).first('source', 'metadata'));
   let timer;
   const deadline = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`stamp read exceeded ${TOKEN_BURN_DEADLINE_MS}ms`)), TOKEN_BURN_DEADLINE_MS);
+    timer = setTimeout(() => reject(new Error(`stamp read exceeded ${deadlineMs}ms`)), deadlineMs);
     timer.unref?.();
   });
   let row;
@@ -250,8 +253,13 @@ async function handleLiveUpgrade(req, socket, head, pathname) {
     return destroySocket(socket);
   }
   const { callSid, token } = parsed;
+  // Socket.IO shares this HTTP server, and Engine.IO ends an upgrade on any
+  // other path that has written nothing after 1 s (destroyUpgradeTimeout).
+  // The stamp read and the burn share one budget under that, so a slow
+  // database refuses the call here instead of after Engine.IO ended the socket.
+  const authEnds = Date.now() + LIVE_UPGRADE_AUTH_MS;
   try {
-    const stamp = await readLiveStamp(callSid);
+    const stamp = await readLiveStamp(callSid, LIVE_UPGRADE_AUTH_MS);
     if (!stamp || !require('../../config/feature-gates').voiceGptLiveTestLive()) {
       logger.warn(`[voice-live] rejected ws upgrade: not a stamped sandbox call, or gate off callSid=${callSid}`);
       return destroySocket(socket);
@@ -260,8 +268,9 @@ async function handleLiveUpgrade(req, socket, head, pathname) {
       logger.warn(`[voice-live] rejected ws upgrade: not the token the cell route issued callSid=${callSid}`);
       return destroySocket(socket);
     }
-    if (!(await burnCallToken(token, callSid))) {
-      logger.warn(`[voice-live] rejected ws upgrade: token already used callSid=${callSid}`);
+    const burnBudget = authEnds - Date.now();
+    if (burnBudget <= 0 || !(await burnCallToken(token, callSid, burnBudget))) {
+      logger.warn(`[voice-live] rejected ws upgrade: token already used, or past the auth budget callSid=${callSid}`);
       return destroySocket(socket);
     }
     if (!liveWss) {

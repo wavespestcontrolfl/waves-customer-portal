@@ -652,9 +652,31 @@ describe('ws upgrade — GPT-Live path', () => {
       const path = liveUrl();
       const socket = { destroy: jest.fn() };
       httpServer.emit('upgrade', { url: path, headers: { 'x-twilio-signature': sign(path) } }, socket, Buffer.alloc(0));
-      await jest.advanceTimersByTimeAsync(3000); // past the read deadline
+      // refused inside the 800 ms budget, before Engine.IO's 1 s upgrade timeout
+      await jest.advanceTimersByTimeAsync(850);
       expect(socket.destroy).toHaveBeenCalled();
       expect(mockBurned.size).toBe(0);
+      expect(runLiveBridge).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+      require('../models/db').mockImplementation(mockDbImpl);
+    }
+  });
+
+  test('the stamp read and the burn share one 800 ms budget: a slow read leaves the burn only the rest', async () => {
+    jest.useFakeTimers();
+    try {
+      const db = require('../models/db');
+      db.mockImplementation((table) => (table === 'call_log'
+        ? { where: () => ({ first: () => new Promise((r) => setTimeout(() => r(mockCallLogRow), 500)) }) }
+        : { insert: () => ({ onConflict: () => ({ ignore: () => ({ returning: () => new Promise(() => {}) }) }) }), where: () => ({ del: () => Promise.resolve(0) }) }));
+      const path = liveUrl();
+      const socket = { destroy: jest.fn() };
+      httpServer.emit('upgrade', { url: path, headers: { 'x-twilio-signature': sign(path) } }, socket, Buffer.alloc(0));
+      await jest.advanceTimersByTimeAsync(700);
+      expect(socket.destroy).not.toHaveBeenCalled(); // the burn is still inside the budget
+      await jest.advanceTimersByTimeAsync(150);
+      expect(socket.destroy).toHaveBeenCalled();
       expect(runLiveBridge).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
