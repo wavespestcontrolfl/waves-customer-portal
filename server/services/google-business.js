@@ -148,22 +148,33 @@ function abortableDelay(ms, signal) {
   });
 }
 
+// Google's status word from a JSON error body ({"error":{"status":"NOT_FOUND"}}), or ''.
+function googleErrorWord(body) {
+  try {
+    const word = JSON.parse(body)?.error?.status;
+    return typeof word === 'string' && /^[A-Z_]{2,40}$/.test(word) ? word : '';
+  } catch { return ''; }
+}
+
+// Every message thrown here names the operation, the HTTP status and Google's status word only, never
+// the response text: a review read or reply response can quote a reviewer's name, review text or a
+// reply, and callers copy the message into logs, stored errors and bells (the review-reply runner logs
+// it on every retry). JSON.parse's own message quotes the text too, so it is left out.
 async function readJsonOrThrow(res, label) {
   if (!res.ok) {
     // googleStatus (not status/httpStatus): the review-reply runner tells a refusal Google may still
     // accept later (404, 429, 5xx) from a permanent one (400, 403), and an Express handler reads err.status.
-    // The body is diagnostic only: a body read that fails (the connection reset after the headers) keeps
-    // the status.
-    const body = await res.text().catch((e) => `(body not read: ${e.message})`);
-    throw Object.assign(new Error(`${label} ${res.status}: ${body.slice(0, 500)}`), { googleStatus: res.status });
+    // A body read that fails (the connection reset after the headers) keeps the status.
+    const word = googleErrorWord(await res.text().catch(() => ''));
+    throw Object.assign(new Error(`${label} ${res.status}${word ? ` ${word}` : ''}`), { googleStatus: res.status });
   }
   const text = await res.text();
   const ct = (res.headers.get('content-type') || '').toLowerCase();
   if (!ct.includes('application/json') && !text.trimStart().startsWith('{') && !text.trimStart().startsWith('[')) {
-    throw new Error(`${label} returned non-JSON response (status ${res.status}, content-type ${ct || 'unknown'}): ${text.slice(0, 500)}`);
+    throw new Error(`${label} returned non-JSON response (status ${res.status}, content-type ${ct || 'unknown'})`);
   }
   try { return JSON.parse(text); }
-  catch (e) { throw new Error(`${label} returned malformed JSON (status ${res.status}): ${e.message}`); }
+  catch { throw new Error(`${label} returned malformed JSON (status ${res.status})`); }
 }
 
 // The same-signature repeat path's digest rewrite: same row shape

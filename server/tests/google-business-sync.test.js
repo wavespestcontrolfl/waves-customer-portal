@@ -347,20 +347,33 @@ describe('Google Business review sync', () => {
 
     test('503 on every attempt throws the unchanged message after three fetches', async () => {
       global.fetch = jest.fn(async () => failRes(503));
-      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 503: /);
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 503$/);
       expect(global.fetch).toHaveBeenCalledTimes(3);
     });
 
     test('403 throws immediately after one fetch', async () => {
       global.fetch = jest.fn(async () => failRes(403));
-      await expect(service.getReviews(loc, 'bradenton')).rejects.toMatchObject({ message: expect.stringMatching(/^GBP getReviews 403: /), googleStatus: 403 });
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toMatchObject({ message: 'GBP getReviews 403', googleStatus: 403 });
       expect(global.fetch).toHaveBeenCalledTimes(1);
     });
 
     test('an error body that cannot be read keeps Google\'s status on the error', async () => {
       global.fetch = jest.fn(async () => ({ ...failRes(403), text: async () => { throw new Error('socket hang up'); } }));
-      await expect(service.getReviews(loc, 'bradenton')).rejects.toMatchObject({ message: 'GBP getReviews 403: (body not read: socket hang up)', googleStatus: 403 });
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toMatchObject({ message: 'GBP getReviews 403', googleStatus: 403 });
       expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('the error message keeps Google\'s status word and never the response text (it can quote a reviewer)', async () => {
+      const body = '{"error":{"code":404,"message":"No review by Dana W. saying great service","status":"NOT_FOUND"}}';
+      global.fetch = jest.fn(async () => ({ ...failRes(404), text: async () => body }));
+      const err = await service.getReviews(loc, 'bradenton').catch((e) => e);
+      expect(err).toMatchObject({ message: 'GBP getReviews 404 NOT_FOUND', googleStatus: 404 });
+      global.fetch = jest.fn(async () => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => '{"reviews":[{"reviewer":{"displayName":"Dana W."}' }));
+      const bad = await service.getReviews(loc, 'bradenton').catch((e) => e);
+      expect(bad.message).toBe('GBP getReviews returned malformed JSON (status 200)');
+      global.fetch = jest.fn(async () => ({ ok: true, status: 200, headers: { get: () => 'text/html' }, text: async () => '<p>Dana W. said great service</p>' }));
+      const html = await service.getReviews(loc, 'bradenton').catch((e) => e);
+      expect(html.message).toBe('GBP getReviews returned non-JSON response (status 200, content-type text/html)');
     });
 
     test('a signal that aborts during the backoff throws and starts no further fetch', async () => {
