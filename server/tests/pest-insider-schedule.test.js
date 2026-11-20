@@ -457,7 +457,6 @@ describe('runIssuePlanner with GATE_PEST_INSIDER_AUTO_SEND on', () => {
     test.each([
       ['SendGrid refused', 'proof_send_failed', 'SendGrid did not accept the FYI copy'],
       ['the switch turned off during the run', 'auto_send_off', 'GATE_PEST_INSIDER_AUTO_SEND turned off during the run, so the FYI copy did not go out'],
-      ['its address cannot reply HOLD', 'fyi_recipient_not_approver', 'its FYI copy would go to an address not in NEWSLETTER_PROOF_APPROVERS, so a HOLD reply could not stop it'],
     ])('a draft whose FYI copy did not go out (%s) raises the notice', async (_label, reason, copy) => {
       const database = fakeDb({ after: { status: 'drafted', reason: null } });
       const result = await runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof: jest.fn(async () => ({ skipped: true, reason })) });

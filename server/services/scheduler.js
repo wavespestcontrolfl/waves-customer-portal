@@ -4617,6 +4617,13 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Newsletter scheduler tick failed: ${err.message}`);
     }
+    // Then a planned Waves Pest Insider issue that did not go out as its FYI copy said gets its
+    // one admin alert (settlePlannedIssues), retried each minute until it reaches the owner.
+    try {
+      await require('./newsletter-sender').settlePlannedIssues();
+    } catch (err) {
+      logger.error(`Pest Insider settle tick failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================

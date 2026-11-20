@@ -13,8 +13,10 @@
  * step (newsletter-proof.js). That step emails the owner an FYI copy and queues the issue
  * for 7:00 AM ET on its Thursday (row 'scheduled'); the sender sends it in the 7:00-10:00 AM
  * ET window (row 'sent'). A HOLD reply or Cancel schedule holds it (row 'held'); a send-time
- * stop fails it (row 'failed'). The 1:00 PM run is the last try: when the issue still cannot
- * go out and nobody was told why, it raises one admin notification.
+ * stop fails it (row 'failed'). The sender's settlePlannedIssues tells the owner once about
+ * every issue that did not go out as its FYI copy said. The 1:00 PM run is the last try before
+ * that: when the issue still cannot go out and nobody was told why, it raises one admin
+ * notification.
  *
  * Calendar dates here are 'YYYY-MM-DD' strings. The date math is the shared ET helpers in
  * utils/datetime-et.js (validCalendarDate, etNthWeekdayOfMonth, addETDays, etDateString);
@@ -278,7 +280,6 @@ const REASON_COPY = [
   [/^gate_off$/, 'GATE_NEWSLETTER_PROOF_APPROVAL is off, so the FYI copy did not go out'],
   [/^auto_send_off$/, 'GATE_PEST_INSIDER_AUTO_SEND turned off during the run, so the FYI copy did not go out'],
   [/^no_approvers_configured$/, 'NEWSLETTER_PROOF_APPROVERS is empty, so the FYI copy did not go out'],
-  [/^fyi_recipient_not_approver$/, 'its FYI copy would go to an address not in NEWSLETTER_PROOF_APPROVERS, so a HOLD reply could not stop it'],
   [/^sendgrid_not_configured$/, 'SendGrid is not set up, so the FYI copy did not go out'],
   [/^proof_send_failed$/, 'SendGrid did not accept the FYI copy'],
   [/^proof_already_sent$/, 'an earlier run started its FYI copy but never queued it'],

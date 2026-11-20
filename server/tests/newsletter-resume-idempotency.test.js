@@ -98,15 +98,18 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
 
 // `mailboxCustomers`: subscriber id -> the customers behind its mailbox, as the
 // planned audience's own query reads them (withMailboxCustomers).
-function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, skipUpdated = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false, mailboxCustomers = {}, retryableLeft = 0, onIssueUpdate } = {}) {
+function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, skipUpdated = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false, mailboxCustomers = {}, retryableLeft = 0, onIssueUpdate, deadlineReached = false, onFinalUpdate } = {}) {
+  const heartbeat = chain({ updated: deadlineReached ? 0 : heartbeatUpdated }); // pre-batch heartbeat (0 = claim lost to a reclaim, or a passed deadline)
   const queues = {
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
       chain({ updated: 1, returning: [{ id: send?.id }] }),// atomic claim
-      chain({ updated: heartbeatUpdated }),                // pre-batch heartbeat (0 = claim lost to a reclaim)
+      heartbeat,
+      // A deadline that passed: the re-read finds the claim still this worker's, so it stops and finalizes.
+      ...(deadlineReached ? [chain({ first: { id: send?.id } })] : []),
       // A lost claim must consume nothing further from this queue.
       ...(truncateSendsQueueAfterHeartbeat ? [] : [
-        chain({ updated: finalUpdated }),                  // final status update (0 = claim rotated after last batch)
+        chain({ updated: finalUpdated, onUpdate: onFinalUpdate }), // final status update (0 = claim rotated after last batch)
         // Loser at finalization never re-fetches for the social share.
         ...(finalUpdated ? [chain({ first: null })] : []),
       ]),
@@ -138,7 +141,8 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
       // Terminal 'skipped' update for recipients that failed the dispatch
       // re-check — only consumed when eligibleAtDispatch drops someone.
       ...(eligibleAtDispatch ? [chain({ updated: skipUpdated ?? (subscribers.length - eligibleAtDispatch.length), onUpdate: onSkipUpdate })] : []),
-      chain({ updated: (eligibleAtDispatch || subscribers).length }), // bulk update post-send
+      // bulk update post-send (none when the deadline stopped the send before its batch)
+      ...(deadlineReached ? [] : [chain({ updated: (eligibleAtDispatch || subscribers).length })]),
       chain({ count: retryableLeft }),                      // final retryable ledger count
     ],
     // A planned Waves Pest Insider issue's row (moveIssueForSend).
@@ -159,7 +163,7 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
     }
     return queue.shift();
   });
-  return { guard: subscriberQueries[0], recheck: subscriberQueries[2] };
+  return { guard: subscriberQueries[0], recheck: subscriberQueries[2], heartbeat };
 }
 
 beforeEach(() => {
@@ -389,10 +393,11 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(mockSendBroadcast).not.toHaveBeenCalled();
   });
 
-  test('a planned issue whose every batch SendGrid refused ends failed, and so does its planned issue row; the owner is told', async () => {
+  test('a planned issue whose every batch SendGrid refused ends failed; its planned issue row is left to settlePlannedIssues', async () => {
     mockTrigger.mockClear();
     mockSendBroadcast.mockRejectedValueOnce(new Error('SendGrid 503'));
     let issueUpdate = null;
+    let finalUpdate = null;
     buildDb({
       send: {
         id: 'send-1', status: 'draft', newsletter_type: 'pest-insider-monthly', html_body: '<p>Body</p>', text_body: 'Body',
@@ -409,17 +414,19 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
       ],
       retryableLeft: 2,
       onIssueUpdate: (payload) => { issueUpdate = payload; },
+      onFinalUpdate: (payload) => { finalUpdate = payload; },
     });
 
     const result = await sendCampaign('send-1');
 
     expect(result).toMatchObject({ accepted: 0, failed: 2 });
-    expect(issueUpdate).toMatchObject({ status: 'failed', reason: 'every SendGrid batch failed' });
-    expect(mockTrigger).toHaveBeenCalledTimes(1);
-    expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Stopped at send time: it reached no reader (every SendGrid batch failed)']);
+    expect(finalUpdate).toMatchObject({ status: 'failed' });
+    // settlePlannedIssues reads the failed send, fails the row and raises the one alert.
+    expect(issueUpdate).toBeNull();
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
-  test('a planned issue whose every reader dropped out at dispatch reached nobody, so its planned issue row fails; the owner is told', async () => {
+  test('a planned issue whose every reader dropped out at dispatch is sent to nobody; its planned issue row is left to settlePlannedIssues', async () => {
     mockTrigger.mockClear();
     let issueUpdate = null;
     buildDb({
@@ -444,10 +451,43 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     const result = await sendCampaign('send-1');
 
     expect(mockSendBroadcast).not.toHaveBeenCalled();
+    // Sent to nobody (recipient_count 0): settlePlannedIssues reads that as not delivered.
     expect(result).toMatchObject({ recipients: 0, skipped_ineligible: 2 });
-    expect(issueUpdate).toMatchObject({ status: 'failed', reason: 'no planned reader was still eligible at send time' });
-    expect(mockTrigger).toHaveBeenCalledTimes(1);
-    expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Stopped at send time: it reached no reader (no planned reader was still eligible at send time)']);
+    expect(issueUpdate).toBeNull();
+    expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
+  test("a send deadline (a planned issue's 10:00 AM ET) that passed before a batch stops the send there: no batch goes to SendGrid, and it ends failed", async () => {
+    let finalUpdate = null;
+    const { heartbeat } = buildDb({
+      send: {
+        id: 'send-1', status: 'scheduled', newsletter_type: 'pest-insider-monthly', html_body: '<p>Body</p>', text_body: 'Body',
+        subject: 'Hello', from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: PLANNED_PI, subject_b: null,
+      },
+      subscribers: [
+        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
+        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+      ],
+      retryableLeft: 2,
+      deadlineReached: true,
+      onFinalUpdate: (payload) => { finalUpdate = payload; },
+    });
+    const notAfter = new Date('2026-12-03T15:00:00Z');
+
+    const result = await sendCampaign('send-1', { expect: { status: 'scheduled', notAfter } });
+
+    // The heartbeat before the batch carries the deadline, on the database clock.
+    expect(heartbeat.whereRaw).toHaveBeenCalledWith('clock_timestamp() < ?::timestamptz', [notAfter]);
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ accepted: 0 });
+    expect(result.lostClaim).toBeUndefined();
+    // Its unsent rows stay queued for a resume; settlePlannedIssues tells the owner.
+    expect(finalUpdate).toMatchObject({ status: 'failed' });
   });
 
   test('a holdout name this server does not know stops a first send before anything is sent', async () => {

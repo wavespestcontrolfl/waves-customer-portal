@@ -1266,7 +1266,8 @@ const TRIGGER_REGISTRY = {
     rule: { area: 'Content', severity: 'needs-you', who: 'person', expiryDays: 30 },
     build: (p) => ({
       title: 'Newsletter proof blocked',
-      body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. Nothing was sent.`,
+      // sentCount: a send that stopped part way (a planned Waves Pest Insider issue's settle step).
+      body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. ${Number(p.sentCount) > 0 ? `${Number(p.sentCount)} readers got it before it stopped; nothing more was sent.` : 'Nothing was sent.'}`,
       link: '/admin/newsletter?tab=history',
     }),
   },

@@ -333,6 +333,41 @@ function isAutoQueued(send) {
   return Boolean(send?.proof_approved_at) && !send.proof_approval_email_id;
 }
 
+/** The inbox sync must have finished a clean run this recently before a planned issue sends. */
+const INBOX_FRESH_MS = 10 * 60 * 1000;
+
+/**
+ * Whether the inbox sync (email/email-sync.js, every 2 minutes) finished a run without errors in
+ * the last 10 minutes. A HOLD reply sent by the FYI copy's 6:30 AM ET deadline is then stored
+ * before the 7:00 AM send reads the inbox (holdReplyOnRecord).
+ */
+async function inboxReadRecently(now = new Date()) {
+  const state = await db('email_sync_state').first('last_sync_at', 'errors');
+  if (!state || state.errors || !state.last_sync_at) return false;
+  return now.getTime() - new Date(state.last_sync_at).getTime() <= INBOX_FRESH_MS;
+}
+
+/**
+ * The send-time HOLD check for an issue whose FYI copy offered HOLD: is there a HOLD reply to that
+ * copy in the stored inbox (emails)? The reply handler applies a HOLD as it reads it; this finds one
+ * it could not apply then (the proof gate off, a sender outside NEWSLETTER_PROOF_APPROVERS, a write
+ * that failed). Any sender counts, since stopping is the safe side, except the issue's own sending
+ * address: its FYI copy can sync back in, and that copy quotes the HOLD line. The reply is read as
+ * the handler reads it (its own text, not the quoted copy).
+ */
+async function holdReplyOnRecord(send) {
+  const token = String(send?.proof_token || '').toLowerCase();
+  if (!token) return false;
+  const query = db('emails').where('subject', 'ilike', `%[PROOF-${token}]%`);
+  // The token is new with each FYI copy; an hour of margin covers clock differences.
+  if (send.proof_sent_at) query.where('received_at', '>=', new Date(new Date(send.proof_sent_at).getTime() - 60 * 60 * 1000));
+  const replies = await query.select('from_address', 'subject', 'body_text', 'body_html');
+  const ownAddress = normalizeEmail(send.from_email);
+  return replies.some((email) => normalizeEmail(email.from_address) !== ownAddress
+    && parseProofToken(email.subject) === token
+    && isHoldReply(extractTopReplyText(email.body_text || htmlReplyToText(email.body_html))));
+}
+
 /**
  * Render a send the way the live broadcast will look for one internal
  * recipient: same wrapper, all merge tags ({{greeting-name}}, {{city}},
@@ -446,16 +481,18 @@ function autoSendBannerText(recipientCount) {
   return `SENDS BY ITSELF — NO REPLY NEEDED\nThis issue goes to ${recipientCount} active subscribers Tuesday at 6:00 AM ET. To skip this week, reply HOLD, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
 }
 
-// The owner's copy of a Waves Pest Insider issue the auto-send switch queued.
+// The owner's copy of a Waves Pest Insider issue the auto-send switch queued. The HOLD deadline is
+// half an hour before the 7:00 AM send, so the reply is in the stored inbox when the send-time
+// check reads it (holdReplyOnRecord, with inboxReadRecently).
 function pestInsiderBannerHtml(recipientCount, issueContext) {
   return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Sends by itself — no reply needed</p>
-<p style="margin:0;font-size:14px;color:#1f2937;">This Waves Pest Insider issue goes to <strong>${recipientCount}</strong> readers <strong>${issueSendTimeCopy(issueContext)}</strong>. To skip this issue, reply <strong>HOLD</strong>, or press Cancel schedule in Newsletter → History.</p>
+<p style="margin:0;font-size:14px;color:#1f2937;">This Waves Pest Insider issue goes to <strong>${recipientCount}</strong> readers <strong>${issueSendTimeCopy(issueContext)}</strong>. To skip this issue, reply <strong>HOLD</strong> by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.</p>
 </div>\n`;
 }
 
 function pestInsiderBannerText(recipientCount, issueContext) {
-  return `SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to ${recipientCount} readers ${issueSendTimeCopy(issueContext)}. To skip this issue, reply HOLD, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
+  return `SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to ${recipientCount} readers ${issueSendTimeCopy(issueContext)}. To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
 }
 
 // Internal panel for a planned Waves Pest Insider issue (proof email only):
@@ -652,15 +689,6 @@ async function sendNewsletterProof(sendId) {
   // A planned issue is only ever proofed as an FYI copy, so its replies always follow the FYI
   // rules (handlePlannedIssueReply). With its switch off nothing proofs or queues it.
   if (issueContext && !pestInsiderAutoSendLive()) return { skipped: true, reason: 'auto_send_off' };
-  // Its FYI copy offers HOLD as the owner's one way to stop it, and a reply counts only from
-  // NEWSLETTER_PROOF_APPROVERS: a copy addressed anywhere else is neither sent nor queued.
-  if (issueContext && !approvalSenders().includes(proofRecipient())) {
-    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id,
-      subject: send.subject,
-      errors: ['Its FYI copy would go to the proof address (NEWSLETTER_PROOF_EMAIL, or the default), which is not in NEWSLETTER_PROOF_APPROVERS, so a HOLD reply could not stop the issue. Nothing was sent or queued.'],
-    });
-    return { skipped: true, reason: 'fyi_recipient_not_approver', notified };
-  }
   if (!calendarContext.valid) {
     const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
     const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
@@ -1123,7 +1151,10 @@ module.exports = {
   htmlReplyToText,
   isApprovalReply,
   isHoldReply,
+  inboxReadRecently,
+  holdReplyOnRecord,
   renderSendPreview,
   sendNewsletterProof,
   maybeHandleProofApproval,
+  notifyProof,
 };

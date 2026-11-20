@@ -66,6 +66,8 @@ const {
   sendNewsletterProof,
   maybeHandleProofApproval,
   approvalSenders,
+  inboxReadRecently,
+  holdReplyOnRecord,
 } = require('../services/newsletter-proof');
 
 function chain(overrides = {}) {
@@ -877,9 +879,10 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     const args = mockSendOne.mock.calls[0][0];
     expect(args.subject).toBe(`FYI: [PROOF-${r.token}] Bubbles & Sea Lions`);
     expect(args.html).toContain('This Waves Pest Insider issue goes to <strong>606</strong> readers <strong>Thursday, August 6 at 7:00 AM ET</strong>');
-    expect(args.html).toContain('reply <strong>HOLD</strong>');
+    // The HOLD deadline is half an hour before the send, so the send-time check can read the reply.
+    expect(args.html).toContain('reply <strong>HOLD</strong> by 6:30 AM ET that day');
     expect(args.html).not.toContain('immediately');
-    expect(args.text).toContain('This Waves Pest Insider issue goes to 606 readers Thursday, August 6 at 7:00 AM ET.');
+    expect(args.text).toContain('This Waves Pest Insider issue goes to 606 readers Thursday, August 6 at 7:00 AM ET. To skip this issue, reply HOLD by 6:30 AM ET that day');
     // The internal panel says what the planner picked and who it goes to.
     expect(args.html).toContain('INTERNAL DIAGNOSTICS');
     expect(args.html).toContain('Fact T03 · What&#39;s this? brown-widow · Tool none'.replace('&#39;', "'"));
@@ -943,16 +946,13 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
   const PI_FYI_DRAFT = { ...PI_DRAFT, proof_token: 'ab12cd34', proof_sent_at: PROOF_STAMP, updated_at: PROOF_STAMP };
   const APPROVED = { ...HOLD, id: 'email-4', body_text: 'approved' };
 
-  test('a planned issue whose FYI address cannot reply HOLD gets no copy and is not queued, and the owner is told', async () => {
-    // The approvers list does not name the proof address, so a HOLD reply from it would be ignored.
+  test('an FYI address outside NEWSLETTER_PROOF_APPROVERS still gets its copy and queues the issue: the send-time check reads its HOLD', async () => {
     process.env.NEWSLETTER_PROOF_EMAIL = 'proofs@wavespestcontrol.com';
-    const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
-    mockTrigger.mockResolvedValueOnce({ bellWritten: true });
+    const { issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
 
-    expect(await sendNewsletterProof('send-1')).toEqual({ skipped: true, reason: 'fyi_recipient_not_approver', notified: true });
-    expect(mockSendOne).not.toHaveBeenCalled();
-    expect(sendsChain.update).not.toHaveBeenCalled();
-    expect(issuesChain.update).not.toHaveBeenCalled();
+    expect(await sendNewsletterProof('send-1')).toEqual(expect.objectContaining({ sent: true, queued: true }));
+    expect(mockSendOne.mock.calls[0][0].to).toBe('proofs@wavespestcontrol.com');
+    expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
   });
 
   test('HOLD before its queueing landed holds the planned row, and a send queued in between goes back to draft', async () => {
@@ -1011,5 +1011,55 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(issuesChain.where).toHaveBeenCalledWith({ send_id: 'send-1' });
     expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted', 'scheduled']);
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
+  });
+});
+
+describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
+  const NOW = new Date('2026-08-06T11:00:00Z');
+  const SEND = {
+    id: 'send-1', proof_token: 'ab12cd34', proof_sent_at: new Date('2026-08-05T11:05:00Z'),
+    from_email: 'newsletter@news.wavespestcontrol.com',
+  };
+  const FYI_SUBJECT = 'FYI: [PROOF-ab12cd34] Native termites can swarm in winter';
+  const reply = (fields) => ({ from_address: 'contact@wavespestcontrol.com', subject: `Re: ${FYI_SUBJECT}`, body_text: 'hold', body_html: null, ...fields });
+
+  function wireInbox({ state, replies = [] } = {}) {
+    const emails = { where: jest.fn(() => emails), select: jest.fn(async () => replies) };
+    const syncState = { first: jest.fn(async () => state) };
+    db.mockImplementation((table) => (table === 'emails' ? emails : syncState));
+    return { emails, syncState };
+  }
+
+  test.each([
+    ['a clean run 3 minutes ago', { last_sync_at: new Date('2026-08-06T10:57:00Z'), errors: null }, true],
+    ['a clean run 11 minutes ago', { last_sync_at: new Date('2026-08-06T10:49:00Z'), errors: null }, false],
+    ['a run with errors', { last_sync_at: new Date('2026-08-06T10:59:00Z'), errors: 'full sync incomplete' }, false],
+    ['no sync state at all', undefined, false],
+  ])('the inbox counts as read only after %s → %s', async (_label, state, expected) => {
+    wireInbox({ state });
+    expect(await inboxReadRecently(NOW)).toBe(expected);
+  });
+
+  test('a HOLD reply from any sender stops the issue, also one outside NEWSLETTER_PROOF_APPROVERS', async () => {
+    const { emails } = wireInbox({ replies: [reply({ from_address: 'adam@example.com', body_text: 'HOLD please' })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+    expect(emails.where).toHaveBeenCalledWith('subject', 'ilike', '%[PROOF-ab12cd34]%');
+    // Only mail since about the FYI copy is read.
+    expect(emails.where).toHaveBeenCalledWith('received_at', '>=', new Date('2026-08-05T10:05:00Z'));
+  });
+
+  test.each([
+    ['the FYI copy itself, synced back in (it quotes the HOLD line)', { from_address: 'Newsletter@News.WavesPestControl.com', subject: FYI_SUBJECT, body_text: 'To skip this issue, reply HOLD by 6:30 AM ET that day' }],
+    ['an APPROVED reply that only quotes the HOLD line', { body_text: 'approved\n\nOn Wed, Aug 5 wrote:\n> To skip this issue, reply HOLD by 6:30 AM ET that day' }],
+    ['a reply whose subject carries a different token that only starts the same', { subject: 'Re: FYI: [PROOF-ab12cd34x] other', body_text: 'hold' }],
+  ])('not a HOLD: %s', async (_label, fields) => {
+    wireInbox({ replies: [reply(fields)] });
+    expect(await holdReplyOnRecord(SEND)).toBe(false);
+  });
+
+  test('a send with no FYI token reads nothing', async () => {
+    const { emails } = wireInbox();
+    expect(await holdReplyOnRecord({ ...SEND, proof_token: null })).toBe(false);
+    expect(emails.select).not.toHaveBeenCalled();
   });
 });

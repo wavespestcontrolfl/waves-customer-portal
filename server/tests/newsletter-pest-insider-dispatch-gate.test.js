@@ -167,7 +167,14 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
   };
   const PLANNED = { id: 'issue-1', issue_date: '2026-12-03', status: 'scheduled', send_id: 'send-pi-2' };
 
-  function wireInsider(rows, { issue = PLANNED, updated = 1 } = {}) {
+  // The send-time HOLD check: by default the inbox sync ran clean a minute ago, and no reply is stored.
+  function withInbox(table, q, { synced = true, replies = [] } = {}) {
+    if (table === 'email_sync_state') q.first = jest.fn(async () => (synced ? { last_sync_at: new Date(Date.now() - 60 * 1000), errors: null } : undefined));
+    if (table === 'emails') q.select = jest.fn(async () => replies);
+    return q;
+  }
+
+  function wireInsider(rows, { issue = PLANNED, updated = 1, inbox } = {}) {
     const updates = [];
     db.mockImplementation((table) => {
       const q = {};
@@ -175,7 +182,7 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
       q.limit = jest.fn(async () => rows);
       q.first = jest.fn(async () => (table === 'pest_insider_issues' ? issue : undefined));
       q.update = jest.fn(async (patch) => { updates.push({ table, patch }); return updated; });
-      return q;
+      return withInbox(table, q, inbox);
     });
     return updates;
   }
@@ -234,31 +241,33 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
       { table: 'newsletter_calendar', patch: expect.objectContaining({ status: 'drafted' }) },
       { table: 'pest_insider_issues', patch: expect.objectContaining({ status: 'failed', reason: `stopped at send time: ${reason}` }) },
     ]);
-    expect(mockTrigger).toHaveBeenCalledTimes(1);
-    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', {
-      sendId: 'send-pi-2',
-      subject: 'Native termites can swarm in winter',
-      errors: [`Stopped at send time: ${reason}`],
-    });
-    // The send, its week and its planned issue moved in one transaction.
+    // The send, its week and its planned issue moved in one transaction. The alert comes from
+    // settlePlannedIssues, which retries it until it reaches the owner.
     expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
-  test('an FYI address that can no longer reply HOLD stops the issue for good, with one notice', async () => {
-    // NEWSLETTER_PROOF_APPROVERS changed after the FYI copy went out: a HOLD reply would be ignored.
-    process.env.NEWSLETTER_PROOF_APPROVERS = 'someone-else@wavespestcontrol.com';
-    const updates = wireInsider([AUTO_QUEUED_INSIDER]);
+  test('a HOLD reply to its FYI copy in the inbox stops it for good, also one the reply handler could not apply', async () => {
+    const hold = { from_address: 'adam@example.com', subject: 'Re: FYI: [PROOF-ab12cd34] Native termites', body_text: 'HOLD', body_html: null };
+    const updates = wireInsider([{ ...AUTO_QUEUED_INSIDER, proof_token: 'ab12cd34', from_email: 'newsletter@news.wavespestcontrol.com' }], { inbox: { replies: [hold] } });
 
     await processScheduledSends();
 
-    const reason = 'its FYI address can no longer reply HOLD (it is not in NEWSLETTER_PROOF_APPROVERS)';
     expect(mockValidateEventSelection).not.toHaveBeenCalled();
     expect(updates.map(({ table, patch }) => [table, patch.status])).toEqual([
       ['newsletter_sends', 'draft'], ['newsletter_calendar', 'drafted'], ['pest_insider_issues', 'failed'],
     ]);
-    expect(updates[2].patch.reason).toBe(`stopped at send time: ${reason}`);
-    expect(mockTrigger).toHaveBeenCalledTimes(1);
-    expect(mockTrigger.mock.calls[0][1].errors).toEqual([`Stopped at send time: ${reason}`]);
+    expect(updates[2].patch.reason).toBe('stopped at send time: a HOLD reply to its FYI copy is in the inbox');
+  });
+
+  test('an inbox the sync has not read cleanly in 10 minutes leaves it scheduled for the next tick', async () => {
+    const updates = wireInsider([{ ...AUTO_QUEUED_INSIDER, proof_token: 'ab12cd34' }], { inbox: { synced: false } });
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('a stop whose planned-issue write fails raises no notice: nothing commits, and the next tick tries again', async () => {
@@ -312,27 +321,25 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
         if (q.conds.some((cond) => cond && cond.status === 'sending')) return 0;
         return table === 'newsletter_sends' && changedSinceRead ? 0 : 1;
       });
-      return q;
+      return withInbox(table, q);
     });
     return updates;
   }
 
-  test('a send that fails before its claim marks its planned issue failed (nothing went out), and the owner is told', async () => {
+  test('a send that fails before its claim is marked failed, bound to the read; its planned issue is left to settlePlannedIssues', async () => {
     const updates = wirePreClaimFailure({ changedSinceRead: false });
     await processScheduledSends();
 
     expect(updates.map(({ table, patch }) => ({ table, patch }))).toEqual([
       { table: 'newsletter_sends', patch: { status: 'failed' } },
       { table: 'newsletter_sends', patch: expect.objectContaining({ status: 'failed' }) },
-      { table: 'pest_insider_issues', patch: expect.objectContaining({ status: 'failed', reason: expect.stringMatching(/^send failed before it started: /) }) },
     ]);
     // The 'sending' flip is bound to this tick's own claim token: never another worker's send.
     expect(updates[0].conds).toContainEqual({ id: 'send-pi-2', status: 'sending', sending_claim_token: expect.any(String) });
     // The 'scheduled' flip is bound to the version this tick read, as the claim is.
     expect(updates[1].conds).toEqual([{ id: 'send-pi-2', status: 'scheduled' }, 'updated_at', 'proof_approved_at']);
-    // The owner was told it would send Thursday: one alert says it did not.
-    expect(mockTrigger).toHaveBeenCalledTimes(1);
-    expect(mockTrigger.mock.calls[0][1].errors).toEqual([expect.stringMatching(/^Stopped at send time: it failed before it started: /)]);
+    // settlePlannedIssues fails its row from the failed send and raises the one alert.
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('a pre-claim failure on a row changed since this tick read it leaves the row and its planned issue as they are', async () => {

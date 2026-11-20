@@ -118,6 +118,8 @@ test('the scheduler returns a Waves Pest Insider issue with no plan to draft wit
   const revert = chain();
   wire({
     newsletter_sends: [chain({ rows: [{ ...SEND, segment_filter: null }] }), chain({ first: { ...SEND, segment_filter: null } }), revert],
+    // A draft made by hand: no planned issue row moves, so the alert goes out right away.
+    pest_insider_issues: [chain({ updated: 0 })],
   });
 
   const result = await processScheduledSends();
@@ -232,7 +234,7 @@ describe('a planned Waves Pest Insider issue the switch queued (GATE_PEST_INSIDE
     delete process.env.NEWSLETTER_PROOF_APPROVERS;
   });
 
-  test('its claim must land before 10:00 AM ET: a claim the window closed on stops the issue for good, with one alert', async () => {
+  test('its claim must land before 10:00 AM ET: a claim the window closed on stops the issue for good', async () => {
     const claim = chain({ returning: [] });
     // The checks before the claim ran past 10:00 AM, so the claim finds nothing.
     claim.update.mockImplementation(() => {
@@ -245,6 +247,8 @@ describe('a planned Waves Pest Insider issue the switch queued (GATE_PEST_INSIDE
       newsletter_sends: [chain({ rows: [QUEUED] }), chain({ first: QUEUED }), claim, chain({ first: { status: 'scheduled' } }), revert],
       newsletter_subscribers: [chain({ rows: PLANNED_ROWS }), chain({ rows: PLANNED_ROWS })],
       pest_insider_issues: [chain({ first: PLANNED }), issueRow],
+      // The inbox sync ran clean a minute ago (the send-time HOLD check reads it).
+      email_sync_state: [chain({ first: { last_sync_at: new Date('2026-12-03T14:58:00Z'), errors: null } })],
     });
 
     const result = await processScheduledSends();
@@ -255,10 +259,8 @@ describe('a planned Waves Pest Insider issue the switch queued (GATE_PEST_INSIDE
     expect(issueRow.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'failed', reason: 'stopped at send time: its send window closed before the send could start',
     }));
-    expect(mockTrigger).toHaveBeenCalledTimes(1);
-    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
-      sendId: 'send-pi-2', errors: ['Stopped at send time: its send window closed before the send could start'],
-    }));
+    // Its one alert comes from settlePlannedIssues, which retries it until it reaches the owner.
+    expect(mockTrigger).not.toHaveBeenCalled();
     expect(require('../services/sendgrid-mail').sendBroadcast).not.toHaveBeenCalled();
   });
 });
