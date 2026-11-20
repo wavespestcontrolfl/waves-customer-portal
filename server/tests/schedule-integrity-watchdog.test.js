@@ -1362,17 +1362,34 @@ describe('same-start visits (class 5)', () => {
     expect(result).toMatchObject({ alerted: 1 });
   });
 
-  test('kill switch off: past the budget the same-start findings wait, with no bell read, all but one whose first day is tomorrow', async () => {
+  test('kill switch off: past the budget only a bell whose earliest new day is tomorrow rings; a bell that already shows tomorrow and gains a later day waits, as does a later new pair', async () => {
     alertEpisodesLive.mockReturnValue(false);
     const tomorrow = pairAlert('cust-pair-1');
     tomorrow[3] = { ...tomorrow[3], itemKeys: ['2026-08-05', '2026-08-10'] };
+    // Its bell shows Aug 5 (tomorrow); Sep 10 is new and not urgent.
+    const knownTomorrow = pairAlert('cust-pair-3');
+    knownTomorrow[3] = { ...knownTomorrow[3], itemKeys: ['2026-08-05', '2026-09-10'] };
     // The class's own order: earliest first day first.
-    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [tomorrow, pairAlert('cust-pair-2')], failed: false });
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [tomorrow, knownTomorrow, pairAlert('cust-pair-2')], failed: false });
     runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, problems: 10, rings: 10 });
-    makeDbMock();
+    makeDbMock({ bellRows: [{ dedupe_key: 'same-start-visits:cust-pair-3', auto_cleared: null, item_keys: ['2026-08-05'] }] });
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: 1 });
     expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-pair-1']);
-    expect(db).not.toHaveBeenCalledWith('notifications');
+    // Killed: the bells that wait get no quiet update and no close.
+    expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalled();
+  });
+
+  test('kill switch off: past the budget a standing bell that carries all its days waits, with no update, and logs the cap hit', async () => {
+    alertEpisodesLive.mockReturnValue(false);
+    const known = pairAlert('cust-pair-1');
+    known[4] = { ...known[4], forDays: jest.fn(() => pairAlert('cust-pair-1')) };
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [known], failed: false });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, problems: 10, rings: 10 });
+    makeDbMock({ bellRows: [{ dedupe_key: 'same-start-visits:cust-pair-1', auto_cleared: null, item_keys: ['2026-08-10'] }] });
+    expect(await runInner({ now: NOW })).toMatchObject({ sameStartVisits: 1, alerted: 0 });
+    expect(known[4].forDays).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('per-run alert cap hit'));
   });
 
   test('past the budget a new pair for tomorrow rings and counts; a bell that already shows tomorrow gets only its quiet update; a later new pair waits (owner 2026-11-19, "A")', async () => {

@@ -957,8 +957,8 @@ async function standingBellDays(prefix) {
   return days;
 }
 
-// The late class's alerts, with real rings up to `budget`. Under episodes the
-// standing bells are read first, and the alerts that would ring go in order of
+// The late class's alerts, with real rings up to `budget`. The standing bells
+// are read first (in both modes), and the alerts that would ring go in order of
 // their earliest day the bell does not carry yet: a day the office already
 // knows never takes a ring from a nearer new pair. An alert whose earliest new
 // day is `alwaysRingBy` (tomorrow) or sooner (today, start still ahead) always
@@ -972,9 +972,10 @@ async function standingBellDays(prefix) {
 // new one later). A finding with no standing bell, or an auto-cleared one (a
 // delivery would reopen it), waits. Only a real wait (a new bell, a reopen, or
 // a day not shown yet) logs the cap hit: a standing bell that carries all its
-// days gets its whole update. Killed: the given order with no bell read, and
-// past the budget only an alert whose first day is `alwaysRingBy` or sooner is
-// delivered, whole (it rings if anything on it is new). Returns the real rings
+// days gets its whole update. Killed: the same order and the same exception,
+// judged by the earliest new day, so a known day never carries a new later one
+// past the budget; the rest wait, with no quiet update and no close (no episode
+// steps). Returns the real rings
 // and the bells closed, and the bells not delivered: a lost write never holds
 // back the rest (every alert is tried and the closes run), and the job wrapper
 // then fails the run.
@@ -984,7 +985,7 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysR
   let held = 0;
   const over = [];
   let undelivered = 0;
-  const standing = episodes && alerts.length ? await standingBellDays(prefix) : new Map();
+  const standing = alerts.length ? await standingBellDays(prefix) : new Map();
   const firstNewDay = (alert) => {
     const carried = standing.get(alert[0]) || [];
     // itemKeys run in date order, so the first one missing is the earliest.
@@ -992,15 +993,15 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysR
   };
   const ranked = alerts.map((alert) => ({ alert, day: firstNewDay(alert) }));
   // A stable sort: equal days keep the class's own order (earliest first day first).
-  if (episodes) ranked.sort((a, b) => (a.day < b.day ? -1 : (a.day > b.day ? 1 : 0)));
+  ranked.sort((a, b) => (a.day < b.day ? -1 : (a.day > b.day ? 1 : 0)));
   for (const { alert, day } of ranked) {
     let delivery = alert;
     const tomorrowOrSooner = day <= alwaysRingBy;
     if (rang >= budget && !tomorrowOrSooner) {
-      if (!episodes) { held += 1; continue; }
       const carried = standing.get(alert[0]);
-      if (!carried || day !== NO_NEW_DAY) held += 1;
-      if (!carried) continue;
+      // Killed: it waits, with no quiet update and no close (no episode steps).
+      if (!carried || !episodes) { held += 1; continue; }
+      if (day !== NO_NEW_DAY) held += 1;
       const kept = typeof alert[4]?.forDays === 'function' ? alert[4].forDays(carried) : null;
       if (!kept) { over.push(alert[0]); continue; }
       delivery = [...kept.slice(0, 4), { ...kept[4], ringOnRefresh: () => false }];
