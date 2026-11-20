@@ -20,7 +20,7 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etW
 // can't sneak past. Add new names here as they come up.
 // Shared so the MRR breakdown + snapshot exclude the same accounts this tool does.
 const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
-const { whereNotUndeliveredSelfServe, countableViewAtSql } = require('../self-serve-estimates');
+const { whereNotUndeliveredSelfServe, sentAtSql, countableViewAtSql } = require('../self-serve-estimates');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 const { customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
 const { CANONICAL_SIBLING } = require('../completion-record-invariants');
@@ -413,16 +413,17 @@ async function comparePeriods(input) {
       const es = await excludeInternalEstimates(
         db({ e: 'estimates' })
           .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-          .whereNotNull('e.sent_at')
-          .whereBetween('e.sent_at', [fromTs, toTs])
           // plan_restart and plan_start (GATE_PORTAL_PLAN_START) sent_at is a
           // synthetic publish stamp (the customer self-served the quote;
           // nothing was delivered) — it is not an estimate SENT (codex GH
           // r19 P1 on #3671) UNLESS an operator later really delivered it:
           // the admin send path stamps deliveryState.firstDeliveredAt, the
           // same real-delivery witness estimate-source-performance counts
-          // for these sources (r26 P2). NULL-aware (r20 P2): legacy rows
-          // carry source NULL, which a bare NOT IN would drop from the count.
+          // for these sources (r26 P2), and the send is dated by it, since a
+          // later suppressed resend rewrites sent_at (sentAtSql; codex
+          // pre-push r16 P1). NULL-aware (r20 P2): legacy rows carry source
+          // NULL, which a bare NOT IN would drop from the count.
+          .whereRaw(`${sentAtSql('e')} BETWEEN ? AND ?`, [fromTs, toTs])
           .where(whereNotUndeliveredSelfServe('e'))
       ).count('* as count').first();
       m.estimates_sent = parseInt(es?.count || 0);
@@ -708,8 +709,10 @@ async function getEstimateFunnel(input) {
   // (whereNotUndeliveredSelfServe, as compare_periods counts sends; codex
   // pre-push P1). All stages share the cohort, so the rates stay rates.
   // compare_periods' accepted count still includes them (a count with no
-  // rate). A delivered one counts as viewed only from its delivery on
-  // (countableViewAtSql; codex pre-push r15): the portal look before the
+  // rate). A delivered one counts as sent at its first delivery
+  // (sentAtSql, in every query dated by the send; codex pre-push r16: a
+  // suppressed resend rewrites sent_at) and as viewed only from its delivery
+  // on (countableViewAtSql; codex pre-push r15): the portal look before the
   // send is not a viewed send.
   function stageQuery(instantSql, status) {
     let qb = db({ e: 'estimates' })
@@ -721,7 +724,7 @@ async function getEstimateFunnel(input) {
   }
 
   const [sent, viewed, accepted, declined] = await Promise.all([
-    stageQuery('e.sent_at').count('* as c').first(),
+    stageQuery(sentAtSql('e')).count('* as c').first(),
     stageQuery(countableViewAtSql('e')).count('* as c').first(),
     stageQuery('e.accepted_at', 'accepted').count('* as c').first(),
     stageQuery('e.declined_at', 'declined').count('* as c').first(),
@@ -737,9 +740,9 @@ async function getEstimateFunnel(input) {
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
       .where('e.status', 'accepted')
       .whereBetween('e.accepted_at', [fromTs, toTs])
-      .whereNotNull('e.sent_at')
+      .whereRaw(`${sentAtSql('e')} IS NOT NULL`)
       .where(whereNotUndeliveredSelfServe('e'))
-  ).select(db.raw("AVG(EXTRACT(EPOCH FROM (e.accepted_at - e.sent_at)) / 3600) as avg_hrs")).first();
+  ).select(db.raw(`AVG(EXTRACT(EPOCH FROM (e.accepted_at - ${sentAtSql('e')})) / 3600) as avg_hrs`)).first();
 
   const totalValue = await excludeInternalEstimates(
     db({ e: 'estimates' })
@@ -767,9 +770,8 @@ async function getEstimateFunnel(input) {
   const byService = await excludeInternalEstimates(
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-      .whereNotNull('e.sent_at')
       .whereNull('e.archived_at')
-      .whereBetween('e.sent_at', [fromTs, toTs])
+      .whereRaw(`${sentAtSql('e')} BETWEEN ? AND ?`, [fromTs, toTs])
       .where(whereNotUndeliveredSelfServe('e'))
   )
     .select(
@@ -791,9 +793,8 @@ async function getEstimateFunnel(input) {
   const openNow = await excludeInternalEstimates(
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-      .whereNotNull('e.sent_at')
       .whereNull('e.archived_at')
-      .whereBetween('e.sent_at', [fromTs, toTs])
+      .whereRaw(`${sentAtSql('e')} BETWEEN ? AND ?`, [fromTs, toTs])
       .whereIn('e.status', ['sent', 'viewed'])
       .where(whereNotUndeliveredSelfServe('e'))
   ).count('* as c').first();

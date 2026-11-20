@@ -1058,7 +1058,9 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
-  test('a restart keeps main\'s premises proof: an unresolvable visit link is not a second premises (plan start alone runs the strict one)', async () => {
+  test('a restart keeps main\'s premises proof: an unresolvable visit link or another profile on the account is not a second premises (plan start alone runs the strict one)', async () => {
+    // Another profile on the account: the strict proof refuses it (codex pre-push r16 P0); a restart, as on main, does not read it.
+    tables.customers.push({ ...CUSTOMER, id: 'cust-2', account_id: 'cust-1' });
     const proof = jest.fn(async (_db, _id, _customer, _street, options) => options?.unresolvedFails !== true);
     const minted = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ customerHasOnlyPrimaryPremises: proof }), randomBytes: () => Buffer.from('abcdef0123456789') });
     expect(minted.url).toEqual(expect.any(String));

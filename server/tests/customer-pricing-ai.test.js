@@ -2130,12 +2130,15 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
   const realPremisesProof = crossSell.customerHasOnlyPrimaryPremises;
   let owns;
   let premises;
+  let otherProfile;
   beforeEach(() => {
     owns = jest.spyOn(restart, 'ownsAnyRecurringService').mockResolvedValue(false);
+    // The strict proof's account read (another profile on the account); plan-start.test.js runs it on rows.
+    otherProfile = jest.spyOn(restart, 'accountHasOtherProfile').mockResolvedValue(false);
     // The mint's single-premises proof, at its home (cross-sell); the street checks run for real.
     premises = jest.spyOn(crossSell, 'customerHasOnlyPrimaryPremises').mockResolvedValue(true);
   });
-  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); premises.mockRestore(); });
+  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); premises.mockRestore(); otherProfile.mockRestore(); });
 
   test('lists the options the route can book, only when the gate is on and the account has no plan', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
@@ -2148,6 +2151,15 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     expect(owns).toHaveBeenCalledWith(null, 'cust-lead');
     // The strict proof, as the mint runs it: an unresolvable visit link fails it (codex pre-push P1).
     expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ id: 'cust-lead' }), expect.any(String), { unresolvedFails: true });
+    expect(otherProfile).toHaveBeenCalledWith(null, expect.objectContaining({ id: 'cust-lead' }));
+  });
+
+  test('absent for an account with another profile: the strict proof reads the whole account (codex pre-push r16 P0)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    otherProfile.mockResolvedValue(true);
+    expect('planStart' in await ask(plain())).toBe(false);
+    otherProfile.mockRejectedValue(new Error('pg down'));
+    expect('planStart' in await ask(plain())).toBe(false);
   });
 
   test('absent for a multi-home account: the mint prices only an account on one provable premises (codex pre-push P1)', async () => {

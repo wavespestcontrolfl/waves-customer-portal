@@ -624,6 +624,23 @@ function resolveMintDeps(deps) {
   };
 }
 
+// True when another non-deleted profile (customers row) shares this
+// customer's account. The key is account_id, or the row's own id for a row
+// never attached to an account, matched as accountPropertyIds matches it
+// (account_id = key OR id = key). The key is re-read from the row, so a
+// caller holding a narrow select cannot skip the check. A failed read throws;
+// every strict caller fails closed.
+async function accountHasOtherProfile(dbh, customer) {
+  const own = await dbh('customers').where({ id: customer.id }).first('account_id');
+  const accountKey = own?.account_id || customer.id;
+  const other = await dbh('customers')
+    .whereNull('deleted_at')
+    .whereNot('id', customer.id)
+    .where(function sameAccount() { this.where('account_id', accountKey).orWhere('id', accountKey); })
+    .first('id');
+  return Boolean(other);
+}
+
 // The account's primary street when it provably has one premises, else null
 // (codex GH r4 P1): the mint prices and addresses its estimate at that
 // street, so a multi-premises profile, a missing primary street or a street
@@ -634,12 +651,19 @@ function resolveMintDeps(deps) {
 // start's hint, mint and accept; codex pre-push P1): a visit whose property
 // row or creating estimate cannot be resolved fails the proof
 // (unresolvedFails, as the other fail-closed callers pass it), because it may
-// be a second premises. Plan restart keeps the portal offer's default, as on
-// main.
+// be a second premises. Strict also fails an account with another profile
+// (codex pre-push r16 P0): the portal keeps each property of a multi-property
+// account as its own customers row under one account (docs/
+// multi-property-model.md), and the proof above reads this row only, so a
+// plan-free profile beside a member profile would sell a first plan. Any
+// other non-deleted profile counts, active or not, as the proof counts every
+// property row. Plan restart keeps the portal offer's default, as on main.
 async function singlePremisesStreet(dbh, customer, { proof, strict = false } = {}) {
   const linkage = require('../estimate-property-linkage');
   const street = linkage.normalizedStampedStreet(customer.address_line1, customer.address_line2, customer.city, customer.zip);
   if (!street || linkage.scopeKeyLacksLocality(street)) return null;
+  // Through the exports, so a suite can stand in for the account read.
+  if (strict && await module.exports.accountHasOtherProfile(dbh, customer)) return null;
   const premisesProof = proof || require('../service-report/cross-sell').customerHasOnlyPrimaryPremises;
   return (await premisesProof(dbh, customer.id, customer, street, { unresolvedFails: strict })) ? street : null;
 }
@@ -965,43 +989,44 @@ async function mintPricedEstimate({
       return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
     }
   }
+  // The WHOLE unaccepted lineage, read FOR UPDATE (codex pre-push r16 P1):
+  // the delivery check and the archive below act on exactly these rows. An
+  // operator send claims a row with one UPDATE that refuses an archived row,
+  // so a claim either committed before this read (its status refuses the
+  // mint here) or waits on the lock and then finds the row archived.
+  // Query-shaped (not the limit-10 reuse read) so no straggler survives.
+  const lineage = await trx('estimates')
+    .where({ customer_id: fresh.id, source })
+    .whereNull('archived_at')
+    .whereNot('status', 'accepted')
+    .forUpdate()
+    .select('id', 'status', 'archived_at', 'expires_at');
   // Mid-delivery lineage refuses the mint FIRST (codex GH r19 P0 — the
   // same guard click-estimate-mint applies): an operator send claims the
   // row 'sending' and its finalization does not reject an archived row,
   // so archiving here would let the provider deliver a token we just
   // killed; a 'scheduled' send would be silently retired before its
-  // worker runs. Query-shaped like the archive below so no straggler
-  // hides past the limit-10 reuse read. A crashed 'sending' claim
-  // (expiry window lapsed) is dead and archives normally —
-  // priorMintStillLive draws the same live/stale line the click-mint
-  // uses. Sends finish in seconds; the customer's next tap proceeds.
+  // worker runs. A crashed 'sending' claim (expiry window lapsed) is dead
+  // and archives normally — priorMintStillLive draws the same live/stale
+  // line the click-mint uses. Sends finish in seconds; the customer's next
+  // tap proceeds.
   const { priorMintStillLive } = require('../service-report/click-estimate-mint');
-  const midDelivery = (await trx('estimates')
-    .where({ customer_id: fresh.id, source })
-    .whereNull('archived_at')
-    .whereIn('status', ['sending', 'scheduled'])
-    .select('id', 'status', 'archived_at', 'expires_at'))
-    .find((row) => priorMintStillLive(row, nowDate));
-  if (midDelivery) {
+  if (lineage.some((row) => ['sending', 'scheduled'].includes(row.status) && priorMintStillLive(row, nowDate))) {
     throw new RestartUnavailableError('delivery_in_flight', 'This quote is on its way to you right now — give it a moment, then try again.');
   }
-  // Minting a replacement: archive the WHOLE unaccepted restart lineage
-  // first — an EXPIRED restart quote left unarchived stays revivable for
-  // seven days through /extension-request (restart mints stamp sent_at),
-  // which would put an older price or cancellation scope back in the wild
-  // beside the new quote (codex GH r6 P1). Query-shaped (not the limit-10
-  // id list) so no straggler row survives; accepted rows are history and
-  // stay. Each archived quote's uncommitted slot holds go in this same
-  // transaction (codex pre-push, GATE_PORTAL_PLAN_START r15): an archived
-  // quote can no longer be booked, so its hold kept a real appointment slot
-  // from other customers until it expired. The scheduler's own predicate
-  // picks the holds; a committed visit is never touched.
-  const archived = await trx('estimates')
-    .where({ customer_id: fresh.id, source })
-    .whereNull('archived_at')
-    .whereNot('status', 'accepted')
-    .update({ archived_at: nowDate, updated_at: nowDate }, ['id']);
-  for (const { id } of archived) {
+  // Minting a replacement: archive that lineage first — an EXPIRED restart
+  // quote left unarchived stays revivable for seven days through
+  // /extension-request (restart mints stamp sent_at), which would put an
+  // older price or cancellation scope back in the wild beside the new quote
+  // (codex GH r6 P1); accepted rows are history and stay. Each archived
+  // quote's uncommitted slot holds go in this same transaction (codex
+  // pre-push, GATE_PORTAL_PLAN_START r15): an archived quote can no longer be
+  // booked, so its hold kept a real appointment slot from other customers
+  // until it expired. The scheduler's own predicate picks the holds; a
+  // committed visit is never touched.
+  const archivedIds = lineage.map((row) => row.id);
+  await trx('estimates').whereIn('id', archivedIds).update({ archived_at: nowDate, updated_at: nowDate });
+  for (const id of archivedIds) {
     await releaseEstimateHolds({ estimateId: id, database: trx });
   }
 
@@ -1468,6 +1493,7 @@ module.exports = {
   planStartAccountOpen,
   planStartOptionBookable,
   ownsAnyRecurringService,
+  accountHasOtherProfile,
   singlePremisesStreet,
   engineResultNeedsReview,
   mintPlanStartEstimate,

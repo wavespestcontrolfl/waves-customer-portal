@@ -1418,8 +1418,9 @@ async function buildCustomerPricingResponse({
 // start-plan route can book for this account, or none. It mirrors the mint's bar without
 // its locks: an account with no plan (planStartAccountOpen), no live recurring service
 // of any kind, a stored type that is not commercial, and one provable premises
-// (singlePremisesStreet, strict as the mint runs it: a multi-home account or a visit whose
-// property link cannot be resolved keeps the request, codex pre-push P1s), and per option an
+// (singlePremisesStreet, strict as the mint runs it: a multi-home account, another profile
+// on the account or a visit whose property link cannot be resolved keeps the request, codex
+// pre-push P1s and r16 P0), and per option an
 // id on today's ladder that the route books
 // (planStartOptionBookable: pest quarterly only), a monthly price, and an engine result the
 // mint's own review check passes (engineResultNeedsReview: review markers, heuristic turf,

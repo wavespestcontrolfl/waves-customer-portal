@@ -248,7 +248,7 @@ function fakeTrx(ops = null, tableFactory = builder) {
       const origFirst = b.first;
       b.first = (...args) => { ops.push(`read:${name}${locked ? ':forUpdate' : ''}`); return origFirst(...args); };
       const origThen = b.then;
-      b.then = (resolve, reject) => { ops.push(`read:${name}`); return origThen(resolve, reject); };
+      b.then = (resolve, reject) => { ops.push(`read:${name}${locked ? ':forUpdate' : ''}`); return origThen(resolve, reject); };
     }
     return b;
   };
@@ -580,6 +580,21 @@ describe('mintPlanStartEstimate', () => {
       await refused('pricing_unavailable', {}, { customerHasOnlyPrimaryPremises: async () => { throw new Error('boom'); } });
     });
 
+    test('another profile on the account is priced by hand: the strict premises proof reads the whole account (codex pre-push r16 P0)', async () => {
+      // Each property of a multi-property account is its own customers row, member or not, active or not.
+      tables.customers = [{ ...LEAD, account_id: 'acct-1' }, { ...CUSTOMER, id: 'cust-2', account_id: 'acct-1', waveguard_tier: 'Gold' }];
+      await refused('pricing_unavailable');
+      // The primary row of an account minted from it carries the account key as its own id.
+      tables.customers = [{ ...LEAD, account_id: 'cust-0' }, { ...CUSTOMER, id: 'cust-0', account_id: null }];
+      await refused('pricing_unavailable');
+      // A row never attached to an account keys the profiles that name it.
+      tables.customers = [{ ...LEAD, account_id: null }, { ...CUSTOMER, id: 'cust-2', account_id: 'cust-1' }];
+      await refused('pricing_unavailable');
+      // A merged (deleted) profile is not one.
+      tables.customers = [{ ...LEAD, account_id: 'acct-1' }, { ...CUSTOMER, id: 'cust-2', account_id: 'acct-1', deleted_at: '2026-11-01' }];
+      await expect(mint()).resolves.toMatchObject({ reused: false });
+    });
+
     test('an unreadable estimate seed is priced by hand: its review guards could not run (codex pre-push P0)', async () => {
       await refused('pricing_unavailable', {}, { crossSell: { loadEstimateSeed: async () => { throw new Error('pg down'); } } });
     });
@@ -847,6 +862,26 @@ describe('mintPlanStartEstimate', () => {
       expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
     });
 
+    test('the replace step reads the lineage\'s delivery state under FOR UPDATE, before it archives (codex pre-push r16 P1)', async () => {
+      // A staff send claims a row with an UPDATE that refuses an archived row. Holding the rows from
+      // the delivery check to the archive means a claim either landed first (and refuses this mint)
+      // or waits on the lock and then finds the row archived; it never lands in between.
+      const first = await mint();
+      const ops = [];
+      const txDb = { transaction: async (fn) => fn(fakeTrx(ops, (table) => {
+        const b = builder(table);
+        const origUpdate = b.update;
+        b.update = (...args) => { ops.push(`update:${String(table).split(' as ')[0]}`); return origUpdate(...args); };
+        return b;
+      })) };
+      recompute.mockResolvedValue(pricedAs(LAWN_LINE));
+      await mint({ serviceKey: 'lawn_care', optionId: 'lawn-enhanced', shown: shownOf(LAWN_LINE), randomBytes: () => Buffer.from('0123456789abcdef') }, { db: txDb });
+      const lockedRead = ops.indexOf('read:estimates:forUpdate');
+      expect(lockedRead).toBeGreaterThanOrEqual(0);
+      expect(ops.indexOf('update:estimates')).toBeGreaterThan(lockedRead);
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
+    });
+
     test('a plan_restart lineage is never touched, and a mid-delivery plan_start refuses the mint', async () => {
       tables.estimates = [
         { id: 'est-restart', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'r', expires_at: '2099-01-01', archived_at: null },
@@ -896,6 +931,9 @@ describe('assertPlanStartAcceptEligible', () => {
         { customer_id: 'cust-1', address_line1: '1 Main St', city: 'Parrish', zip: '34219' },
         { customer_id: 'cust-1', address_line1: '9 Oak Ave', city: 'Parrish', zip: '34219' },
       ];
+    }],
+    ['gained another profile on the account since the mint (codex pre-push r16 P0)', () => {
+      tables.customers = [{ ...LEAD, account_id: 'acct-1' }, { ...CUSTOMER, id: 'cust-2', account_id: 'acct-1' }];
     }],
     ['has no street with a city or zip', () => { tables.customers = [{ ...LEAD, city: null, zip: null }]; }],
     ['has an estimate with no stored address', () => { delete tables.estimates[0].address; }],

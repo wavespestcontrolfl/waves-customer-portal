@@ -82,15 +82,38 @@ test('every get_estimate_funnel query leaves out undelivered self-serve quotes, 
 test('the funnel\'s viewed stage counts a self-serve quote\'s view only from staff delivery on (codex pre-push r15 P1)', async () => {
   recorded.length = 0;
   await executeDashboardTool('get_estimate_funnel', { date_from: '2026-11-01', date_to: '2026-11-19' });
-  const { countableViewAtSql } = require('../services/self-serve-estimates');
+  const { sentAtSql, countableViewAtSql } = require('../services/self-serve-estimates');
   const stages = recorded.filter((r) => r.method === 'whereRaw' && String(r.args[0]).endsWith(' BETWEEN ? AND ?'));
   expect(stages.map((r) => r.args[0])).toEqual([
-    'e.sent_at BETWEEN ? AND ?',
+    `${sentAtSql('e')} BETWEEN ? AND ?`,
     `${countableViewAtSql('e')} BETWEEN ? AND ?`,
     'e.accepted_at BETWEEN ? AND ?',
     'e.declined_at BETWEEN ? AND ?',
+    // The sent cohort by service, then open follow-ups: both dated by the send.
+    `${sentAtSql('e')} BETWEEN ? AND ?`,
+    `${sentAtSql('e')} BETWEEN ? AND ?`,
   ]);
   for (const r of stages) expect(r.args[1]).toEqual(['2026-11-01T00:00:00', '2026-11-19T23:59:59']);
   // The raw first-view stamp filters nothing on its own.
   expect(recorded.some((r) => r.method === 'whereBetween' && r.args[0] === 'e.viewed_at')).toBe(false);
+});
+
+test('every estimates query dated by the send reads sentAtSql, never the sent_at a suppressed resend rewrites (codex pre-push r16 P1)', async () => {
+  const { sentAtSql } = require('../services/self-serve-estimates');
+  const sendDated = `${sentAtSql('e')} BETWEEN ? AND ?`;
+  const rawSentAt = () => recorded.filter((r) => String(r.table).includes('estimates')
+    && ['whereNotNull', 'whereBetween'].includes(r.method) && r.args[0] === 'e.sent_at');
+
+  recorded.length = 0;
+  await executeDashboardTool('get_estimate_funnel', { date_from: '2026-11-01', date_to: '2026-11-19' });
+  expect(rawSentAt()).toEqual([]);
+  // The response time runs from the first delivery for a self-serve quote.
+  const average = recorded.find((r) => r.method === 'select' && JSON.stringify(r.args).includes('avg_hrs'));
+  expect(average.args[0].__raw[0]).toBe(`AVG(EXTRACT(EPOCH FROM (e.accepted_at - ${sentAtSql('e')})) / 3600) as avg_hrs`);
+  expect(recorded.some((r) => r.method === 'whereRaw' && r.args[0] === `${sentAtSql('e')} IS NOT NULL`)).toBe(true);
+
+  recorded.length = 0;
+  await executeDashboardTool('compare_periods', { period_a: 'this_month', period_b: 'last_month', metrics: ['estimates_sent'] });
+  expect(rawSentAt()).toEqual([]);
+  expect(recorded.filter((r) => r.method === 'whereRaw' && r.args[0] === sendDated).length).toBe(2);
 });

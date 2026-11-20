@@ -8,9 +8,11 @@
 // follow-ups, the accepted value) leave it out unless staff really delivered
 // it (deliveryState.firstDeliveredAt). A source-NULL legacy row stays in
 // (whereNotUndeliveredSelfServe, services/self-serve-estimates.js; codex
-// pre-push P1). A delivered one counts as viewed only from its delivery on
-// (countableViewAtSql; codex pre-push r15). Only real rows prove the
-// NULL-aware NOT IN, the JSON path and the guarded timestamp cast.
+// pre-push P1). A delivered one counts as sent at its first delivery, which a
+// later suppressed resend never moves (sentAtSql; codex pre-push r16), and as
+// viewed only from its delivery on (countableViewAtSql; codex pre-push r15).
+// Only real rows prove the NULL-aware NOT IN, the JSON path and the guarded
+// timestamp cast.
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => {
@@ -54,7 +56,7 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
   afterEach(async () => { if (trx) await trx.rollback(); });
   afterAll(async () => { await database?.destroy(); });
 
-  async function seed() {
+  async function insertCustomer() {
     const customerId = randomUUID();
     await trx('customers').insert({
       id: customerId, first_name: 'Fixture', last_name: `Selfserve${customerId.slice(0, 6)}`,
@@ -62,6 +64,11 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
       address_line1: '100 Test Lane', city: 'Test City', zip: '00000',
       active: true, pipeline_stage: 'active_customer', monthly_rate: 0,
     });
+    return customerId;
+  }
+
+  async function seed() {
+    const customerId = await insertCustomer();
     const row = (source, status, estimateData = {}, lastViewedAt = null) => ({
       id: randomUUID(), customer_id: customerId, source, status, sent_at: AT, viewed_at: AT,
       last_viewed_at: lastViewedAt, accepted_at: status === 'accepted' ? AT : null, service_interest: SERVICE,
@@ -80,7 +87,7 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
       row('plan_restart', 'viewed', delivered(DELIVERED)),
       // ... until a view after the send, which counts.
       row('plan_start', 'viewed', delivered(DELIVERED), LATER),
-      // An unreadable delivery stamp: sent, no view counted, and no cast error.
+      // An unreadable delivery stamp: sent (dated by sent_at), no view counted, and no cast error.
       row('plan_start', 'viewed', delivered('not a date')),
     ]);
   }
@@ -110,5 +117,34 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     const delta = (key) => after.period_a.metrics[key] - before.period_a.metrics[key];
     expect(delta('estimates_sent')).toBe(7);
     expect(delta('estimates_accepted')).toBe(2);
+  });
+
+  test('a suppressed resend never moves a delivered self-serve quote across a reporting boundary (codex pre-push r16 P1)', async () => {
+    // Staff delivered it March 30; a suppressed April 2 resend rewrote sent_at; the customer accepted April 5.
+    const funnel = (from, to) => executeDashboardTool('get_estimate_funnel', { date_from: from, date_to: to });
+    const sends = async () => {
+      const out = await executeDashboardTool('compare_periods', { period_a: '2004-04', period_b: '2004-03', metrics: ['estimates_sent'] });
+      return [out.period_a.metrics.estimates_sent, out.period_b.metrics.estimates_sent];
+    };
+    const marchBefore = await funnel('2004-03-01', '2004-03-31');
+    const aprilBefore = await funnel('2004-04-01', '2004-04-30');
+    const sendsBefore = await sends();
+    // The response time below is this one quote's.
+    expect(aprilBefore.funnel.accepted).toBe(0);
+    await trx('estimates').insert({
+      id: randomUUID(), customer_id: await insertCustomer(), source: 'plan_start', status: 'accepted',
+      sent_at: '2004-04-02T15:00:00Z', accepted_at: '2004-04-05T15:00:00Z', service_interest: SERVICE,
+      monthly_total: 50, onetime_total: 0,
+      estimate_data: { deliveryState: { firstDeliveredAt: '2004-03-30T15:00:00Z', lastDeliveredAt: '2004-03-30T15:00:00Z' } },
+    });
+    const marchAfter = await funnel('2004-03-01', '2004-03-31');
+    const aprilAfter = await funnel('2004-04-01', '2004-04-30');
+    expect(marchAfter.funnel.sent - marchBefore.funnel.sent).toBe(1);
+    expect(aprilAfter.funnel.sent - aprilBefore.funnel.sent).toBe(0);
+    expect(aprilAfter.funnel.accepted - aprilBefore.funnel.accepted).toBe(1);
+    // Six days from the delivery, not three from the rewritten sent_at.
+    expect(aprilAfter.avg_response_hours).toBe('144.0');
+    const sendsAfter = await sends();
+    expect([sendsAfter[0] - sendsBefore[0], sendsAfter[1] - sendsBefore[1]]).toEqual([0, 1]);
   });
 });
