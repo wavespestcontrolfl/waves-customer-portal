@@ -1,7 +1,7 @@
 // Same-start visits check on real Postgres (owner 2026-11-19, "build check"): the finder's SQL
-// against the migrated schema, and one bell's whole life through the schedule-integrity
+// against the migrated schema, one bell's whole life through the schedule-integrity
 // watchdog (raise, a new day rings, a fixed day is quiet, the split closes it, a comeback
-// rings again). Real migrated PostgreSQL and the REAL notification service, synthetic records,
+// rings again), and a new pair for tomorrow ringing past a spent budget (owner 2026-11-19, "A"). Real migrated PostgreSQL and the REAL notification service, synthetic records,
 // rolled back after every test (same harness as prepay-coverage-bell-refresh-postgres.test.js).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -18,10 +18,10 @@ jest.mock('../models/db', () => {
 jest.mock('../services/irrigation-weekly-email', () => ({
   findLawnEmailAudienceGaps: jest.fn(async () => []), findUnstampedRecurringLawnMembers: jest.fn(async () => []),
 }));
-// The real combined-booking check, which one test tells to report a spent budget for one run.
+// The real combined-booking check, wrapped so one test can stand in for a run whose budget it spent.
 jest.mock('../services/combined-booking-check', () => {
   const actual = jest.requireActual('../services/combined-booking-check');
-  return { ...actual, runCombinedBookingCheck: jest.fn((...args) => actual.runCombinedBookingCheck(...args)) };
+  return { ...actual, runCombinedBookingCheck: jest.fn(actual.runCombinedBookingCheck) };
 });
 const { randomUUID } = require('node:crypto');
 
@@ -237,82 +237,29 @@ postgres('same-start visits check on Postgres', () => {
     expect(back.metadata).toMatchObject({ autoCleared: false, recurrenceGeneration: 1 });
   });
 
-  test('a pair tomorrow that a spent budget holds is on one quiet standing count; the next day it is gone and the count closes', async () => {
+  test('a spent budget never holds a new pair for tomorrow: it rings; a pair on a later day waits for a later run (owner 2026-11-19, "A")', async () => {
     const { runInner } = require('../services/schedule-integrity-watchdog');
     const { runCombinedBookingCheck } = require('../services/combined-booking-check');
-    const NotificationService = require('../services/notification-service');
     const tech = await technician();
-    const customerId = await customer();
-    const [, pest] = await pair(customerId, { scheduled_date: '2040-01-11', technician_id: tech });
-    const rows = (prefix) => trx('notifications').where({ recipient_type: 'admin' }).whereRaw("starts_with(metadata->>'dedupeKey', ?)", [prefix]);
-    const bellUnread = () => NotificationService.getAdminUnreadCount({ fullAccess: true }, trx);
-    const unreadBefore = await bellUnread();
+    const tomorrowCustomer = await customer();
+    const laterCustomer = await customer({ first_name: 'Sample', last_name: 'Later' });
+    await pair(tomorrowCustomer, { scheduled_date: '2040-01-11', technician_id: tech });
+    await pair(laterCustomer, { scheduled_date: '2040-01-12', window_start: '13:00', window_end: '14:00', technician_id: tech });
+    const bell = async (customerId) => (await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`same-start-visits:${customerId}`]))[0];
 
-    // Day 1: the combined-booking check spent all ten rings, so no bell is left for the pair.
-    runCombinedBookingCheck.mockResolvedValueOnce({ candidates: 0, checked: 10, ok: 0, problems: 10, deferred: 0, skipped: 0, failed: 0, closed: 0, held: 0, rings: 10 });
-    const first = await runInner({ now });
-    expect(first).toMatchObject({ sameStartVisits: 1, sameStartHeld: 1, alerted: 0 });
-    expect(await rows(`same-start-visits:${customerId}`)).toHaveLength(0);
-    const [count, ...extra] = await rows('same-start-visits-held:');
-    expect(extra).toHaveLength(0);
-    expect(count.title).toBe('Schedule — split same-time visits for 1 customer');
-    expect(count.body).toBe('1 customer has visits at the same time, first Jan 11; the bell limit held them.');
-    expect(count.detail).toBe('Synthetic Fixture — Jan 11 at 10 AM: Lawn Care Service and Pest Control Service.');
-    expect(count.link).toBe(`/admin/dispatch?tab=schedule&date=2040-01-11&appointment=${pest.id}`);
-    expect(count.metadata).toMatchObject({
-      feed: 'activity', quiet: true, count: 1, itemKeys: [`${customerId}:2040-01-11`], doneWhen: 'count_zero', severity: 'needs-you',
-    });
-    expect(count.done_at).toBeNull();
-    // Activity only: the bell's unread count does not move.
-    expect(await bellUnread()).toBe(unreadBefore);
-
-    // The same day again: the count is rewritten in place, never a second row.
-    runCombinedBookingCheck.mockResolvedValueOnce({ candidates: 0, checked: 10, ok: 0, problems: 10, deferred: 0, skipped: 0, failed: 0, closed: 0, held: 0, rings: 10 });
+    // The combined-booking check spent the run's ten rings.
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, ok: 0, problems: 10, deferred: 0, skipped: 0, failed: 0, held: 0, rings: 10 });
     await runInner({ now });
-    const again = await rows('same-start-visits-held:');
-    expect(again.map((r) => r.id)).toEqual([count.id]);
+    const rang = await bell(tomorrowCustomer);
+    expect(rang).toMatchObject({ read_at: null, done_at: null });
+    expect(rang.metadata).toMatchObject({ itemKeys: ['2040-01-11'], severity: 'needs-you' });
+    expect(rang.metadata.feed).toBeUndefined();
+    expect(await bell(laterCustomer)).toBeUndefined();
 
-    // Day 2: that pair is today's (the finder leaves today out), so nothing waits and the count closes at zero.
-    const next = await runInner({ now: new Date('2040-01-11T16:00:00Z') });
-    expect(next).toMatchObject({ sameStartVisits: 0, sameStartHeld: 0 });
-    const [closed, ...extra2] = await rows('same-start-visits-held:');
-    expect(extra2).toHaveLength(0);
-    expect(closed.id).toBe(count.id);
-    expect(closed.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'count_zero' });
-    expect(closed.done_at).not.toBeNull();
-  });
-
-  test('a count someone closed stays closed while it lists every pair that waits; a new pair starts a new quiet row', async () => {
-    const { runInner } = require('../services/schedule-integrity-watchdog');
-    const { runCombinedBookingCheck } = require('../services/combined-booking-check');
-    const spent = () => runCombinedBookingCheck.mockResolvedValueOnce({ candidates: 0, checked: 10, ok: 0, problems: 10, deferred: 0, skipped: 0, failed: 0, closed: 0, held: 0, rings: 10 });
-    const counts = () => trx('notifications').where({ recipient_type: 'admin' }).whereRaw("starts_with(metadata->>'dedupeKey', ?)", ['same-start-visits-held:']);
-    const tech = await technician();
-    const first = await customer();
-    await pair(first, { scheduled_date: '2040-01-11', technician_id: tech });
-    spent();
+    // The next run has rings left: the later pair rings then.
     await runInner({ now });
-    const [count] = await counts();
-
-    // A person marks it done: the next run, with the same pair still held, leaves it closed.
-    await trx('notifications').where({ id: count.id }).update({ done_at: new Date('2040-01-10T17:00:00Z'), done_by: randomUUID() });
-    spent();
-    expect(await runInner({ now })).toMatchObject({ sameStartHeld: 1 });
-    expect((await counts()).map((r) => r.id)).toEqual([count.id]);
-
-    // A second customer's pair is held too: a new quiet row lists both; the closed row stays closed.
-    const second = await customer();
-    await pair(second, { scheduled_date: '2040-01-12', technician_id: tech });
-    spent();
-    expect(await runInner({ now })).toMatchObject({ sameStartHeld: 2 });
-    const all = await counts();
-    expect(all).toHaveLength(2);
-    const kept = all.find((r) => r.id === count.id);
-    const fresh = all.find((r) => r.id !== count.id);
-    expect(kept.done_at).not.toBeNull();
-    expect(fresh.metadata.dedupeKey).not.toBe(count.metadata.dedupeKey);
-    expect(fresh.metadata).toMatchObject({ count: 2, feed: 'activity', quiet: true, itemKeys: [`${first}:2040-01-11`, `${second}:2040-01-12`].sort() });
-    expect(fresh.done_at).toBeNull();
+    expect((await bell(laterCustomer)).metadata.itemKeys).toEqual(['2040-01-12']);
   });
 
   test('a day past the ten listed still counts: moving it rings the bell again; a second start on a listed day is quiet', async () => {
