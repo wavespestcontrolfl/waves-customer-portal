@@ -14,9 +14,9 @@
  *   node server/scripts/ci-shard-timings.js \
  *     --out server/tests/helpers/ci-shard-timings.json /tmp/ci-logs/*.log
  *
- * The script refuses to write when the logs give no times for one of the two
- * jobs (a missing job, or a log format it does not recognise), so a partial
- * refresh can never replace the measured times with defaults.
+ * New times merge into the existing file: a test file the given logs do not
+ * mention keeps its recorded time, so logs from only some shards (or a log
+ * format the script does not recognise) can update times but never erase them.
  *
  * A file's time is the median over the logs that ran it. Jest prints a file's
  * time only when it is slow ("PASS tests/x.test.js (12.3 s)"); in a serial
@@ -84,23 +84,21 @@ function main(args) {
       }
     }
   }
-  const missing = Object.keys(samples).filter((section) => !samples[section].size);
-  if (missing.length) {
-    process.stderr.write(`No ${missing.join(' or ')} times in these logs; ${outPath} left unchanged.\n`);
-    process.exit(1);
-  }
+  const previous = fs.existsSync(outPath) ? JSON.parse(fs.readFileSync(outPath, 'utf8')) : {};
   const round = (seconds) => Math.round(seconds * 10) / 10;
   const out = {};
   for (const [section, bySection] of Object.entries(samples)) {
-    const files = {};
-    for (const file of [...bySection.keys()].sort()) files[file] = round(median(bySection.get(file)));
+    const merged = { ...previous[section]?.files };
+    for (const [file, seconds] of bySection) merged[file] = round(median(seconds));
+    const files = Object.fromEntries(Object.keys(merged).sort().map((file) => [file, merged[file]]));
     const measured = Object.values(files);
-    const defaultSeconds = section === 'unit' ? UNIT_DEFAULT_SECONDS : round(median(measured));
+    const defaultSeconds = section === 'unit' || !measured.length ? UNIT_DEFAULT_SECONDS : round(median(measured));
     out[section] = { defaultSeconds, files };
   }
   fs.writeFileSync(`${outPath}.tmp`, `${JSON.stringify(out, null, 2)}\n`);
   fs.renameSync(`${outPath}.tmp`, outPath);
-  process.stdout.write(`${outPath}: ${Object.keys(out.unit.files).length} unit and ${Object.keys(out.db.files).length} DB file times\n`);
+  process.stdout.write(`${outPath}: updated ${samples.unit.size} unit and ${samples.db.size} DB file times; `
+    + `${Object.keys(out.unit.files).length} unit and ${Object.keys(out.db.files).length} DB in all\n`);
 }
 
 if (require.main === module) main(process.argv.slice(2));
