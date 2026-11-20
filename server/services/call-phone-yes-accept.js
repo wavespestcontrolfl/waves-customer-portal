@@ -326,9 +326,9 @@ const TAP_ROW_RULES = [
   // A booking the office has not reviewed (a voice-agent or outbound-review request still pending, hidden from the
   // customer), by the customer surfaces' own rule: the plan would start billing and email the customer first.
   ['visit_unreviewed', (row) => require('./call-booking-source-actions').isUnreviewedDispatchOwned(row)],
-  // A start off the hour (AGENTS.md: window_start is always HH:00): the seeder copies the parent's start to every next
-  // visit. A visit with no start time is not refused.
-  ['visit_off_hour', (row) => row.window_start != null && !require('./annual-prepay-series-slot').wholeHourStart(row.window_start)],
+  // A start off the hour (AGENTS.md: window_start is always HH:00:00), read on the whole stored time: the seeder copies
+  // the parent's start to every next visit. A visit with no start time is not refused.
+  ['visit_off_hour', (row) => row.window_start != null && !/^\d{2}:00(:00)?$/.test(String(row.window_start))],
 ];
 
 // The customer already holds a plan: a WaveGuard membership (tier or legacy monthly rate; strict, so a failed read

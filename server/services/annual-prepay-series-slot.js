@@ -200,8 +200,6 @@ async function seriesSlotHandoff(conn, row, { cols = null, now = new Date() } = 
 
 module.exports = {
   inSavepoint,
-  // Also read by the phone-yes tap (call-phone-yes-accept.js): it refuses a booked visit whose start a seed may not copy.
-  wholeHourStart,
   recheckTechnician,
   coverageSeriesSlot,
   seriesSlotAbsentDays,

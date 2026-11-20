@@ -335,6 +335,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['the visit is an outbound-review booking still pending review', { visitOver: { source_action: 'ai_call_outbound_review', status: 'pending', customer_confirmed: false } }, 'visit_unreviewed'],
     // A start off the hour: the seeder copies the parent's start to every next visit (AGENTS.md: starts on the hour).
     ['the visit starts off the hour', { visitOver: { window_start: '09:30', window_end: '11:30' } }, 'visit_off_hour'],
+    ['the visit starts seconds after the hour', { visitOver: { window_start: '09:00:30', window_end: '11:00' } }, 'visit_off_hour'],
     // Visit types completion never bills, by the label or the catalog key: a plan from one would bill $0.
     ['the visit is a re-service by its label', { visitOver: { service_type: 'Pest Control Re-Service' } }, 'visit_free_type'],
     ['the visit is a re-service by its catalog key', { visitOver: { service_key_snapshot: 'pest_re_service' } }, 'visit_free_type'],
@@ -1222,7 +1223,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       expect(ev).toMatchObject({ card: true, acceptProblem: null, yes: null });
       const row = await listed(card.id);
       expect(row.call_phone_yes).toMatchObject({ can_accept: false, preview_token: null });
-      expect(row.call_phone_yes.message).toContain('not the latest word about this estimate');
+      expect(row.call_phone_yes.message).toBe(`The tap cannot accept this one. ${TAP_REFUSALS.word_not_current.replace(/^Nothing was accepted\. /, '')}`);
       const out = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at, preview_token: 'tok' });
       expect(out).toMatchObject({ status: 409, body: { code: 'word_not_current' } });
       expect(await statusOf('estimates', estB.id)).toBe('sent');
