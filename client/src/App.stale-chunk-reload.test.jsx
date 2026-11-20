@@ -180,6 +180,35 @@ test.each([
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
 });
 
+test('held work on a staff page during an app-link navigation: the chunk is not swallowed, and the window ends with no reload', () => {
+  vi.useFakeTimers();
+  window.history.pushState({}, '', '/admin/communications');
+  holding = true;
+  const heal = vi.fn();
+  markPageNavigating(heal);
+  const cancelled = preloadErrorEvent();
+  handleVitePreloadError(cancelled, vi.fn());
+  expect(cancelled.defaultPrevented).toBe(false);
+  vi.advanceTimersByTime(30000);
+  expect(heal).not.toHaveBeenCalled();
+});
+
+test('work held when a navigation window ends delays its reload until the work is done', () => {
+  vi.useFakeTimers();
+  window.history.pushState({}, '', '/admin/communications');
+  const heal = vi.fn();
+  markPageNavigating(heal);
+  handleVitePreloadError(preloadErrorEvent(), vi.fn());
+  holding = true;
+  vi.advanceTimersByTime(34000);
+  expect(heal).not.toHaveBeenCalled();
+  expect(isStaleChunkReloadPending()).toBe(true);
+  holding = false;
+  vi.advanceTimersByTime(2000);
+  expect(heal).toHaveBeenCalledTimes(1);
+  expect(isStaleChunkReloadPending()).toBe(true);
+});
+
 test('on a customer page, held work leaves the stale-chunk reload as it was', () => {
   holding = true;
   const reload = vi.fn();

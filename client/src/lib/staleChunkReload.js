@@ -28,6 +28,8 @@ export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 // Long enough for a slow navigation to commit. It bounds how long a page whose
 // navigation never committed keeps placeholders before it reloads.
 const NAVIGATION_WINDOW_MS = 30000;
+// How often a reload that held work delays asks again.
+const HELD_RELOAD_CHECK_MS = 2000;
 
 let reloadPending = false;
 let navigatingUntil = 0;
@@ -47,6 +49,20 @@ export function markStaleChunkReloadPending() {
   reloadPending = true;
 }
 
+// Held work on a staff page (portalReload.js) delays the reload until it
+// ends. The reload is pending from the start, so placeholders stay meanwhile.
+function reloadWhenFree(reload) {
+  markStaleChunkReloadPending();
+  const attempt = () => {
+    if (staffReloadBlocker()) {
+      setTimeout(attempt, HELD_RELOAD_CHECK_MS);
+      return;
+    }
+    reload();
+  };
+  attempt();
+}
+
 // Call right before location.assign. Returns the call that closes the window
 // when the navigation did not start.
 export function markPageNavigating(reload = () => window.location.reload()) {
@@ -54,14 +70,14 @@ export function markPageNavigating(reload = () => window.location.reload()) {
   navigatingUntil = until;
   // The page is still here: the navigation never committed, and React.lazy
   // keeps the placeholder each held chunk resolved to. Reload, as for a stale
-  // chunk. No one-shot guard: this runs at most once per navigation, and the
-  // next document skips the launch URL it already consumed.
+  // chunk, once no held work on a staff page stops it. No one-shot guard: this
+  // runs at most once per navigation, and the next document skips the launch
+  // URL it already consumed.
   const reloadHeldChunks = () => {
     navigatingUntil = 0;
     if (!chunkHeld) return;
     chunkHeld = false;
-    markStaleChunkReloadPending();
-    reload();
+    reloadWhenFree(reload);
   };
   const timer = setTimeout(() => {
     if (navigatingUntil === until) reloadHeldChunks();
@@ -76,14 +92,15 @@ export function markPageNavigating(reload = () => window.location.reload()) {
 // One-shot guard (App.jsx clears the flag on a successful lazy load) so a
 // genuine outage still surfaces instead of reload-looping.
 export function handleVitePreloadError(event, reload = () => window.location.reload()) {
+  // Held work on a staff page keeps the tab: the import fails as it would
+  // with no handler, and lazyWithRetry shows the retry screen. Nothing is
+  // held for a navigation either, so its window ends with no reload.
+  if (staffReloadBlocker()) return;
   if (pageNavigating()) {
     chunkHeld = true;
     event.preventDefault();
     return;
   }
-  // Held work on a staff page keeps the tab: the import fails as it would
-  // with no handler, and lazyWithRetry shows the retry screen.
-  if (staffReloadBlocker()) return;
   try {
     if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
