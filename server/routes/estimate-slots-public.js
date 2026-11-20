@@ -306,11 +306,9 @@ function blockingStateRefusal(state, { browse = false } = {}) {
 // shared checks: slotBlockingRefusal (each route's first read, and the card steps' post-Stripe re-read) and
 // lockedContactReviewRefusal (the locked reserve and extend rows). The page shows its refused-quote banner (codex
 // pre-push P1 x2: a tab opened before the change could hold a time, and a change during the Stripe mint passed).
-// `retiresCapture`: the page drops a recurring card it captured on this answer, so a route that is handed that card
-// retires it first (respondNoBookingRefusal).
 function staffChangedQuoteSlotRefusal(row) {
   const refusal = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(row);
-  return refusal ? { status: 409, body: { error: refusal.message, code: refusal.code }, retiresCapture: true } : null;
+  return refusal ? { status: 409, body: { error: refusal.message, code: refusal.code } } : null;
 }
 async function slotBlockingRefusal(estimate, opts, shape) {
   return blockingStateRefusal(await blockingStateFor(estimate, opts), shape) || staffChangedQuoteSlotRefusal(estimate);
@@ -447,18 +445,8 @@ function lockedAreaAddOnRuleRefusal(row, requestedServiceMode) {
     || (requestedServiceMode === undefined ? null : recurringAreaAddOnRefusalBody(row, resolveSlotServiceMode(row, requestedServiceMode)));
   return body ? { status: 409, body } : null;
 }
-// Answer a no-booking refusal; a park refusal first runs the park side effects (deduped office alert, hold release). A
-// refused plan quote (`retiresCapture`) first retires the recurring card the tab captured (`retireSetupIntentId`, sent
-// by a hold extension), with the accept's own helper: the page drops it on this answer (codex pre-push P0). Stripe
-// unable to confirm = the existing 503, and the tab keeps the card for the accept's own retirement.
-async function respondNoBookingRefusal(res, estimate, refusal, { retireSetupIntentId = '' } = {}) {
-  if (refusal.retiresCapture && retireSetupIntentId) {
-    try {
-      await retireOrDenyDroppedCapture(estimate, retireSetupIntentId);
-    } catch (retireErr) {
-      return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
-    }
-  }
+// Answer a no-booking refusal; a park refusal first runs the park side effects (deduped office alert, hold release).
+async function respondNoBookingRefusal(res, estimate, refusal) {
   if (refusal.park) await refuseParkedWrite(estimate, refusal.park.rejectedCustomerId);
   return res.status(refusal.status).json(refusal.body);
 }
@@ -1266,10 +1254,6 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
   if (!HOLD_ID_RE.test(String(scheduledServiceId || ''))) {
     return res.status(404).json({ error: 'Not found' });
   }
-  // The recurring card this checkout captured: the page's confirm steps extend right after Stripe's confirmation and
-  // send it, so a refused plan quote retires it before its 409 (respondNoBookingRefusal).
-  const capturedSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
-    ? req.body.recurringCardSetupIntentId.trim() : '';
   try {
     const estimate = await db('estimates')
       .where({ token })
@@ -1322,7 +1306,7 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
       return null;
     };
     const preTxnRefusal = await noBookingRefusal(estimate);
-    if (preTxnRefusal) return respondNoBookingRefusal(res, estimate, preTxnRefusal, { retireSetupIntentId: capturedSetupIntentId });
+    if (preTxnRefusal) return respondNoBookingRefusal(res, estimate, preTxnRefusal);
 
     try {
       const { scheduledServiceId: extendedId, expiresAt } = await slotReservation.extendReservation({
@@ -1342,7 +1326,7 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
       if (svcErr.code === 'ESTIMATE_NO_BOOKING' && svcErr.response) {
         // The locked revalidation refused — same body the pre-txn guard
         // uses, so the client's existing handling applies unchanged.
-        return respondNoBookingRefusal(res, estimate, svcErr.response, { retireSetupIntentId: capturedSetupIntentId });
+        return respondNoBookingRefusal(res, estimate, svcErr.response);
       }
       if (svcErr.code === 'ESTIMATE_TERMINAL') {
         return res.status(409).json({ error: 'Estimate is no longer active' });

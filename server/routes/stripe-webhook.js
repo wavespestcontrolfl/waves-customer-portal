@@ -5119,6 +5119,21 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     // the flag is off. Flag-off + not-yet-accepted acks and drops (no
     // retry loop for a killed feature).
     if (!RecurringCards.isRecurringCardOnFileEnabled() && estimate.status !== 'accepted') return;
+    // A customer's own plan quote that staff changed is never accepted: the accept refuses it, and no writer turns
+    // its options back off (the customer's next tap replaces it). The page drops a card it captured there by several
+    // paths, so retire the capture here, on this event's next delivery, instead of waiting for an accept that cannot
+    // come: one place for every path the tab took. Stripe unable to confirm = retry.
+    if (estimate.status !== 'accepted'
+      && require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate)) {
+      const retired = await RecurringCards.retireOrphanedCaptureIntent({ estimate, setupIntentId: setupIntent.id });
+      if (!retired.ok) {
+        throw annotateSetupIntentWebhookError(
+          new Error(`recurring card capture ${setupIntent.id} on a refused plan quote ${estimate.id} could not be retired — retry later`),
+          { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'refused_quote_retire_failed' },
+        );
+      }
+      return;
+    }
     // This event normally arrives BEFORE the accept commits (the customer
     // confirms the card, then clicks through the deposit + accept). Acking it
     // then would burn the only durable retry this capture has — a deploy/crash

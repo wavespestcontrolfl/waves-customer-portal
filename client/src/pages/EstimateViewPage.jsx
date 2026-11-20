@@ -7014,16 +7014,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     }
     const run = (async () => {
       try {
-        // The recurring card this checkout captured rides along: a refused plan quote retires it before its 409, since
-        // the settle below drops it on that answer (codex pre-push P0). A 503 (Stripe could not confirm) is
-        // 'retryable', so the card stays for the accept's own retirement.
-        const capturedSetupIntentId = recurringCardSetupIntentIdRef.current;
         const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve/${encodeURIComponent(scheduledServiceId)}/extend`, {
           method: 'POST',
-          ...(capturedSetupIntentId ? {
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ recurringCardSetupIntentId: capturedSetupIntentId }),
-          } : {}),
         });
         const body = await r.json().catch(() => ({}));
         if (r.ok) {
@@ -7068,6 +7060,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         // A refused plan quote (codex pre-push P1) is a no-booking answer too:
         // the settle releases the hold and reloads, and the reload's /data
         // marks the quote (estimate.quoteRefusal), so the page shows its banner.
+        // A recurring card the recovery drops here is retired server-side: such
+        // a quote is never accepted, so its setup_intent.succeeded webhook
+        // retires the capture (stripe-webhook.js), whichever request saw it.
         if (STALE_QUOTE_CODES.has(body.code)) return 'no_booking';
         // The route's specialized no-booking bodies (codex r7 P2): staff can
         // reshape an estimate mid-checkout into a commercial-manual,
@@ -7287,7 +7282,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // A refused plan quote holds no time (codex pre-push P1): when /data marks it (estimate.quoteRefusal) and still
     // offers a live hold, the hold is released through the same release-then-refresh recovery a refused answer runs
     // (refuseStaleQuoteRef), and never adopted. Not mid-confirmSetup (recoverFromDeadHold refuses then, and the
-    // confirm's own extend or accept gets the refusal).
+    // confirm's own extend or accept gets the refusal). A recurring card this tab restored (a 3DS return) is never
+    // used on such a quote, and the setup_intent.succeeded webhook retires it (stripe-webhook.js).
     if (held && quoteRefusalCode) {
       if (!inlineConfirmBusyRef.current && refusedQuoteHoldReleaseRef.current !== held.id) {
         refusedQuoteHoldReleaseRef.current = held.id;
