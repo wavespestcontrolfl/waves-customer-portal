@@ -143,22 +143,29 @@ function closeCopy(target, firstName, liveOffer) {
 
 // The dated update is offered only while the asked day is still ahead in Eastern
 // time: for a day that has come, the server picks another start date, so the
-// note stays as history and the card's Revise is the action.
-function DateRequestNote({ offer, busy, canAct, onUpdate }) {
+// note stays as history and the card's Revise is the action. The day is checked
+// again at the click: a card left open across Eastern midnight still shows the
+// button, and that click writes nothing (onDayCame says why; the card drops it).
+function DateRequestNote({ offer, busy, canAct, onUpdate, onDayCame }) {
   const asked = dateRequestText(offer);
   if (!asked) return null;
-  const ahead = offer.requestedStartDate > todayET();
+  const day = offer.requestedStartDate;
+  const ahead = () => day > todayET();
   return (
     <div className="border-hairline border border-zinc-200 rounded p-3 mb-3">
       <div className="text-14 text-zinc-800 mb-1">{asked}</div>
-      {canAct && ahead && (
-        <Button size="sm" onClick={() => onUpdate(offer.requestedStartDate)} disabled={busy}>
-          Make an updated offer for {formatDay(offer.requestedStartDate)}
+      {canAct && ahead() && (
+        <Button size="sm" onClick={() => (ahead() ? onUpdate(day) : onDayCame(day))} disabled={busy}>
+          Make an updated offer for {formatDay(day)}
         </Button>
       )}
     </div>
   );
 }
+
+// The dated update's day came while the card was open: nothing was written.
+const dayCameText = (day) =>
+  `${formatDay(day)} is no longer in the future, so an updated offer cannot start then. Nothing was changed. Use Revise to choose another start date.`;
 
 // busy: a signed copy (or a write) is loading. Every signed-copy button waits for it,
 // so a slower read can never replace the copy the owner chose last.
@@ -333,7 +340,13 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
       </div>
       <Terms offer={offer} />
       <Timeline entries={offer.timeline} />
-      <DateRequestNote offer={offer} busy={busy || Boolean(draft)} canAct={canAct} onUpdate={revise} />
+      <DateRequestNote
+        offer={offer}
+        busy={busy || Boolean(draft)}
+        canAct={canAct}
+        onUpdate={revise}
+        onDayCame={(day) => setError(dayCameText(day))}
+      />
       {error && !closing && (
         <ActionFeedback error className="mb-3">
           {error}

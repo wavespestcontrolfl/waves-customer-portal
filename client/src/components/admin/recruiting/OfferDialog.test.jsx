@@ -232,14 +232,18 @@ describe("OfferDialog", () => {
     expect(screen.queryByText(/use Revise/)).toBeNull();
   });
 
-  // A result left open past the expiry: when the expiry passes, the page's clock closes the offer with no read (the
-  // read after the send still says sent). The clock is frozen (beforeEach) and moved by hand; the form's timer is real.
-  it("a send result left open past the offer's expiry reads as closed unsigned when the expiry passes, with no read", async () => {
+  // A result left open past the expiry: when the expiry passes, the page's clock closes the offer with no read. The read
+  // after the send still says sent, or it failed and still holds the draft: the result then shows the send's answer,
+  // and that answer's expiry counts. The clock is frozen (beforeEach) and moved by hand; the form's timer is real.
+  it.each([
+    ["the read after the send says sent", (outside, afterSend) => async () => { outside.read(afterSend); return afterSend; }],
+    ["the read after the send failed", (outside) => async () => { outside.fail(); return null; }],
+  ])("a send result left open past the offer's expiry reads as closed unsigned when the expiry passes, with no read (%s)", async (_case, onSentFor) => {
     const sentRow = draftRow({ status: "sent", updatedAt: "2026-12-12T13:15:00.000Z", expiresAt: new Date(NOW.getTime() + 300).toISOString() });
     sendOffer.mockResolvedValueOnce({ offer: sentRow, comms: { sms: { outcome: "sent" }, email: { outcome: "sent" } } });
     const outside = {};
     const afterSend = { ...panel(draftRow()), current: sentRow };
-    render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} onSent={async () => { outside.read(afterSend); return afterSend; }} />);
+    render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} onSent={onSentFor(outside, afterSend)} />);
     fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
     const ask = await screen.findByRole("dialog", { name: "Send offer" });
     fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));

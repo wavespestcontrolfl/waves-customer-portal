@@ -411,8 +411,9 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState(null);
-  // An offer out passing its expiry while the form is open: the send result and the lock follow it with no other read.
-  useRenderAtExpiry(data);
+  // An offer out passing its expiry while the form is open: the lock and the send result follow it with no other read.
+  // The result's own offer counts too: after a send whose read failed, the read still holds the draft.
+  useRenderAtExpiry(data, result);
   // The dialog's own close handler (Escape, backdrop) honors the same busy state.
   useEffect(() => {
     onBusyChange(busy);
