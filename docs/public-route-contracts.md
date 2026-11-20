@@ -5957,9 +5957,15 @@ logs (`redact-request-url.js`). No query parameters are read. The render cache i
 token.
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
-url-safe 4-32 code format gate before any DB read; every hit below the
-gate writes a `referral_clicks` row, malformed/unknown codes redirect
-home without touching the DB).
+url-safe 4-32 code format gate before any DB read; a malformed code
+redirects home without touching the DB. A well-formed code is looked up:
+an active promoter (or a merged alias of one) writes a `referral_clicks`
+row on every hit and redirects with `?ref=`; a legacy
+`customers.referral_code` redirects with `?ref=` and writes no click row;
+an unknown code redirects home. On a promoter hit, a crawler, link-preview,
+scanner or empty user agent (`utils/bot-ua.js` plus the empty check) still
+redirects and gets a row with `device_type` 'bot', but is never a unique
+click and never raises `total_clicks`).
 The estimate `/data` response includes `verifiedStaffPreview: true` only
 when `adminPreview=1` is accompanied by a valid staff bearer token. The
 customer SPA uses that verified field (or the existing verified
