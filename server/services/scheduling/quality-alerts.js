@@ -65,8 +65,7 @@ function capRouteQualityCards(expected, limit = MAX_CARDS_PER_DATE) {
 }
 
 // The drive model whose minutes can back a lateness claim: the GPS-fitted
-// drive clock (owner 2026-10-28), live whenever drive-time calibration is on.
-// The legacy estimate cannot back one.
+// drive clock (owner 2026-10-28). The old straight-line estimate cannot back one.
 const TIMED_DRIVE_MODEL = 'drive_clock';
 
 // One technician's unresolved exceptions for a day, plus the modeled-late

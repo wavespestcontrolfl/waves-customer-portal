@@ -3383,8 +3383,7 @@ const gates = {
   // <72h or 72h-reminder-sent: frozen), plus the ±5-day cumulative drift
   // budget, the ≥5-days-out destination floor, and the reminder-sent freeze.
   // OFF = auto-dispatch's legacy flat 14-day lock, byte for byte. Read at CALL
-  // time via gateEnvValue (same pattern and rationale as
-  // GATE_DRIVE_TIME_CALIBRATION: it moves the numbers/windows scheduling
+  // time via gateEnvValue (the redeploy-free pattern: it moves the numbers/windows scheduling
   // decisions are made with, so the flip is a deliberate act in EVERY
   // environment — never an ambient dev default — and needs no redeploy).
   // Kill switch: unset GATE_ROUTE_TIERS.
@@ -3460,29 +3459,14 @@ const gates = {
   // GATE_ROUTE_SCORECARD.
   routeScorecard: gateEnvValue('GATE_ROUTE_SCORECARD'),
 
-  // Drive-Time Calibration — swaps the straight-line drive-time approximation
-  // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
-  // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an
-  // estimator change — no external calls, no new data, no customer-facing
-  // surface of its own; it moves the numbers auto-dispatch and the find-time
-  // scorer rank slots with. Opt-in everywhere so the shift in slot ordering is
-  // a deliberate flip. Off → the legacy constants apply unchanged.
-  // NOTE: consumers read this through gateEnvValue() at CALL time rather than
-  // this baked value, so a flip takes effect without a redeploy. Parsed with
-  // the SAME helper here so the registry and the startup log can never disagree
-  // with the scheduler — with a bare === 'true' a value of `1`/`on`/`TRUE`
-  // would calibrate the estimator while logGateStatus reported it disabled.
-  driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
-
   // Schedule tie-proximity display order (owner ruling 2026-09-26) — when two
   // stops on a tech's day start within 30 minutes of each other, the one
   // closer to the previous stop shows first, instead of falling back to
   // whichever was booked first. DISPLAY ONLY: server/services/schedule-tie-
   // proximity.js returns a `displayOrder` per stop; nothing writes
   // route_order or any other column, and no customer communication is sent.
-  // Uses the existing shared drive-time estimator (GATE_DRIVE_TIME_CALIBRATION
-  // governs which one) — no new Google API calls. Off (default in every
-  // environment) → the mobile day/week list and the desktop day board's route-
+  // Uses the existing shared drive-time estimator — no new Google API calls.
+  // Off (default in every environment) → the mobile day/week list and the desktop day board's route-
   // order badge sort by window start alone, exactly as before this gate
   // existed. Consumers read gateEnvValue() at CALL time, so a flip needs no
   // redeploy. Kill switch: unset GATE_SCHEDULE_TIE_PROXIMITY.
@@ -6456,7 +6440,7 @@ function leadInspectionLinkLive() {
 }
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL read at CALL time via gateEnvValue (same
-// convention as GATE_ROUTE_TIERS / GATE_DRIVE_TIME_CALIBRATION — it moves
+// convention as GATE_ROUTE_TIERS — it moves
 // the numbers auto-dispatch ranks placements with, so the flip is deliberate
 // in every environment and needs no redeploy). The one canonical reader for
 // every entry point: candidate-slots.js (current-placement scoring + the

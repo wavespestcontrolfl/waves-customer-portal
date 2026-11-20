@@ -62,11 +62,6 @@ jest.mock('../services/route-optimizer', () => ({
 
 const TOOLS_DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
 
-// These assertions assume LEGACY drive times (see the mocked haversine above),
-// and the mock deliberately pulls the REAL gate-sensitive estimator. Pin the
-// gate off so the suite does not depend on the ambient environment; the
-// calibrated model is covered by drive-time-calibration.test.js.
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 // cancel_plan (C3) is dark behind GATE_CANCEL_FLOW_V2 — its unconfirmed
 // call 404s (a tool error, not a preview) with the gate off, so pin it ON
 // here: the contract under test is "no mutation without confirmed", which
@@ -76,7 +71,6 @@ const ORIGINAL_PLATFORM_GATE = process.env.GATE_IB_PLATFORM;
 beforeAll(() => {
   // reprice_future_visits is dark behind GATE_IB_REPRICE_VISITS; off, its preview refuses.
   process.env.GATE_IB_REPRICE_VISITS = 'true';
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
@@ -119,8 +113,6 @@ afterAll(() => {
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
   if (ORIGINAL_CANCEL_GATE === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
   else process.env.GATE_CANCEL_FLOW_V2 = ORIGINAL_CANCEL_GATE;
   delete process.env.GATE_IB_REPRICE_VISITS;
@@ -1077,14 +1069,6 @@ const UNCONFIRMED_CALLS = [
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
-
-    // The two route optimizers refuse BEFORE their confirmation gate while
-    // drive-time calibration is off — they may not certify an arrival window
-    // on the uncalibrated model (that refusal has its own coverage in
-    // admin-schedule-optimize-window-guard). This contract is about the gate,
-    // so give them the calibrated model and let them reach it.
-    const needsCalibration = String(toolName).startsWith('optimize_');
-    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     // This recorder has no pricing_config rows. Live sync success is a
     // controlled prerequisite here; the real-DB estimate suite tests outages.
@@ -1233,7 +1217,6 @@ const UNCONFIRMED_CALLS = [
       repriceCoverage?.mockRestore();
       prepaySwitchPreview?.mockRestore();
       acceptDryRun?.mockRestore();
-      if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {
           if (value === undefined) delete process.env[key];
@@ -1313,14 +1296,6 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
-
-    // The two route optimizers refuse BEFORE their confirmation gate while
-    // drive-time calibration is off — they may not certify an arrival window
-    // on the uncalibrated model (that refusal has its own coverage in
-    // admin-schedule-optimize-window-guard). This contract is about the gate,
-    // so give them the calibrated model and let them reach it.
-    const needsCalibration = String(toolName).startsWith('optimize_');
-    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     const result = await executor(toolName, input, context);
 
