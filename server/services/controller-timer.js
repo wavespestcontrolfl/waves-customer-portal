@@ -2,8 +2,9 @@
  * The sprinkler timer on file: property_preferences.irrigation_controller_brand / _model / _app
  * (migration 20261119140000). The three columns are ONE record about one box on the wall of one home, so
  * nothing that writes or moves a preferences row treats them one by one:
- *   - a write saves it whole or not at all, and only from a form rendered against the home on the row now
- *     (settleControllerTimer: the customer's and the staff preference writer, under their preference lock);
+ *   - a write saves it whole or not at all, only from a form rendered against the home on the row now, and only over
+ *     the timer that form showed (settleControllerTimer: the customer's and the staff preference writer, under their
+ *     preference lock);
  *   - a move clears it (customer-address-fanout markSprinklerSettingsMoved);
  *   - a customer merge never fills it column by column, and never gives one customer's timer to the other. The
  *     kept customer's own timer stays while the merge leaves their home unchanged, else it is cleared
@@ -34,6 +35,24 @@ function hasControllerTimer(row) {
   return CONTROLLER_TIMER_FIELDS.some((field) => row?.[field] != null);
 }
 
+// The timer as one comparable value: brand|model|app, '' for a blank (the customer's page builds the same).
+function controllerTimerKey(row) {
+  return CONTROLLER_TIMER_FIELDS.map((field) => row?.[field] ?? '').join('|');
+}
+
+// The timers a form says the row may hold, as controllerTimerKey values: the one it showed when its timer change was
+// made, and any its own failed saves sent (they may have landed). `controller_timer_seen` from the customer's page,
+// `controllerTimerSeen` from the staff form; one key or a list, each key counted once. There are 20 timers that can
+// exist, so a list of more than 32 keys is not one a form built. null when the request carries none.
+function controllerTimerSeen(body) {
+  const raw = body || {};
+  const seen = raw.controller_timer_seen ?? raw.controllerTimerSeen;
+  const keys = typeof seen === 'string' ? [seen] : Array.isArray(seen) ? [...new Set(seen)] : null;
+  const valid = Array.isArray(keys) && keys.length > 0 && keys.length <= 32
+    && keys.every((key) => typeof key === 'string' && key.length <= 64);
+  return valid ? keys : null;
+}
+
 // Why the three values cannot be one timer, or null when they can.
 function controllerTimerProblem({ brand, model, app }) {
   if (brand == null) return model == null && app == null ? null : 'A sprinkler timer with no brand has no model and no phone-app answer.';
@@ -44,17 +63,24 @@ function controllerTimerProblem({ brand, model, app }) {
 
 const STALE_HOME = 'The home on this account changed. Reload, then set the sprinkler timer again.';
 const NOT_WHOLE = 'The sprinkler timer saves as one record: send the brand, the model and the phone-app answer together.';
+const TIMER_CHANGED = 'The sprinkler timer on this account changed while this page was open. Reload, then set it again.';
 
 // Settles the timer fields of one preference write, in place. Call it inside the writer's preference lock, with
-// `fresh` = the request was rendered against the home on the row now: a move clears the timer under the same lock,
-// and the lock orders the writes but says nothing about when the form was rendered.
+// `fresh` = the request was rendered against the home on the row now (a move clears the timer under the same lock,
+// and the lock orders the writes but says nothing about when the form was rendered), `stored` = the row read under
+// the lock, and `seen` = the timers the form says the row may hold (controllerTimerSeen: a key or a list). A change
+// lands only over one of them: a page left open never puts back a timer someone else replaced, and an app answer
+// never lands on another box. A write that names none (null) is refused. A timer equal to the one stored changes
+// nothing and needs no check: the retry of a save that landed but whose answer was lost.
 // Returns the rejections ([{ field, message }], one for each timer field the write named). When it returns any,
 // no timer field is left in `updates`, so the stored timer is never a mix of two writes.
-function settleControllerTimer(updates, { fresh = true } = {}) {
+function settleControllerTimer(updates, { fresh = true, stored = null, seen = null } = {}) {
   const named = CONTROLLER_TIMER_FIELDS.filter((field) => field in updates);
   if (!named.length) return [];
   let message = controllerTimerProblem({ brand: updates[BRAND], model: updates[MODEL], app: updates[APP] });
   if (named.length < CONTROLLER_TIMER_FIELDS.length) message = NOT_WHOLE;
+  const storedKey = controllerTimerKey(stored);
+  if (!message && ![].concat(seen ?? []).includes(storedKey) && controllerTimerKey(updates) !== storedKey) message = TIMER_CHANGED;
   if (!fresh) message = STALE_HOME;
   if (!message) return [];
   for (const field of named) delete updates[field];
@@ -71,6 +97,6 @@ function settleKeptControllerTimer(winnerRow, premise) {
 }
 
 module.exports = {
-  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerOf, controllerTimerProblem, hasControllerTimer,
-  settleControllerTimer, settleKeptControllerTimer,
+  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerKey, controllerTimerOf, controllerTimerProblem,
+  controllerTimerSeen, hasControllerTimer, settleControllerTimer, settleKeptControllerTimer,
 };
