@@ -142,6 +142,23 @@ const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
 // watchdog's page.
 const SCHEDULED_SMS_CLAIM_JOB = 'scheduled-sms-claim';
 const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
+// Timed waits a replay's own check names when no provider send was tried. The
+// executor refunds the claimed attempt and waits until nextAllowedAt; the check
+// that names the wait also bounds it.
+//  - BILLING_TEXT_LEG_IN_FLIGHT: another attempt holds this notice's billing Text
+//    claim (messaging/billing-text-leg-dedupe.js). Spent on the bounded ladder, a
+//    claim live across three ticks would terminally block this replay, and the
+//    notice would be lost if that other attempt then ended not_sent. Past
+//    CLAIM_STALE_MS the claim answers with the non-retryable
+//    BILLING_TEXT_LEG_CLAIM_STALE instead of this hold.
+//  - CUSTOMER_MID_CHECKOUT: a queued estimate follow-up whose customer started
+//    checkout after the replay's recheck (estimate-follow-up.js
+//    followupTextProviderCheck). The wait lasts while the card step or a
+//    visit-time hold is live; then the check ends the text or lets it go.
+const TIMED_WAIT_HOLDS = {
+  BILLING_TEXT_LEG_IN_FLIGHT: { at: 'billing_text_in_flight_hold_at', why: 'waiting on an in-flight billing text for the same notice' },
+  CUSTOMER_MID_CHECKOUT: { at: 'customer_checkout_hold_at', why: 'waiting while the customer is mid-checkout' },
+};
 const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
@@ -7123,23 +7140,19 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} waiting on a street-level address hold — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
-          } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
-            // Another attempt holds this notice's billing Text claim
-            // (messaging/billing-text-leg-dedupe.js), so no provider send
-            // was tried. Refund the attempt like QUIET_HOURS_HOLD above:
-            // spent on the bounded ladder, a claim live across three ticks
-            // would terminally block this replay, and the notice would be
-            // lost if that other attempt then ends not_sent. Still bounded:
-            // past CLAIM_STALE_MS the claim answers with the non-retryable
-            // BILLING_TEXT_LEG_CLAIM_STALE instead of this hold.
-            const inFlightRetryAt = new Date(smsResult.nextAllowedAt);
+          } else if (TIMED_WAIT_HOLDS[smsResult.code] && smsResult.nextAllowedAt) {
+            // A timed wait the replay's own check named (TIMED_WAIT_HOLDS):
+            // no provider send was tried, so refund the attempt like
+            // QUIET_HOURS_HOLD above and wait until nextAllowedAt.
+            const { at: holdKey, why } = TIMED_WAIT_HOLDS[smsResult.code];
+            const waitRetryAt = new Date(smsResult.nextAllowedAt);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',
-              scheduled_for: inFlightRetryAt,
+              scheduled_for: waitRetryAt,
               updated_at: completedAt,
               metadata: db.raw(`
                 COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-                  'billing_text_in_flight_hold_at', ?::timestamptz,
+                  ?::text, ?::timestamptz,
                   'scheduled_sms_attempts',
                   GREATEST(
                     CASE
@@ -7150,9 +7163,9 @@ function initScheduledJobs() {
                     0
                   )
                 )
-              `, [completedAt]),
+              `, [holdKey, completedAt]),
             });
-            logger.info(`[scheduled-sms] ${msg.id} waiting on an in-flight billing text for the same notice — rescheduled for ${inFlightRetryAt.toISOString()} (attempt refunded)`);
+            logger.info(`[scheduled-sms] ${msg.id} ${why} — rescheduled for ${waitRetryAt.toISOString()} (attempt refunded)`);
           } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
             // MOVE_HOLD: the replay now names its visit (appointmentId, app

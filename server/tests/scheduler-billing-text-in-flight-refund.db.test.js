@@ -132,6 +132,27 @@ postgres('scheduled billing replay held by an in-flight Text claim (real Postgre
     expect(new Date(held.scheduled_for).toISOString()).toBe(nextAllowedAt);
   });
 
+  // A queued estimate follow-up whose customer started checkout after the replay's recheck: the
+  // provider-boundary check (estimate-follow-up.js followupTextProviderCheck) names a timed wait.
+  test('a customer mid-checkout at the provider boundary refunds the final attempt and waits - never terminally blocked', async () => {
+    const queued = await queueFinalAttempt();
+    const nextAllowedAt = new Date(Date.now() + 20 * 60 * 1000).toISOString();
+    mockSendCustomerMessage.mockResolvedValue({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CUSTOMER_MID_CHECKOUT',
+      retryable: true, nextAllowedAt,
+    });
+
+    await tick();
+
+    const held = await fixture.knex('sms_log').where({ id: queued.id }).first();
+    expect(held).toMatchObject({
+      status: 'scheduled',
+      metadata: { scheduled_sms_attempts: 2, customer_checkout_hold_at: expect.any(String) },
+    });
+    expect(held.metadata.billing_text_in_flight_hold_at).toBeUndefined();
+    expect(new Date(held.scheduled_for).toISOString()).toBe(nextAllowedAt);
+  });
+
   test('a dedupe-unavailable infra hold still spends the bounded ladder', async () => {
     const queued = await queueFinalAttempt();
     mockSendCustomerMessage.mockResolvedValue({
