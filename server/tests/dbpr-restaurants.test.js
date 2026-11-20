@@ -41,9 +41,9 @@ const LIC_HEAD = ['Application Number', 'Application Type', 'Application Approva
   'Location Zip Code', 'Location County Code', 'Location County', 'Secondary Phone Number', 'District', 'Region', 'License Number',
   'Primary Status Code', 'Secondary Status Code', 'License Expiry Date', 'Last Inspection Date', 'Number of Seats',
   'Base Risk Level', 'Secondary Risk Level'];
-function licRow({ app = '7001', county = 'Sarasota', primary = '555-010-0000', mailCounty = '51', secondary = '941-555-0101', seats = '40', date = '08/21/2026', city = 'SARASOTA', zip = '34231-1234' } = {}) {
+function licRow({ app = '7001', county = 'Sarasota', primary = '555-010-0000', mailCounty = '51', secondary = '941-555-0101', seats = '40', date = '08/21/2026', city = 'SARASOTA', zip = '34231-1234', line3 = '' } = {}) {
   return csvLine([app, 'Plan Review and Initial (COMBO SEAT)', date, '200', '2010', 'SAMPLE DINER LLC', 'SEAT', '', 'SAMPLE DINER LLC', '', '1 MAIL ST', ' ',
-    'TAMPA', 'FL', '33601', primary, mailCounty, 'SAMPLE DINER', ' ', '200 SAMPLE TRL', 'UNIT 3', '', city, 'FL', zip, '68', county,
+    'TAMPA', 'FL', '33601', primary, mailCounty, 'SAMPLE DINER', ' ', '200 SAMPLE TRL', 'UNIT 3', line3, city, 'FL', zip, '68', county,
     secondary, 'D7', '07', 'SEA0000002', '20', '20', '12/01/2026', '10/29/2026', seats]);
 }
 const licCsv = (rows) => `${csvLine(LIC_HEAD)}\n${rows.join('\n')}\n`;
@@ -107,9 +107,11 @@ describe('parseLicenseRows and the phone rule', () => {
     const rows = parseDbprCsv(licCsv([
       licRow(), licRow({ app: '7002', county: 'Polk' }), licRow({ app: '7003', county: 'Charlotte', seats: '' }),
       licRow({ app: '7004', county: 'Charlotte', city: 'Punta Gorda', zip: '33982-0001' }),
+      licRow({ app: '7005', line3: 'BLDG B' }),
     ]));
     const out = svc.parseLicenseRows(rows, 'new_license');
-    expect(out.map((r) => r.source_key)).toEqual(['7001', '7003']);
+    expect(out.map((r) => r.source_key)).toEqual(['7001', '7003', '7005']);
+    expect(out[2].address).toBe('200 SAMPLE TRL UNIT 3 BLDG B');
     expect(out[0]).toMatchObject({
       kind: 'new_license', license_number: 'SEA0000002', business_name: 'SAMPLE DINER', address: '200 SAMPLE TRL UNIT 3',
       city: 'SARASOTA', zip: '34231', county: 'Sarasota', phone: '9415550101', seats: 40, event_date: '2026-08-21',

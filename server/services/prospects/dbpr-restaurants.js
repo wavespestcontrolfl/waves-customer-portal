@@ -23,7 +23,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
-const { parseDbprCsv, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
+const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
 
 const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
@@ -40,7 +40,8 @@ const FILES = {
 const PLACE_COLUMNS = ['Location City', 'Location Zip Code'];
 const LICENSE_COLUMNS = [
   'Application Number', 'Application Type', 'Application Approval Date', 'License Number', 'License Type Code',
-  'Business Name', 'Location Street Address', 'Location Address Line 2', ...PLACE_COLUMNS, 'Location County',
+  'Business Name', 'Location Street Address', 'Location Address Line 2', 'Location Address Line 3', ...PLACE_COLUMNS,
+  'Location County',
   'Primary Phone Number', 'Secondary Phone Number', 'Mailing County Code', 'Number of Seats',
 ];
 const REQUIRED_COLUMNS = {
@@ -184,7 +185,8 @@ function parseLicenseRows(rows, kind, counts = { malformed: 0 }) {
       license_id: null,
       license_type_code: clean(row['License Type Code'], 20),
       business_name: clean(row['Business Name'], 200),
-      address: clean([row['Location Street Address'], row['Location Address Line 2']].filter(Boolean).join(' '), 200),
+      address: clean(['Location Street Address', 'Location Address Line 2', 'Location Address Line 3']
+        .map((column) => row[column]).filter(Boolean).join(' '), 200),
       city: clean(row['Location City'], 80),
       zip: clean(String(row['Location Zip Code'] || '').slice(0, 5), 10),
       county: clean(row['Location County'], 40),
@@ -248,12 +250,14 @@ const defaultStore = { upsertRecords };
 
 async function loadFile(kind, fetchText) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
-  const rows = parseDbprCsv(text);
-  // The header: a required column that no row carries is renamed or gone. One short row never hides a column.
-  const missing = REQUIRED_COLUMNS[kind].filter((c) => !rows.some((row) => c in row));
-  if (missing.length) throw new Error('unexpected file layout');
   const counts = { malformed: 0 };
-  const records = kind === 'inspection' ? parseInspectionRows(rows, counts) : parseLicenseRows(rows, kind, counts);
+  const records = [];
+  // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
+  const header = await eachDbprCsvRow(text, (row) => {
+    records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts) : parseLicenseRows([row], kind, counts)));
+  });
+  // A required column missing from the header is renamed or gone: the whole file is refused.
+  if (REQUIRED_COLUMNS[kind].some((column) => !header.includes(column))) throw new Error('unexpected file layout');
   return { records, malformed: counts.malformed };
 }
 
