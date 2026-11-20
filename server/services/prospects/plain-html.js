@@ -20,14 +20,16 @@
  *   numbers, a q's quotation marks) or shows in another direction (a bdo), or one that loads a style sheet (a link);
  * - a start tag with the hidden or popover attribute, a dir other than ltr, a label on an option (which a browser
  *   can show in place of its content), or a style attribute that can hide it or reorder its text (a display,
- *   visibility or content-visibility declaration whose value is none, hidden, collapse or a function such as var();
- *   a direction other than ltr; a unicode-bidi other than normal); or a style sheet (a style element with no type,
- *   or of type text/css: isStyleSheet) with such a declaration in a rule whose selector can match an element of the
- *   page (canMatch). A CSS escape or an import, which can spell or load any style, counts as such a declaration. Of
- *   two attributes with one name, a browser keeps the first, and so does this;
+ *   visibility or content-visibility declaration whose value is none, hidden, collapse, a table column or column
+ *   group (whose content a browser does not draw) or a function such as var(); a direction other than ltr; a
+ *   unicode-bidi other than normal); or a style sheet (a style element with no type, or of type text/css:
+ *   isStyleSheet) with such a declaration in a rule whose selector can match an element of the page (canMatch). A
+ *   CSS escape or an import, which can spell or load any style, counts as such a declaration. Of two attributes with
+ *   one name, a browser keeps the first, and so does this;
  * - a style that can show what a script, a style or the title holds, whose text this drops (a display other than
  *   none, or an all: SHOWING_RE): in a style attribute of one of them, or in a sheet rule whose selector can match
- *   one of them (canMatchTextElement: any but one whose last compound is led by the name of another element);
+ *   one of them (canMatchTextElement: any but one whose last compound is led by the name of another element; the
+ *   steps of a @keyframes, "from" and "to", count, as an animation can run on any element);
  * - a run of text that holds a right-to-left letter (Hebrew, Arabic and the like) or a direction control other than
  *   the left-to-right mark (RIGHT_TO_LEFT_RE). Without them, and without the dir, direction and unicode-bidi above, a
  *   browser shows each line's text in the order it is written;
@@ -35,15 +37,16 @@
  * - a page that ends inside a tag, a comment, a doctype, a script, a style or the title.
  *
  * plainPage does not lay the page out. Where a browser shows a box (a float, a position, a table's caption and its
- * head and foot rows, which a browser shows above or below its other rows), its size, colour, opacity, transform
- * and font, letter case, what a style or the browser adds around it (generated content such as a list marker), a
- * display other than none on an element plainPage keeps, an image's alt text (shown only when the image cannot
- * load) and what a script does when it runs are not read. A reader can rely on the text the page holds and the order
- * in which it is written, not on where or how a browser shows it: the source's own styles, images and scripts must
- * not hide or add what its reader needs. Where this cannot judge a style, it counts it as one that can hide or show:
- * a sheet whatever its media (print only, a screen width), and a selector with a pseudo-class or an attribute as one
- * that can match. So a page can be refused though a browser shows all of it, but it is never read as shown when it
- * can hide or show text in a way listed above.
+ * head and foot rows, which a browser shows above or below its other rows), how it draws the box and its text (its
+ * size, colour, opacity, clip, mask, filter, transform and font, letter case), what a style or the browser adds
+ * around a box or puts in place of what it holds (generated content: a list marker, a content property), a display
+ * that shows an element plainPage keeps (a span shown as a block), an image's alt text (shown only when the image
+ * cannot load) and what a script does when it runs are not read. A reader can rely on the text the page holds and
+ * the order in which it is written, not on where or how a browser shows it: the source's own styles, images and
+ * scripts must not hide or add what its reader needs. Where this cannot judge a style, it counts it as one that can
+ * hide or show: a sheet whatever its media (print only, a screen width), and a selector with a pseudo-class or an
+ * attribute as one that can match. So a page can be refused though a browser shows all of it, but it is never read
+ * as shown when it can hide or show text in a way listed above.
  *
  * htmlText(html) is the text of a part of a page plainPage rebuilt, as a browser shows it by default: an inline tag
  * (INLINE_TAGS) joins the text on both sides, and any other tag parts it with a space. A browser can part or join
@@ -129,17 +132,23 @@ function readAttributes(html, i) {
 
 // A style's text read left to right, as CSS reads it: a comment becomes a space, and a string or an unquoted url()
 // (whose "/*" or quote is part of the address) is emptied, so none of them can hide a declaration from a test or add
-// one to it; the "<!--" and "-->" a style sheet may wrap itself in are out. A "url(" is a url() only where a token
-// starts: after a name character (a NUL reads as one), a "#" or an "@" it is part of a name, a hash ("#url") or an
-// at-keyword, and a "/*" after it opens a comment. A CSS escape ("\6e one" spells "none") can spell any style, so a
-// style that holds a backslash is not read this way: it counts as one that can hide.
-const CSS_SKIP_RE = /\/\*[\s\S]*?(?:\*\/|$)|"[^"\n\r\f]*"?|'[^'\n\r\f]*'?|(?<![-\w#@\x00\u0080-\uffff])url\(\s*(?=[^\s"'])[^)]*(?:\)|$)/gi;
-const flatCss = (css) => css.replace(CSS_SKIP_RE, (skipped) => (skipped[0] === '/' ? ' ' : '""')).replace(/<!--|-->/g, ' ');
+// one to it; the "<!--" and "-->" a style sheet may wrap itself in are out. A "url(" opens a url() where a token
+// starts and the first character after its white space is not a quote. CSS white space is a space, a tab or a line
+// break, not a no-break space: "url(&nbsp;'" opens one, which runs to the first ")". A "-->" is the wrapper only
+// where a token starts too. After a name character (a NUL reads as one), a "#" or an "@", either one is part of a
+// name, a hash or an at-keyword: "#url(" is a hash and a "(", after which a "/*" opens a comment, and ".nav-->" is
+// the class "nav--" and a ">". A "<!--" is out wherever it is, as no name holds a "<". A CSS escape ("\6e one"
+// spells "none") can spell any style, so a style that holds a backslash is not read this way: it counts as one that
+// can hide.
+const CSS_SKIP_RE = /\/\*[\s\S]*?(?:\*\/|$)|"[^"\n\r\f]*"?|'[^'\n\r\f]*'?|(?<![-\w#@\x00\u0080-\uffff])url\([ \t\n\r\f]*(?=[^ \t\n\r\f"'])[^)]*(?:\)|$)/gi;
+const flatCss = (css) => css.replace(CSS_SKIP_RE, (skipped) => (skipped[0] === '/' ? ' ' : '""')).replace(/<!--/g, ' ')
+  .replace(/(?<![-\w#@\x00\u0080-\uffff])-->/g, ' ');
 // Whether one declaration (a run of a style's flat text between ";", "{" and "}") can hide its element or reorder its
-// text: display, visibility or content-visibility with a value of none, hidden or collapse, or with a function (var(),
-// attr()), which can stand for any value; direction with any value but ltr; unicode-bidi with any value but normal.
-// A custom property (--display) sets nothing by itself. Each run is read once, so no style can make it slow.
-const HIDING_RE = /^\s*(?:(?:display|visibility|content-visibility)\s*:[\s\S]*(?:none|hidden|collapse|\()|direction\s*:(?!\s*ltr\b)|unicode-bidi\s*:(?!\s*normal\b))/i;
+// text: display, visibility or content-visibility with a value of none, hidden or collapse, a table column or column
+// group (a browser does not draw what one holds), or a function (var(), attr()), which can stand for any value;
+// direction with any value but ltr; unicode-bidi with any value but normal. A custom property (--display) sets
+// nothing by itself. Each run is read once, so no style can make it slow.
+const HIDING_RE = /^\s*(?:(?:display|visibility|content-visibility)\s*:[\s\S]*(?:none|hidden|collapse|column|\()|direction\s*:(?!\s*ltr\b)|unicode-bidi\s*:(?!\s*normal\b))/i;
 const hidingStyle = (css) => css.includes('\\') || flatCss(css).split(/[;{}]/).some((run) => HIDING_RE.test(run));
 // Whether one declaration can show what a script, a style or the title holds (a browser shows none of them by
 // default, and plainPage drops their text): a display with any value but none, or an all, which can reset display.
@@ -180,11 +189,14 @@ const canMatch = (selector, names) => selector.split(',').some((part) => !/^[-\w
 // Whether a selector can match a script, a style or the title: an at-rule's prelude (which this cannot tell), or a
 // part (between commas) whose last compound selector is not led by the name of another element, with only classes,
 // ids, pseudo-classes without arguments and attribute tests after it ("a.top:link", "input[type=text]"). Only CSS
-// white space or a combinator ends a compound: a no-break space is part of a name.
+// white space or a combinator ends a compound: a no-break space is part of a name. "from" and "to" (KEYFRAME_STEPS)
+// name no element here: in a @keyframes they are the first and last steps of an animation, which can run on any
+// element, a script too.
 const TYPE_LED_RE = /(?:^|[ \t\n\r\f>+~])([A-Za-z][-\w]*)(?:[.#][-\w]+|::?[-\w]+|\[[^\]]*\])*[ \t\n\r\f]*$/;
+const KEYFRAME_STEPS = new Set(['from', 'to']);
 const canMatchTextElement = (selector) => selector.includes('@') || selector.split(',').some((part) => {
-  const subject = TYPE_LED_RE.exec(part);
-  return !subject || TEXT_ELEMENTS.has(subject[1].toLowerCase());
+  const name = TYPE_LED_RE.exec(part)?.[1].toLowerCase();
+  return !name || TEXT_ELEMENTS.has(name) || KEYFRAME_STEPS.has(name);
 });
 // Whether a style sheet can hide an element of a page whose elements have the class and id names `names`, or show
 // what a script, a style or the title holds: it holds a backslash, or an import (a sheet this cannot read); or it

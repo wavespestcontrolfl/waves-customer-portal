@@ -85,6 +85,9 @@ describe('plainPage', () => {
       // After a "#" (a hash: "#url"), an "@" or a NUL, "url(" starts no url(): the "/*" after it opens a comment.
       '<td style="--x: #url(/* ) \' */); display:none">x', '<td style="--x: @url(/* ) \' */); display:none">x',
       '<td style="--x: a\u0000url(/* ) \' */); display:none">x',
+      // CSS white space is a space, a tab or a line break: after a no-break space, "url(" opens a url() that runs to
+      // the first ")", so the quote in it opens no string. A browser does not draw what a table column holds.
+      '<td style="background: url(&nbsp;\'a); display:none; \')">x', '<td style="display: table-column">x',
       // Of two attributes with one name, a browser keeps the first.
       '<td style="display:none" style="color:red">x',
       // In an attribute, a reference without its ";" before a letter, a digit or "=" stays as written: no quote opens.
@@ -124,6 +127,10 @@ describe('plainPage', () => {
       '<style>display: none</style><td>x', '<style>.a { .b { color: red } display: none }</style><td>x',
       // A function can stand for any value, and an unquoted url() keeps its "/*" as part of the address.
       '<style>td { --d: none; display: var(--d) }</style><td>x', '<style>td { background: url(/i/*/d.png); display: none }</style><td>x',
+      // After a no-break space, "url(" opens a url(), whose quote opens no string; a browser does not draw a column group.
+      '<style>td { background: url(\u00a0\'a); display: none; \') }</style><td>x', '<style>td { display: TABLE-COLUMN-GROUP }</style><td>x',
+      // A "-->" right after a name is part of it: ".nav-->" is the class "nav--" and a ">".
+      '<style>.nav--> b { display: none }</style><td class="nav--"><b>x</b>',
       // A CSS escape can spell any style, and an import loads a sheet this cannot read.
       '<style>td { display: \\6e one }</style><td>x', '<style>@import "a.css";</style><td>x',
       // Read left to right, as CSS reads it: a "/*" in a string opens no comment, and a quote in a comment opens no string.
@@ -145,6 +152,8 @@ describe('plainPage', () => {
       '<style>.x:not(a b, c) { display: block }</style><td>x', '<style>head > :first-child { display: block }</style><td>x',
       '<style>.x\u00a0b { display: block }</style><td>x', '<style>script { @media screen { display: block } }</style><td>x',
       '<style>display: block</style><td>x', '<style>a { b { color: red } display: block }</style><td>x',
+      // A step of a @keyframes ("from" or "to", in any case) applies to whatever element the animation runs on.
+      '<style>@keyframes show { from { display: block } }</style><td>x', '<style>@keyframes s { 50% { color: red } TO { display: inline } }</style><td>x',
       '<title style="display: block">Callback</title><td>x', '<script style="display:inline">y</script><td>x',
       '<title style="d\\69splay: block">Callback</title><td>x'];
     for (const cell of hiding) expect(plain(`<table><tr><td>Routine</td>${cell}</table>`)).toBeNull();
@@ -156,6 +165,10 @@ describe('plainPage', () => {
     // A style element of another type is inert, and of two class attributes a browser keeps the first.
     expect(plain('<style type="text/plain">td { display: none }</style><style>.b { display: none }</style><td class=a class=b>A'))
       .toBe('<td>A');
+    // ".nav-->" is the class "nav--" and a ">", which no element has here; an animation with no display or visibility
+    // step hides and shows nothing.
+    expect(plain('<style>.nav--> b { display: none } @keyframes fade { from { opacity: 0 } to { opacity: 1 } }</style>'
+      + '<td class=nav><b>A</b>')).toBe('<td><b>A</b>');
     // A display in a rule led by another element's name (as on the state's pages), or none on a script, a style or the
     // title, shows nothing this drops.
     expect(plain('<style>li a:top { display: block } a.top:link { display: block } input[type=text] { display: inline-block }'
