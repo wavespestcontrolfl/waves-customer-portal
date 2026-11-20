@@ -762,11 +762,13 @@ async function ringOpenCards(now) {
 
 // An open card read again under its call's triage lock (the lock every card writer takes first), with the times that
 // make it urgent, read by the clock after the lock (`now`: a visit may start, or an estimate expire, while the pass
-// waits for it). Null once it is no longer open (the tap accepted it, or a person claimed, resolved or dismissed it),
-// while a row it reads is busy (holdCardRows), while its evidence says something the card does not show yet
-// (cardState: a close or a refresh the next run writes), and while a call in the word's window still owes a read: the
-// card shows nothing new then (yesState) and the tap refuses, since the read may take the yes back. A read ends within
-// OWED_READ_HOURS.
+// waits for it), and whether the card's tap would accept now (`canAccept`: tapCheck, read in this transaction, so the
+// bell says "accept" only when the tap would; it refuses an expired estimate, more than one open estimate or visit, a
+// visit in the past, and a yes that is not the latest word about the estimate it would take). Null once it is no longer
+// open (the tap accepted it, or a person claimed, resolved or dismissed it), while a row it reads is busy
+// (holdCardRows), while its evidence says something the card does not show yet (cardState: a close or a refresh the
+// next run writes), and while a call in the word's window still owes a read: the card shows nothing new then
+// (yesState) and the tap refuses, since the read may take the yes back. A read ends within OWED_READ_HOURS.
 async function openCardNow(trx, listed) {
   await lockTriageCall(trx, listed.call_log_id);
   const card = await trx('triage_items').where({ id: listed.id, reason_code: REASON_CODE, status: 'open' })
@@ -775,17 +777,20 @@ async function openCardNow(trx, listed) {
   if (!held || await cardState(card, trx)) return null;
   if (held.since && await Word.unreadCallSince(trx, { customerId: card.related_customer_id, since: held.since })) return null;
   const now = new Date();
-  return { card, now, ...(await cardTimes(trx, card, now)) };
+  const tap = await tapCheck(card, { now, conn: trx });
+  return { card, now, canAccept: tap.ok, ...(await cardTimes(trx, card, now)) };
 }
 
 // The rows a ring reads, held FOR SHARE to its commit, as the tap holds them: the customer's row (its phone numbers
 // decide which unlinked calls are theirs), the customer's estimates (the tap's own lock, which also refuses while one is
 // being sent), the customer's calls in the word's window (cardEstimatesOf's `since`, the window cardState reads: the
-// yes, any later word, the booking call) and every visit the call booked. A change to one (a new number, an accept, a
-// decline, an extension, a re-read, a visit moved) either landed before, and the reads after the lock see it, or waits
-// for the ring's commit, so the ring says what was true when it committed. Returns { since }, or null for a change in
-// flight right now: the card rings nothing this run (NOWAIT, in a savepoint, so the bell never waits on a row and its
-// transaction stays usable). A call or a visit inserted meanwhile has no row to hold; the next run reads it.
+// yes, any later word, the booking call), the service catalog (the tap's catalog lock, scheduling/catalog-lock.js,
+// taken before the visit rows as the tap takes it: a visit's catalog row decides whether it is a pest visit) and every
+// visit the call booked. A change to one (a new number, an accept, a decline, an extension, a re-read, a catalog edit, a
+// visit moved) either landed before, and the reads after the lock see it, or waits for the ring's commit, so the ring
+// says what was true when it committed. Returns { since }, or null for a change in flight right now: the card rings
+// nothing this run (NOWAIT, in a savepoint, so the bell never waits on a row and its transaction stays usable). A call
+// or a visit inserted meanwhile has no row to hold; the next run reads it.
 async function holdCardRows(trx, card) {
   const customerId = card.related_customer_id;
   try {
@@ -794,6 +799,7 @@ async function holdCardRows(trx, card) {
       await lockCustomerEstimates(sp, customerId);
       const { since } = await cardEstimatesOf(card, sp);
       if (since) await Word.lockCallsSince(sp, { customerId, since });
+      await sp.raw(`${require('./scheduling/catalog-lock').CATALOG_SHARE_LOCK_SQL} NOWAIT`);
       await visitsCallBooked(sp, card.call_log_id, customerId).orderBy('id').forShare().noWait().select('id');
       return { since };
     });
@@ -806,19 +812,15 @@ async function holdCardRows(trx, card) {
 // The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and the
 // soonest visit to come among the ones that keep the card open (booked by the call, on the calendar, not linked to an
 // estimate, pest). Both are read under the card's customer, as its moot check reads them. A call that booked several
-// visits files its card with no visit of its own, so the call's visits are read, not the card's. `openToAccept`: an
-// estimate on the card is still open and not past its expiry (the card stays open after each one expires, and the tap
-// refuses an expired estimate).
+// visits files its card with no visit of its own, so the call's visits are read, not the card's.
 async function cardTimes(conn, card, now) {
   const { visitStart } = require('./call-phone-yes-bell');
   const ids = cardEstimateIds(card);
-  const expiries = ids.length
+  const soonest = ids.length
     ? await conn('estimates').whereIn('id', ids).where({ customer_id: card.related_customer_id })
-      .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at')
-      .where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', now))
-      .pluck('expires_at')
-    : [];
-  const soonest = expiries.filter(Boolean).map((at) => new Date(at)).sort((a, b) => a - b)[0] || null;
+      .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').where('expires_at', '>', now)
+      .orderBy('expires_at').first('expires_at')
+    : null;
   const upcoming = (await callVisitsOnCalendar(conn, card.call_log_id, card.related_customer_id))
     .filter((v) => !v.source_estimate_id && visitStart(v) > now)
     .sort((a, b) => visitStart(a) - visitStart(b));
@@ -826,7 +828,7 @@ async function cardTimes(conn, card, now) {
   for (const candidate of upcoming) {
     if (await isPestVisit(conn, candidate)) { visit = candidate; break; }
   }
-  return { expiresAt: soonest, several: ids.length > 1, openToAccept: expiries.length > 0, visit };
+  return { expiresAt: soonest?.expires_at || null, several: ids.length > 1, visit };
 }
 
 // One call's card, filed when the call earns one. True when a card was filed.
@@ -976,16 +978,17 @@ function bookingCallProblem(booking) {
 // What the card's read (tapStateOf) and the tap both check first. { ok: true, evaluation, customerId }, or { ok: false, reason, note }
 // (note: the card's text before any tap). No tap has run yet, so a note never says "Nothing was accepted" (the office
 // may have accepted the estimate by hand).
-async function tapCheck(shown, { now }) {
+// `conn`: the global handle, or the bell's ring transaction (openCardNow), so the check reads under the ring's locks.
+async function tapCheck(shown, { now, conn = db }) {
   const note = (why) => `The tap cannot accept this one. ${why}`;
   // A list row carries the card's payload and version as shown, but not its links (the customer and the estimate it was
   // filed for, which the sweep never rewrites): those come from the card's own row.
   const links = 'related_customer_id' in shown && 'related_estimate_id' in shown ? shown
-    : await db('triage_items').where({ id: shown.id }).first('related_customer_id', 'related_estimate_id');
+    : await conn('triage_items').where({ id: shown.id }).first('related_customer_id', 'related_estimate_id');
   if (!links) return { ok: false, reason: 'card_changed', note: note(TAP_UNAVAILABLE.card_changed) };
   const card = { ...shown, related_customer_id: links.related_customer_id, related_estimate_id: links.related_estimate_id };
   const customerId = parseJson(card.payload).customer_id || card.related_customer_id || null;
-  const evaluation = await evaluatePhoneYes({ callLogId: card.call_log_id, customerId, now });
+  const evaluation = await evaluatePhoneYes({ callLogId: card.call_log_id, customerId, conn, now });
   if (!evaluation.card) return { ok: false, reason: evaluation.reason, note: note(whyNot(evaluation.reason)) };
   if (evaluation.acceptProblem) {
     const why = REASONS[evaluation.acceptProblem] || 'The accept would not go ahead.';
@@ -998,7 +1001,7 @@ async function tapCheck(shown, { now }) {
   // An estimate with no send time (an older row; the send path always stamps one): the word's window starts at its
   // creation, but the accept stamps sent_at as it claims the row, so the link step would read another window each try.
   if (!evaluation.estimate.sent_at) return { ok: false, reason: 'estimate_no_send_time', note: note(TAP_UNAVAILABLE.estimate_no_send_time) };
-  const booking = await db('call_log').where({ id: card.call_log_id, customer_id: customerId }).first(Word.CALL_COLUMNS);
+  const booking = await conn('call_log').where({ id: card.call_log_id, customer_id: customerId }).first(Word.CALL_COLUMNS);
   const bookingWhy = bookingCallProblem(booking);
   if (bookingWhy) return { ok: false, reason: bookingWhy, note: note(whyNot(bookingWhy)) };
   // The words the card shows must be the latest word about THIS estimate (read in its window): a card that names a
@@ -1008,7 +1011,7 @@ async function tapCheck(shown, { now }) {
   }
   // The card must show what the sweep would show now (cardState: nothing to rewrite or close): the caller's word, the
   // estimate links and the accepted state as they stand. A tap never acts on words the card no longer holds.
-  if (await cardState(card)) return { ok: false, reason: 'card_out_of_date', note: note(TAP_UNAVAILABLE.card_out_of_date) };
+  if (await cardState(card, conn)) return { ok: false, reason: 'card_out_of_date', note: note(TAP_UNAVAILABLE.card_out_of_date) };
   // The plan and its per-visit price, as the accept will bill them: the card shows them before the tap, and the accept
   // pins the price (priceSeriesStep). The evaluation's own check refused a visit with none (acceptProblem:
   // plan_unresolved), so there are terms here.

@@ -99,7 +99,8 @@ describe('the words, by card state', () => {
     ['an estimate accepted, the visit not linked', { yes_heard: true, caller_words: WORDS, estimate_accepted: true }, VISIT,
       "check Pat Sampleton's booked visit", 'An estimate was accepted, but the visit the call booked for Tue, Nov 24 is not linked to it yet.'],
   ])('%s', (_label, payload, visit, action, why) => {
-    const text = textFor({ name: 'Pat Sampleton', card: card(payload), visit });
+    // The card's tap would accept (canAccept): a yes says "accept".
+    const text = textFor({ name: 'Pat Sampleton', card: card(payload), visit, canAccept: true });
     expect(text).toMatchObject({ action, why });
     expect(() => passesRules(text)).not.toThrow();
   });
@@ -110,26 +111,26 @@ describe('the words, by card state', () => {
       'An open estimate on the card expires Tue, Nov 24 and is not accepted yet.'],
     ['the visit is soon', { due: 'visit_soon' }, 'The visit the call booked is Tue, Nov 24, and its card in Triage is still open.'],
   ])('time short: %s', (_label, facts, why) => {
-    const text = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: WORDS }), visit: VISIT, ...facts });
+    const text = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: WORDS }), visit: VISIT, canAccept: true, ...facts });
     expect(text).toMatchObject({ action: "accept Pat Sampleton's estimate", why });
     expect(() => passesRules(text)).not.toThrow();
   });
 
-  test('a yes with no estimate on the card open to accept asks for a check: the tap refuses an expired estimate', () => {
+  test("a yes the card's tap would refuse asks for a check, not an accept; so does a yes with no tap answer read", () => {
     const yes = card({ yes_heard: true, caller_words: WORDS });
-    expect(textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, openToAccept: false })).toMatchObject({
+    const filed = textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, canAccept: false });
+    expect(filed).toMatchObject({
       action: "check Pat Sampleton's estimate",
-      why: 'The caller said yes to pay per application, but no estimate on the card is open to accept now.',
+      why: "The caller said yes to pay per application, but the card's tap cannot accept it now.",
     });
-    const short = textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, due: 'visit_soon', openToAccept: false });
+    expect(textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT })).toEqual(filed);
+    const short = textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, due: 'visit_soon', canAccept: false });
     expect(short).toMatchObject({
       action: "check Pat Sampleton's estimate", why: 'The visit the call booked is Tue, Nov 24, and its card in Triage is still open.',
     });
-    for (const text of [textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, openToAccept: false }), short]) {
-      expect(() => passesRules(text)).not.toThrow();
-    }
+    for (const text of [filed, short]) expect(() => passesRules(text)).not.toThrow();
     // An accepted estimate's card asks about its visit either way.
-    expect(textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, estimate_accepted: true }), visit: VISIT, openToAccept: false }).action)
+    expect(textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, estimate_accepted: true }), visit: VISIT, canAccept: false }).action)
       .toBe("check Pat Sampleton's booked visit");
   });
 
@@ -148,7 +149,7 @@ describe('the words, by card state', () => {
   ])("%s: the caller's words never reach the bell", (_label, words, secret) => {
     for (const payload of [{ yes_heard: true, caller_words: words }, { yes_heard: true, caller_words: words, estimate_accepted: true }]) {
       for (const due of [null, 'visit_soon']) {
-        const text = JSON.stringify(textFor({ name: 'Pat Sampleton', card: card(payload), visit: VISIT, due }));
+        const text = JSON.stringify(textFor({ name: 'Pat Sampleton', card: card(payload), visit: VISIT, due, canAccept: true }));
         expect(text).not.toMatch(secret);
         expect(text).not.toMatch(/[“”]/);
       }

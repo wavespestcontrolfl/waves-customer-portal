@@ -698,10 +698,11 @@ The time short is read by the clock after the card's lock. A claimed card (`in_p
 Push Settings (no row, so no banner either; open rows are still rewritten and closed): the switch is read for each ring, under the
 card's lock, by the rule `triggerNotification` writes a shared bell row by (`bellWanted`); a card that rang nothing meanwhile
 rings once the switch is on again, if it is still open. Category `estimate` with
-`bell: true`, headline "Estimates — accept <who>'s estimate" for a card with the caller's yes while an estimate on it is open to accept
-(`sent` or `viewed`, not archived, not past its expiry, the tap's own rule); "check <who>'s estimate" when no yes was heard, the yes is
-being read again, or every estimate on the card expired (the card stays open, and the tap refuses an expired estimate); "check
-<who>'s booked visit" once an estimate on the card was accepted and the visit is not linked), subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
+`bell: true`, headline "Estimates — accept <who>'s estimate" for a card with the caller's yes while the card's tap would accept it
+(`tapCheck`, read in the ring's transaction); "check <who>'s estimate" when no yes was heard, the yes is being read again, or the
+tap would refuse (an expired estimate, more than one open estimate or visit, a visit in the past, a yes that is not the latest
+word about the estimate it would take; the card's tap says why); "check <who>'s booked visit" once an estimate on the card was
+accepted and the visit is not linked), subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
 Keys `call-phone-yes:<card id>` (filed) and `call-phone-yes-due:<card id>` (time short), both without `dedupeOpenOnly`: a closed row
 still holds its key, so each key rings at most once and no `RERING` entry is owed. The filed row closes in the commit that writes the
 time-short row (every pass retries that close, and a raise that wrote no row closes nothing), so a card has one open row; the close also
@@ -716,8 +717,8 @@ Triage, which shows the words. Each card rings in a transaction of its own that 
 triage lock (`lockTriageCall`, which every card writer takes first) and reads the card and its evidence again there, so a card the
 tap accepts, a person claims or a customer's accept changes while the pass runs rings nothing. A customer's own accept takes no
 triage lock, so the ring also holds every row it reads FOR SHARE to its commit, as the tap does (`holdCardRows`: the customer's row,
-whose numbers decide which unlinked calls are theirs, their estimates, their calls in the window the card's check reads, the call's
-visits); a row changing right now skips the card this run
+whose numbers decide which unlinked calls are theirs, their estimates, their calls in the window the card's check reads, the
+service catalog with the tap's own SHARE lock taken before the visits, the call's visits); a row changing right now skips the card this run
 (NOWAIT). A call or a visit inserted meanwhile has no row to hold; the next run reads it. Each ring sends a phone banner with the New lead sound
 (`bell-banners.js` kind `call_phone_yes`, 7:00 AM to 9:00 PM Eastern; the 8 AM banner counts a ring at night). The same pass closes
 the rows of every card that is no longer open, listed again after the rings: accepted by the tap, resolved or dismissed by a
