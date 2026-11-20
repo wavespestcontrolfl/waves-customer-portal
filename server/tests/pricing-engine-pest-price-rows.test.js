@@ -53,10 +53,11 @@ const fullRows = (constants) => ({
     .map(([tier, t]) => [tier, { discount: t.discount, min_services: t.minServices }])),
 });
 // A row of another service, so that a config with no pest row is still not empty.
-const sync = ({ constants, bridge }, config) => bridge.syncConstantsFromDB(pricingConfigDb([
+const configDb = ({ constants }, config) => pricingConfigDb([
   { config_key: 'global_labor_rate', data: { value: constants.GLOBAL.LABOR_RATE } },
   ...Object.entries(config).map(([config_key, data]) => ({ config_key, data })),
-]));
+]);
+const sync = (worker, config) => worker.bridge.syncConstantsFromDB(configDb(worker, config));
 
 // What a cold worker and a warm worker (one that loaded the full rows first) answer for the same rows.
 // `change(config, constants)` edits the full rows in place.
@@ -541,6 +542,91 @@ describe('a sync that fails leaves the answer of the last good sync', () => {
     await sync(worker, partial);
     expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(false);
     await sync(worker, fullRows(worker.constants));
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(true);
+  });
+});
+
+// A sync puts the rows into the engine and then awaits its other reads (the product catalog among them). Only at
+// its end does it succeed (the answer moves) or fail (the constants go back). In between, the engine can hold
+// rows that the answer has not judged, or values that will not stay. So the answer is no until the sync is over.
+describe('while a sync is in flight the answer is no', () => {
+  // A sync that stops at its first catalog read, after it has put the rows into the engine, until finish().
+  const pausedSync = async (worker, config) => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let reached;
+    const atCatalogRead = new Promise((resolve) => { reached = resolve; });
+    const db = configDb(worker, config);
+    db.schema.hasTable = jest.fn(async (table) => {
+      if (table === 'products_catalog') { reached(); await gate; }
+      return true;
+    });
+    const done = worker.bridge.syncConstantsFromDB(db);
+    await atCatalogRead;
+    return { finish: () => { release(); return done; } };
+  };
+  // A worker whose last sync loaded the full rows: its answer is yes.
+  const warmWorker = async () => {
+    const worker = freshWorker();
+    await sync(worker, fullRows(worker.constants));
+    expect(worker.bridge.isSyncInFlight()).toBe(false);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(true);
+    return worker;
+  };
+
+  test('a refresh of rows that lack a field: the engine already holds its new base price, and the yes of the sync before it does not stand', async () => {
+    const worker = await warmWorker();
+    const base = worker.constants.PEST.base;
+    const partial = fullRows(worker.constants);
+    partial.pest_base.base = base + 5;
+    delete partial.pest_features.indoor;
+
+    const refresh = await pausedSync(worker, partial);
+    expect(worker.bridge.isSyncInFlight()).toBe(true);
+    expect(worker.constants.PEST.base).toBe(base + 5);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(false);
+
+    await expect(refresh.finish()).resolves.toBe(true);
+    expect(worker.bridge.isSyncInFlight()).toBe(false);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(false);
+  });
+
+  test('a refresh of complete rows: no until it is over, then yes', async () => {
+    const worker = await warmWorker();
+    const base = worker.constants.PEST.base;
+    const complete = fullRows(worker.constants);
+    complete.pest_base.base = base + 5;
+
+    const refresh = await pausedSync(worker, complete);
+    expect(worker.constants.PEST.base).toBe(base + 5);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(false);
+
+    await expect(refresh.finish()).resolves.toBe(true);
+    expect(worker.constants.PEST.base).toBe(base + 5);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(true);
+  });
+
+  test('a refresh the validation refuses: no while the engine holds its rows, and yes again when the constants are back', async () => {
+    const worker = await warmWorker();
+    const base = worker.constants.PEST.base;
+    const refused = refusedRows(worker.constants);
+    refused.pest_base.base = base + 5;
+
+    const refresh = await pausedSync(worker, refused);
+    expect(worker.constants.PEST.base).toBe(base + 5);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(false);
+
+    await expect(refresh.finish()).resolves.toBe(false);
+    expect(worker.constants.PEST.base).toBe(base);
+    expect(worker.bridge.isSyncInFlight()).toBe(false);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(true);
+  });
+
+  test('the first sync of a worker: no while it runs, yes when its complete rows are in', async () => {
+    const worker = freshWorker();
+    const refresh = await pausedSync(worker, fullRows(worker.constants));
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(false);
+    await expect(refresh.finish()).resolves.toBe(true);
     expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(true);
   });
 });

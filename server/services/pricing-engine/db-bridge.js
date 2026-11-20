@@ -833,6 +833,13 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 //   boolean.
 // The answer moves together with _lastSync: a failed sync restores the
 // constants and leaves this answer as it was.
+// While a sync is in flight the answer is no. A sync puts the rows into the
+// engine first and then awaits its other reads. Only at its end does it
+// succeed (this answer moves) or fail (the constants go back). In between,
+// the engine can hold values of rows that this answer has not judged, or
+// values that will not stay. So a caller asks in the same tick as it
+// computes the price, with no await in between: yes then means that the
+// engine holds what the last successful sync loaded, and nothing newer.
 const PEST_REQUIRED_FEATURE_ROW_FIELDS = Object.freeze([
   'pool_cage', 'pool_cage_small', 'pool_cage_medium', 'pool_cage_large', 'pool_cage_oversized', 'pool_no_cage',
   'shrubs_heavy', 'shrubs_moderate', 'shrubs_light', 'landscape_complex', 'landscape_moderate', 'landscape_simple',
@@ -881,7 +888,7 @@ function rowsStateRecurringPestPrice(config) {
 }
 let _pestPriceIsFromRows = false; // the answer of the last successful sync
 function recurringPestPriceIsFromRows() {
-  return _pestPriceIsFromRows;
+  return _pestPriceIsFromRows && !isSyncInFlight();
 }
 
 // ── Pre-slab inventory-price link (owner decision 2026-07-10) ─────────────
