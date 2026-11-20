@@ -9,6 +9,13 @@ import SafeMarkdown from './SafeMarkdown';
 afterEach(cleanup);
 
 describe('SafeMarkdown', () => {
+  it('keeps each clause number of a numbered list, across a blank line too', () => {
+    const { container } = render(<SafeMarkdown markdown={'1. Hours\n\n2. Pay\n3. Pay day\n\n7) Notice'} />);
+    const items = [...container.querySelectorAll('ol li')];
+    expect(items.map((li) => li.textContent)).toEqual(['Hours', 'Pay', 'Pay day', 'Notice']);
+    expect(items.map((li) => li.value)).toEqual([1, 2, 3, 7]);
+  });
+
   it('renders headings, lists and bold as elements', () => {
     const { container } = render(
       <MemoryRouter>

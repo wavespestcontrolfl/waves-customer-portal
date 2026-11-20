@@ -34,7 +34,8 @@ function renderInline(text) {
 
 const HEADING_RE = /^(#{1,6})\s+(.*)$/;
 const BULLET_RE = /^\s*[-*]\s+(.*)$/;
-const NUMBER_RE = /^\s*\d+[.)]\s+(.*)$/;
+// A numbered item keeps its own number (up to 9 digits, as in CommonMark).
+const NUMBER_RE = /^\s*(\d{1,9})[.)]\s+(.*)$/;
 const RULE_RE = /^\s*([-*_])(\s*\1){2,}\s*$/;
 
 export function parseBlocks(markdown) {
@@ -51,18 +52,20 @@ export function parseBlocks(markdown) {
   };
   for (const line of String(markdown || "").replace(/\r/g, "").split("\n")) {
     const heading = HEADING_RE.exec(line);
-    const item = BULLET_RE.exec(line) || NUMBER_RE.exec(line);
+    const bullet = BULLET_RE.exec(line);
+    const numbered = bullet ? null : NUMBER_RE.exec(line);
     if (!line.trim() || RULE_RE.test(line) || heading) {
       flushPara();
       flushList();
       if (heading) blocks.push({ type: "h", level: heading[1].length, text: heading[2].replace(ANCHOR_RE, "") });
       else if (line.trim()) blocks.push({ type: "hr" });
-    } else if (item) {
+    } else if (bullet || numbered) {
       flushPara();
-      const type = BULLET_RE.test(line) ? "ul" : "ol";
+      const type = bullet ? "ul" : "ol";
       if (list && list.type !== type) flushList();
       list = list || { type, items: [] };
-      list.items.push(item[1]);
+      // "1. Hours", a blank line, then "2. Pay" are two lists; each item shows its own number, so Pay still reads 2.
+      list.items.push(bullet ? { text: bullet[1] } : { text: numbered[2], number: Number(numbered[1]) });
     } else {
       flushList();
       para.push(line);
@@ -89,7 +92,9 @@ function Block({ block }) {
   return (
     <List className={`text-14 text-zinc-800 mb-2 pl-5 ${block.type === "ol" ? "list-decimal" : "list-disc"}`}>
       {block.items.map((item, i) => (
-        <li key={i}>{renderInline(item)}</li>
+        <li key={i} value={item.number}>
+          {renderInline(item.text)}
+        </li>
       ))}
     </List>
   );

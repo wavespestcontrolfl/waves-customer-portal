@@ -889,10 +889,21 @@ async function queuedInviteRivals(app, stage, handoffEntry, trx) {
 
 // Offer links pasted into any other held text (an owner reply), pinned in order as { job_offer_id, token_hash } so the
 // replay can put each real link back (deferred-replay-registry replayBodyFor): the stored body hides them and the token
-// is never stored. null = no link to pin; false = a link that matches no offer, which cannot be rebuilt, so the text is
-// not queued (the owner sees it did not go out) rather than queued with a link that could never be sent.
-async function pinPastedOfferLinks(stage, body, trx) {
-  const tokens = stage === 'offer_sent' ? [] : offerLinkTokens(body);
+// is never stored. The replay must give back the text exactly as written, so it is checked here with the tokens the
+// replay will use: in the offer text, its own offer's link (read from the offer row) in every hidden link; in any other
+// text, the pasted links in order. A text it cannot give back (a link in another spelling, two links in one run of
+// text, a hidden copy of a token, a link split by spaces, a hidden link pasted from the message history, another
+// offer's link in the offer text) or whose link matches no offer is not queued: false, and the owner sees it did not
+// go out, rather than the applicant getting other words or nothing. null = nothing to pin.
+async function pinPastedOfferLinks(stage, body, trx, offerToken) {
+  const offerText = stage === 'offer_sent';
+  const tokens = offerText ? [] : offerLinkTokens(body);
+  const { replayBodyFor } = require('./messaging/deferred-replay-registry');
+  const recheck = offerText ? { offerToken } : { offerTokens: tokens };
+  if (replayBodyFor('recruiting_comms_deferred', recheck, redactOfferLinks(body)) !== body) {
+    logger.warn(`[recruiting-comms] held ${stage} text not queued: its replay would not give back the text as written`);
+    return false;
+  }
   if (!tokens.length) return null;
   const rows = await trx('job_offers').whereIn('token', [...new Set(tokens)]).select('id', 'token');
   const idOf = new Map(rows.map((r) => [r.token, r.id]));
@@ -918,7 +929,7 @@ async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber
       await trx('job_applications').where({ id: app.id }).forUpdate().first('id');
       const { superseded, rivals } = await queuedInviteRivals(app, stage, handoffEntry, trx);
       if (superseded) return 'superseded';
-      const offerLinks = await pinPastedOfferLinks(stage, body, trx);
+      const offerLinks = await pinPastedOfferLinks(stage, body, trx, opts.offerToken);
       if (offerLinks === false) return null;
       await trx('sms_log').insert({
         customer_id: null,
