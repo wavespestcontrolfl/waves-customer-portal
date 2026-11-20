@@ -24,6 +24,10 @@ const MAX_PERMIT_LIMIT = 100;
 // Table and column names are fixed here and picked by a validated kind; every value is a bound parameter.
 // Pool: a canceled permit is not a pool (the table keeps them on purpose). Home: only new builds on a residential
 // permit count; the table also holds commercial permits ("New", "New Multi-Family Residential"), which are not homes.
+// Home: the county also drops a canceled or withdrawn permit from its report with no status update. The weekly sync
+// re-reads the whole report in ONE transaction, so every row it saw carries that run's last_seen_at, the newest in
+// the table. A permit with no certificate of occupancy that the newest sync did not see has vanished and is left
+// out; a finished home (co_date set) stays. A stale sync empties nothing: the newest run on file is the measure.
 const SOURCES = {
   pool: {
     table: 'pool_permit_records',
@@ -41,7 +45,8 @@ const SOURCES = {
     address: 'address_raw',
     city: 'NULL',
     typeOfWork: 'type_of_work',
-    where: "AND LOWER(COALESCE(permit_type, '')) = 'residential' AND type_of_work ILIKE 'New%' AND LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')",
+    where: "AND LOWER(COALESCE(permit_type, '')) = 'residential' AND type_of_work ILIKE 'New%' AND LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')"
+      + ' AND (co_date IS NOT NULL OR last_seen_at >= (SELECT MAX(last_seen_at) FROM construction_permit_records))',
   },
 };
 

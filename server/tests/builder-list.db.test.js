@@ -158,6 +158,23 @@ describeDb('Builders list (PostgreSQL)', () => {
     expect(sites[0]).toEqual({ id: 'A-2', issuedDate: '2026-11-14', status: 'Permit Issued', address: '200 SAMPLE TRL', city: 'PARRISH', zip: '34219', typeOfWork: null });
   });
 
+  test('home: a permit the newest county sync did not see is left out, unless the home has its certificate of occupancy', async () => {
+    // Every row the newest sync read carries that run's stamp: here this transaction's now(), the insert default.
+    const before = '2026-11-12T12:00:00Z';
+    await mockPg('construction_permit_records').insert([
+      home({ permit_no: 'H-SEEN' }),
+      home({ permit_no: 'H-GONE', last_seen_at: before }),
+      home({ permit_no: 'H-DONE', issued_date: '2026-11-09', co_date: '2026-11-14', last_seen_at: before }),
+      home({ permit_no: 'H-GONE-2', contractor_name: 'GONE SAMPLE HOMES LLC', contractor_license: 'CGC777', last_seen_at: before }),
+    ]);
+    const result = await listBuilders({ kind: 'home', now: NOW });
+    expect(result.builders.map((builder) => [builder.key, builder.permits30])).toEqual([['SAMPLE HOMES', 2]]);
+    expect(result.week).toMatchObject({ permits: 2, builders: 1 });
+    const sites = await builderPermits({ kind: 'home', key: 'SAMPLE HOMES', now: NOW });
+    expect(sites.map((site) => site.id)).toEqual(['H-SEEN', 'H-DONE']);
+    expect(await builderPermits({ kind: 'home', key: 'GONE SAMPLE HOMES', now: NOW })).toEqual([]);
+  });
+
   test('home job sites carry the type of work and the one-line address', async () => {
     await mockPg('construction_permit_records').insert([home({ permit_no: 'H-1' })]);
     const sites = await builderPermits({ kind: 'home', key: 'SAMPLE HOMES', now: NOW });
