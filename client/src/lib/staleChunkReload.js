@@ -35,6 +35,10 @@
 // reloads, and any other import() fails to its caller. A page move opens a
 // new path, so a page whose code is missing still reloads at once when
 // nothing holds the tab.
+//
+// The one reload for a missing chunk counts until the tab leaves the path it
+// reopened (chunkReloadAttempted): a route can load in parts, and the part
+// that loads clears the one-shot flag before the part still missing fails.
 
 import { isAdminPath } from './adminBookmarkMeta';
 import { isPageUse, PAGE_USE_EVENTS, staffBlockerAfterWork, staffReloadBlocker } from './portalReload';
@@ -57,6 +61,7 @@ let reloadPending = false;
 let navigatingUntil = 0;
 let chunkHeld = false;
 let usedPath = null;
+let reloadedPath = pathOpenedByChunkReload();
 
 // Notes the path of each use of a page, as the Reload bar counts a use
 // (isPageUse, lib/portalReload.js). Installed once, by main.jsx.
@@ -64,6 +69,39 @@ export function watchPageUse(target = document) {
   const noteUse = (event) => { if (isPageUse(event)) usedPath = window.location.pathname; };
   PAGE_USE_EVENTS.forEach((type) => target.addEventListener(type, noteUse, true));
   return () => PAGE_USE_EVENTS.forEach((type) => target.removeEventListener(type, noteUse, true));
+}
+
+// Whether the tab's last use was on the staff page in view.
+export function usedOnThisStaffPage() {
+  const { pathname } = window.location;
+  return isAdminPath(pathname) && usedPath === pathname;
+}
+
+// The path this page load opened on, when the one reload for a missing chunk
+// opened it: the flag is set only right before that reload.
+function pathOpenedByChunkReload() {
+  try {
+    return sessionStorage.getItem(CHUNK_RELOAD_FLAG) ? window.location.pathname : null;
+  } catch {
+    return null;
+  }
+}
+
+// Whether this tab already reloaded once for a missing chunk. A page that
+// loads clears the flag (noteChunkLoaded), and a route can load in parts: on
+// /admin/today/protocols the Today shell loads, then its page. So the path
+// that reload reopened counts too, or a page still missing under a shell that
+// loaded would reload the tab at every load. Throws when storage is blocked.
+export function chunkReloadAttempted() {
+  return window.location.pathname === reloadedPath || Boolean(sessionStorage.getItem(CHUNK_RELOAD_FLAG));
+}
+
+// A page loaded (App.jsx lazyWithRetry): the live build serves its code, so a
+// later deploy may reload the tab again. The path the one reload reopened
+// counts until a page loads on another path.
+export function noteChunkLoaded() {
+  if (window.location.pathname !== reloadedPath) reloadedPath = null;
+  sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
 }
 
 function pageNavigating() {
@@ -106,8 +144,8 @@ export function markPageNavigating(reload = () => window.location.reload()) {
   };
 }
 
-// One-shot guard (App.jsx clears the flag on a successful lazy load) so a
-// genuine outage still surfaces instead of reload-looping.
+// One-shot guard (chunkReloadAttempted) so a genuine outage still surfaces
+// instead of reload-looping.
 export function handleVitePreloadError(event, reload = () => window.location.reload()) {
   if (pageNavigating()) {
     chunkHeld = true;
@@ -116,10 +154,9 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
   }
   // A staff tab with open or held work, or last used on this path: the
   // import fails as it would with no handler (see the top of this file).
-  const { pathname } = window.location;
-  if (staffReloadBlocker() || (isAdminPath(pathname) && usedPath === pathname)) return;
+  if (staffReloadBlocker() || usedOnThisStaffPage()) return;
   try {
-    if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;
+    if (chunkReloadAttempted()) return;
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
   } catch {
     return;
@@ -133,8 +170,10 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
 // page move does, then reloads once, as for a stale chunk, when nothing holds
 // the tab. Resolves why it did not reload: what holds the tab, 'reloaded'
 // when this tab already reloaded once for a missing chunk (a real outage then
-// gets the retry screen, not a reload loop), 'storage' when session storage
-// is blocked (no one-shot guard), or 'moved' when the page closed meanwhile.
+// gets the retry screen, not a reload loop), 'page-use' when the tab was used
+// on this page meanwhile (its retry screen asks first, as the preload error
+// would), 'storage' when session storage is blocked (no one-shot guard), or
+// 'moved' when the page closed meanwhile.
 export async function reloadForMissingCode({
   current = () => true,
   reload = () => window.location.reload(),
@@ -144,7 +183,8 @@ export async function reloadForMissingCode({
   if (!current()) return 'moved';
   if (blocker) return blocker;
   try {
-    if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return 'reloaded';
+    if (chunkReloadAttempted()) return 'reloaded';
+    if (usedOnThisStaffPage()) return 'page-use';
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
   } catch {
     return 'storage';
@@ -154,10 +194,12 @@ export async function reloadForMissingCode({
   return null;
 }
 
-// Test-only reset; module state otherwise lives for the page's lifetime.
+// Test-only: a new page load. Module state otherwise lives for the page's
+// lifetime.
 export function resetStaleChunkReloadForTests() {
   reloadPending = false;
   navigatingUntil = 0;
   chunkHeld = false;
   usedPath = null;
+  reloadedPath = pathOpenedByChunkReload();
 }

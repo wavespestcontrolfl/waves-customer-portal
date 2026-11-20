@@ -2,7 +2,8 @@ import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import {
-  CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, reloadForMissingCode,
+  CHUNK_RELOAD_FLAG, chunkReloadAttempted, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending,
+  noteChunkLoaded, reloadForMissingCode, usedOnThisStaffPage,
 } from './lib/staleChunkReload';
 import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload, usePageUsed } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -305,7 +306,8 @@ function showReloadToast() {
 // (MissingPageCode, `newVersion`): the page's code is then most likely gone
 // because the portal has a new version, so it says so. Its button names that
 // work first, as the Reload bar does (components/PortalUpdate.jsx), and
-// becomes "Reload anyway".
+// becomes "Reload anyway". When the tab's last use was on this page, it asks
+// once about the page too, as the bar does after a use.
 function ChunkLoadFallback({ newVersion = false }) {
   // Case-insensitive, as the routes match: /ADMIN/... is a staff page too.
   const operatorPath = /^\/(admin|tech)(\/|$)/i.test(window.location.pathname);
@@ -342,7 +344,7 @@ function ChunkLoadFallback({ newVersion = false }) {
           {named ? heldText : idle.text}
         </div>
         <button
-          onClick={() => tryReload(false)}
+          onClick={() => tryReload(usedOnThisStaffPage())}
           style={{
             minHeight: 42, padding: '0 18px', background: COLORS.glassNavy, color: '#fff',
             border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700,
@@ -377,9 +379,10 @@ function RouteFallback({ label = 'Loading...' }) {
 // A staff page whose code the live build no longer serves, when the
 // stale-chunk reload did not run at once (lib/staleChunkReload.js): it waits
 // for open work, as a page move does, then reloads once. When work still
-// holds the tab, or the one reload for a missing chunk already ran, it shows
-// the retry screen. After that one reload, or offline, the code may be out of
-// reach rather than replaced, so the screen asks to check the connection.
+// holds the tab, the tab was used on this page meanwhile, or the one reload
+// for a missing chunk already ran, it shows the retry screen. After that one
+// reload, or offline, the code may be out of reach rather than replaced, so
+// the screen asks to check the connection.
 function MissingPageCode() {
   const [blocker, setBlocker] = useState(null);
   useEffect(() => {
@@ -402,7 +405,7 @@ export function lazyWithRetry(factory) {
       // placeholder and keep the one-shot flag; clearing it here would let a
       // still-stale build reload-loop.
       if (!mod && isStaleChunkReloadPending()) return { default: RouteFallback };
-      sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
+      noteChunkLoaded();
       return mod;
     } catch (err) {
       // A CSS preload already started the reload, then the chunk itself
@@ -412,7 +415,7 @@ export function lazyWithRetry(factory) {
         // A staff page obeys the holds of an out-of-date tab
         // (lib/staleChunkReload.js).
         if (isAdminPath(window.location.pathname)) return { default: MissingPageCode };
-        if (!sessionStorage.getItem(CHUNK_RELOAD_FLAG)) {
+        if (!chunkReloadAttempted()) {
           sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
           markStaleChunkReloadPending();
           showReloadToast();

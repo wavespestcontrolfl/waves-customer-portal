@@ -189,6 +189,23 @@ test('the missing-code check knows the error of each browser and of a Vite style
   expect(isChunkError(null)).toBe(false);
 });
 
+// A route can load in parts: a shell, then its page. The shell that loads
+// clears the one-shot flag before the page still missing fails.
+function shellAround(Page, label) {
+  return lazyWithRetry(() => Promise.resolve({
+    default: () => <div>{label}<Suspense fallback={null}><Page /></Suspense></div>,
+  }));
+}
+
+test('on a customer page too, after the one reload a page still missing under a shell that loaded gets the retry screen, not another reload', async () => {
+  sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+  resetStaleChunkReloadForTests(); // the page load the one reload opened
+  renderInBoundary(shellAround(lazyWithRetry(missingChunk), 'Portal shell'));
+  expect(await screen.findByText('Couldn’t load this page')).toBeInTheDocument();
+  expect(document.getElementById('chunk-reload-toast')).toBeNull();
+  expect(isStaleChunkReloadPending()).toBe(false);
+});
+
 test('a customer page keeps its stale-chunk reload while a staff tab hold is open, and after a use of the page', () => {
   holding = true;
   const stop = watchPageUse(document);
@@ -252,6 +269,32 @@ describe('on a staff page', () => {
     }
   });
 
+  test('a use of the page while a page whose code is missing waits keeps the tab: the retry screen says new version, and Reload asks about the page first', async () => {
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    const stop = watchPageUse(document);
+    try {
+      const read = target.fetch('/api/admin/auth/me');
+      renderInBoundary(lazyWithRetry(missingChunk));
+      expect(await screen.findByText('Loading the new version...')).toBeInTheDocument();
+      fireEvent.input(document.body);
+      pending[0]({ headers: new Headers() });
+      await read;
+      expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+      tap(screen.getByRole('button', { name: 'Reload' }));
+      expect(screen.getByText('Anything not saved on this page will be lost.')).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+      tap(screen.getByRole('button', { name: 'Reload anyway' }));
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+      uninstall();
+    }
+  });
+
   test('a page whose code is missing while held work keeps the tab says the portal has a new version; Reload names the work, then Reload anyway reloads', async () => {
     holding = true;
     renderInBoundary(lazyWithRetry(missingChunk));
@@ -276,6 +319,34 @@ describe('on a staff page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(reload).toHaveBeenCalledTimes(1);
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  });
+
+  test('after the one reload, a page still missing under a shell that loaded gets the retry screen, not another reload', async () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/today/protocols', reload });
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    resetStaleChunkReloadForTests(); // the page load the one reload opened
+    renderInBoundary(shellAround(lazyWithRetry(missingChunk), 'Today shell'));
+    expect(await screen.findByText('Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.getByText('Today shell')).toBeInTheDocument();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a page that loads on another path ends that count, so a later missing chunk reloads at once again', async () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/today/protocols', reload });
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    resetStaleChunkReloadForTests(); // the page load the one reload opened
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
+    renderInBoundary(lazyWithRetry(() => Promise.resolve({ default: () => <div>Today page</div> })));
+    expect(await screen.findByText('Today page')).toBeInTheDocument();
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/today/protocols', reload });
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   test('offline, a page whose code is missing asks to check the connection, and its Retry names the offline device', async () => {
