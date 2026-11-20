@@ -49,6 +49,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { isDeepStrictEqual } = require('util');
 
 for (const name of Object.keys(process.env)) {
   if (/^(DATABASE_|POSTGRES_|PG[A-Z]+$)/.test(name)) delete process.env[name];
@@ -97,7 +98,8 @@ function heroesFileText(raw) {
   const text = `{\n${top}  "heroes": {\n${lines.join(',\n')}\n  }\n}\n`;
   const back = JSON.parse(text);
   validateHeroes(back);
-  if (JSON.stringify(back.heroes) !== JSON.stringify(raw.heroes)) throw new Error('the heroes file text does not hold the heroes it was built from');
+  // Same heroes, whatever order a person wrote an entry's keys in (motion before art is fine).
+  if (!isDeepStrictEqual(back.heroes, raw.heroes)) throw new Error('the heroes file text does not hold the heroes it was built from');
   return text;
 }
 

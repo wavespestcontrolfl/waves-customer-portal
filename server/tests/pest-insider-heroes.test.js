@@ -341,6 +341,21 @@ describe('taking new art', () => {
     expect(validateHeroes({ heroes: { T03: kept } }).T03.gifFile).toMatch(/^t03-[0-9a-f]{10}\.gif$/);
   }, 60000);
 
+  test("an entry a person wrote with its motion before its art does not block another fact's import", async () => {
+    const raw = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'));
+    const { art, motion } = raw.heroes.A02;
+    expect(motion).toBeDefined();
+    raw.heroes.A02 = { motion, art };
+    fs.writeFileSync(path.join(root, MANIFEST), JSON.stringify(raw, null, 2));
+    fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
+    const taken = run('--execute');
+    expect([taken.status, taken.stderr]).toEqual([0, expect.not.stringContaining('does not hold the heroes')]);
+    // the file is written back one fact per line, art first; A02 keeps its art and motion
+    const text = fs.readFileSync(path.join(root, MANIFEST), 'utf8');
+    expect(text).toContain(`"A02": { "art": ${JSON.stringify(art)}, "motion": ${JSON.stringify(motion)} }`);
+    expect(JSON.parse(text).heroes.A02).toEqual({ art, motion });
+  }, 60000);
+
   test('runs one import at a time: while another holds the lock, it stops and writes nothing', async () => {
     fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
     fs.writeFileSync(path.join(root, `${MANIFEST}.lock`), '1\n');
