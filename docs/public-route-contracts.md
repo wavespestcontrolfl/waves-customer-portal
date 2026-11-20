@@ -3180,7 +3180,13 @@ such a record), never the merged `structured_notes` lists (which fold in raw
 `[Found]` / `[Next]` lines) or `ai_report`, on a record with no note too. On
 every record each value passes `customerCopyViolations` before it prints (the
 web payload screens its recommendations with it too), and a line that holds an
-access code drops (`withoutAccessCodeLines`); a refused value is left out. The payload adds
+access code drops (`withoutAccessCodeLines`); a refused value is left out. That
+PDF prints the service title frozen at completion, but it judges whether the
+note may stand from the stored row, as the web report does: a row with no
+stored `service_line` takes the line its stored `service_type` names before
+the frozen title replaces the type (`applyReportIdentitySnapshotToLegacyPdf`),
+so a visit corrected after completion (pest to lawn) prints its note in
+neither place. The payload adds
 one key and no query parameter: `summaryIsOwnNote: true`, present only when
 `summary` is the note (on such a record a `technician_report` summary is always
 the note). The page's Visit Summary and the PDF print that summary as stored

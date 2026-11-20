@@ -230,6 +230,19 @@ function applyReportIdentitySnapshot(service) {
   return out;
 }
 
+// The note rule reads the line the web report renders as, from the stored
+// row (technician-report-copy.js reportServiceLine), and the web overlay
+// leaves service_type alone. A row with no stored line takes the one its
+// stored type names before the legacy PDF's frozen title replaces that type,
+// so a visit corrected after completion (pest to lawn) shows its note in that
+// PDF only where the web report shows it. A row read without the service_line
+// column stays without it (no note).
+function storedLineBeforeFrozenTitle(service) {
+  if (!Object.prototype.hasOwnProperty.call(service, 'service_line') || service.service_line) return {};
+  // Required here: the line table loads the service-type normalizer.
+  return { service_line: require('./service-line-configs').detectServiceLine(service.service_type) };
+}
+
 /**
  * The portal's legacy pdfkit generator (documents.js generateServiceReportPDF)
  * takes separate customer / service / products inputs instead of the joined
@@ -255,7 +268,11 @@ function applyReportIdentitySnapshotToLegacyPdf({ customer, service, products = 
   if (snapshot.technicianName) outService.technician_name = snapshot.technicianName;
   // The generator's heading, callback classification, and aftercare copy
   // key on service.service_type — same frozen title the V1 report uses.
-  if (snapshot.serviceTitle) outService.service_type = snapshot.serviceTitle;
+  // The note rule does not (storedLineBeforeFrozenTitle).
+  if (snapshot.serviceTitle) {
+    Object.assign(outService, storedLineBeforeFrozenTitle(service));
+    outService.service_type = snapshot.serviceTitle;
+  }
   const facts = snapshot.productFacts && typeof snapshot.productFacts === 'object' ? snapshot.productFacts : null;
   const outProducts = (products || []).map((product) => {
     const frozen = facts ? facts[canonicalProductId(product?.product_id)] : null;

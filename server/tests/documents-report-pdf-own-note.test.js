@@ -136,6 +136,21 @@ describe.each([
   ['the signed-in download', '/api/documents/service-report/svc-1'],
   ['the share link', `/api/documents/shared/${SHARE_TOKEN}`],
 ])('the report PDF through %s', (_label, path) => {
+  test('a visit corrected after completion prints its note only where the web report shows it', async () => {
+    // The web report judges the line from the stored row (no stored line: the
+    // stored type); this PDF prints the frozen title completion saved.
+    const notes = JSON.stringify({ reportNote: { v: 1, text: NOTE_TEXT, source: 'cleaned' }, ...LISTS });
+    const frozenAs = (serviceTitle) => JSON.stringify({ reportIdentitySnapshot: { version: 1, serviceTitle } });
+    // Completed as pest, corrected to lawn: the web withholds the note.
+    serviceRow = { ...visit(notes), service_line: null, service_type: 'Lawn Fertilization', service_data: frozenAs('Quarterly Pest Control') };
+    const lawnNow = await printed(path);
+    expect(lawnNow).toContain('Quarterly Pest Control');
+    expect(lawnNow).not.toContain('I treated the perimeter');
+    // Completed as lawn, corrected to pest: the web shows the note.
+    serviceRow = { ...visit(notes), service_line: null, service_type: 'Quarterly Pest Control', service_data: frozenAs('Lawn Fertilization') };
+    expect(await printed(path)).toContain('I treated the perimeter');
+  });
+
   test("a note record prints the form's screened lists, never the raw note's lines or the AI report", async () => {
     serviceRow = visit(JSON.stringify({ reportNote: { v: 1, text: NOTE_TEXT, source: 'cleaned' }, ...LISTS }));
     const text = await printed(path);
