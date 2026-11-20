@@ -771,7 +771,11 @@ async function getEstimateFunnel(input) {
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
       .where('e.status', 'accepted')
       .whereRaw(...inWindowRaw('e.accepted_at', bounds))
-      .whereRaw(`${sentAtSql('e')} IS NOT NULL`)
+      // A response follows the send it answers: an acceptance before the send
+      // anchor (a portal accept while a staff send was in flight, which the
+      // send path keeps) has no response time, and still counts as accepted
+      // above (codex pre-push P1). A NULL anchor drops the row, as before.
+      .whereRaw(`e.accepted_at >= ${sentAtSql('e')}`)
       .where(whereNotUndeliveredSelfServe('e'))
   ).select(db.raw(`AVG(EXTRACT(EPOCH FROM (e.accepted_at - ${sentAtSql('e')})) / 3600) as avg_hrs`)).first();
 

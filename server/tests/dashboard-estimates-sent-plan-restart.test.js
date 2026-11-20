@@ -118,7 +118,8 @@ test('every estimates query dated by the send reads sentAtSql, never the sent_at
   // The response time runs from the first delivery for a self-serve quote.
   const average = recorded.find((r) => r.method === 'select' && JSON.stringify(r.args).includes('avg_hrs'));
   expect(average.args[0].__raw[0]).toBe(`AVG(EXTRACT(EPOCH FROM (e.accepted_at - ${sentAtSql('e')})) / 3600) as avg_hrs`);
-  expect(recorded.some((r) => r.method === 'whereRaw' && r.args[0] === `${sentAtSql('e')} IS NOT NULL`)).toBe(true);
+  // Only an acceptance at or after that anchor has a response time.
+  expect(recorded.some((r) => r.method === 'whereRaw' && r.args[0] === `e.accepted_at >= ${sentAtSql('e')}`)).toBe(true);
 
   recorded.length = 0;
   await executeDashboardTool('compare_periods', { period_a: 'this_month', period_b: 'last_month', metrics: ['estimates_sent'] });

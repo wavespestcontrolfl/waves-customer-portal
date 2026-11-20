@@ -189,6 +189,23 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect([sendsAfter[0] - sendsBefore[0], sendsAfter[1] - sendsBefore[1]]).toEqual([0, 1]);
   });
 
+  test('an acceptance before the send it answers counts as accepted but has no response time (codex pre-push P1)', async () => {
+    const funnel = () => executeDashboardTool('get_estimate_funnel', { date_from: '2005-06-01', date_to: '2005-06-30' });
+    const before = await funnel();
+    expect(before.funnel.accepted).toBe(0);
+    const customerId = await insertCustomer();
+    const quote = (acceptedAt) => ({
+      id: randomUUID(), customer_id: customerId, source: 'plan_start', status: 'accepted',
+      sent_at: '2005-06-10T15:00:00Z', accepted_at: acceptedAt, service_interest: SERVICE, monthly_total: 50, onetime_total: 0,
+      estimate_data: { deliveryState: { firstDeliveredAt: '2005-06-10T15:00:00Z' } },
+    });
+    // One accepted in the portal an hour before the staff send stamped its delivery; one a day after.
+    await trx('estimates').insert([quote('2005-06-10T14:00:00Z'), quote('2005-06-11T15:00:00Z')]);
+    const after = await funnel();
+    expect(after.funnel.accepted - before.funnel.accepted).toBe(2);
+    expect(after.avg_response_hours).toBe('24.0');
+  });
+
   test('a send on the last Eastern evening of a month counts in that month, in any session zone (codex pre-push P1)', async () => {
     // A naive date string reads in the session's zone; UTC here, so only real Eastern bounds pass.
     await trx.raw("SET LOCAL TIME ZONE 'UTC'");
