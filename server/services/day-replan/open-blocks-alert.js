@@ -262,7 +262,7 @@ function fillSummary(fill, blocks = []) {
     + ' Each fit is the staff finder\'s check of a new visit on the day as booked.'
     + (shortFit ? ` A block short of ${SLOT_MIN} minutes can still hold a job when the stops around it have room for the drive.` : '')
     + ` A plan visit moves up at most ${MOVE_UP_DAYS} days, and its customer was told a day: call before moving it.`
-    + (fill.rain?.leftOut ? ` Rain: ${count(fill.rain.leftOut, 'outdoor job', 'outdoor jobs')} left out of an opening in rain hours (the rain rules: only rain-safe work runs in rain).` : '')
+    + (fill.rain?.leftOut ? ` Rain: ${count(fill.rain.leftOut, 'job', 'jobs')} left out of an opening in rain hours (the rain rules: only rain-safe work runs in rain).` : '')
     + ' Nothing is held, booked or moved; staff decide whether to call.';
 }
 

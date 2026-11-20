@@ -342,7 +342,7 @@ describe('runOpenBlocksAlert', () => {
     await runOpenBlocksAlert({ conn: saturday().conn, now: NOW });
     const [, , opts] = raiseAdminAlert.mock.calls[0];
     expect(opts.detail).toContain('  - Lead, Dana l1 (Waves Assessment, 30 min): +9 min drive, finishes 12:30 PM; runs in rain hours (rain-safe work)');
-    expect(opts.detail).toContain(' Rain: 3 outdoor jobs left out of an opening in rain hours (the rain rules: only rain-safe work runs in rain).');
+    expect(opts.detail).toContain(' Rain: 3 jobs left out of an opening in rain hours (the rain rules: only rain-safe work runs in rain).');
     expect(opts.metadata.fill.rain).toEqual({ checked: true, leftOut: 3 });
     expect(opts.metadata.fill.lines).toEqual([expect.objectContaining({ kind: 'lead', inRain: true })]);
   });

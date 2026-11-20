@@ -145,7 +145,8 @@ const OVERFLOW_SERVICE = Object.freeze({ name: 'More services', serviceKey: 'boo
 // visit. `items` are names or { name, serviceKey }; a key the screen sent
 // (the selected catalog row) settles the identity ahead of the name, which
 // is not unique in the catalog. Only while the caller's gate is on (the
-// picker's by default); read one at a
+// picker's by default; `gate: null` always reads, for a rule with no gate of
+// its own: the 07:05 fill list, day-replan/fill-list.js); read one at a
 // time; an entry that cannot be resolved (or a failed read) keeps its name
 // and takes the word rules.
 async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK' } = {}) {
@@ -153,7 +154,7 @@ async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK' } = 
     .map((item) => ({ name: String((item && item.name) ?? item ?? '').trim(), serviceKey: (item && item.serviceKey) || null }))
     .filter((item) => item.name);
   const { gateEnvValue } = require('../../config/feature-gates');
-  if (!list.length || !gateEnvValue(gate)) return list.map((item) => item.name);
+  if (!list.length || (gate !== null && !gateEnvValue(gate))) return list.map((item) => item.name);
   const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
   const out = [];
   for (const { name, serviceKey } of list) {

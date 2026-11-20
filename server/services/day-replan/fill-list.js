@@ -38,16 +38,18 @@
  * the move screen says so before the move commits (SeriesMoveNotice.jsx). The list only suggests the move.
  *
  * Rain (owner 2026-11-19 D3: "the rain rules decide which jobs qualify"): with the rain note's NWS hours (`outlooks`,
- * rain-note.js; the 07:05 notice passes them), a job whose services are not all rain-safe (rain-fit.js rainFitFor
- * 'avoid': spray, lawn, exclusion and other outside work) takes its least-drive fit in a block that is not in rain;
- * with none, it is left out of that block and counted. Rain is the booking rain rule (isWetWindow): a chance of
- * RAIN_PCT or more in any hour from the booked row's start to RAIN_AFTER_HOURS after its end (or after the modeled
- * departure, when that is later), at the forecast point nearest the job's stored location (rainArea). Unknown is kept:
- * no forecast for the area, no wet hour but an hour without a reading, or a day past the horizon. A rain-safe job
- * (every service on RAIN_OK_KEYS: assessments, inspections, rodent checks) stays and its line says it runs in rain
- * hours. A job's services are named as the screen that books or moves it names them (`rainServices`): an estimate as
- * the estimate page does, a lead's visit by its catalog key, a plan visit as the rain pass reads a booked row. They are
- * read only for a job in an area with rain.
+ * rain-note.js; the 07:05 notice passes them), only rain-safe work runs in rain hours. A job that is not (rain-fit.js
+ * rainFitFor other than 'prefer': spray, lawn, exclusion and other outside work, or work of no known class) takes its
+ * least-drive fit in a block that is not in rain; with none, it is left out of that block and counted. Rain is the
+ * booking rain rule (isWetWindow): a chance of RAIN_PCT or more in any hour from the booked row's start to
+ * RAIN_AFTER_HOURS after its end (or after the modeled departure, when that is later), at the forecast point nearest
+ * the job's stored location (rainArea). Unknown weather is kept: no forecast for the area, no wet hour but an hour
+ * without a reading, or a day past the horizon. A rain-safe job (every service on RAIN_OK_KEYS: assessments,
+ * inspections, rodent checks) stays and its line says it runs in rain hours. A job's services are named as the screen
+ * that books or moves it names them (`rainServices`: an estimate as the estimate page does, a lead's visit by its
+ * catalog key, a plan visit by its stored rows) and classified as those screens classify them (rain-fit.js
+ * withCatalogKeys, then rainFitFor). They are read only for a job in an area with rain; a class that cannot be read
+ * keeps the job out of rain hours.
  *
  * Nothing here is paid: no geocoding and no road times.
  */
@@ -71,7 +73,7 @@ const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { shiftDateStr } = require('../auto-dispatch/dates');
 const { isUnplacedDueDate } = require('../auto-dispatch/move-rules');
 const mowingDays = require('../auto-dispatch/mowing-days');
-const { rainFitFor, isWetWindow, RAIN_PCT } = require('../scheduling/rain-fit');
+const { rainFitFor, isWetWindow, withCatalogKeys, RAIN_PCT } = require('../scheduling/rain-fit');
 const { ZONE_COORDS } = require('../scheduling/forecast-zones');
 const { loadReminderOffIds } = require('../auto-dispatch/reminder-off');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -245,8 +247,8 @@ async function planVisitCandidate(conn, row, day, addOns) {
   const pattern = loaded.service.recurring_pattern;
   const oneOff = pattern === LAWN_ROUNDS_9 ? (date) => roundsRowMoveIsOneOff(loaded.service, date) : () => true;
   return { ...loaded, deactivated, holds, prospective: true, label: loaded.service.service_type || row.service_type,
-    // Its services as the rain pass reads a booked row (rain-fit.js outdoorStopRows): the key snapshot, else the catalog
-    // key of its service id, else the name. Read only when the rain rule needs them.
+    // Its stored services (the row and its add-ons), as the move screens name them (rain-fit.js storedVisitServices): the
+    // key snapshot, else the catalog key of its service id, else the name. Read only when the rain rule needs them.
     rainServices: () => Promise.all([loaded.service, ...extra].map(async (svc) => ({
       name: svc.service_type, serviceKey: svc.service_key_snapshot || await catalogKeyById(conn, svc.service_id) }))),
     dayOpen: (date) => date >= earliest && date < day && oneOff(date) && clampDateToSeason(pattern, date) === date
@@ -354,17 +356,40 @@ function rainArea(service) {
 const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 
 /**
- * A job's rain verdict for one fit, by its rain rule (`rule`: its area's hours and its rainFitFor class): 'out' when it
- * is not rain-safe and would run in rain, 'in' when it is rain-safe and would run in rain, null otherwise (dry,
- * unknown, or no rule). The hours are the booked row's, as the booking ranking reads a slot (customer-rain-rank.js
- * slotRainTierOf: its window), to the modeled departure when the work runs past the row's end.
+ * A job's rain verdict for one fit, by its rain rule (`rule`: its area's hours and its rainFitFor class, null when the
+ * class could not be read): when the fit would run in rain, 'in' for rain-safe work ('prefer') and 'out' for any other
+ * job; null otherwise (dry, unknown, or no rule). The hours are the booked row's, as the booking ranking reads a slot
+ * (customer-rain-rank.js slotRainTierOf: its window), to the modeled departure when the work runs past the row's end.
  */
 function rainVerdict(rule, day, fit, today) {
-  if (!rule || rule.fit === 'neutral') return null;
+  if (!rule) return null;
   const end = Math.max(toMin(fit.windowStart) + fit.length, fit.endMin);
   const wet = isWetWindow(rule.hours, { date: day, start_time: fit.windowStart, end_time: hhmm(end) }, today);
   if (wet !== true) return null;
-  return rule.fit === 'avoid' ? 'out' : 'in';
+  return rule.fit === 'prefer' ? 'in' : 'out';
+}
+
+/**
+ * Each job's rain rule (`{ hours, fit }`), for a job whose area's NWS hours hold rain (RAIN_PCT or more in some hour):
+ * those hours and its services' rain class, read once as the screens that book or move it read one (rain-fit.js
+ * withCatalogKeys; the rule has no gate of its own, so it always reads). A job in a dry area, or with no forecast, has
+ * none. A class that cannot be read is null: that job stays out of rain hours, and the others go on.
+ */
+async function rainRules(conn, candidates, outlooks) {
+  const rules = new Map();
+  if (!outlooks) return rules;
+  for (const { kind, id, candidate } of candidates) {
+    const hours = outlooks[rainArea(candidate.service)];
+    if (!Array.isArray(hours) || !hours.some((h) => Number(h?.rainChance) >= RAIN_PCT)) continue;
+    let fit = null;
+    try {
+      fit = rainFitFor(await withCatalogKeys(await candidate.rainServices(), conn, { gate: null }));
+    } catch (err) {
+      logger.warn(`[fill-list] ${kind} ${id}: rain class unread (${err.message}); kept out of rain hours`);
+    }
+    rules.set(candidate, { hours, fit });
+  }
+  return rules;
 }
 
 const KINDS = ['estimate', 'lead', 'visit'];
@@ -474,14 +499,7 @@ async function fillList(conn, blocks, now, { outlooks = null } = {}) {
     techDays.set(key, [...(techDays.get(key) || []), i]);
   });
   const fitted = { estimate: new Set(), lead: new Set(), visit: new Set() };
-  // Each job's rain rule, for a job whose area's NWS hours hold rain (RAIN_PCT or more in some hour): those hours and its
-  // services' rain class, read once. A job in a dry area, or with no forecast, has none.
-  const rainOf = new Map();
-  for (const { candidate } of candidates) {
-    const hours = outlooks && outlooks[rainArea(candidate.service)];
-    if (!Array.isArray(hours) || !hours.some((h) => Number(h?.rainChance) >= RAIN_PCT)) continue;
-    rainOf.set(candidate, { hours, fit: rainFitFor(await candidate.rainServices()) });
-  }
+  const rainOf = await rainRules(conn, candidates, outlooks);
   const rainLeftOut = new Set();
   for (const indexes of techDays.values()) {
     const { day, techId } = blocks[indexes[0]];

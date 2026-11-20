@@ -164,6 +164,13 @@ describe('withCatalogKeys', () => {
     expect(resolver).not.toHaveBeenCalled();
   });
 
+  test('gate null (a rule with no gate of its own: the 07:05 fill list): read with the picker\'s gate off', async () => {
+    const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
+    expect(await load(resolver)([{ name: 'Shared Label', serviceKey: 'wdo_inspection' }], {}, { gate: null }))
+      .toEqual([{ name: 'Shared Label', serviceKey: 'wdo_inspection', findingsType: null }]);
+    expect(resolver).toHaveBeenCalledTimes(1);
+  });
+
   test('gate on: each name gets the identity its visit would have', async () => {
     process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const resolver = jest.fn(async ({ service_type: name }) => (name === 'Rodent Trapping Service'

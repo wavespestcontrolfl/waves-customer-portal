@@ -48,6 +48,13 @@ jest.mock('../services/auto-dispatch/reminder-off', () => ({ loadReminderOffIds:
 // The estimate page's catalog lookup for a quote line without a key (customer-rain-rank.js catalogKeyForRow): none here
 // unless a test says.
 jest.mock('../services/slot-reservation', () => ({ ...jest.requireActual('../services/slot-reservation'), catalogLinkForProfile: jest.fn(async () => null) }));
+// The catalog identity the booking screens' rain rule reads (rain-fit.js withCatalogKeys, the completion-profile
+// resolver): a stored key settles it; a name the catalog has gives its key (one here); else none.
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: jest.fn(async (row) => ({ findingsType: null,
+    serviceKey: row.service_key_snapshot || { 'mosquito misting system refill': 'mosquito_misting_refill' }[String(row.service_type).toLowerCase()] || null })),
+}));
 
 const logger = require('../services/logger');
 const page = require('../routes/estimate-slots-public')._internals;
@@ -62,6 +69,7 @@ const { getServices } = require('../services/service-library');
 const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
 const { loadReminderOffIds } = require('../services/auto-dispatch/reminder-off');
 const { catalogLinkForProfile } = require('../services/slot-reservation');
+const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { fillList, MAX_PER_BLOCK, MOVE_UP_DAYS, _internals } = require('../services/day-replan/fill-list');
 const { ZONE_COORDS } = require('../services/scheduling/forecast-zones');
 
@@ -149,10 +157,12 @@ function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = 
       if (typeof args[0] === 'string' && args.length === 2) q.match[args[0]] = args[1];
       return q;
     };
-    // The catalog row of a service id (`catalog`: { id, service_key }).
+    // The catalog row of a service id (`catalog`: { id, service_key }, or { id, error } for a read that fails).
     q.first = async (column) => {
       record('first', [column]);
-      return table === 'services' ? catalog.find((row) => row.id === q.match.id) : undefined;
+      const row = table === 'services' ? catalog.find((r) => r.id === q.match.id) : undefined;
+      if (row && row.error) throw row.error;
+      return row;
     };
     q.select = async (first) => {
       if (table === 'estimates') return first === '*' ? estimates : leadEstimates;
@@ -988,6 +998,9 @@ describe('fillList', () => {
     catalogLinkForProfile.mockResolvedValueOnce({ service_key: 'cockroach_control' });
     expect(await estimateRain([roach])).toBe('in');
     expect(await estimateRain([roach])).toBe('out');
+    // Then the screens' own catalog read (withCatalogKeys): a line without a key whose label is a catalog name takes
+    // that row's key (a misting refill is rain-safe).
+    expect(await estimateRain([{ service: 'mosquito', label: 'Mosquito Misting System Refill' }])).toBe('in');
     // A plan visit as the rain pass reads a booked row: its key snapshot (a bait station check is rain-safe, whatever
     // its name says), else the catalog key of its service id, else its name. An outdoor add-on makes it outdoor work.
     const visitRain = async (row, { key = 'rodent_bait_quarterly', addOns = [], catalog = [] } = {}) => {
@@ -1001,6 +1014,8 @@ describe('fillList', () => {
     const unkeyed = { ...row, service_id: 'svc-bait' };
     expect(await visitRain(unkeyed, { key: null, catalog: [{ id: 'svc-bait', service_key: 'rodent_bait_quarterly' }] })).toBe('in');
     expect(await visitRain(unkeyed, { key: null })).toBe('out');
+    // Work of no known class (a general appointment) is not rain-safe work: it stays out of rain hours too.
+    expect(await visitRain({ ...row, service_type: 'General Appointment' }, { key: 'general_appointment' })).toBe('out');
     // A lead's visit by its catalog key: an inspection whose name reads as outside work is still rain-safe.
     getServices.mockResolvedValue({ services: [...CATALOG,
       { id: 'svc-spot', service_key: 'termite_inspection', name: 'Termite Spot Check', category: 'inspection', default_duration_minutes: 60 }] });
@@ -1017,14 +1032,33 @@ describe('fillList', () => {
     // Catalog reads: the plan visit's row (no key snapshot) and the estimate's quote line (no key).
     const reads = async (hours) => {
       catalogLinkForProfile.mockClear();
+      resolveCompletionProfileForScheduledService.mockClear();
       const { conn, calls } = fakeConn({ estimates: [estimate('near')], plan: [row], catalog: [{ id: 'svc-1', service_key: 'pest_quarterly' }] });
       const out = await fillList(conn, [morning], NOW, { outlooks: { [area]: hours } });
       expect(out.byBlock[0].map((l) => l.kind)).toEqual(['estimate', 'visit']);
-      return [calls.filter(([table, m]) => table === 'services' && m === 'first').length, catalogLinkForProfile.mock.calls.length];
+      return [calls.filter(([table, m]) => table === 'services' && m === 'first').length, catalogLinkForProfile.mock.calls.length,
+        resolveCompletionProfileForScheduledService.mock.calls.length];
     };
-    expect(await reads(rainHours(DAY, { 15: 59 }))).toEqual([0, 0]);
+    expect(await reads(rainHours(DAY, { 15: 59 }))).toEqual([0, 0, 0]);
     // A 60% hour at 3 PM is rain: both jobs are read, once each, and their 9:00 rows stay dry.
-    expect(await reads(rainHours(DAY, { 15: 60 }))).toEqual([1, 1]);
+    expect(await reads(rainHours(DAY, { 15: 60 }))).toEqual([1, 1, 2]);
+  });
+
+  test('rain: a job whose class cannot be read stays out of rain hours only; the other jobs and the list go on', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const row = planVisit('v1', '2040-09-12', { service_id: 'svc-down' });
+    loadGapCandidate.mockResolvedValue(loaded(row, { lat: HQ.lat + 0.01, service_key_snapshot: null, service_id: 'svc-down' }));
+    const area = rainArea({ lat: HQ.lat + 0.01, lng: HQ.lng });
+    const run = (hours) => fillList(fakeConn({ leads: [lead('l1')], plan: [row], catalog: [{ id: 'svc-down', error: new Error('catalog timeout') }] }).conn,
+      [morning], NOW, { outlooks: { [area]: hours } });
+    // Rain all day: the plan visit is left out and counted; the lead (rain-safe) is listed.
+    let out = await run(rainHours(DAY, { all: 70 }));
+    expect([out.byBlock[0].map((l) => [l.kind, !!l.inRain]), out.rain]).toEqual([[['lead', true]], { checked: true, leftOut: 1 }]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('visit v1: rain class unread (catalog timeout)'));
+    // Rain at 3 PM only: its 9:00 row is dry, so it is listed.
+    out = await run(rainHours(DAY, { 15: 70 }));
+    expect(out.byBlock[0].map((l) => [l.kind, !!l.inRain])).toEqual([['lead', false], ['visit', false]]);
   });
 
   test('rain: the area is the forecast point nearest the job; the hours are the booked row\'s, to the modeled departure when later', () => {
@@ -1039,7 +1073,9 @@ describe('fillList', () => {
     const wet = rainHours(DAY, { all: 70 });
     expect(rainVerdict({ fit: 'avoid', hours: wet }, DAY, row9, today)).toBe('out');
     expect(rainVerdict({ fit: 'prefer', hours: wet }, DAY, row9, today)).toBe('in');
-    expect(rainVerdict({ fit: 'neutral', hours: wet }, DAY, row9, today)).toBeNull();
+    // Work of no known class, or a class that could not be read: not rain-safe.
+    expect(rainVerdict({ fit: 'neutral', hours: wet }, DAY, row9, today)).toBe('out');
+    expect(rainVerdict({ fit: null, hours: wet }, DAY, row9, today)).toBe('out');
     expect(rainVerdict(undefined, DAY, row9, today)).toBeNull();
     // Past the horizon (3 days from today): unknown.
     expect(rainVerdict({ fit: 'avoid', hours: wet }, DAY, row9, '2040-09-01')).toBeNull();
