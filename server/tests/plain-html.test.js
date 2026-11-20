@@ -154,6 +154,8 @@ describe('plainPage', () => {
       '<style>display: block</style><td>x', '<style>a { b { color: red } display: block }</style><td>x',
       // A step of a @keyframes ("from" or "to", in any case) applies to whatever element the animation runs on.
       '<style>@keyframes show { from { display: block } }</style><td>x', '<style>@keyframes s { 50% { color: red } TO { display: inline } }</style><td>x',
+      // The title's class counts for a showing rule too.
+      '<style>.banner { display: block }</style><title class=banner>T</title><td>x',
       '<title style="display: block">Callback</title><td>x', '<script style="display:inline">y</script><td>x',
       '<title style="d\\69splay: block">Callback</title><td>x'];
     for (const cell of hiding) expect(plain(`<table><tr><td>Routine</td>${cell}</table>`)).toBeNull();
@@ -165,6 +167,9 @@ describe('plainPage', () => {
     // A style element of another type is inert, and of two class attributes a browser keeps the first.
     expect(plain('<style type="text/plain">td { display: none }</style><style>.b { display: none }</style><td class=a class=b>A'))
       .toBe('<td>A');
+    // A showing rule shows nothing when its selector names a class no element has, or when its only part that can
+    // match an element is led by another element's name.
+    expect(plain('<style>.banner { display: block } .absent, a { display: block }</style><td class=x>A')).toBe('<td>A');
     // ".nav-->" is the class "nav--" and a ">", which no element has here; an animation with no display or visibility
     // step hides and shows nothing.
     expect(plain('<style>.nav--> b { display: none } @keyframes fade { from { opacity: 0 } to { opacity: 1 } }</style>'

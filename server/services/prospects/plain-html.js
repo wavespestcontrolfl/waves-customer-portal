@@ -28,8 +28,9 @@
  *   one name, a browser keeps the first, and so does this;
  * - a style that can show what a script, a style or the title holds, whose text this drops (a display other than
  *   none, or an all: SHOWING_RE): in a style attribute of one of them, or in a sheet rule whose selector can match
- *   one of them (canMatchTextElement: any but one whose last compound is led by the name of another element; the
- *   steps of a @keyframes, "from" and "to", count, as an animation can run on any element);
+ *   one of them (canMatchTextElement: a part that can match an element of the page, as canMatch judges it, and
+ *   whose last compound is not led by the name of another element; the steps of a @keyframes, "from" and "to",
+ *   count, as an animation can run on any element);
  * - a run of text that holds a right-to-left letter (Hebrew, Arabic and the like) or a direction control other than
  *   the left-to-right mark (RIGHT_TO_LEFT_RE). Without them, and without the dir, direction and unicode-bidi above, a
  *   browser shows each line's text in the order it is written;
@@ -186,15 +187,18 @@ const namesOf = (attributes) => attributes.flatMap(({ name, value }) => {
 // or an id no element has. Any other selector (a pseudo-class, an attribute, "*") may match any element.
 const canMatch = (selector, names) => selector.split(',').some((part) => !/^[-\w \t\n\r\f.#>+~]*$/.test(part)
   || (part.match(/[.#][-\w]+/g) || []).every((name) => names.has(name.toLowerCase())));
-// Whether a selector can match a script, a style or the title: an at-rule's prelude (which this cannot tell), or a
-// part (between commas) whose last compound selector is not led by the name of another element, with only classes,
-// ids, pseudo-classes without arguments and attribute tests after it ("a.top:link", "input[type=text]"). Only CSS
-// white space or a combinator ends a compound: a no-break space is part of a name. "from" and "to" (KEYFRAME_STEPS)
-// name no element here: in a @keyframes they are the first and last steps of an animation, which can run on any
-// element, a script too.
+// Whether a selector can match a script, a style or the title of a page whose elements have the class and id names
+// `names`: some part (between commas) that can match an element of the page (canMatch, which counts their names
+// too) and is an at-rule's prelude (which this cannot tell) or has a last compound selector not led by the name of
+// another element, with only classes, ids, pseudo-classes without arguments and attribute tests after it
+// ("a.top:link", "input[type=text]"). Only CSS white space or a combinator ends a compound: a no-break space is
+// part of a name. "from" and "to" (KEYFRAME_STEPS) name no element here: in a @keyframes they are the first and
+// last steps of an animation, which can run on any element, a script too.
 const TYPE_LED_RE = /(?:^|[ \t\n\r\f>+~])([A-Za-z][-\w]*)(?:[.#][-\w]+|::?[-\w]+|\[[^\]]*\])*[ \t\n\r\f]*$/;
 const KEYFRAME_STEPS = new Set(['from', 'to']);
-const canMatchTextElement = (selector) => selector.includes('@') || selector.split(',').some((part) => {
+const canMatchTextElement = (selector, names) => selector.split(',').some((part) => {
+  if (!canMatch(part, names)) return false;
+  if (part.includes('@')) return true;
   const name = TYPE_LED_RE.exec(part)?.[1].toLowerCase();
   return !name || TEXT_ELEMENTS.has(name) || KEYFRAME_STEPS.has(name);
 });
@@ -216,7 +220,7 @@ function sheetCanHide(css, names) {
   for (const [, mark, run] of flat.matchAll(/([;{}]?)([^;{}]*)/g)) {
     if (mark === '{') {
       matches = canMatch(before, names);
-      matchesText = canMatchTextElement(before);
+      matchesText = canMatchTextElement(before, names);
     } else if (mark === '}') {
       matches = true;
       matchesText = true;
