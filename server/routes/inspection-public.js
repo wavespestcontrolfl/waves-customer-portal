@@ -646,7 +646,17 @@ function storedAddressCandidates(lead, custRow) {
 // that pin: then the fresh times are built here, with that address and the
 // trusted customer read again, as the next commit's first build reads them
 // (phase 1's copy can be stale by now: pre-push P1 on c08db66cc0); a failed
-// read carries none. An address a geocode review now quarantines for that
+// read carries none. They are built only on the profile this booking used,
+// and only when the next commit's phase 1 keeps no other staff-verified pin
+// for that address (retainReviewedLocation); when it would, the refusal
+// answers as a moved booking does (`address_changed`), so the page drops the
+// typed address and its reload and retry read that pin (pre-push P1 on
+// 419b536e4b). A booking from the stored address (none typed) builds them at
+// its pin when the profile read again still has that stored pin and address:
+// the next commit, with none typed, resolves to them, and the page makes no
+// new lookup (pre-push P1 on 419b536e4b: its reload's GET paid for a county
+// lookup). A profile a review blocks has no stored pin, so that refusal
+// reloads. An address a geocode review now quarantines for that
 // customer answers the next commit's own refusal (`failure`
 // 'address_unresolved', which sendSlotTaken sends in place of SLOT_TAKEN), so
 // the page shows its address message, not the times it holds. The rule is the
@@ -673,21 +683,36 @@ function storedAddressCandidates(lead, custRow) {
 // restores (pre-push P1 on 7cdf34198a).
 async function nextCommitRefresh({ lead, verified, resolved, custRow, bookingAddress, bookingLocation, locationMoved }) {
   if (!funnelOn()) return { location: bookingLocation, address: bookingAddress, customer: custRow };
-  if (resolved.source !== 'supplied') return { location: null };
   const nextCust = await loadLead(db, lead.id)
     .then((nextLead) => (nextLead ? loadTrustedCustomer(db, nextLead, verified) : null))
     .catch((err) => {
       logger.warn(`[inspection-public] next-commit customer read failed for lead ${lead.id}: ${err.message}`);
       return null;
     });
+  const fresh = { location: bookingLocation, address: bookingAddress, customer: nextCust };
+  // The property a commit with no address typed books: the profile's stored pin and address (none for a profile a
+  // geocode review blocks, so that refusal reloads the list, which shows the address form).
+  const stored = nextCust ? storedCoordsResolution(nextCust) : null;
+  const atStored = Boolean(stored) && sameLocation(stored.location, bookingLocation)
+    && require('node:util').isDeepStrictEqual(locationMoved ? customerAddressFields(nextCust) : stored.address, bookingAddress);
+  if (resolved.source !== 'supplied') return atStored ? fresh : { location: null };
   if (reviewRefusesBooking(nextCust, nextCust, resolved)) return { location: null, failure: 'address_unresolved' };
-  if (!locationMoved) {
-    return nextCust ? { location: bookingLocation, address: bookingAddress, customer: nextCust } : { location: null };
-  }
-  const stored = nextCust && String(nextCust.id) === String(custRow.id) ? storedCoordsResolution(nextCust) : null;
-  const sameProperty = Boolean(stored) && sameLocation(stored.location, bookingLocation)
-    && require('node:util').isDeepStrictEqual(customerAddressFields(nextCust), bookingAddress);
-  return { location: null, addressChanged: sameProperty };
+  const sameProfile = Boolean(nextCust) && String(nextCust.id) === String(custRow.id);
+  if (locationMoved) return { location: null, addressChanged: sameProfile && atStored };
+  if (!sameProfile) return { location: null };
+  // Phase 1 keeps the profile's staff-verified pin for a typed address the customers row matches
+  // (retainReviewedLocation, read as listFallbackCity reads it). A pin other than this booking's moves that commit.
+  const pin = { lat: Number(nextCust.latitude), lng: Number(nextCust.longitude) };
+  const keepsOtherPin = Boolean(nextCust.verified_by_review) && nextCust.latitude != null && nextCust.longitude != null
+    && !sameLocation(pin, bookingLocation)
+    && await db('customers').where({ id: nextCust.id }).first('address_line1', 'address_line2', 'zip', 'latitude', 'longitude')
+      .then((row) => Boolean(row) && profileMatchesAddress(row, resolved.address, resolved.location))
+      .catch((err) => {
+        logger.warn(`[inspection-public] next-commit pin read failed for customer ${nextCust.id}: ${err.message}`);
+        return null;
+      });
+  if (keepsOtherPin === null) return { location: null };
+  return keepsOtherPin ? { location: null, addressChanged: true } : fresh;
 }
 
 // Everything the page's own booking address resolves from when no address

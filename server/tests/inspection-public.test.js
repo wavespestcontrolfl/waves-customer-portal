@@ -1182,11 +1182,12 @@ describe('round-10 P2 :1682: LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY carri
   });
 
   // With the funnel off (GATE_SOUTH_ZONE_DAY_FUNNEL) the 409 carries fresh times at the customer's own pin, as before
-  // the far-south rule: the switch restores that answer (pre-push P1 on 7cdf34198a). With it on, no times are built
-  // and the page reloads its own list (nextCommitRefresh).
+  // the far-south rule: the switch restores that answer (pre-push P1 on 7cdf34198a). With it on, the stored pin and
+  // address read again are the ones this booking used, so the next commit books there too and the 409 carries fresh
+  // times there: the page makes no new lookup (pre-push P1 on 419b536e4b: its reload's GET paid for a county lookup).
   test.each([
     ['the funnel off: fresh times at the customer\'s pin', false, [[27.4, -82.5], [27.4, -82.5]]],
-    ['the funnel on: no times, the page reloads its list', true, [[27.4, -82.5]]],
+    ['the funnel on: fresh times at the customer\'s unchanged pin', true, [[27.4, -82.5], [27.4, -82.5]]],
   ])('an ordinary slot-taken 409 (no address race) carries neither address_changed nor lead (%s)', async (_label, funnel, builtPins) => {
     mockFarSouthGates.funnel = funnel;
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
@@ -1206,7 +1207,7 @@ describe('round-10 P2 :1682: LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY carri
     expect(res.body.address_changed).toBeUndefined();
     expect(res.body.lead).toBeUndefined();
     expect(mockBuildAvailability.mock.calls.map(([args]) => [args.lat, args.lng])).toEqual(builtPins);
-    expect(res.body.availability === null).toBe(funnel);
+    expect(res.body.availability).not.toBeNull();
   });
 });
 
@@ -2756,6 +2757,12 @@ describe('POST /:token commit', () => {
       ['carries no times when that read fails', () => {
         firstResults.leads = () => { throw new Error('leads unreadable'); };
       }, { location: null }],
+      // Pre-push P1 on 419b536e4b: the next commit's phase 1 decides on the profile it loads. Times are built only on the
+      // profile this booking used; another one carries none, and the page reloads its list.
+      ['carries no times when the next commit loads another profile', () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-0', first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+        seedPhoneHousehold({ id: 'cust-0', account_id: 'acct-9', is_primary_profile: true, address_line1: '9 Home St', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101' });
+      }, { location: null }],
       // Pre-push P1s on 23dfae53de and 172712852a: staff sent the profile's pin to review since phase one. The next
       // commit's resolver answers `address_unresolved` for a typed copy of that address, so the refusal answers that.
       ['answers the next commit\'s address refusal when a geocode review now quarantines that address', () => {
@@ -2800,6 +2807,96 @@ describe('POST /:token commit', () => {
 
       expect(refresh).toMatchObject(expected);
       if (!expected.customer) expect(refresh).toEqual(expected);
+    });
+
+    // Pre-push P1 on 419b536e4b: a booking from the stored address (none typed) reuses its validated pin when the
+    // profile read again still has that stored pin and address, as the next commit, with none typed, resolves them.
+    // The page then makes no new lookup (its reload's GET paid for a county lookup). A changed pin or address, or a
+    // failed read, carries no times: the page reloads its list.
+    test.each([
+      ['its stored pin and address unchanged: fresh times there, with the profile read again', {}, null, true],
+      ['a new pin since phase 1: no times', { latitude: 27.5, longitude: -82.6 }, null, false],
+      ['a new address since phase 1: no times', { address_line1: '9 Home St' }, null, false],
+      ['a failed read: no times', {}, () => { firstResults.leads = () => { throw new Error('leads unreadable'); }; }, false],
+      // A blocked profile has no stored pin: the next commit answers the address form, which the page's reload shows.
+      ['that address sent to review since phase 1: no times, no address refusal', {}, () => {
+        gateState.reviewLive = true;
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: 'needs_pin', address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+          latitude: null, longitude: null, updated_at: new Date(),
+        };
+      }, false],
+    ])('a stored-address booking refused after phase 1, %s', async (_label, edit, seedMore, reused) => {
+      mockFarSouthGates.funnel = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      const stored = { address_line1: '123 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.1, longitude: -82.2 };
+      seedPhoneHousehold({ id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101', ...stored, ...edit });
+      if (seedMore) seedMore();
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const bookingAddress = { line1: '123 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'customer', address: bookingAddress }, custRow: { id: 'cust-9', ...stored },
+        bookingAddress, bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: false,
+      });
+
+      if (reused) {
+        expect(refresh).toMatchObject({ location: { lat: 27.1, lng: -82.2 }, address: bookingAddress, customer: { id: 'cust-9' } });
+      } else {
+        expect(refresh).toEqual({ location: null });
+      }
+    });
+
+    // Pre-push P1 on 419b536e4b: at the same pin, the next commit's phase 1 keeps the profile's staff-verified pin for a
+    // typed address the customers row matches (retainReviewedLocation). Staff may verify a pin for that address after
+    // this commit: the next commit then books that pin, so the refusal answers as a moved booking does (the page drops
+    // the typed address, and its reload and retry read that pin). The booking's own pin builds fresh times as before;
+    // a failed read of the row carries none.
+    test.each([
+      ['another pin', { latitude: 27.5, longitude: -82.6 }, null, '34209', { location: null, addressChanged: true }],
+      ['this booking\'s own pin', { latitude: 27.4, longitude: -82.5 }, null, '34209', 'fresh'],
+      ['another pin, and the customers row read fails', { latitude: 27.5, longitude: -82.6 }, 'fails', '34209', { location: null }],
+      // The trusted view can carry the primary property's pin. Phase 1 matches the customers row itself, which has no
+      // pin here, so a typed address with no ZIP does not match it, and phase 1 writes over the profile at the typed pin.
+      ['another pin on the primary property only, for a typed address with no ZIP', { latitude: 27.5, longitude: -82.6 },
+        { latitude: null, longitude: null }, null, 'fresh'],
+    ])('a typed address refused at the same pin, after staff verified %s for that address', async (_label, pin, rawRow, typedZip, expected) => {
+      mockFarSouthGates.funnel = true;
+      gateState.reviewLive = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: '123 Palm Ave', address_line2: null,
+        city: 'Venice', state: 'FL', zip: '34209', phone: '9415550101', latitude: pin.latitude, longitude: pin.longitude,
+      });
+      firstResults.customer_geocode_reviews = {
+        customer_id: 'cust-9', status: 'verified', address_snapshot: ['123 Palm Ave', null, 'Venice', 'FL', '34209'],
+        latitude: pin.latitude, longitude: pin.longitude, updated_at: new Date(),
+      };
+      if (rawRow) {
+        const trustedRead = firstResults.customers;
+        firstResults.customers = (q) => {
+          if (q.firstColumns[0] !== 'address_line1') return trustedRead(q);
+          if (rawRow === 'fails') throw new Error('customers row unreadable');
+          return { ...trustedRead(q), ...rawRow };
+        };
+      }
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const typed = { line1: '123 Palm Ave', line2: null, city: 'Venice', state: 'FL', zip: typedZip };
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied', address: typed, location: { lat: 27.4, lng: -82.5 } },
+        custRow: { id: 'cust-9' }, bookingAddress: typed, bookingLocation: { lat: 27.4, lng: -82.5 }, locationMoved: false,
+      });
+
+      if (expected === 'fresh') {
+        expect(refresh).toMatchObject({ location: { lat: 27.4, lng: -82.5 }, address: typed, customer: { id: 'cust-9', verified_by_review: true } });
+      } else {
+        expect(refresh).toEqual(expected);
+      }
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its

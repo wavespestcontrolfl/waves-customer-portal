@@ -7719,9 +7719,14 @@ that address and the trusted customer, as the lists and the next commit's first
 check read them. A booking refused after phase one (its re-check or the booking
 itself), with the funnel on, carries fresh times only when the page's next
 commit reads this one's inputs: an address typed (the page sends it again) at
-the same pin. They are built there with that address and the trusted customer
-read again (phase one's copy can be stale by then), as the next commit's first
-build reads them. A typed address a geocode review now quarantines for that
+the same pin, on the same profile, or no address typed and that profile's stored
+pin and address, read again, still the ones this booking used. They are built
+there with that address and the trusted customer read again (phase one's copy
+can be stale by then), as the next commit's first build reads them; for the
+stored address the page then makes no new lookup. When the next commit's phase
+one would keep another staff-verified pin for the typed address (staff verified
+one since), the refusal answers `address_changed: true` with no times, as a
+moved booking does below. A typed address a geocode review now quarantines for that
 customer, at the same pin or a moved one, answers the next commit's own `422 address_unresolved` in place of
 `SLOT_TAKEN`, by the rule the next commit's phase one applies (a blocked
 profile with no address on file takes no typed address there), and the page
