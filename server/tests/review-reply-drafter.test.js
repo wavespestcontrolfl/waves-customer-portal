@@ -902,18 +902,26 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(w('Thanks for using YOUR APP.')).toBe('Thanks for using the Waves app.');
     expect(w('Glad the Waves app helps. Thanks! our app is new.')).toBe('Glad the Waves app helps. Thanks! The Waves app is new.');
     expect(w('Hi Dana,\n\nthe app works. Try the Waves Pest Control app and our Waves mobile app.')).toBe('Hi Dana,\n\nThe Waves app works. Try the Waves app and the Waves app.');
+    // The brand name with no article gets "the"; one that already has an article keeps it; a bare "an app" is not ours.
+    expect(w('Thanks for using Waves app notifications.')).toBe('Thanks for using the Waves app notifications.');
+    expect(w('Waves app alerts help. A new Waves Pest Control app helps, and an app is fine.')).toBe('The Waves app alerts help. A new Waves app helps, and an app is fine.');
+    // The nearest article owns the name; one behind a preposition, a conjunction or a verb belongs to an earlier phrase.
+    expect(w('Thanks for trying the great new Waves app. A tip on a Waves app helps, as do any Waves app alerts.')).toBe('Thanks for trying the great new Waves app. A tip on a Waves app helps, as do any Waves app alerts.');
+    expect(w('Your review of Waves app helps, and our customers love Waves mobile app alerts.')).toBe('Your review of the Waves app helps, and our customers love the Waves app alerts.');
     const same = 'Happy to apply the apps and our application, the App Store and the app-based tools.';
     expect(w(same)).toBe(same);
   });
-  test('a draft that says "the app" is stored as "the Waves app" and passes verification', async () => {
+  test('a draft that says "the app" or an article-free "Waves app" is stored as "the Waves app" and passes verification', async () => {
     const g = grounding({ text: appReview });
-    mockDispatch.mockResolvedValueOnce({ ok: true, text: good('Hi Dana,\n\nThank you for the kind words about the app and Marcus.') });
-    const r = await Drafter.draftReviewReply({ grounding: g, recentReplies: [] });
-    expect(r.ok).toBe(true);
-    expect(r.attempts).toBe(1);
-    expect(r.text).toContain('words about the Waves app and Marcus');
-    expect(r.version).toBe('reply-v3');
-    expect(Drafter.verifyReplyText(r.text, g)).toBeNull();
+    for (const said of ['the app', 'Waves app']) {
+      mockDispatch.mockResolvedValueOnce({ ok: true, text: good(`Hi Dana,\n\nThank you for the kind words about ${said} and Marcus.`) });
+      const r = await Drafter.draftReviewReply({ grounding: g, recentReplies: [] });
+      expect(r.ok).toBe(true);
+      expect(r.attempts).toBe(1);
+      expect(r.text).toContain('words about the Waves app and Marcus');
+      expect(r.version).toBe('reply-v3');
+      expect(Drafter.verifyReplyText(r.text, g)).toBeNull();
+    }
   });
 });
 
