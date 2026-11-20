@@ -794,6 +794,45 @@ describe('aerial download cap', () => {
   });
 });
 
+describe('a failed call, billed or not', () => {
+  const failedWith = (...reasons) => ({ ok: false, reason: 'all_providers_failed', failures: reasons.map((reason) => ({ provider: 'gemini', model: 'test-vision', reason })) });
+
+  it.each(['gemini_timeout', 'gemini_500', 'gemini_503', 'gemini_429', 'error', 'something_new'])(
+    'keeps a failed row at the 5-cent ceiling for %s (it may have been billed), and the next request may retry',
+    async (reason) => {
+      mockDispatch.mockResolvedValue(failedWith(reason));
+      const res = await post(home());
+      expect(res.json).toEqual({ status: 'model_failed', cached: false, read: null });
+      expect(mockRows).toHaveLength(1);
+      expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'unknown', model: 'test-vision', cost_estimate_cents: svc.FALLBACK_COST_CENTS }));
+      expect(mockRows.filter((r) => r.status === 'pending')).toHaveLength(0);
+      // A failed row is never reused.
+      mockDispatch.mockResolvedValue({ ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} });
+      const again = await post(home());
+      expect(again.json.cached).toBe(false);
+      expect(again.json.read.tier).toBe('med');
+      expect(mockDispatch).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(['no_key', 'no_route', 'gemini_400', 'gemini_401', 'gemini_403', 'gemini_404', 'gemini_413', 'gemini_422'])(
+    'deletes the claim for %s: the request never reached billing',
+    async (reason) => {
+      mockDispatch.mockResolvedValue(failedWith(reason));
+      const res = await post(home());
+      expect(res.json).toEqual({ status: 'model_failed', cached: false, read: null });
+      expect(mockRows).toHaveLength(0);
+    },
+  );
+
+  it('keeps the row when only some failed legs are provably unbilled', async () => {
+    mockDispatch.mockResolvedValue(failedWith('gemini_401', 'gemini_timeout'));
+    await post(home());
+    expect(mockRows).toHaveLength(1);
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', cost_estimate_cents: svc.FALLBACK_COST_CENTS }));
+  });
+});
+
 describe('a billed unusable answer', () => {
   it('books it as a failed row with its cost, which a LATER request does not reuse and may retry', async () => {
     mockDispatch.mockResolvedValue({

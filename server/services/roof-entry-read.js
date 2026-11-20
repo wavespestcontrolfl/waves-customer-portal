@@ -14,6 +14,13 @@
  *   - a crop is CLAIMED with a pending row (one per crop, a partial unique index) before the image fetch and the model
  *     call, so two requests, on one server or two, cannot both pay for it, and no connection or lock is held while the
  *     slow, paid steps run. The paid result is written to the claimed row by id.
+ *   - a failure that may have been billed (timeout, 5xx, body error, unknown) is kept as a 'failed' row at the 5-cent
+ *     ceiling (spend unknown); only a confirmed pre-billing failure releases the claim. A failed row is never reused.
+ * Migrations (all pushed, none editable): 20261119140000 roof_entry_reads, 20261119150000 claims (status, claimed_at,
+ * source_id, pending and copy indexes), 20261119160000 context_key (replaces the copy index). Rolling back the third
+ * restores the old copy index, which can fail if an estimate with copies was deleted since (SET NULL made two old-style
+ * keys equal). The table is dark behind GATE_ROOF_ENTRY_READ (no rows until the owner turns it on); recovery is to
+ * delete the colliding cost-0 copy rows (source_id not null) before the rollback.
  * The model gives yes / no / unsure per entry type and up to 6 pins as 0-1 image fractions. It is never asked to
  * count: vision models count poorly, and the technician's own count (saveTechCount) is the ground truth.
  */
@@ -363,14 +370,26 @@ async function callModel(image) {
   });
 }
 
-// What the one provider call produced, as the row's model, validated read and billed leg. A call that failed but
-// was billed (the provider answered, then the answer could not be parsed) is still on the books as tier 'unknown'.
+// Failures the dispatcher reports for a request that provably never reached the provider's billing: no key (nothing
+// sent), no route, or a 4xx the provider refuses before any processing (the same statuses llm-cost treats as unbilled).
+// Everything else (timeout, 5xx, a body read error, the catch-all 'error', anything new) may have been billed.
+const UNBILLED_FAILURE = /^(no_key|no_route|same_provider_fallback)$|^[a-z0-9]+_(400|401|402|403|404|413|422)$/;
+
+// What the one provider call produced, as the row's model, validated read and billed leg:
+//  - an answer: its usage prices the read; a schema-breaking answer is kept as tier 'unknown' by the caller;
+//  - a failed leg that reported usage was billed (it could not be parsed): kept as 'unknown' with that usage's cost;
+//  - a failure that is confirmed pre-billing: null, so the caller releases the claim and the next request may retry;
+//  - any other failure may have been billed (a timeout or body error after the request was sent): spend unknown, so the
+//    caller keeps a 'failed' row at the ceiling. A failed row is never reused, so the next request may retry.
 function settleOutcome(outcome) {
   if (outcome.ok) {
     return { model: outcome.model, checked: validateRead(outcome.json), billed: { provider: outcome.provider, model: outcome.model, usage: outcome.usage } };
   }
-  const leg = (outcome.failures || []).find((f) => f.usage);
-  return leg ? { model: leg.model, checked: null, billed: leg } : null;
+  const failures = outcome.failures || [];
+  const leg = failures.find((f) => f.usage);
+  if (leg) return { model: leg.model, checked: null, billed: leg };
+  if (failures.every((f) => UNBILLED_FAILURE.test(String(f.reason)))) return null;
+  return { model: failures[0]?.model || ONE_CALL_POLICY.primary.model, checked: null, billed: null, spendUnknown: true };
 }
 
 // One short statement takes the crop's claim: a pending row with this request's context and the policy's model id. The
@@ -436,7 +455,8 @@ async function finishClaim(claim, renewedAt, settled, prices) {
       ai_flags: JSON.stringify(settled.checked ? settled.checked.flags : {}),
       ai_tier: settled.checked ? settled.checked.tier : TIER_UNKNOWN,
       status: settled.checked ? STATUS_DONE : STATUS_FAILED,
-      cost_estimate_cents: estimateCostCents(settled.billed, prices),
+      // Spend unknown (the call may have been billed with no usage seen) is booked at the ceiling, never at zero.
+      cost_estimate_cents: settled.spendUnknown ? FALLBACK_COST_CENTS : estimateCostCents(settled.billed, prices),
     })
     .returning('*');
   return row ? publicRead(row) : null;
@@ -470,7 +490,9 @@ async function payForRead({ claim, key, ctx, lat, lng, county, prices }) {
     return { status: 'model_failed', cached: false, read: null };
   }
   const read = await finishClaim(claim, renewedAt, settled, prices);
-  return read ? { status: 'ok', cached: false, read } : afterLostClaim(key, ctx);
+  if (!read) return afterLostClaim(key, ctx);
+  // A failed call with unknown spend is on the books, but there is no answer: the caller may simply try again.
+  return settled.spendUnknown ? { status: 'model_failed', cached: false, read: null } : { status: 'ok', cached: false, read };
 }
 
 // The answer for a reusable read, for this request's context (a copy row when the context differs).
