@@ -28,10 +28,10 @@ vi.mock('../utils/api', () => {
   return { default: proxy };
 });
 
-const auth = vi.hoisted(() => ({ customer: null }));
+const auth = vi.hoisted(() => ({ customer: null, epoch: 0 }));
 vi.mock('../hooks/useAuth', () => ({
   useAuth: () => ({
-    sessionEpoch: 0,
+    sessionEpoch: auth.epoch,
     customer: auth.customer,
     logout: vi.fn(),
     properties: [],
@@ -63,6 +63,7 @@ beforeEach(() => {
   window.history.replaceState({}, '', '/');
   window.innerWidth = 360; // useIsMobile reads innerWidth on mount
   auth.customer = holder;
+  auth.epoch = 0;
   api.getSchedule.mockResolvedValue({ upcoming: [] });
   api.getNotificationPrefs.mockResolvedValue({});
   api.getAutopay.mockResolvedValue({ state: 'disabled' });
@@ -139,6 +140,27 @@ describe('Waves Chat pill with Messages offered', () => {
     expect(box).toHaveValue('I have a pest, lawn or plant problem: ');
     expect(box).toHaveFocus();
     expect(api.sendPortalMessage).not.toHaveBeenCalled();
+  });
+
+  it('a session switch while the sheet is open reloads the thread and drops the draft', async () => {
+    const view = render(<BrowserRouter><PortalPage /></BrowserRouter>);
+    await screen.findByText(/hello pat/i);
+    fireEvent.click(await screen.findByRole('button', { name: /^Waves Chat/ }));
+    const before = await screen.findByRole('dialog', { name: 'Waves Chat' });
+    await within(before).findByText('Your visit is set for Thursday.');
+    fireEvent.change(within(before).getByRole('textbox', { name: 'Message Waves' }), { target: { value: 'For the first account' } });
+
+    api.getPortalMessages.mockResolvedValue({
+      messages: [{ id: 'w9', from: 'waves', body: 'Second account thread.', createdAt: '2026-11-03T17:00:00.000Z' }],
+      hasMore: false,
+      unread: 0,
+    });
+    auth.epoch = 1;
+    view.rerender(<BrowserRouter><PortalPage /></BrowserRouter>);
+    const after = await screen.findByRole('dialog', { name: 'Waves Chat' });
+    expect(await within(after).findByText('Second account thread.')).toBeInTheDocument();
+    expect(within(after).queryByText('Your visit is set for Thursday.')).toBeNull();
+    expect(within(after).getByRole('textbox', { name: 'Message Waves' })).toHaveValue('');
   });
 
   it('shows an unread answer on the pill and clears it once the sheet has shown it', async () => {

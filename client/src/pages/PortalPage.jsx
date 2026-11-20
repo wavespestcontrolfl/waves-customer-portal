@@ -18700,6 +18700,10 @@ export default function PortalPage() {
       )}
       {showWavesChat && chatAvailable && (
         <WavesChatSheet
+          // A session or property switch (another tab, or this one) reloads the
+          // thread and drops the draft: nothing typed under one account is
+          // sent into another's thread.
+          key={sessionEpoch}
           onClose={() => setShowWavesChat(false)}
           onUnread={messagesGate.setUnread}
           firstName={[customer?.firstName, customer?.first_name].find(Boolean) || ''}
