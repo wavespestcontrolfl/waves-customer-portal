@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "Parts each Waves Pest Insider text names (owner 2026-11-19: show a picture when the email names a part). Checked by server/services/pest-insider/parts.js; drawn by ops/agents/pest-insider-parts.js. facts = lead facts by id (shown text: title + lead sentences). species = What's this? species by slug (shown text: its fact). A text with a part word (parts.js PART_WORDS) needs an entry. parts = the parts a reader can look for, in the text's words; [] = a person read the text and it names no part to show, and why says so. An entry with parts has a picture: heading (the text's own words); 1 or 2 panels, each a photo cropped to the panel's shape ([left, top, width, height] in photo pixels, after rotate) or a diagram; 2 panels both have a name (the text's own words) or neither does. Each panel has 1 to 3 marks: at = 1 or 2 circle centers, r = the circle radius, pill = the label's top-left corner, all in panel pixels (parts.js panelSize); label = the text's own words. photos = real photos only, never AI: CC0, CC BY 4.0 or Public domain, with the page they came from; the email shows a credit line under the picture. sha16 = the first 16 hex characters of the photo file's sha256.",
+  "notes": "Parts each Waves Pest Insider text names (owner 2026-11-19: show a picture when the email names a part). Checked by server/services/pest-insider/parts.js; drawn by ops/agents/pest-insider-parts.js. facts = lead facts by id (shown text: title + lead sentences). species = What's this? species by slug (shown text: its fact). A text with a part word (parts.js PART_WORDS) needs an entry. parts = the parts a reader can look for, in the text's words; [] = a person read the text and it names no part to show, and why says so. An entry with parts has a picture: heading (the text's own words); 1 or 2 panels, each a photo cropped to the panel's shape ([left, top, width, height] in photo pixels, after rotate) or a diagram; 2 panels both have a name (the text's own words) or neither does. Each panel has 1 to 3 marks: at = 1 or 2 circle centers, r = the circle radius, pill = the label's top-left corner, all in panel pixels (parts.js panelSize); label = the text's own words. photos = real photos only, never AI: CC0, CC BY 4.0 or Public domain, with the page they came from; the email shows a credit line under the picture. sha16 = the first 16 hex characters of the photo file's sha256. text16 = the first 16 hex characters of the sha256 of the text a person reviewed (parts.js textHash); when the text changes, a test fails until a person reviews the list again and updates text16.",
   "photos": {
     "termite-340864961.jpg": { "sha16": "f1628573e983ed10", "source": "https://www.inaturalist.org/observations/340864961", "license": "CC BY 4.0", "author": "Zakqary Roy", "subject": "termite" },
     "fire-ant-91208856.jpg": { "sha16": "61f615ddc1059006", "source": "https://www.inaturalist.org/observations/91208856", "license": "CC0", "author": "cgmayers", "subject": "fire ant" },
@@ -14,7 +14,7 @@
   },
   "facts": {
     "T03": {
-      "parts": ["waist", "antennae"],
+      "parts": ["waist", "antennae"], "text16": "05e8344cd6e4538d",
       "heading": "To rule out ants, look at the waist and antennae",
       "panels": [
         { "name": "termites", "photo": "termite-340864961.jpg", "crop": [80, 0, 858, 769],
@@ -24,7 +24,7 @@
       ]
     },
     "T01": {
-      "parts": ["pellets", "wings"],
+      "parts": ["pellets", "wings"], "text16": "bc0443828f763722",
       "heading": "Sweeping up the pellets and wings",
       "panels": [
         { "photo": "termite-pellets-177672553.jpg", "crop": [120, 520, 420, 409], "marks": [ { "at": [[139, 186]], "r": 26, "label": "pellets", "pill": [20, 236] } ] },
@@ -32,58 +32,58 @@
       ]
     },
     "L02": {
-      "parts": ["leaf blades"],
+      "parts": ["leaf blades"], "text16": "dc31d76ec92f81c1",
       "heading": "Leaf blades are folded in half lengthwise",
       "panels": [
         { "diagram": "folded-blade", "marks": [ { "at": [[150, 150]], "r": 22, "label": "leaf blades", "pill": [210, 60] }, { "at": [[410, 150]], "r": 22, "label": "folded in half", "pill": [428, 60] } ] }
       ]
     },
-    "L05": { "parts": [], "why": "Roots and the blade are mowing advice: nothing to find or tell apart." },
-    "L09": { "parts": [], "why": "Leaves and roots say when the disease shows: nothing to find or tell apart." },
-    "P02": { "parts": [], "why": "Fronds and crowns are a pruning lesson, not a part the reader looks for." },
-    "D01": { "parts": [], "why": "Fronds and leaf skirts say where rats nest; eight feet is a distance." },
-    "D03": { "parts": [], "why": "Droppings here are a cleanup safety rule, not something to identify." }
+    "L05": { "parts": [], "text16": "28d7f202c4d3b075", "why": "Roots and the blade are mowing advice: nothing to find or tell apart." },
+    "L09": { "parts": [], "text16": "9e732d726462023a", "why": "Leaves and roots say when the disease shows: nothing to find or tell apart." },
+    "P02": { "parts": [], "text16": "aebf204e9901b72c", "why": "Fronds and crowns are a pruning lesson, not a part the reader looks for." },
+    "D01": { "parts": [], "text16": "5bd3d46d3bb4fc8e", "why": "Fronds and leaf skirts say where rats nest; eight feet is a distance." },
+    "D03": { "parts": [], "text16": "ffacb1fdebecdcf6", "why": "Droppings here are a cleanup safety rule, not something to identify." }
   },
   "species": {
     "earwig": {
-      "parts": ["pincers"],
+      "parts": ["pincers"], "text16": "627b3967feab5c72",
       "heading": "The pincers are for folding its wings and courtship",
       "panels": [ { "photo": "earwig-370935894.jpg", "rotate": 270, "crop": [0, 284, 1024, 492], "marks": [ { "at": [[511, 92]], "r": 36, "label": "pincers", "pill": [470, 222] } ] } ]
     },
     "puss-caterpillar": {
-      "parts": ["hairs"],
+      "parts": ["hairs"], "text16": "b9f42e14a04d990b",
       "heading": "The most venomous caterpillar in the United States",
       "panels": [ { "photo": "puss-caterpillar-243839273.jpg", "crop": [60, 80, 930, 447], "marks": [ { "at": [[481, 103]], "r": 30, "label": "the \"hairs\"", "pill": [440, 14] }, { "at": [[237, 134]], "r": 36, "label": "conceal venomous spines", "pill": [40, 236] } ] } ]
     },
     "bigheaded-ant": {
-      "parts": ["jaws"],
+      "parts": ["jaws"], "text16": "44cb64a8d2568e29",
       "heading": "Their oversized jaws crack seeds and defend the nest",
       "panels": [ { "photo": "bigheaded-ant-31175728.jpg", "crop": [140, 215, 620, 298], "marks": [ { "at": [[120, 98]], "r": 26, "label": "oversized jaws", "pill": [14, 226] } ] } ]
     },
     "house-centipede": {
-      "parts": ["legs"],
+      "parts": ["legs"], "text16": "167af32fb3d78cad",
       "heading": "An unpaid exterminator with too many legs",
       "panels": [ { "photo": "house-centipede-19251730.jpg", "crop": [0, 110, 1024, 492], "marks": [ { "at": [[365, 99]], "r": 34, "label": "too many legs", "pill": [430, 200] } ] } ]
     },
     "io-moth-caterpillar": {
-      "parts": ["eyes"],
+      "parts": ["eyes"], "text16": "d08ae34bb9d75bd6",
       "heading": "It grows into a moth with huge false \"eyes\" on its hindwings",
       "panels": [ { "photo": "io-moth-28369492.jpg", "crop": [0, 73, 1024, 492], "marks": [ { "at": [[230, 154], [330, 154]], "r": 32, "label": "huge false \"eyes\"", "pill": [206, 228] } ] } ]
     },
     "drywood-termite": {
-      "parts": ["pellet piles"],
+      "parts": ["pellet piles"], "text16": "b7df82246cab34f6",
       "heading": "Those pellet piles are \"kick-out\" debris",
       "panels": [ { "photo": "termite-pellets-177672553.jpg", "crop": [0, 560, 768, 369], "marks": [ { "at": [[221, 66]], "r": 34, "label": "pellet piles", "pill": [330, 200] } ] } ]
     },
-    "fire-ant": { "parts": [], "why": "Jaws here are how it stings, not a feature to look for." },
-    "sri-lankan-weevil": { "parts": [], "why": "The notched leaf is plant damage, not a part of the weevil." },
-    "lovebug": { "parts": [], "why": "Body fluids are not a part to show." },
-    "fungus-gnat": { "parts": [], "why": "\"An overwatering alarm with wings\" is a figure of speech." },
-    "millipede": { "parts": [], "why": "Leaves and leaf litter are its food and home, not its parts." },
-    "spiraling-whitefly": { "parts": [], "why": "The frond is where the eggs sit, not a part of the whitefly." },
-    "tea-scale": { "parts": [], "why": "The scales and shell are the whole insect, which the card already names." },
-    "house-mouse": { "parts": [], "why": "Droppings here explain its feeding habit; no part of the mouse is named." },
-    "stink-bug": { "parts": [], "why": "The glands on the thorax do not show in a photo." },
-    "carpenter-bee": { "parts": [], "why": "The text says the male has no stinger: nothing to circle." }
+    "fire-ant": { "parts": [], "text16": "731aad619d596e69", "why": "Jaws here are how it stings, not a feature to look for." },
+    "sri-lankan-weevil": { "parts": [], "text16": "707ad3d4d21c43e8", "why": "The notched leaf is plant damage, not a part of the weevil." },
+    "lovebug": { "parts": [], "text16": "2043267c56b3e3cb", "why": "Body fluids are not a part to show." },
+    "fungus-gnat": { "parts": [], "text16": "1b4caa2058a26278", "why": "\"An overwatering alarm with wings\" is a figure of speech." },
+    "millipede": { "parts": [], "text16": "994a0095918ea90a", "why": "Leaves and leaf litter are its food and home, not its parts." },
+    "spiraling-whitefly": { "parts": [], "text16": "4f7521e8af5801ab", "why": "The frond is where the eggs sit, not a part of the whitefly." },
+    "tea-scale": { "parts": [], "text16": "7699e7e5104056dc", "why": "The scales and shell are the whole insect, which the card already names." },
+    "house-mouse": { "parts": [], "text16": "f2abf86c941d0914", "why": "Droppings here explain its feeding habit; no part of the mouse is named." },
+    "stink-bug": { "parts": [], "text16": "f1ab770f4c634079", "why": "The glands on the thorax do not show in a photo." },
+    "carpenter-bee": { "parts": [], "text16": "3757fe50fb7587d1", "why": "The text says the male has no stinger: nothing to circle." }
   }
 }

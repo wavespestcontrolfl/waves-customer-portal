@@ -7,7 +7,7 @@ const path = require('path');
 const crypto = require('crypto');
 const {
   PARTS, PART_DIR, PHOTO_DIR, PART_BASE_URL, PART_WIDTH, PART_HEIGHT, PART_DESIGN, LICENSES, DIAGRAMS,
-  panelSize, partWordsIn, factText, speciesText, validateParts, partPictureForFact, partPictureForSpecies,
+  panelSize, partWordsIn, factText, speciesText, textHash, validateParts, staleReviews, partPictureForFact, partPictureForSpecies,
 } = require('../services/pest-insider/parts');
 const { FACTS } = require('../services/pest-insider/facts');
 const { POSTS, POST_URLS, postUrl } = require('../services/pest-insider/posts');
@@ -28,6 +28,18 @@ describe('the part rule', () => {
       ...SPECIES.filter((species) => partWordsIn(species.fact).length && !PARTS.species[species.slug]).map((species) => `species ${species.slug}: ${partWordsIn(species.fact).join(', ')}`),
     ];
     expect(missing).toEqual([]);
+  });
+
+  test('each list still matches the text a person reviewed (text16)', () => {
+    const stale = staleReviews().map((row) => `${row.kind}.${row.id}: the text changed since its review. Read it again, fix parts, why or the picture, then set text16 to ${row.now} in server/data/pest-insider-parts-v1.json`);
+    expect(stale).toEqual([]);
+  });
+
+  test('a text that changes after its review needs a fresh review', () => {
+    const longer = `${speciesText('earwig')} Its antennae are long.`;
+    const textOf = { facts: factText, species: (slug) => (slug === 'earwig' ? longer : speciesText(slug)) };
+    expect(staleReviews(raw, textOf)).toEqual([{ kind: 'species', id: 'earwig', text16: raw.species.earwig.text16, now: textHash(longer) }]);
+    expect(textHash('abc')).toBe(crypto.createHash('sha256').update('abc').digest('hex').slice(0, 16));
   });
 
   test('the tripwire matches whole words only, the ones the owner named among them', () => {
@@ -188,6 +200,8 @@ describe('validateParts', () => {
     ['a part the text does not name', (d) => { d.facts.T03.parts.push('legs'); }, /the text does not name legs/],
     ['a part no label circles', (d) => { d.facts.T03.panels[0].marks.pop(); d.facts.T03.panels[1].marks.pop(); }, /no label circles antennae/],
     ['an empty list with no why', (d) => { delete d.facts.L05.why; }, /says why in a line/],
+    ['an entry with no text16', (d) => { delete d.species.earwig.text16; }, /text16 is the reviewed text's textHash/],
+    ['a text16 that is not 16 lowercase hex characters', (d) => { d.facts.L05.text16 = 'ABCDEF0123456789'; }, /text16 is the reviewed text's textHash/],
     ['an empty list with a picture', (d) => { d.facts.L05.heading = 'Mowing higher grows a deeper root system'; }, /a list with no parts has no picture/],
     ['a crop of another shape', (d) => { d.species.earwig.panels[0].crop = [0, 0, 1024, 1024]; }, /the crop keeps the panel's shape/],
     ['a crop smaller than the panel', (d) => { d.species.earwig.panels[0].crop = [0, 0, 400, 192]; }, /at least 566x272/],

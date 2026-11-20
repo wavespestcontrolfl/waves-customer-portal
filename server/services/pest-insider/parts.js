@@ -16,8 +16,12 @@
  *     part. The heading, the panel names and the labels are the text's own
  *     words. Photos are CC0, CC BY or public domain only (no share-alike, no
  *     non-commercial), and the email shows a credit line under the picture.
- * The tests fail when a text with a part word has no entry, or when an issue
- * that names a part would go out without its picture.
+ *   - text16 binds the review to the text a person read: the first 16 hex
+ *     characters of its sha256 (textHash). When the text changes, the old
+ *     review no longer counts (staleReviews), so new words get a fresh look.
+ * The tests fail when a text with a part word has no entry, when an entry's
+ * text changed since its review, or when an issue that names a part would
+ * go out without its picture.
  *
  * ops/agents/pest-insider-parts.js draws each picture from the photos in
  * PHOTO_DIR into PART_DIR as <id>-<hash>.jpg. The hash covers everything
@@ -84,6 +88,8 @@ function partWordsIn(text) {
 // Words compared as a reader sees them: case, curly quotes and spacing aside.
 const normalize = (text) => String(text).toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim();
 const isText = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max && !/[\r\n<>]/.test(v);
+/** The first 16 hex characters of a shown text's sha256: an entry's text16. */
+const textHash = (text) => crypto.createHash('sha256').update(String(text), 'utf8').digest('hex').slice(0, 16);
 const isOwnWords = (text, words, max) => isText(words, max) && normalize(text).includes(normalize(words));
 const names = (text, part) => new RegExp(`\\b${normalize(part).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(normalize(text));
 const keysOnly = (obj, allowed) => Object.keys(obj).filter((k) => !allowed.includes(k));
@@ -151,7 +157,7 @@ function panelProblem(panel, size, count, text, photos) {
 }
 
 function pictureProblem(entry, text, photos) {
-  const extra = keysOnly(entry, ['parts', 'why', 'heading', 'panels']);
+  const extra = keysOnly(entry, ['parts', 'why', 'text16', 'heading', 'panels']);
   if (extra.length) return `an entry has parts, why, heading and panels only, not ${extra.join(', ')}`;
   if (!isOwnWords(text, entry.heading, 60)) return 'the heading is the text\'s own words (60 characters at most)';
   if (!Array.isArray(entry.panels) || ![1, 2].includes(entry.panels.length)) return 'a picture has 1 or 2 panels';
@@ -171,9 +177,10 @@ function entryProblem(entry, text, photos) {
   const missing = entry.parts.filter((part) => !names(text, part));
   if (missing.length) return `the text does not name ${missing.join(', ')}`;
   if (entry.why !== undefined && !isText(entry.why, 160)) return 'why is one line (160 characters at most)';
+  if (typeof entry.text16 !== 'string' || !/^[0-9a-f]{16}$/.test(entry.text16)) return 'text16 is the reviewed text\'s textHash (16 hex characters)';
   if (entry.parts.length) return pictureProblem(entry, text, photos);
   if (entry.why === undefined) return 'a list with no parts says why in a line';
-  const extra = keysOnly(entry, ['parts', 'why']);
+  const extra = keysOnly(entry, ['parts', 'why', 'text16']);
   return extra.length ? `a list with no parts has no picture (${extra.join(', ')})` : null;
 }
 
@@ -237,6 +244,17 @@ function validateParts(raw, textOf = { facts: factText, species: speciesText }) 
 /** { facts: { id: { parts, picture } }, species: { slug: { parts, picture } } }, checked and frozen. */
 const PARTS = validateParts(data);
 
+/**
+ * Entries whose text changed since a person reviewed it: [{ kind, id, text16, now }].
+ * The load checks above still hold (own words, named parts), so a changed
+ * text never breaks a send; the test fails instead, and asks for a review.
+ */
+function staleReviews(raw = data, textOf = { facts: factText, species: speciesText }) {
+  return ['facts', 'species'].flatMap((kind) => Object.entries(raw[kind])
+    .map(([id, entry]) => ({ kind, id, text16: entry.text16, now: textHash(textOf[kind](id)) }))
+    .filter((row) => row.text16 !== row.now));
+}
+
 const entryOf = (map, key) => (typeof key === 'string' && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null);
 /** A lead fact's part picture ({ url, alt, credits, ... }), or null. */
 const partPictureForFact = (id) => entryOf(PARTS.facts, id)?.picture || null;
@@ -245,5 +263,5 @@ const partPictureForSpecies = (slug) => entryOf(PARTS.species, slug)?.picture ||
 
 module.exports = {
   PART_DESIGN, PART_WIDTH, PART_HEIGHT, PART_BASE_URL, PART_DIR, PHOTO_DIR, LICENSES, PHOTO_SITES, DIAGRAMS, PART_WORDS, PARTS,
-  panelSize, partWordsIn, factText, speciesText, validateParts, partPictureForFact, partPictureForSpecies,
+  panelSize, partWordsIn, factText, speciesText, textHash, validateParts, staleReviews, partPictureForFact, partPictureForSpecies,
 };
