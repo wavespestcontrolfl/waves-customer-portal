@@ -362,4 +362,5 @@ module.exports = {
   readTruck,
   readOwnerRating,
   seasonScore,
+  buildSeasonScore,
 };

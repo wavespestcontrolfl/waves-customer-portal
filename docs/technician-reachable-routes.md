@@ -324,6 +324,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/tech/pay-growth/services/:id/score` | tech-pay-growth |
 | GET | `/api/tech/payroll/checks` | tech-payroll |
 | GET | `/api/tech/payroll/checks/:id/stub` | tech-payroll |
+| GET | `/api/tech/rewards-scoreboard` | tech-rewards-scoreboard |
 | POST | `/api/tech/services/:id/customer-pick` | tech-track |
 | POST | `/api/tech/services/:id/dictation` | tech-track |
 | GET | `/api/tech/services/:id/dictation/availability` | tech-track |

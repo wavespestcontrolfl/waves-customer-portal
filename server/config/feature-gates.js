@@ -474,6 +474,7 @@
  *   GATE_IB_ANSWER_SEND_TO_CLAUDE=true (owner 2026-11-05: under a bar answer that searched its tools and changed nothing, the owner login sees "Claude has this as gap #N." or a free "Send to Claude" button that sends the owner's own typed question (a pasted one gets no button), never the answer. Read at call time via ibAnswerSendToClaudeLive(); off = the /query reply and the claude-ideas status stay as before)
  *   GATE_CALL_RECORDING_CARD_PAUSE=true (owner 2026-11-16 "ok build all", live-call suite part 9: while card details are spoken on a live-transcribed call, the call recording pauses for 90 seconds. When a stored utterance says "card number", "credit card", "debit card", "card ending", "expiration date", "security code", "CVV", "CVC" or "code on the back", or the live scrub masked a card number, the Dial recording on the caller's call is paused by REST (silence, so it stays aligned with the live text) and resumed at the end; a later trigger only moves the end out. State is call_log.metadata.live_transcription.card_pause. Needs GATE_LIVE_CALL_TRANSCRIPTION on. Read via isEnabled('callRecordingCardPause') at boot, strict 'true', dark by default; off = no recording change and nothing new required. RISK: if a resume fails, the rest of that call's recording is silent and the post-call transcript loses it; the gate is the instant off switch. Sends nothing to a customer; no paid call beyond the Twilio REST update. Kill: delete the variable.)
  *   GATE_REVIEW_YEARLY_ASK=true (owner 2026-11-20, Tech Rewards plan D6-R1: a yearly review ask for long-time recurring customers. A daily job at 10:36 AM ET picks recurring customers with 12 or more months since their first completed recurring visit, no Google review (linked or probable), no review ask in 30 days, no review-link tap in 180 days, texts and review asks on, and no yearly ask in 365 days, and enrolls ONE ask in the 14 days after the service anniversary through the normal review cadence, so every existing review guard still applies. Off: the job still runs but only counts and logs the volume, with no enrollment, no text and no writes. Needs GATE_REVIEW_SEQUENCES on to enroll. Texts a customer, so the flip is the owner's. Strict `=== 'true'`, read at call time via reviewYearlyAskLive(). Kill: unset.)
+ *   GATE_TECH_REWARDS_SCOREBOARD=true (owner 2026-11-20, Tech Rewards plan D5-4: a technician sees their own rewards scoreboard on the Staff page, tab Scoreboard under Time: the live season score and its five parts, review rate, commission year to date, season bonus estimate and next stay bonus date, all labeled estimates where they are. Own numbers only; another technician's id answers 403. Named risk: it shows pay estimates, and a wrong number creates a pay expectation, so the owner checks the numbers first in Staff > Team > Scoreboard preview, which works with this off. Read at call time, strict 'true', dark by default; off = GET /api/tech/rewards-scoreboard answers 404 and the tab is hidden. Pays, sends and files nothing; rollback = unset)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -9517,3 +9518,12 @@ function reviewAskResultsVisitLive() {
 }
 // GATE_REVIEW_ASK_RESULTS_VISIT reader, on its own line so gate PRs never conflict.
 module.exports.reviewAskResultsVisitLive = reviewAskResultsVisitLive;
+
+// GATE_TECH_REWARDS_SCOREBOARD read at CALL time, strict `=== 'true'`, dark (owner 2026-11-20, Tech Rewards Plan D5-4). Named risk: a technician
+// sees pay estimates (season bonus, stay bonus). Off = GET /api/tech/rewards-scoreboard answers 404 and the Staff tab is hidden; the admin
+// preview (/api/admin/tech-rewards-scoreboard) is not gated.
+function techRewardsScoreboardLive() {
+  return process.env.GATE_TECH_REWARDS_SCOREBOARD === 'true';
+}
+// GATE_TECH_REWARDS_SCOREBOARD reader, on its own line so gate PRs never conflict.
+module.exports.techRewardsScoreboardLive = techRewardsScoreboardLive;

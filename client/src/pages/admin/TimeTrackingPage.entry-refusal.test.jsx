@@ -16,6 +16,7 @@ vi.mock("../../hooks/useStaffDocumentsAvailable", () => ({ default: () => false 
 vi.mock("../../hooks/usePayGrowthAvailable", () => ({ default: () => false }));
 vi.mock("../../hooks/usePayrollAvailable", () => ({ default: () => false }));
 vi.mock("../../hooks/useTechPayStubs", () => ({ default: () => ({ status: "off" }) }));
+vi.mock("../../hooks/useTechScoreboard", () => ({ default: () => ({ status: "off" }) }));
 vi.mock("../../hooks/useRenderedTabBeacon", () => ({ default: () => {} }));
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {

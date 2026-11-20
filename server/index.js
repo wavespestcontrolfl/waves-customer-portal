@@ -918,6 +918,7 @@ app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-dupli
 app.use('/api/admin/neighborhood-access', require('./routes/admin-neighborhood-access'));
 app.use('/api/admin/payroll', require('./routes/admin-payroll'));
 app.use('/api/admin/tech-protocol-audits', require('./routes/admin-tech-protocol-audit'));
+app.use('/api/admin/tech-rewards-scoreboard', require('./routes/admin-tech-rewards-scoreboard'));
 app.use('/api/admin/access-codes', require('./routes/admin-access-codes'));
 app.use('/api/admin/customer-geocodes', require('./routes/admin-customer-geocodes'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
@@ -1178,6 +1179,7 @@ app.use('/api/admin/timesheets', require('./routes/admin-timesheet-approval'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/tech/pay-growth', require('./routes/tech-pay-growth'));
 app.use('/api/tech/payroll', require('./routes/tech-payroll'));
+app.use('/api/tech/rewards-scoreboard', require('./routes/tech-rewards-scoreboard'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
 app.use('/api/admin/consultations', require('./routes/admin-consultations'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));

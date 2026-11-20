@@ -10,6 +10,8 @@ import PayGrowth from "../../components/payGrowth/PayGrowth";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import PayrollSettings from "../../components/payroll/PayrollSettings";
 import ProtocolAudit from "../../components/techRewards/ProtocolAudit";
+import Scoreboard, { ScoreboardPreview } from "../../components/techRewards/Scoreboard";
+import useTechScoreboard from "../../hooks/useTechScoreboard";
 import ServiceLinesCard from "./ServiceLinesCard";
 import TerritoryReadoutCard from "./TerritoryReadoutCard";
 import usePayrollAvailable from "../../hooks/usePayrollAvailable";
@@ -197,6 +199,8 @@ const STAFF_SECTIONS = [
   { key: "protocol-audit", label: "Protocol audit", Icon: CheckCircle2 },
   { key: "payroll", label: "Payroll", Icon: Wallet },
   { key: "pay-stubs", label: "Pay stubs", Icon: Receipt },
+  { key: "scoreboard", label: "Scoreboard", Icon: BarChart3 },
+  { key: "scoreboard-preview", label: "Scoreboard preview", Icon: BarChart3 },
 ];
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf
@@ -208,13 +212,13 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "time",
     label: "Time",
     Icon: Clock,
-    tabs: ["timesheet", "entries", "approvals", "pay-stubs"],
+    tabs: ["timesheet", "entries", "approvals", "pay-stubs", "scoreboard"],
   },
   {
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents", "pay-growth", "protocol-audit", "payroll"],
+    tabs: ["team", "documents", "pay-growth", "protocol-audit", "scoreboard-preview", "payroll"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -226,7 +230,7 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 // Staff page is Dashboard, its own pay stubs and the team roster. Documents is
 // office-only too: its list and upload are admin routes (a technician reads its
 // own documents under Today -> More).
-const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics", "documents", "protocol-audit"]);
+const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics", "documents", "protocol-audit", "scoreboard-preview"]);
 
 // Resolve the LEAF the page will actually render for a ?tab= deep link.
 // Gate-off or non-admin deep links to pay-growth fall back to the group's
@@ -239,11 +243,12 @@ const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "an
 // The Pay stubs tab (GATE_TECH_PAY_STUBS) is open to every staff role; it falls back to
 // Timesheet (Dashboard for a technician) when off and waits (null) while its one
 // request is pending. A technician's link to an office-only leaf opens Dashboard.
-export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailable = false, payStubsStatus = "off") {
+export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailable = false, payStubsStatus = "off", scoreboardStatus = "off") {
   if (role !== "admin" && OFFICE_ONLY_STAFF_TABS.has(rawTab)) return "dashboard";
-  if (rawTab === "pay-stubs") {
-    if (payStubsStatus === "ready") return "pay-stubs";
-    if (payStubsStatus === "loading") return null;
+  const gatedStatus = new Map([["pay-stubs", payStubsStatus], ["scoreboard", scoreboardStatus]]).get(rawTab);
+  if (gatedStatus !== undefined) {
+    if (gatedStatus === "ready") return rawTab;
+    if (gatedStatus === "loading") return null;
     return role === "admin" ? "timesheet" : "dashboard";
   }
   if (rawTab === "payroll") {
@@ -255,24 +260,38 @@ export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailab
   return payGrowthAvailable === true ? "pay-growth" : null;
 }
 
+// The leaves of a section this viewer can open: a gated leaf needs its gate answer, an office-only one an admin login.
+function openStaffLeaves(group, leafOpen, role) {
+  return group.tabs.filter((key) => (leafOpen[key] ?? true) && (role === "admin" || !OFFICE_ONLY_STAFF_TABS.has(key)));
+}
+
+const AVAILABILITY_WORDS = {
+  payroll: "Checking payroll availability…",
+  "pay-stubs": "Checking pay stub availability…",
+  scoreboard: "Checking scoreboard availability…",
+};
+
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
   const payGrowthAvailable = usePayGrowthAvailable();
   const payrollAvailable = usePayrollAvailable(readStaffRole() === "admin");
   const payStubs = useTechPayStubs();
+  const scoreboard = useTechScoreboard();
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
   const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
   // null = pay-growth requested by an admin while availability is still
   // unknown: no leaf renders and no beacon fires until it resolves.
   const payrollGateOpen = payrollAvailable === true && readStaffRole() === "admin";
-  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole(), payrollAvailable, payStubs.status);
+  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole(), payrollAvailable, payStubs.status, scoreboard.status);
   // The leaves this viewer can open in a section; a section with none is not shown.
-  const visibleLeaves = (group) => group.tabs
-    .filter((key) => key !== "pay-growth" || payGrowthGateOpen)
-    .filter((key) => key !== "payroll" || payrollGateOpen)
-    .filter((key) => key !== "pay-stubs" || payStubs.status === "ready")
-    .filter((key) => readStaffRole() === "admin" || !OFFICE_ONLY_STAFF_TABS.has(key));
+  const leafOpen = {
+    "pay-growth": payGrowthGateOpen,
+    payroll: payrollGateOpen,
+    "pay-stubs": payStubs.status === "ready",
+    scoreboard: scoreboard.status === "ready",
+  };
+  const visibleLeaves = (group) => openStaffLeaves(group, leafOpen, readStaffRole());
   // weekStart: the Monday an Approvals link opens (the same ?weekStart= a
   // timesheet bell carries).
   const setTab = (value, weekStart = null) => {
@@ -346,9 +365,11 @@ export default function TimeTrackingPage() {
       </> : <DocumentsTab showToast={showToast} />)}
       {tab === "pay-growth" && <PayGrowth manage />}
       {tab === "protocol-audit" && <ProtocolAudit />}
+      {tab === "scoreboard-preview" && <ScoreboardPreview />}
       {tab === "payroll" && <PayrollSettings />}
       {tab === "pay-stubs" && <TechPayStubs stubs={payStubs} />}
-      {tab === null && <p role="status" style={{ color: "#71717A" }}>{rawTab === "payroll" ? "Checking payroll availability…" : rawTab === "pay-stubs" ? "Checking pay stub availability…" : "Checking pay and growth availability…"}</p>}
+      {tab === "scoreboard" && <Scoreboard board={scoreboard} />}
+      {tab === null && <p role="status" style={{ color: "#71717A" }}>{AVAILABILITY_WORDS[rawTab] || "Checking pay and growth availability…"}</p>}
       <div
         style={{
           position: "fixed",
