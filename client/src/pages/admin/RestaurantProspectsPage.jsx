@@ -51,18 +51,21 @@ export function readText(readAt) {
   return readAt ? `The state files were last read on ${readDay(readAt)}.` : "";
 }
 
-// readFailedAt is the end of the latest weekly run when that run failed: the rows then mix two reads.
-export function failedText(data) {
-  return `The weekly read on ${readDay(data.readFailedAt)} failed, so this list may be missing restaurants. The state files were last read in full on ${readDay(data.readAt)}.`;
+// While a weekly run is under way (readingSince), or after one that did not finish (readFailedAt), the job has
+// committed some files and not others: the rows may mix two reads.
+export function stateText(data) {
+  const full = `The state files were last read in full on ${readDay(data.readAt)}.`;
+  if (data.readingSince) return `The state files are being read now, so this list may be missing restaurants. ${full}`;
+  return `The weekly read on ${readDay(data.readFailedAt)} did not finish, so this list may be missing restaurants. ${full}`;
 }
 
-// The line above the list. Before the first run that read all three files (readAt null), or after a run that failed
-// (readFailedAt), the rows may come from one file or mix two reads: counts would claim what the state has not
-// answered, so the line says the list may be missing restaurants. The counts cover the whole period; the list stops
+// The line above the list. Before the first run that read all three files (readAt null), while a run is under way
+// (readingSince) or after one that did not finish (readFailedAt), the rows may come from one file or mix two reads:
+// counts would claim what the state has not answered, so the line says the list may be missing restaurants. The counts cover the whole period; the list stops
 // at its newest 1,000 rows, and then says so.
 export function headlineText(data) {
   if (!data.readAt) return "Not every state file has been read yet, so this list may be missing restaurants.";
-  if (data.readFailedAt) return failedText(data);
+  if (data.readingSince || data.readFailedAt) return stateText(data);
   const total = data.counts.new_restaurant + data.counts.new_owner + data.counts.pest_finding;
   const cut = data.rows.length < total ? `The list shows the newest ${countText(data.rows.length)}.` : "";
   return [summaryText(data), readText(data.readAt), cut].filter(Boolean).join(" ");

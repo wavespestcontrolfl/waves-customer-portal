@@ -6,7 +6,10 @@ const SKIP = !process.env.DATABASE_URL;
 
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
-  for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
+  for (const name of ['raw', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
+  // Each transaction's settings are kept, so a test can check the list's snapshot (inside a test's own transaction
+  // knex opens a savepoint and the settings do not apply; the real database opens BEGIN TRANSACTION with them).
+  db.transaction = (...args) => { mockTransactionSettings.push(args[1]); return mockPg.transaction(...args); };
   for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
 });
@@ -19,6 +22,7 @@ const describeDb = SKIP ? describe.skip : describe;
 jest.setTimeout(60000);
 let database;
 let mockPg;
+const mockTransactionSettings = [];
 
 // 2026-11-19 12:00 ET. 30 days: Oct 21 to Nov 19. 90 days: Aug 22 to Nov 19. New: first read on or after Nov 12 17:00Z.
 const NOW = new Date('2026-11-19T17:00:00Z');
@@ -174,7 +178,7 @@ describeDb('Restaurants list (PostgreSQL)', () => {
   test('before the first file read the answer is empty, with no read time', async () => {
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result).toEqual({
-      days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null, readFailedAt: null,
+      days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null, readingSince: null, readFailedAt: null,
       counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [],
     });
   });
@@ -187,18 +191,35 @@ describeDb('Restaurants list (PostgreSQL)', () => {
       .update({ last_started_at: NOW, last_finished_at: NOW, last_status: 'failed', consecutive_failures: 1 });
     const failed = await listRestaurants({ days: 30, now: NOW });
     expect([failed.readAt, failed.readFailedAt]).toEqual([daysAgo(1).toISOString(), NOW.toISOString()]);
-    // A run under way after the failure leaves the last finished run's outcome.
-    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: new Date(NOW.getTime() + 60000), last_status: 'running' });
-    expect((await listRestaurants({ days: 30, now: NOW })).readFailedAt).toBe(NOW.toISOString());
+    // A run under way after the failure is named, and the last finished run's outcome stays.
+    const start = new Date(NOW.getTime() + 60000);
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: start, last_status: 'running' });
+    const reading = await listRestaurants({ days: 30, now: start });
+    expect([reading.readingSince, reading.readFailedAt]).toEqual([start.toISOString(), NOW.toISOString()]);
     // A good run after it clears the failure: it writes the finish and the success with one value.
     const later = new Date(NOW.getTime() + 120000);
     await mockPg('job_health').where({ job_name: SYNC_JOB })
       .update({ last_finished_at: later, last_success_at: later, last_status: 'success', consecutive_failures: 0 });
-    const good = await listRestaurants({ days: 30, now: NOW });
-    expect([good.readAt, good.readFailedAt]).toEqual([later.toISOString(), null]);
+    const good = await listRestaurants({ days: 30, now: later });
+    expect([good.readAt, good.readingSince, good.readFailedAt]).toEqual([later.toISOString(), null, null]);
+    // The next run starts: under way for two hours; after that it died, and counts as failed from its start.
+    const next = new Date(later.getTime() + 60000);
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: next, last_status: 'running' });
+    const soon = await listRestaurants({ days: 30, now: new Date(next.getTime() + 119 * 60000) });
+    expect([soon.readingSince, soon.readFailedAt]).toEqual([next.toISOString(), null]);
+    const dead = await listRestaurants({ days: 30, now: new Date(next.getTime() + 121 * 60000) });
+    expect([dead.readingSince, dead.readFailedAt]).toEqual([null, next.toISOString()]);
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: later });
     // A failed first run, with no good read before it.
     await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_success_at: null, last_status: 'failed' });
     expect((await listRestaurants({ days: 30, now: NOW })).readFailedAt).toBe(later.toISOString());
+  });
+
+  test('the rows and the job state are read in one read-only REPEATABLE READ snapshot', async () => {
+    mockTransactionSettings.length = 0;
+    await listRestaurants({ days: 30, now: NOW });
+    // knex adds its own keys to the settings it is given.
+    expect(mockTransactionSettings).toEqual([expect.objectContaining({ isolationLevel: 'repeatable read', readOnly: true })]);
   });
 
   test('a period that is not offered is refused before any read', async () => {
