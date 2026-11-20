@@ -73,7 +73,8 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   }
   const profile = await slots.resolveCatalogSlotProfile(estimate,
     { ...(picker.serviceMode ? { serviceMode: picker.serviceMode } : {}), ...(picker.selection || {}) }, conn);
-  const performs = slots.appointmentServicesFor(profile).map((row) => ({
+  const performed = slots.appointmentServicesFor(profile);
+  const performs = performed.map((row) => ({
     service_type: row.label || profile.serviceLabel, service_key_snapshot: row.resolvedServiceKey || row.service || null,
   }));
   const [primary = { service_type: profile.serviceLabel, service_key_snapshot: null }] = performs;
@@ -95,7 +96,10 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   const mowing = mowingDays.unitRule(preferences, performs);
   const dayOpen = (date) => (!seasonal || slots.inMosquitoSeason(date)) && (!moveInDate || date >= moveInDate)
     && !mowingDays.blocksLive(date, mowing);
-  return { service, preferences, holds: [], siblingDates: [], deactivated, label: profile.serviceLabel, prospective: true, dayOpen };
+  // The line names the services this visit performs, in the page's words: plan-only mode keeps a companion program that
+  // books its own visits in the profile's label.
+  return { service, preferences, holds: [], siblingDates: [], deactivated,
+    label: slots.formatServiceProfileLabel(performed) || profile.serviceLabel, prospective: true, dayOpen };
 }
 
 function analyzeGapCandidate(candidate, rows, {

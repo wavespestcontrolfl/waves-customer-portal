@@ -14,8 +14,9 @@ jest.mock('../services/estimate-slot-availability', () => {
   return {
     resolveEstimateCoords: jest.fn(), resolveCatalogSlotProfile: jest.fn(), appointmentServicesFor: jest.fn((profile) => profile.services),
     estimateMoveInDate: jest.fn(async () => null),
-    // The booking page's own season rule.
+    // The booking page's own season rule and its name for a set of services.
     seasonalSelectionProfile: actual.seasonalSelectionProfile, inMosquitoSeason: actual.inMosquitoSeason,
+    formatServiceProfileLabel: actual.formatServiceProfileLabel,
   };
 });
 jest.mock('../services/auto-dispatch/preferences', () => {
@@ -143,11 +144,15 @@ describe('open estimates', () => {
     page.pageSlotPicker.mockImplementation(async (id) => (id === 'booked' ? null : { serviceMode: 'one_time', selection: {} }));
     try {
       const { conn } = fakeConn({ estimates: [estimate('renewal'), estimate('booked'), estimate('open')] });
-      expect(await _internals.openEstimates(conn, NOW)).toEqual({
+      page.pageSlotPicker.mockClear();
+      const result = await _internals.openEstimates(conn, NOW);
+      expect(result).toEqual({
         estimates: [{ estimate: expect.objectContaining({ id: 'open' }), picker: { serviceMode: 'one_time', selection: {} } }], unread: 0 });
       // The page's two checks, in its order: a refused estimate never reaches the picker.
       expect(page.slotBrowseRefusal).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }));
       expect(page.pageSlotPicker.mock.calls.map(([id]) => id)).toEqual(['booked', 'open']);
+      // One revision: the picker reads the row the refusal read and the visit is sized from, never its own.
+      expect(page.pageSlotPicker.mock.calls[1][1].row).toBe(result.estimates[0].estimate);
     } finally {
       page.slotBrowseRefusal.mockImplementation(async () => null);
       page.pageSlotPicker.mockImplementation(async () => PICKER);
@@ -260,12 +265,13 @@ describe('fillList', () => {
       // The same pest service with lawn care on one visit: the whole 60 minutes.
       slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, reservationServiceMix: true, serviceLabel: 'Pest Control + Lawn Care',
         services: [{ service: 'pest_control', label: 'One-Time Pest Control' }, { service: 'lawn_care', label: 'Lawn Care' }] });
-      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ length: 60, onSiteMin: 60 });
+      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ label: 'One-Time Pest Control + Lawn Care', length: 60, onSiteMin: 60 });
       // A recurring estimate whose lawn program books its own visits: plan-only mode keeps lawn care in the profile,
       // but this visit performs pest control alone, so it plans the recurring pest row.
       slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, serviceMode: 'recurring', serviceLabel: 'Quarterly Pest Control + Lawn Care',
         services: [{ service: 'pest_control', label: 'Quarterly Pest Control' }, { service: 'lawn_care', label: 'Lawn Care (Every 6 weeks)' }] });
-      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ length: 60, onSiteMin: 35 });
+      // The line names that visit's own service.
+      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ label: 'Quarterly Pest Control', length: 60, onSiteMin: 35 });
     } finally {
       slots.appointmentServicesFor.mockImplementation(fake);
       if (before === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;

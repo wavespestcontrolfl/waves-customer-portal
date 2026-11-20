@@ -70,9 +70,10 @@ async function openEstimates(conn, now) {
     if (takenIds.has(String(row.id))) continue;
     try {
       // The page's own answer: no times to offer (a refusal), or no picker (an appointment already scheduled, a quote
-      // to give, invoice only); else its picker's service mode and default selection, which size the visit.
+      // to give, invoice only); else its picker's service mode and default selection, which size the visit. Both
+      // checks and the visit read this one row, so they judge one revision of the estimate.
       if (await page.slotBrowseRefusal(row)) continue;
-      const picker = await page.pageSlotPicker(row.id);
+      const picker = await page.pageSlotPicker(row.id, { row });
       if (picker) out.push({ estimate: row, picker });
     } catch (err) {
       unread += 1;

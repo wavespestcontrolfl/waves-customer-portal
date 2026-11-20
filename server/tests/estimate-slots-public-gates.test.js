@@ -1469,6 +1469,25 @@ describe('offerableEstimateSlots — the page\'s default selection axes', () => 
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
+  // The 07:05 fill list passes its own read of the estimate, so its checks judge one revision.
+  test('pageSlotPicker with the caller\'s row: no estimate read, and the snapshot step rewrites a copy, never the row', async () => {
+    const { pageSlotPicker } = require('../routes/estimate-slots-public')._internals;
+    const { reconcileFrozenMembershipSnapshot } = require('../routes/estimate-public');
+    const db = require('../models/db');
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('monthly'), freq('quarterly', { recommended: true })],
+      services: [{ key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [freq('monthly'), freq('quarterly')] }],
+    });
+    reconcileFrozenMembershipSnapshot.mockImplementationOnce(async (full) => { full.estimate_data = { rewritten: true }; });
+    db.mockClear();
+    buildPricingBundle.mockClear();
+    const row = { ...OWN, estimate_data: { kept: true } };
+    await expect(pageSlotPicker('est-1', { row })).resolves.toEqual({ serviceMode: 'recurring', selection: { selectedFrequency: 'quarterly' } });
+    expect(db).not.toHaveBeenCalledWith('estimates');
+    expect(buildPricingBundle).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1', estimate_data: { rewritten: true } }), expect.anything());
+    expect(row.estimate_data).toEqual({ kept: true });
+  });
+
   test('a section default the combined list does not offer falls back to frequencies[0], exactly as the page does', async () => {
     buildPricingBundle.mockResolvedValue({
       frequencies: [freq('monthly'), freq('quarterly')],

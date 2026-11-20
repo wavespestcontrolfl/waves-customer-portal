@@ -3076,6 +3076,8 @@ module.exports = {
   resolveCatalogSlotProfile,
   // The services one appointment performs: the rain ranking's and the fill list's (day-replan/fill-list.js) read.
   appointmentServicesFor,
+  // The page's name for a set of services ("4x Pest Control + Lawn Care"): the fill list names the visit with it.
+  formatServiceProfileLabel,
   // A new-home estimate's move-in date (no first visit before it): the page's and the fill list's read.
   estimateMoveInDate,
   // The offer/commit collision guard, shared with the day-agreement shadow sweep.
