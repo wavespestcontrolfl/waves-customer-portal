@@ -70,14 +70,22 @@ const DIAGRAMS = Object.freeze(['folded-blade']);
 /**
  * Words that may name a body or plant part. A tripwire only: a text with one
  * needs a reviewed entry, and a person decides what, if anything, it shows.
+ * It covers body parts and markings, plant parts, and droppings and pellets
+ * (the plan's T01 and D03 cases). It leaves out what a pest builds (nest, web,
+ * mud tubes) and life stages (eggs, larvae), and "back", which here means
+ * "come back". Each word is matched whole, so "ear" never matches "year".
  */
 const PART_WORDS = Object.freeze([
-  'abdomen', 'antenna', 'antennae', 'antennas', 'bark', 'blade', 'blades', 'body', 'bodies', 'claw', 'claws',
-  'crown', 'crowns', 'droppings', 'eye', 'eyes', 'eyespot', 'eyespots', 'fang', 'fangs', 'feet', 'foot',
-  'frond', 'fronds', 'hair', 'hairs', 'head', 'heads', 'jaw', 'jaws', 'leaf', 'leaves', 'leg', 'legs',
-  'mandible', 'mandibles', 'mouth', 'pellet', 'pellets', 'pincer', 'pincers', 'root', 'roots', 'scale',
-  'scales', 'seed', 'seeds', 'segment', 'segments', 'shell', 'skin', 'spine', 'spines', 'stem', 'stems',
-  'stinger', 'stingers', 'tail', 'tails', 'teeth', 'thorax', 'tooth', 'trunk', 'waist', 'wing', 'wings',
+  'abdomen', 'antenna', 'antennae', 'antennas', 'bark', 'beak', 'belly', 'blade', 'blades', 'body', 'bodies',
+  'branch', 'branches', 'carapace', 'claw', 'claws', 'color', 'colors', 'crown', 'crowns', 'droppings', 'ear',
+  'ears', 'exoskeleton', 'eye', 'eyes', 'eyespot', 'eyespots', 'fang', 'fangs', 'feet', 'foot', 'forewing',
+  'forewings', 'frond', 'fronds', 'fur', 'gill', 'gills', 'gland', 'glands', 'hair', 'hairs', 'head', 'heads',
+  'hindwing', 'hindwings', 'horn', 'horns', 'hourglass', 'jaw', 'jaws', 'leaf', 'leaves', 'leg', 'legs', 'lung',
+  'lungs', 'mandible', 'mandibles', 'marking', 'markings', 'mouth', 'mouthparts', 'organ', 'organs', 'pellet',
+  'pellets', 'pincer', 'pincers', 'proboscis', 'root', 'roots', 'scale', 'scales', 'seed', 'seeds', 'segment',
+  'segments', 'shell', 'skin', 'snout', 'spine', 'spines', 'spot', 'spots', 'stem', 'stems', 'stinger',
+  'stingers', 'stripe', 'stripes', 'tail', 'tails', 'teeth', 'thorax', 'tongue', 'tooth', 'trunk', 'underside',
+  'waist', 'whisker', 'whiskers', 'wing', 'wings',
 ]);
 const WORD_RE = new RegExp(`\\b(${PART_WORDS.join('|')})\\b`, 'gi');
 

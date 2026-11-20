@@ -42,7 +42,9 @@
     "L09": { "parts": [], "text16": "9e732d726462023a", "why": "Leaves and roots say when the disease shows: nothing to find or tell apart." },
     "P02": { "parts": [], "text16": "aebf204e9901b72c", "why": "Fronds and crowns are a pruning lesson, not a part the reader looks for." },
     "D01": { "parts": [], "text16": "5bd3d46d3bb4fc8e", "why": "Fronds and leaf skirts say where rats nest; eight feet is a distance." },
-    "D03": { "parts": [], "text16": "ffacb1fdebecdcf6", "why": "Droppings here are a cleanup safety rule, not something to identify." }
+    "D03": { "parts": [], "text16": "ffacb1fdebecdcf6", "why": "Droppings here are a cleanup safety rule, not something to identify." },
+    "L10": { "parts": [], "text16": "906af28261c62122", "why": "The spots are patches of stressed lawn, not a part to circle." },
+    "P04": { "parts": [], "text16": "6317659fdad54ed2", "why": "The spot is where a palm stood, not a part to show." }
   },
   "species": {
     "earwig": {
@@ -84,6 +86,10 @@
     "tea-scale": { "parts": [], "text16": "7699e7e5104056dc", "why": "The scales and shell are the whole insect, which the card already names." },
     "house-mouse": { "parts": [], "text16": "f2abf86c941d0914", "why": "Droppings here explain its feeding habit; no part of the mouse is named." },
     "stink-bug": { "parts": [], "text16": "f1ab770f4c634079", "why": "The glands on the thorax do not show in a photo." },
-    "carpenter-bee": { "parts": [], "text16": "3757fe50fb7587d1", "why": "The text says the male has no stinger: nothing to circle." }
+    "carpenter-bee": { "parts": [], "text16": "3757fe50fb7587d1", "why": "The text says the male has no stinger: nothing to circle." },
+    "lubber-grasshopper": { "parts": [], "text16": "95e5e7b461908c88", "why": "The colors cover the whole insect; there is no one part to circle." },
+    "pillbug": { "parts": [], "text16": "84a9951346be003d", "why": "The gill-like organs are tucked under its body, where a photo of the bug does not show them." },
+    "roof-rat": { "parts": [], "text16": "5035a160f3fc06bc", "why": "Fences and branches are where it runs, not a part to look for." },
+    "black-widow": { "parts": [], "text16": "c5b42b1526243597", "why": "Her hiding spot is a place, not a part of the spider." }
   }
 }
