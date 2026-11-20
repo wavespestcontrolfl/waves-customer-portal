@@ -31,7 +31,7 @@ const {
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { resolveZoneRouteDaySlug } = require('../services/scheduling/zone-route-days');
-const { resolveEstimateZone, leadBookingZone } = require('../services/slot-zone');
+const { leadBookingZone } = require('../services/slot-zone');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
@@ -2747,10 +2747,10 @@ async function createSelfBooking(payload = {}) {
     // date lock, given the zone this booking stamps on its visit; false
     // refuses it as a taken slot. callbackVisit.zoneAddress ({ address, city },
     // the lead assessment link): the booking address the caller's list resolved
-    // its zone from; this booking's zone resolves the same way
-    // (resolveEstimateZone: its city decides, its text only without one) in
-    // place of the customer's city, so the list, the slot guard and the stamp
-    // agree.
+    // its zone from; this booking's zone is that address's zone, resolved the
+    // same way, else the zone of this booking's customer's city on file
+    // (slot-zone.js leadBookingZone), so the list, the slot guard and the
+    // stamp agree.
     const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
       && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
       ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
