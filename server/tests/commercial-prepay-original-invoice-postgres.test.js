@@ -520,6 +520,41 @@ postgres('commercial prepay original-invoice ownership', () => {
     expect((await stored(residential.ids.termId)).commercial_setup_series_root_id).toBeNull();
   });
 
+  test('payment and refund of an invoice-only sale leave the only other bait series and its invoice alone', async () => {
+    const { ids, payment } = await seedSale();
+    await trx('scheduled_services').where({ id: ids.otherPropertyRootId }).update({ status: 'cancelled' });
+    await trx('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'payment_pending' });
+    const other = () => trx('scheduled_services').where({ id: ids.olderRootId }).first();
+    const otherInvoice = () => trx('invoices').where({ id: ids.olderInvoiceId }).first();
+    const originalClaim = () => trx('setup_fee_claims').where({ invoice_id: ids.invoiceId }).first();
+    const initial = await other();
+    const invoiceBefore = await otherInvoice();
+    const claimBefore = await originalClaim();
+    const renewals = require('../services/annual-prepay-renewals');
+    await renewals.syncTermForInvoicePayment(ids.invoiceId, trx);
+    expect(await trx('annual_prepay_terms').where({ id: ids.termId }).first('status'))
+      .toEqual({ status: 'active' });
+    expect(await other()).toEqual(initial);
+    expect(await otherInvoice()).toEqual(invoiceBefore);
+    expect(await originalClaim()).toEqual(claimBefore);
+
+    // A later booking linked to the selling estimate is also the only live
+    // series that the old refund path could choose for an empty setup stamp.
+    await trx('scheduled_services').where({ id: ids.olderRootId })
+      .update({ source_estimate_id: ids.estimateId, pending_setup_fee: null });
+    const booked = await other();
+    await trx('payments').where({ id: payment.id }).update({
+      status: 'refunded', refund_status: 'full', refund_amount: 55,
+    });
+    await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'refunded', paid_at: null });
+    await renewals.syncTermForRefundedPayment(await trx('payments').where({ id: payment.id }).first(), trx);
+    expect(await trx('annual_prepay_terms').where({ id: ids.termId }).first('status'))
+      .toEqual({ status: 'cancelled' });
+    expect(await other()).toEqual(booked);
+    expect(await otherInvoice()).toEqual(invoiceBefore);
+    expect(await originalClaim()).toEqual(claimBefore);
+  });
+
   test('a Customer 360 first-visit promise seeds and covers only its own new series on payment', async () => {
     const { ids } = await seedSale({ coverageServiceType: 'Rodent Bait Stations' });
     const renewals = require('../services/annual-prepay-renewals');

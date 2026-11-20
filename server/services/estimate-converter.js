@@ -8278,7 +8278,7 @@ const EstimateConverter = {
     // refresh cannot adopt an unrelated existing visit.
     let commercialRodentSetupOwner = null;
     if (commercialSetupSale && frozenRodentBaitSetupAmount(estimateData) > 0) {
-      const { authoritativeServiceKey } = require('./secure-appointment-plans');
+      const { authoritativeServiceKey, setupCollectionConflict } = require('./secure-appointment-plans');
       const confirmedStart = confirmedCommercialVisits.find(
         (visit) => String(visit.id) === String(firstScheduledServiceId),
       );
@@ -8298,6 +8298,8 @@ const EstimateConverter = {
           .first('id', 'customer_id', 'service_id', 'service_type');
         if (root && await authoritativeServiceKey(database, root) === 'commercial_rodent_bait') {
           commercialRodentSetupOwner = root;
+        } else if (confirmedStart) {
+          throw setupCollectionConflict('The selected setup visit changed before acceptance. Refresh and select the visit again.');
         }
       }
     }
@@ -8640,6 +8642,7 @@ const EstimateConverter = {
                   anchorId: commercialRodentSetupOwner.id,
                   amount: prepayRodentSetupAmount,
                   estimateId,
+                  expectedCommercialCustomerId: customerId,
                 });
               } else {
                 await plans.recordSetupFeeClaimForInvoice(invoiceTrx, {

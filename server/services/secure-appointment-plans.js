@@ -906,10 +906,18 @@ function setupCollectionConflict(message) {
 // r40 P1 — the /secure prepay selection used to clear ANY non-null stamp,
 // racing the technician's completion claim on the parent into a double
 // charge).
-async function retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId, amount, estimateId = null }) {
+async function retireDirectSetupClaimForPrepay(trx, {
+  anchorId, invoiceId, amount, estimateId = null, expectedCommercialCustomerId = null,
+}) {
   const fee = cents(Math.max(0, Number(amount) || 0));
   if (!anchorId || !invoiceId) return { recorded: false, retired: false };
-  const parent = await trx('scheduled_services').where({ id: anchorId }).forUpdate().first('id', 'pending_setup_fee');
+  const parent = await trx('scheduled_services').where({ id: anchorId }).forUpdate()
+    .first('id', 'customer_id', 'pending_setup_fee', 'recurring_parent_id', 'service_id', 'service_type');
+  if (expectedCommercialCustomerId && (!parent || parent.recurring_parent_id
+    || String(parent.customer_id) !== String(expectedCommercialCustomerId)
+    || await authoritativeServiceKey(trx, parent) !== 'commercial_rodent_bait')) {
+    throw setupCollectionConflict('The selected setup visit changed before acceptance. Refresh and select the visit again.');
+  }
   const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
   if (stamp != null && stamp < 0) {
     throw setupCollectionConflict('The bait-station setup is being billed by a completion in progress — retry in a moment');
@@ -1653,6 +1661,7 @@ module.exports = {
   anchorSetupFeeClaim,
   liveAnchorlessCoverageSetupClaim,
   assertFrozenRodentSetupStillOwed,
+  setupCollectionConflict,
   retireDirectSetupClaimForPrepay,
   retirePrepayOnBookSetupClaim,
   findDirectRodentSetupObligationForCoverage,

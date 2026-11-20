@@ -22,19 +22,18 @@ async function confirmedCommercialSaleVisits(database, customerId, { adoptedExis
 
 // A selected child identifies its series parent for the setup claim only.
 // Both must belong to the customer, and the parent must still anchor a
-// commercial rodent series that can consume the setup (including a cancelled
-// parent whose selected child remains live).
+// commercial rodent series. A completed parent can still have a live setup
+// invoice. Keep it so the invoice transaction checks that claim under lock.
 async function confirmedCommercialRodentRoots(database, customerId, visits) {
   if (!visits.length) return [];
   const roots = await database('scheduled_services').where({ customer_id: customerId })
     .whereIn('id', visits.map((row) => row.recurring_parent_id || row.id))
     .whereNull('recurring_parent_id').whereNull('reservation_expires_at')
     .orderBy('scheduled_date', 'asc');
-  const { authoritativeServiceKey, seriesCanStillConsume } = require('./secure-appointment-plans');
+  const { authoritativeServiceKey } = require('./secure-appointment-plans');
   const rodentRoots = [];
   for (const root of roots) {
-    if (await authoritativeServiceKey(database, root) === 'commercial_rodent_bait'
-      && await seriesCanStillConsume(database, root)) rodentRoots.push(root);
+    if (await authoritativeServiceKey(database, root) === 'commercial_rodent_bait') rodentRoots.push(root);
   }
   return rodentRoots;
 }

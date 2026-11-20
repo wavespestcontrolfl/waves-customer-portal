@@ -725,6 +725,38 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       expect(await mockTransaction('annual_prepay_terms').where({ source_estimate_id: estimateId })).toHaveLength(0);
     });
 
+    test('a completed selected series with a billed setup cannot become an invoice-only sale', async () => {
+      const { customerId, estimateId } = await fixture(mockTransaction, {
+        data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+      });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({
+        category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+      });
+      const rootId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: CHOSEN_DATE,
+        extra: { status: 'completed', is_recurring: true, pending_setup_fee: null, estimated_price: 165 },
+      });
+      const completionId = randomUUID();
+      await mockTransaction('invoices').insert({
+        id: completionId, customer_id: customerId, scheduled_service_id: rootId, token: randomUUID(),
+        invoice_number: 'SETUP-' + completionId.slice(0, 8), title: 'Bait station setup', status: 'paid',
+        paid_at: new Date(), subtotal: 55, total: 55, due_date: CHOSEN_DATE, line_items: '[]',
+      });
+      await mockTransaction('setup_fee_claims').insert({
+        invoice_id: completionId, scheduled_service_id: rootId, amount: 55,
+      });
+      await expect(EstimateConverter().convertEstimate(estimateId, {
+        billingTerm: 'prepay_annual', prepayInvoiceAmount: 660, skipAutoSchedule: true,
+        adoptedExistingAppointmentId: rootId, autoSendInvoice: false, skipMembershipEmail: true,
+      })).rejects.toMatchObject({ statusCode: 409, switchConflict: true });
+      expect(await mockTransaction('invoices').where({ customer_id: customerId }).select('id', 'status'))
+        .toEqual([{ id: completionId, status: 'paid' }]);
+      expect(await mockTransaction('setup_fee_claims').where({ scheduled_service_id: rootId }).select('invoice_id'))
+        .toEqual([{ invoice_id: completionId }]);
+      expect(await mockTransaction('annual_prepay_terms').where({ source_estimate_id: estimateId })).toHaveLength(0);
+    });
+
     test('the standalone converter rejects an in-flight selected-root claim before its invoice commits', async () => {
       const { customerId, estimateId } = await fixture(mockTransaction, {
         data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
