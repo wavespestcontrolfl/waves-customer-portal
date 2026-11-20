@@ -21,6 +21,11 @@
 // changed here.
 const PLAN_START_BLOCKERS = Object.freeze(['not_live', 'commercial', 'has_plan']);
 
+// The billing lanes only a plan has (billing-lane.js BILLING_MODES): dues on
+// the 1st, a fee per application, a year paid up front. The other two
+// (per_visit, one_time) say nothing about a plan.
+const PLAN_ONLY_BILLING_LANES = Object.freeze(['monthly_membership', 'per_application', 'annual_prepay']);
+
 // A legacy plan visit that is live now. Such a visit carries no recurring flag
 // (NULL) and a recurring_parent_id, and it is a plan visit all the same: the
 // plan's own row rule counts it (isPlanSeriesRow in
@@ -55,7 +60,10 @@ async function hasLiveLegacyPlanVisit(database, customerId) {
 //   the predicate the setup-fee decision reads (isMembershipCustomerRow). Also
 //   a monthly rate beside a tier value that names no plan ('None',
 //   'One-Time'): that predicate reads such a row as "no plan", and a rate on
-//   the account is a billed plan amount whatever the tier column says;
+//   the account is a billed plan amount whatever the tier column says. And a
+//   billing lane that only a plan has, by the lane's one reader
+//   (resolveBillingLane): an accept or the office set it, also on an account
+//   with no tier and no rate;
 // - the calendar: any live recurring obligation, at any property. The test is
 //   the live rows, never the owned keys: a recurring palm injection or a
 //   termite bond maps to no service family and is still the customer's plan.
@@ -74,6 +82,10 @@ async function hasLiveLegacyPlanVisit(database, customerId) {
 //   name. The read asks for a strict table probe: with GATE_PLAN_RATE_LEDGER
 //   off the ledger answers a failed probe as "no ledger", and here a billed
 //   rate is evidence in either mode;
+// - an active plan hold (cancellation-resolution/holds.js): the plan is
+//   paused, not over. The hold itself takes two of the records above away
+//   until the return date (the family's ledger component and the account's
+//   monthly rate go to 0), and it skips the visits inside the pause;
 // - annual prepay: a term whose paid coverage is live, or a prepay invoice
 //   still payable (a payment starts the term and seeds its visits), by the
 //   churn guard's own two reads (customer-lifecycle-guard.js).
@@ -84,6 +96,7 @@ async function customerHoldsPlan(database, customer) {
   // This asks "is there a plan record", fail closed. It does not sort the
   // account into a way of billing (that is resolveBillingLane's question).
   if (Number(customer.monthly_rate) > 0) return true;
+  if (PLAN_ONLY_BILLING_LANES.includes(require('./billing-lane').resolveBillingLane(customer).mode)) return true;
   if ((await existing.loadLiveRecurringObligationRows(database, customer.id)).length) return true;
   if (await hasLiveLegacyPlanVisit(database, customer.id)) return true;
   const ongoingSeries = await require('./recurring-series-topup').eligibleSeriesParentIds(database, { customerId: customer.id });
@@ -91,6 +104,7 @@ async function customerHoldsPlan(database, customer) {
   const billedRates = (await require('./plan-rate-ledger').loadComponents(database, customer.id, { strictProbe: true }))
     .filter((row) => Number(row.monthly_rate) > 0);
   if (billedRates.length) return true;
+  if (await database('plan_holds').where({ customer_id: customer.id, status: 'active' }).first('id')) return true;
   if (await require('./customer-lifecycle-guard').findActivePrepayTerm(database, customer.id)) return true;
   return Boolean(await require('./admin-cancellation').findPendingPrepayInvoice(customer.id, null, database));
 }

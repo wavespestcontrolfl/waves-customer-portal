@@ -159,6 +159,10 @@ describe('planStartBlocker', () => {
       // The membership predicate reads these tier values as "no plan" and then ignores the rate.
       ['a monthly rate beside the tier value None', { customer: { waveguard_tier: 'None', monthly_rate: 45 } }],
       ['a monthly rate beside the tier value One-Time', { customer: { waveguard_tier: 'One-Time', monthly_rate: 45 } }],
+      // A billing lane only a plan has, on an account with no tier and no rate.
+      ['the per-application lane on the account', { customer: { billing_mode: 'per_application' } }],
+      ['the annual prepay lane on the account', { customer: { billing_mode: 'annual_prepay' } }],
+      ['the monthly dues lane on the account', { customer: { billing_mode: 'monthly_membership' } }],
       ['a pest visit that carries the recurring flag', { visits: onlyFor(isCalendarRead, [FLAGGED]) }],
       ['a recurring lawn visit', { visits: onlyFor(isCalendarRead, [{ ...FLAGGED, service_type: 'Lawn Care Program' }]) }],
       // Palm injection maps to no service family. The live recurring row is the plan.
@@ -168,6 +172,8 @@ describe('planStartBlocker', () => {
       ['a billed plan rate of a named family', { planRates: [{ family_key: 'lawn_care', monthly_rate: 55 }] }],
       ['a billed plan rate the ledger could not name', { planRates: [{ family_key: 'unattributed', monthly_rate: 45 }] }],
       ['a billed plan rate saved as text', { planRates: [{ family_key: 'pest_control', monthly_rate: '45.00' }] }],
+      // The hold flow sets the family's ledger component and the account's rate to 0 until the return date.
+      ['an active plan hold, beside a ledger component the hold set to 0', { planRates: [{ family_key: 'lawn_care', monthly_rate: 0 }], tables: { plan_holds: [{ id: 'hold-1' }] } }],
       ['an annual prepay whose paid coverage is live', { tables: { 'annual_prepay_terms as t': [{ id: 'term-1' }] } }],
       ['an annual prepay invoice that is still payable', { tables: PREPAY_INVOICE('sent') }],
     ])('%s: has_plan', async (_label, given) => {
@@ -177,12 +183,23 @@ describe('planStartBlocker', () => {
     test.each([
       ['a tier value that names no plan', { customer: { waveguard_tier: 'One-Time' } }],
       ['a monthly rate of zero', { customer: { monthly_rate: 0 } }],
+      ['the per-visit lane on the account', { customer: { billing_mode: 'per_visit' } }],
+      ['the one-time lane on the account', { customer: { billing_mode: 'one_time' } }],
+      ['a lane value the app does not know', { customer: { billing_mode: 'weekly' } }],
       ['a plan rate of zero', { planRates: [{ family_key: 'unattributed', monthly_rate: 0 }] }],
       ['an annual prepay invoice that was voided', { tables: PREPAY_INVOICE('void') }],
       ['a pending annual prepay term with no invoice row', { tables: { annual_prepay_terms: [{ id: 'term-1', prepay_invoice_id: 'inv-9' }], invoices: [] } }],
     ])('%s is not a plan record', async (_label, given) => {
       expect(await blocker(world(given))).toBeNull();
     });
+  });
+
+  // The fake applies no filter, so this pins the filter itself: this customer's holds, and only the active ones
+  // (a resumed or a cancelled hold is over). PostgreSQL proves the statuses.
+  test("the hold read asks for this customer's active holds", async () => {
+    const reads = [];
+    await blocker(world({ tables: { plan_holds: (calls) => { reads.push(calls.map((call) => [...call])); return []; } } }));
+    expect(reads).toEqual([[['where', { customer_id: 'cust-1', status: 'active' }]]]);
   });
 
   // The calendar read answers the rows that carry the recurring flag. One row rule (isLiveObligationRow) decides
@@ -308,6 +325,7 @@ describe('planStartBlocker', () => {
       ['the legacy visit read', { visits: failFor(isLegacyRead, 'legacy read down') }, 'legacy read down'],
       ['the ongoing series read', { ...ONGOING_COLUMN, visits: failFor(isSeriesRead, 'series read down') }, 'series read down'],
       ['the plan-rate ledger read', { planRates: failing('ledger read down') }, 'ledger read down'],
+      ['the plan hold read', { tables: { plan_holds: failing('hold read down') } }, 'hold read down'],
       ['the annual prepay coverage read', { tables: { 'annual_prepay_terms as t': failing('coverage read down') } }, 'coverage read down'],
       ['the pending annual prepay read', { tables: { annual_prepay_terms: failing('pending prepay read down') } }, 'pending prepay read down'],
       ['the invoice read of a pending annual prepay', { tables: { annual_prepay_terms: [{ id: 'term-1', prepay_invoice_id: 'inv-1' }], invoices: failing('invoice read down') } }, 'invoice read down'],

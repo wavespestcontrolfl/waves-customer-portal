@@ -166,6 +166,10 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a legacy monthly rate and no tier', { monthly_rate: 45 }],
       // The membership predicate reads the One-Time tier as "no plan" and then ignores the rate.
       ['a monthly rate beside the One-Time tier', { waveguard_tier: 'One-Time', monthly_rate: 45 }],
+      // A billing lane only a plan has. The column's check constraint takes these values.
+      ['the per-application lane, with no tier and no rate,', { billing_mode: 'per_application' }],
+      ['the annual prepay lane, with no tier and no rate,', { billing_mode: 'annual_prepay' }],
+      ['the monthly dues lane, with no tier and no rate,', { billing_mode: 'monthly_membership' }],
     ])('%s on the account: has_plan', async (_label, change) => {
       expect(await planStartBlocker(trx, (await seedCustomer(change)).id)).toBe('has_plan');
     });
@@ -173,6 +177,8 @@ postgres('planStartBlocker (live Postgres)', () => {
     test.each([
       ['the One-Time tier', { waveguard_tier: 'One-Time' }],
       ['a monthly rate of zero', { monthly_rate: 0 }],
+      ['the per-visit lane', { billing_mode: 'per_visit' }],
+      ['the one-time lane', { billing_mode: 'one_time' }],
     ])('%s is not a plan record', async (_label, change) => {
       expect(await planStartBlocker(trx, (await seedCustomer(change)).id)).toBeNull();
     });
@@ -296,6 +302,36 @@ postgres('planStartBlocker (live Postgres)', () => {
 
     test("another customer's rate does not count", async () => {
       await rate(await seedCustomer());
+      expect(await planStartBlocker(trx, (await seedCustomer()).id)).toBeNull();
+    });
+  });
+
+  // A hold pauses a lawn, mosquito or tree and shrub plan (cancellation-resolution/holds.js). It sets the family's
+  // ledger component and the account's monthly rate to 0 until the return date and skips the visits inside the
+  // pause. So on some days the hold is the only record that says the plan goes on.
+  describe('a plan hold', () => {
+    const hold = (customer, change = {}) => trx('plan_holds').insert({
+      customer_id: customer.id, family_key: 'lawn_care', starts_on: day(-5), resume_on: day(40), held_monthly_rate: 55, status: 'active', ...change,
+    });
+
+    test('an active hold, as the hold flow leaves the account (the ledger component at 0, no rate on the account): has_plan', async () => {
+      expect(await blockerFor(async (customer) => {
+        await trx('customer_plan_rates').insert({ customer_id: customer.id, family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' });
+        await hold(customer);
+      })).toBe('has_plan');
+    });
+
+    test('an active hold whose return date has passed (not resumed yet): has_plan', async () => {
+      expect(await blockerFor((customer) => hold(customer, { starts_on: day(-60), resume_on: day(-1) }))).toBe('has_plan');
+    });
+
+    // The three statuses the table's check constraint takes: active, resumed, cancelled.
+    test.each([['resumed'], ['cancelled']])('a %s hold is over, and is not a plan record', async (status) => {
+      expect(await blockerFor((customer) => hold(customer, { status }))).toBeNull();
+    });
+
+    test("another customer's hold does not count", async () => {
+      await hold(await seedCustomer());
       expect(await planStartBlocker(trx, (await seedCustomer()).id)).toBeNull();
     });
   });
