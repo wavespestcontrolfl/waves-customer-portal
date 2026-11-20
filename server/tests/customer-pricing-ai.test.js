@@ -1146,13 +1146,17 @@ describe('ownership lifecycle evidence', () => {
 // The default stays best-effort: the bridge answers a failed refresh with the values it had.
 describe('strictPriceSettings: the refresh of the price settings before the engine prices', () => {
   const pricingEngine = require('../services/pricing-engine');
+  const bridge = require('../services/pricing-engine/db-bridge');
   let needsSync;
   let sync;
+  let fromRows;
   beforeEach(() => {
     needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(true);
     sync = jest.spyOn(pricingEngine, 'syncConstantsFromDB').mockResolvedValue(false);
+    // The bridge's proof that the pest price inputs are the rows' own ('pest price inputs' below).
+    fromRows = jest.spyOn(bridge, 'recurringPestPriceIsFromRows').mockReturnValue(true);
   });
-  afterEach(() => { needsSync.mockRestore(); sync.mockRestore(); });
+  afterEach(() => { needsSync.mockRestore(); sync.mockRestore(); fromRows.mockRestore(); });
 
   const customer = propertyCustomer({ id: 'cust-strict', waveguard_tier: null, monthly_rate: null });
   // A handle the bridge could refresh from (the refresh itself is the spy above).
@@ -1196,7 +1200,6 @@ describe('strictPriceSettings: the refresh of the price settings before the engi
   // while the time of the last good refresh still reads fresh. Strict waits for it: the bridge runs one refresh
   // at a time, so the refresh strict asks for starts after the running one.
   describe('a refresh that is already running while the settings read fresh', () => {
-    const bridge = require('../services/pricing-engine/db-bridge');
     let running;
     beforeEach(() => {
       needsSync.mockReturnValue(false);
@@ -1228,6 +1231,65 @@ describe('strictPriceSettings: the refresh of the price settings before the engi
       running.mockReturnValue(false);
       await price({ strictPriceSettings: true });
       expect(sync).not.toHaveBeenCalled();
+    });
+  });
+
+  // A refresh answers true when pricing_config holds any row at all. For a row that is missing, the engine keeps
+  // what it had: the in-code default on a cold start, an earlier value on a warm process. Strict asks the bridge
+  // whether the last good refresh applied every row of the recurring pest price, on both paths.
+  describe('pest price inputs that did not come from their rows', () => {
+    test('strict, the refreshed path: a refresh that succeeds without the rows throws, and the proof is read after the refresh', async () => {
+      const order = [];
+      sync.mockImplementation(async () => { order.push('refresh'); return true; });
+      fromRows.mockImplementation(() => { order.push('proof'); return false; });
+      await expect(price({ strictPriceSettings: true })).rejects.toMatchObject(UNAVAILABLE);
+      expect(order).toEqual(['refresh', 'proof']);
+    });
+
+    test('strict, the cached path: settings that read fresh without the rows throw, and no refresh is asked for', async () => {
+      needsSync.mockReturnValue(false);
+      fromRows.mockReturnValue(false);
+      await expect(price({ strictPriceSettings: true })).rejects.toMatchObject(UNAVAILABLE);
+      expect(sync).not.toHaveBeenCalled();
+    });
+
+    test('strict: the proof of the refresh that just ran counts, not the one before it', async () => {
+      fromRows.mockReturnValue(false);
+      sync.mockImplementation(async () => { fromRows.mockReturnValue(true); return true; });
+      const result = await price({ strictPriceSettings: true });
+      expect(result.options.length).toBeGreaterThan(0);
+    });
+
+    test('strict: a refresh that fails throws before the proof is read', async () => {
+      fromRows.mockReturnValue(false);
+      await expect(price({ strictPriceSettings: true })).rejects.toMatchObject({ ...UNAVAILABLE, message: 'live price settings could not be loaded' });
+      expect(fromRows).not.toHaveBeenCalled();
+    });
+
+    test('the default does not ask for the proof and prices as before', async () => {
+      fromRows.mockReturnValue(false);
+      needsSync.mockReturnValue(false);
+      const result = await price();
+      expect(fromRows).not.toHaveBeenCalled();
+      expect(result.options.length).toBeGreaterThan(0);
+    });
+  });
+
+  // The bridge has the from-rows proof for the recurring pest price only, so strict prices nothing else.
+  describe('strict prices pest control only', () => {
+    test.each([
+      ['lawn care', 'I am interested in adding lawn care'],
+      ['pest control with mosquito', 'I am interested in adding pest control and mosquito service'],
+    ])('a strict request for %s is refused before any property lookup or refresh', async (_label, prompt) => {
+      const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
+      await expect(price({ strictPriceSettings: true, prompt, propertyLookup })).rejects.toThrow('strictPriceSettings prices pest control only');
+      expect(propertyLookup).not.toHaveBeenCalled();
+      expect(sync).not.toHaveBeenCalled();
+    });
+
+    test('the same requests without strict are not refused', async () => {
+      const result = await price({ prompt: 'I am interested in adding pest control and mosquito service' });
+      expect(result.code).not.toBe('PRICING_CONFIG_UNAVAILABLE');
     });
   });
 

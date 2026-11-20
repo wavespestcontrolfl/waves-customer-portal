@@ -1,8 +1,9 @@
 // buildStartOffer against real PostgreSQL (one rolled-back transaction per test): the price of the quarterly
 // pest plan for a customer with NO plan (the one-time job to plan offer, owner 2026-11-19 "build"). The unit
 // suite (portal-offer.test.js) pins the decisions on a fake that applies no filter. This one proves what only a
-// database can: the SQL of the legacy plan-visit read on the real table, and the real engine price on real
-// tables. Only the property lookup is a stub (no network, no spend). All names and addresses are synthetic.
+// database can: the SQL of the plan reads on the real table (the legacy plan visit, the ongoing series root),
+// the real engine price on real tables, and the real bridge on real price settings rows. Only the property
+// lookup is a stub (no network, no spend). All names and addresses are synthetic.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -62,13 +63,13 @@ postgres('plan start offer price (live Postgres)', () => {
   // ---- Fixtures: the least each table needs. ----
 
   // A one-time customer: live, no tier, no plan rate.
-  async function seedCustomer() {
+  async function seedCustomer(change = {}) {
     const tag = hex(4);
     const [row] = await trx('customers').insert({
       first_name: 'Jordan', last_name: 'Example', email: `jordan.${tag}@example.test`,
       phone: `+1941${String(parseInt(tag, 16) % 10000000).padStart(7, '0')}`,
       address_line1: `${(parseInt(tag, 16) % 9000) + 100} Example Test Ln`, city: 'Parrish', state: 'FL', zip: '34219',
-      active: true, pipeline_stage: 'won',
+      active: true, pipeline_stage: 'won', ...change,
     }).returning('*');
     return row;
   }
@@ -92,6 +93,16 @@ postgres('plan start offer price (live Postgres)', () => {
       customer_id: customer.id, scheduled_date: day(10), service_type: PLAN_SERVICE, status: 'confirmed', is_recurring: true, ...change,
     }).returning('*');
     return visit;
+  }
+
+  // The root of a recurring series with NO other visit: its own visit is over, and no later visit is on the
+  // calendar. recurring_ongoing says whether the plan goes on (the nightly top-up extends such a series).
+  async function seedSeriesRoot(customer, change = {}) {
+    const [root] = await trx('scheduled_services').insert({
+      customer_id: customer.id, scheduled_date: day(-80), service_type: PLAN_SERVICE, status: 'completed',
+      is_recurring: true, recurring_ongoing: true, ...change,
+    }).returning('*');
+    return root;
   }
 
   // The visit the offer follows: the customer's completed one-time job. It carries no address stamp and no link,
@@ -210,5 +221,117 @@ postgres('plan start offer price (live Postgres)', () => {
     const customer = await seedCustomer();
     await trx('customer_plan_rates').insert({ customer_id: customer.id, family_key: 'lawn_care', monthly_rate: 55, source: 'estimate_accept' });
     expect(await price(customer)).toEqual(HAS_PLAN);
+  });
+
+  // An ongoing series BETWEEN visits: no live visit for the two calendar reads to find, and no tier, rate or
+  // prepay on the account. The root alone says the plan goes on.
+  describe('an ongoing recurring series with no visit on the calendar', () => {
+    test.each([
+      ['whose last visit is completed', {}],
+      ['whose own visit was cancelled while the series goes on', { status: 'cancelled' }],
+    ])('a series %s means the customer has a plan', async (_label, change) => {
+      const customer = await seedCustomer();
+      await seedSeriesRoot(customer, change);
+      expect(await price(customer)).toEqual(HAS_PLAN);
+    });
+
+    test.each([
+      ['a completed finite series (never ongoing)', { recurring_ongoing: false }],
+      ['a series that a cancel ended (the flag is cleared)', { recurring_ongoing: false, status: 'cancelled' }],
+      ['a series saved with no ongoing flag (NULL)', { recurring_ongoing: null }],
+    ])('%s is not a plan: the home is priced', async (_label, change) => {
+      const customer = await seedCustomer();
+      await seedSeriesRoot(customer, change);
+      expect(await price(customer)).toMatchObject(PRICED);
+    });
+
+    test("another customer's ongoing series does not count", async () => {
+      const customer = await seedCustomer();
+      await seedSeriesRoot(await seedCustomer());
+      expect(await price(customer)).toMatchObject(PRICED);
+    });
+
+    test('the rows are the ones the nightly top-up would extend (its own selector)', async () => {
+      const customer = await seedCustomer();
+      const root = await seedSeriesRoot(customer);
+      await seedSeriesRoot(customer, { recurring_ongoing: false });
+      const { eligibleSeriesParentIds } = require('../services/recurring-series-topup');
+      expect(await eligibleSeriesParentIds(trx, { customerId: customer.id })).toEqual([root.id]);
+    });
+  });
+
+  // The account-level commercial rule. The tier column accepts 'Commercial' (its check constraint), and the
+  // plan check reads that tier as "no plan": without the rule this account would get the residential price.
+  test.each([
+    ['the Commercial tier and no property type', { waveguard_tier: 'Commercial' }],
+    ['the Commercial tier and a residential property type', { waveguard_tier: 'Commercial', property_type: 'single_family' }],
+    ['a business property type', { property_type: 'business' }],
+  ])('a commercial account (%s) gets no residential offer', async (_label, change) => {
+    const customer = await seedCustomer(change);
+    expect(await price(customer)).toEqual({ option: null, reason: 'premises' });
+  });
+
+  // The REAL bridge on the REAL pricing_config. A refresh succeeds when the table holds any row at all, and for
+  // a row that is missing the engine keeps what it had. The start offer prices only when every row of the
+  // recurring pest price was applied by the last good refresh.
+  describe('the price settings rows of the recurring pest price', () => {
+    const PRICE_ROWS = ['pest_base', 'pest_footprint', 'pest_features', 'pest_property_type', 'waveguard_tiers'];
+    const UNAVAILABLE = { code: 'PRICING_CONFIG_UNAVAILABLE' };
+    const engine = () => require('../services/pricing-engine');
+    const bridge = () => require('../services/pricing-engine/db-bridge');
+    // Each test changes pricing_config inside its own transaction. The settings this process holds are marked
+    // stale before and after, so every price here (and the first one of the next test) loads the rows it can see.
+    beforeEach(() => engine().invalidatePricingConfigCache());
+    afterEach(() => engine().invalidatePricingConfigCache());
+
+    test('the migrated schema carries the five rows, and the start offer prices from them', async () => {
+      expect((await trx('pricing_config').whereIn('config_key', PRICE_ROWS).pluck('config_key')).sort()).toEqual([...PRICE_ROWS].sort());
+      const customer = await seedCustomer();
+      expect(await price(customer)).toMatchObject(PRICED);
+      expect(bridge().recurringPestPriceIsFromRows()).toBe(true);
+    });
+
+    test.each(PRICE_ROWS)('without the %s row the refresh still succeeds, and there is no start offer price', async (key) => {
+      const customer = await seedCustomer();
+      expect(await trx('pricing_config').where({ config_key: key }).del()).toBe(1);
+      await expect(price(customer)).rejects.toMatchObject(UNAVAILABLE);
+      // The refresh ran and succeeded: the settings read fresh. The missing row alone refused the price.
+      expect(engine().needsSync()).toBe(false);
+      expect(bridge().recurringPestPriceIsFromRows()).toBe(false);
+      // Fresh settings are refused the same way (no second refresh needed to say no).
+      await expect(price(customer)).rejects.toMatchObject(UNAVAILABLE);
+    });
+
+    test('a base row with no floor is not enough', async () => {
+      const customer = await seedCustomer();
+      await trx.raw("UPDATE pricing_config SET data = data - 'floor' WHERE config_key = 'pest_base'");
+      await expect(price(customer)).rejects.toMatchObject(UNAVAILABLE);
+    });
+
+    // The hazard on a warm process, and the default that stays as it was for a price a person reads.
+    test('after the base row is removed the engine still holds the earlier base price: the default pricer prices from it, the start offer refuses', async () => {
+      const constants = require('../services/pricing-engine/constants');
+      const pricer = require('../services/customer-pricing-ai');
+      const customer = await seedCustomer();
+      expect(await price(customer)).toMatchObject(PRICED);
+      const base = constants.PEST.base;
+      const [row] = await trx('pricing_config').where({ config_key: 'pest_base' }).select('*');
+
+      await trx('pricing_config').where({ config_key: 'pest_base' }).del();
+      engine().invalidatePricingConfigCache();
+      const ask = (extra) => pricer.buildCustomerPricingResponse({
+        customer, prompt: 'I am interested in adding pest control', db: trx, propertyLookup: async () => SAVED_LOOKUP, ...extra,
+      });
+      expect((await ask()).options.length).toBeGreaterThan(0);
+      expect(constants.PEST.base).toBe(base);
+      await expect(ask({ strictPriceSettings: true })).rejects.toMatchObject(UNAVAILABLE);
+      await expect(price(customer)).rejects.toMatchObject(UNAVAILABLE);
+
+      // The row is back: the next refresh proves it, and the price returns.
+      await trx('pricing_config').insert({ ...row, data: JSON.stringify(row.data) });
+      engine().invalidatePricingConfigCache();
+      expect(await price(customer)).toMatchObject(PRICED);
+      expect(bridge().recurringPestPriceIsFromRows()).toBe(true);
+    });
   });
 });

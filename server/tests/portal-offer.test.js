@@ -18,7 +18,7 @@ const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISO
 
 // Same minimal knex fake as the report suite (kept in sync by hand — the
 // fixture builder is test scaffolding, not a production surface).
-function dbForTables(tables = {}) {
+function dbForTables(tables = {}, { scheduledColumns = {} } = {}) {
   const dbFn = (table) => {
     // A table is a list of rows. It can also be a function of the filters one read used ([name, ...args] in call
     // order), for a test whose answer must depend on WHICH read asks (this fake applies no filter itself).
@@ -40,6 +40,7 @@ function dbForTables(tables = {}) {
       // The annual-prepay coverage read (coveredTermsAsOf) filters with raw SQL; this fake answers by table.
       whereRaw: filter('whereRaw'),
       distinct() { return answer(); },
+      pluck(column) { return answer().map((row) => row[column]); },
       columnInfo() {
         return table === 'scheduled_services'
           ? {
@@ -48,6 +49,8 @@ function dbForTables(tables = {}) {
             service_address_line2: {},
             service_address_city: {},
             service_address_zip: {},
+            // Columns one test adds (recurring_ongoing: the ongoing-series read asks for it only where it exists).
+            ...scheduledColumns,
           }
           : {};
       },
@@ -83,7 +86,7 @@ function recurringRows(serviceTypes) {
   }));
 }
 
-function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [], tables = {} } = {}) {
+function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [], tables = {}, scheduledColumns = {} } = {}) {
   const scheduled = recurringRows(serviceTypes);
   return dbForTables({
     customers: [customer],
@@ -94,7 +97,7 @@ function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [], table
     estimates: [],
     customer_plan_rates: planRates,
     ...tables,
-  });
+  }, { scheduledColumns });
 }
 
 const missLookup = async () => null;
@@ -324,10 +327,16 @@ describe('buildStartOffer', () => {
   });
 
   // The fake database holds no price settings, so the bridge's refresh would fail and the start offer would
-  // refuse to price (strict price settings). Fresh settings are the default here; one describe below tests the rule.
+  // refuse to price (strict price settings). Fresh settings whose pest price inputs came from their rows are
+  // the default here; one describe below tests the rule.
+  const bridge = require('../services/pricing-engine/db-bridge');
   let needsSync;
-  beforeEach(() => { needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false); });
-  afterEach(() => { needsSync.mockRestore(); });
+  let fromRows;
+  beforeEach(() => {
+    needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
+    fromRows = jest.spyOn(bridge, 'recurringPestPriceIsFromRows').mockReturnValue(true);
+  });
+  afterEach(() => { needsSync.mockRestore(); fromRows.mockRestore(); });
 
   test('a customer with no plan gets the standard pest plan, priced by the real engine, with the setup fee a new plan carries', async () => {
     const { option, reason } = await start(noPlanDb());
@@ -458,6 +467,93 @@ describe('buildStartOffer', () => {
         ['whereNotNull', 'recurring_parent_id'],
         ['whereNotIn', 'status', require('../services/waveguard-existing-services').TERMINAL_STATUSES],
       ]));
+    });
+  });
+
+  // An ongoing series BETWEEN visits. Its root says the plan goes on (a cancel clears recurring_ongoing, and the
+  // nightly top-up extends the series), also on a day with no visit of it on the calendar: the last visit is
+  // completed and the next one is not minted yet. Both calendar reads see no live visit then, so the offer also
+  // reads the top-up's own selector. The table below answers ONLY that read, with the filter the database
+  // applies, so these cases cannot pass on the calendar reads.
+  describe('an ongoing recurring series with no visit on the calendar', () => {
+    const PAST_DATE = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const ROOT = { id: 'root-1', is_recurring: true, recurring_ongoing: true, recurring_parent_id: null, status: 'completed', scheduled_date: PAST_DATE };
+    const asksForOngoingRoot = (calls) => calls.some(([name, filter]) => name === 'where' && filter && filter.recurring_ongoing === true);
+    const ongoingRoots = (rows) => rows.filter((row) => row.is_recurring === true && row.recurring_ongoing === true && row.recurring_parent_id == null);
+    const seriesDb = (rows, scheduledColumns = { recurring_ongoing: {} }) => noPlanDb({
+      scheduledColumns,
+      visits: (calls) => (asksForOngoingRoot(calls) ? ongoingRoots(rows) : []),
+    });
+
+    test.each([
+      ['a completed root, no later visit', {}],
+      ['a root whose own visit was cancelled while the series goes on', { status: 'cancelled' }],
+    ])('%s: the customer has a plan', async (_label, change) => {
+      expect(await start(seriesDb([{ ...ROOT, ...change }]))).toEqual({ option: null, reason: 'has_plan' });
+    });
+
+    // A finite series that ran out, and a series a cancel ended, keep no ongoing root: not a plan today.
+    test.each([
+      ['a completed finite series (the root was never ongoing)', { recurring_ongoing: false }],
+      ['a cancelled series (the cancel cleared the flag)', { recurring_ongoing: false, status: 'cancelled' }],
+      ['a completed visit of a series that is not its root', { recurring_parent_id: 'root-0' }],
+    ])('%s is not a plan: the home is priced', async (_label, change) => {
+      expect(await start(seriesDb([{ ...ROOT, ...change }]))).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+    });
+
+    test("the read is the nightly top-up's own selector, for this customer only", async () => {
+      const reads = [];
+      const db = noPlanDb({ scheduledColumns: { recurring_ongoing: {} }, visits: (calls) => { reads.push(calls.map(([name, ...args]) => [name, ...args])); return []; } });
+      await start(db);
+      expect(reads.find(asksForOngoingRoot)).toEqual([
+        ['where', { is_recurring: true, recurring_ongoing: true }],
+        ['whereNull', 'recurring_parent_id'],
+        ['where', 'customer_id', 'cust-1'],
+      ]);
+    });
+
+    test('a schema without the column has no ongoing series to read', async () => {
+      const reads = [];
+      const db = noPlanDb({ visits: (calls) => { reads.push(calls); return []; } });
+      expect(await start(db)).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+      expect(reads.some(asksForOngoingRoot)).toBe(false);
+    });
+
+    test('a failed read throws: an outage is never read as "no plan"', async () => {
+      const db = noPlanDb({
+        scheduledColumns: { recurring_ongoing: {} },
+        visits: (calls) => { if (asksForOngoingRoot(calls)) throw new Error('series read down'); return []; },
+      });
+      await expect(start(db)).rejects.toThrow('series read down');
+    });
+  });
+
+  // The account-level commercial rule (isCommercialAccount: the 'commercial' tier sentinel, or a commercial or
+  // business property type). The premises proof reads the property type by the engine's rule, and the plan
+  // check reads the Commercial tier as "no plan". Without this rule a commercial account with a blank property
+  // type and a home-like saved lookup would get the residential plan's price.
+  describe('a commercial account', () => {
+    test.each([
+      ['the Commercial tier and no property type', { waveguard_tier: 'Commercial', property_type: null }],
+      ['the commercial tier in another spelling, with a residential property type', { waveguard_tier: ' commercial ', property_type: 'single_family' }],
+      ['a business property type and no tier', { property_type: 'Business' }],
+      ['a commercial property type and no tier', { property_type: 'commercial' }],
+    ])('%s: no residential offer, and nothing is read or priced for it', async (_label, customer) => {
+      const pricer = jest.spyOn(require('../services/customer-pricing-ai'), 'buildCustomerPricingResponse');
+      const visitReads = [];
+      try {
+        const db = noPlanDb({ customer, visits: (calls) => { visitReads.push(calls); return []; } });
+        expect(await start(db)).toEqual({ option: null, reason: 'premises' });
+        expect(pricer).not.toHaveBeenCalled();
+        // Refused before the plan check: no plan read of the calendar.
+        expect(visitReads.some((calls) => calls.some(([name, column]) => name === 'whereNull' && column === 'is_recurring'))).toBe(false);
+      } finally {
+        pricer.mockRestore();
+      }
+    });
+
+    test('a residential account with no tier is still priced', async () => {
+      expect(await start(noPlanDb({ customer: { property_type: 'single_family' } }))).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
     });
   });
 
@@ -654,6 +750,26 @@ describe('buildStartOffer', () => {
       } finally {
         running.mockRestore();
       }
+    });
+
+    // A refresh answers true when pricing_config holds any row at all, and the engine keeps what it had for a
+    // row that is missing. The start offer needs the bridge's proof that the pest price inputs are the rows' own.
+    test('pest price inputs that did not come from their rows are no price: after a refresh that succeeds, and on fresh settings', async () => {
+      fromRows.mockReturnValue(false);
+      needsSync.mockReturnValue(true);
+      sync.mockResolvedValue(true);
+      await expect(start(noPlanDb())).rejects.toMatchObject({ code: 'PRICING_CONFIG_UNAVAILABLE' });
+      expect(sync).toHaveBeenCalledTimes(1);
+      needsSync.mockReturnValue(false);
+      await expect(start(noPlanDb())).rejects.toMatchObject({ code: 'PRICING_CONFIG_UNAVAILABLE' });
+      expect(sync).toHaveBeenCalledTimes(1);
+    });
+
+    test('the portal card does not ask for that proof and is still built', async () => {
+      fromRows.mockReturnValue(false);
+      const card = await buildPortalOffer('cust-1', dbFor({ serviceTypes: ['Quarterly Pest Control'] }), { propertyLookup: savedLookup });
+      expect(fromRows).not.toHaveBeenCalled();
+      expect(['priced', 'quote_cta']).toContain(card.mode);
     });
 
     test('a customer who is refused before the price costs no refresh', async () => {

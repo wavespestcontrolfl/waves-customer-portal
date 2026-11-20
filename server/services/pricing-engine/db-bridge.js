@@ -770,6 +770,48 @@ function syncBedBugPricingConfig(bedBugConfig) {
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
 
+// Which pricing_config fields of the recurring pest price a sync took from
+// their rows. A sync keeps what the engine had for a row or a field that is
+// missing: the in-code default on a cold start, an earlier value on a warm
+// process (two processes can then hold different prices). That is the answer
+// every surface a person reads shows. A price that nobody watches (the plan
+// start offer) must come from the rows, so that caller asks
+// recurringPestPriceIsFromRows() (same idea as mistingRefillPriceIsFromRow).
+//
+// The rows are every pricing_config row the recurring pest price reads: the
+// four pest rows and the tier row (the frequency discounts, the roach
+// modifiers and the home-age steps are in-code only). The answer is yes when
+// the last SUCCESSFUL sync
+//   1. applied each row: the base price and the floor, the footprint
+//      breakpoints, a features field, a property type, and the discount of
+//      every tier; and
+//   2. left nothing over: every field a sync of this process ever took from
+//      a row came from its row again. A field that was removed from a row
+//      keeps its earlier value in this process until a restart, and that
+//      value is in no row.
+// A field no row has carried since the process started (the seeded
+// pest_features row has no attached_garage) is the in-code value in every
+// process, for every caller: that is not a leftover.
+// Both sets move together with _lastSync: a failed sync restores the
+// constants and leaves this answer as it was.
+// The pest_features fields the sync reads (the lines in the Pest Control block).
+const PEST_FEATURE_ROW_FIELDS = Object.freeze([
+  'pool_cage', 'pool_cage_small', 'pool_cage_medium', 'pool_cage_large', 'pool_cage_oversized', 'pool_no_cage',
+  'shrubs_heavy', 'shrubs_moderate', 'shrubs_light', 'landscape_complex', 'landscape_moderate', 'landscape_simple',
+  'near_water', 'indoor', 'attached_garage',
+]);
+let _pestPriceFieldsApplied = new Set(); // by the last successful sync
+const _pestPriceFieldsEverApplied = new Set(); // by any successful sync of this process
+function recurringPestPriceIsFromRows() {
+  const applied = _pestPriceFieldsApplied;
+  for (const name of _pestPriceFieldsEverApplied) if (!applied.has(name)) return false;
+  const some = (row) => [...applied].some((name) => name.startsWith(`${row}.`));
+  return applied.has('pest_base.base') && applied.has('pest_base.floor')
+    && applied.has('pest_footprint.breakpoints')
+    && some('pest_features') && some('pest_property_type')
+    && Object.keys(constants.WAVEGUARD.tiers).every((tier) => applied.has(`waveguard_tiers.${tier}.discount`));
+}
+
 // ── Pre-slab inventory-price link (owner decision 2026-07-10) ─────────────
 // Approved inventory prices drive pre-slab container costs: each product
 // with a catalogProductName is looked up in products_catalog, and an active,
@@ -1195,9 +1237,12 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       typeof config.pest_base?.enforce_floor_post_discount === 'boolean'
         ? config.pest_base.enforce_floor_post_discount
         : false;
+    // The fields this sync takes from the rows of the recurring pest price (recurringPestPriceIsFromRows).
+    const pestPriceFields = new Set();
     if (config.pest_base) {
       if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);
       if (config.pest_base.floor) constants.PEST.floor = r(config.pest_base.floor);
+      for (const field of ['base', 'floor']) if (config.pest_base[field]) pestPriceFields.add(`pest_base.${field}`);
       // Initial Roach Knockdown sliding scale — DB shape mirrors the constants:
       //   { regular: [{sqft, price}, ...], german: [{sqft, price}, ...],
       //     regular_standalone: [{sqft, price}, ...] }
@@ -1245,6 +1290,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     if (config.pest_features) {
       const f = config.pest_features;
       const adj = constants.PEST.additionalAdjustments;
+      for (const field of PEST_FEATURE_ROW_FIELDS) if (f[field] != null) pestPriceFields.add(`pest_features.${field}`);
       if (f.pool_cage != null) adj.poolCage = r(f.pool_cage);
       if (f.pool_cage_small != null) adj.poolCageSmall = r(f.pool_cage_small);
       if (f.pool_cage_medium != null) adj.poolCageMedium = r(f.pool_cage_medium);
@@ -1266,11 +1312,13 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         sqft: bp.sqft,
         adj: bp.adj >= 0 ? r(bp.adj) : -r(Math.abs(bp.adj)),
       }));
+      pestPriceFields.add('pest_footprint.breakpoints');
     }
     if (config.pest_property_type) {
       for (const [type, val] of Object.entries(config.pest_property_type)) {
         if (constants.PROPERTY_TYPE_ADJ[type] !== undefined) {
           constants.PROPERTY_TYPE_ADJ[type] = val >= 0 ? r(val) : -r(Math.abs(val));
+          pestPriceFields.add(`pest_property_type.${type}`);
         }
       }
     }
@@ -1795,6 +1843,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         if (constants.WAVEGUARD.tiers[tier]) {
           if (val.discount !== undefined) constants.WAVEGUARD.tiers[tier].discount = val.discount;
           if (val.min_services !== undefined) constants.WAVEGUARD.tiers[tier].minServices = val.min_services;
+          // A recurring pest price takes the discount of the customer's tier (recurringPestPriceIsFromRows).
+          for (const field of ['discount', 'min_services']) if (val[field] !== undefined) pestPriceFields.add(`waveguard_tiers.${tier}.${field}`);
         }
       }
     }
@@ -2299,6 +2349,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
 
     assertValidPestPricingConfig(constants);
 
+    _pestPriceFieldsApplied = pestPriceFields;
+    for (const name of pestPriceFields) _pestPriceFieldsEverApplied.add(name);
     _lastSync = Date.now();
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
@@ -2335,6 +2387,7 @@ module.exports = {
   readRodentAdditionalCheckPriceFromCatalog,
   needsSync,
   invalidatePricingConfigCache,
+  recurringPestPriceIsFromRows,
   validatePestPricingConfig,
   assertValidPestPricingConfig,
 };

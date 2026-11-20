@@ -1196,15 +1196,30 @@ function buildQuoteOption({
 // settings again. After it answers true the engine prices in this same turn
 // (no await between here and the last generateEstimate), and a refresh begins
 // with a database read, so none can change the settings in between.
+// strict also needs the price inputs to be the ROWS' own. A refresh answers
+// true when pricing_config holds any row at all; for a row or a field that
+// is missing the engine keeps what it had (the in-code default on a cold
+// start, an earlier value on a warm process). So strict asks the bridge
+// whether the last good refresh took the pest price inputs from their rows
+// and left nothing over (recurringPestPriceIsFromRows), on both paths: a
+// refresh that just ran, and settings that read fresh. The bridge has that
+// proof for the recurring pest price only, which is why strict prices pest
+// control only (buildCustomerPricingResponse refuses another service).
+function priceSettingsUnavailable(message) {
+  return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
+}
 async function maybeSyncPricingEngine(db, { strict = false } = {}) {
   const canSync = Boolean(db && db.schema && typeof db.schema.hasTable === 'function');
   if (!canSync && !strict) return;
+  const bridge = require('./pricing-engine/db-bridge');
   const due = Boolean(pricingEngine.needsSync && pricingEngine.needsSync());
-  const running = strict && require('./pricing-engine/db-bridge').isSyncInFlight();
-  if (!due && !running) return;
-  const synced = canSync ? await pricingEngine.syncConstantsFromDB(db) : false;
-  if (strict && synced !== true) {
-    throw Object.assign(new Error('live price settings could not be loaded'), { code: 'PRICING_CONFIG_UNAVAILABLE' });
+  const running = strict && bridge.isSyncInFlight();
+  if (due || running) {
+    const synced = canSync ? await pricingEngine.syncConstantsFromDB(db) : false;
+    if (strict && synced !== true) throw priceSettingsUnavailable('live price settings could not be loaded');
+  }
+  if (strict && !bridge.recurringPestPriceIsFromRows()) {
+    throw priceSettingsUnavailable('the pest price settings did not come from their rows');
   }
 }
 
@@ -1226,8 +1241,10 @@ async function buildCustomerPricingResponse({
   // payload — may ever receive it.
   includeEngineContext = false,
   // Opt-in ONLY (the plan start offer, priced by a job with nobody watching):
-  // a due refresh of the price settings that fails throws, instead of a price
-  // from the values the engine had (maybeSyncPricingEngine).
+  // a due or running refresh of the price settings that fails throws, and so
+  // does a pest price whose inputs did not come from their rows, instead of
+  // a price from the values the engine had (maybeSyncPricingEngine). Pest
+  // control only.
   strictPriceSettings = false,
 }) {
   const text = String(prompt || '').trim();
@@ -1298,6 +1315,12 @@ async function buildCustomerPricingResponse({
   // geocoding/AI property lookup (cache writes, provider cost, latency).
   const alreadyIncluded = requestedServices.filter(key => ownedAndNotRepeatable(key, ownedSet));
   const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
+  // strictPriceSettings: the bridge can prove "from the rows" for the
+  // recurring pest price only (maybeSyncPricingEngine), so strict refuses to
+  // price anything else. A caller's mistake: refused before any lookup.
+  if (strictPriceSettings && servicesToPrice.some((key) => key !== 'pest_control')) {
+    throw new Error('strictPriceSettings prices pest control only');
+  }
 
   let lookupFn = propertyLookup;
   if (!lookupFn && servicesToPrice.length) {

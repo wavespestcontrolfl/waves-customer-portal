@@ -1468,7 +1468,8 @@ async function hasLiveLegacyPlanVisit(database, customerId) {
 //   (no recurring flag, a recurring parent) counts too (hasLiveLegacyPlanVisit).
 //   One row rule judges both shapes (isLiveObligationRow), so a visit that
 //   rides a job without being a plan visit (a callback, an included
-//   follow-up, a one-time booking) is not a plan, whatever its flag says;
+//   follow-up, a one-time booking) is not a plan, whatever its flag says.
+//   An ongoing series counts between its visits too (its root);
 // - the plan-rate ledger: any billed component, also one the ledger could not
 //   name (the portal card reads only the named ones: it must place a rate on
 //   a family, and here a billed rate with no name is still a plan). The read
@@ -1484,6 +1485,12 @@ async function customerHoldsPlan(database, customer) {
   if (existing.isMembershipCustomerRow(customer)) return true;
   if ((await existing.loadLiveRecurringObligationRows(database, customer.id)).length) return true;
   if (await hasLiveLegacyPlanVisit(database, customer.id)) return true;
+  // An ongoing series BETWEEN visits: its root says the plan goes on (a cancel
+  // clears the flag; the nightly top-up extends the series), also on a day
+  // with no visit of it on the calendar. The top-up's own selector, as the
+  // billing rules read it (unpricedOngoingSeries in billing-mode-rules.js).
+  const ongoingSeries = await require('../recurring-series-topup').eligibleSeriesParentIds(database, { customerId: customer.id });
+  if (ongoingSeries.length) return true;
   const billedRates = (await require('../plan-rate-ledger').loadComponents(database, customer.id, { strictProbe: true }))
     .filter((row) => Number(row.monthly_rate) > 0);
   if (billedRates.length) return true;
@@ -1531,7 +1538,9 @@ const START_OFFER_FAMILIES = Object.freeze(['pest_control']);
 // failed refresh with the values it had (the code defaults on a cold start);
 // a card that a person reads may show a price from those, and an offer priced
 // with nobody watching must not (same rule as pricingIsFresh in
-// misting-refill.js).
+// misting-refill.js). Strict also needs the pest price inputs to be the rows'
+// own (recurringPestPriceIsFromRows in the bridge, as the misting refill asks
+// mistingRefillPriceIsFromRow).
 async function buildStartOffer(customerId, database, targetKey, { propertyLookup = strictCacheOnlyPropertyLookup, visitId = null } = {}) {
   if (!customerId || !database || !visitId || !START_OFFER_FAMILIES.includes(targetKey)) {
     throw new Error('buildStartOffer: a customer, a database, a start offer family and the visit the offer follows are required');
@@ -1539,6 +1548,12 @@ async function buildStartOffer(customerId, database, targetKey, { propertyLookup
   const premises = await resolvePortalOfferPremises(database, customerId);
   if (!premises) return { option: null, reason: 'premises' };
   const { customer, primaryStreet } = premises;
+  // The account-level commercial rule (the 'commercial' tier sentinel, or a
+  // commercial or business property type). The premises proof reads the
+  // property type by the engine's rule, and the plan check reads the
+  // 'commercial' tier as "no plan", so without this a commercial account with
+  // a blank property type could get the residential plan's price.
+  if (require('../self-booking-plan-sync').isCommercialAccount(customer)) return { option: null, reason: 'premises' };
   if (!(await visitIsAtPrimaryPremises(database, customer, visitId, primaryStreet))) return { option: null, reason: 'premises' };
   if (await customerHoldsPlan(database, customer)) return { option: null, reason: 'has_plan' };
   const pricing = await resolvePortalOfferPricingResult({
