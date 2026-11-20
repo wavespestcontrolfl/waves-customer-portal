@@ -5,7 +5,7 @@ import {
   CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
   noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, trackStaffImport, usedOnThisStaffPage,
 } from './lib/staleChunkReload';
-import { PortalUpdateBar, PortalUpdateGate, useBrowserOffline, useHoldAwareReload, useNewerBuild, usePageUsed } from './components/PortalUpdate';
+import { PortalUpdateBar, PortalUpdateGate, useBrowserOffline, useHoldAwareReload, useNewerBuild, usePageUse } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -304,7 +304,7 @@ function ChunkLoadFallback({ newVersion = false, staff = false }) {
   // The staff layout can stay around this screen, the Ask Waves draft
   // included: a use of the page clears what the button named, so it asks
   // again, as the Reload bar does.
-  usePageUsed(null, clearNamed);
+  usePageUse(clearNamed);
   if (!operatorPath) {
     return (
       <CustomerFailureScreen

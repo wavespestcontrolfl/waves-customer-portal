@@ -14,6 +14,8 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => false }));
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
 import { registerReloadHold } from '../lib/reloadHolds';
 import { countDeviceWrite } from '../lib/deviceWrites';
+import { PAGE_USE_EVENTS } from '../lib/portalReload';
+import { watchPageUse } from '../lib/staleChunkReload';
 import { PortalReloadPrompt, PortalUpdateBar, PortalUpdateGate } from './PortalUpdate';
 
 let holding = false;
@@ -386,6 +388,47 @@ describe('PortalUpdateBar', () => {
     expect(screen.getByText('Anything not saved on this page will be lost.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  // The tab keeps one record of a use (lib/staleChunkReload.js): the bar,
+  // each prompt and the stale-chunk reload share one set of document
+  // listeners, and each still hears every use while it listens.
+  test('the bar and every prompt share one set of document listeners for a use of the page, and each hears every use', () => {
+    const added = vi.spyOn(document, 'addEventListener');
+    const removed = vi.spyOn(document, 'removeEventListener');
+    const forUse = (spy) => spy.mock.calls.filter(([type, , capture]) => PAGE_USE_EVENTS.includes(type) && capture === true);
+    const stop = watchPageUse();
+    renderAt('/admin/today/truck-check');
+    goLive('bbb222bbb222');
+    const prompts = render(
+      <MemoryRouter initialEntries={['/admin/today/truck-check']}>
+        <PortalReloadPrompt message="Part one did not load." />
+        <PortalReloadPrompt message="Part two did not load." />
+      </MemoryRouter>,
+    );
+    expect(forUse(added)).toHaveLength(PAGE_USE_EVENTS.length);
+    const [barReload, ...promptReloads] = screen.getAllByRole('button', { name: 'Reload' });
+    promptReloads.forEach((button) => fireEvent.click(button));
+    expect(screen.getAllByText('Anything not saved on this page will be lost.')).toHaveLength(2);
+    // A use clears what each prompt named, and the bar asks after it.
+    fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose' } });
+    expect(screen.getByText('Part one did not load.')).toBeTruthy();
+    expect(screen.getByText('Part two did not load.')).toBeTruthy();
+    fireEvent.click(barReload);
+    expect(reload).not.toHaveBeenCalled();
+    expect(screen.getByText('Anything not saved on this page will be lost.')).toBeTruthy();
+    // With the prompts gone, the bar still hears a use.
+    prompts.unmount();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose, left side' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(forUse(removed)).toHaveLength(0);
+    cleanup();
+    stop();
+    expect(forUse(removed)).toHaveLength(PAGE_USE_EVENTS.length);
+    expect(forUse(added)).toHaveLength(PAGE_USE_EVENTS.length);
   });
 
   test('a page not used since it opened reloads at once, and a page move ends a use', () => {

@@ -45,9 +45,9 @@
 // A reload closes the page in view and opens the address. While a move is
 // not yet in view the two differ: the address changes first, and Back
 // changes it even before the routes render. So every rule here judges both
-// pages. The staff rules apply while either is a staff page (staffTab), and
-// a page that never reloads by itself bars the reload whether it is in view
-// or at the address. A page whose code is missing reloads only while the
+// pages. The staff rules apply while either is a staff page, or a page that
+// a move from a field page opened (staffTab), and a page that never reloads
+// by itself bars the reload whether it is in view or at the address. A page whose code is missing reloads only while the
 // address names that page: after Back, its reload would open the next page.
 // Two paths name one page when they decode alike, case kept (samePage).
 //
@@ -64,12 +64,15 @@
 // an offline screen. Nor does the page a move from a field page opens, as
 // PortalUpdateGate judges that move (notePageMove): field work can still be
 // on its way. There a page whose code is missing shows its retry screen.
+// That page keeps the staff rules, a customer page too, and a redirect
+// continues the move: Back from Today to /recap/:token, which redirects to
+// /report/:token, opens the report from Today.
 //
 // The one reload for a missing chunk counts until the tab leaves the path it
 // reopened (chunkReloadAttempted): a route can load in parts, and the part
 // that loads clears the one-shot flag before the part still missing fails.
 
-import { decodedPath, isAdminPath } from './adminBookmarkMeta';
+import { decodedPath, isAdminPath, isFieldPath } from './adminBookmarkMeta';
 import {
   blockersBesideWork, isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
 } from './portalReload';
@@ -121,9 +124,9 @@ export function notePageMove(from, to) {
   renderedMove = { from, to };
 }
 
-// A move in view also ends the use of the page it left, as for the Reload
-// bar (usePageUsed): the move remounted the routes, so nothing unsaved stays
-// from that use, and Back to that page opens it unused. A move React dropped
+// A move in view also ends the use of the page it left
+// (usedOnThisStaffPage): the move remounted the routes, so nothing unsaved
+// stays from that use, and Back to that page opens it unused. A move React dropped
 // leaves the page and its use. A move in view away from the path the one
 // reload reopened, to another page (samePage), also ends that reload's
 // count, path and flag (chunkReloadAttempted); nothing else does. A move can
@@ -156,10 +159,15 @@ function pageInView() {
 }
 
 // Whether the staff rules apply: while the page in view or the address is a
-// staff page (see the top of this file). App.jsx and LazyPanel.jsx ask it
-// too, for a page or a part whose code is missing.
+// staff page, or a page that a move from a field page opened, which never
+// reloads by itself (see the top of this file). A redirect continues the
+// move it ends (PortalUpdateGate): after Back from Today to /recap/:token,
+// the report it redirects to asks for its code once the redirect is in view,
+// and that code keeps the staff rules. App.jsx and LazyPanel.jsx ask it too,
+// for a page or a part whose code is missing.
 export function staffTab() {
-  return isAdminPath(pageInView()) || isAdminPath(window.location.pathname);
+  return [pageInView(), window.location.pathname]
+    .some((pathname) => isAdminPath(pathname) || isFieldPath(moveFromFor(pathname)));
 }
 
 // Runs `load`, an import asked for on a staff tab: a page's code
@@ -176,16 +184,53 @@ export async function trackStaffImport(load) {
   }
 }
 
-// Notes each use of a page against the page in view, as the Reload bar
-// counts a use (isPageUse, lib/portalReload.js). Installed once, by main.jsx.
-export function watchPageUse(target = document) {
-  const noteUse = (event) => { if (isPageUse(event)) usedPath = pageInView(); };
-  PAGE_USE_EVENTS.forEach((type) => target.addEventListener(type, noteUse, true));
-  return () => PAGE_USE_EVENTS.forEach((type) => target.removeEventListener(type, noteUse, true));
+// One set of document listeners notes each use of the page in view for the
+// whole tab (isPageUse, lib/portalReload.js): it records the page used
+// (usedOnThisStaffPage), then tells each listener (onPageUse), such as a
+// Reload button that clears what it named (usePageUse in
+// components/PortalUpdate.jsx). It listens while anyone asks: main.jsx for
+// the page load (watchPageUse), and each listener while it listens.
+const pageUseListeners = new Set();
+let pageUseWatchers = 0;
+
+function noteUse(event) {
+  if (!isPageUse(event)) return;
+  usedPath = pageInView();
+  [...pageUseListeners].forEach((note) => note());
+}
+
+export function watchPageUse() {
+  if (pageUseWatchers === 0) PAGE_USE_EVENTS.forEach((type) => document.addEventListener(type, noteUse, true));
+  pageUseWatchers += 1;
+  let watching = true;
+  return () => {
+    if (!watching) return;
+    watching = false;
+    pageUseWatchers -= 1;
+    if (pageUseWatchers === 0) PAGE_USE_EVENTS.forEach((type) => document.removeEventListener(type, noteUse, true));
+  };
+}
+
+// Calls `listener` at each use of the page in view, until the stop it
+// returns.
+export function onPageUse(listener) {
+  const note = () => listener();
+  pageUseListeners.add(note);
+  const stopWatching = watchPageUse();
+  return () => {
+    pageUseListeners.delete(note);
+    stopWatching();
+  };
 }
 
 // Whether the tab was used on the staff page in view since it came into
-// view. Both paths read the page in view, so they share one spelling.
+// view: a tap, a key or a field change anywhere but on a Reload control. A
+// page keeps unsaved work in many ways: a field, a toggle, a picked slot, a
+// signature on a canvas, a shape drawn on a map. No list of controls names
+// them all, so after any use a reload asks once first: the Reload bar, the
+// staff retry screen (App.jsx) and a page whose code is missing ask this. A
+// page move ends the use once it is in view (notePageInView). Both paths
+// read the page in view, so they share one spelling.
 export function usedOnThisStaffPage() {
   const pathname = pageInView();
   return isAdminPath(pathname) && usedPath === pathname;

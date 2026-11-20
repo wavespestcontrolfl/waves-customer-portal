@@ -84,6 +84,12 @@ function renderInBoundary(Page) {
 // BrowserRouter makes it in App.jsx: a move to Blog then stays out of view,
 // and its render is dropped when another move replaces it. `pages`: the page
 // for a path, such as one whose code is missing, in place of the default.
+// Like App.jsx's RecapLinkRedirect: an old recap link only redirects, with
+// replace, to the report.
+function RecapLink() {
+  return <Navigate to="/report/abc" replace />;
+}
+
 function renderGate(entries, { transitions = false, pages = {} } = {}) {
   let navigate;
   function Navigator() {
@@ -319,7 +325,7 @@ test('a customer page\'s own import on its way does not stop the stale-chunk rel
 
 test('a customer page keeps its stale-chunk reload while a staff tab hold is open, and after a use of the page', () => {
   holding = true;
-  const stop = watchPageUse(document);
+  const stop = watchPageUse();
   try {
     fireEvent.pointerDown(document.body);
     const reload = vi.fn();
@@ -485,7 +491,7 @@ describe('on a staff page', () => {
     const pending = [];
     const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
     const uninstall = installPortalVersionWatch({ target });
-    const stop = watchPageUse(document);
+    const stop = watchPageUse();
     try {
       nameNewerBuild();
       const read = target.fetch('/api/admin/auth/me');
@@ -571,7 +577,7 @@ describe('on a staff page', () => {
   test('a page used before its code failed does not wait for open work: it says new version at once, and Reload names the work and the page', async () => {
     const target = { fetch: () => new Promise(() => {}) };
     const uninstall = installPortalVersionWatch({ target });
-    const stop = watchPageUse(document);
+    const stop = watchPageUse();
     try {
       nameNewerBuild();
       fireEvent.input(document.body);
@@ -677,7 +683,7 @@ describe('on a staff page', () => {
   });
 
   test('a move ends the use of the page it leaves: Back to a page used before the move, with no use since, reloads at once', async () => {
-    const stop = watchPageUse(document);
+    const stop = watchPageUse();
     try {
       const move = renderGate(['/admin/dashboard']);
       fireEvent.input(document.body);
@@ -697,7 +703,7 @@ describe('on a staff page', () => {
   // React drops the render of a move that Back undoes while the new page's
   // code loads: the page stays in view, with its use and its move.
   test('a move that never comes into view keeps the use of the page: Back while the next page loads', async () => {
-    const stop = watchPageUse(document);
+    const stop = watchPageUse();
     try {
       const move = renderGate(['/admin/dashboard'], { transitions: true });
       fireEvent.input(document.body);
@@ -715,7 +721,7 @@ describe('on a staff page', () => {
   // While a move is not yet in view, the address already names the next
   // page. A use then is a use of the page still in view.
   test('a use while the next page loads counts for the page in view: Back to that page keeps the tab', async () => {
-    const stop = watchPageUse(document);
+    const stop = watchPageUse();
     try {
       const move = renderGate(['/admin/dashboard'], { transitions: true });
       move('/admin/blog');
@@ -735,7 +741,7 @@ describe('on a staff page', () => {
   // The page the use was on closes as the next page comes into view, so the
   // reload drops nothing the move did not.
   test('a use while the next page loads: that page\'s missing code reloads only once it is in view, never over the page the use was on', async () => {
-    const stop = watchPageUse(document);
+    const stop = watchPageUse();
     let failBlog;
     let usedPageInViewAtReload = null;
     reload.mockImplementation(() => { usedPageInViewAtReload = screen.queryByText('/admin/dashboard') !== null; });
@@ -805,6 +811,44 @@ describe('on a staff page', () => {
     expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
     await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('manual');
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  // A redirect continues the move it ends (PortalUpdateGate). Back from Today
+  // to /recap/:token, which redirects to /report/:token, opens both from
+  // Today. The report asks for its code once the redirect is in view, and
+  // that code keeps the staff rules: the move from the field page bars the
+  // reload, at the preload error and at the page.
+  test('Back from Today to a link that redirects to a customer page whose code is missing: with a field write still open, nothing reloads', async () => {
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
+      const write = target.fetch('/api/admin/today/visits/v1/complete', { method: 'POST' });
+      let failReport;
+      const move = renderGate(['/recap/abc', '/admin/today'], {
+        transitions: true,
+        pages: {
+          '/recap/:token': RecapLink,
+          '/report/:token': lazyWithRetry(() => new Promise((_, reject) => { failReport = reject; })),
+        },
+      });
+      // The address the redirect leaves: the browser's names the report.
+      vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+      move(-1);
+      await waitFor(() => expect(failReport).toBeDefined());
+      const stale = preloadErrorEvent();
+      handleVitePreloadError(stale, reload);
+      expect(stale.defaultPrevented).toBe(false);
+      await act(async () => { failReport(new TypeError('Failed to fetch dynamically imported module: /assets/ReportViewPage-old.js')); });
+      expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+      pending[0]({ headers: new Headers() });
+      await write;
+    } finally {
+      uninstall();
+    }
   });
 
   // Back from a field page to a customer page whose code was asked for while
@@ -898,7 +942,7 @@ describe('on a staff page', () => {
   });
 
   test('a page used since it opened keeps the tab, so its missing code asks first; at the next page, a page whose code is missing reloads at once', async () => {
-    const stop = watchPageUse(document);
+    const stop = watchPageUse();
     try {
       fireEvent.input(document.body);
       await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('page-use');
@@ -912,7 +956,7 @@ describe('on a staff page', () => {
   });
 
   test('a tap on a Reload control is no use of the page, so a page whose code is missing still reloads at once', async () => {
-    const stop = watchPageUse(document);
+    const stop = watchPageUse();
     const control = document.body.appendChild(document.createElement('button'));
     control.setAttribute('data-portal-reload-prompt', '');
     try {
@@ -1265,7 +1309,7 @@ describe('on a staff page', () => {
   ])('%s during the wait for open work ends the wait: a page whose code is missing names the open work at once', async (_, start) => {
     const target = { fetch: () => new Promise(() => {}) };
     const uninstall = installPortalVersionWatch({ target });
-    const stop = watchPageUse(document);
+    const stop = watchPageUse();
     try {
       target.fetch('/api/admin/dashboard');
       const result = reloadForMissingCode({ pathname: '/admin/dashboard', reload });
