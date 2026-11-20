@@ -79,13 +79,14 @@
 // reopened (chunkReloadAttempted): a route can load in parts, and the part
 // that loads clears the one-shot flag before the part still missing fails.
 //
-// Vite marks a stylesheet as loaded once it starts to load it. So after one
-// failed in a tab that did not reload, a later import that lists the same
-// stylesheet skips it, and its page renders without it, with no error.
-// Several imports list one stylesheet: the report pages, Dispatch and
-// Projects share one. Which stylesheets an import lists is Vite's own, so
-// after a stylesheet failed, every later import fails as it did, through the
-// same handler (loadCode): only a reload loads the tab's code whole again.
+// Vite's preload helper marks a stylesheet as loaded once it starts to load
+// it. So a tab that lives on after a stylesheet failed, as a held staff tab
+// does, would skip it at a later import that lists it, and render that page
+// without it, with no error. The build changes the helper
+// (lib/stylesheetRetry.js): an import that lists a stylesheet still loading
+// waits for it and fails with it, and a stylesheet that failed is forgotten,
+// so the next import that lists it loads it again, and fails as the first
+// did while it is still missing.
 
 import { decodedPath, isAdminPath, isFieldPath } from './adminBookmarkMeta';
 import { isWavesAdminApp } from '../native/platform';
@@ -117,8 +118,6 @@ let renderedMove = NO_MOVE;
 let shownMove = NO_MOVE;
 let reloadedPath = pathOpenedByChunkReload();
 const staffImports = new Set();
-// The error of a stylesheet Vite failed to load in this tab, if any.
-let failedStylesheet = null;
 
 // Whether two paths name one page: alike once each is decoded, case kept
 // (decodedPath, lib/adminBookmarkMeta.js). The router keeps a link's path as
@@ -208,25 +207,10 @@ export async function trackStaffImport(load) {
   const entry = {};
   staffImports.add(entry);
   try {
-    return await loadCode(load);
+    return await load();
   } finally {
     staffImports.delete(entry);
   }
-}
-
-// Runs `load`, the import of a page's or a part's code, for each loader:
-// lazyWithRetry, lazyPanel and trackStaffImport. Once a stylesheet failed in
-// this tab, an import that resolves fails as that stylesheet did, through
-// the handler, as Vite fails it: its page could render without a stylesheet
-// Vite skipped (see the top of this file).
-export async function loadCode(load) {
-  const mod = await load();
-  if (failedStylesheet === null) return mod;
-  const event = new Event('vite:preloadError', { cancelable: true });
-  event.payload = new Error(failedStylesheet);
-  handleVitePreloadError(event);
-  if (!event.defaultPrevented) throw event.payload;
-  return undefined;
 }
 
 // One set of document listeners notes each use of the page in view for the
@@ -389,10 +373,8 @@ export function markPageNavigating(reload = () => window.location.reload()) {
 }
 
 // One-shot guard (takeChunkReload) so a genuine outage still surfaces instead
-// of reload-looping. It notes a stylesheet that failed, for loadCode.
+// of reload-looping.
 export function handleVitePreloadError(event, reload = () => window.location.reload()) {
-  const message = String(event.payload?.message || '');
-  if (/Unable to preload CSS/i.test(message)) failedStylesheet = message;
   if (pageNavigating()) {
     chunkHeld = true;
     event.preventDefault();
@@ -505,5 +487,4 @@ export function resetStaleChunkReloadForTests() {
   shownMove = NO_MOVE;
   reloadedPath = pathOpenedByChunkReload();
   staffImports.clear();
-  failedStylesheet = null;
 }

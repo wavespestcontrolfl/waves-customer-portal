@@ -1026,39 +1026,6 @@ describe('on a staff page', () => {
     }
   });
 
-  // Vite marks a stylesheet as loaded once it starts to load it, so after one
-  // failed, a later import that lists it skips it, and its page would render
-  // without it. Until a reload, every later import fails as that stylesheet
-  // did (loadCode): a staff page with held work gets its retry screen, and a
-  // customer page in view reloads at once, as the handler reloads one.
-  function failStylesheet() {
-    const failed = preloadErrorEvent();
-    failed.payload = new Error('Unable to preload CSS for /assets/CustomerReportHeader-old.css');
-    handleVitePreloadError(failed, reload);
-    expect(failed.defaultPrevented).toBe(false);
-  }
-
-  test('once a stylesheet failed on a held staff tab, a later page whose code loads gets the retry screen, not the page without the stylesheet', async () => {
-    holding = true;
-    failStylesheet();
-    renderInBoundary(lazyWithRetry(() => Promise.resolve({ default: () => <div>Loaded page</div> })));
-    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
-    expect(screen.queryByText('Loaded page')).not.toBeInTheDocument();
-    expect(reload).not.toHaveBeenCalled();
-  });
-
-  test('once a stylesheet failed on a staff tab, a customer page in view whose code loads later reloads at once', async () => {
-    failStylesheet();
-    notePageInView(null, '/admin/dashboard');
-    notePageMove('/admin/dashboard', '/report/abc');
-    notePageInView('/admin/dashboard', '/report/abc');
-    vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
-    renderInBoundary(lazyWithRetry(() => Promise.resolve({ default: () => <div>Loaded page</div> })));
-    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
-    expect(screen.queryByText('Loaded page')).not.toBeInTheDocument();
-    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
-  });
-
   // Back from a field page to a customer page whose code was asked for while
   // the field page was in view: that page keeps the staff rules through its
   // recovery, so the move from the field page still bars its reload.
