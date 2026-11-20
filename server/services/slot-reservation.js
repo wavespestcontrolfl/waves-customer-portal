@@ -1315,6 +1315,16 @@ async function reserveSlot({
         err.code = 'ESTIMATE_NOT_FOUND';
         throw err;
       }
+      // An archived row takes no hold, whatever its source (GATE_PORTAL_PLAN_START pre-push P1): the
+      // route refuses one before this transaction, but the plan-start and plan-restart mints archive
+      // the quote they replace and release its holds, so a reserve that passed the route and waited on
+      // this row lock would re-create a hold no accept can use, tying up the slot until it expires.
+      // Checked first, with the same generic not-found as a missing row, as the route does.
+      if (estimate.archived_at) {
+        const err = new Error('estimate is archived');
+        err.code = 'ESTIMATE_NOT_FOUND';
+        throw err;
+      }
       // The hold's pin, valid only while the LOCKED row still quotes the
       // address the coords were geocoded from (codex #3244 r7) — used by
       // both travel-gap probes and the insert's geo stamp alike, so a slot

@@ -136,6 +136,7 @@ const {
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
+  planStartSnapshotMatchesTotals,
   resolveStoredPestPricingVersion,
 } = require('../services/estimate-pricing-bundle-utils');
 const {
@@ -10745,6 +10746,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     if (annualPrepaySelected && !slotId && !existingAppointmentId && !isCommercialAccept) {
       return res.status(400).json({ error: 'annual prepay requires selecting a service appointment first' });
     }
+    // A plan-start quote (GATE_PORTAL_PLAN_START) is the portal card's booking path: its accept
+    // must carry the visit it books, a held slot or the appointment the page shows, so it never
+    // starts a plan with no visit (codex pre-push r23 P1). The page asks for a slot first
+    // (standard_slot_pick); this refuses a slotless request and leaves the quote open. Both ids
+    // are verified below as on every accept.
+    if (estimate.source === 'plan_start' && !slotId && !existingAppointmentId) {
+      return res.status(400).json({ error: 'Pick a visit time to start your plan.', code: 'plan_start_slot_required' });
+    }
     if (billByInvoice && !estimate.customer_id && !estimate.customer_phone) {
       return res.status(400).json({ error: 'invoice-mode estimates require a linked customer or customer phone before online acceptance' });
     }
@@ -12492,6 +12501,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       if (estimate.source === 'plan_restart') {
         const { assertRestartAcceptEligible } = require('../services/cancellation-resolution/restart');
         await assertRestartAcceptEligible(trx, estimate);
+      }
+      // Plan-start accept revalidation (GATE_PORTAL_PLAN_START): same point, same
+      // lock — the account must still be active, not cancelled, and own no live
+      // recurring service (the mint priced it standalone). Drift refuses with a
+      // 409 the estimate page renders.
+      if (estimate.source === 'plan_start') {
+        const { assertPlanStartAcceptEligible } = require('../services/cancellation-resolution/restart');
+        await assertPlanStartAcceptEligible(trx, estimate);
       }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
@@ -29509,10 +29526,15 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
 // buildPricingBundleInner) instead of rebuilding the offer from live pricing.
 // Pure; also read by the admin Pipeline card, which shows an open offer's
 // per-application price only when the page would sell exactly that snapshot.
+// The plan-start mint publishes a quote only when this returns true.
 function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
   return Boolean(snapshotBundle)
     && Array.isArray(snapshotBundle.frequencies)
-    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    && (pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+      // A plan-start quote's opening entry can carry its totals where no
+      // entry is within a cent of both (quarterly pest: monthly x 12 is
+      // not the per-application total); see the helper.
+      || planStartSnapshotMatchesTotals(snapshotBundle, estimate, estData))
     // Snapshots that violate the lawn program policy (retired Quarterly
     // cadence, or an itemized lawn price below the program minimum) must NOT
     // short-circuit — they re-derive through the clamped ladder builders so

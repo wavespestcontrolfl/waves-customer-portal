@@ -197,7 +197,12 @@ function builder(table) {
   b.forUpdate = () => b;
   b.limit = (n) => { limitN = n; return b; };
   b.first = async () => rows()[0] || null;
-  b.update = async (patch) => { const hit = rows(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
+  // A returning list (the replace step's archive) answers with the updated ids, as pg does.
+  b.update = async (patch, returning) => {
+    const hit = rows();
+    hit.forEach((r) => Object.assign(r, patch));
+    return returning ? hit.map((r) => ({ id: r.id })) : hit.length;
+  };
   b.insert = (row) => {
     const list = (tables[table] ||= []);
     const inserted = { id: `${table}-${list.length + 1}`, created_at: new Date().toISOString(), ...row };
@@ -241,6 +246,7 @@ const CUSTOMER = {
   address_line1: '1 Main St', city: 'Parrish', state: 'FL', zip: '34219', property_type: null,
 };
 const recompute = jest.fn();
+const releaseHolds = jest.fn(async () => ({ released: 0 }));
 function deps(overrides = {}) {
   const pricingAi = require('../services/customer-pricing-ai');
   return {
@@ -257,6 +263,8 @@ function deps(overrides = {}) {
     // Injected so the mint never requires the heavy cross-sell/lookup
     // modules in this suite; the seed and cache-only lookup paths are inert.
     crossSell: { loadEstimateSeed: async () => null },
+    // The scheduler's hold release, recorded: the replace step frees each archived quote's holds.
+    releaseEstimateHolds: releaseHolds,
     propertyLookup: null,
     // Single-premises proof + verified-override probe (codex GH r4): green
     // by default here; the refusal tests override them.
@@ -271,6 +279,7 @@ function deps(overrides = {}) {
 beforeEach(() => {
   db.mockImplementation((table) => builder(table));
   recompute.mockReset();
+  releaseHolds.mockClear();
   recompute.mockResolvedValue({
     recomputed: true,
     serverResult: { engineVersion: 'v9.9', lineItems: [] },
@@ -343,6 +352,30 @@ describe('mintRestartEstimate', () => {
     expect(recompute).toHaveBeenCalledTimes(1);
     expect(tables.estimates).toHaveLength(1);
     expect(tables.estimates[0].archived_at == null).toBe(true);
+    expect(releaseHolds).not.toHaveBeenCalled();
+  });
+
+  test('an identical tap at an address that does not parse back to its home reuses the live quote: its stored address is today\'s own string (codex pre-push r38 P1)', async () => {
+    // With no city, the unit line "Building 2" reads back as the stored address's city.
+    const unitOnly = { ...CUSTOMER, address_line2: 'Building 2', city: null };
+    tables.customers = [{ ...unitOnly }];
+    const realAddress = deps({ pricingAi: { ...deps().pricingAi, addressForCustomer: require('../services/customer-pricing-ai').addressForCustomer } });
+    const first = await actualRestart.mintRestartEstimate({ customer: unitOnly, deps: realAddress, randomBytes: () => Buffer.from('abcdef0123456789') });
+    const again = await actualRestart.mintRestartEstimate({ customer: unitOnly, deps: realAddress });
+    expect(again).toEqual({ estimateId: first.estimateId, token: first.token, url: first.url, reused: true });
+    expect(tables.estimates[0].archived_at == null).toBe(true);
+    expect(releaseHolds).not.toHaveBeenCalled();
+  });
+
+  test('a quote that expires while the tap waits on its locks is not handed back: liveness reads the clock after the locks (codex pre-push P1)', async () => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    tables.estimates[0].expires_at = '2026-09-01T12:00:00.000Z';
+    // The tap starts a second before the quote expires; its locked read lands a second after.
+    let calls = 0;
+    const now = () => new Date(calls++ === 0 ? '2026-09-01T11:59:59Z' : '2026-09-01T12:00:01Z');
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), now, randomBytes: () => Buffer.from('0123456789abcdef') });
+    expect(again.reused).toBe(false);
+    expect(again.estimateId).not.toBe(first.estimateId);
   });
 
   test('a live quote from a PRIOR attempt is never reused — same families re-cancelled re-mint at today\'s price (codex GH r16 P1)', async () => {
@@ -379,9 +412,18 @@ describe('mintRestartEstimate', () => {
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() }))
       .rejects.toMatchObject({ code: 'delivery_in_flight' });
 
-    // A CRASHED 'sending' claim (window lapsed) is dead — archives + mints.
+    // A resend claimed just before expiry is in flight while its claim is fresh, whatever
+    // expires_at says: the send refreshes the expiry only after the handoff (codex pre-push P1).
     tables.estimates[0].status = 'sending';
     tables.estimates[0].expires_at = '2020-01-01';
+    tables.estimates[0].updated_at = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() }))
+      .rejects.toMatchObject({ code: 'delivery_in_flight' });
+    expect(tables.estimates).toHaveLength(1);
+    expect(tables.estimates[0].archived_at == null).toBe(true);
+
+    // A CRASHED 'sending' claim (window lapsed, claim no longer fresh) is dead — archives + mints.
+    tables.estimates[0].updated_at = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     expect(result.reused).toBe(false);
     expect(tables.estimates.find((e) => e.id === 'est-sending').archived_at != null).toBe(true);
@@ -398,6 +440,41 @@ describe('mintRestartEstimate', () => {
     const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('bbcdef0123456789') });
     expect(again.reused).toBe(false);
     expect(again.estimateId).not.toBe(first.estimateId);
+    expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
+  });
+
+  test('the reuse checks read the live quote again under its row lock: a tier picked while today\'s price was computed re-mints it (codex pre-push P1)', async () => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(first.estimateId).toBe('estimates-1');
+    // The customer's tier pick in another tab commits during the recompute,
+    // after the first lineage read: a new row version, as Postgres returns
+    // one, without the frozen snapshot (the page's tier handlers drop it).
+    const priced = recompute.getMockImplementation();
+    recompute.mockImplementationOnce(async (...args) => {
+      const stored = JSON.parse(tables.estimates[0].estimate_data);
+      delete stored.sendSnapshot.pricingBundle;
+      tables.estimates[0] = { ...tables.estimates[0], estimate_data: JSON.stringify(stored) };
+      return priced(...args);
+    });
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('bbcdef0123456789') });
+    expect(again.reused).toBe(false);
+    expect(again.estimateId).not.toBe(first.estimateId);
+    expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
+  });
+
+  test.each([
+    // The page's tier handlers delete sendSnapshot.pricingBundle and leave inputs, result and totals.
+    ['the page dropped its frozen snapshot', (stored) => { delete stored.sendSnapshot.pricingBundle; }, {}],
+    ['its frozen snapshot no longer carries the row\'s totals', () => {},
+      { bundleUtils: { pricingBundleMatchesEstimateTotals: (_bundle, row) => row.id !== 'estimates-1' } }],
+  ])('a live quote whose %s is re-minted, never handed back (codex pre-push P0)', async (_label, editStored, depOverrides) => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(first.estimateId).toBe('estimates-1');
+    const stored = JSON.parse(tables.estimates[0].estimate_data);
+    editStored(stored);
+    tables.estimates[0].estimate_data = JSON.stringify(stored);
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(depOverrides), randomBytes: () => Buffer.from('bbcdef0123456789') });
+    expect(again.reused).toBe(false);
     expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
   });
 
@@ -436,7 +513,9 @@ describe('mintRestartEstimate', () => {
       // Accepted rows are history and must survive the sweep.
       { id: 'est-done', customer_id: 'cust-1', source: 'plan_restart', status: 'accepted', token: 'done', expires_at: '2020-01-01', archived_at: null },
     );
-    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });
+    let trx = null;
+    const txDb = { transaction: async (fn) => { trx = fakeTrx(); return fn(trx); } };
+    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: txDb }) });
     expect(result.reused).toBe(false);
     expect(recompute).toHaveBeenCalledTimes(1);
     // Codex GH r6 P1: an expired-but-unarchived restart quote stays
@@ -444,6 +523,9 @@ describe('mintRestartEstimate', () => {
     // mint must retire the whole unaccepted lineage.
     expect(tables.estimates.find((r) => r.id === 'est-old').archived_at).not.toBeNull();
     expect(tables.estimates.find((r) => r.id === 'est-done').archived_at).toBeNull();
+    // The quote it archives frees its slot holds in the same transaction
+    // (codex pre-push r15 P1); an accepted or already-archived quote's do not.
+    expect(releaseHolds.mock.calls).toEqual([[{ estimateId: 'est-old', database: trx }]]);
   });
 
   test('refuses an account that is not cancelled (row re-read under the lock)', async () => {
@@ -481,6 +563,54 @@ describe('mintRestartEstimate', () => {
     const d = deps({ crossSell: { loadEstimateSeed: async () => ({ homeSqFt: 2200, requiresFieldVerification: true }) } });
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
     expect(tables.estimates).toHaveLength(0);
+  });
+
+  test('a restart keeps main\'s best-effort seed: an unreadable seed still prices (plan start alone refuses)', async () => {
+    const d = deps({ crossSell: { loadEstimateSeed: async () => { throw new Error('pg down'); } } });
+    const minted = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d, randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(minted.url).toEqual(expect.any(String));
+    expect(tables.estimates).toHaveLength(1);
+  });
+
+  test.each([
+    ['a $79 fee', 79],
+    ['a $0 fee', 0],
+  ])('a pest restart freezes %s where the accept bills it; a quote minted before the freeze is re-minted (codex pre-push P0s)', async (_label, fee) => {
+    tables.cancellation_cases[0].scope = JSON.stringify(['pest_control']);
+    recompute.mockResolvedValue({
+      recomputed: true,
+      // A solo pest plan, the mix the setup fee applies to.
+      serverResult: { engineVersion: 'v9.9', lineItems: [{ service: 'pest_control', annual: 452 }], oneTime: { membershipFee: fee, total: fee } },
+      rawEngineResult: { waveGuard: { tier: 'Bronze' }, lineItems: [] },
+      serverTotals: { monthlyTotal: 37.67, annualTotal: 452, onetimeTotal: fee },
+    });
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    const { setupFeeQuote, ...preChange } = JSON.parse(tables.estimates[0].estimate_data);
+    expect(setupFeeQuote).toEqual({ amount: fee, kind: 'waveguard_membership' });
+    // The public accept's own decision: whether a fee applies, then the amount it stamps and invoices.
+    const converter = require('../services/estimate-converter');
+    const bills = (data) => (converter.shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: converter.recurringServicesFromEstimateData(data), estimateData: data,
+    }) ? converter.frozenSetupFeeAmount(data) : 0);
+    expect(bills({ ...preChange, setupFeeQuote })).toBe(fee);
+    // Without the freeze the accept bills the $99 code constant.
+    expect(bills(preChange)).toBe(99);
+    // A live quote minted before the freeze, otherwise today's offer, is never handed back.
+    tables.estimates[0].estimate_data = JSON.stringify(preChange);
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('bbcdef0123456789') });
+    expect(again.reused).toBe(false);
+    expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
+    expect(JSON.parse(tables.estimates.find((r) => r.id === again.estimateId).estimate_data).setupFeeQuote).toEqual(setupFeeQuote);
+  });
+
+  test('a Tree & Shrub restart on a seed whose zero tree count is ambiguous is priced by hand (codex pre-push P0)', async () => {
+    tables.cancellation_cases = [{ id: 'case-1', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['tree_shrub']), created_at: '2026-08-22' }];
+    const seeded = (seed) => deps({ crossSell: { loadEstimateSeed: async () => seed } });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: seeded({ homeSqFt: 2200, zeroTreeCountAmbiguous: true }) }))
+      .rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(tables.estimates).toHaveLength(0);
+    // A known tree count restarts as before.
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: seeded({ homeSqFt: 2200 }) })).resolves.toMatchObject({ reused: false });
   });
 
   test('whole-account scope ([]) recovers the families from the rows the processor pulled', async () => {
@@ -632,10 +762,13 @@ describe('mintRestartEstimate', () => {
 
   test('a failing turf-profile read degrades to a null profile — the savepoint keeps the mint alive (codex GH r23 P2)', async () => {
     const d = deps();
-    d.pricingAi.loadTurfProfile = async () => { throw new Error('schema skew boom'); };
+    const reads = [];
+    d.pricingAi.loadTurfProfile = async (_db, _id, options) => { reads.push(options); throw new Error('schema skew boom'); };
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d, randomBytes: () => Buffer.from('abcdef0123456789') });
     expect(result.reused).toBe(false);
     expect(tables.estimates).toHaveLength(1);
+    // Restart keeps main's forgiving read, lawn included (plan start reads it strictly).
+    expect(reads).toEqual([{ strict: false }]);
   });
 
   test('a failing request lookup falls back to case-only correlation — the savepoint keeps the outer transaction usable (codex GH r25 P2)', async () => {
@@ -977,6 +1110,15 @@ describe('mintRestartEstimate', () => {
     tables.customers[0].address_line1 = null;
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'pricing_unavailable' });
     expect(tables.estimates).toHaveLength(0);
+  });
+
+  test('a restart keeps main\'s premises proof: an unresolvable visit link or another profile on the account is not a second premises (plan start alone runs the strict one)', async () => {
+    // Another profile on the account: the strict proof refuses it (codex pre-push r16 P0); a restart, as on main, does not read it.
+    tables.customers.push({ ...CUSTOMER, id: 'cust-2', account_id: 'cust-1' });
+    const proof = jest.fn(async (_db, _id, _customer, _street, options) => options?.unresolvedFails !== true);
+    const minted = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ customerHasOnlyPrimaryPremises: proof }), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(minted.url).toEqual(expect.any(String));
+    expect(proof).toHaveBeenCalledWith(expect.anything(), 'cust-1', expect.anything(), expect.any(String), { unresolvedFails: false });
   });
 
   test('multi-premises also blocks REUSE of a live restart estimate (no URL of any kind)', async () => {

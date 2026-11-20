@@ -206,6 +206,7 @@
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
+ *   GATE_PORTAL_PLAN_START=true (owner 2026-11-19, "BUILD": a signed-in customer with no recurring plan who taps "Add ... to my plan" on the portal pricing card gets a server-priced estimate for that option and books a first visit through the normal estimate accept flow (pick a time, save a card, confirm), instead of a request that waits for the office. It has a gate because it shows a bookable price and leads to card capture and booking. Off = the card files the same request as today and the pricing answer carries no planStart hint. Kill = unset)
  *   GATE_SIGNUP_SINGLE_EMAIL=true (ONE email at recurring signup: the accepted-onboarding email also carries the property and the plan (no payment section: the "Auto Pay is set up" email stays its own email, owner 2026-09-30), and the separate membership.started / welcome emails are skipped ONLY when that combined email was accepted for sending — each still sends if it was not; same-day later acceptances get a short per-property email; the welcome TEXT is unchanged; strict === 'true', read at call time; dark in dev AND prod)
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=shadow (runs created + finalized as would_send, nothing dispatched) | true (live sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
@@ -2548,6 +2549,9 @@ const gates = {
   // env at call time via gateEnvValue('GATE_CANCEL_FLOW_V2'); kill switch =
   // unset. Owner flips with the C1 portal flow.
   cancelFlowV2: gateEnvValue('GATE_CANCEL_FLOW_V2'),
+  // GATE_PORTAL_PLAN_START: read at CALL time via portalPlanStartLive(); this entry is for logGateStatus, so the boot log
+  // shows the flip.
+  portalPlanStart: process.env.GATE_PORTAL_PLAN_START === 'true',
   // Boot diagnostics show the effective conjunction; selection reads it at call time.
   termiteAnnualPlan: termiteAnnualPlanSelectionEnabled(),
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
@@ -6837,6 +6841,13 @@ function termiteAnnualPlanSelectionEnabled() {
   return gateEnvValue('GATE_TERMITE_ANNUAL_PLAN') && gateEnvValue('GATE_CANCEL_FLOW_V2');
 }
 
+// GATE_PORTAL_PLAN_START read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19). It has a gate because it shows
+// a bookable price and leads to card capture and booking. Off = POST /api/requests/start-plan answers 404 and the
+// pricing answer carries no planStart hint. Kill = unset.
+function portalPlanStartLive() {
+  return process.env.GATE_PORTAL_PLAN_START === 'true';
+}
+
 // Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
 // GATE_PEST_STRANDED_RECOVERY). STRICT: a full ISO-8601 timestamp WITH an
 // explicit offset (`2026-08-28T14:00:00Z` / `2026-08-28T10:00:00-04:00`)
@@ -8347,6 +8358,8 @@ module.exports.customerRouteCheckMode = customerRouteCheckMode;
 module.exports.callConferencePathMode = callConferencePathMode;
 // GATE_CALL_WARM_TRANSFER reader, on its own line so gate PRs never conflict.
 module.exports.callWarmTransferLive = callWarmTransferLive;
+// GATE_PORTAL_PLAN_START reader, on its own line so gate PRs never conflict.
+module.exports.portalPlanStartLive = portalPlanStartLive;
 // GATE_MOVING_ESTIMATE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02, moving PR B1). On, the Moving card's new-home estimate, its server-stamped setup-fee waiver and the accept-time move guards
 // work (services/customer-moves.js). Off = no estimate action, no waiver, no guard. Kill = unset.
 function movingEstimateLive() {

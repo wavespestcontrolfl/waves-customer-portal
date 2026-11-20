@@ -2092,6 +2092,46 @@ bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
 
+`PUT /api/estimates/:token/accept` on an estimate with `source = 'plan_start'` (the portal
+pricing card's first-plan quote, `GATE_PORTAL_PLAN_START`) re-runs the mint's eligibility inside
+the accept transaction, at the same point and under the same locks as the plan-restart re-check
+(comms advisory lock, then the customers row `FOR UPDATE`): the customer must still be active (the
+flag exactly true: customer auth reads NULL as inactive), not churned, not deleted, carry no plan
+membership on the row (a real WaveGuard tier, a plan billing lane or a monthly rate), and own no
+live recurring service of any family (rodent and commercial rows included, and a visit still en
+route or on site after ET midnight) and no annual prepay term covering today, since the mint priced
+the option with no WaveGuard qualifiers. The account must also still pass the mint's residential and
+premises checks: a stored property type that is not commercial (the mint's stored-type guard,
+`isCommercialProperty`), and one provable premises (`singlePremisesStreet`, strict: not flagged
+multi-home, a primary street with a city or zip, at most one property row and that row at the
+primary street, and no visit whose stamped address, property row or creating estimate names another
+address or cannot be resolved) whose street is both the estimate's own address and the home the mint
+priced (`estimate_data.planStart.premisesKey`), so a move or a second property since the mint refuses,
+even after a staff address change rewrote the open quote's address. The estimate must still belong to
+the customer the accept read before its row lock: one that a merge or its undo moved to another
+customer refuses, and the re-check reads and locks no other customer. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
+error reads "This account changed since this estimate was created — please go back to your portal
+for a current price.") and writes nothing. A re-check that cannot read its state, or that finds the
+customer's property-preferences key held by another change (the re-check tries that key and never
+waits on it while it holds the comms key), answers 409
+`{ error, code: 'PLAN_START_RECHECK_RETRY' }` with a retry line and writes nothing; the estimate page
+keeps the held time and the payment choice for that retry, as for `ACCEPT_INVOICE_BUSY_RETRY`. Before that
+check, a `plan_start` accept must name the visit it books: a held `slotId` or an `existingAppointmentId`,
+both verified as on every accept. An accept that names neither answers 400 `{ error, code:
+'plan_start_slot_required' }` and writes nothing, so the quote stays open. Estimates of every other source are unchanged.
+
+`GET /api/estimates/:token` and the accept build an estimate's offer through
+`buildPricingBundle`, which serves the frozen send snapshot as is only when
+`sentSnapshotServesAsIs` passes (`server/routes/estimate-public.js`). For a `plan_start` row that
+predicate also accepts the snapshot when the entry the page opens on carries the row's
+`monthly_total` to the cent and its displayed per-application price times its visits equals the
+row's `annual_total` to the cent (`planStartSnapshotMatchesTotals`,
+`server/services/estimate-pricing-bundle-utils.js`). Without it, a quarterly pest quote misses the
+generic check (its entry shows monthly x 12, cents off the per-application total) and the page
+rebuilds the offer on live pricing. The plan-start mint publishes a quote, and hands back a live
+one, only when this predicate serves its snapshot: a live quote whose snapshot a page handler deleted
+(`invalidateSendSnapshotPricingBundle`) is re-minted. Every other source keeps the generic check.
+
 `PUT /api/estimates/:token/accept` answers 409
 `{ error, reason: 'retired_lawn_cadence_selection' }` when a recurring lawn
 row still resolves to a retired lawn cadence — any tier hidden via

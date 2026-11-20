@@ -3018,7 +3018,8 @@ function EstimatePipelineViewV2({
                             modal stages the customer from the quote's contact and the
                             estimate is attached to them on book. */}
                         {(e.status === "sent" || e.status === "viewed") &&
-                          !e.archivedAt && (
+                          !e.archivedAt &&
+                          !isOpenPlanStartQuote(e) && (
                             <Button
                               size="sm"
                               variant="secondary"
@@ -3612,16 +3613,30 @@ const EDITABLE_ESTIMATE_STATUSES = [
   "viewed",
   "send_failed",
 ];
+// The server refuses an in-place edit of a customer's own mint
+// (admin-estimate-persistence.js REVISE_REFUSED_MINT_SOURCES), so the menus
+// never offer one.
+const EDIT_REFUSED_SOURCES = ["plan_restart", "plan_start"];
 function canEditEstimateInPlace(estimate) {
   return (
     EDITABLE_ESTIMATE_STATUSES.includes(estimate.status) &&
+    !EDIT_REFUSED_SOURCES.includes(estimate.source) &&
     !!String(estimate.token || "").trim() &&
     !estimate.isCommercialProposal &&
     !estimate.archivedAt
   );
 }
+// An open portal plan-start quote is the customer's own booking: the server
+// refuses a staff accept and an accept-on-book on it (409
+// plan_start_self_serve), so its row offers neither Schedule nor Mark Won nor
+// Annual Prepay. Once the customer accepts it, it books like any accepted
+// estimate.
+function isOpenPlanStartQuote(estimate) {
+  return estimate.source === "plan_start" && estimate.status !== "accepted";
+}
 function canMarkEstimateWon(estimate) {
   if (!["sent", "viewed"].includes(estimate.status)) return false;
+  if (isOpenPlanStartQuote(estimate)) return false;
   // The server rejects any estimate with a one-time option from manual accept
   // (recurring-vs-one-time must be recorded via the customer link) — proposals
   // included. Don't offer a Mark Won that always 400s.

@@ -297,6 +297,9 @@ function pricingServices(pricing = {}) {
   }];
 }
 
+// The opening entry (with pricingServices above) has a server mirror for the
+// plan-start mint and page reader: openingEntryForService in
+// server/services/estimate-pricing-bundle-utils.js. Change both together.
 function defaultSelectedForServices(services = [], previous = {}, preserveSelection = false) {
   return services.reduce((next, section) => {
     const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -8400,8 +8403,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             setPrepayConsentChecked(false);
             throw new Error(body.error || 'Your total changed while confirming — please confirm the updated amount.');
           }
-          if (['ACCEPT_INVOICE_BUSY_RETRY', 'DEPOSIT_LEDGER_BUSY_RETRY'].includes(body.code)) {
-            // Invoice/deposit settlement is briefly holding a lock. The
+          if (['ACCEPT_INVOICE_BUSY_RETRY', 'DEPOSIT_LEDGER_BUSY_RETRY', 'PLAN_START_RECHECK_RETRY'].includes(body.code)) {
+            // Invoice/deposit settlement is briefly holding a lock, or the
+            // plan start re-check could not read its state (a read failure,
+            // not a changed account). The
             // acceptance transaction rolled back without invalidating this
             // reservation, so keep the held time, plan selections, payment
             // preference and any acknowledged prepay quote intact. Falling

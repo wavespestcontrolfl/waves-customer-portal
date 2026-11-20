@@ -1,11 +1,11 @@
 import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useAuth, tokenCustomerId } from '../hooks/useAuth';
+import { useAuth, tokenCustomerId, tokenContactKey } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import usePortalActivity from '../hooks/usePortalActivity';
-import api from '../utils/api';
+import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
@@ -11044,6 +11044,30 @@ const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'S
 // Hidden badge types (engagement-tracking ones we don't show)
 const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downloader', 'responsive', 'early_adopter', 'feedback_hero', 'portal_explorer', 'feedback_champion'];
 
+// The pricing card's primary action: today's "Request This", or "See my price and book" when the
+// server offers a first plan (GATE_PORTAL_PLAN_START). One button, so both look and behave alike.
+function PricingActionButton({ onClick, busy, disabled = false, label, busyLabel, compact, primaryButton }) {
+  return (
+    <button type="button" onClick={onClick} disabled={busy || disabled} data-glass-accent="" data-glass-size="primary" style={{
+      ...primaryButton,
+      width: compact ? '100%' : 'fit-content',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 8,
+      opacity: busy || disabled ? 0.65 : 1,
+      cursor: busy ? 'wait' : (disabled ? 'not-allowed' : 'pointer'),
+    }}>
+      <Icon name="plus" size={15} strokeWidth={2} />
+      {busy ? busyLabel : label}
+    </button>
+  );
+}
+
+// Plan-start refusals that file today's request: the server could not price or book the option
+// online. Any other coded refusal shows the server's own message and files nothing; one is
+// delivery_in_flight, a quote staff are sending this customer right now (codex pre-push P1).
+const PLAN_START_REQUEST_CODES = ['pricing_unavailable', 'not_eligible', 'offer_changed'];
+
 function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secondaryButton, onExploreTiers }) {
   const [prompt, setPrompt] = useState("I'm interested in adding lawn care");
   const [result, setResult] = useState(null);
@@ -11052,41 +11076,160 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const [error, setError] = useState('');
   const [requesting, setRequesting] = useState(false);
   const [requested, setRequested] = useState(false);
+  const [startingPlan, setStartingPlan] = useState(false);
+  const [planStartUrl, setPlanStartUrl] = useState('');
+  const planStartTimer = useRef(null);
+  // The tap's session check for the estimate on screen (codex pre-push P0): the hand-off, on the
+  // timer or on "Open it now", opens the estimate only while that session is active and drops it
+  // otherwise. "Open it now" is a button, so the page never holds the estimate link itself.
+  const planStartSession = useRef(null);
+  // A start the server is still minting, whatever option is on screen now. The mint archives
+  // the account's other live plan-start quote, so a second start before the first settles could
+  // archive the quote the browser then opens: starts run one at a time (codex pre-push P1).
+  const [minting, setMinting] = useState(false);
+  // Bumped whenever the answer or the option changes, and when the card goes away: a start still
+  // in flight for the old one is dropped, never opened, and a request that lands for the old one
+  // never marks the new one as sent (codex pre-push P1s).
+  const planStartSeq = useRef(0);
+  const dropPendingPlanStart = () => {
+    planStartSeq.current += 1;
+    clearTimeout(planStartTimer.current);
+    planStartSession.current = null;
+    setPlanStartUrl('');
+    setStartingPlan(false);
+  };
+  const openPlanStart = (url) => {
+    if (planStartSession.current?.()) window.location.assign(url);
+    else dropPendingPlanStart();
+  };
+  // Bumped on every pricing query and when the card goes away: only the latest
+  // answer may set the result, the option, the error or the loading state, so
+  // an older answer never turns booking on (codex pre-push P1).
+  const pricingSeq = useRef(0);
+  useEffect(() => () => {
+    planStartSeq.current += 1;
+    pricingSeq.current += 1;
+    clearTimeout(planStartTimer.current);
+  }, []);
+  useEffect(dropPendingPlanStart, [selectedId]);
 
   const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const options = result?.options || [];
   const selected = options.find((option) => option.id === selectedId) || options[0] || null;
+  // GATE_PORTAL_PLAN_START: a customer with no recurring plan books through a real estimate instead of
+  // filing a request. The server hint lists the options it can book; the start-plan route decides.
+  const canStartPlan = Boolean(selected) && (result.planStart?.optionIds || []).includes(selected.id);
 
   const runPricing = async (nextPrompt = prompt) => {
     const cleanPrompt = String(nextPrompt || '').trim();
+    pricingSeq.current += 1;
+    const seq = pricingSeq.current;
     setPrompt(cleanPrompt);
     setLoading(true);
     setError('');
     setRequested(false);
+    dropPendingPlanStart();
     try {
       const data = await api.queryCustomerPricing(cleanPrompt);
+      if (seq !== pricingSeq.current) return;
       setResult(data);
       setSelectedId(data?.options?.[0]?.id || '');
     } catch (err) {
+      if (seq !== pricingSeq.current) return;
       setError(err.message || 'Pricing unavailable.');
     } finally {
-      setLoading(false);
+      if (seq === pricingSeq.current) setLoading(false);
     }
   };
 
+  // Off while a new answer loads, as the start is: the option on screen is the old answer's, and
+  // the request would capture the new answer's sequence, so it could mark the new answer as sent
+  // (codex pre-push P1).
   const submitRequest = async () => {
-    if (requesting) return;
+    if (requesting || loading) return;
+    const seq = planStartSeq.current;
     setRequesting(true);
     try {
       const subject = selected?.requestSubject || 'Service pricing review requested';
       const description = selected?.requestDescription || `Customer asked WAVES AI: "${prompt}". ${result?.message || ''}`;
       await api.createRequest?.({ category: 'add_service', subject, description });
-      setRequested(true);
+      if (seq === planStartSeq.current) setRequested(true);
     } catch (err) {
       showCustomerAlert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
     } finally {
       setRequesting(false);
     }
+  };
+
+  // Sure refusals made no quote: a 4xx the mint coded (priced by hand, the price changed, a quote on
+  // its way), and the 404 the route answers before the mint while plan start is off. No answer, a
+  // server or gateway error, or any other 4xx with no code (a proxy timeout, a 409 whose body did
+  // not parse, which may be delivery_in_flight) may hide a quote the server already made, or one on
+  // its way (codex pre-push P1s).
+  const startRefused = (err) => Number.isInteger(err?.status) && err.status >= 400 && err.status < 500
+    && (Boolean(err.code) || err.status === 404);
+
+  // Opens the priced estimate (pick a time, save a card there). A pricing or eligibility refusal,
+  // or the 404 the route answers before the mint while plan start is off, falls back to today's
+  // request, so the customer never hits a dead end. A failure with no sure answer files nothing and asks for a new
+  // tap, which hands back the quote the first call may have made: one tap never makes both a quote
+  // and a request. The card never repeats a start on its own, because a late repeat would replace
+  // a quote another tab made since and free its slot hold (codex pre-push P1). Off while a new
+  // answer loads (the option on screen is the old answer's) and while an earlier start still mints
+  // (codex pre-push P1s).
+  //
+  // Everything stays with the tap's own session (codex pre-push P0/P1): the API client answers a
+  // request whose session changed while it waited, so a late reply could hand this account's
+  // estimate link, or file its request, under another account. The check is the API client's own
+  // (sameRequestSession); a requestSuperseded cancel means it already failed. It reads the stored
+  // credential too: a login or logout in another tab rewrites waves_token before this tab's storage
+  // handler updates api.token (codex pre-push P0). It compares the contact claim too, as useAuth does
+  // (tokenContactKey): the API client's check reads none, and it lets a same-customer token of any
+  // session stand in for a token from before durable sessions, so a contact signing in on the
+  // holder's row would pass it (codex pre-push P0).
+  const startPlan = async () => {
+    if (minting || startingPlan || requesting || loading || !selected) return;
+    const seq = planStartSeq.current;
+    const tapToken = api.token;
+    const tapSession = tokenSessionIdentity(tapToken);
+    const tapContact = tokenContactKey(tapToken);
+    const tapSessionActive = () => [api.token, localStorage.getItem('waves_token')]
+      .every((token) => token === tapToken
+        || (sameRequestSession(tapSession, tokenSessionIdentity(token)) && tokenContactKey(token) === tapContact));
+    // Another tab already changed the account, and this tab has not heard of it yet: the start would
+    // mint under the old token and could replace that account's quote and free its slot hold (codex
+    // pre-push P1). Send nothing; the storage handler brings this tab up to date.
+    if (!tapSessionActive()) return;
+    setMinting(true);
+    setStartingPlan(true);
+    const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;
+    let out = null;
+    let refusal = null;
+    try {
+      out = await api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
+    } catch (err) {
+      if (startRefused(err)) refusal = err;
+    } finally {
+      setMinting(false);
+    }
+    if (seq !== planStartSeq.current) return; // another option or a new answer took over
+    if (!tapSessionActive()) {
+      setStartingPlan(false); // another session is active now: this reply is not its own
+      return;
+    }
+    if (out?.url) {
+      // Same hand-off as the cancelled-plan restart: a beat on screen, plus a button if navigation is blocked.
+      planStartSession.current = tapSessionActive;
+      setPlanStartUrl(out.url);
+      planStartTimer.current = setTimeout(() => openPlanStart(out.url), 1500);
+      return;
+    }
+    setStartingPlan(false);
+    if (refusal && (!refusal.code || PLAN_START_REQUEST_CODES.includes(refusal.code))) {
+      await submitRequest();
+      return;
+    }
+    showCustomerAlert(refusal ? refusal.message : 'We could not confirm your estimate. Please tap again in a moment, or call us at (941) 297-5749.');
   };
 
   const promptChips = [
@@ -11283,6 +11426,9 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       // option's own price leads above; only setup / one-time
                       // / tier facts tile here.
                       selected.dueAtStart ? { label: 'Setup', value: money(selected.dueAtStart) } : null,
+                      // A bookable first plan shows the WaveGuard setup fee its estimate charges (codex pre-push
+                      // P1). Only with the plan-start button: the request flow keeps today's tiles.
+                      canStartPlan && selected.setupFee ? { label: 'WaveGuard setup', value: money(selected.setupFee) } : null,
                       selected.oneTime ? { label: 'One-time', value: money(selected.oneTime) } : null,
                       selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                     ].filter(Boolean).slice(0, 3).map((item) => (
@@ -11303,19 +11449,19 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
                       <Icon name="check" size={15} strokeWidth={2} /> Request sent
                     </span>
+                  ) : planStartUrl ? (
+                    <span style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
+                      Opening your estimate... <button type="button" onClick={() => openPlanStart(planStartUrl)} style={{ color: B.wavesBlue, background: 'none', border: 0, padding: 0, font: 'inherit', textDecoration: 'underline', cursor: 'pointer' }}>Open it now</button>
+                    </span>
+                  ) : canStartPlan ? (
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      <PricingActionButton onClick={startPlan} busy={requesting || startingPlan} disabled={loading || minting} label="See my price and book" busyLabel="Opening..." compact={compact} primaryButton={primaryButton} />
+                      <div style={{ color: '#475569', fontSize: 14, lineHeight: 1.45 }}>
+                        Your estimate shows the full price and open times. Pick a time to book.
+                      </div>
+                    </div>
                   ) : (
-                    <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" data-glass-size="primary" style={{
-                      ...primaryButton,
-                      width: compact ? '100%' : 'fit-content',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      opacity: requesting ? 0.65 : 1,
-                      cursor: requesting ? 'wait' : 'pointer',
-                    }}>
-                      <Icon name="plus" size={15} strokeWidth={2} />
-                      {requesting ? 'Sending...' : 'Request This'}
-                    </button>
+                    <PricingActionButton onClick={submitRequest} busy={requesting} disabled={loading} label="Request This" busyLabel="Sending..." compact={compact} primaryButton={primaryButton} />
                   )}
                 </div>
               )}
@@ -11323,7 +11469,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           )}
 
           {options.length === 0 && result && (
-            <button data-glass-accent="" type="button" onClick={submitRequest} disabled={requesting || requested} style={{
+            <button data-glass-accent="" type="button" onClick={submitRequest} disabled={requesting || requested || loading} style={{
               ...secondaryButton,
               width: compact ? '100%' : 'fit-content',
               display: 'inline-flex',
