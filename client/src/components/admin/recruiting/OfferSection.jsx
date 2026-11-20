@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-import { useCoverWhile } from "./detailCover";
 import { ActionFeedback, Button } from "../../ui";
 import { fetchSignedCopy } from "./offerApi";
 import OfferTimeline, { History, SignedCopyView } from "./OfferTimeline";
@@ -15,7 +14,6 @@ const LIVE_STATES = ["draft", "sent", "date_requested"];
 export default function OfferSection({ detail, offerFlow, onChanged, detailStale = false }) {
   const { enabled, data, openForm, error: readError, refreshError, ownerActions, retry } = offerFlow;
   const [signed, setSigned] = useState(null);
-  useCoverWhile(Boolean(signed)); // the signed copy opens over the detail and hides its replies
   const [error, setError] = useState(null);
   const [reading, setReading] = useState(false); // a signed copy is loading: one read at a time (History)
   if (detail.role !== "technician") return null;

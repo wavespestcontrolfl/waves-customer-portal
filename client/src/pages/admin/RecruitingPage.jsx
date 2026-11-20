@@ -18,7 +18,6 @@ import OfferDialog from "../../components/admin/recruiting/OfferDialog";
 import OfferSection from "../../components/admin/recruiting/OfferSection";
 import useOfferFlow from "../../components/admin/recruiting/useOfferFlow";
 import { stageMoveOfferNote } from "../../components/admin/recruiting/offerLogic";
-import { DetailCover, useCoverWhile } from "../../components/admin/recruiting/detailCover";
 import {
   Button,
   Badge,
@@ -472,7 +471,6 @@ function StageChangeDialog({
   onConfirm,
   onClose,
 }) {
-  useCoverWhile(open); // open over the applicant detail, it hides the replies
   return (
     <Dialog open={open} onClose={busy ? undefined : onClose} layer={130} size="lg">
       <DialogHeader>
@@ -1114,12 +1112,6 @@ export default function RecruitingPage() {
   const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError), offerFlow.reload);
   const detailIdRef = useRef(null);
   detailIdRef.current = detail?.id ?? null;
-  // The dialogs open over the detail, which hide its replies: the stage dialog, the offer form, and the card's signed
-  // copy and withdraw or discard question. Each counts itself through DetailCover.
-  const covers = useRef(0);
-  const countCover = useCallback((n) => {
-    covers.current += n;
-  }, []);
 
   // refresh: re-read the open applicant in place. It never bumps detailSeq, so a
   // switch to another applicant that is still opening is not cancelled, and it
@@ -1151,11 +1143,10 @@ export default function RecruitingPage() {
         if (!wanted()) return;
       }
       if (inPlace) fresh = ++refreshSeq.current;
-      // An open marks the replies it shows as read. The page's own re-reads (after an offer action, or a Try again)
-      // never do: a reply that arrived meanwhile may sit behind a dialog. Nor does an open of the applicant on screen
-      // while a dialog over the detail hides its replies: the next open marks them (?peek=1 acknowledges nothing).
-      const peek = refresh || (inPlace && covers.current > 0);
-      const data = await adminFetch(`/admin/careers/${id}${peek ? "?peek=1" : ""}`);
+      // An open of another applicant marks the replies it shows as read. A read in place never does (?peek=1): the
+      // page's own re-reads (after an offer action, or a Try again) and an open of the applicant already on screen,
+      // whose answer may land behind a dialog, after another open, or be dropped. The next open marks those replies.
+      const data = await adminFetch(`/admin/careers/${id}${inPlace ? "?peek=1" : ""}`);
       if (!newest()) return;
       setDetail(data.application);
       setReplyMedia(data.reply_media || {});
@@ -1343,7 +1334,6 @@ export default function RecruitingPage() {
         </div>
       )}
 
-      <DetailCover.Provider value={countCover}>
       <Dialog open={Boolean(detail)} onClose={closeDetail}>
         {detail && (
           <ApplicationDetailContent
@@ -1407,7 +1397,6 @@ export default function RecruitingPage() {
         onConfirm={stageWorkflow.confirmStage}
         onClose={stageWorkflow.closeStageDialog}
       />
-      </DetailCover.Provider>
     </UiSurface>
   );
 }

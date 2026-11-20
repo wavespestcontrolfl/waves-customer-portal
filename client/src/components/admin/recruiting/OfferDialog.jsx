@@ -20,7 +20,6 @@ import {
 } from "../../ui";
 import SafeMarkdown from "../../SafeMarkdown";
 import { saveOfferDraft, sendOffer } from "./offerApi";
-import { useCoverWhile } from "./detailCover";
 import {
   describeSend,
   expiryLabel,
@@ -186,6 +185,15 @@ function offerIdsOf(data) {
 // The offer with this id in a read; null with no read, or for an offer the read does not hold.
 function offerIn(data, id) {
   return (data && offersOf(data).find((o) => o.id === id)) || null;
+}
+
+// The status a send's result shows for its offer: from the newer of the send's answer and the latest read, by the
+// offer's version (updatedAt, which every write moves forward). A read can be newer (another session withdrew or
+// replaced the offer, or the applicant answered, while the result is open) or older (a read that started during the
+// send and landed after its answer). Without both versions, the send's answer.
+function sentStatus(result, data) {
+  const now = offerIn(data, result.offer.id);
+  return now && Date.parse(now.updatedAt) > Date.parse(result.offer.updatedAt) ? now.status : result.offer.status;
 }
 
 function initialDraftId(draft, data) {
@@ -582,13 +590,10 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
     try {
       const out = await sendOffer(applicationId, pinned.id, pinned.draftHash, reviewedOut);
       // The answer's offer row is read after delivery: it can already be withdrawn or replaced. An answer without this
-      // offer and the channels never gets here (sendOffer throws it as a lost answer, and the read decides).
-      setResult({ comms: out.comms, offerStatus: out.offer.status });
-      // The read after the send is newer than its answer (another session may withdraw or replace the offer in
-      // between), so the result follows that read's status for this offer; the delivery outcomes stay the send's own.
-      // A read that still shows the offer as a draft is not newer: the send left draft before it answered.
-      const now = offerIn(await onSent(), out.offer.id);
-      if (now && now.status !== "draft") setResult({ comms: out.comms, offerStatus: now.status });
+      // offer and the channels never gets here (sendOffer throws it as a lost answer, and the read decides). The result
+      // keeps the send's own delivery outcomes; the status it shows follows the newest version (sentStatus).
+      setResult({ offer: out.offer, comms: out.comms });
+      await onSent();
       setConfirming(false);
     } catch (err) {
       await writeFailed(err, "send");
@@ -598,7 +603,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
   };
 
   if (result) {
-    const sent = describeSend(result.comms, firstName, result.offerStatus);
+    const sent = describeSend(result.comms, firstName, sentStatus(result, data));
     return (
       <>
         <DialogBody>
@@ -681,7 +686,6 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
 }
 
 export default function OfferDialog({ open, applicationId, contact, data, draft, seenOut = null, stale = false, onClose, onChanged, onSent }) {
-  useCoverWhile(open); // open over the applicant detail, it hides the replies
   const [busy, setBusy] = useState(false);
   const name = String(contact?.name || "Applicant");
   const status = (draft || data?.current)?.status;

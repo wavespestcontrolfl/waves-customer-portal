@@ -250,7 +250,7 @@ export function describeSend(comms, firstName, offerStatus) {
     return { headline: `Offer sent to ${firstName}.`, lines: [`${firstName} has already answered it. The offer card shows the answer.`] };
   }
   if (offerStatus !== "sent") {
-    return { headline: "This offer is no longer open.", lines: [...lines, "It was withdrawn or replaced while it was being sent. The offer card shows where it stands."] };
+    return { headline: "This offer is no longer open.", lines: [...lines, "It was withdrawn or replaced after you pressed Send. The offer card shows where it stands."] };
   }
   if (states.length && states.every(([, st]) => st === "out")) return { headline: `Offer sent to ${firstName}.`, lines: [] };
   if (states.length && states.every(([, st]) => st === "failed")) {

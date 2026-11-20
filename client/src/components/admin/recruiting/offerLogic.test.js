@@ -133,7 +133,7 @@ describe('offer helpers', () => {
     for (const status of ['withdrawn', 'superseded']) {
       expect(describeSend(failed, 'Jordan', status)).toEqual({
         headline: 'This offer is no longer open.',
-        lines: ['The text did not go out.', 'The email did not go out.', 'It was withdrawn or replaced while it was being sent. The offer card shows where it stands.'],
+        lines: ['The text did not go out.', 'The email did not go out.', 'It was withdrawn or replaced after you pressed Send. The offer card shows where it stands.'],
       });
     }
     expect(describeSend({ sms: { outcome: 'sent' } }, 'Jordan', 'accepted')).toEqual({

@@ -170,15 +170,47 @@ describe("OfferDialog", () => {
   // The read after a send is newer than its answer: another session may withdraw the offer in between. The result
   // follows that read, and keeps the send's own delivery outcomes.
   it("a send result follows the read after it: an offer withdrawn since reads as no longer open, with no Revise advice", async () => {
-    sendOffer.mockResolvedValueOnce({ offer: draftRow({ status: "sent" }), comms: { sms: { outcome: "failed" }, email: { outcome: "failed" } } });
-    const after = { ...panel(draftRow()), current: draftRow({ status: "withdrawn" }) };
-    render(<Harness initial={panel(draftRow())} reads={[]} onSent={async () => after} />);
+    sendOffer.mockResolvedValueOnce({ offer: draftRow({ status: "sent", updatedAt: "2026-12-12T13:15:00.000Z" }), comms: { sms: { outcome: "failed" }, email: { outcome: "failed" } } });
+    const after = { ...panel(draftRow()), current: draftRow({ status: "withdrawn", updatedAt: "2026-12-12T13:16:00.000Z" }) };
+    const outside = {};
+    render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} onSent={async () => { outside.read(after); return after; }} />);
     fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
     const ask = await screen.findByRole("dialog", { name: "Send offer" });
     fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
     expect(await screen.findByText("This offer is no longer open.")).toBeInTheDocument();
     expect(screen.queryByText("The offer is open.")).toBeNull();
     expect(screen.queryByText(/use Revise/)).toBeNull();
+  });
+
+  // The result keeps following the reads while it is open: a later read (a bell link, a Try again) can show the offer
+  // withdrawn after the read that followed the send.
+  it("a send result follows a later read: an offer withdrawn while the result is open reads as no longer open", async () => {
+    const sentRow = draftRow({ status: "sent", updatedAt: "2026-12-12T13:15:00.000Z" });
+    sendOffer.mockResolvedValueOnce({ offer: sentRow, comms: { sms: { outcome: "failed" }, email: { outcome: "failed" } } });
+    const outside = {};
+    const afterSend = { ...panel(draftRow()), current: sentRow };
+    render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} onSent={async () => { outside.read(afterSend); return afterSend; }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    const ask = await screen.findByRole("dialog", { name: "Send offer" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
+    expect(await screen.findByText("The offer is open.")).toBeInTheDocument();
+    expect(screen.getByText(/use Revise/)).toBeInTheDocument();
+    act(() => outside.read({ ...panel(draftRow()), current: draftRow({ status: "withdrawn", updatedAt: "2026-12-12T13:20:00.000Z" }) }));
+    expect(await screen.findByText("This offer is no longer open.")).toBeInTheDocument();
+    expect(screen.queryByText(/use Revise/)).toBeNull();
+  });
+
+  // A read older than the send's answer (one that started during the send and landed after it) does not undo it.
+  it("a send result keeps its answer over an older read: an offer the answer shows withdrawn stays no longer open", async () => {
+    sendOffer.mockResolvedValueOnce({ offer: draftRow({ status: "withdrawn", updatedAt: "2026-12-12T13:16:00.000Z" }), comms: { sms: { outcome: "sent" }, email: { outcome: "sent" } } });
+    const outside = {};
+    const older = { ...panel(draftRow()), current: draftRow({ status: "sent", updatedAt: "2026-12-12T13:15:00.000Z" }) };
+    render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} onSent={async () => { outside.read(older); return older; }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    const ask = await screen.findByRole("dialog", { name: "Send offer" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
+    expect(await screen.findByText("This offer is no longer open.")).toBeInTheDocument();
+    expect(screen.queryByText(/Offer sent to/)).toBeNull();
   });
 
   // A send refused for a reason the form does not show (the Terms lost their issued status, say): nothing was sent. The
