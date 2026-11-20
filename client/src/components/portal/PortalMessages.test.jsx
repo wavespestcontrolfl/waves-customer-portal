@@ -268,6 +268,56 @@ describe('PortalMessages read marker', () => {
 });
 
 describe('PortalMessages composer', () => {
+  const pick = (files) => fireEvent.change(document.querySelector('[data-portal-photo-input]'), { target: { files } });
+  const photo = (name, type = 'image/jpeg') => new File(['pixels'], name, { type, lastModified: 1 });
+
+  it('sends a photo with no words, shows it in the thread without an empty bubble, and clears the tray', async () => {
+    api.sendPortalMessage.mockResolvedValue({
+      message: { id: 'm3', from: 'you', body: '', createdAt: '2026-11-03T17:00:00.000Z', photos: [{ url: 'https://bucket.example/p1' }] },
+    });
+    render(<PortalMessages />);
+    await screen.findByText('Do you spray the pool cage?');
+    const ants = photo('ants.jpg');
+    pick([ants]);
+    expect(screen.getByAltText('Photo 1 to send')).toBeInTheDocument();
+    const send = screen.getByRole('button', { name: 'Send' });
+    expect(send).toBeEnabled();
+    fireEvent.click(send);
+
+    const sent = await screen.findByAltText('Photo 1 you sent');
+    expect(sent).toHaveAttribute('src', 'https://bucket.example/p1');
+    // Small photos go as they are (under the batch budget), with empty words.
+    expect(api.sendPortalMessage).toHaveBeenCalledWith('', expect.any(String), [ants]);
+    expect(screen.queryByAltText('Photo 1 to send')).toBeNull();
+    // The photo stands alone: no text bubble was added for the empty words.
+    expect(sent.parentElement.nextElementSibling).toBeNull();
+  });
+
+  it('takes at most three photos of the allowed types, lets one be removed, and a failed send keeps them with the same requestId', async () => {
+    render(<PortalMessages />);
+    await screen.findByText('Do you spray the pool cage?');
+    pick([photo('notes.pdf', 'application/pdf')]);
+    expect(screen.getByRole('alert')).toHaveTextContent('Photos must be JPEG, PNG, WebP or HEIC images.');
+    expect(screen.queryByAltText('Photo 1 to send')).toBeNull();
+
+    pick([photo('a.jpg'), photo('b.png', 'image/png'), photo('c.jpg'), photo('d.jpg')]);
+    expect(screen.getByRole('alert')).toHaveTextContent('You can send up to 3 photos in one message.');
+    expect(screen.getAllByAltText(/to send$/)).toHaveLength(3);
+    expect(screen.getByRole('button', { name: 'Add a photo' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 2' }));
+    expect(screen.getAllByAltText(/to send$/)).toHaveLength(2);
+
+    api.sendPortalMessage.mockRejectedValueOnce(Object.assign(new Error('Each photo must be 5 MB or smaller.'), { status: 413 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('Each photo must be 5 MB or smaller.')).toBeInTheDocument();
+    expect(screen.getAllByAltText(/to send$/)).toHaveLength(2);
+    api.sendPortalMessage.mockResolvedValue({ message: { id: 'm3', from: 'you', body: '', createdAt: '2026-11-03T17:00:00.000Z', photos: [] } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(api.sendPortalMessage).toHaveBeenCalledTimes(2));
+    expect(api.sendPortalMessage.mock.calls[1][1]).toBe(api.sendPortalMessage.mock.calls[0][1]);
+    expect(api.sendPortalMessage.mock.calls[1][2].map((f) => f.name)).toEqual(['a.jpg', 'c.jpg']);
+  });
+
   it('disables Send while empty, then sends with a requestId, appends and clears', async () => {
     api.sendPortalMessage.mockResolvedValue({ message: { id: 'm3', from: 'you', body: 'Is Friday ok?', createdAt: '2026-11-03T17:00:00.000Z' } });
     render(<PortalMessages />);
@@ -318,7 +368,7 @@ describe('PortalMessages composer', () => {
     fireEvent.change(composer(), { target: { value: 'Please call me today' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     await waitFor(() => expect(composer()).toHaveValue(''));
-    expect(api.sendPortalMessage.mock.calls[1]).toEqual(['Please call me today', expect.any(String)]);
+    expect(api.sendPortalMessage.mock.calls[1]).toEqual(['Please call me today', expect.any(String), []]);
     expect(api.sendPortalMessage.mock.calls[1][1]).not.toBe(api.sendPortalMessage.mock.calls[0][1]);
   });
 
