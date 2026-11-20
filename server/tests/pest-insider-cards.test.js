@@ -12,6 +12,7 @@ const { POSTS } = require('../services/pest-insider/posts');
 
 const MAIN = FACTS.filter((f) => !f.reserve);
 const A01 = { layout: 'number', tag: 'Ants', scheme: 'light', pieces: [{ before: 'White-footed ant colonies range from', big: '8,000 to 3 million ants' }] };
+const L05 = { layout: 'number', tag: 'Lawn', scheme: 'gold', pieces: [{ before: 'Most St. Augustine should be cut at', big: '3.5 to 4 inches' }] };
 const refuse = (cards, message) => expect(() => validateCards({ cards })).toThrow(message);
 
 describe('the reviewed card list', () => {
@@ -81,6 +82,9 @@ describe('the reviewed card list', () => {
     ['a piece that skips words', { A01: { ...A01, pieces: [{ before: 'White-footed ant colonies range', big: '3 million ants' }] } }, /not copied exactly/],
     ['a piece cut inside a word', { A01: { ...A01, pieces: [{ big: 'illion ants' }] } }, /as whole words/],
     ['a piece that ends inside a word', { A01: { ...A01, pieces: [{ big: '8,000 to 3 mill' }] } }, /as whole words/],
+    ['a piece cut after a decimal point', { L05: { ...L05, pieces: [{ big: '5 to 4 inches' }] } }, /as whole words/],
+    ['a piece that ends before a decimal point', { L05: { ...L05, pieces: [{ before: 'Most St. Augustine should be cut at', big: '3' }] } }, /as whole words/],
+    ['a piece cut inside grouped thousands', { A01: { ...A01, pieces: [{ big: '000 to 3 million ants' }] } }, /as whole words/],
     ['no big words', { A01: { ...A01, pieces: [{ before: 'White-footed ant colonies range from' }] } }, /big words/],
     ['big words over 40 characters', { A01: { ...A01, pieces: [{ big: 'UF/IFAS says white-footed ant colonies range from 8,000 to 3 million ants' }] } }, /big words/],
     ['markup in the words', { A01: { ...A01, pieces: [{ big: '<b>8,000</b>' }] } }, /big words/],

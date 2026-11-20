@@ -93,13 +93,20 @@ function monthsNamed(text) {
   return found;
 }
 
-// The piece sits in the sentence as whole words: no cut inside a word, so
-// "illion ants" never passes for "3 million ants".
+// A mark between two digits is part of one number: "3.5", "8,000",
+// "2004-2005", "3/4".
+const joinsNumber = (left, mark, right) => /\d/.test(left || '') && /[.,/:\-\u2013\u2014]/.test(mark || '') && /\d/.test(right || '');
+
+// The piece sits in the sentence as whole words and whole numbers: no cut
+// inside a word or a number, so "illion ants" never passes for "3 million
+// ants", and "5 to 4 inches" never passes for "3.5 to 4 inches".
 function hasWords(sentence, piece) {
   for (let i = sentence.indexOf(piece); i >= 0; i = sentence.indexOf(piece, i + 1)) {
+    const end = i + piece.length;
     const before = sentence[i - 1] || ' ';
-    const after = sentence[i + piece.length] || ' ';
-    if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) return true;
+    const after = sentence[end] || ' ';
+    const cutsNumber = joinsNumber(sentence[i - 2], before, piece[0]) || joinsNumber(piece[piece.length - 1], after, sentence[end + 1]);
+    if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after) && !cutsNumber) return true;
   }
   return false;
 }

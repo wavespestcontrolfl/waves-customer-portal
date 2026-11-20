@@ -55,7 +55,6 @@ process.env.WAVES_LOCAL_DEV = '1';
 const { chromium } = require('playwright');
 const sharp = require('sharp');
 const { WAVES_COLORS: C } = require('../../server/services/pest-insider/cards');
-const { FACTS } = require('../../server/services/pest-insider/facts');
 
 const args = process.argv.slice(2);
 const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
@@ -87,25 +86,42 @@ function writeHeroesFile(raw) {
   fs.writeFileSync(HEROES_FILE, `{\n  "version": ${raw.version},\n  "notes": ${JSON.stringify(raw.notes)},\n  "heroes": {\n${lines.join(',\n')}\n  }\n}\n`);
 }
 
-async function importArt(dir, { HERO_WIDTH, HERO_HEIGHT, ART_DIR }) {
+// Takes new art in two steps, so the art files and the heroes file never
+// disagree. Step 1 writes nothing: every <fact>.png in the folder is cut to
+// size, and the new heroes file must pass heroes.js (a main fact with a
+// card), or nothing is taken. Step 2 writes the art, then the heroes file;
+// if a write fails, the old art is written back.
+async function importArt(dir, { HERO_WIDTH, HERO_HEIGHT, ART_DIR, validateHeroes }) {
   const raw = JSON.parse(fs.readFileSync(HEROES_FILE, 'utf8'));
   const artDir = path.join(repoRoot, ART_DIR);
-  if (execute) fs.mkdirSync(artDir, { recursive: true });
-  const main = FACTS.filter((f) => !f.reserve).map((f) => f.id);
-  let taken = 0;
-  for (const id of main) {
+  const batch = [];
+  for (const name of fs.readdirSync(dir).filter((f) => /^[a-z]\d\d\.png$/.test(f)).sort()) {
+    const id = name.slice(0, 3).toUpperCase();
     if (only && !only.has(id)) continue;
-    const src = path.join(dir, `${id.toLowerCase()}.png`);
-    if (!fs.existsSync(src)) continue;
-    const webp = await sharp(src).resize(HERO_WIDTH * 2, HERO_HEIGHT * 2, { fit: 'cover', position: 'centre' }).webp({ quality: 82, effort: 6 }).toBuffer();
-    if (execute) fs.writeFileSync(path.join(artDir, `${id.toLowerCase()}.webp`), webp);
-    raw.heroes[id] = { art: sha16(webp) };
-    taken += 1;
-    console.log(`${id}  art ${raw.heroes[id].art}  ${Math.round(webp.length / 1024)} KB${execute ? '' : '  (dry run)'}`);
+    const webp = await sharp(path.join(dir, name)).resize(HERO_WIDTH * 2, HERO_HEIGHT * 2, { fit: 'cover', position: 'centre' }).webp({ quality: 82, effort: 6 }).toBuffer();
+    batch.push({ id, file: path.join(artDir, `${id.toLowerCase()}.webp`), webp, art: sha16(webp) });
   }
-  if (!execute) { console.log(`Dry run: ${taken} art file(s) would be taken; nothing written. Add --execute.`); return; }
-  writeHeroesFile(raw);
-  console.log(`${taken} art file(s) taken; now draw: node ops/agents/pest-insider-heroes.js --execute`);
+  const next = { ...raw, heroes: { ...raw.heroes } };
+  for (const item of batch) next.heroes[item.id] = { art: item.art };
+  validateHeroes(next);
+  for (const item of batch) console.log(`${item.id}  art ${item.art}  ${Math.round(item.webp.length / 1024)} KB${execute ? '' : '  (dry run)'}`);
+  if (!execute) { console.log(`Dry run: ${batch.length} art file(s) would be taken; nothing written. Add --execute.`); return; }
+  fs.mkdirSync(artDir, { recursive: true });
+  const written = [];
+  try {
+    for (const item of batch) {
+      const old = fs.existsSync(item.file) ? fs.readFileSync(item.file) : null;
+      fs.writeFileSync(item.file, item.webp);
+      written.push({ ...item, old });
+    }
+    writeHeroesFile(next);
+  } catch (err) {
+    for (const item of written) if (item.old) fs.writeFileSync(item.file, item.old);
+    const added = written.filter((item) => !item.old).map((item) => path.relative(repoRoot, item.file));
+    console.error(`Import failed; the old art is back.${added.length ? ` New art files no fact names yet: ${added.join(', ')}` : ''}`);
+    throw err;
+  }
+  console.log(`${batch.length} art file(s) taken; now draw: node ops/agents/pest-insider-heroes.js --execute`);
 }
 
 // With art: a navy panel on the left (solid, then fading into the art) holds
