@@ -894,6 +894,33 @@ function wholeHomeSealInputs(exclusion, property, input) {
   };
 }
 
+// Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, owner 2026-11-19 choice 2A): the technician's one-tap answer on site, as V2
+// pricer inputs, else null (no pick). THE one gate decision for roof-style pricing, shaped like wholeHomeSealInputs: a NEW
+// request with a pick while the gate is off is refused (fail closed), never priced as if nothing was tapped; a stored estimate
+// re-priced as sold (input.savedEstimateReplay) keeps its quote-time multiplier and per-foot rate (input.roofStyleReplay, read
+// from its own saved rows and honored only on a replay). The pick only exists on the V2 shape; any other shape is refused.
+const ROOF_STYLES = ['shingle', 'flat_tile', 'barrel_tile', 'metal', 'other'];
+function roofStyleInputs(exclusion, input) {
+  const style = exclusion.roofStyle;
+  if (style === undefined || style === null || style === '') return null;
+  const replay = input.savedEstimateReplay === true;
+  if (require('../../config/feature-gates').exclusionRoofStylePricingLive?.() !== true && !replay) {
+    throw wholeHomeInputError('Roof style pricing is not enabled on this environment (GATE_EXCLUSION_ROOF_STYLE_PRICING). Clear the roof style and reprice.', 'EXCLUSION_ROOF_STYLE_GATED');
+  }
+  if (!ROOF_STYLES.includes(style)) {
+    throw wholeHomeInputError('The roof style must be shingle, flat tile, barrel tile, metal or other.', 'EXCLUSION_ROOF_STYLE_INVALID');
+  }
+  if (exclusion.pricingVersion !== 'v2') {
+    throw wholeHomeInputError('A roof style needs the per-point exclusion (pricingVersion v2). Clear the roof style or reprice from the estimate tool.', 'EXCLUSION_ROOF_STYLE_INCOMPATIBLE');
+  }
+  const frozen = replay ? input.roofStyleReplay : null;
+  return {
+    roofStyle: style,
+    barrelEaveFt: exclusion.barrelEaveFt,
+    ...(frozen ? { frozenTileMultiplier: frozen.multiplier, frozenBarrelPerFt: frozen.perFt, frozenBarrelMinimum: frozen.minimum } : {}),
+  };
+}
+
 // A fail-closed 400 for a whole-home pick that cannot be priced as asked (never silently priced another way).
 function wholeHomeInputError(message, code) {
   const err = new Error(message);
@@ -2277,6 +2304,7 @@ function generateEstimate(input) {
   // V2 exclusion as per-section line items rather than one combined row.
   let rodentExclusionV2Summary = null;
   const wholeHomeSeal = wholeHomeSealInputs(services.exclusion || {}, property, input);
+  const roofStyle = roofStyleInputs(services.exclusion || {}, input);
   if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control', {
     // Only the V2 shape is unit-scoped (per point + per LF, no home-sqft
     // floors) — this is the LIVE producer shape (property-lookup-v2 sends
@@ -2313,6 +2341,7 @@ function generateEstimate(input) {
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
         ...wholeHomeSeal,
+        ...roofStyle,
       });
       rodentExclusionV2Summary = result;
       // Per-section rows (wire mesh points / bird boxes / linear mesh, plus

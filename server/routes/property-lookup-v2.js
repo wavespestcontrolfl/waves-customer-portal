@@ -5417,6 +5417,14 @@ function wholeHomeSealFields(options, home) {
   return options.exclSealScope === 'whole_home' ? { sealScope: 'whole_home', ...home } : {};
 }
 
+// The Roof style pick of the admin estimate tool, as services.exclusion fields: {} without a pick. The pick passes
+// through (the feet only with Barrel tile); the estimate engine makes the one GATE_EXCLUSION_ROOF_STYLE_PRICING decision.
+function roofStyleFields(options) {
+  const style = typeof options.exclRoofStyle === 'string' ? options.exclRoofStyle : '';
+  if (!style) return {};
+  return { roofStyle: style, ...(style === 'barrel_tile' ? { barrelEaveFt: Number(options.exclBarrelEaveFt) || 0 } : {}) };
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -6038,9 +6046,11 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // Whole-home seal (GATE_EXCLUSION_WHOLE_HOME, dark): an all-zero count still prices the home-size
     // minimum, so the pick alone selects the V2 shape. Gate off = the field is never read.
     const wholeHomeSeal = wholeHomeSealFields(o, { homeSqFt, stories, roofType: p.roofType });
+    // Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, dark): a measured barrel closure is V2 work; a pick alone is not.
+    const roofStyle = roofStyleFields(o);
     const hasV2Fields = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
       o.exclStandardBirdBox || o.exclTileHighBirdBox || o.exclCustomBirdBox ||
-      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope);
+      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope || roofStyle.barrelEaveFt > 0);
     if (hasV2Fields) {
       services.exclusion = {
         pricingVersion: 'v2',
@@ -6054,6 +6064,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         waiveInspection: !!o.exclWaiveInspection,
         urgency, afterHours,
         ...wholeHomeSeal,
+        ...roofStyle,
       };
     } else {
       services.exclusion = {
