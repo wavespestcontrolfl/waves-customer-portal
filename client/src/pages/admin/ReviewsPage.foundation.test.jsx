@@ -446,6 +446,36 @@ describe("Reviews workspace foundation", () => {
     expect(screen.queryByText("15 reviews a month")).toBeNull();
   }, 30000);
 
+  it("a queue-only failure still shows the real cap; an incentives failure shows Unavailable", async () => {
+    const mount = async (queueStatus, incentivesStatus) => {
+      vi.stubGlobal("fetch", vi.fn(async (url) => {
+        const path = String(url);
+        if (path.includes("/admin/reviews/incentives/attribution-queue?")) {
+          return queueStatus === 200 ? response({ items: [] }) : response({ error: "Synthetic queue failure" }, queueStatus);
+        }
+        if (path.includes("/admin/reviews/incentives?")) {
+          return incentivesStatus === 200
+            ? response({ summary: { confirmedGoogleReviews: 1 }, payouts: [], leaderboard: [], policy: { enabled: true, amountCents: 1500, monthlyCapCount: 15 } })
+            : response({ error: "Synthetic incentives failure" }, incentivesStatus);
+        }
+        if (path.includes("/admin/reviews")) {
+          return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      }));
+      render(<ReviewsPage />);
+      await screen.findByText("No reviews match your filters");
+      fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+      fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    };
+    await mount(503, 200);
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    cleanup();
+    await mount(200, 503);
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("15 reviews a month")).toBeNull();
+  }, 30000);
+
   it("Mark Pending Paid sends only the pending ids the button was enabled from, never over-cap rows", async () => {
     const posts = [];
     const payout = (id, patch) => ({

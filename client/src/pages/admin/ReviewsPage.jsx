@@ -826,10 +826,9 @@ function fmtDateTime(value) {
 }
 // Owner 2026-11-20 D4: the monthly cap on paid reviews per technician (null = none).
 // "No monthly cap" only for a policy that loaded; a failed load shows "Unavailable", never a guess.
-function monthlyCapLabel(data, readError) {
-  const policy = data?.policy;
-  // A failed read, first or a later refresh, means the policy on screen may be stale: say so.
-  if (!policy || readError) return "Unavailable";
+function monthlyCapLabel(policy, readFailed) {
+  // A failed policy read, first or a later refresh, means the policy on screen may be stale: say so.
+  if (!policy || readFailed) return "Unavailable";
   return policy.monthlyCapCount
     ? `${policy.monthlyCapCount} reviews a month`
     : "No monthly cap";
@@ -1043,6 +1042,9 @@ function ReviewIncentivesPanel() {
   const [readError, setReadError] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [paidNotice, setPaidNotice] = useState(null);
+  // The cap card follows the policy read alone, so a failed attribution-queue read never hides the cap.
+  const [capPolicy, setCapPolicy] = useState(null);
+  const [capReadFailed, setCapReadFailed] = useState(false);
   const [queue, setQueue] = useState([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [activeRepairId, setActiveRepairId] = useState(null);
@@ -1063,8 +1065,21 @@ function ReviewIncentivesPanel() {
     if (!background) setLoading(true);
     if (!background) setQueueLoading(true);
     if (!background) setReadError(null);
+    const incentivesRead = adminFetch(`/admin/reviews/incentives?days=${days}`).then(
+      (d) => {
+        if (gen === loadGen.current) {
+          setCapPolicy(d?.policy || null);
+          setCapReadFailed(false);
+        }
+        return d;
+      },
+      (e) => {
+        if (gen === loadGen.current) setCapReadFailed(true);
+        throw e;
+      },
+    );
     return Promise.all([
-      adminFetch(`/admin/reviews/incentives?days=${days}`),
+      incentivesRead,
       adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`),
     ])
       .then(([d, q]) => {
@@ -1373,7 +1388,7 @@ function ReviewIncentivesPanel() {
             <PolicyInfoCard
               Icon={CalendarDays}
               label="Monthly cap"
-              value={monthlyCapLabel(data, readError)}
+              value={monthlyCapLabel(capPolicy, capReadFailed)}
               sub="Per technician, by Eastern calendar month. Reviews past the cap are not paid."
             />
             <PolicyInfoCard
