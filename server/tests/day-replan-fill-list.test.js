@@ -244,8 +244,11 @@ describe('fillList', () => {
 
   test('a combined visit keeps its full length on the modeled route: the planned minutes of one service never shrink it', async () => {
     const before = process.env.GATE_SCHEDULING_CAPACITY;
-    // Plan-only mode: the route plans the owner's minutes on site, and nothing else changes.
+    const fake = slots.appointmentServicesFor.getMockImplementation();
+    // Plan-only mode: the route plans the owner's minutes on site, and nothing else changes. The page's own rule for
+    // the services this visit performs.
     process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    slots.appointmentServicesFor.mockImplementation(jest.requireActual('../services/estimate-slot-availability').appointmentServicesFor);
     try {
       dayStops({ [DAY]: [stop('first', '08:00')] });
       locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
@@ -258,7 +261,13 @@ describe('fillList', () => {
       slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, reservationServiceMix: true, serviceLabel: 'Pest Control + Lawn Care',
         services: [{ service: 'pest_control', label: 'One-Time Pest Control' }, { service: 'lawn_care', label: 'Lawn Care' }] });
       expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ length: 60, onSiteMin: 60 });
+      // A recurring estimate whose lawn program books its own visits: plan-only mode keeps lawn care in the profile,
+      // but this visit performs pest control alone, so it plans the recurring pest row.
+      slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, serviceMode: 'recurring', serviceLabel: 'Quarterly Pest Control + Lawn Care',
+        services: [{ service: 'pest_control', label: 'Quarterly Pest Control' }, { service: 'lawn_care', label: 'Lawn Care (Every 6 weeks)' }] });
+      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ length: 60, onSiteMin: 35 });
     } finally {
+      slots.appointmentServicesFor.mockImplementation(fake);
       if (before === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = before;
     }
