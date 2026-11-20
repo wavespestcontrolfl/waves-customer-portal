@@ -119,12 +119,23 @@ describe("Saved whole-home picks and new estimates", () => {
     expect(container.querySelector('[data-testid="exclusion-whole-home-blocked"]')).toBeNull();
   });
 
+  it("changing the service address resets a Whole home pick to Spot seal", async () => {
+    const { container, getByLabelText } = await openExclusion({ data: {}, exclusionWholeHome: true });
+    await waitFor(() => expect(container.querySelector("#estimate-exclSealScope")).toBeTruthy());
+    fireEvent.change(container.querySelector("#estimate-exclSealScope"), { target: { value: "whole_home" } });
+    expect(container.querySelector("#estimate-exclSealScope").value).toBe("whole_home");
+    fireEvent.change(getByLabelText("Service address"), { target: { value: "12 Example Lane, Bradenton FL" } });
+    await waitFor(() => expect(container.querySelector("#estimate-exclSealScope").value).toBe("spot"));
+  }, 30000);
+
   it("a new estimate resets the seal scope and the checklist", () => {
     expect(exclusionScopeReset()).toEqual({ exclSealScope: "spot", exclusionChecklist: [] });
     expect(exclusionScopeReset().exclusionChecklist).not.toBe(exclusionScopeReset().exclusionChecklist);
-    // nextEstimate (the Next estimate button) must apply it to the form it carries over.
+    // clearedPropertyFields (a new address or customer, and Next estimate through it) applies it.
     const source = fs.readFileSync("src/pages/admin/EstimateToolViewV2.jsx", "utf8");
+    const cleared = source.slice(source.indexOf("function clearedPropertyFields()"));
+    expect(cleared.slice(0, cleared.indexOf("const [form, setForm]"))).toContain("...exclusionScopeReset()");
     const nextEstimate = source.slice(source.indexOf("function nextEstimate()"));
-    expect(nextEstimate.slice(0, nextEstimate.indexOf("fleaOfferKey"))).toContain("...exclusionScopeReset()");
+    expect(nextEstimate.slice(0, nextEstimate.indexOf("fleaOfferKey"))).toContain("...clearedPropertyFields()");
   });
 });

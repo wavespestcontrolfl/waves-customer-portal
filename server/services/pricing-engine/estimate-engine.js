@@ -864,9 +864,23 @@ function stripBedBugInternalPricing(result) {
 // else null (a spot seal, or the gate off). The home size is the request's, else the property's TOTAL living
 // area (input homeSqFt), and only then its footprint (the ground floor: a two-story home would tier too low).
 // With none of them it stays 0: the pricer then flags its rows footprintWasDefaulted (a guessed size).
-function wholeHomeSealInputs(exclusion, property) {
+//
+// THE one GATE_EXCLUSION_WHOLE_HOME decision for pricing. A NEW request that asks for a whole-home seal while the
+// gate is off is refused (fail closed, like a gated misting pick): pricing it as a spot seal would silently drop the
+// included guarantee and cut the price. A stored estimate re-priced as sold (input.savedEstimateReplay, set by
+// extractEngineInputs and the persisted-estimate replay) keeps the terms it was quoted after a rollback. The
+// pricer and the routes read no gate of their own.
+function wholeHomeSealInputs(exclusion, property, input) {
   if (exclusion.sealScope !== 'whole_home') return null;
-  if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true) return null;
+  if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true && input.savedEstimateReplay !== true) {
+    const err = new Error('The whole-home seal is not enabled on this environment (GATE_EXCLUSION_WHOLE_HOME). Choose Spot seal for Seal scope and reprice.');
+    err.status = 400;
+    err.statusCode = 400;
+    err.code = 'EXCLUSION_WHOLE_HOME_GATED';
+    err.failClosed = true;
+    err.isOperational = true;
+    throw err;
+  }
   return {
     sealScope: 'whole_home',
     homeSqFt: exclusion.homeSqFt || property.homeSqFt || property.footprint || 0,
@@ -2258,7 +2272,7 @@ function generateEstimate(input) {
     // A whole-home seal (gate on) is priced from the HOME's size, which a commercial
     // property has no minimum table for: it never counts as a scoped one-time.
     scopedOneTime: services.exclusion.pricingVersion === 'v2'
-      && !wholeHomeSealInputs(services.exclusion, property)
+      && !wholeHomeSealInputs(services.exclusion, property, input)
       && ['standardWireMeshPoints', 'advancedWireMeshPoints', 'standardBirdBoxes', 'tileHighBirdBoxes',
         'customBirdBoxes', 'meshSoftLF', 'meshConcreteLF']
         .some((k) => Number(services.exclusion[k]) > 0),
@@ -2281,7 +2295,7 @@ function generateEstimate(input) {
         approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
-        ...wholeHomeSealInputs(services.exclusion, property),
+        ...wholeHomeSealInputs(services.exclusion, property, input),
       });
       rodentExclusionV2Summary = result;
       // Per-section rows (wire mesh points / bird boxes / linear mesh, plus

@@ -57,12 +57,16 @@ describe('GATE_EXCLUSION_WHOLE_HOME reader', () => {
 describe('priceRodentExclusionV2 whole-home seal', () => {
   const spot = { standardWireMeshPoints: 2, waiveInspection: true };
 
-  test('gate off: sealScope is ignored and the result is identical to a spot seal', () => {
-    const plain = priceRodentExclusionV2({ ...spot, homeSqFt: 3000 });
+  test('without a whole-home pick the result is a spot seal, gate on or off', () => {
+    const plain = withGate(undefined, () => priceRodentExclusionV2({ ...spot, homeSqFt: 3000 }));
+    expect(plain.includesReentryGuarantee).toBeUndefined();
+    expect(plain.price).toBe(195);
+    expect(gateOn(() => priceRodentExclusionV2({ ...spot, homeSqFt: 3000 }))).toEqual(plain);
+  });
+
+  test('the pricer reads no gate: the engine decides it once (a stored whole-home quote prices on after a rollback)', () => {
     const asked = withGate(undefined, () => priceRodentExclusionV2({ ...spot, sealScope: 'whole_home', homeSqFt: 3000 }));
-    expect(asked).toEqual(plain);
-    expect(asked.includesReentryGuarantee).toBeUndefined();
-    expect(asked.price).toBe(195);
+    expect(asked).toMatchObject({ price: 895, includesReentryGuarantee: true });
   });
 
   test('gate on, spot seal (default or explicit): unchanged, no guarantee flag', () => {
@@ -156,11 +160,32 @@ describe('priceRodentExclusionV2 whole-home seal', () => {
 describe('estimate engine with a whole-home exclusion', () => {
   const exclusion = (extra = {}) => ({ pricingVersion: 'v2', standardWireMeshPoints: 2, waiveInspection: true, ...extra });
 
-  test('gate off: a whole-home request prices as a spot seal', () => {
-    const spot = withGate(undefined, () => generateEstimate(baseInput({ services: { exclusion: exclusion() } })));
-    const asked = withGate(undefined, () => generateEstimate(baseInput({ services: { exclusion: exclusion({ sealScope: 'whole_home' }) } })));
-    expect(asked.lineItems).toEqual(spot.lineItems);
-    expect(asked.lineItems.some((li) => li.includesReentryGuarantee)).toBe(false);
+  test('gate off: a new whole-home request is refused (fail closed), never priced as a spot seal', () => {
+    withGate(undefined, () => {
+      let error;
+      try { generateEstimate(baseInput({ services: { exclusion: exclusion({ sealScope: 'whole_home' }) } })); } catch (err) { error = err; }
+      expect(error).toMatchObject({ statusCode: 400, code: 'EXCLUSION_WHOLE_HOME_GATED', failClosed: true });
+      expect(error.message).toMatch(/Choose Spot seal/);
+    });
+  });
+
+  test('gate off: a request with no whole-home pick is unchanged', () => {
+    const plain = withGate(undefined, () => generateEstimate(baseInput({ services: { exclusion: exclusion() } })));
+    const spot = withGate(undefined, () => generateEstimate(baseInput({ services: { exclusion: exclusion({ sealScope: 'spot' }) } })));
+    expect(spot.lineItems).toEqual(plain.lineItems);
+    expect(plain.lineItems.some((li) => li.includesReentryGuarantee)).toBe(false);
+  });
+
+  test('gate off: a stored estimate re-priced as sold keeps its whole-home terms', () => {
+    withGate(undefined, () => {
+      const replay = generateEstimate(baseInput({
+        savedEstimateReplay: true,
+        services: { exclusion: exclusion({ sealScope: 'whole_home', homeSqFt: 2000 }) },
+      }));
+      const rows = replay.lineItems.filter((li) => li.service === 'rodent_exclusion');
+      expect(rows.reduce((sum, li) => sum + li.price, 0)).toBe(595);
+      expect(rows.every((li) => li.includesReentryGuarantee === true)).toBe(true);
+    });
   });
 
   test('gate on: home size comes from the request, else the property footprint', () => {
@@ -290,6 +315,21 @@ describe('customer copy for an included re-entry guarantee', () => {
     expect(copy.includes).not.toContain(BULLET);
   });
 
+  test('one predicate: only a recognized rodent exclusion key with the flag counts (keys, copy and Ask Waves agree)', () => {
+    const { hasIncludedReentryGuarantee, includedReentryGuaranteeFields } = require('../../shared/estimate-purchased-warranty.cjs');
+    const flagged = { includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
+    for (const service of ['rodent_exclusion', 'exclusion', 'exclusion_v2']) {
+      expect(hasIncludedReentryGuarantee({ service, ...flagged })).toBe(true);
+    }
+    for (const service of ['bed_bug', 'rodent_trapping', undefined]) {
+      expect(hasIncludedReentryGuarantee({ service, label: 'Rodent Exclusion', ...flagged })).toBe(false);
+      expect(includedReentryGuaranteeFields({ service, ...flagged })).toEqual({});
+    }
+    expect(hasIncludedReentryGuarantee({ service: 'rodent_exclusion', includesReentryGuarantee: 'true' })).toBe(false);
+    const bedBug = resolveOneTimeServiceCopy({ service: 'bed_bug', label: 'Bed Bug Heat Treatment', ...flagged });
+    expect(bedBug.includes).not.toContain(BULLET);
+  });
+
   test('a flagged row with no renewal price keeps the normal terms and states no renewal', () => {
     const copy = resolveOneTimeServiceCopy({ ...row, guaranteeRenewalPrice: null }, { guaranteeScope: 'satisfaction' });
     expect(copy.includes).toContain(BULLET);
@@ -310,12 +350,10 @@ describe('the estimator route translation of the Seal scope pick', () => {
     });
   });
 
-  test('gate off: an explicit Whole home pick is refused (never priced as a spot seal)', () => {
+  test('the route translation passes the pick through and reads no gate (the engine refuses it when the gate is off)', () => {
     withGate(undefined, () => {
-      let error;
-      try { translate({ exclSealScope: 'whole_home' }); } catch (err) { error = err; }
-      expect(error).toMatchObject({ statusCode: 400, code: 'EXCLUSION_WHOLE_HOME_GATED', failClosed: true });
-      expect(error.message).toMatch(/Choose Spot seal/);
+      expect(translate({ exclSealScope: 'whole_home' }).services.exclusion).toMatchObject({ sealScope: 'whole_home', homeSqFt: 2000 });
+      expect(() => generateEstimate(translate({ exclSealScope: 'whole_home' }))).toThrow(/Choose Spot seal/);
     });
   });
 

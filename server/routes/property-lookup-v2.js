@@ -5398,20 +5398,10 @@ function isAssociationCommercialJob({ commercialRiskType = null, commercialSubty
     || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
 }
 
-// The Seal scope pick of the admin estimate tool, as services.exclusion fields. {} without a Whole home
-// pick, so every other request is untouched. A Whole home pick while GATE_EXCLUSION_WHOLE_HOME is off
-// (the gate closed after the tool loaded) is refused, like a gated misting pick: pricing it as a spot
-// seal would silently drop the guarantee and cut the price.
+// The Seal scope pick of the admin estimate tool, as services.exclusion fields: {} without a Whole home
+// pick. The pick passes through; the estimate engine makes the one GATE_EXCLUSION_WHOLE_HOME decision.
 function wholeHomeSealFields(options, home) {
-  if (options.exclSealScope !== 'whole_home') return {};
-  if (require('../config/feature-gates').exclusionWholeHomeLive?.() !== true) {
-    const err = new Error('The whole-home seal is not enabled on this environment (GATE_EXCLUSION_WHOLE_HOME). Choose Spot seal for Seal scope and reprice.');
-    err.statusCode = 400;
-    err.code = 'EXCLUSION_WHOLE_HOME_GATED';
-    err.failClosed = true;
-    throw err;
-  }
-  return { sealScope: 'whole_home', ...home };
+  return options.exclSealScope === 'whole_home' ? { sealScope: 'whole_home', ...home } : {};
 }
 
 function translateV2CallToV1Input(profile, selectedServices, options) {

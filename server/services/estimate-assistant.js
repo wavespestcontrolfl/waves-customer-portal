@@ -13,6 +13,7 @@ const {
   hasPurchasedTrenchingWarranty,
   includedReentryPurchasedTerms,
   isPreSlabTreatmentItem,
+  isRodentExclusionRow,
   preSlabExtendedWarrantySelected,
   preSlabSelectedWarrantyPart,
   preSlabWarrantyDecision,
@@ -481,8 +482,7 @@ function purchasedTermsForRow(item) {
 // merge then clears a same-label whole-home row an older snapshot still carries.
 function includedReentryProjection(item) {
   const purchasedTerms = includedReentryPurchasedTerms(item);
-  const isExclusionRow = /^(rodent_)?exclusion/.test(cleanText(item.service || item.serviceKey).toLowerCase());
-  return purchasedTerms.length || isExclusionRow ? { purchasedTerms } : {};
+  return isRodentExclusionRow(item) ? { purchasedTerms } : {};
 }
 
 function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
@@ -656,7 +656,10 @@ function oneTimeRowsFromEstimateData(estData = {}) {
   const currentRows = projectedCurrent.map((row) => (isPreSlabTreatmentItem(row)
     ? { ...row, ...preSlabProjectionFields(row, reconcilePricedPreSlabWarrantyEvidence(row, evidenceGroups, {}, projectedCurrent)) }
     : row));
-  const fallbackRows = roots.slice(1).flatMap(oneTimeRowsFromResult);
+  // An older root never lends the included re-entry guarantee: it is stated only from the CURRENT
+  // evidence, so an exclusion removed from the estimate takes its guarantee with it.
+  const fallbackRows = roots.slice(1).flatMap(oneTimeRowsFromResult)
+    .map((row) => (isRodentExclusionRow(row) ? { ...row, purchasedTerms: [] } : row));
   const mergedRows = mergeOneTimeServiceRows(currentRows, fallbackRows);
   return mergedRows.map((row) => {
     if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;

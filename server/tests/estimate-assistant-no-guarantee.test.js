@@ -434,6 +434,35 @@ describe('estimate assistant no-guarantee context', () => {
     expect(answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context)).not.toContain('1-year re-entry guarantee');
   });
 
+  test('an exclusion removed from the estimate takes its older whole-home guarantee with it', () => {
+    const older = { service: 'rodent_exclusion', label: 'Rodent Exclusion', amount: 595, price: 595, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
+    for (const current of [
+      { oneTime: { items: [{ service: 'rodent_trapping', label: 'Rodent Trapping', amount: 350, price: 350 }] } },
+      { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] } },
+    ]) {
+      const context = buildEstimateAssistantContext({
+        estimate: { monthly_total: 55 },
+        estData: { result: current, engineResult: { oneTime: { items: [older] } } },
+        pricingBundle: { frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 55, annual: 660 }] },
+      });
+      const terms = [...(context.oneTime?.items || []), ...(context.services || [])].flatMap((row) => row.purchasedTerms || []);
+      expect(terms).toEqual([]);
+      expect(answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context)).not.toContain('1-year re-entry guarantee');
+    }
+  });
+
+  test('the flag on a non-exclusion row gives no Ask Waves terms', () => {
+    const row = { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, price: 650, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 650 },
+      estData: { result: { oneTime: { items: [row] } } },
+      pricingBundle: { anchorOneTimePrice: 650, oneTimeBreakdown: { items: [row] } },
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items[0].purchasedTerms || []).toEqual([]);
+    expect(answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context)).not.toContain('1-year re-entry guarantee');
+  });
+
   test.each(['pricing', 'saved'])('%s purchased warranty scope survives without allowing arbitrary warranty prose', (source) => {
     const row = { service: 'termite_trenching', label: 'Front foundation', amount: 1200, price: 1200,
       warrantyTier: 'one_year_retreat', warrantyAdder: 100, detail: 'Guaranteed termite-free forever' };

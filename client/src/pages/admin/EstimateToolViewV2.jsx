@@ -1962,6 +1962,8 @@ export default function EstimateToolViewV2({
       ...EMPTY_PROPERTY_MEASUREMENTS,
       ...Object.fromEntries(PROPERTY_FORM_FIELDS.map((field) => [field, defaults[field] ?? ""])),
       propertyId: "", _manualFields: [], _unitCountEdited: false,
+      // The seal scope and checked points belong to the property they were picked for.
+      ...exclusionScopeReset(),
     };
   }
 
@@ -3977,8 +3979,10 @@ export default function EstimateToolViewV2({
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),
-      // Same address, same service property: the link stays.
+      // Same address, same service property: the link and the seal scope stay.
       propertyId: f.propertyId,
+      exclSealScope: f.exclSealScope,
+      exclusionChecklist: f.exclusionChecklist,
       _homeSqFtEdited: false,
       _lotSqFtEdited: false,
       _storiesEdited: false,
@@ -5336,7 +5340,6 @@ export default function EstimateToolViewV2({
       roachFeeOverride: "",
       standaloneRoachFeeOverride: "",
       linePriceOverrides: {},
-      ...exclusionScopeReset(),
       fleaOfferKey: "flea_elimination_two_visit",
       fleaComplexity: "light",
       fleaExteriorSourceSuspected: false,

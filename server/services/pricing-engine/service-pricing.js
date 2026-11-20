@@ -9724,13 +9724,12 @@ function priceExclusion(options = {}) {
   };
 }
 
-// Whole-home seal terms (GATE_EXCLUSION_WHOLE_HOME, owner 2026-11-19). Null for a
-// spot seal or while the gate is off, so every caller keeps the spot-seal path
-// byte for byte. A whole-home seal swaps the job floor for a home-size minimum
-// and includes the 1-year re-entry guarantee in the price.
+// Whole-home seal terms (owner 2026-11-19). Null for a spot seal, so every caller keeps the
+// spot-seal path byte for byte. A whole-home seal swaps the job floor for a home-size minimum
+// and includes the 1-year re-entry guarantee in the price. The gate (GATE_EXCLUSION_WHOLE_HOME)
+// is decided once, in the estimate engine (wholeHomeSealInputs); the pricer only prices the pick.
 function wholeHomeSealTerms(options = {}) {
   if (options.sealScope !== 'whole_home') return null;
-  if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true) return null;
   const sized = Number(options.homeSqFt) > 0;
   const sqFt = sized ? Number(options.homeSqFt) : 2000;
   // The same home-size table the spot-seal pricer reads: Settings (pricing_config
