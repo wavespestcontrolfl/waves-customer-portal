@@ -8644,16 +8644,18 @@ that Node's WHATWG URL parser opens as the signing page across a grid of dot seg
 delimiters and backslashes. The same scan pins only those tokens (a 64-hex query value beside them is not pinned),
 so a held text replays each one as the standard link. Any other copy of a token found on an offer path, anywhere in
 the text (the link's own query or fragment, or another word), is hidden too: that unit is stored as the standard link
-for each offer-path token it holds, or as the bare marker when it holds none, which the replay leaves as it is. The
-units' reader text is also read run together (once with every unit, once with the units outside tags only), so a link
-or a copy split by markup, spaces or line breaks (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is
-found and hidden in every piece: the marker in the first unit, nothing in the rest, the tags kept. The
+for each offer-path token it holds, or as the bare marker when it holds none. The replay rebuilds only the standard
+link, so a held text whose stored form gains a bare marker is not queued (the owner sees it did not go out). The
+units' reader text is also read run together (once with every unit, once with the units outside tags only) with
+every character a reader does not see dropped, so a link or a copy split by markup, white space (also `&nbsp;`), line
+breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
+every piece: the marker in the first unit, nothing in the rest, the tags kept. The
 service worker never handles an offer page, in any request mode (`client/public/sw.js` `isOfferLinkPath`: the path,
 percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the
 server routes `/API/` as `/api/`). It stores no URL that could carry the link, because a stored response or request
 keeps its URL: every entry is rebuilt without its URL (`withoutUrl`, `tagWithBuild`) and stored under a key with no
 query or fragment (the shell under `/`, any other same-origin GET under its own path), and a redirected response is
-served but not stored. A request with a query or fragment that is not a page load is left to the browser. Its cache
+served but not stored (the shell and its assets included). A request with a query or fragment that is not a page load is left to the browser. Its cache
 has a new name (`waves-customer-v13-private-links`), so activation drops the older worker's bucket whole, offer links
 included, before the worker claims a page, and each page load drops any older bucket found again
 (`sweepOlderCaches`). It never serves its offline shell in the page's place, so the browser always fetches the page

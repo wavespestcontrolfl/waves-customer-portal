@@ -494,6 +494,14 @@ describe('service-worker private link pages', () => {
       : fakeResponse(shellHtml(['/assets/index-9.js']))));
     await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
     expect(await (await cache.match('/')).text()).toContain('index-2');
+    // Nor a shell that itself answers with a redirect: its page is another URL's. It is served; the shell stays.
+    worker.setFetch(async (request) => (String(request.url).includes('/assets/')
+      ? fakeResponse('asset')
+      : new FakeResponse(shellHtml(['/assets/index-8.js']), { url: `https://portal.test/careers/offer/${token}`, redirected: true })));
+    const redirected = await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+    expect(redirected.response.redirected).toBe(true);
+    await tick();
+    expect(await (await cache.match('/')).text()).toContain('index-2');
     for (const inner of nested) {
       for (const path of [`/go?next=${inner}`, `/assets/chunk.js?next=${inner}`, `/manifest.json#${inner}`]) {
         const { response } = await worker.dispatchFetch(path, { mode: 'cors' });

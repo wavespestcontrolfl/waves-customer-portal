@@ -244,19 +244,23 @@ function readerViews(text) {
       if (next === out) break;
       out = next;
     }
-    return out.normalize('NFKC').replace(/\s|\p{Cf}/gu, '').toLowerCase();
+    return out.normalize('NFKC').replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '').toLowerCase();
   };
   return [read(text), read(text.replace(/<!--[\s\S]*?-->|<[^>]*>/g, ''))];
 }
 
 describe('a found token split anywhere is hidden in every piece', () => {
   // A token that does not repeat, as a real one does not. Every split point inside it, with each separator a reader
-  // skips: markup an email shows nothing for, a space, a line break, a quoted reply's wrap, an invisible character.
+  // skips: markup an email shows nothing for, a space (also written &nbsp;, %C2%A0 or as a figure space), a line break,
+  // a quoted reply's wrap, an invisible character (a zero-width space, a soft hyphen, a blank braille pattern).
   // The link split alone, beside the whole link in an href, and as a plain copy.
   const token = createHash('sha256').update('split grid').digest('hex');
   const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
   const at = link.length - 64;
-  const SEPARATORS = ['<wbr>', '<span>', '</span><span style="x">', '<!-- -->', ' ', '\n', '\n> ', '&#8203;', '%E2%80%8B'];
+  const SEPARATORS = [
+    '<wbr>', '<span>', '</span><span style="x">', '<!-- -->', ' ', '\n', '\n> ', '&#8203;', '%E2%80%8B',
+    '&nbsp;', '%C2%A0', '&#x2007;', '&shy;', '&#10240;',
+  ];
 
   test('in every split, the stored text shows no piece run together into the token', () => {
     let checked = 0;

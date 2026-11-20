@@ -353,6 +353,8 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   // is never superseded: the worker needs a shell.
   if (await isSuperseded()) throw new Error('Shell refresh superseded by a newer navigation');
   if (!shellResponse.ok) throw new Error(`Shell request failed (${shellResponse.status})`);
+  // A redirected response holds another URL's page; it is served, never stored.
+  if (shellResponse.redirected) throw new Error('Shell request redirected');
 
   const html = await shellResponse.clone().text();
   const assets = shellAssetUrls(html);
@@ -657,8 +659,9 @@ function isOfferLinkPath(pathname) {
 // stores is rebuilt without its URL, and it is stored only under a key with
 // no query or fragment: the shell under '/' (from any page), and any other
 // same-origin GET under its own path, when that response was not redirected
-// (its body is another URL's). A request with a query or fragment that is
-// not a page load is left to the browser. tagWithBuild rebuilds assets too.
+// (its body is another URL's; the shell and its assets the same). A request
+// with a query or fragment that is not a page load is left to the browser.
+// tagWithBuild rebuilds assets too.
 function withoutUrl(response) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }

@@ -26,16 +26,19 @@
  *   appears. A unit whose reader's text still holds one after the steps above (a copy in the link's own query or
  *   fragment, or anywhere else) is replaced as a whole: by the standard hidden link for each offer-path token it holds,
  *   or by the bare marker when it holds none. The bare marker is not a link, so the replay leaves it as it is.
- * - A link or a copy split over several units. A reader sees the text run together: markup, spaces and line breaks drop
- *   out of a link that is shown or copied (a <wbr> or a <span> inside it, a quoted reply that wraps it). So the reader's
- *   text of the units is also read joined, with nothing between them: once with every unit, as plain text shows it, and
- *   once with the units outside tags only, as an email shows it. There "careers" may end a longer word, and the token is
- *   the 64 hex after "offer/" whatever follows. A token on an offer path there counts as found, and each found token
- *   split over several units is hidden in all of them: the bare marker in the first (or the standard hidden link for
- *   an offer-path token that unit holds whole, as above) and nothing in the rest. Tags and spaces stay, so the bare
- *   marker never forms the hidden link the replay rebuilds.
- * An /careers/interview/ link is not on that path and is left alone. Out of reach: a token mixed with other visible
- * characters (a dash every few letters), which a person has to edit to use.
+ * - A link or a copy split by anything a reader does not see. A reader sees a shown or copied link run together:
+ *   markup, white space (raw or written as a character reference such as &nbsp;), controls and other invisible
+ *   characters drop out (a <wbr> or a <span> inside it, a quoted reply that wraps it). So for copies each unit's reader
+ *   text is read with all of those dropped, and the units are also read joined, with nothing between them: once with
+ *   every unit, as plain text shows it, and once with the units outside tags only, as an email shows it. There
+ *   "careers" may end a longer word, and the token is the 64 hex after "offer/" whatever follows. A token on an offer
+ *   path there counts as found. A unit that holds a found token whole in that reading is replaced as above; a found
+ *   token split over several units is hidden in all of them: the bare marker in the first (or the standard hidden link
+ *   for an offer-path token that unit holds whole, as above) and nothing in the rest. Tags and spaces between units
+ *   stay, so the bare marker never forms the hidden link the replay rebuilds.
+ * An /careers/interview/ link is not on that path and is left alone. Out of reach: a token mixed with characters a
+ * reader sees (a dash every few letters), or split by text the email hides by style; a person has to edit such a text,
+ * or craft it, to use the token.
  */
 
 const { decodeHTML } = require('entities');
@@ -68,6 +71,11 @@ function readable(unit) {
   }
   return out.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/').toLowerCase();
 }
+
+// A reading as a reader sees it run together: every character with no mark of its own dropped (white space, raw or
+// decoded from a character reference, controls, format and other default-ignorable characters, the blank braille
+// pattern).
+const compact = (seen) => seen.replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '');
 
 // Walks path segments as a browser resolves them: a "." segment is skipped, ".." drops the segment before it (an empty
 // one too), and an empty segment is kept. A segment that opens with a 64-hex token right after "careers" and "offer"
@@ -133,19 +141,20 @@ function unitsOf(text) {
   let t = 0;
   return [...text.matchAll(UNIT_RE)].map((m) => {
     while (t < tags.length && tags[t][1] <= m.index) t += 1;
-    return { text: m[0], at: m.index, seen: readable(m[0]), inTag: t < tags.length && tags[t][0] <= m.index };
+    const seen = readable(m[0]);
+    return { text: m[0], at: m.index, seen, flat: compact(seen), inTag: t < tags.length && tags[t][0] <= m.index };
   });
 }
 
-// The reader's text of the units run together, with nothing between them, so a link or a token split by markup,
-// spaces or line breaks reads as one: once with every unit (plain text), once with the units outside tags only (an
-// email as it shows). Each view keeps where each unit's text starts and ends in it.
+// The units' compact reader text run together, with nothing between them, so a link or a token split by markup or by
+// anything invisible reads as one: once with every unit (plain text), once with the units outside tags only (an email
+// as it shows). Each view keeps where each unit's text starts and ends in it.
 function joinedViews(units) {
   return [units, units.filter((u) => !u.inTag)].map((list) => {
     let text = '';
     const spans = list.map((u) => {
       const start = text.length;
-      text += u.seen;
+      text += u.flat;
       return { u, start, end: text.length };
     });
     return { text, spans };
@@ -202,7 +211,8 @@ function storedUnit(u, mark, linked, tokens) {
       return `${path}${HIDDEN}`;
     });
     const seen = kept === u.text ? u.seen : readable(kept);
-    if (!offerTokensOf(kept, seen).length && ![...linked].some((token) => seen.includes(token))) {
+    const flat = kept === u.text ? u.flat : compact(seen);
+    if (!offerTokensOf(kept, seen).length && ![...linked].some((token) => flat.includes(token))) {
       tokens.push(...sent);
       return kept;
     }
