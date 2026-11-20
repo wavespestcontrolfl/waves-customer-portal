@@ -45,9 +45,7 @@
 // a page that never reloads by itself bars the reload whether it is in view
 // or at the address. A page whose code is missing reloads only while the
 // address names that page: after Back, its reload would open the next page.
-// Two paths name one page when they decode alike, case kept (decodedPath):
-// the router keeps a link's path as written, while the browser encodes the
-// address, and a route's parameters keep their case.
+// Two paths name one page when they decode alike, case kept (samePage).
 //
 // A page can hold unsaved work in component state that no hold names. So a
 // staff tab used on the page in view since it came into view (watchPageUse)
@@ -97,6 +95,16 @@ let shownMove = NO_MOVE;
 let reloadedPath = pathOpenedByChunkReload();
 const staffImports = new Set();
 
+// Whether two paths name one page: alike once each is decoded, case kept
+// (decodedPath, lib/adminBookmarkMeta.js). The router keeps a link's path as
+// written, while the browser encodes the address, and one page's address can
+// be spelled two ways, such as /%61dmin/dashboard and /admin/dashboard. A
+// route's parameters keep their case. Every rule here that compares a path
+// from one source with a path from another asks this.
+function samePage(a, b) {
+  return a != null && b != null && decodedPath(a) === decodedPath(b);
+}
+
 // PortalUpdateGate (components/PortalUpdate.jsx) notes each page move: `to`
 // the page it opens, `from` the page it leaves as #8121's rule judges it (a
 // redirect continues the move it ends, so Today -> /admin -> the dashboard
@@ -113,7 +121,7 @@ export function notePageMove(from, to) {
 // bar (usePageUsed): the move remounted the routes, so nothing unsaved stays
 // from that use, and Back to that page opens it unused. A move React dropped
 // leaves the page and its use. A move in view away from the path the one
-// reload reopened, to another page (decodedPath), also ends that reload's
+// reload reopened, to another page (samePage), also ends that reload's
 // count, path and flag (chunkReloadAttempted); nothing else does. A move can
 // load nothing: React.lazy keeps a page it loaded, the More page is in the
 // entry bundle, and the reopened page may still fail. While a reload is
@@ -123,16 +131,17 @@ export function notePageMove(from, to) {
 export function notePageInView(from, to) {
   shownMove = { from, to };
   usedPath = null;
-  if (reloadPending || reloadedPath === null || decodedPath(to) === decodedPath(reloadedPath)) return;
+  if (reloadPending || reloadedPath === null || samePage(to, reloadedPath)) return;
   reloadedPath = null;
   clearChunkReloadFlag();
 }
 
 // The page that the move to `pathname` left. Null for a move the gate has not
 // rendered yet: the page in view then judges it (staffSelfReloadBarred).
+// `pathname` can be the address, in the browser's spelling.
 function moveFromFor(pathname) {
-  if (renderedMove.to === pathname) return renderedMove.from;
-  return shownMove.to === pathname ? shownMove.from : null;
+  if (samePage(renderedMove.to, pathname)) return renderedMove.from;
+  return samePage(shownMove.to, pathname) ? shownMove.from : null;
 }
 
 // The page in view: the one the last move in view opened, or before any
@@ -178,7 +187,7 @@ export function watchPageUse(target = document) {
 }
 
 // Whether the tab was used on the staff page in view since it came into
-// view.
+// view. Both paths read the page in view, so they share one spelling.
 export function usedOnThisStaffPage() {
   const pathname = pageInView();
   return isAdminPath(pathname) && usedPath === pathname;
@@ -209,10 +218,10 @@ function pathOpenedByChunkReload() {
 // that loaded would reload the tab at every load. That path counts until a
 // move to another page comes into view, which clears the flag too
 // (notePageInView). A page that loads on another path does not end it: Back
-// can still undo the move that page belongs to. Throws when storage is
-// blocked.
+// can still undo the move that page belongs to. The path counts in any
+// spelling of its page (samePage). Throws when storage is blocked.
 function chunkReloadAttempted() {
-  return window.location.pathname === reloadedPath || Boolean(sessionStorage.getItem(CHUNK_RELOAD_FLAG));
+  return samePage(window.location.pathname, reloadedPath) || Boolean(sessionStorage.getItem(CHUNK_RELOAD_FLAG));
 }
 
 // Takes the one reload for a missing chunk: sets the flag and returns true.
@@ -349,7 +358,7 @@ export function missingCodeIsNewVersion(newer, offline) {
 // closed or moved, or a reason of selfReloadRuledOut came up). `pathname`:
 // the path of the route whose code is missing, as the router rendered it
 // (App.jsx). It reloads only while the address names that page, before and
-// after the wait: the same path once each is decoded, case kept (decodedPath).
+// after the wait (samePage).
 // Back moves the address on
 // at once, even before this page's effect starts, but the routes keep this
 // page in view until the next page's code loads: a reload then would open
@@ -366,7 +375,7 @@ export async function reloadForMissingCode({
   reload = () => window.location.reload(),
   now,
 } = {}) {
-  const atPage = () => decodedPath(window.location.pathname) === decodedPath(pathname);
+  const atPage = () => samePage(window.location.pathname, pathname);
   if (!atPage()) return 'moved';
   const noReload = () => !current() || !atPage() || Boolean(selfReloadRuledOut());
   if (!noReload()) await waitForWork({ now, done: noReload });

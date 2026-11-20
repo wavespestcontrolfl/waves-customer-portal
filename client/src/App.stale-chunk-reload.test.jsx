@@ -23,6 +23,7 @@ import {
   markStaleChunkReloadPending,
   noteChunkLoaded,
   notePageInView,
+  notePageMove,
   reloadForMissingCode,
   resetStaleChunkReloadForTests,
   watchPageUse,
@@ -806,6 +807,16 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  // The router keeps a link's path as written, while the browser encodes the
+  // address: the move the gate rendered is found under either spelling.
+  test('a move from a field page bars the reload of the page it opens, also at an address the browser encoded', async () => {
+    notePageInView(null, '/admin/dashboard');
+    notePageMove('/admin/today', '/admin/blog/café');
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog/caf%C3%A9', reload });
+    await expect(reloadForMissingCode({ pathname: '/admin/blog/café', reload })).resolves.toBe('manual');
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   test('a move from a field page bars the reload: the next page\'s missing code gets the retry screen once that page is in view, and the one-shot flag stays clear', async () => {
     nameNewerBuild();
     const move = renderGate(['/admin/today'], { transitions: true, pages: { '/admin/blog': lazyWithRetry(missingChunk) } });
@@ -998,6 +1009,20 @@ describe('on a staff page', () => {
     noteChunkLoaded();
     notePageInView(null, '/admin/blog/café');
     await expect(reloadForMissingCode({ pathname: '/admin/blog/café', reload })).resolves.toBe('reloaded');
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  // The browser can spell one page two ways, such as an address typed with
+  // an encoded letter and a link's plain path.
+  test('the one reload\'s count holds on its page in another spelling: after a page load cleared the flag, a move to the plain spelling gets no second reload', async () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/%61dmin/dashboard', reload });
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    resetStaleChunkReloadForTests(); // the page load the one reload opened
+    noteChunkLoaded(); // a page loaded there
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/dashboard', reload });
+    notePageInView('/%61dmin/dashboard', '/admin/dashboard');
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('reloaded');
     expect(reload).not.toHaveBeenCalled();
   });
 
