@@ -38,9 +38,10 @@ function isHeldOut(customerId) {
 
 /**
  * The warm readers as a query: every subscriber the send path would mail whose address opened
- * a Waves email at or after `since`. Ordered by id; selects the id and the linked customer only.
+ * a Waves email from `since` through `until` (both inclusive), so a plan made for a past moment
+ * counts only the opens before it. Ordered by id; selects the id and the linked customer only.
  */
-function warmAudienceQuery({ since }) {
+function warmAudienceQuery({ since, until }) {
   // Lazy: the sender pulls the whole newsletter stack; the planner loads this only when it runs.
   const db = require('../../models/db');
   const { buildSubscriberQuery } = require('../newsletter-sender');
@@ -49,7 +50,8 @@ function warmAudienceQuery({ since }) {
       this.select(db.raw('1'))
         .from('email_messages as opened')
         .whereRaw('lower(opened.recipient_email_snapshot) = lower(newsletter_subscribers.email)')
-        .where('opened.opened_at', '>=', since);
+        .where('opened.opened_at', '>=', since)
+        .where('opened.opened_at', '<=', until);
     })
     .select('newsletter_subscribers.id', 'newsletter_subscribers.customer_id')
     .orderBy('newsletter_subscribers.id', 'asc');
@@ -65,7 +67,7 @@ async function selectIssueAudience({ asOf = new Date() } = {}) {
   const NewsletterSubscribers = require('../newsletter-subscribers');
 
   await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
-  const warm = await warmAudienceQuery({ since: new Date(asOf.getTime() - WARM_DAYS * DAY_MS) });
+  const warm = await warmAudienceQuery({ since: new Date(asOf.getTime() - WARM_DAYS * DAY_MS), until: asOf });
 
   const subscriberIds = [];
   let heldOut = 0;

@@ -479,12 +479,15 @@ function buildSubscriberQuery(segmentFilter, customerIds = null) {
 // services/pest-insider/audience.js). Absent or null = no constraint. Present =
 // only those ids, still under every rule in buildSubscriberQuery. A present-but-
 // unusable value (not an array, an empty array, or any element that is not a
-// positive integer) matches nobody: an exact list must never broaden to every
-// active subscriber. One array binding, so a long list cannot hit Postgres's
-// bind-parameter limit.
+// positive integer inside Postgres's integer range, the id column's type)
+// matches nobody: an exact list must never broaden to every active
+// subscriber, and an id the int[] cast would refuse must not abort the count.
+// One array binding, so a long list cannot hit Postgres's bind-parameter limit.
+const PG_INTEGER_MAX = 2147483647;
 function narrowToSubscriberIds(q, ids) {
   if (ids == null) return q;
-  const usable = Array.isArray(ids) && ids.length > 0 && ids.every((id) => Number.isSafeInteger(id) && id > 0);
+  const usable = Array.isArray(ids) && ids.length > 0
+    && ids.every((id) => Number.isInteger(id) && id > 0 && id <= PG_INTEGER_MAX);
   return usable ? q.whereRaw('newsletter_subscribers.id = ANY(?::int[])', [ids]) : q.whereRaw('1 = 0');
 }
 

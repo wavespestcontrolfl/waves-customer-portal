@@ -28,10 +28,17 @@ describe('subscriber_ids', () => {
     ['a numeric-string element', [1, '2']],
     ['a null element', [1, null]],
     ['an unsafe integer', [Number.MAX_SAFE_INTEGER + 1]],
+    ['an id past the Postgres integer range', [1, 2147483648]],
   ])('%s fails closed', (_label, value) => {
     const { sql } = shapeOf({ subscriber_ids: value });
     expect(sql).toMatch(/1 = 0/);
     expect(sql).not.toMatch(/ANY\(/);
+  });
+
+  test('the largest Postgres integer is still a usable id', () => {
+    const { sql, bindings } = shapeOf({ subscriber_ids: [2147483647] });
+    expect(sql).toMatch(/ANY\(/);
+    expect(bindings).toContainEqual([2147483647]);
   });
 
   test('absent or null keeps the old behavior', () => {
@@ -53,13 +60,14 @@ describe('subscriber_ids', () => {
 });
 
 describe('warmAudienceQuery', () => {
-  test('starts from the send path query and requires an opened Waves email since the cutoff', () => {
+  test('starts from the send path query and requires an opened Waves email between the cutoff and asOf', () => {
     const since = new Date('2026-09-03T12:00:00Z');
+    const until = new Date('2026-12-02T12:00:00Z');
     const base = shapeOf(null);
-    const { sql, bindings } = warmAudienceQuery({ since }).toSQL();
+    const { sql, bindings } = warmAudienceQuery({ since, until }).toSQL();
     expect(bindings.slice(0, base.bindings.length)).toEqual(base.bindings);
-    expect(bindings[bindings.length - 1]).toEqual(since);
-    expect(sql).toMatch(new RegExp(`exists \\(select 1 from "email_messages" as "opened" where lower\\(opened\\.recipient_email_snapshot\\) = lower\\(newsletter_subscribers\\.email\\) and "opened"\\."opened_at" >= ${P}\\)`));
+    expect(bindings.slice(-2)).toEqual([since, until]);
+    expect(sql).toMatch(new RegExp(`exists \\(select 1 from "email_messages" as "opened" where lower\\(opened\\.recipient_email_snapshot\\) = lower\\(newsletter_subscribers\\.email\\) and "opened"\\."opened_at" >= ${P} and "opened"\\."opened_at" <= ${P}\\)`));
     // The send path query opens with its WITH clauses; the main select after them reads two columns.
     expect(sql).toContain(') select "newsletter_subscribers"."id", "newsletter_subscribers"."customer_id" from "newsletter_subscribers" where ');
     expect(sql).toMatch(/order by "newsletter_subscribers"\."id" asc$/);

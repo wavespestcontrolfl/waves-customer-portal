@@ -93,7 +93,7 @@ describe('selectIssueAudience', () => {
     expect(order).toEqual(['relink', 'query']);
   });
 
-  test('asks for an opened Waves email in the 90 days before asOf', async () => {
+  test('asks for an opened Waves email in the 90 days up to asOf, and none after it', async () => {
     buildSubscriberQuery.mockReturnValue(fakeQuery([]));
     const asOf = new Date('2026-12-02T12:00:00Z');
     await selectIssueAudience({ asOf });
@@ -105,6 +105,7 @@ describe('selectIssueAudience', () => {
       ['from', 'email_messages as opened'],
       ['whereRaw', 'lower(opened.recipient_email_snapshot) = lower(newsletter_subscribers.email)'],
       ['where', 'opened.opened_at', '>=', new Date(asOf.getTime() - 90 * 24 * 60 * 60 * 1000)],
+      ['where', 'opened.opened_at', '<=', asOf],
     ]);
   });
 
