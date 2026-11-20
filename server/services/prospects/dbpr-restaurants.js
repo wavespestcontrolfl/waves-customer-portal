@@ -311,6 +311,8 @@ const defaultStore = { upsertRecords, lastRead, saveRead };
 // license row too (two stray cells reach 38). So a file that starts to fill the risk levels fails, by the rule
 // below, until this width is changed.
 const ROW_WIDTHS = { inspection: 0, new_license: -2, owner_change: -2 };
+// Malformed rows may be at most this share of the rows that count (loadFile).
+const MALFORMED_SHARE = 0.1;
 
 // The column with each row's own date. The state cuts each file by it: every row of the 2026-11-20 files falls in
 // one fiscal year.
@@ -351,11 +353,13 @@ async function loadFile(kind, fetchText, now, last) {
     const newYearHasRows = Boolean(last && last.fiscalYear === fiscalYearOf(today) && last.rows > 0);
     if (!/-07-0[1-7]$/.test(today) || newYearHasRows) throw new Error('empty file');
   }
-  // Malformed rows and not one good row in the area mean a changed format (a new date format, say), not a quiet
-  // week: the file fails. A file whose rows all fall outside the area, or whose good rows cite nothing, succeeds.
-  // Malformed counts rows in the area and rows that cannot be placed (a wrong width); a row outside the area never
-  // counts, whatever its date.
-  if (!counts.valid && counts.malformed) throw new Error('no good row in the area');
+  // Malformed rows over a tenth of the rows that count mean a changed format (a new date format, rows of a new
+  // width), not a stray row: the file fails, even beside good rows. With no good row, one malformed row fails it. The
+  // rows that count are the good and malformed ones: malformed counts rows in the area and rows that cannot be placed
+  // (a wrong width); a row outside the area never counts, whatever its date. A file whose rows all fall outside the
+  // area, or whose good rows cite nothing, succeeds. Each file holds the whole year, so a later good read still
+  // writes every row.
+  if (counts.malformed > (counts.valid + counts.malformed) * MALFORMED_SHARE) throw new Error('too many malformed rows');
   // Rows without one readable date up to today leave nothing to measure the file by (a cut file of rows outside the
   // area, say):
   // it fails. Only a header alone, above, reads with no fiscal year.

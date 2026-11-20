@@ -278,11 +278,12 @@ describe('syncRestaurantProspects', () => {
 
   test('rows skipped for a bad key are counted per file, and the log carries the count only', async () => {
     store = makeStore();
-    fetchText = makeFetch({ 'newfood.csv': () => licCsv([licRow({ app: '7001' }), licRow({ app: 'X'.repeat(41) })]) });
+    const good = Array.from({ length: 10 }, (_, i) => licRow({ app: String(7001 + i) }));
+    fetchText = makeFetch({ 'newfood.csv': () => licCsv([...good, licRow({ app: 'X'.repeat(41) })]) });
     const result = await sync({ fetchText, store });
     expect(result.failures).toBe(0);
-    expect(result.files.new_license).toEqual({ kept: 1, malformed: 1, upserted: 1 });
-    expect(logger.info.mock.calls.map((c) => c[0]).join('\n')).toMatch(/new_license=1\(1 malformed\)/);
+    expect(result.files.new_license).toEqual({ kept: 10, malformed: 1, upserted: 10 });
+    expect(logger.info.mock.calls.map((c) => c[0]).join('\n')).toMatch(/new_license=10\(1 malformed\)/);
   });
 
   test.each([
@@ -323,20 +324,31 @@ describe('syncRestaurantProspects', () => {
     expect(later.files.inspection).toEqual({ failed: true });
   });
 
-  test('a file whose rows in the area all fail to parse fails; a good row beside a bad one does not', async () => {
+  test('malformed rows over a tenth of the rows that count fail the file, beside good rows too; a tenth passes', async () => {
     store = makeStore();
+    const good = Array.from({ length: 9 }, (_, i) => licRow({ app: String(7101 + i) }));
     fetchText = makeFetch({
+      // Every row in the area malformed (a new date format): no good row.
       'newfood.csv': () => licCsv([licRow({ app: '7001', date: '2026-08-21' }), licRow({ app: '7002', date: '2026-08-22' })]),
-      'chgownr_food.csv': () => licCsv([licRow({ app: '7003', date: '2026-08-21' }), licRow({ app: '7004' })]),
+      // One malformed row beside nine good ones: a tenth, a stray row.
+      'chgownr_food.csv': () => licCsv([licRow({ app: '7003', date: '2026-08-21' }), ...good]),
     });
     const result = await sync({ fetchText, store });
     expect(result.failures).toBe(1);
-    expect(result.files).toMatchObject({ new_license: { failed: true }, owner_change: { kept: 1, malformed: 1 } });
+    expect(result.files).toMatchObject({ new_license: { failed: true }, owner_change: { kept: 9, malformed: 1 } });
+    expect(reads.owner_change).toEqual({ fiscalYear: '2026-07-01', rows: 10 });
+    // Two rows of a new width (the risk levels filled) beside the nine good ones: over a tenth, so the file fails
+    // and the measure stays.
+    const filled = (app) => `${licRow({ app })},"1","1"`;
+    fetchText = makeFetch({ 'chgownr_food.csv': () => licCsv([filled('7004'), filled('7005'), ...good]) });
+    const second = await sync({ fetchText, store });
+    expect(second.files.owner_change).toEqual({ failed: true });
+    expect(reads.owner_change).toEqual({ fiscalYear: '2026-07-01', rows: 10 });
   });
-
   test('good inspections that cite nothing, beside a malformed row, are a quiet week, not a failed file', async () => {
     store = makeStore();
-    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9301', v35: 0 }), inspRow({ visit: '9302', date: 'not a date' })]) });
+    const quiet = Array.from({ length: 9 }, (_, i) => inspRow({ visit: String(9301 + i), v35: 0 }));
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...quiet, inspRow({ visit: '9401', date: 'not a date' })]) });
     const result = await sync({ fetchText, store });
     expect(result.failures).toBe(0);
     expect(result.files.inspection).toEqual({ kept: 0, malformed: 1, upserted: 0 });
@@ -346,10 +358,11 @@ describe('syncRestaurantProspects', () => {
     store = makeStore();
     // An extra cell before the ids: License ID would read it, and Inspection Visit ID would read the License ID.
     const wide = inspRow({ visit: '9003' }).replace('"5001","9003"', '"0","5001","9003"');
-    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9001' }), wide]) });
+    const good = Array.from({ length: 9 }, (_, i) => inspRow({ visit: String(9101 + i) }));
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...good, wide]) });
     const result = await sync({ fetchText, store });
-    expect(result.files.inspection).toEqual({ kept: 1, malformed: 1, upserted: 1 });
-    expect(upserts.filter((r) => r.kind === 'inspection').map((r) => r.source_key)).toEqual(['9001']);
+    expect(result.files.inspection).toEqual({ kept: 9, malformed: 1, upserted: 9 });
+    expect(upserts.filter((r) => r.kind === 'inspection').map((r) => r.source_key)).not.toContain('9003');
   });
 
   test('a file without a column the parsers need is refused whole, and the other files still load', async () => {
@@ -508,19 +521,23 @@ describe('syncRestaurantProspects', () => {
     // 38 cells from two stray cells after Location County: the district would read as the license number.
     const twoAdded = licRow({ app: '7004' }).replace('"Sarasota","941-555-0101"', '"Sarasota","X","Y","941-555-0101"');
     const filled = `${licRow({ app: '7005' })},"1","1"`; // 38 cells: the two risk levels filled
-    fetchText = makeFetch({ 'newfood.csv': () => licCsv([licRow({ app: '7001' }), added, lost, twoAdded, filled]) });
+    // Forty good rows, so the four malformed ones stay under a tenth and the file loads.
+    const good = Array.from({ length: 40 }, (_, i) => licRow({ app: String(7101 + i) }));
+    fetchText = makeFetch({ 'newfood.csv': () => licCsv([...good, added, lost, twoAdded, filled]) });
     const result = await sync({ fetchText, store });
-    expect(result.files.new_license).toEqual({ kept: 1, malformed: 4, upserted: 1 });
-    expect(upserts.filter((r) => r.kind === 'new_license').map((r) => r.source_key)).toEqual(['7001']);
+    expect(result.files.new_license).toEqual({ kept: 40, malformed: 4, upserted: 40 });
+    const malformed = ['7002', '7003', '7004', '7005'];
+    expect(upserts.filter((r) => r.kind === 'new_license' && malformed.includes(r.source_key))).toEqual([]);
   });
 
   test('a short first row never hides a column: the file loads and the short row is counted', async () => {
     store = makeStore();
     const short = licRow({ app: '7002' }).split(',').slice(0, 27).join(',');
-    fetchText = makeFetch({ 'newfood.csv': () => licCsv([short, licRow({ app: '7001' })]) });
+    const good = Array.from({ length: 9 }, (_, i) => licRow({ app: String(7001 + i) }));
+    fetchText = makeFetch({ 'newfood.csv': () => licCsv([short, ...good]) });
     const result = await sync({ fetchText, store });
     expect(result.failures).toBe(0);
-    expect(result.files.new_license).toEqual({ kept: 1, malformed: 1, upserted: 1 });
+    expect(result.files.new_license).toEqual({ kept: 9, malformed: 1, upserted: 9 });
   });
 
   test.each(['1', 'true', 'ON'])('DBPR_PROSPECT_SYNC_DISABLED=%s makes the sync a no-op', async (value) => {
