@@ -202,6 +202,26 @@ describe("OfferDialog", () => {
     expect(sendOffer).not.toHaveBeenCalled();
   });
 
+  // The offers out (the read's outStamp) are pinned when the form opens. A read that changes them (the applicant asked
+  // for another date) closes the Send question and locks the form until Show the new version, and Send then carries the
+  // stamp the owner reviewed, never a later read's.
+  it("closes the Send question when a read changes the offers out, and Send carries only the stamp the owner reviewed", async () => {
+    const outside = {};
+    sendOffer.mockResolvedValueOnce({ comms: {}, offer: { status: "sent" } });
+    render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    expect(await screen.findByRole("dialog", { name: "Send offer" })).toBeInTheDocument();
+    act(() => outside.read({ ...panel(draftRow()), outStamp: "out-2" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Send offer" })).toBeNull());
+    expect(screen.getByText(/The offer you sent before changed after you opened this form/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show the new version" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Send offer" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Send offer" })).getByRole("button", { name: "Send offer" }));
+    await waitFor(() => expect(sendOffer).toHaveBeenCalledTimes(1));
+    expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1", "out-2");
+  });
+
   // A background read that fails (after a stage change, say) leaves the data on screen out of date. The card turns its
   // actions off; the form goes read-only too, closes an open Send question, and reads again on Try again.
   it("locks the form and closes the Send question when a background read fails, until Try again reads", async () => {

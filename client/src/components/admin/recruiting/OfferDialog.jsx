@@ -29,6 +29,7 @@ import {
   isStartWeekday,
   isStaleWrite,
   LOST_ANSWER_TEXT,
+  OUT_CHANGED_TEXT,
   isValidDay,
   offerErrorMessage,
   sendChannels,
@@ -256,13 +257,17 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
 // owner's edits still on screen, until they load the newer version (`newer`; after a
 // refused first save, the open draft another admin made). It is also read-only until
 // a read has succeeded and holds the draft this form is about.
-function formLock({ data, draftId, pinned, needRead, conflict }) {
+// reviewedOut: the offers out (the read's outStamp) as the owner last reviewed them.
+// A read with other offers out (an answer, a date request) makes a saved draft
+// "changed" too (outMoved), until the owner loads it again (Show the new version).
+function formLock({ data, draftId, pinned, needRead, conflict, reviewedOut }) {
   const latest = reviewedDraft(data, draftId);
+  const outMoved = Boolean(pinned) && data.outStamp !== reviewedOut;
   // A form with no draft yet: an open draft in the read is another admin's (this form's own
   // save sets draftId first). It shows as changed, with the owner's edits kept, until they load it.
   const newer = latest || (!draftId ? openDraft(data) : null);
-  const changed = !needRead && (conflict || Boolean(!draftId && newer) || (Boolean(pinned) && (!latest || latest.draftHash !== pinned.draftHash)));
-  return { newer, changed, locked: needRead || changed || Boolean(draftId && !pinned) };
+  const changed = !needRead && (conflict || outMoved || Boolean(!draftId && newer) || (Boolean(pinned) && (!latest || latest.draftHash !== pinned.draftHash)));
+  return { newer, changed, outMoved, locked: needRead || changed || Boolean(draftId && !pinned) };
 }
 
 function ReadOnlyNotice({ changed, locked, message, hasNewer, onAdopt, onRetry, refreshFailed }) {
@@ -303,6 +308,9 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
   const [edits, setEdits] = useState({});
   const [draftId, setDraftId] = useState(() => initialDraftId(draft, data));
   const [pinned, setPinned] = useState(() => reviewedDraft(data, initialDraftId(draft, data)));
+  // The offers out as the owner reviewed them: when the form opened, or at Show the new version. Send carries this
+  // stamp, never a later read's, so the server refuses a send over a change the owner has not seen (OFFERS_CHANGED).
+  const [reviewedOut, setReviewedOut] = useState(() => data.outStamp);
   const [needRead, setNeedRead] = useState(false);
   // Set when the server refused a write as stale. The form stays read-only, with the owner's
   // edits on screen, until they load the new version or close the form.
@@ -321,9 +329,9 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
     onBusyChange(busy);
     return () => onBusyChange(false);
   }, [busy, onBusyChange]);
-  const { newer, changed, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict });
-  // A refused write's sentence shows once, in the read-only notice (after the re-read).
-  const notice = conflict ? error : null;
+  const { newer, changed, outMoved, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict, reviewedOut });
+  // A refused write's sentence shows once, in the read-only notice (after the re-read); else a change to the offers out.
+  const notice = conflict ? error : outMoved && OUT_CHANGED_TEXT;
   const { base, fields, firstName, sendTo, startError, rateErrors, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
   // A read that changes the draft, or locks the form, while the Send question is open closes
   // the question: Send carries only the hash of the draft whose letter is on screen.
@@ -461,6 +469,7 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
     if (!newer) return onClose();
     setPinned(newer);
     setDraftId(newer.id);
+    setReviewedOut(data.outStamp);
     setEdits({});
     setConflict(false);
     setError(null);
@@ -491,7 +500,7 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
     setBusy(true);
     setError(null);
     try {
-      const out = await sendOffer(applicationId, pinned.id, pinned.draftHash, data.outStamp);
+      const out = await sendOffer(applicationId, pinned.id, pinned.draftHash, reviewedOut);
       // The answer's offer row is read after delivery: it can already be withdrawn or replaced.
       setResult({ comms: out.comms || {}, offerStatus: out.offer?.status });
       await onSent();

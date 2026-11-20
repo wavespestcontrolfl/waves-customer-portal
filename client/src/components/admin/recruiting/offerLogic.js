@@ -149,6 +149,10 @@ const ERROR_TEXT = {
   DRAFT_HASH_REQUIRED: "The draft could not be checked, so nothing was done. Reload the offer and review it first.",
 };
 
+// A read whose offers out differ from the ones the owner reviewed in the form (an
+// answer or a date request): the form locks with this until Show the new version.
+export const OUT_CHANGED_TEXT = "The offer you sent before changed after you opened this form (an answer or a date request). Check the offer card before you send.";
+
 // err = the Error the offer API helper throws (err.body.code on a 409).
 export function offerErrorMessage(err) {
   if (isGateOffAnswer(err)) return OFFERS_OFF_TEXT;
