@@ -23,6 +23,7 @@ const { SERVICE_AREA_COUNTIES } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
 const { parseDbprCsv, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
 
 const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
 const REPORT_BASE = 'https://www.myfloridalicense.com/inspectionDetail.asp';
@@ -31,10 +32,13 @@ const FILES = {
   new_license: 'newfood.csv',
   owner_change: 'chgownr_food.csv',
 };
+// Every column a parser needs to keep, place or look up a row. A file without one is refused whole: no License ID
+// would store inspections whose report can never be read, and no city or ZIP would let Punta Gorda rows through.
+const PLACE_COLUMNS = ['Location City', 'Location Zip Code'];
 const REQUIRED_COLUMNS = {
-  inspection: ['County Name', 'Inspection Date', 'Inspection Visit ID', 'Violation 35'],
-  new_license: ['Application Number', 'Application Approval Date', 'Location County'],
-  owner_change: ['Application Number', 'Application Approval Date', 'Location County'],
+  inspection: ['County Name', ...PLACE_COLUMNS, 'Inspection Date', 'Inspection Visit ID', 'License ID', 'Violation 35'],
+  new_license: ['Application Number', 'Application Approval Date', 'Location County', ...PLACE_COLUMNS],
+  owner_change: ['Application Number', 'Application Approval Date', 'Location County', ...PLACE_COLUMNS],
 };
 
 const FILE_TIMEOUT_MS = 60 * 1000;
@@ -76,13 +80,17 @@ function inServiceArea(county, city, zip) {
   return !isExcludedLocality(city) && !isExcludedZip(zip);
 }
 
-// A phone is picked by shape (10 or more digits), never by column name: chgownr_food.csv swaps the Primary Phone
-// and Mailing County Code values. The location's own line (Secondary Phone Number) comes first, then the owner's.
+// A trailing extension ("x12", "ext. 12", "extension 12", "#12") is dropped first, so its digits never join the number.
+const PHONE_EXTENSION_RE = /\s*(?:x|ext\.?|extension|#)\s*\d{1,6}\s*$/i;
+
+// A phone is picked by shape, never by column name: chgownr_food.csv swaps the Primary Phone and Mailing County Code
+// values. The location's own line (Secondary Phone Number) comes first, then the owner's. A value counts only as a
+// valid US number (ten digits, or 1 and ten digits, area code 2-9; utils/phone.js); anything else tries the next.
 function pickPhone(row) {
   const candidates = [row['Secondary Phone Number'], row['Primary Phone Number'], row['Mailing County Code']];
   for (const value of candidates) {
-    const digits = String(value || '').replace(/\D/g, '');
-    if (digits.length >= 10) return digits.slice(-10);
+    const ten = nanpNationalDigits(String(value || '').replace(PHONE_EXTENSION_RE, ''));
+    if (ten && isValidNanpNumber(ten)) return ten;
   }
   return null;
 }
@@ -165,14 +173,16 @@ function reportText(html) {
 }
 
 /**
- * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page is not an inspection
- * report (an error page or a changed layout must count as a failed read, never as "no pests"). findings holds the
- * 35A entries only. An entry runs from its code to the next code.
+ * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. A page
+ * answers only when it is whole (the state office footer closes it) and lists the violation 35 the file counted (a
+ * 35A or 35B code). An error page, a changed layout or a page cut short is a failed read, retried later, never
+ * "no pests". findings holds the 35A entries only. An entry runs from its code to the next code.
  */
 function parseInspectionReport(html) {
   const text = reportText(html);
-  if (!/Inspection Information/.test(text)) return null;
+  if (!/Inspection Information/.test(text) || !PAGE_FOOTER_RE.test(text)) return null;
   const marks = [...text.matchAll(VIOLATION_CODE_RE)];
+  if (!marks.some((mark) => /^35[AB]-/.test(mark[0]))) return null;
   const findings = [];
   marks.forEach((mark, i) => {
     if (!/^35A-/.test(mark[0])) return;
@@ -261,28 +271,28 @@ async function syncFiles(deps, result) {
   }
 }
 
+// The download and the page split only: a failed download or a page that cannot answer returns null (a failed read).
 async function readOneReport(row, deps) {
   const url = reportUrl(row.source_key, row.license_id);
   if (!url) return null;
-  const report = parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS));
-  if (report) await deps.store.saveReport(row.id, report);
-  return report;
+  try {
+    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS));
+  } catch {
+    return null;
+  }
 }
 
 // Newest first, at most REPORT_MAX_PER_RUN a run, one request a second. Each result is written as it is read, so a
-// killed run keeps its progress. A failed read adds 1 to detail_attempts and leaves pest_evidence NULL.
+// killed run keeps its progress. A failed read adds 1 to detail_attempts and leaves pest_evidence NULL. A database
+// failure is not a failed read: it stops the run (the sync's own handler counts it) and costs the row no attempt.
 async function readReports(deps, result, now) {
   const cutoff = etDateString(addETDays(now, -REPORT_WINDOW_DAYS));
   const pending = await deps.store.pendingInspections({ cutoff, limit: REPORT_MAX_PER_RUN });
   for (let i = 0; i < pending.length; i += 1) {
     if (i > 0) await deps.sleep(REPORT_GAP_MS);
-    let report = null;
-    try {
-      report = await readOneReport(pending[i], deps);
-    } catch {
-      report = null;
-    }
+    const report = await readOneReport(pending[i], deps);
     if (report) {
+      await deps.store.saveReport(pending[i].id, report);
       result.reportsRead += 1;
       if (report.pestEvidence) result.pestFound += 1;
     } else {

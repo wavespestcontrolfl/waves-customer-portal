@@ -114,6 +114,24 @@ describe('parseLicenseRows and the phone rule', () => {
     expect(svc.pickPhone({ 'Primary Phone Number': '614-555-0100', 'Mailing County Code': '736', 'Secondary Phone Number': '941-555-0101' })).toBe('9415550101');
     expect(svc.pickPhone({ 'Primary Phone Number': '62', 'Mailing County Code': '51', 'Secondary Phone Number': '' })).toBeNull();
   });
+
+  test.each([
+    ['941-555-0101 ext. 23', '9415550101'],
+    ['(941) 555-0101 x 7', '9415550101'],
+    ['941.555.0101 extension 4021', '9415550101'],
+    ['941-555-0101 #12', '9415550101'],
+    ['1-941-555-0101', '9415550101'],
+  ])('pickPhone reads %s as %s: an extension never joins the number', (value, phone) => {
+    expect(svc.pickPhone({ 'Secondary Phone Number': value })).toBe(phone);
+  });
+
+  test('a value that is not a valid US number is passed over for the next one', () => {
+    // Twelve digits with no extension mark, a bad area code, and a long run of digits are not phones.
+    expect(svc.pickPhone({ 'Secondary Phone Number': '941555010123', 'Primary Phone Number': '9415550177' })).toBe('9415550177');
+    expect(svc.pickPhone({ 'Secondary Phone Number': '041-555-0101', 'Mailing County Code': '(813) 555-0110' })).toBe('8135550110');
+    expect(svc.pickPhone({ 'Secondary Phone Number': '123456789012345', 'Primary Phone Number': '9415550177' })).toBe('9415550177');
+    expect(svc.pickPhone({ 'Secondary Phone Number': '1-041-555-0101' })).toBeNull();
+  });
 });
 
 describe('parseInspectionReport', () => {
@@ -137,8 +155,18 @@ describe('parseInspectionReport', () => {
     expect(svc.parseInspectionReport('')).toBeNull();
   });
 
+  test('a page cut short, or one that lists no violation 35, is a failed read, not "no pests"', () => {
+    const whole = fixture('report-35b.html');
+    // Only the heading arrived.
+    expect(svc.parseInspectionReport('<html><body><p>Inspection Information</p></body></html>')).toBeNull();
+    // The page stops before the footer that closes every report.
+    expect(svc.parseInspectionReport(whole.slice(0, whole.indexOf('2601 Blair Stone Road')))).toBeNull();
+    // A whole page, but the violation 35 the file counted is not on it.
+    expect(svc.parseInspectionReport(whole.replace('35B-03-4', '08A-05-6'))).toBeNull();
+  });
+
   test('finding text is capped', () => {
-    const long = `<p>Inspection Information</p><u>35A-02-8</u> ${'x'.repeat(2000)}`;
+    const long = `<p>Inspection Information</p><u>35A-02-8</u> ${'x'.repeat(2000)} <p>2601 Blair Stone Road</p>`;
     expect(svc.parseInspectionReport(long).findings[0].text).toHaveLength(400);
   });
 });
@@ -243,6 +271,27 @@ describe('syncRestaurantProspects', () => {
     expect(upserts.map((r) => r.kind)).toEqual(['inspection']);
     const logged = [...logger.warn.mock.calls, ...logger.info.mock.calls].map((c) => c[0]).join('\n');
     expect(logged).not.toMatch(/SAMPLE DINER|SAMPLE TRL/);
+  });
+
+  test('a failed save is a database failure: it stops the run, counts once, and costs the row no read attempt', async () => {
+    store = makeStore([{ id: 'a', source_key: '9000', license_id: '5001' }, { id: 'b', source_key: '9001', license_id: '5001' }]);
+    store.saveReport.mockRejectedValueOnce(new Error('connection lost'));
+    fetchText = jest.fn(async (url) => (url.includes('inspectionDetail.asp') ? fixture('report-35b.html') : files[url.split('/').pop()]()));
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(result).toMatchObject({ failures: 1, reportsRead: 0, reportsFailed: 0 });
+    expect(store.saveReport.mock.calls.map(([id]) => id)).toEqual(['a']);
+    expect(store.bumpAttempts).not.toHaveBeenCalled();
+  });
+
+  test('a file without a column the parsers need is refused whole, and the other files still load', async () => {
+    store = makeStore([]);
+    fetchText = makeFetch({
+      '7fdinspi.csv': () => files['7fdinspi.csv']().replace('"License ID"', '"License Ref"'),
+      'newfood.csv': () => files['newfood.csv']().replace('"Location City"', '"Location Town"'),
+    });
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { failed: true }, owner_change: { kept: 1 } });
+    expect(upserts.map((r) => r.kind)).toEqual(['owner_change']);
   });
 
   test('a database failure goes into the result, never out of the sync', async () => {
