@@ -365,8 +365,8 @@ async function loadFile(kind, fetchText, now) {
   // Rows without one readable date up to today leave nothing to measure the file by (a cut file of rows outside the
   // area, say): it fails. Only a header alone, above, reads with no fiscal year.
   if (rowsRead && !years.size) throw new Error('no dated row');
-  // The fiscal year most rows fall in (null for a header alone) and that year's newest date, so a stray date of
-  // another year never moves a file or makes it look fresh.
+  // The fiscal year most rows fall in (null for a header alone), with that year's row count and newest date, so a
+  // stray date of another year never moves a file, makes it look fresh or swells its measure.
   const [fiscalYear, year] = [...years].sort((a, b) => b[1].rows - a[1].rows)[0] || [null, null];
   // A good row in the area dated in another fiscal year is a stray date (a mistyped one, or a file the state started
   // over late), whether it cites violation 35 or not. Stored, it would stay wrong (a known key only refreshes
@@ -382,7 +382,7 @@ async function loadFile(kind, fetchText, now) {
   // area, or whose good rows cite nothing, succeeds. Each file holds the whole year, so a later good read still
   // writes every row.
   if (counts.malformed > (counts.valid + counts.malformed) * MALFORMED_SHARE) throw new Error('too many malformed rows');
-  return { records: kept, malformed: counts.malformed, rowsRead, fiscalYear, newest: year && year.newest };
+  return { records: kept, malformed: counts.malformed, rows: year ? year.rows : 0, fiscalYear, newest: year && year.newest };
 }
 
 // The first day (July 1) of the fiscal year a day (YYYY-MM-DD) falls in.
@@ -399,8 +399,9 @@ function fiscalYearOf(day) {
 //   short   it holds under 90% of the measure's rows (under 20 rows in the measure the check waits), or it is a
 //           header alone after a read of the same fiscal year held a row (loadFile passes one only in early July).
 // Its rows are still written (each one is whole and valid), the run counts a failure, and the read never becomes
-// the measure, so a download cut at the same place each week fails each week. Every row counts, kept or not. A read
-// belongs to the fiscal year of its rows, so a file the state starts over late is still last year's file. If the
+// the measure, so a download cut at the same place each week fails each week. A read belongs to the fiscal year of
+// its rows, so a file the state starts over late is still last year's file, and only the rows of that year count
+// (kept or not, in the area or not): other years' rows never swell the measure. If the
 // state truly removed rows, check the file by hand, then delete the system_settings row
 // restaurant_prospects_read_<kind>: the next read sets the measure again.
 const SHORT_SHARE = 0.9;
@@ -440,12 +441,12 @@ function judgeRead(last, read, now) {
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
-      const { records, malformed, rowsRead, fiscalYear, newest } = await loadFile(kind, deps.fetchText, deps.now);
+      const { records, malformed, rows, fiscalYear, newest } = await loadFile(kind, deps.fetchText, deps.now);
       const unique = dedupeByKey(records);
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
       // Judged only once every row of this read is stored (settleRead). The rows are whole and valid, so they stay
       // written even when the read fails.
-      const problem = await deps.store.settleRead(kind, { fiscalYear, rows: rowsRead, newest }, deps.now);
+      const problem = await deps.store.settleRead(kind, { fiscalYear, rows, newest }, deps.now);
       if (problem) {
         result.failures += 1;
         result.files[kind][problem.flag] = true;

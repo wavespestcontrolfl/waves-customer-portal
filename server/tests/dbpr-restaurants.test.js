@@ -337,14 +337,14 @@ describe('syncRestaurantProspects', () => {
     const result = await sync({ fetchText, store });
     expect(result.failures).toBe(1);
     expect(result.files).toMatchObject({ new_license: { failed: true }, owner_change: { kept: 9, malformed: 1 } });
-    expect(reads.owner_change).toEqual({ fiscalYear: '2026-07-01', rows: 10 });
+    expect(reads.owner_change).toEqual({ fiscalYear: '2026-07-01', rows: 9 });
     // Two rows of a new width (the risk levels filled) beside the nine good ones: over a tenth, so the file fails
     // and the measure stays.
     const filled = (app) => `${licRow({ app })},"1","1"`;
     fetchText = makeFetch({ 'chgownr_food.csv': () => licCsv([filled('7004'), filled('7005'), ...good]) });
     const second = await sync({ fetchText, store });
     expect(second.files.owner_change).toEqual({ failed: true });
-    expect(reads.owner_change).toEqual({ fiscalYear: '2026-07-01', rows: 10 });
+    expect(reads.owner_change).toEqual({ fiscalYear: '2026-07-01', rows: 9 });
   });
   test('good inspections that cite nothing, beside a malformed row, are a quiet week, not a failed file', async () => {
     store = makeStore();
@@ -493,19 +493,19 @@ describe('syncRestaurantProspects', () => {
   test('a row dated after today is malformed and never stored; a file with no readable date, or none from the last 14 days, fails', async () => {
     store = makeStore();
     reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
-    // One row dated after today (Nov 19, 2026) beside 21 good ones: it is malformed and never stored.
+    // One row dated after today (Nov 19, 2026) beside 21 good ones: it is malformed, never stored and not measured.
     const rows = [...Array.from({ length: 21 }, (_, i) => inspRow({ visit: String(9001 + i) })), inspRow({ visit: '9101', date: '11/20/2026' })];
     fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv(rows) });
     expect((await sync({ fetchText, store })).files.inspection).toEqual({ kept: 21, malformed: 1, upserted: 21 });
     expect(upserts.map((record) => record.source_key)).not.toContain('9101');
-    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 22 });
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 21 });
     // A cut file whose one row has a mistyped year: no good row, so it fails and the measure stays.
     fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(1, '03/02/2031') });
     expect((await sync({ fetchText, store })).files.inspection).toEqual({ failed: true });
     // A cut file of rows outside the area whose dates do not read: nothing to measure it by.
     fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9001', county: 'Polk', date: '2026-11-16' })]) });
     expect((await sync({ fetchText, store })).files.inspection).toEqual({ failed: true });
-    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 22 });
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 21 });
     // Frozen: the newest row is 15 days old, and the state posts every day.
     fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22, '11/04/2026') });
     const frozen = await sync({ fetchText, store });
@@ -538,7 +538,20 @@ describe('syncRestaurantProspects', () => {
     // 9 of them beside 90 of this year pass, counted.
     fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...visits(90, '11/16/2026', 1, 9001), ...visits(9, '06/15/2026', 0, 9201)]) });
     expect((await sync({ fetchText, store })).files.inspection).toEqual({ kept: 90, malformed: 9, upserted: 90 });
-    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 99 });
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 90 });
+  });
+
+  test('the measure counts only the rows of the read\'s fiscal year: last year\'s rows outside the area never swell it', async () => {
+    store = makeStore();
+    const visits = (count, date, county, from) => Array.from({ length: count }, (_, i) => inspRow({ visit: String(from + i), date, county }));
+    const thisYear = visits(60, '11/16/2026', 'Manatee', 9001);
+    // 60 rows of this year beside 40 of last year outside the area (they never count as malformed): the measure is 60.
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...thisYear, ...visits(40, '06/15/2026', 'Hillsborough', 9201)]) });
+    expect((await sync({ fetchText, store })).failures).toBe(0);
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 60 });
+    // The state drops last year's rows: the same 60 rows are a full read, not a short one.
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv(thisYear) });
+    expect((await sync({ fetchText, store })).failures).toBe(0);
   });
 
   test('a license row loads only with the usual 36 cells: a cell added, two added or one lost is malformed', async () => {
