@@ -10439,6 +10439,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
   // AFTER the transaction rolls back (never Stripe I/O under the row locks, and
   // never retired by a refusal that did not end the accept).
   let droppedCaptureToRetire = null;
+  // The estimate and owner this request first read: an overlapping accept's success replay answers only for them.
+  let acceptOwner = null;
   // The customer's authorization moment = SERVER RECEIPT of the submit
   // (Codex r17/r24): captured before ANY preflight await, so an Auto Pay
   // opt-out committed in another tab after the click — even during the
@@ -10457,6 +10459,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     res.locals.acceptEstimateId = estimate.id;
+    acceptOwner = { id: estimate.id, customerId: estimate.customer_id || null };
     await reconcileFrozenMembershipSnapshot(estimate);
     // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
     // gate to still be live — acceptance bills/schedules from stored rows
@@ -16995,11 +16998,19 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // Two accepts of one plan quote overlapped on its row lock (codex pre-push P1): the later one's locked plan check
     // read the plan the earlier one had just created as a state change, and refused. That accept succeeded, so this one
     // answers with the same success replay as any accept of an accepted estimate, and never retires the card that
-    // accept bound. A read that fails answers the error path, again with nothing retired.
+    // accept bound. The replay answers only for the estimate and owner this request first read (codex pre-push P0): the
+    // same refusal also answers a merge or undo that moved the estimate to another customer, whose later accept this
+    // request must not be handed (it carries that customer's pay link). Such a request keeps its 409, and an accepted
+    // estimate's card is not its to retire. A read that fails answers the error path, again with nothing retired.
     if (err && err.status === 409 && (err.code === 'RESTART_STATE_CHANGED' || err.code === 'PLAN_START_STATE_CHANGED')) {
       try {
         const current = await db('estimates').where({ token: req.params.token }).first();
-        if (current?.status === 'accepted') return await respondAlreadyAccepted(res, current);
+        if (current?.status === 'accepted') {
+          if (acceptOwner && current.id === acceptOwner.id && (current.customer_id || null) === acceptOwner.customerId) {
+            return await respondAlreadyAccepted(res, current);
+          }
+          droppedCaptureToRetire = null;
+        }
       } catch (replayErr) {
         return next(replayErr);
       }

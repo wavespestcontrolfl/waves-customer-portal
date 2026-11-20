@@ -2487,6 +2487,40 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
       expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     });
 
+    test('a merge or undo moved the estimate to another customer, whose accept then committed: no replay, the 409 stays, and nothing is retired (codex pre-push P0)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-16', token: 'tok-restart-16-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      const firstOwner = storedEstimate().customer_id;
+      expect(firstOwner).toBeTruthy();
+      const restart = require('../services/cancellation-resolution/restart');
+      const realCheck = restart.assertRestartAcceptEligible;
+      let refusedUnderLock = false;
+      spies.push(jest.spyOn(restart, 'assertRestartAcceptEligible').mockImplementation(async (...args) => {
+        try {
+          return await realCheck(...args);
+        } catch (checkErr) {
+          refusedUnderLock = true;
+          throw checkErr;
+        }
+      }));
+      db.__state.onTable = (table) => {
+        if (table !== 'estimates' || !refusedUnderLock) return;
+        refusedUnderLock = false;
+        Object.assign(storedEstimate(), {
+          customer_id: 'cust-moved-to', status: 'accepted',
+          accepted_at: '2026-11-20T12:00:00.000Z', price_locked_at: '2026-11-20T12:00:00.000Z',
+        });
+      };
+      const res = await putAccept('tok-restart-16-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(res.data.success).toBeUndefined();
+      expect(JSON.stringify(res.data)).not.toMatch(/\/pay\//);
+      expect(retire).not.toHaveBeenCalled();
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
     test('control: the same refusal on an estimate still not accepted keeps the 409 and retires the card', async () => {
       const body = verifiedCapture();
       resetStore(restartEstimate({ id: 'est-restart-15', token: 'tok-restart-15-x012345678' }));

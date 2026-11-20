@@ -2147,7 +2147,10 @@ retirement, the accept answers the existing 503 `RECURRING_CARD_RETIRE_FAILED` a
 intent. Two accepts of one plan quote that overlap on its row lock are the exception: the later one's
 locked check reads the plan the earlier one created as a state change, so after the rollback the accept
 re-reads the estimate, and when it is now accepted it answers the same success replay as any accept of an
-accepted estimate and retires nothing (a failed read takes the error path, also with nothing retired).
+accepted estimate and retires nothing (a failed read takes the error path, also with nothing retired). The
+replay answers only for the estimate and customer the request first read: the same refusal answers a merge or
+undo that moved the estimate to another customer, so when that customer's accept committed instead, the
+request keeps its 409 and retires nothing.
 The estimate page answers both state-changed codes with a banner that keeps the server's
 message and links back to the portal, never "Refresh times". It turns off its one booking condition
 (the time picker, the pick-a-time prompts, the sticky booking bar and every book button) and its
