@@ -3,6 +3,7 @@ import { ActionFeedback, Button } from "../../ui";
 import { fetchSignedCopy } from "./offerApi";
 import OfferTimeline, { History, SignedCopyView } from "./OfferTimeline";
 import { firstNameOf, offerErrorMessage, shownOffer } from "./offerLogic";
+import { useRenderAtExpiry } from "./useOfferFlow";
 
 // The offer part of the application detail. Renders nothing while the flow is
 // off (today's status-only behavior); a failed read shows an error with Retry
@@ -16,6 +17,8 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
   const [signed, setSigned] = useState(null);
   const [error, setError] = useState(null);
   const [reading, setReading] = useState(false); // a signed copy is loading: one read at a time (History)
+  // A card left open past the offer's expiry shows it closed unsigned, and offers Make an offer, with no other read.
+  useRenderAtExpiry(data);
   if (detail.role !== "technician") return null;
   // A failed first read is retried with the combined re-read too (the offer, then the application): an offer signed
   // meanwhile moves the application, and the stage must follow it.

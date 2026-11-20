@@ -20,6 +20,7 @@ import {
 } from "../../ui";
 import SafeMarkdown from "../../SafeMarkdown";
 import { saveOfferDraft, sendOffer } from "./offerApi";
+import { useRenderAtExpiry } from "./useOfferFlow";
 import {
   APPLICATION_CLOSED_TEXT,
   describeSend,
@@ -410,6 +411,8 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState(null);
+  // An offer out passing its expiry while the form is open: the send result and the lock follow it with no other read.
+  useRenderAtExpiry(data);
   // The dialog's own close handler (Escape, backdrop) honors the same busy state.
   useEffect(() => {
     onBusyChange(busy);

@@ -232,10 +232,10 @@ describe("OfferDialog", () => {
     expect(screen.queryByText(/use Revise/)).toBeNull();
   });
 
-  // A result left open past the expiry: the page's clock closes the offer even while a read (from a server clock a
-  // minute behind) still says sent.
-  it("a send result left open past the offer's expiry reads as closed unsigned by the page's clock", async () => {
-    const sentRow = draftRow({ status: "sent", updatedAt: "2026-12-12T13:15:00.000Z", expiresAt: "2026-11-26T15:00:00.000Z" });
+  // A result left open past the expiry: when the expiry passes, the page's clock closes the offer with no read (the
+  // read after the send still says sent). The clock is frozen (beforeEach) and moved by hand; the form's timer is real.
+  it("a send result left open past the offer's expiry reads as closed unsigned when the expiry passes, with no read", async () => {
+    const sentRow = draftRow({ status: "sent", updatedAt: "2026-12-12T13:15:00.000Z", expiresAt: new Date(NOW.getTime() + 300).toISOString() });
     sendOffer.mockResolvedValueOnce({ offer: sentRow, comms: { sms: { outcome: "sent" }, email: { outcome: "sent" } } });
     const outside = {};
     const afterSend = { ...panel(draftRow()), current: sentRow };
@@ -244,9 +244,8 @@ describe("OfferDialog", () => {
     const ask = await screen.findByRole("dialog", { name: "Send offer" });
     fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
     expect(await screen.findByText("Offer sent to Jordan.")).toBeInTheDocument();
-    vi.setSystemTime(new Date("2026-11-26T15:01:00Z"));
-    act(() => outside.read({ ...panel(draftRow()), current: { ...sentRow } }));
-    expect(await screen.findByText("This offer is no longer open.")).toBeInTheDocument();
+    vi.setSystemTime(new Date(NOW.getTime() + 1300));
+    expect(await screen.findByText("This offer is no longer open.", {}, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.getByText("It passed its expiry before Jordan signed it. The offer card shows it as Closed unsigned.")).toBeInTheDocument();
   });
 

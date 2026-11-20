@@ -640,6 +640,29 @@ describe('RecruitingPage offer flow: read failures, re-offers and drafts', () =>
     expect(screen.getByLabelText('Start date')).toHaveValue('2027-01-04');
   });
 
+  // A card left open across the offer's expiry: when the expiry passes, the page's clock closes the offer with no read,
+  // so the card shows Closed unsigned and offers Make an offer in place of Revise. The clock is frozen (beforeEach) and
+  // moved by hand; the card's timer is real.
+  it('a card left open past the offer expiry shows it closed unsigned and offers Make an offer, with no read', async () => {
+    const expiresAt = new Date(Date.now() + 300).toISOString();
+    const { calls } = setupFetch({}, {
+      offer: offerPayload({ current: offerRecord({ status: 'sent', expiresAt, timeline: [] }) }),
+      detail: detailFixture({ status: 'offer' }),
+    });
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    expect(within(card).getByText('Sent')).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Revise' })).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: 'Make an offer' })).toBeNull();
+    const reads = () => calls.filter((c) => c.method === 'GET' && c.path.startsWith('/admin/careers/app-1')).length;
+    const before = reads();
+    vi.setSystemTime(new Date(Date.parse(expiresAt) + 1000));
+    await waitFor(() => expect(within(screen.getByTestId('offer-card')).getByText('Closed unsigned')).toBeInTheDocument(), { timeout: 3000 });
+    expect(within(screen.getByTestId('offer-card')).getByRole('button', { name: 'Make an offer' })).toBeInTheDocument();
+    expect(within(screen.getByTestId('offer-card')).queryByRole('button', { name: 'Revise' })).toBeNull();
+    expect(reads()).toBe(before);
+  });
+
   it.each([['accepted', 'hired'], ['declined', 'withdrawn']])('no new offer after a %s offer', async (status, appStatus) => {
     const old = offerRecord({ status, timeline: [] });
     setupFetch({}, { offer: offerPayload({ current: old }), detail: detailFixture({ status: appStatus }) });

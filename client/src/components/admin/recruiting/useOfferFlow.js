@@ -3,6 +3,24 @@ import { fetchOffer } from "./offerApi";
 import { offerErrorMessage } from "./offerLogic";
 
 const IDLE = { id: null, status: "idle", data: null, error: null };
+// A timer waits at most 2^31 - 1 ms (about 24.8 days); a longer wait fires early and arms again.
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * Renders the caller again once the offer read's current offer passes its expiry. From then on a sent offer reads as
+ * closed unsigned by the page's clock (shownOffer), so a card or a form left open changes with no other read.
+ */
+export function useRenderAtExpiry(data) {
+  const [tick, setTick] = useState(0);
+  const offer = data?.current;
+  const at = offer?.status === "sent" ? Date.parse(offer.expiresAt) : NaN;
+  useEffect(() => {
+    const wait = at - Date.now();
+    if (!(wait >= 0)) return undefined; // no expiry ahead: none, or already past
+    const timer = setTimeout(() => setTick((n) => n + 1), Math.min(wait + 1, MAX_TIMER_MS));
+    return () => clearTimeout(timer);
+  }, [at, tick]);
+}
 
 /**
  * Reads the open application's offer state. Three outcomes stay distinct:

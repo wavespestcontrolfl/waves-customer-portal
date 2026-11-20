@@ -308,8 +308,9 @@ function buildStatusPatchPlan(req) {
     return { error: { code: 400, body: { error: 'Unknown expected status' } } };
   }
 
-  // The job offers the stage dialog's preview showed (its offers.stamp). Optional, like expected_status; when present,
-  // a move that withdraws offers is refused if they changed since.
+  // The job offers the stage dialog's preview showed (its offers.stamp). Optional, like expected_status: with it, a move
+  // whose offers changed since is refused; without it (a page loaded before the stamp), a move that would withdraw an
+  // offer is refused (applyStatusTransition).
   const expectedOffers = req.body.expected_offers ?? null;
   if (expectedOffers !== null && !(typeof expectedOffers === 'string' && /^[0-9a-f]{32}$/.test(expectedOffers))) {
     return { error: { code: 400, body: { error: 'Unknown expected offers' } } };
@@ -476,11 +477,11 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan, { o
   // The move withdraws exactly what its dialog showed. The preview's stamp names the offers it withdraws (none, for a
   // move that keeps them); the same rule names them again here, under the lock. Any difference is refused before
   // anything is written, and the dialog reads the preview again: another session sent, edited or withdrew an offer, or
-  // the preview read the application at another stage than this move leaves.
-  if (plan.expectedOffers) {
-    const withdrawn = closesOffers ? await JobOffers.liveOffersOf(trx, applicationId, { lock: true }) : [];
-    if (JobOffers.offerStampOf(withdrawn) !== plan.expectedOffers) return { row, offersChanged: true };
-  }
+  // the preview read the application at another stage than this move leaves. A move without a stamp (a page loaded
+  // before the stamp) never showed an offer: it goes through only when it withdraws none.
+  const withdrawn = closesOffers ? await JobOffers.liveOffersOf(trx, applicationId, { lock: true }) : [];
+  if (!plan.expectedOffers && withdrawn.length) return { row, offersUnseen: true };
+  if (plan.expectedOffers && JobOffers.offerStampOf(withdrawn) !== plan.expectedOffers) return { row, offersChanged: true };
   // An offer the applicant holds is withdrawn only by the owner account, as on POST .../withdraw: any other admin's
   // stage move is refused here, before anything is written.
   if (closesOffers && !ownerAccount && (await JobOffers.heldOffersOf(trx, applicationId)).length) {
@@ -604,6 +605,14 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(409).json({
         error: 'The job offer changed since this opened. Nothing was changed. Check the move again.',
         code: 'OFFERS_CHANGED',
+        application: await presentApplication(txResult.row),
+      });
+    }
+    // A page loaded before the offers stamp sends none: it cannot show the offer, so it is told to reload.
+    if (txResult.offersUnseen) {
+      return res.status(409).json({
+        error: 'This application has a job offer this page does not show. Reload the page, then make the move again. Nothing was changed.',
+        code: 'OFFERS_UNSEEN',
         application: await presentApplication(txResult.row),
       });
     }
