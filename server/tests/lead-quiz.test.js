@@ -4,7 +4,7 @@
  * them. Every stored or shown value must be a fixed token.
  */
 const {
-  QUIZ_SEEING, QUIZ_PROPERTY, normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizIsCommercial,
+  QUIZ_SEEING, QUIZ_PROPERTY, normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizNamesProblem, quizIsCommercial,
 } = require('../services/lead-quiz');
 
 describe('normalizeQuiz', () => {
@@ -73,6 +73,19 @@ describe('staff wording', () => {
     expect(quizNoteLine({ kind: 'lawn' }, null)).toBe('Lawn Quiz');
     expect(quizNoteLine(null, 'now')).toBe('');
     expect(quizNoteLine({ kind: 'tree', seeing: 'ants' }, 'now')).toBe('');
+  });
+
+  test('the answers name the problem for every tile but "Not sure"', () => {
+    for (const kind of Object.keys(QUIZ_SEEING)) {
+      for (const seeing of QUIZ_SEEING[kind]) {
+        expect({ kind, seeing, names: quizNamesProblem({ kind, seeing }) }).toEqual({ kind, seeing, names: seeing !== 'unsure' });
+      }
+    }
+    // An unanswered question, another quiz's tile and a non-quiz lead name nothing.
+    expect(quizNamesProblem({ kind: 'pest', property: 'condo' })).toBe(false);
+    expect(quizNamesProblem({ kind: 'pest', seeing: 'weeds' })).toBe(false);
+    expect(quizNamesProblem({ kind: 'tree', seeing: 'ants' })).toBe(false);
+    expect(quizNamesProblem(null)).toBe(false);
   });
 
   test('only "business" is commercial', () => {

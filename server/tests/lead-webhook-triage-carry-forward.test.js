@@ -6,7 +6,7 @@
  * them), and nothing else from intake attribution comes along.
  * Needs DATABASE_URL (CI); skipped locally without one.
  */
-const { _test: { TRIAGE_REPLACE_EXTRACTED_SQL } } = require('../routes/lead-webhook');
+const { _test: { TRIAGE_REPLACE_EXTRACTED_SQL, triageExtractedForWrite } } = require('../routes/lead-webhook');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 describeDb('AI triage extracted_data replace', () => {
@@ -53,6 +53,17 @@ describeDb('AI triage extracted_data replace', () => {
       .toEqual({ stage: 'lead_webhook_received', timeline: 'now', quiz, summary: 'Roaches in a condo' });
     // A lead with no quiz gains no key.
     expect(await replace({ stage: 'lead_webhook_received' }, { summary: 's' })).toEqual({ stage: 'lead_webhook_received', summary: 's' });
+  });
+
+  test('a model-returned timeline or quiz cannot replace or supply the visitor\'s answers', async () => {
+    // The route drops the intake-owned keys before the write (triageExtractedForWrite).
+    const quiz = { kind: 'pest', seeing: 'roaches', property: 'condo' };
+    const conflicting = { summary: 'Wants a price', timeline: 'browsing', quiz: { kind: 'lawn', seeing: 'weeds' } };
+    expect(await replace({ stage: 'lead_webhook_received', timeline: 'now', quiz }, triageExtractedForWrite(conflicting)))
+      .toEqual({ stage: 'lead_webhook_received', timeline: 'now', quiz, summary: 'Wants a price' });
+    // A form that asked neither question gains neither key from the model.
+    expect(await replace({ stage: 'lead_webhook_received' }, triageExtractedForWrite(conflicting)))
+      .toEqual({ stage: 'lead_webhook_received', summary: 'Wants a price' });
   });
 
   test('an intake with no page URLs adds no attribution key at all', async () => {

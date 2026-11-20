@@ -19,7 +19,7 @@ const path = require('path');
 const { _test } = require('../routes/lead-webhook');
 const { evaluateLeadEstimateAutomationReadiness } = require('../services/lead-estimate-automation');
 
-const { buildLeadWebhookIntake, commercialLeadFields, TRIAGE_REPLACE_EXTRACTED_SQL } = _test;
+const { buildLeadWebhookIntake, commercialLeadFields, TRIAGE_REPLACE_EXTRACTED_SQL, triageExtractedForWrite } = _test;
 
 const quizBody = (extra = {}) => ({
   name: 'Pat Sample',
@@ -104,10 +104,27 @@ describe('route wiring', () => {
     expect(triageAt).toBeGreaterThan(TRIAGE_REPLACE_EXTRACTED_SQL.indexOf(carried));
     const triage = src.slice(src.indexOf('if (triageResult.extractedData) {'));
     const block = triage.slice(0, triage.indexOf('if (Object.keys(updates).length > 0)'));
-    expect(block).toMatch(/const \{ source_evidence: _ignoredSourceEvidence, quiz: _ignoredQuiz, \.\.\.safeTriageExtracted \} = triageResult\.extractedData;/);
+    expect(block).toMatch(/const safeTriageExtracted = triageExtractedForWrite\(triageResult\.extractedData\);/);
     // Both branches write the stripped object, never the raw triage output.
     expect(block.match(/JSON\.stringify\(safeTriageExtracted\)/g)).toHaveLength(2);
     expect(block).not.toMatch(/JSON\.stringify\(triageResult\.extractedData\)/);
+  });
+
+  test('a model-returned quiz, timeline or source_evidence never reaches a triage write', () => {
+    // The third quiz answer is `timeline`, and leads.urgency is set from the
+    // declared one: a model value would leave the two in disagreement.
+    expect(triageExtractedForWrite({
+      summary: 'Roaches in a condo',
+      timeline: 'browsing',
+      quiz: { kind: 'lawn', seeing: 'weeds', property: 'house' },
+      source_evidence: { kind: 'google_ads' },
+      pest_type: 'roaches',
+    })).toEqual({ summary: 'Roaches in a condo', pest_type: 'roaches' });
+    // Nothing else is touched, and the input is not mutated.
+    const triage = { summary: 's', timeline: 'now' };
+    expect(triageExtractedForWrite(triage)).toEqual({ summary: 's' });
+    expect(triage).toEqual({ summary: 's', timeline: 'now' });
+    expect(triageExtractedForWrite({})).toEqual({});
   });
 
   test('both Customer 360 notes carry the quiz line', () => {
@@ -121,7 +138,7 @@ describe('route wiring', () => {
     const bell = src.slice(src.indexOf("await triggerNotification('new_lead', {"));
     const block = bell.slice(0, bell.indexOf('});'));
     expect(block).toMatch(/source: quizName\(quiz\) \|\| leadSource\.detail \|\| leadSource\.source,/);
-    expect(block).toMatch(/\.\.\.\(quizAnswers \? \{ quizAnswers \} : \{\}\),/);
+    expect(block).toMatch(/\.\.\.\(quizAnswers \? \{ quizAnswers, quizNamesProblem: quizNamesProblem\(quiz\) \} : \{\}\),/);
     expect(src).toMatch(/lead_source_id: leadSourceId,/);
   });
 });

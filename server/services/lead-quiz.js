@@ -83,6 +83,16 @@ function quizNoteLine(quiz, timeline) {
   return answers ? `${name}: ${answers}` : name;
 }
 
+/**
+ * True when the "What are you seeing?" answer names a problem: one of the
+ * quiz's tiles other than "Not sure". Only then do the answers say what the
+ * visitor wants, so only then may they stand in for the service line in the
+ * new-lead bell.
+ */
+function quizNamesProblem(quiz) {
+  return !!quizName(quiz) && quiz.seeing !== 'unsure' && QUIZ_SEEING[quiz.kind].includes(quiz.seeing);
+}
+
 /** "Business" on the property question: the lead is a commercial premises. */
 function quizIsCommercial(quiz) {
   return quiz?.property === 'business';
@@ -95,5 +105,6 @@ module.exports = {
   quizName,
   quizAnswersLine,
   quizNoteLine,
+  quizNamesProblem,
   quizIsCommercial,
 };

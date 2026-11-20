@@ -4423,13 +4423,16 @@ unknown `kind`, a non-object or an absent key is a no-op; an unknown
 `seeing` / `property` is SILENTLY DROPPED and the rest kept; no other key
 of the object and no typed text is ever stored. The third quiz answer is
 the `timeline` field above. Stored in `extracted_data.quiz` (kept through
-the AI triage's extracted_data replace; a `quiz` key in the model's output
-is dropped, so it can never replace the visitor's answers; kept on the
-unverified hold's stage too) and written as a "Pest Quiz: Roaches, condo,
+the AI triage's extracted_data replace; a `quiz` or `timeline` key in the
+model's output is dropped before both triage writes, so it can never
+replace or supply the visitor's answers; kept on the unverified hold's
+stage too) and written as a "Pest Quiz: Roaches, condo,
 wants it today" line on the new-lead / existing-customer Customer 360 note
 and on the unverified hold's lead activity note.
 The new-lead bell reads "<name> via Pest Quiz (<zip>) - Roaches, condo,
-wants it today"; the lead's source row (`lead_source_id`) is NOT changed by
+wants it today"; a "Not sure" or partly answered quiz keeps the service
+line beside the answers ("- Wants Pest Control - Not sure, condo, wants it
+today"); the lead's source row (`lead_source_id`) is NOT changed by
 a quiz: a quiz is a form, not a traffic source.
 `property: business` is a stated commercial premises: it sets the intake's
 `isCommercial`, so the readiness gate records

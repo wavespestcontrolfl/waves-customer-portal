@@ -12,7 +12,7 @@ const { sendLeadAutoReplyOnce, sendCurrentCustomerQuoteText } = require('../serv
 
 const { aiTriageLead } = require('../services/lead-triage');
 const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
-const { normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizIsCommercial } = require('../services/lead-quiz');
+const { normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizNamesProblem, quizIsCommercial } = require('../services/lead-quiz');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
@@ -1017,11 +1017,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         name: `${firstName || ''} ${lastName || ''}`.trim() || phoneFormatted,
         // A quiz lead's bell names the quiz and its answers ("via Pest Quiz
         // (34202) - Roaches, condo, wants it today"). The lead row keeps its
-        // real source (lead_source_id) either way.
+        // real source (lead_source_id) either way. The answers stand in for
+        // the service line only when they name the problem; a "Not sure" or
+        // partly answered quiz keeps the service beside them.
         source: quizName(quiz) || leadSource.detail || leadSource.source,
         zip: customer.zip,
         service: serviceInterest || null,
-        ...(quizAnswers ? { quizAnswers } : {}),
+        ...(quizAnswers ? { quizAnswers, quizNamesProblem: quizNamesProblem(quiz) } : {}),
         leadId: leadRecord?.id || customer.id,
         // The bell's Call (alert-call-button.js) dials the lead row's number, or this customer's when the lead row
         // failed and leadId above is the customer id.
@@ -1082,11 +1084,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             // the triage's prose guess only fills in when the form didn't ask.
             if (triageResult.urgency && !declaredUrgency) updates.urgency = triageResult.urgency;
             if (triageResult.extractedData) {
-              // source_evidence is server-owned intake evidence. The model may
-              // summarize the source, but it cannot replace that proof.
-              // quiz is the visitor's own tap answers (services/lead-quiz.js),
-              // owned by intake the same way.
-              const { source_evidence: _ignoredSourceEvidence, quiz: _ignoredQuiz, ...safeTriageExtracted } = triageResult.extractedData;
+              // The intake-owned keys are dropped from the model's output
+              // first (triageExtractedForWrite), so neither write below can
+              // replace or supply them.
+              const safeTriageExtracted = triageExtractedForWrite(triageResult.extractedData);
               // On an attached call-pipeline lead, MERGE — a wholesale replace
               // here would clobber the voicemail provenance and the text-back
               // one-shot stamp the attach just preserved. The replace branch
@@ -1621,6 +1622,20 @@ function normalizeSignHost(value) {
     .replace(/\s+/g, ' ')
     .trim();
   return Array.from(cleaned).slice(0, SIGN_HOST_MAX_LENGTH).join('').trim();
+}
+
+// Keys of a lead's extracted_data that the intake owns. The AI triage may
+// describe the lead, but its output never replaces or supplies them:
+// source_evidence is the server's own source proof, and quiz + timeline are
+// the visitor's own tap answers (services/lead-quiz.js, lead-timeline.js).
+// leads.urgency is set from the declared timeline, so a model-returned
+// timeline would leave the stored answer and the urgency in disagreement.
+// Applied before BOTH triage writes (the replace below and the call-lead merge).
+function triageExtractedForWrite(extractedData) {
+  const {
+    source_evidence: _ignoredSourceEvidence, quiz: _ignoredQuiz, timeline: _ignoredTimeline, ...safeTriageExtracted
+  } = extractedData;
+  return safeTriageExtracted;
 }
 
 // The AI triage's extracted_data REPLACES the intake snapshot on a fresh form
@@ -2243,6 +2258,7 @@ module.exports._test = {
   normalizeSignHost,
   SIGN_HOST_MAX_LENGTH,
   TRIAGE_REPLACE_EXTRACTED_SQL,
+  triageExtractedForWrite,
   CALL_ATTACH_EXTRACTED_SQL,
   getLeadWebhookAttribution,
   normalizeLeadServiceInterest,
