@@ -733,6 +733,21 @@ describe('buildReportCrossSell', () => {
     expect(await loadEstimateSeed(fake.database, 'cust-1', street)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
   });
 
+  test('a newer estimate whose inputs carry no dimension never hides an older measured one with a review marker (codex pre-push r29 P1)', async () => {
+    const { loadEstimateSeed } = _private;
+    const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(SEED_HERE);
+    for (const dimensionless of [{ engineInputs: {} }, { engineInputs: { services: { pest: true } } }, { inputs: { homeSqFt: 0, stories: 'n/a' } }]) {
+      const rows = [
+        seedRow('est-marked', SEED_HERE, 'accepted', 5, { ...seedInputs, fieldVerify: ['lawn_sqft'] }),
+        seedRow('est-newest', SEED_HERE, 'accepted', 9, dimensionless),
+      ];
+      expect(await loadEstimateSeed(pagedEstimates(rows).database, 'cust-1', street)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+    }
+    // With no measured estimate at all, there is still no seed.
+    const onlyDimensionless = [seedRow('est-newest', SEED_HERE, 'accepted', 9, { engineInputs: { services: { pest: true } } })];
+    expect(await loadEstimateSeed(pagedEstimates(onlyDimensionless).database, 'cust-1', street)).toBeNull();
+  });
+
   test('a row that leaves the accepted set after the address list never seeds: the next accepted row does (codex pre-push r27 P1)', async () => {
     const { loadEstimateSeed } = _private;
     const rows = [

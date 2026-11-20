@@ -441,6 +441,11 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
       // where its footprint-trust stamp lives (Codex #6398 r20).
       const inputs = estData?.engineInputs || estData?.inputs || estData?.engineInput;
       if (!inputs || typeof inputs !== 'object') continue;
+      // Inputs with no dimension cannot seed (codex pre-push r29 P1): an empty
+      // object, or one holding only service picks, must not stop the scan
+      // before an older same-premises estimate with measurements, whose review
+      // markers then apply.
+      if (![inputs.homeSqFt, inputs.lotSqFt, inputs.lawnSqFt, inputs.turfSf, inputs.bedArea, inputs.stories].some(positiveOrNull)) continue;
       pick = { row, inputs, estData };
       break;
     }
@@ -531,8 +536,8 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     roofType: cleanString(inputs.roofType),
     cageEvidence: seedCageEvidence(pick.estData),
   };
-  const hasAnyDimension = seed.homeSqFt || seed.lotSqFt || seed.lawnSqFt || seed.bedArea || seed.stories;
-  return hasAnyDimension ? seed : null;
+  // The scan took only a row with a dimension, so the seed carries one.
+  return seed;
 }
 
 // Default property lookup for the offer price: CACHE-ONLY. The live lookup
