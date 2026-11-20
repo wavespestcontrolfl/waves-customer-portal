@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BIFENTHRIN_LABEL_BOTTLE, canonicalTermiticideProducts, clearPriorBottleLabelChecks, termiticideProductOptions } from "./EstimateToolViewV2";
+import { BIFENTHRIN_LABEL_BOTTLE, canonicalTermiticideFields, clearPriorBottleLabelChecks, termiticideProductOptions } from "./EstimateToolViewV2";
 
 // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18), so the
 // pre-slab and trenching dropdowns list the bottle once (LESCO Crosscheck Plus since 2026-11-18); a saved bifen_it selection keeps a match.
@@ -89,22 +89,33 @@ describe("label checks saved for the earlier bifenthrin bottle", () => {
   });
 
   it("restores a saved alias as its option key, so the picker and the label panel show the product the engine prices", () => {
-    expect(canonicalTermiticideProducts({ preslabProductKey: "talak", trenchingProductKey: "Crosscheck Plus", notes: "kept" }))
+    expect(canonicalTermiticideFields({ preslabProductKey: "talak", trenchingProductKey: "Crosscheck Plus", notes: "kept" }))
       .toEqual({ preslabProductKey: "talstar_p", trenchingProductKey: "talstar_p", notes: "kept" });
-    expect(canonicalTermiticideProducts({ preslabProductKey: "termidor", trenchingProductKey: "taurus" }))
+    expect(canonicalTermiticideFields({ preslabProductKey: "termidor", trenchingProductKey: "taurus" }))
       .toEqual({ preslabProductKey: "termidor_sc", trenchingProductKey: "taurus_sc" });
-    expect(canonicalTermiticideProducts({ preslabProductKey: "Cross Check Plus", trenchingProductKey: "LESCO Cross Check Plus" }))
+    expect(canonicalTermiticideFields({ preslabProductKey: "Cross Check Plus", trenchingProductKey: "LESCO Cross Check Plus" }))
       .toEqual({ preslabProductKey: "talstar_p", trenchingProductKey: "talstar_p" });
     const keys = { preslabProductKey: "talstar_p", trenchingProductKey: "" };
-    expect(canonicalTermiticideProducts(keys)).toBe(keys);
+    expect(canonicalTermiticideFields(keys)).toBe(keys);
     const unknown = { preslabProductKey: "mystery bottle", trenchingProductKey: "bifen_it" };
-    expect(canonicalTermiticideProducts(unknown)).toBe(unknown);
+    expect(canonicalTermiticideFields(unknown)).toBe(unknown);
+  });
+
+  // The server reads a trenching rate alias as "standard" or "high" by its own token rules, so a reopen shows that rate in the picker
+  // and the label box (pre-push audit 31).
+  it("restores a saved trenching rate alias as the rate the server reads", () => {
+    for (const [saved, rate] of [["high_rate", "high"], ["0.125%", "high"], ["Problem Soil", "high"], ["Regular", "standard"], ["0.06%", "standard"]]) {
+      expect(canonicalTermiticideFields({ trenchingApplicationRate: saved, notes: "kept" })).toEqual({ trenchingApplicationRate: rate, notes: "kept" });
+    }
+    for (const asSaved of [{ trenchingApplicationRate: "high" }, { trenchingApplicationRate: "extreme" }, { trenchingApplicationRate: "" }]) {
+      expect(canonicalTermiticideFields(asSaved)).toBe(asSaved);
+    }
   });
 
   it("keeps a pre-slab ingredient name as saved, so the server still holds it for review; trenching resolves it", () => {
-    expect(canonicalTermiticideProducts({ preslabProductKey: "bifenthrin", trenchingProductKey: "bifenthrin" }))
+    expect(canonicalTermiticideFields({ preslabProductKey: "bifenthrin", trenchingProductKey: "bifenthrin" }))
       .toEqual({ preslabProductKey: "bifenthrin", trenchingProductKey: "bifen_it" });
-    expect(canonicalTermiticideProducts({ preslabProductKey: " Fipronil ", trenchingProductKey: "fipronil" }))
+    expect(canonicalTermiticideFields({ preslabProductKey: " Fipronil ", trenchingProductKey: "fipronil" }))
       .toEqual({ preslabProductKey: " Fipronil ", trenchingProductKey: "taurus_sc" });
   });
 

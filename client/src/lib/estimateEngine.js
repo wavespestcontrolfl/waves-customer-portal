@@ -1534,10 +1534,18 @@ export function normalizeTrenchingProductKey(value, { fallback = 'taurus_sc' } =
   return aliases[raw] || fallback;
 }
 
-function normalizeTrenchingRate(value) {
-  const raw = String(value || 'standard').trim().toLowerCase().replace(/[%\s.-]+/g, '_').replace(/_+/g, '_');
-  if (['high', 'high_rate', '0_125', '0_12', 'problem_soil', 'active_subterranean', 'formosan', 'asian_subterranean'].includes(raw)) return 'high';
-  return 'standard';
+// The server's rate aliases and token rules (normalizeTrenchingApplicationRate in service-pricing.js), so "0.125%" is the high rate
+// here as there. The estimate tool canonicalizes a saved alias with it, so the picker, the label box and the server agree (pre-push
+// audit 31).
+const TRENCHING_RATE_ALIASES = {
+  standard: 'standard', regular: 'standard', '0_06': 'standard', standard_0_06: 'standard',
+  high: 'high', high_rate: 'high', '0_125': 'high', '0_12': 'high', problem_soil: 'high',
+  active_subterranean: 'high', formosan: 'high', asian_subterranean: 'high',
+};
+export function normalizeTrenchingRate(value, { fallback = 'standard' } = {}) {
+  const raw = String(value || 'standard').trim().toLowerCase().replace(/[\s-]+/g, '_')
+    .replace(/%/g, '').replace(/\./g, '_').replace(/_+/g, '_');
+  return TRENCHING_RATE_ALIASES[raw] || fallback;
 }
 
 function normalizeTrenchingWarranty(value, product) {

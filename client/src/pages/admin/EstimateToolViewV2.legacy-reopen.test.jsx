@@ -193,6 +193,7 @@ describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck P
 describe('the trenching label check', () => {
   const TRENCH = { svcTrenching: true, trenchingPerimeterLF: '240', trenchingProductKey: 'taurus_sc', trenchingLabelConfirmed: true, homeSqFt: '2400', lotSqFt: '9000', stories: '2' };
   const labelCheck = () => screen.getByLabelText('Label rate and trench depth confirmed');
+  const REDUCED_VOLUME = /^Label rate, trench depth and reduced volume confirmed \(soil will not accept the labeled volume; a continuous barrier can still be achieved\)$/;
 
   it.each([
     ['application rate', 'estimate-trenchingApplicationRate', 'high'],
@@ -213,11 +214,20 @@ describe('the trenching label check', () => {
     reopen({ ...TRENCH, trenchingProductKey: 'talstar_p', _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
     await waitFor(() => expect(labelCheck()).toBeChecked());
     fireEvent.change(document.getElementById('estimate-trenchingApplicationRate'), { target: { value: 'high' } });
-    const reducedVolume = /^Label rate, trench depth and reduced volume confirmed \(soil will not accept the labeled volume; a continuous barrier can still be achieved\)$/;
-    await waitFor(() => expect(screen.getByLabelText(reducedVolume)).not.toBeChecked());
+    await waitFor(() => expect(screen.getByLabelText(REDUCED_VOLUME)).not.toBeChecked());
     expect(screen.queryByLabelText('Label rate and trench depth confirmed')).not.toBeInTheDocument();
     fireEvent.change(document.getElementById('estimate-trenchingProductKey'), { target: { value: 'taurus_sc' } });
     await waitFor(() => expect(labelCheck()).not.toBeChecked());
-    expect(screen.queryByLabelText(reducedVolume)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(REDUCED_VOLUME)).not.toBeInTheDocument();
+  });
+
+  // The server reads a saved "high_rate" as the high rate, so the reopen does too: the picker, the box text and the server agree, and
+  // the saved price stays current (pre-push audit 31).
+  it('reopens a saved rate alias as the high rate, with the reduced-volume box', async () => {
+    reopen({ ...TRENCH, trenchingProductKey: 'talstar_p', trenchingApplicationRate: 'high_rate', _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
+    await waitFor(() => expect(screen.getByLabelText(REDUCED_VOLUME)).toBeChecked());
+    expect(document.getElementById('estimate-trenchingApplicationRate')).toHaveValue('high');
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(reviewAndSend()).toBeEnabled();
   });
 });

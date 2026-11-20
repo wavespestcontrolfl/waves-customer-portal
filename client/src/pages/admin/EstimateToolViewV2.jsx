@@ -28,6 +28,7 @@ import {
   termiteBaitSystemLabel,
   normalizePreSlabProductKey,
   normalizeTrenchingProductKey,
+  normalizeTrenchingRate,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
@@ -151,15 +152,23 @@ const TRENCHING_REDUCED_VOLUME_CHECK = "Label rate, trench depth and reduced vol
 const LABEL_CHECK_FOR_FIELD = Object.fromEntries(LABEL_CHECKS.flatMap(({ productField, checkField, alsoConfirms = [] }) =>
   [productField, ...alsoConfirms].map((field) => [field, checkField])));
 
-// A saved alias ("talak", "Crosscheck Plus") becomes its option key, so the picker shows the product the engine prices and the label
-// panel shows that product's warning. A blank or unrecognized value, or a pre-slab ingredient name, is left as saved.
-export function canonicalTermiticideProducts(form) {
+// The saved fields a reopen canonicalizes: each product field, and the trenching rate (pre-push audit 31).
+const CANONICAL_FIELDS = [
+  ...LABEL_CHECKS.map(({ productField, resolve, keepAsSaved }) => ({ field: productField, resolve, keepAsSaved })),
+  { field: "trenchingApplicationRate", resolve: normalizeTrenchingRate },
+];
+
+// A saved alias becomes its option value, as the server reads it. A product alias ("talak", "Crosscheck Plus") becomes its option
+// key, so the picker shows the product the engine prices and the label panel shows that product's warning. A rate alias
+// ("high_rate", "0.125%") becomes "standard" or "high", so the picker and the label box show the rate the server prices. A blank or
+// unrecognized value, or a pre-slab ingredient name, is left as saved.
+export function canonicalTermiticideFields(form) {
   let next = form;
-  for (const { productField, resolve, keepAsSaved } of LABEL_CHECKS) {
-    const value = form[productField];
+  for (const { field, resolve, keepAsSaved } of CANONICAL_FIELDS) {
+    const value = form[field];
     if (typeof value !== "string" || !value.trim() || keepAsSaved?.has(productToken(value))) continue;
     const key = resolve(value, { fallback: null });
-    if (key && key !== value) next = { ...next, [productField]: key };
+    if (key && key !== value) next = { ...next, [field]: key };
   }
   return next;
 }
@@ -2323,7 +2332,7 @@ export default function EstimateToolViewV2({
   function reopenEditSource(d) {
     const restored = formFromEditSource(d);
     const { form: scrubbed, cleared } = scrubReopenedEstimateForm(restored, d.engineProfile);
-    const { form: seeded, cleared: labelChecks } = clearPriorBottleLabelChecks(d.inputs, canonicalTermiticideProducts(scrubbed));
+    const { form: seeded, cleared: labelChecks } = clearPriorBottleLabelChecks(d.inputs, canonicalTermiticideFields(scrubbed));
     const guessedHomeSize = linesPricedOnGuessedHomeSize(d.result).length > 0;
     const notice = [
       cleared.length > 0
@@ -7800,13 +7809,13 @@ export default function EstimateToolViewV2({
                       )}
                       <CheckboxV2
                         k="trenchingLabelConfirmed"
-                        label={form.trenchingApplicationRate === "high" && BIFENTHRIN_OPTION_KEYS.has(normalizeTrenchingProductKey(form.trenchingProductKey))
+                        label={normalizeTrenchingRate(form.trenchingApplicationRate) === "high" && BIFENTHRIN_OPTION_KEYS.has(normalizeTrenchingProductKey(form.trenchingProductKey))
                           ? TRENCHING_REDUCED_VOLUME_CHECK
                           : "Label rate and trench depth confirmed"}
                       />
                       <div className="text-14 text-zinc-600 leading-snug mb-1">
                         {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).warning}
-                        {form.trenchingApplicationRate === "high" ? " High rate requires label confirmation." : ""}
+                        {normalizeTrenchingRate(form.trenchingApplicationRate) === "high" ? " High rate requires label confirmation." : ""}
                       </div>
                       <div className="text-14 text-zinc-500 leading-snug">
                         Admin config: {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).config}
