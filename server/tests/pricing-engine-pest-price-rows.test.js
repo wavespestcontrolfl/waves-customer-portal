@@ -8,8 +8,6 @@
 //
 // The answer must depend on the rows of the last successful sync alone, never on what an earlier sync of the
 // worker loaded: every partial row below is tried on a cold worker and on a warm one, and both must refuse it.
-const fs = require('fs');
-
 // A worker that just started: pristine constants and a bridge that has not synced (its own module registry).
 function freshWorker() {
   jest.resetModules();
@@ -507,23 +505,13 @@ describe('the tier thresholds are the ones the engine\'s tier picker uses', () =
   });
 });
 
-// The answer must know every field of these rows that the sync reads. A new field needs a decision: required,
-// or optional with an explicit default.
-// - pest_features: the bridge loads the row through ONE table, and the answer takes its fields from the same
-//   table. So the sync cannot load a field the answer does not judge, and the test below is about behavior.
-// - pest_property_type and the tier names: the sync and the answer both go by the keys the engine holds.
-// - pest_base, pest_footprint and the two fields of a tier are single reads in the sync. The tests on them read
-//   the source: each fails when the sync starts to read another field of its row.
-describe('the bridge reads no field of these rows that the answer does not know', () => {
-  const source = fs.readFileSync(require.resolve('../services/pricing-engine/db-bridge'), 'utf8');
-  const fieldsRead = (text, pattern) => [...new Set([...text.matchAll(pattern)].map((match) => match[1]))].sort();
-  const block = (from, to) => {
-    const start = source.indexOf(from);
-    const end = source.indexOf(to, start);
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    return source.slice(start, end);
-  };
+// The answer must judge every field of these rows that the sync loads. In the bridge, one table per row lists the
+// fields, and the sync's loader and the answer both walk it (pest_property_type and the tier names go by the keys
+// the engine holds). So the sync cannot load a field through a table that the answer does not judge, and a new
+// line is required unless it says optional. The tests here are about what the loaders do: each field sets its one
+// constant, read by its own rule.
+describe('each field of these rows sets its one constant, read by its own rule', () => {
+  const factor = () => freshWorker().constants.PROCESSING_ADJUSTMENT;
 
   // Each field sets its one adjustment and no other, and every adjustment the engine holds has its field. An
   // adjustment the engine gains needs a line in the bridge's table, and with it the decision.
@@ -542,19 +530,36 @@ describe('the bridge reads no field of these rows that the answer does not know'
     expect(Object.keys(setBy).sort()).toEqual(Object.keys(freshWorker().constants.PEST.additionalAdjustments).sort());
   });
 
-  test('pest_base: base and floor (required), enforce_floor_post_discount (optional, a boolean), initial_roach (the visit-1 knockdown, not this price)', () => {
-    expect(fieldsRead(source, /config\.pest_base\??\.([a-z_]+)/g)).toEqual(['base', 'enforce_floor_post_discount', 'floor', 'initial_roach']);
+  // 120.4 and 88.6 round to two different whole numbers, so two swapped fields would show.
+  test('pest_base: base and floor are rounded whole, each into the constant of its own name', async () => {
+    const worker = freshWorker();
+    const { constants } = worker;
+    await expect(sync(worker, { ...fullRows(constants), pest_base: { base: 120.4, floor: 88.6 } })).resolves.toBe(true);
+    expect({ base: constants.PEST.base, floor: constants.PEST.floor })
+      .toEqual({ base: Math.round(120.4 * factor()), floor: Math.round(88.6 * factor()) });
   });
 
-  test('pest_footprint: breakpoints, each with sqft and adj', () => {
-    expect(fieldsRead(source, /config\.pest_footprint\??\.([a-z_]+)/g)).toEqual(['breakpoints']);
-    const footprint = block('if (config.pest_footprint?.breakpoints) {', 'if (config.pest_property_type) {');
-    expect(fieldsRead(footprint, /\bbp\.([a-z_]+)/g)).toEqual(['adj', 'sqft']);
+  // -12.5 rounded whole is -12, and apart from its sign -13. A field the answer does not know stays out.
+  test('pest_footprint: a breakpoint gives the engine its sqft as stored and its adj rounded apart from its sign, and nothing else', async () => {
+    const worker = freshWorker();
+    const signed = Math.round(12.5 * factor());
+    expect(Math.round(-12.5 * factor())).not.toBe(-signed);
+    const breakpoints = [{ sqft: 1000.5, adj: -12.5, other: 9 }, { sqft: 2000, adj: 12.5 }];
+    await expect(sync(worker, { ...fullRows(worker.constants), pest_footprint: { breakpoints } })).resolves.toBe(true);
+    expect(worker.constants.PEST.footprintBrackets).toEqual([{ sqft: 1000.5, adj: -signed }, { sqft: 2000, adj: signed }]);
   });
 
-  test('waveguard_tiers: discount and min_services of each tier', () => {
-    const tiers = block('if (config.waveguard_tiers) {', '// ── Mosquito');
-    expect(fieldsRead(tiers, /\bval\.([a-z_]+)/g)).toEqual(['discount', 'min_services']);
+  // One field of one tier in the row: that value of that tier moves, and nothing else of any tier.
+  test.each([
+    ['discount', 'discount', 0.77],
+    ['min_services', 'minServices', 7],
+  ])('waveguard_tiers: the %s of a tier sets the %s of that tier as stored, and nothing else', async (field, key, marker) => {
+    for (const tier of TIERS) {
+      const worker = freshWorker();
+      const before = JSON.parse(JSON.stringify(worker.constants.WAVEGUARD.tiers));
+      await expect(sync(worker, { ...fullRows(worker.constants), waveguard_tiers: { [tier]: { [field]: marker, other: 9 } } })).resolves.toBe(true);
+      expect(JSON.parse(JSON.stringify(worker.constants.WAVEGUARD.tiers))).toEqual({ ...before, [tier]: { ...before[tier], [key]: marker } });
+    }
   });
 
   test('the engine knows the six property types and the four tiers the rows carry', () => {

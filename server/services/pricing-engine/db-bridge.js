@@ -857,15 +857,32 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 // values that will not stay. So a caller asks in the same tick as it
 // computes the price, with no await in between: yes then means that the
 // engine holds what the last successful sync loaded, and nothing newer.
-// The pest_features row, one line per field: the adjustment it sets
-// (PEST.additionalAdjustments) and how the sync reads its value. The sync's
-// loader and the answer both walk THIS table, so the sync cannot load a
-// field of the row that the answer does not judge. A field is required
+//
+// The fields the sync loads from these rows, one line per field. The sync's
+// loaders and the answer walk the SAME tables, so the sync cannot load a
+// field through them that the answer does not judge. A field is required
 // unless its line says optional. An optional field needs one value in every
 // process when the row leaves it out, so the sync must rebase it to its
 // in-code value before it reads the row (as it does for attached_garage).
+// pest_property_type has no table: its loader and the answer both go by the
+// property types the engine holds.
 const roundSigned = (val) => (val >= 0 ? r(val) : -r(Math.abs(val)));
 const asStored = (val) => val;
+// A value a row carries as a number. Not isFiniteNumber above, which also
+// takes null and text.
+const isRowNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+// pest_base: the price fields. Each sets the PEST constant of its own name,
+// rounded whole. (The sync reads two more fields of this row by name: the
+// floor switch, which the answer judges below, and initial_roach, the
+// visit-1 knockdown, which is not this price.)
+const PEST_BASE_PRICE_ROW_FIELDS = Object.freeze(['base', 'floor']);
+// pest_footprint: the fields of one breakpoint and how the sync reads each.
+const PEST_FOOTPRINT_BREAKPOINT_FIELDS = Object.freeze([
+  { field: 'sqft', read: asStored },
+  { field: 'adj', read: roundSigned },
+]);
+// pest_features: the adjustment each field sets (PEST.additionalAdjustments)
+// and how the sync reads its value.
 const PEST_FEATURE_ROW_FIELDS = Object.freeze([
   { field: 'pool_cage', adjustment: 'poolCage', read: r },
   { field: 'pool_cage_small', adjustment: 'poolCageSmall', read: r },
@@ -885,31 +902,36 @@ const PEST_FEATURE_ROW_FIELDS = Object.freeze([
 ]);
 const PEST_REQUIRED_FEATURE_ROW_FIELDS = Object.freeze(PEST_FEATURE_ROW_FIELDS.filter((entry) => !entry.optional).map((entry) => entry.field));
 const PEST_OPTIONAL_FEATURE_ROW_FIELDS = Object.freeze(PEST_FEATURE_ROW_FIELDS.filter((entry) => entry.optional).map((entry) => entry.field));
+// waveguard_tiers: the fields of one tier, the key each sets in
+// WAVEGUARD.tiers[tier] (as stored), and when a row states it: a discount
+// from 0 up to, not including, 1, and the service count the engine's tier
+// picker uses for that tier.
+const WAVEGUARD_TIER_ROW_FIELDS = Object.freeze([
+  { field: 'discount', key: 'discount', states: (value) => isRowNumber(value) && value >= 0 && value < 1 },
+  { field: 'min_services', key: 'minServices', states: (value, tier) => isRowNumber(value) && value === WAVEGUARD_TIER_ENGINE_MIN_SERVICES[tier] },
+]);
 const pestPriceRow = (config, key) => (config[key] && typeof config[key] === 'object' ? config[key] : {});
 const RECURRING_PEST_PRICE_ROW_FIELDS = Object.freeze([
-  'pest_base.base', 'pest_base.floor', 'pest_footprint.breakpoints',
+  ...PEST_BASE_PRICE_ROW_FIELDS.map((field) => `pest_base.${field}`),
+  'pest_footprint.breakpoints',
   ...PEST_REQUIRED_FEATURE_ROW_FIELDS.map((field) => `pest_features.${field}`),
   ...PEST_PROPERTY_TYPE_KEYS.map((type) => `pest_property_type.${type}`),
-  ...WAVEGUARD_TIER_KEYS.flatMap((tier) => [`waveguard_tiers.${tier}.discount`, `waveguard_tiers.${tier}.min_services`]),
+  ...WAVEGUARD_TIER_KEYS.flatMap((tier) => WAVEGUARD_TIER_ROW_FIELDS.map(({ field }) => `waveguard_tiers.${tier}.${field}`)),
 ]);
-// A value a row carries as a number. Not isFiniteNumber above, which also
-// takes null and text.
-const isRowNumber = (value) => typeof value === 'number' && Number.isFinite(value);
 // The required fields that the rows of one sync (its parsed `config`) carry.
 function recurringPestPriceFieldsInRows(config) {
   const fields = new Set();
   const add = (name, carried) => { if (carried) fields.add(name); };
   const row = (key) => pestPriceRow(config, key);
-  for (const field of ['base', 'floor']) add(`pest_base.${field}`, isRowNumber(row('pest_base')[field]) && row('pest_base')[field] > 0);
+  for (const field of PEST_BASE_PRICE_ROW_FIELDS) add(`pest_base.${field}`, isRowNumber(row('pest_base')[field]) && row('pest_base')[field] > 0);
   const breakpoints = row('pest_footprint').breakpoints;
   add('pest_footprint.breakpoints', Array.isArray(breakpoints) && breakpoints.length > 0
-    && breakpoints.every((bp) => isRowNumber(bp?.sqft) && isRowNumber(bp?.adj)));
+    && breakpoints.every((bp) => PEST_FOOTPRINT_BREAKPOINT_FIELDS.every(({ field }) => isRowNumber(bp?.[field]))));
   for (const field of PEST_REQUIRED_FEATURE_ROW_FIELDS) add(`pest_features.${field}`, isRowNumber(row('pest_features')[field]));
   for (const type of PEST_PROPERTY_TYPE_KEYS) add(`pest_property_type.${type}`, isRowNumber(row('pest_property_type')[type]));
   for (const tier of WAVEGUARD_TIER_KEYS) {
     const values = row('waveguard_tiers')[tier] || {};
-    add(`waveguard_tiers.${tier}.discount`, isRowNumber(values.discount) && values.discount >= 0 && values.discount < 1);
-    add(`waveguard_tiers.${tier}.min_services`, isRowNumber(values.min_services) && values.min_services === WAVEGUARD_TIER_ENGINE_MIN_SERVICES[tier]);
+    for (const { field, states } of WAVEGUARD_TIER_ROW_FIELDS) add(`waveguard_tiers.${tier}.${field}`, states(values[field], tier));
   }
   return fields;
 }
@@ -1356,8 +1378,9 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         ? config.pest_base.enforce_floor_post_discount
         : false;
     if (config.pest_base) {
-      if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);
-      if (config.pest_base.floor) constants.PEST.floor = r(config.pest_base.floor);
+      for (const field of PEST_BASE_PRICE_ROW_FIELDS) {
+        if (config.pest_base[field]) constants.PEST[field] = r(config.pest_base[field]);
+      }
       // Initial Roach Knockdown sliding scale — DB shape mirrors the constants:
       //   { regular: [{sqft, price}, ...], german: [{sqft, price}, ...],
       //     regular_standalone: [{sqft, price}, ...] }
@@ -1416,10 +1439,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
     }
     if (config.pest_footprint?.breakpoints) {
-      constants.PEST.footprintBrackets = config.pest_footprint.breakpoints.map(bp => ({
-        sqft: bp.sqft,
-        adj: bp.adj >= 0 ? r(bp.adj) : -r(Math.abs(bp.adj)),
-      }));
+      constants.PEST.footprintBrackets = config.pest_footprint.breakpoints.map((bp) => Object.fromEntries(
+        PEST_FOOTPRINT_BREAKPOINT_FIELDS.map(({ field, read }) => [field, read(bp[field])])));
     }
     if (config.pest_property_type) {
       for (const [type, val] of Object.entries(config.pest_property_type)) {
@@ -1947,8 +1968,9 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     if (config.waveguard_tiers) {
       for (const [tier, val] of Object.entries(config.waveguard_tiers)) {
         if (constants.WAVEGUARD.tiers[tier]) {
-          if (val.discount !== undefined) constants.WAVEGUARD.tiers[tier].discount = val.discount;
-          if (val.min_services !== undefined) constants.WAVEGUARD.tiers[tier].minServices = val.min_services;
+          for (const { field, key } of WAVEGUARD_TIER_ROW_FIELDS) {
+            if (val[field] !== undefined) constants.WAVEGUARD.tiers[tier][key] = val[field];
+          }
         }
       }
     }
