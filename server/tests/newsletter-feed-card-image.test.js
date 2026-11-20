@@ -94,19 +94,21 @@ test('a Waves Pest Insider issue whose top picture moves: the feed shows its sti
   const { renderIssue } = require('../services/pest-insider/render');
   const { heroFor } = require('../services/pest-insider/heroes');
   const { factById } = require('../services/pest-insider/facts');
-  const { postUrl } = require('../services/pest-insider/posts');
-  // T03's top picture and card both move: each comes as its still (for
-  // classic Outlook, first in the HTML) and its GIF (every other mail app).
-  const hero = heroFor('T03');
+  const { POSTS, postUrl } = require('../services/pest-insider/posts');
+  // A fact whose top picture moves (which facts move is data): the picture
+  // comes as its still (for classic Outlook, first in the HTML) and its GIF.
+  const factId = Object.keys(POSTS).find((id) => heroFor(id).gifUrl);
+  const hero = heroFor(factId);
   expect(hero.gifUrl).toMatch(/\.gif$/);
   const { html_body: body } = renderIssue({
-    subject: 'Native termites can swarm in winter',
-    preview: 'Swarmers in December are not a fluke.',
-    lead: { headline: factById('T03').title, factId: 'T03', postUrl: postUrl('T03'), sentences: [{ text: 'They swarm on warm days after rain.' }] },
+    subject: factById(factId).title,
+    preview: 'One fact, one critter.',
+    lead: { headline: factById(factId).title, factId, postUrl: postUrl(factId), sentences: [{ text: 'They swarm on warm days after rain.' }] },
     idItem: { text: 'It raises a generation in about a week.', species: { slug: 'aedes-mosquito', name: 'Aedes Mosquito' } },
   });
   mockRows = [{ ...row(1, body), newsletter_type: 'pest-insider-monthly' }];
   const [post] = await getPublishedPosts({ limit: 1 });
+  expect(body).toContain(hero.gifUrl);
   expect(post.image).toBe(hero.url);
-  expect(post.image).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/pest-insider\/heroes\/t03-[0-9a-f]{10}\.jpg$/);
+  expect(post.image).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/pest-insider\/heroes\/[a-z]\d\d-[0-9a-f]{10}\.jpg$/);
 });

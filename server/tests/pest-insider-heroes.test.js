@@ -319,8 +319,16 @@ describe('taking new art', () => {
     expect(fs.readFileSync(path.join(root, ART_DIR, `t03-${art}.webp`), 'utf8')).toBe('a hand edit');
   }, 60000);
 
+  // The tests place their own motion: which facts move is data, and an art import may drop it.
+  const placeMotion = (id, motion) => {
+    const raw = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'));
+    raw.heroes[id] = { art: raw.heroes[id].art, motion };
+    fs.writeFileSync(path.join(root, MANIFEST), JSON.stringify(raw, null, 2));
+  };
+  const RAIN = { kind: 'rain', color: 'white', ...SAMPLE.rain };
+
   test('new art drops the motion placed on the old art, and says so; the same art again keeps its motion', async () => {
-    expect(HEROES.T03.motion).not.toBeNull();
+    placeMotion('T03', RAIN);
     fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
     // the dry run says what the import would drop, and drops nothing
     const before = state();
@@ -332,38 +340,39 @@ describe('taking new art', () => {
     const raw = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'));
     expect(Object.keys(raw.heroes.T03)).toEqual(['art']);
     // a person places the motion again on the new art; importing that same art keeps it
-    raw.heroes.T03.motion = { ...HEROES.T03.motion };
-    fs.writeFileSync(path.join(root, MANIFEST), JSON.stringify(raw, null, 2));
+    placeMotion('T03', RAIN);
     const again = run('--execute');
     expect([again.status, again.stdout]).toEqual([0, expect.not.stringContaining('the motion of')]);
     const kept = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8')).heroes.T03;
-    expect(kept).toEqual({ art: raw.heroes.T03.art, motion: { ...HEROES.T03.motion } });
+    expect(kept).toEqual({ art: raw.heroes.T03.art, motion: RAIN });
     expect(validateHeroes({ heroes: { T03: kept } }).T03.gifFile).toMatch(/^t03-[0-9a-f]{10}\.gif$/);
   }, 60000);
 
   test("an entry a person wrote with its motion before its art does not block another fact's import", async () => {
     const raw = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'));
-    const { art, motion } = raw.heroes.A02;
-    expect(motion).toBeDefined();
-    raw.heroes.A02 = { motion, art };
+    // another fact with art, written motion first
+    const other = Object.keys(raw.heroes).find((id) => id !== 'T03' && raw.heroes[id].art);
+    const { art } = raw.heroes[other];
+    raw.heroes[other] = { motion: RAIN, art };
     fs.writeFileSync(path.join(root, MANIFEST), JSON.stringify(raw, null, 2));
     fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
     const taken = run('--execute');
     expect([taken.status, taken.stderr]).toEqual([0, expect.not.stringContaining('does not hold the heroes')]);
-    // the file is written back one fact per line, art first; A02 keeps its art and motion
+    // the file is written back one fact per line, art first; the other fact keeps its art and motion
     const text = fs.readFileSync(path.join(root, MANIFEST), 'utf8');
-    expect(text).toContain(`"A02": { "art": ${JSON.stringify(art)}, "motion": ${JSON.stringify(motion)} }`);
-    expect(JSON.parse(text).heroes.A02).toEqual({ art, motion });
+    expect(text).toContain(`${JSON.stringify(other)}: { "art": ${JSON.stringify(art)}, "motion": ${JSON.stringify(RAIN)} }`);
+    expect(JSON.parse(text).heroes[other]).toEqual({ art, motion: RAIN });
   }, 60000);
 
   test('runs one import at a time: while another holds the lock, it stops and writes nothing', async () => {
+    placeMotion('T03', RAIN);
     fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
     fs.writeFileSync(path.join(root, `${MANIFEST}.lock`), '1\n');
     const before = state();
     const stopped = run('--execute');
     expect([stopped.status, stopped.stderr]).toEqual([1, expect.stringContaining('Another import holds server/data/pest-insider-heroes-v1.json.lock')]);
     expect(state()).toEqual(before);
-    // T03 moves, but an import that stops drops no motion, so it says nothing of it
+    // T03 moves here, but an import that stops drops no motion, so it says nothing of it
     expect(stopped.stdout).not.toContain('the motion of');
   }, 60000);
 });
