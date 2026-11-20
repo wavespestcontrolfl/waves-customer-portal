@@ -648,16 +648,14 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
       .whereNull('e.archived_at')
       .whereIn('e.status', ['sent', 'viewed'])
       .whereRaw("e.expires_at >= NOW() AND e.expires_at <= NOW() + INTERVAL '3 days'")
-      // plan_restart quotes publish 'sent' with NOTHING delivered and carry a
+      // Self-serve quotes (plan_restart, plan_start, the report card's
+      // service_report_cta) publish 'sent' with NOTHING delivered and carry a
       // zero-follow-up contract (C4, codex GH #3671 r28 P1) — prompting
       // staff to call before one expires is exactly the follow-up it
       // forbids. Excluded unless an operator really delivered it
       // (deliveryState.firstDeliveredAt, the admin send path's witness);
       // NULL-aware so legacy source-NULL rows stay in.
-      .where(function notUndeliveredPlanRestart() {
-        this.whereNull('e.source').orWhereNot('e.source', 'plan_restart')
-          .orWhereRaw("(e.estimate_data #>> '{deliveryState,firstDeliveredAt}') IS NOT NULL");
-      });
+      .where(require('./self-serve-estimates').whereNotUndeliveredSelfServe('e'));
     if (INTERNAL_TEST_CUSTOMERS.length) {
       expiringQuery
         .whereNotIn(db.raw("LOWER(COALESCE(e.customer_name, ''))"), INTERNAL_TEST_CUSTOMERS)
