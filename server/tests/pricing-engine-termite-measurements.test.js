@@ -377,13 +377,13 @@ describe('termite measurement overrides and safeguards', () => {
       expect(offChart.warnings.join(' ')).toMatch(/2 fl oz a finished gallon at 3 gal per 10 linear feet per foot of depth, are not a pair on the label's volume adjustment chart \(1 fl oz at 4 gal, or 2 fl oz at 2 gal\)/);
       expect(offChart.manualReviewReasons).not.toContain('reduced_volume_confirmation_required');
       expect(offChart.manualReviewReasons).toContain('off_label_chart_confirmation_required');
-      // The label's 0.06% (1 fl oz a gallon) at 3 gal is not a chart pair either: in review too, with its checked label box, and it
-      // does not show the 0.06% label.
+      // The label's 0.06% (1 fl oz a gallon) at 3 gal is not a chart pair either: in review too, with its checked label box. Its
+      // dilution is still the 0.06%, so it shows that label (pre-push audit at the fifteenth push).
       const standardOffChart = trench({});
       expect(standardOffChart).toMatchObject({ finishedGallons: 60, productOz: 60, labelConfirmed: true, requiresManualReview: true });
       expect(standardOffChart.manualReviewReasons).toContain('off_label_chart_confirmation_required');
       expect(standardOffChart.warnings.join(' ')).toMatch(/1 fl oz a finished gallon at 3 gal .* not a pair on the label's volume adjustment chart/);
-      expect(standardOffChart.concentrationLabel).toBe('high_rate');
+      expect(standardOffChart.concentrationLabel).toBe('0.06%');
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 2; // the eighth push's case: the standard rate at 0.12%
       const standardAtTwo = trench({});
       expect(standardAtTwo).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true, requiresManualReview: true });

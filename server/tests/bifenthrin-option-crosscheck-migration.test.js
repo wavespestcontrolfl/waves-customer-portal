@@ -356,6 +356,20 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.price_snapshots.map((snapshot) => snapshot.id)).toEqual(['s0']);
     });
 
+    // A snapshot purged since up() cannot be linked again: the foreign key would abort the rollback, so the price comes back with no
+    // link (pre-push audit at the fifteenth push).
+    test('down() restores the price with no snapshot link when the earlier snapshot is gone', async () => {
+      const db = world({ vendors: [vendorRow({ latest_snapshot_id: 's0' })] });
+      db.price_snapshots = [{ id: 's0', product_id: 'p1', vendor_id: 'ven1', vendor_pricing_id: 'v1', price: '58.42' }];
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      db.price_snapshots = db.price_snapshots.filter((snapshot) => snapshot.id !== 's0');
+      await migration.down(knex);
+      expect(db.vendor_pricing[0]).toMatchObject({ price: '58.42', latest_snapshot_id: null });
+      expect(db.price_snapshots).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/earlier price snapshot s0 is gone/));
+    });
+
     test('an install without the snapshot table or the link column gets no snapshot, and the price still moves', async () => {
       const noTable = world();
       await migration.up(fakeKnex(noTable));
@@ -1319,6 +1333,16 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(snapshot(db)).toBe(after);
       await migration.down(knex);
       expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
+    });
+
+    // Only a name the engine resolves to Crosscheck Plus counts: another Crosscheck product is another bottle, and moves (pre-push
+    // audit at the fifteenth push: LESCO Crosscheck G kept its own cost under the trench's Crosscheck Plus label).
+    test('an override that names another Crosscheck product moves to Crosscheck Plus', async () => {
+      const other = { catalog_product_name: 'LESCO Crosscheck G', container_cost: 45 };
+      const db = world({ preslab: preslabRow(other, PROD_PRESLAB_PRODUCT), trench: trenchRow(other, PROD_TRENCH_PRODUCT), catalog: [], vendors: [] });
+      await migration.up(fakeKnex(db));
+      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual(CROSSCHECK_PRESLAB);
+      expect(productOf(db, 'onetime_trenching', 'talstar_p')).toEqual({ catalog_product_name: 'LESCO Crosscheck G', ...CROSSCHECK_TRENCH });
     });
 
     // Only another bottle's figures or name move a product with no label of its own: one with none, or with Crosscheck Plus's own,

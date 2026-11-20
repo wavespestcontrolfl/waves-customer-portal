@@ -13,8 +13,10 @@
  * (its overlays read (products || product_costs)[key] || row[key]), so the quote follows whichever one the bridge reads.
  * A product is rewritten only while it still holds the Talak values, or has no label of its own and carries another bottle's
  * figures or name, a Talak warning included (pre-push audit at the twelfth push). A name is read before any figure: one with no
- * label of its own that names a Crosscheck bottle (its catalog name, the camelCase alias first, as db-bridge reads it) is an admin's
- * own Crosscheck product, so its figures stay and only a Talak warning on it moves (pre-push audit at the fourteenth push). db-bridge sets only a non-empty label, so such a product shows the code's label, which this change moves to
+ * label of its own that names Crosscheck Plus (its catalog name, the camelCase alias first, as db-bridge reads it, by a name the
+ * engine resolves to Crosscheck Plus) is an admin's own Crosscheck Plus product, so its figures stay and only a Talak warning on it
+ * moves (pre-push audits at the fourteenth and fifteenth pushes; another Crosscheck product, LESCO Crosscheck G, is another
+ * bottle). db-bridge sets only a non-empty label, so such a product shows the code's label, which this change moves to
  * Crosscheck Plus: left as it is, it would quote another bottle's cost under Crosscheck Plus's name and label check. That is the
  * admin seed's Talak product (41.57 / 96 with its rate fields: what ensureTable in routes/admin-pricing-config.js inserted from
  * 2026-10-25 until this change, when it creates the table), with or without an admin's edits since, and an admin's price for that
@@ -119,7 +121,8 @@
  * to what up() saw (a stale unit cost would outrank a price entered since), and leaves an approval up() superseded closed (see
  * above); it restores the pest breakdown only when its audit row exists AND the row still
  * deep-equals what up() wrote; then it deletes this migration's price_history and price_snapshots rows (a restored vendor row
- * links its earlier snapshot again), audit rows and changelog row.
+ * links its earlier snapshot again while that snapshot exists, else none: pre-push audit at the fifteenth push), audit rows and
+ * changelog row.
  *
  * The CROSSCHECK_* values are inlined (a pushed migration is frozen): server/tests/bifenthrin-option-crosscheck-migration.test.js asserts
  * they equal the talstar_p and bifen_it products in constants.js, so a later constant change fails that test instead of silently
@@ -691,7 +694,12 @@ async function restoreProductPrice(knex, before, written) {
     if (!row || !sameColumns(row, written.vendor_pricing)) {
       console.warn(`${LOG} down: the ${CATALOG_NAME} price changed since this migration - leaving it alone`);
     } else {
-      await knex('vendor_pricing').where({ id: row.id }).update(before.vendor_pricing);
+      // The earlier snapshot link comes back only while that snapshot exists: the portal deletes none today, but one purged since up()
+      // would fail the foreign key and abort the rollback, so the price comes back with no link (pre-push audit at the fifteenth push).
+      const link = before.vendor_pricing.latest_snapshot_id;
+      const linked = link == null || Boolean(await knex('price_snapshots').where({ id: link }).first());
+      if (!linked) console.warn(`${LOG} down: the earlier price snapshot ${link} is gone - restoring the ${CATALOG_NAME} price with no snapshot link`);
+      await knex('vendor_pricing').where({ id: row.id }).update(linked ? before.vendor_pricing : { ...before.vendor_pricing, latest_snapshot_id: null });
       if (before.price_history_id && await knex.schema.hasTable('price_history')) {
         await knex('price_history').where({ id: before.price_history_id }).del();
       }
@@ -801,11 +809,15 @@ const holds = (product, values) => Object.entries(values).every(([k, v]) => isDe
 // code's Crosscheck Plus product (pre-push audit at the twelfth push). See the header.
 const BOTTLE_FIELDS = ['container_cost', 'container_oz', 'catalog_product_name', 'package_label'];
 const ownLabel = (product) => typeof product.label === 'string' && product.label.trim() !== '';
-// A product with no label of its own whose catalog name, as db-bridge reads it (the camelCase alias first), names a Crosscheck
-// bottle: an admin's own Crosscheck product, whatever its figures (pre-push audit at the fourteenth push: an override naming LESCO
+// The names the engine resolves to Crosscheck Plus (service-pricing.js, its pre-slab and trenching product aliases), by its token
+// rule. Another Crosscheck product (LESCO Crosscheck G) is another bottle (pre-push audit at the fifteenth push).
+const CROSSCHECK_PLUS_NAMES = ['crosscheck', 'crosscheck_plus', 'lesco_crosscheck_plus', 'cross_check', 'cross_check_plus', 'lesco_cross_check_plus'];
+const nameToken = (name) => String(name ?? '').trim().toLowerCase().replace(/[\s/-]+/g, '_').replace(/_+/g, '_');
+// A product with no label of its own whose catalog name, as db-bridge reads it (the camelCase alias first), names Crosscheck Plus:
+// an admin's own Crosscheck Plus product, whatever its figures (pre-push audit at the fourteenth push: an override naming LESCO
 // Crosscheck Plus at an admin's $45 was repriced to $30.90).
-const namesCrosscheck = (product) => !ownLabel(product)
-  && /cross[\s_-]*check/i.test(String(product.catalogProductName ?? product.catalog_product_name ?? ''));
+const namesCrosscheckPlus = (product) => !ownLabel(product)
+  && CROSSCHECK_PLUS_NAMES.includes(nameToken(product.catalogProductName ?? product.catalog_product_name));
 const carriesOtherBottle = (product, plan) => !ownLabel(product) && (SHADOWING_ALIASES.some((alias) => product[alias] !== undefined)
   || BOTTLE_FIELDS.some((field) => field in plan.to && product[field] !== undefined && !isDeepStrictEqual(product[field], plan.to[field]))
   || (Array.isArray(product.warnings) && product.warnings.some((warning) => plan.from.warnings.includes(warning))));
@@ -813,13 +825,13 @@ const isOldBottle = (product, plan) => holds(product, plan.from) || carriesOther
 
 // The product on the new bottle: the bottle's fields follow the code's, and its other values stay, an admin's own positioning and
 // warnings included. A Talak warning moves to its Crosscheck Plus wording in place, and every other entry stays (pre-push audit at
-// the eleventh push); a product with none takes the code's. A product that names a Crosscheck bottle keeps every other value.
+// the eleventh push); a product with none takes the code's. A product that names Crosscheck Plus keeps every other value.
 function toCrosscheck(product, plan) {
   const { warnings, positioning, ...bottle } = plan.to;
   const moved = Array.isArray(product.warnings)
     ? product.warnings.map((warning) => (plan.from.warnings.includes(warning) ? warnings[plan.from.warnings.indexOf(warning)] : warning))
     : warnings;
-  if (namesCrosscheck(product)) return Array.isArray(product.warnings) ? { ...product, warnings: moved } : product;
+  if (namesCrosscheckPlus(product)) return Array.isArray(product.warnings) ? { ...product, warnings: moved } : product;
   const next = { ...product };
   for (const alias of SHADOWING_ALIASES) delete next[alias];
   return { ...next, ...bottle, positioning: next.positioning ?? positioning, warnings: moved };

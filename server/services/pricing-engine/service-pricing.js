@@ -7253,9 +7253,11 @@ function priceTrenching(property = {}, options = {}, replay) {
     positioning: product.positioning,
     applicationRate: rateResolution.applicationRate,
     requestedApplicationRate: rateResolution.requestedApplicationRate,
-    // A bottle with a volume adjustment chart shows its 0.06% label only for the chart's 0.06% pair, at either rate; every other pair
-    // shows the high rate's label (pre-push audits 28, and at the ninth and twelfth pushes). Any other bottle names its rate, as on main.
-    concentrationLabel: (halfVolumeLabel ? chartPair !== 0 : rateResolution.applicationRate === 'high')
+    // The label names the dilution the line priced, whatever its volume: a bottle with a volume adjustment chart shows its 0.06% label
+    // only at that dilution (the chart's first pair's), at either rate, and the high rate's label at any other; an off-chart volume
+    // goes to review on its own reason (pre-push audits 28, and at the ninth, twelfth and fifteenth pushes: 1 fl oz a gallon at 3 gal
+    // is still the 0.06% dilution). Any other bottle names its rate, as on main.
+    concentrationLabel: (halfVolumeLabel ? Math.abs(productOzPerFinishedGallon - chartPairs[0][0]) > 1e-9 : rateResolution.applicationRate === 'high')
       ? product.highConcentrationLabel || rateConfig.concentrationLabel
       : product.standardConcentrationLabel || rateConfig.concentrationLabel,
     trenchDepthFt,
