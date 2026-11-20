@@ -1452,6 +1452,10 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(stamp(adopted(), { leadPhone: ani, callerId: null })).toBe(false);
     expect(stamp(adopted(), { leadPhone: null, callerId: ani })).toBe(false);
     expect(stampCallerIdReachback(stored, adopted()).caller_id_reachback).toBe(false);
+    // Either extractor heard "do not contact me" (pre-push P1 r6): the hard veto
+    // reads only V2's flags, so the processor passes its combined v2DoNotContact.
+    expect(stamp(adopted(), { ...phones, doNotContact: true })).toBe(false);
+    expect(stamp(adopted(), { ...phones, doNotContact: false })).toBe(true);
     // Adoption did not run (no valid V2 result, shadow mode, or the primary
     // switch is off): the processor passes null and the old rule stands.
     expect(stamp(null)).toBe(false);
@@ -1459,7 +1463,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(stampCallerIdReachback({ ...stored, caller_id_reachback: true }, null, phones).caller_id_reachback).toBe(false);
   });
 
-  test('the processor stamps the reachback from the ADOPTED V2 extraction and the lead phone, after every exit that skips the lead step (pre-push P1 x4)', () => {
+  test('the processor stamps the reachback from the ADOPTED V2 extraction, the lead phone and the do-not-contact signal, after every exit that skips the lead step (pre-push P1 x5)', () => {
     // 1. A valid V2 result in shadow mode, or with CALL_EXTRACTION_V2_PRIMARY=false,
     //    may not drive the canonical writes: the stamp reads only the extraction
     //    the adoption block used.
@@ -1467,7 +1471,8 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     //    follow-up, spam or a non-lead voicemail) never stores the stamp, so the
     //    ads attribution mirror cannot treat it as a linked phone-only call.
     // 3. The stamp compares the phone Step 4b keys the lead on with the call's
-    //    own number, both resolved before it.
+    //    own number, both resolved before it, and reads the combined
+    //    do-not-contact signal, also set before it.
     // 4. Model output can carry any key, so the field is reset to false right
     //    after adoption, before every early exit: an exit stores false, never a
     //    model-written true.
@@ -1480,7 +1485,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     const decl = at('let adoptedV2Extraction = null;');
     const assign = at('adoptedV2Extraction = v2Result.extraction;');
     const blockEnd = src.indexOf('\n    }\n', adoptionIf);
-    const stamp = at('extracted = stampCallerIdReachback(extracted, adoptedV2Extraction, { leadPhone: phone, callerId: contactPhone });');
+    const stamp = at('extracted = stampCallerIdReachback(extracted, adoptedV2Extraction, {\n      leadPhone: phone, callerId: contactPhone, doNotContact: v2DoNotContact,\n    });');
     // Declared before the adoption block, assigned only inside it.
     expect(decl).toBeLessThan(adoptionIf);
     expect(assign).toBeGreaterThan(adoptionIf);
@@ -1503,6 +1508,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     // `phone` is Step 3's resolved lead phone and `contactPhone` the call's own number.
     expect(stamp).toBeGreaterThan(at('    const phone = resolveCallContactPhone(call, extracted.phone);'));
     expect(stamp).toBeGreaterThan(at('    const contactPhone = resolveCallContactPhone(call);'));
+    expect(stamp).toBeGreaterThan(at('    const v2DoNotContact = '));
   });
 
   test('normalizeCallExtraction carries is_lead + call_type through', () => {

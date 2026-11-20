@@ -11190,7 +11190,7 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
 const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 
 // Phone-only prospects (owner 2026-11-19). `caller_id_reachback` on the stored extraction is true
-// when the caller ID may stand in as the reachback for a customer-less lead. All four must hold:
+// when the caller ID may stand in as the reachback for a customer-less lead. All five must hold:
 // 1. Primary adoption used a V2 extraction on this pass (`adoptedV2Extraction`; null in shadow mode,
 //    with CALL_EXTRACTION_V2_PRIMARY=false, or with no valid V2 result), so a V2 result that may not
 //    drive the canonical writes never opens a lead.
@@ -11200,17 +11200,20 @@ const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 // 4. The phone Step 4b keys the lead on (`leadPhone`, resolveCallContactPhone with the extracted
 //    number) is the call's own number (`callerId`, resolveCallContactPhone of the call alone). A
 //    dictated number is unverified, and for this lead the phone is the only reachback.
+// 5. Neither extractor heard a do-not-contact request (`doNotContact`, the processor's
+//    v2DoNotContact): the V2 hard veto sees only V2's flags.
 // hasWorkableLeadSignal reads the stamp: a live caller who gave only a phone number then makes a
 // customer-less lead in Needs Review, where before the call made none. The processor stamps once,
 // just before the Step 4 write and the Step 4b gate. From the end of V2 adoption until then the
 // field reads false (model output can carry any key), so the hard veto, the tech follow-up and the
 // spam/voicemail exits store false, and the ads attribution mirror (phoneSuccessorActuallyLinked)
 // keeps the old verdict for a call the processor never linked.
-function stampCallerIdReachback(extracted, adoptedV2Extraction, { leadPhone = null, callerId = null } = {}) {
+function stampCallerIdReachback(extracted, adoptedV2Extraction, { leadPhone = null, callerId = null, doNotContact = false } = {}) {
   const reachback = !!adoptedV2Extraction
     && !callEndedWithNothingToDo(adoptedV2Extraction)
     && adoptedV2Extraction.caller?.caller_id_disclaimed !== true
-    && samePhone(leadPhone, callerId);
+    && samePhone(leadPhone, callerId)
+    && doNotContact !== true;
   return { ...extracted, caller_id_reachback: reachback };
 }
 
@@ -17174,7 +17177,9 @@ const CallRecordingProcessor = {
 
     // Phone-only reachback (stampCallerIdReachback): stamped after every exit that skips the lead
     // step, before the Step 4 write that stores it and the Step 4b gate that reads it.
-    extracted = stampCallerIdReachback(extracted, adoptedV2Extraction, { leadPhone: phone, callerId: contactPhone });
+    extracted = stampCallerIdReachback(extracted, adoptedV2Extraction, {
+      leadPhone: phone, callerId: contactPhone, doNotContact: v2DoNotContact,
+    });
 
     // Step 4: Update call log with extraction results.
     // Keep the row claimed as 'processing' while downstream side effects run.
