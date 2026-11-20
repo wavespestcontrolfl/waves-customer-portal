@@ -23,7 +23,8 @@
  *     (forward_acceptance.accepted_at); on an outbound bridge call it is between the call's start
  *     and the customer leg's end stamp minus its duration (the stamp is our receipt of the callback,
  *     so it bounds the answer and never times it); otherwise it is somewhere between the call's
- *     start and its end (callTiming);
+ *     start and its end, where an outbound call without Twilio's end stamp may have ended up to the
+ *     staff ring time after its start plus duration (callTiming);
  *   - an email a person sent (a Gmail SENT row, personSentFilter) to the lead's address, leaving out
  *     the SEO link outreach job's sends (its stored Gmail thread ref, seo_link_prospects);
  *   - an estimate a person sent: the lead's estimate (leads.estimate_id, or the public-quote mirror
@@ -116,13 +117,18 @@ async function personTexts(conn, peers, since) {
 // 'processed' status. Those closures are per-lead SQL on the route, so the batch reads the stamp and
 // the settled flag and applies the same precedence in judgeReach.
 const SETTLED_CALL_SQL = "(cl.processing_token IS NULL AND (cl.processing_status IS NULL OR cl.processing_status = 'processed'))";
+// Twilio rings a call at most 600 seconds (the Timeout maximum of its calls API and of <Dial>).
+const MAX_RING_MS = 600 * 1000;
+
 // Outbound staff-bridge calls: the row is created when the bridge rings the employee, before the
 // customer's leg exists, so its start is not the time the customer was reached. The bridge records the
 // customer leg only on some calls (metadata.customer_leg = { status, duration_seconds, ended_at },
-// twilio-voice-webhook.js /outbound-dial-complete): when it is there the customer connected at
-// ended_at minus duration_seconds. When it is not, the only bound is the call's own end (callEndedAtSql,
-// start plus duration): see bucketReach. The phone branch reads every call that ENDED after the earliest
-// first contact: one that rang before a lead's first contact can still reach a person after it.
+// twilio-voice-webhook.js /outbound-dial-complete): when it is there the customer connected by
+// ended_at minus duration_seconds at the latest. When it is not, the only bound is the call's own end
+// (callEndedAtSql: Twilio's stamp, else start plus duration, early by the staff ring time on an outbound
+// call): see callTiming and bucketReach. The phone branch reads every call that may have ENDED after the
+// earliest first contact, so it reaches back MAX_RING_MS: one that rang before a lead's first contact
+// can still reach a person after it.
 async function personCalls(conn, peers, sids, leadIds, since) {
   if (!peers.length && !sids.length && !leadIds.length) return [];
   const started = callStartedAtSql('cl');
@@ -136,14 +142,14 @@ async function personCalls(conn, peers, sids, leadIds, since) {
       .where((placed) => placed.where('cl.direction', 'outbound').whereRaw(personCallBackSql('cl')))
       .orWhere((answered) => answered.where('cl.direction', 'inbound').where('cl.answered_by', 'human')))
     .where((mine) => mine
-      .where((onPhone) => onPhone.whereRaw(`${ended} > ?`, [since]).whereRaw(`${peerSql} = ANY(?)`, [peers]))
+      .where((onPhone) => onPhone.whereRaw(`${ended} > ?`, [new Date(since.getTime() - MAX_RING_MS)]).whereRaw(`${peerSql} = ANY(?)`, [peers]))
       .orWhereIn('cl.twilio_call_sid', sids)
       // A later call the processor settled onto one of these leads carries another sid and may carry
       // another phone.
       .orWhere((stamped) => stamped.whereRaw("cl.metadata->>'lead_id' = ANY(?)", [leadIds]).whereRaw(SETTLED_CALL_SQL)))
     .select('cl.twilio_call_sid as sid', 'cl.customer_id', conn.raw(`${started} as at`), conn.raw(`${peerSql} as peer`),
       conn.raw("cl.metadata->>'lead_id' as stamp_lead_id"), conn.raw(`${SETTLED_CALL_SQL} as settled`),
-      'cl.direction', conn.raw(`${ended} as ended_at`),
+      'cl.direction', conn.raw(`${ended} as ended_at`), conn.raw("cl.metadata->>'ended_at' as end_stamp"),
       conn.raw("cl.metadata->'forward_acceptance'->>'accepted' as accepted"),
       conn.raw("cl.metadata->'forward_acceptance'->>'accepted_at' as accepted_at"),
       conn.raw("cl.metadata->'customer_leg'->>'ended_at' as leg_ended_at"),
@@ -155,12 +161,25 @@ async function personCalls(conn, peers, sids, leadIds, since) {
   }));
 }
 
+// The latest an outbound bridge call's customer leg could have connected: the leg's end stamp minus its
+// duration (callTiming says why it is a latest bound). NaN when the call recorded no customer leg.
+function legAnsweredBy(row) {
+  const legEnd = row.leg_ended_at ? Date.parse(row.leg_ended_at) : NaN;
+  const legSeconds = row.leg_seconds == null || row.leg_seconds === '' ? NaN : Number(row.leg_seconds);
+  return Number.isFinite(legEnd) && Number.isFinite(legSeconds) && legSeconds >= 0 ? legEnd - legSeconds * 1000 : NaN;
+}
+
 // When a call reached a person: { at, spanEnd }. `at` is the earliest the contact could have happened;
-// `spanEnd` is the latest (the call's own end), or null when `at` is exact.
+// `spanEnd` is the latest (by the call's own end at the latest), or null when `at` is exact.
+//  - The call's end: Twilio's own stamp when /call-status wrote one (metadata.ended_at, from the event's
+//    Timestamp, read as `end_stamp`; callEndedAtSql then returns it). Without it callEndedAtSql returns
+//    start plus duration. An inbound call's duration runs from its start (Twilio answers it to run our
+//    TwiML), so that is its end; an outbound call's runs from when the staff phone answered, so it is
+//    early by the staff ring time: the call had ended by it plus MAX_RING_MS.
 //  - Outbound bridge call with a customer leg: between the call's start and the leg's end stamp minus
-//    its duration. /outbound-dial-complete stamps customer_leg.ended_at when its callback arrives, after
-//    the leg ended, so a late callback moves that bound later, never earlier: the latest the customer
-//    could have answered, not the answer time (callEndedAtSql trusts no such stamp as an end either).
+//    its duration, or the call's stamped end if sooner. /outbound-dial-complete stamps
+//    customer_leg.ended_at when its callback arrives, after the leg ended, so a late callback moves that
+//    bound later, never earlier: the latest the customer could have answered, not the answer time.
 //  - Inbound call with forward_acceptance: exact, when the staff phone accepted it
 //    (metadata.forward_acceptance.accepted_at, written by /inbound-forward-accept). Twilio waits for
 //    that callback's reply before it bridges the caller, so the caller is reached at the stamp or a
@@ -169,11 +188,11 @@ async function personCalls(conn, peers, sids, leadIds, since) {
 function callTiming(row) {
   const start = asMs(row.at);
   const end = asMs(row.ended_at);
-  const span = { at: start, spanEnd: end != null && end > start ? end : null };
+  const stamped = end != null && asMs(row.end_stamp) === end;
+  const latestEnd = end != null && !stamped && row.direction === 'outbound' ? end + MAX_RING_MS : end;
+  const span = { at: start, spanEnd: latestEnd != null && latestEnd > start ? latestEnd : null };
   if (row.direction === 'outbound') {
-    const legEnd = row.leg_ended_at ? Date.parse(row.leg_ended_at) : NaN;
-    const legSeconds = row.leg_seconds == null || row.leg_seconds === '' ? NaN : Number(row.leg_seconds);
-    const latest = Number.isFinite(legEnd) && Number.isFinite(legSeconds) && legSeconds >= 0 ? legEnd - legSeconds * 1000 : NaN;
+    const latest = stamped ? Math.min(legAnsweredBy(row), end) : legAnsweredBy(row);
     return latest > start ? { at: start, spanEnd: latest } : span;
   }
   const acceptedAt = row.accepted === 'true' || row.accepted === true ? asMs(row.accepted_at) : null;

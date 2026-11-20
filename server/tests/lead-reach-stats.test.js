@@ -371,7 +371,13 @@ function fakeConn(rowsByTable) {
     const builder = new Proxy({}, {
       get: (_t, prop) => {
         if (prop === 'then') return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
-        if (prop === 'whereRaw' || prop === 'orWhereRaw') return (sql) => { (conn.raws[name] = conn.raws[name] || []).push(String(sql)); return builder; };
+        if (prop === 'whereRaw' || prop === 'orWhereRaw') {
+          return (sql, bindings) => {
+            (conn.raws[name] = conn.raws[name] || []).push(String(sql));
+            (conn.bindings[name] = conn.bindings[name] || []).push(bindings);
+            return builder;
+          };
+        }
         // A grouped condition (where/orWhere with a callback) runs on the same builder, so its SQL is recorded too.
         if (['where', 'orWhere', 'andWhere'].includes(prop)) return (...args) => { if (typeof args[0] === 'function') args[0](builder); return builder; };
         // A modifier (knex .modify) runs on the same builder, so its SQL is recorded too.
@@ -384,6 +390,7 @@ function fakeConn(rowsByTable) {
   conn.raw = (sql) => sql;
   conn.calls = calls;
   conn.raws = {};
+  conn.bindings = {};
   return conn;
 }
 
@@ -674,6 +681,29 @@ describe('loadLeadReachStats', () => {
     expect(await run({ at: new Date(at(20)), leg_ended_at: new Date(at(24)).toISOString() })).toMatchObject({ reachedLater: 1, notJudged: 0 });
     // A leg stamp that puts the answer before the call's start says nothing: the call's own span decides (minute 2 to 30).
     expect(await run({ leg_ended_at: new Date(at(3)).toISOString() })).toMatchObject({ reachedWithin: 0, notJudged: 1 });
+  });
+
+  // GitHub Codex #8138 round 2 (P2): without Twilio's end stamp, callEndedAtSql's end is start plus duration,
+  // early by the staff ring time on an outbound call.
+  test('an outbound call without Twilio\'s end stamp may have been answered up to the staff ring time after its computed end', async () => {
+    const peer = lead(1).phone.replace('+1', '');
+    const run = (row) => loadLeadReachStats([lead(1)], { conn: fakeConn({ call_log: [{ peer, direction: 'outbound', at: new Date(at(14)), ended_at: new Date(at(14.5)), ...row }] }) });
+    // Stamped by Twilio: answered by minute 14.5 at the latest, within.
+    expect(await run({ end_stamp: new Date(at(14.5)).toISOString() })).toMatchObject({ reachedWithin: 1, notJudged: 0 });
+    // Start plus duration only: the staff phone may have rung up to 10 minutes first, so the answer may be after minute 15.
+    expect(await run({})).toMatchObject({ reachedWithin: 0, notJudged: 1 });
+    // An inbound call's duration runs from its start: its computed end is its end.
+    expect(await run({ direction: 'inbound' })).toMatchObject({ reachedWithin: 1, notJudged: 0 });
+    // The bound stays finite: an unstamped call an hour before first contact is still no contact of this lead's.
+    expect(await run({ at: new Date(at(-60)), ended_at: new Date(at(-59)) })).toMatchObject({ reachedWithin: 0, neverReached: 1, notJudged: 0 });
+    // A late customer-leg callback is capped by the call's stamped end: answered by minute 10.
+    expect(await run({ at: new Date(at(2)), ended_at: new Date(at(10)), end_stamp: new Date(at(10)).toISOString(), leg_ended_at: new Date(at(20)).toISOString(), leg_seconds: '120' }))
+      .toMatchObject({ reachedWithin: 1, notJudged: 0 });
+    // The phone read reaches back the longest ring before the earliest first contact, so it reads such a call.
+    const { callEndedAtSql } = require('../services/sms-pending-conversations');
+    const conn = fakeConn({ call_log: [] });
+    await loadLeadReachStats([lead(1)], { conn });
+    expect(conn.bindings.call_log[conn.raws.call_log.indexOf(`${callEndedAtSql('cl')} > ?`)]).toEqual([new Date(at(-10))]);
   });
 
   // Round 4, finding 4: emailCustomerLink's own guard, shared.
