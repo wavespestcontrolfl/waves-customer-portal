@@ -26193,7 +26193,9 @@ async function runPrepaySwitch({
         await trx('invoices')
           .where({ id: inv.id })
           .update({
-            notes: trx.raw('concat(coalesce(notes, ?), ?)', ['', `\n${supersededByMarker(invoice.id)}`]),
+            // `||`, not concat(): concat() takes "any", so Postgres cannot type
+            // the bound marker and refuses the whole switch (42P18).
+            notes: trx.raw('coalesce(notes, ?) || ?', ['', `\n${supersededByMarker(invoice.id)}`]),
             updated_at: new Date(),
           });
       }
