@@ -83,20 +83,29 @@ export function tomorrowET(now = new Date()) {
 }
 
 const filled = (value) => typeof value === 'string' && value.trim() !== '';
-const blank = (value) => value == null || value === '';
-const positiveAmount = (value) =>
-  (typeof value === 'number' || filled(value)) && Number.isFinite(Number(value)) && Number(value) > 0;
 
-// True when an offer read carries every term the page shows: the job, a real
-// start date, a rate above zero, the week, who they report to and pay day,
-// and a pay step only with both its rate and its date (a date alone would drop
-// a dated raise from the page). The page signs only such an offer, so no one
-// signs a blank start date, a "$0.00 an hour" or an offer missing its raise.
+// An amount that money() shows exactly: a number (or a numeric string) of whole
+// cents, at least one cent. A rate that would read "$0.00", or that money()
+// would round or write in exponent form, is not one.
+function exactAmount(value) {
+  if (typeof value !== 'number' && !filled(value)) return false;
+  const n = Number(value);
+  const shown = Number.isFinite(n) ? n.toFixed(2) : '';
+  return /^\d+\.\d{2}$/.test(shown) && Number(shown) === n && n >= 0.01;
+}
+
+// True when an offer read carries every term the page shows, exactly as the
+// page shows it: the job, a real start date, an hourly rate, the week, who they
+// report to and pay day. The pay step is in every read: no raise is both step
+// fields sent as null, and a raise needs both its rate and its date (a read
+// that leaves them out, or a date alone, would drop a dated raise from the
+// page). The page signs only such an offer, so no one signs a blank start date,
+// a "$0.00 an hour" or an offer missing its raise.
 export function hasOfferFacts(data) {
-  const noStep = blank(data.stepRate) && blank(data.stepEffectiveOn);
+  const noStep = data.stepRate === null && data.stepEffectiveOn === null;
   return filled(data.jobTitle) && filled(data.hoursLine) && filled(data.reportTo) && filled(data.payDayLine)
-    && weekdayOf(data.startDate) !== null && positiveAmount(data.hourlyRate)
-    && (noStep || (positiveAmount(data.stepRate) && weekdayOf(data.stepEffectiveOn) !== null));
+    && weekdayOf(data.startDate) !== null && exactAmount(data.hourlyRate)
+    && (noStep || (exactAmount(data.stepRate) && weekdayOf(data.stepEffectiveOn) !== null));
 }
 
 // null when valid, else the message to show.
