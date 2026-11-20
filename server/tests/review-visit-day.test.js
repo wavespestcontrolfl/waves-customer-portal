@@ -1,7 +1,16 @@
 // The day a drafted review text speaks about (owner 2026-10-27, "FIX"): the day the
 // technician was at the visit, not the close day a late completion stamps on the record.
 jest.mock('../models/db', () => jest.fn());
-const { draftServiceDate, draftVisitDate, visitWorkedOn } = require('../services/review-visit-day');
+const mockProfile = { value: { serviceKey: 'pest_general', findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' } };
+const mockResolve = jest.fn(async () => {
+  if (mockProfile.value instanceof Error) throw mockProfile.value;
+  return mockProfile.value;
+});
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: (...args) => mockResolve(...args),
+}));
+const { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskKeptForVisit, lateCloseAskVerdict, lateCloseAskVerdictOrNull } = require('../services/review-visit-day');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const DAY = 86400000;
@@ -108,5 +117,230 @@ describe('draftServiceDate: record first, then the cadence\'s visit', () => {
     expect(await draftServiceDate({ recordDate, scheduledServiceId: 'ss-gone' }, fakeDb({ scheduled_services: [] }))).toBe(recordDate);
     const failing = fakeDb({ service_records: [{ id: 'sr-4', scheduled_service_id: 'ss-4' }] }, { throwOn: 'scheduled_services' });
     expect(await draftServiceDate({ recordDate, serviceRecordId: 'sr-4' }, failing)).toBe(recordDate);
+  });
+});
+
+// Late backdated closeouts keep the review ask (owner 2026-11-20, D6 R3): the 3-ET-day window.
+describe('closedWithinDaysOfWorkedDay: the 3-day late-close window', () => {
+  const closedAt = new Date('2026-11-20T15:00:00Z'); // Nov 20, 10 AM ET
+  const within = (scheduledDate, extra = {}) => closedWithinDaysOfWorkedDay({ scheduledDate, closedAt, ...extra });
+
+  test('the same day and 3 days back are inside the window', () => {
+    expect(within('2026-11-20')).toBe(true);
+    expect(within('2026-11-17')).toBe(true);
+  });
+
+  test('4 days back is outside the window', () => {
+    expect(within('2026-11-16')).toBe(false);
+  });
+
+  test('a late-evening ET arrival counts by its ET day, not its UTC day', () => {
+    // Nov 16 9 PM ET = Nov 17 02:00 UTC. ET day gap 4 (out); a UTC-cut day would read 3 (in).
+    expect(closedWithinDaysOfWorkedDay({ arrivedAt: '2026-11-17T02:00:00Z', scheduledDate: '2026-11-16', closedAt })).toBe(false);
+    // Nov 17 9 PM ET = Nov 18 02:00 UTC. ET day gap 3 (in).
+    expect(closedWithinDaysOfWorkedDay({ arrivedAt: '2026-11-18T02:00:00Z', scheduledDate: '2026-11-17', closedAt })).toBe(true);
+  });
+
+  test('a stale arrival before the scheduled day falls back to the scheduled day', () => {
+    expect(closedWithinDaysOfWorkedDay({ arrivedAt: '2026-11-01T14:00:00Z', scheduledDate: '2026-11-19', closedAt })).toBe(true);
+  });
+
+  test('an unreadable worked day, or an unreadable close, is outside the window', () => {
+    expect(closedWithinDaysOfWorkedDay({ closedAt })).toBe(false);
+    expect(closedWithinDaysOfWorkedDay({ scheduledDate: 'not a day', closedAt })).toBe(false);
+    expect(closedWithinDaysOfWorkedDay({ scheduledDate: '2026-11-19' })).toBe(false);
+    expect(closedWithinDaysOfWorkedDay({ scheduledDate: '2026-11-19', closedAt: 'garbage' })).toBe(false);
+  });
+
+  test('a worked day after the close is outside the window', () => {
+    expect(within('2026-11-22')).toBe(false);
+  });
+});
+
+describe('lateCloseAskKeptForVisit: the preview read', () => {
+  let savedGate;
+  beforeEach(() => { savedGate = process.env.GATE_REVIEW_LATE_CLOSE_ASK; process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'true'; });
+  afterEach(() => { if (savedGate === undefined) delete process.env.GATE_REVIEW_LATE_CLOSE_ASK; else process.env.GATE_REVIEW_LATE_CLOSE_ASK = savedGate; });
+  const now = new Date('2026-11-20T15:00:00Z');
+  const IDENT = { id: 'v1', service_id: 'sv-1', service_type: 'General Pest Control', service_key_snapshot: null, is_recurring: true };
+  const visitDb = (row, fail = false) => jest.fn(() => ({ where: () => ({ first: async () => { if (fail) throw new Error('pg blip'); return row; } }) }));
+
+  test('a visit worked 2 days ago is kept; one worked 5 days ago is not', async () => {
+    expect(await lateCloseAskKeptForVisit('v1', visitDb({ ...IDENT, arrived_at: null, scheduled_date: '2026-11-18' }), now)).toBe(true);
+    expect(await lateCloseAskKeptForVisit('v1', visitDb({ ...IDENT, arrived_at: null, scheduled_date: '2026-11-15' }), now)).toBe(false);
+  });
+
+  describe('delivery posture the commit enforces (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
+    const inWindow = { ...IDENT, arrived_at: null, scheduled_date: '2026-11-18' };
+    afterEach(() => { mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' }; });
+
+    test('an internal-only assessment is never kept', async () => {
+      mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'internal_only', deliveryMode: 'auto_send', category: 'pest' };
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
+    });
+
+    test('a typed profile with delivery off is never kept; an auto-send one is', async () => {
+      mockProfile.value = { serviceKey: 'pest_general', findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'internal_only', category: 'pest' };
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
+      mockProfile.value = { serviceKey: 'pest_general', findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' };
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(true);
+    });
+
+    test('no profile is a confirmed no; a profile READ that fails is unknown (null), so the panel asks again', async () => {
+      mockProfile.value = null;
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
+      mockProfile.value = new Error('pg blip');
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBeNull();
+    });
+  });
+
+  test('inside a transaction a failed visit pre-read rolls back only its savepoint, and the transaction stays usable', async () => {
+    const raw = jest.fn(async () => ({}));
+    const failing = Object.assign(jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('relation does not exist'); } }) })), { isTransaction: true, raw });
+    expect(await lateCloseAskKeptForVisit('v1', failing, now)).toBeNull();
+    const sql = raw.mock.calls.map((c) => String(c[0]));
+    expect(sql[0]).toMatch(/^SAVEPOINT fail_soft_/);
+    expect(sql[1]).toMatch(/^ROLLBACK TO SAVEPOINT fail_soft_/);
+    expect(sql[2]).toMatch(/^RELEASE SAVEPOINT fail_soft_/);
+    // The same handle then reads a good visit normally.
+    raw.mockClear();
+    const good = Object.assign(visitDb({ ...IDENT, arrived_at: null, scheduled_date: '2026-11-18' }), { isTransaction: true, raw });
+    expect(await lateCloseAskKeptForVisit('v1', good, now)).toBe(true);
+    expect(raw.mock.calls.map((c) => String(c[0])).slice(0, 1)).toEqual([expect.stringMatching(/^SAVEPOINT fail_soft_/)]);
+  });
+
+  test('no visit or no id is a confirmed false; a failed visit read is unknown (null)', async () => {
+    expect(await lateCloseAskKeptForVisit('v1', visitDb(null), now)).toBe(false);
+    expect(await lateCloseAskKeptForVisit('', visitDb({ ...IDENT, scheduled_date: '2026-11-18' }), now)).toBe(false);
+    expect(await lateCloseAskKeptForVisit('v1', visitDb(null, true), now)).toBeNull();
+  });
+});
+
+// THE verdict (commit and preview): every input fails closed.
+describe('lateCloseAskVerdict', () => {
+  const closedAt = new Date('2026-11-20T15:00:00Z');
+  const ident = { id: 'v1', service_id: 'sv-1', service_type: 'General Pest Control', service_key_snapshot: null, is_recurring: true };
+  const visit = { ...ident, arrived_at: null, scheduled_date: '2026-11-18' };
+  const base = { isBackfill: true, visitOutcome: 'completed', systemQuietCloseout: false, recapReviewOnly: false, isInternalOnlyCompletion: false, deliverySuppressed: false, visit, preLockVisit: { ...visit }, knex: {}, closedAt };
+  let saved;
+  beforeEach(() => {
+    saved = process.env.GATE_REVIEW_LATE_CLOSE_ASK; process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'true';
+    mockResolve.mockClear();
+    mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' };
+  });
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_REVIEW_LATE_CLOSE_ASK; else process.env.GATE_REVIEW_LATE_CLOSE_ASK = saved; });
+
+  test('gate on, completed backfill worked 2 days ago, auto-send profile: kept; the profile is read STRICT from the locked row', async () => {
+    expect(await lateCloseAskVerdict(base)).toBe(true);
+    expect(mockResolve).toHaveBeenCalledWith(visit, base.knex, { strict: true });
+  });
+
+  test('gate off or not exactly true: not kept', async () => {
+    delete process.env.GATE_REVIEW_LATE_CLOSE_ASK;
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+    process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'yes';
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+  });
+
+  test('worked 5 days ago, or an unreadable worked day: not kept', async () => {
+    const old = { ...visit, scheduled_date: '2026-11-15' };
+    expect(await lateCloseAskVerdict({ ...base, visit: old, preLockVisit: { ...old } })).toBe(false);
+    const blank = { ...ident, arrived_at: null, scheduled_date: null };
+    expect(await lateCloseAskVerdict({ ...base, visit: blank, preLockVisit: { ...blank } })).toBe(false);
+  });
+
+  test('only a completed admin backfill: live, system quiet, invoice-issued, recap-only, internal-only, other outcomes are all not kept', async () => {
+    expect(await lateCloseAskVerdict({ ...base, isBackfill: false })).toBe(false);
+    expect(await lateCloseAskVerdict({ ...base, systemQuietCloseout: true })).toBe(false);
+    expect(await lateCloseAskVerdict({ ...base, issuedInvoiceCloseout: { invoiceId: 'i' } })).toBe(false);
+    expect(await lateCloseAskVerdict({ ...base, recapReviewOnly: true })).toBe(false);
+    expect(await lateCloseAskVerdict({ ...base, isInternalOnlyCompletion: true })).toBe(false);
+    for (const visitOutcome of ['incomplete', 'customer_declined', 'inspection_only', 'follow_up_needed', null, undefined]) {
+      expect(await lateCloseAskVerdict({ ...base, visitOutcome })).toBe(false);
+    }
+  });
+
+  test('an omitted or non-boolean flag is unknown: not kept', async () => {
+    for (const flag of ['systemQuietCloseout', 'recapReviewOnly', 'isInternalOnlyCompletion', 'deliverySuppressed']) {
+      const { [flag]: _gone, ...without } = base;
+      expect(await lateCloseAskVerdict(without)).toBe(false);
+      expect(await lateCloseAskVerdict({ ...base, [flag]: null })).toBe(false);
+      expect(await lateCloseAskVerdict({ ...base, [flag]: 'false' })).toBe(false);
+    }
+    expect(await lateCloseAskVerdict({ ...base, isBackfill: 'true' })).toBe(false);
+    expect(await lateCloseAskVerdict({ ...base, isBackfill: undefined })).toBe(false);
+  });
+
+  test('the resolver\'s synthesized fallback (an ambiguous or missing profile) is not kept, even when it names a key', async () => {
+    // The real resolver's answer for a visit whose service resolves to nothing.
+    const none = () => { const q = { where: () => q, whereRaw: () => q, first: async () => null, select: async () => [] }; return q; };
+    const actual = jest.requireActual('../services/service-completion-profiles');
+    mockResolve.mockImplementationOnce((row, k, opts) => actual.resolveCompletionProfileForScheduledService(row, k, opts));
+    const fallback = await actual.resolveCompletionProfileForScheduledService(visit, none, { strict: true });
+    expect(fallback.synthesized).toBe(true);
+    mockResolve.mockImplementationOnce(async () => fallback);
+    expect(await lateCloseAskVerdict({ ...base, knex: none })).toBe(false);
+    mockProfile.value = { ...fallback, serviceKey: 'pest_general' };
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+    mockProfile.value = { ...mockProfile.value, synthesized: undefined, serviceKey: null };
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+  });
+
+  test('inside the closeout transaction the profile read runs in its own savepoint: an error drops the ask and rolls only the savepoint back', async () => {
+    const raw = jest.fn(async () => ({}));
+    const trx = { isTransaction: true, raw };
+    mockProfile.value = new Error('relation does not exist');
+    expect(await lateCloseAskVerdict({ ...base, knex: trx })).toBe(false);
+    const sql = raw.mock.calls.map((c) => String(c[0]));
+    expect(sql[0]).toMatch(/^SAVEPOINT scope_/);
+    expect(sql[1]).toMatch(/^ROLLBACK TO SAVEPOINT scope_/);
+    expect(sql[2]).toMatch(/^RELEASE SAVEPOINT scope_/);
+    // The transaction handle is untouched and still usable: a later good read releases its savepoint normally.
+    raw.mockClear();
+    mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' };
+    expect(await lateCloseAskVerdict({ ...base, knex: trx })).toBe(true);
+    expect(raw.mock.calls.map((c) => String(c[0]))).toEqual([expect.stringMatching(/^SAVEPOINT scope_/), expect.stringMatching(/^RELEASE SAVEPOINT scope_/)]);
+  });
+
+  test('a delivery posture that already silenced comms (or an omitted one) is never lifted', async () => {
+    expect(await lateCloseAskVerdict({ ...base, deliverySuppressed: true })).toBe(false);
+    const { deliverySuppressed: _omit, ...unsaid } = base;
+    expect(await lateCloseAskVerdict(unsaid)).toBe(false);
+  });
+
+  test('a strict profile lookup error, or no profile, is not kept (the error is unknown to the preview, a plain no to the commit)', async () => {
+    mockProfile.value = new Error('profile table probe failed');
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+    expect(await lateCloseAskVerdictOrNull(base)).toBeNull();
+    mockProfile.value = null;
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+  });
+
+  test('the locked profile silencing delivery (internal-only mode, typed delivery off) is not kept', async () => {
+    mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'internal_only', deliveryMode: 'auto_send', category: 'pest' };
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+    mockProfile.value = { serviceKey: 'pest_general', findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'disabled', category: 'pest' };
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+  });
+
+  test('the window is anchored to the wall-clock close: a combined-visit packet whose historical end is inside the window but whose submission is outside is not kept', async () => {
+    const old = { ...ident, arrived_at: null, scheduled_date: '2026-11-15' };
+    const historicalEnd = new Date('2026-11-17T20:00:00Z'); // 2 ET days after the visit
+    const submittedAt = new Date('2026-11-20T15:00:00Z');   // 5 ET days after the visit
+    expect(await lateCloseAskVerdict({ ...base, visit: old, preLockVisit: { ...old }, closedAt: historicalEnd })).toBe(true);
+    expect(await lateCloseAskVerdict({ ...base, visit: old, preLockVisit: { ...old }, closedAt: submittedAt })).toBe(false);
+  });
+
+  test('drift between the pre-lock row and the locked row on ANY identity column the resolver keys on is not kept', async () => {
+    for (const [col, value] of [['service_id', 'sv-2'], ['service_type', 'WDO Inspection'], ['service_key_snapshot', 'wdo_inspection'], ['is_recurring', false], ['id', 'v2']]) {
+      expect(await lateCloseAskVerdict({ ...base, preLockVisit: { ...visit, [col]: value } })).toBe(false);
+    }
+  });
+
+  test('an identity column the projection never read (undefined), a missing row or a missing pre-lock row is unknown: not kept', async () => {
+    const { service_key_snapshot: _s, ...partial } = visit;
+    expect(await lateCloseAskVerdict({ ...base, visit: partial, preLockVisit: { ...partial } })).toBe(false);
+    expect(await lateCloseAskVerdict({ ...base, visit: null })).toBe(false);
+    expect(await lateCloseAskVerdict({ ...base, preLockVisit: null })).toBe(false);
   });
 });

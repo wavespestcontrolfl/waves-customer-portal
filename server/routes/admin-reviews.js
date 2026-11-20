@@ -168,6 +168,11 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, technici
       visitKeys.alreadyReviewed = await ReviewService.alreadyReviewedForVisit(serviceId);
       visitKeys.firstAskReasons = ReviewService.firstAskOptOutReasons();
     }
+    // GATE_REVIEW_LATE_CLOSE_ASK: whether a backdated closeout of this visit now would keep the review ask (closed within 3
+    // days of the worked day). The panel then stops showing a backdated closeout's review box as suppressed.
+    if (require('../config/feature-gates').reviewLateCloseAskLive() && serviceId) {
+      visitKeys.lateCloseAskKept = await require('../services/review-visit-day').lateCloseAskKeptForVisit(serviceId);
+    }
     res.json({
       ...visitKeys,
       at: at.toISOString(),

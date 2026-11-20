@@ -266,15 +266,21 @@ export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adju
 // requestReview=false under a backdated quiet closeout — with the reason set,
 // the review checkbox shows the suppressed state and the custom-review-time
 // validation never blocks a submit the server would silence anyway.
+// GATE_REVIEW_LATE_CLOSE_ASK: `lateCloseAskKept` (the send-time preview says a closeout made now is
+// within 3 days of the worked day) lifts only that reason; the other reasons still apply.
 export function completionReviewSuppressionReason({
   isIncompleteVisit = false,
   backfillQuietCloseout = false,
+  lateCloseAskKept = false,
+  oneTimeRecapOnly = false,
   visitOutcome = "completed",
   customerConcernInteraction = false,
   alreadyReviewed = false,
 } = {}) {
   if (isIncompleteVisit) return "incomplete";
-  if (backfillQuietCloseout) return "backfill";
+  // The one-time recap closeout has its own review rule, so the late-close ask never lifts it.
+  // Only a completed visit keeps the ask (the server's rule): inspection-only and follow-up outcomes stay suppressed.
+  if (backfillQuietCloseout && !(lateCloseAskKept === true && !oneTimeRecapOnly && visitOutcome === "completed")) return "backfill";
   if (visitOutcome === "customer_declined") return "customer_declined";
   if (visitOutcome === "customer_concern" || customerConcernInteraction) {
     return "customer_concern";
@@ -320,17 +326,60 @@ export const COMPLAINT_ON_SITE_PROMPT = "Turn it off for a complaint on site? OK
 // The client suppression reason for a customer marked as already reviewed (GATE_REVIEW_ALREADY_REVIEWED).
 export const ALREADY_REVIEWED_SUPPRESSION = "already_reviewed";
 export const ALREADY_REVIEWED_LABEL = "Already left a Google review";
+// GATE_REVIEW_LATE_CLOSE_ASK: a backdated closeout within 3 days of the worked day still sends the review ask.
+export const LATE_CLOSE_ASK_LABEL = "Keep the review request (closed within 3 days)";
+// Shown when a fresh preview says a closeout that looked suppressed now keeps its review request; the operator confirms by submitting again.
+export const LATE_CLOSE_NOW_KEPT_MESSAGE = "This closeout now keeps its review request (closed within 3 days). Check the review box, then submit again.";
 
 // The label of the review box: the suppressed, included and plain wordings are today's.
 // `reviewedOn` ('YYYY-MM-DD' or null) dates the already-reviewed label.
-export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk, reviewedOn = null }) {
+export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk, reviewedOn = null, lateCloseAskKept = false, willReview = false }) {
   if (reviewSuppressionReason === ALREADY_REVIEWED_SUPPRESSION) {
     const on = formatETDateOnly(reviewedOn, { month: "short", day: "numeric", year: "numeric" });
     return on ? `${ALREADY_REVIEWED_LABEL} (${on})` : ALREADY_REVIEWED_LABEL;
   }
   if (reviewSuppressionReason) return "Review request suppressed";
   if (oneTimeRecapOnly) return "Review request included";
+  if (lateCloseAskKept === true && willReview === true && !firstAsk) return LATE_CLOSE_ASK_LABEL;
   return firstAsk ? FIRST_REVIEW_ASK_LABEL : "Send review request";
+}
+
+// The line under the "Backdated closeout" checkbox. Checked, it promises no customer messages, except the review ask
+// when the closeout keeps it (GATE_REVIEW_LATE_CLOSE_ASK) and the review box is on.
+export function backfillCheckboxHint({ backfillCloseout = false, reviewAskGoes = false } = {}) {
+  if (!backfillCloseout) return "Unchecked: completes as today with the normal customer messages.";
+  return reviewAskGoes === true
+    ? "Records to the visit day. Skips the completion text, report email and auto-charge; a separate review request may still go."
+    : "Records to the visit day, sends no customer messages, and skips auto-charge.";
+}
+
+// Runs `start(signal)` and gives its answer, or null when it fails or `timeoutMs` passes first (the request is aborted): a stalled
+// submit-time preview read then takes the unavailable path instead of leaving the closeout unsaved. No timeout = no signal.
+export function withAbortTimeout(start, timeoutMs = 0) {
+  const controller = timeoutMs > 0 && typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  return Promise.resolve()
+    .then(() => start(controller ? controller.signal : undefined))
+    .catch(() => null)
+    .finally(() => { if (timer) clearTimeout(timer); });
+}
+
+// The one-shot send-time-preview read the panel makes while its review box is off. `apply(data)` gets each answer (null =
+// a failed read) unless stopped. With `retry` (a backdated closeout, whose ask stays suppressed until an answer says
+// otherwise) a failed read is read again every `intervalMs`, the normal poll's interval, until one answer lands. The returned
+// function stops it: the box was unchecked, the panel closed, or the effect re-ran.
+export function runPreviewReadWithRetry({ read, apply, retry = false, intervalMs = 60 * 1000 }) {
+  let gone = false;
+  let timer = null;
+  const stopTimer = () => { if (timer !== null) { clearInterval(timer); timer = null; } };
+  const attempt = () => read().then((data) => {
+    if (gone) return;
+    apply(data);
+    if (previewAnswerSettled(data)) stopTimer();
+  });
+  attempt();
+  if (retry) timer = setInterval(attempt, intervalMs);
+  return () => { gone = true; stopTimer(); };
 }
 
 // The preview's own verdict on the first ask, only when the server sent one (no visit named: no key).
@@ -342,6 +391,13 @@ export const alreadyReviewedFrom = (preview) => {
   const value = preview?.alreadyReviewed;
   return value && typeof value === "object" ? { reviewedOn: typeof value.reviewedOn === "string" ? value.reviewedOn : null } : null;
 };
+
+// GATE_REVIEW_LATE_CLOSE_ASK: the preview's read that a backdated closeout made now keeps the review ask.
+// Only a boolean true counts; no key (gate off), null (unknown) or a failed read is false: the box stays suppressed.
+export const lateCloseAskKeptFrom = (preview) => preview?.lateCloseAskKept === true;
+// A preview answer is settled unless the read failed (null) or the server could not read the visit (`lateCloseAskKept: null`:
+// unknown, not a confirmed no). No key (gate off) is settled.
+export const previewAnswerSettled = (preview) => !!preview && preview.lateCloseAskKept !== null;
 
 // The off reasons the server honors for a first ask now: the known ones it lists, else only
 // "Complaint on site" (gate off: no key).
@@ -414,13 +470,42 @@ export function customReviewTimeProblem(reviewCustomAt) {
   return null;
 }
 
+// A submit-time preview re-check is one at a time: true when this call took it, false while another is still pending
+// (the caller then returns, so a second tap never submits behind it). The caller clears `ref.current` when its read ends.
+export function claimPreviewRecheck(ref) {
+  if (ref.current) return false;
+  ref.current = true;
+  return true;
+}
+
+// Shown when the submit-time re-check could not read the visit (`lateCloseAskKept: null`): not the same as "past 3 days".
+export const LATE_CLOSE_UNAVAILABLE_MESSAGE = "The review check is unavailable right now. If you submit again, this closeout is saved with the review request off.";
+
+// The late-close part of the submit verdict (GATE_REVIEW_LATE_CLOSE_ASK). `lateCloseShown` is the verdict the box shows
+// (true/false), or null when this is not a backdated closeout. A backdated closeout whose verdict changed since the box was shown
+// changes the displayed review choice: the operator sees it and submits again. A failed re-check (no answer) and an unknown answer
+// (null) are the same: the review check is unavailable, the page clears the verdict, and the next submit goes suppressed.
+function lateCloseSubmitNotice({ fresh, shown, lateCloseShown }) {
+  if (lateCloseShown === true && (!fresh || fresh.lateCloseAskKept === null)) {
+    return { message: LATE_CLOSE_UNAVAILABLE_MESSAGE, ...(!fresh ? { noticed: true, dropShown: !!shown } : {}) };
+  }
+  if (fresh && typeof lateCloseShown === "boolean" && lateCloseAskKeptFrom(fresh) !== lateCloseShown) {
+    return { message: lateCloseShown
+      ? "This closeout is now past the 3 days after the visit, so no review request will be sent. Submit again to confirm."
+      : LATE_CLOSE_NOW_KEPT_MESSAGE };
+  }
+  return null;
+}
+
 // What to do with the fresh send-time preview read at submit, against the one the screen shows
 // (`shown`): null to go on, else { message, noticed, dropShown }. A bucket change of an Automatic
 // time needs the operator's second look; a failed re-check stops ONCE (`failureNoticed`), after
 // which the submit proceeds and the server computes the window itself (codex #4140 r3, r13, r18).
 // `reportTextExpected` false (texting off, no phone): no report text anchors the ask, so the
 // server uses the smart window even when the preview offered the after-report time.
-export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed, reportTextExpected = true }) {
+export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed, reportTextExpected = true, lateCloseShown = null }) {
+  const lateClose = lateCloseSubmitNotice({ fresh, shown, lateCloseShown });
+  if (lateClose) return lateClose;
   if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
     return { message: `The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.` };
   }
