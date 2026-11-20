@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
 vi.mock("../../lib/adminFetch", () => ({ adminFetch }));
 
-import RestaurantProspectsPage, { readText, summaryText } from "./RestaurantProspectsPage";
+import RestaurantProspectsPage, { headlineText, readText, summaryText } from "./RestaurantProspectsPage";
 
 const reply = (body, { ok = true, status = 200 } = {}) => Promise.resolve({ ok, status, json: async () => body });
 
@@ -109,6 +109,17 @@ it("before the first good read it says the files have not been read, and claims 
   expect(screen.queryByRole("table")).toBeNull();
 });
 
+it("rows from a first run that did not read every file show with a not-complete line and no counts", async () => {
+  // The license file was read and the inspection file failed: one new restaurant, and pest findings not known.
+  route({ "/admin/prospects/restaurants?days=30": () => reply({ ...LIST30, readAt: null, counts: { new_restaurant: 1, new_owner: 0, pest_finding: 0 }, rows: [LIST30.rows[0]] }) });
+  renderPage();
+  expect(await screen.findByText("Not every state file has been read yet, so this list may be missing restaurants.")).toBeInTheDocument();
+  expect(screen.queryByText(/pest findings?/)).toBeNull();
+  expect(screen.queryByText(/new restaurants?,/)).toBeNull();
+  expect(rowOf(screen.getByRole("table", { name: "Restaurants" }), "SAMPLE GRILL")).toBeInTheDocument();
+  expect(screen.queryByText("The state files have not been read yet.")).toBeNull();
+});
+
 it("a read with nothing in the window shows the zero counts and an empty message", async () => {
   route({ "/admin/prospects/restaurants?days=30": () => reply({ ...LIST30, counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [] }) });
   renderPage();
@@ -140,4 +151,10 @@ it("summaryText says one or many per reason; readText names the Eastern day of t
   expect(readText(null)).toBe("");
   // 11:30 PM on Nov 16 Eastern is already Nov 17 in UTC: the day named is Nov 16.
   expect(readText("2026-11-17T04:30:00.000Z")).toBe("The state files were last read on Nov 16, 2026.");
+  // headlineText claims counts only after a full read.
+  const counts = { new_restaurant: 2, new_owner: 0, pest_finding: 0 };
+  expect(headlineText({ from: "2026-10-21", through: "2026-11-19", counts, readAt: null }))
+    .toBe("Not every state file has been read yet, so this list may be missing restaurants.");
+  expect(headlineText({ from: "2026-10-21", through: "2026-11-19", counts, readAt: "2026-11-17T04:30:00.000Z" }))
+    .toBe("2 new restaurants, 0 new owners and 0 pest findings from Oct 21 to Nov 19. The state files were last read on Nov 16, 2026.");
 });

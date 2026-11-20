@@ -47,6 +47,13 @@ export function readText(readAt) {
   return readAt ? `The state files were last read on ${formatETDate(readAt, { month: "short", day: "numeric", year: "numeric" })}.` : "";
 }
 
+// The line above the list. Before the first run that read all three files (readAt null), the rows may come from one
+// file only: counts would claim zeros the state has not answered, so the line says the list is not complete.
+export function headlineText(data) {
+  if (!data.readAt) return "Not every state file has been read yet, so this list may be missing restaurants.";
+  return `${summaryText(data)} ${readText(data.readAt)}`;
+}
+
 // One request per period. A late answer for a period the owner already left is dropped.
 function useRestaurants(days) {
   const [state, setState] = useState({ loading: true, error: "", data: null });
@@ -138,7 +145,7 @@ export default function RestaurantProspectsPage({ embedded = false }) {
       )}
       {data && (data.readAt || data.rows.length > 0) && (
         <>
-          <p className="mb-3 text-ui-body text-zinc-900">{[summaryText(data), readText(data.readAt)].filter(Boolean).join(" ")}</p>
+          <p className="mb-3 text-ui-body text-zinc-900">{headlineText(data)}</p>
           {data.rows.length === 0
             ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()}.</div>
             : <RestaurantTable rows={data.rows} />}
