@@ -230,16 +230,16 @@ describe('parseInspectionReport', () => {
   });
 
   test('35B only is not pest evidence, and the page footer never lands in a finding', () => {
-    expect(svc.parseInspectionReport(fixture('report-35b.html'))).toEqual({ pestEvidence: false, findings: [] });
+    expect(svc.parseInspectionReport(fixture('report-35b.html'), { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
     const lastIs35A = svc.parseInspectionReport(fixture('report-35a.html').replace('08A-05-6', '35A-07-1'));
     expect(JSON.stringify(lastIs35A)).not.toMatch(/Blair Stone|850-555/);
   });
 
   test('a 35A code quoted in a 35B note, or in an HTML comment, is not pest evidence', () => {
     const quoted = fixture('report-35b.html').replace('back door propped open.', 'back door propped open; see 35A-02-8 at the last visit.');
-    expect(svc.parseInspectionReport(quoted)).toEqual({ pestEvidence: false, findings: [] });
+    expect(svc.parseInspectionReport(quoted, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
     const commented = fixture('report-35b.html').replace('<table>', '<table><!-- <tr><td>35A-02-8</td><td>old row</td></tr> -->');
-    expect(svc.parseInspectionReport(commented)).toEqual({ pestEvidence: false, findings: [] });
+    expect(svc.parseInspectionReport(commented, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
   });
 
   test('a page with no inspection section is a failed read, not "no pests"', () => {
@@ -266,14 +266,14 @@ describe('parseInspectionReport', () => {
   test('a code counts only inside the violations table: a lone 35A code in another table or the footer is no answer, never pests', () => {
     const b = fixture('report-35b.html');
     const reference = b.replace('<p>2601 Blair Stone Road', '<table><tr><td>Code</td><td>Meaning</td></tr><tr><td>35A-02-8</td><td>Pests</td></tr></table><p>2601 Blair Stone Road');
-    expect(svc.parseInspectionReport(reference)).toBeNull();
+    expect(svc.parseInspectionReport(reference, { cited35: 1 })).toBeNull();
     const footer = b.replace('<p>2601 Blair Stone Road, Tallahassee FL 32399</p>', '<table><tr><td>35A-02-8</td><td>2601 Blair Stone Road</td></tr></table>');
     expect(footer).toContain('<td>35A-02-8</td><td>2601 Blair Stone Road');
-    expect(svc.parseInspectionReport(footer)).toBeNull();
+    expect(svc.parseInspectionReport(footer, { cited35: 1 })).toBeNull();
     // A violations table without its head row is not the table either: no answer.
-    expect(svc.parseInspectionReport(b.replace(/<tr><td><font><u><b>Violation[\s\S]*?<\/tr>\n/, ''))).toBeNull();
+    expect(svc.parseInspectionReport(b.replace(/<tr><td><font><u><b>Violation[\s\S]*?<\/tr>\n/, ''), { cited35: 1 })).toBeNull();
     // The page as it is still answers.
-    expect(svc.parseInspectionReport(b)).toEqual({ pestEvidence: false, findings: [] });
+    expect(svc.parseInspectionReport(b, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
   });
 
   test('a page that lists fewer violation-35 rows than the file counted cannot answer: the missing one could be 35A', () => {
@@ -282,27 +282,29 @@ describe('parseInspectionReport', () => {
     expect(svc.parseInspectionReport(b, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
     // A follow-up report may list more than the visit counted (earlier visits' rows).
     expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: 1 })).toMatchObject({ pestEvidence: true });
-    // A row stored before the count was kept has none: read as before.
-    expect(svc.parseInspectionReport(b, { cited35: null })).toEqual({ pestEvidence: false, findings: [] });
+    // A row stored before the count was kept has none: a 35A row still answers, but "no pests" needs the count.
+    expect(svc.parseInspectionReport(b, { cited35: null })).toBeNull();
+    expect(svc.parseInspectionReport(b)).toBeNull();
+    expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: null })).toMatchObject({ pestEvidence: true });
   });
 
   test('each violations row is read whole: a code alone in the Observation cell is text; an unreadable code cell is no answer', () => {
     // A 35B row whose observation is a 35A code alone: text, not a second finding.
-    expect(svc.parseInspectionReport(reportPage('<tr><td>35B-03-4</td><td>&nbsp;</td><td>35A-02-8</td></tr>')))
+    expect(svc.parseInspectionReport(reportPage('<tr><td>35B-03-4</td><td>&nbsp;</td><td>35A-02-8</td></tr>'), { cited35: 1 }))
       .toEqual({ pestEvidence: false, findings: [] });
     // A row whose code cannot be read beside a readable 35B row: no answer, never "no pests".
     const b = fixture('report-35b.html');
     const starred = b.replace('</table>', '<tr><td><u>35A-02-8*</u></td><td>&nbsp;&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>\n</table>');
     expect(starred).toContain('35A-02-8*');
-    expect(svc.parseInspectionReport(starred)).toBeNull();
+    expect(svc.parseInspectionReport(starred, { cited35: 1 })).toBeNull();
     // A row whose code cell is blank, its observation a 35A code alone: cells keep their places, so no answer.
     const blankCode = b.replace('</table>', '<tr><td></td><td>&nbsp;&nbsp;</td><td>35A-02-8</td></tr>\n</table>');
     expect(blankCode).toContain('<td></td><td>&nbsp;&nbsp;</td><td>35A-02-8</td>');
-    expect(svc.parseInspectionReport(blankCode)).toBeNull();
+    expect(svc.parseInspectionReport(blankCode, { cited35: 1 })).toBeNull();
     // A row with an observation and no code cell: no answer either.
-    expect(svc.parseInspectionReport(b.replace('</table>', '<tr><td>High Priority - Live flies at the bar.</td></tr>\n</table>'))).toBeNull();
+    expect(svc.parseInspectionReport(b.replace('</table>', '<tr><td>High Priority - Live flies at the bar.</td></tr>\n</table>'), { cited35: 1 })).toBeNull();
     // A row of blank cells is skipped.
-    expect(svc.parseInspectionReport(b.replace('</table>', '<tr><td>&nbsp;</td><td> </td></tr>\n</table>'))).toEqual({ pestEvidence: false, findings: [] });
+    expect(svc.parseInspectionReport(b.replace('</table>', '<tr><td>&nbsp;</td><td> </td></tr>\n</table>'), { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
   });
 
   test('a cell or a row without its end tag still counts, so a 35A code cell without </td> is never read as "no pests"', () => {
@@ -400,7 +402,7 @@ describe('syncRestaurantProspects', () => {
   afterAll(() => { delete process.env.DBPR_PROSPECT_SYNC_DISABLED; });
 
   test('after the files, reads the reports of the last 45 days, newest first, at most 100, one request a second', async () => {
-    store = makeStore(Array.from({ length: 3 }, (_, i) => ({ id: `id${i}`, source_key: `${9000 + i}`, license_id: '5001' })));
+    store = makeStore(Array.from({ length: 3 }, (_, i) => ({ id: `id${i}`, source_key: `${9000 + i}`, license_id: '5001', violation35: 1 })));
     fetchText = jest.fn(async (url) => {
       if (url.includes('inspectionDetail.asp')) return url.includes('9001') ? fixture('report-35b.html') : fixture('report-35a.html');
       return files[url.split('/').pop()]();
@@ -419,7 +421,7 @@ describe('syncRestaurantProspects', () => {
       { id: 'a', source_key: '9000', license_id: '5001' },
       { id: 'b', source_key: '9001', license_id: '5001' },
       { id: 'c', source_key: '9002; DROP', license_id: '5001' },
-      { id: 'd', source_key: '9003', license_id: '5001' },
+      { id: 'd', source_key: '9003', license_id: '5001', violation35: 1 },
     ]);
     fetchText = jest.fn(async (url) => {
       if (url.includes('InspVisitID=9000')) throw new Error('HTTP 503');
@@ -444,7 +446,7 @@ describe('syncRestaurantProspects', () => {
   });
 
   test('a failed save is a database failure: it stops the reads, counts once, and costs the row no read attempt', async () => {
-    store = makeStore([{ id: 'a', source_key: '9000', license_id: '5001' }, { id: 'b', source_key: '9001', license_id: '5001' }]);
+    store = makeStore([{ id: 'a', source_key: '9000', license_id: '5001', violation35: 1 }, { id: 'b', source_key: '9001', license_id: '5001', violation35: 1 }]);
     store.saveReport.mockRejectedValueOnce(new Error('connection lost'));
     fetchText = jest.fn(async (url) => (url.includes('inspectionDetail.asp') ? fixture('report-35b.html') : files[url.split('/').pop()]()));
     const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });

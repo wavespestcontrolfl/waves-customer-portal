@@ -303,8 +303,9 @@ function newestNoteFirst(text) {
 /**
  * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. A page
  * answers only when it is whole (the state office footer closes it) and lists the violation 35 the file counted (a
- * 35A or 35B code), at least as many as the file counted when the count is known (cited35: the missing one could be
- * 35A; a follow-up report may list more, from earlier visits). An error page, a changed layout or a page cut short
+ * 35A or 35B code), at least as many as the file counted (cited35: the missing one could be 35A; a follow-up report
+ * may list more, from earlier visits). Without the count only a 35A row answers. An error page, a changed layout or
+ * a page cut short
  * is a failed read, retried later, never
  * "no pests". The violations table is the rows after its "Violation" / "Observation" head, up to the next table
  * tag. Each of its rows is read whole, by cell position: the cell in the Violation column is the code and the cells
@@ -349,7 +350,11 @@ function parseInspectionReport(html, { cited35 = null } = {}) {
   }
   endRow();
   const listed35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).length;
-  if (unreadable || !listed35 || (Number.isInteger(cited35) && listed35 < cited35)) return null;
+  if (unreadable || !listed35) return null;
+  const has35A = entries.some((entry) => /^35A-/.test(entry.code));
+  // Fewer 35 rows than the file counted: the missing one could be 35A. Without the count (a row stored before it was
+  // kept), only a 35A row answers: "no pests" needs the count.
+  if (Number.isInteger(cited35) ? listed35 < cited35 : !has35A) return null;
   const findings = entries
     .filter((entry) => /^35A-/.test(entry.code))
     .map((entry) => ({ code: entry.code, text: newestNoteFirst(entry.parts.join(' ')).slice(0, FINDING_TEXT_MAX) }));
