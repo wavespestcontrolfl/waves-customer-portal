@@ -36,11 +36,22 @@ const phoneText = (phone) => (/^\d{10}$/.test(phone || "") ? `(${phone.slice(0, 
 // At 1100 px and under the table shows each restaurant as a stacked record (the shared records layout): counts read left there.
 const COUNT_CELL = "align-middle max-[1100px]:text-left";
 
-// The pest count is per inspection (one row each), whatever the number of findings in it.
+// The pest count is per inspection (one row each), whatever the number of findings in it. Before any inspection
+// report has been answered (pestRead false) there is no pest count to give, so the line leaves it out.
 export function summaryText(data) {
   const { counts, from, through } = data;
-  const parts = `${plural(counts.new_restaurant, "new restaurant")}, ${plural(counts.new_owner, "new owner")} and ${plural(counts.pest_finding, "inspection")} that found pests`;
+  const licenses = `${plural(counts.new_restaurant, "new restaurant")}`;
+  const parts = data.pestRead
+    ? `${licenses}, ${plural(counts.new_owner, "new owner")} and ${plural(counts.pest_finding, "inspection")} that found pests`
+    : `${licenses} and ${plural(counts.new_owner, "new owner")}`;
   return `${parts} from ${shortDay(from)} to ${shortDay(through)}.`;
+}
+
+// The pest half of the line: nothing to qualify while no report has been answered (the line says when they show),
+// else the inspections whose pest answer is not known yet.
+export function pestText(data) {
+  if (!data.pestRead) return "Pest findings show once the inspection reports are read.";
+  return unknownText(Number(data.pestUnknown || 0));
 }
 
 // The period's inspections whose pest answer is not known yet (a report still to be read, or one that could not be
@@ -61,7 +72,7 @@ export function headlineText(data) {
   if (!data.readAt) return "Not every state file has been read yet, so this list may be missing restaurants.";
   const total = data.counts.new_restaurant + data.counts.new_owner + data.counts.pest_finding;
   const cut = data.rows.length < total ? `The list shows the newest ${countText(data.rows.length)}.` : "";
-  return [summaryText(data), unknownText(Number(data.pestUnknown || 0)), readText(data.readAt), cut].filter(Boolean).join(" ");
+  return [summaryText(data), pestText(data), readText(data.readAt), cut].filter(Boolean).join(" ");
 }
 
 // One request per period. A late answer for a period the owner already left is dropped.
@@ -157,7 +168,7 @@ export default function RestaurantProspectsPage({ embedded = false }) {
         <>
           <p className="mb-3 text-ui-body text-zinc-900">{headlineText(data)}</p>
           {data.rows.length === 0
-            ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()}{data.pestUnknown > 0 ? " so far" : ""}.</div>
+            ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()}{!data.pestRead || data.pestUnknown > 0 ? " so far" : ""}.</div>
             : <RestaurantTable rows={data.rows} />}
         </>
       )}

@@ -170,16 +170,28 @@ describeDb('Restaurants list (PostgreSQL)', () => {
       prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: true, detail: JSON.stringify({ findings: ROACHES }) }),
     ]);
     const result = await listRestaurants({ days: 30, now: NOW });
+    expect(result.pestRead).toBe(true);
     expect(result.pestUnknown).toBe(3);
     expect(result.counts.pest_finding).toBe(1);
     expect(result.rows.map((row) => row.reason)).toEqual(['pest_finding']);
+  });
+
+  test('pestRead turns true once any inspection report is answered, in any period, 35B only too', async () => {
+    await mockPg('restaurant_prospects').insert([
+      prospect({ event_date: '2026-11-18' }),
+      prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: null, detail: JSON.stringify({ visitNumber: 1 }) }),
+    ]);
+    expect((await listRestaurants({ days: 30, now: NOW })).pestRead).toBe(false);
+    // An answer long before the period still says the reads run.
+    await mockPg('restaurant_prospects').insert(prospect({ kind: 'inspection', event_date: '2026-06-01', pest_evidence: false }));
+    expect((await listRestaurants({ days: 30, now: NOW })).pestRead).toBe(true);
   });
 
   test('before the first file read the answer is empty, with no read time', async () => {
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result).toEqual({
       days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null,
-      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, pestUnknown: 0, rows: [],
+      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, pestRead: false, pestUnknown: 0, rows: [],
     });
   });
 

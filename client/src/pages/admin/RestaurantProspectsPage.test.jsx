@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
 vi.mock("../../lib/adminFetch", () => ({ adminFetch }));
 
-import RestaurantProspectsPage, { headlineText, readText, summaryText, unknownText } from "./RestaurantProspectsPage";
+import RestaurantProspectsPage, { headlineText, pestText, readText, summaryText, unknownText } from "./RestaurantProspectsPage";
 
 const reply = (body, { ok = true, status = 200 } = {}) => Promise.resolve({ ok, status, json: async () => body });
 
@@ -17,7 +17,7 @@ const ROACHES = { code: "35A-02-4", text: "Live roaches seen in the dry storage 
 const DROPPINGS = { code: "35A-03-4", text: "Rodent droppings under the prep table." };
 const LIST30 = {
   days: 30, from: "2026-10-21", through: "2026-11-19", readAt: READ_AT,
-  counts: { new_restaurant: 1, new_owner: 1, pest_finding: 1 }, pestUnknown: 0,
+  counts: { new_restaurant: 1, new_owner: 1, pest_finding: 1 }, pestRead: true, pestUnknown: 0,
   rows: [
     { id: "r-1", reason: "new_restaurant", name: "SAMPLE GRILL", address: "200 SAMPLE TRL", city: "BRADENTON", zip: "34208", county: "Manatee", phone: "9415550101", seats: 40, eventDate: "2026-11-18", licenseNumber: "SEA0000001", isNew: true, findings: [] },
     { id: "r-2", reason: "pest_finding", name: "SAMPLE BISTRO", address: "300 SAMPLE AVE", city: "SARASOTA", zip: "34231", county: "Sarasota", phone: null, seats: null, eventDate: "2026-11-12", licenseNumber: "SEA0000002", isNew: false, findings: [ROACHES, DROPPINGS] },
@@ -26,7 +26,7 @@ const LIST30 = {
 };
 const LIST90 = {
   days: 90, from: "2026-08-22", through: "2026-11-19", readAt: READ_AT,
-  counts: { new_restaurant: 1, new_owner: 0, pest_finding: 0 }, pestUnknown: 0,
+  counts: { new_restaurant: 1, new_owner: 0, pest_finding: 0 }, pestRead: true, pestUnknown: 0,
   rows: [{ id: "r-9", reason: "new_restaurant", name: "SAMPLE TAVERN", address: "500 SAMPLE WAY", city: "VENICE", zip: "34285", county: "Sarasota", phone: "9415550103", seats: 60, eventDate: "2026-08-25", licenseNumber: "SEA0000009", isNew: false, findings: [] }],
 };
 
@@ -130,6 +130,14 @@ it("inspections without a pest answer yet are named, so a pest count of 0 never 
   expect(screen.getByText("Nothing in the last 30 days so far.")).toBeInTheDocument();
 });
 
+it("before any inspection report is answered the line gives no pest count and says when pest findings show", async () => {
+  route({ "/admin/prospects/restaurants?days=30": () => reply({ ...LIST30, counts: { new_restaurant: 1, new_owner: 1, pest_finding: 0 }, pestRead: false, pestUnknown: 40, rows: [LIST30.rows[0], LIST30.rows[2]] }) });
+  renderPage();
+  expect(await screen.findByText("1 new restaurant and 1 new owner from Oct 21 to Nov 19. Pest findings show once the inspection reports are read. The state files were last read on Nov 16, 2026.")).toBeInTheDocument();
+  expect(screen.queryByText(/that found pests from/)).toBeNull();
+  expect(screen.queryByText(/not known yet/)).toBeNull();
+});
+
 it("a read with nothing in the window shows the zero counts and an empty message", async () => {
   route({ "/admin/prospects/restaurants?days=30": () => reply({ ...LIST30, counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [] }) });
   renderPage();
@@ -156,16 +164,20 @@ it("a late answer for the period the owner left never replaces the list shown no
 });
 
 it("summaryText says one or many per reason; readText names the Eastern day of the read", () => {
-  expect(summaryText({ from: "2026-10-21", through: "2026-11-19", counts: { new_restaurant: 2, new_owner: 0, pest_finding: 1 } }))
+  expect(summaryText({ from: "2026-10-21", through: "2026-11-19", pestRead: true, counts: { new_restaurant: 2, new_owner: 0, pest_finding: 1 } }))
     .toBe("2 new restaurants, 0 new owners and 1 inspection that found pests from Oct 21 to Nov 19.");
+  expect(summaryText({ from: "2026-10-21", through: "2026-11-19", pestRead: false, counts: { new_restaurant: 2, new_owner: 0, pest_finding: 0 } }))
+    .toBe("2 new restaurants and 0 new owners from Oct 21 to Nov 19.");
   expect(readText(null)).toBe("");
   // 11:30 PM on Nov 16 Eastern is already Nov 17 in UTC: the day named is Nov 16.
   expect(readText("2026-11-17T04:30:00.000Z")).toBe("The state files were last read on Nov 16, 2026.");
+  expect(pestText({ pestRead: false, pestUnknown: 9 })).toBe("Pest findings show once the inspection reports are read.");
+  expect(pestText({ pestRead: true, pestUnknown: 0 })).toBe("");
   expect(unknownText(0)).toBe("");
   expect(unknownText(1)).toBe("Pests are not known yet for 1 inspection.");
   // headlineText claims counts only after a full read, and says when the list stops short of them.
   const counts = { new_restaurant: 2, new_owner: 0, pest_finding: 0 };
-  const window = { from: "2026-10-21", through: "2026-11-19", counts, rows: [LIST30.rows[0], LIST30.rows[0]] };
+  const window = { from: "2026-10-21", through: "2026-11-19", counts, pestRead: true, rows: [LIST30.rows[0], LIST30.rows[0]] };
   expect(headlineText({ ...window, readAt: null }))
     .toBe("Not every state file has been read yet, so this list may be missing restaurants.");
   expect(headlineText({ ...window, readAt: "2026-11-17T04:30:00.000Z" }))
