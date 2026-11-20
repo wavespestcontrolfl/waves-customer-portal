@@ -630,6 +630,18 @@ describe('ws upgrade — GPT-Live path', () => {
     expect(runLiveBridge).not.toHaveBeenCalled();
   });
 
+  test('a request target that is not the exact canonical path is refused, even with a signature over the canonical URL', async () => {
+    const db = require('../models/db');
+    const signed = sign(liveUrl());
+    const encodedSid = LIVE_SID.replace('A', '%41');
+    for (const target of [`${liveUrl()}?x=1`, `/ws/voice-live/${encodedSid}/${LIVE_TOKEN}`, `/ws/voice-live/%20${LIVE_SID}/${LIVE_TOKEN}`]) {
+      const socket = await upgradeLive(target, { signature: signed });
+      expect(socket.destroy).toHaveBeenCalled();
+    }
+    expect(db).not.toHaveBeenCalled();
+    expect(mockBurned.size).toBe(0);
+  });
+
   test('a STALLED stamp read refuses the upgrade within the deadline, before any token burn', async () => {
     jest.useFakeTimers();
     try {

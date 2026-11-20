@@ -237,7 +237,11 @@ function isStampedToken(stamp, token) {
 
 async function handleLiveUpgrade(req, socket, head, pathname) {
   const parsed = parseLivePath(pathname);
-  if (!parsed || !liveSignatureValid(req, parsed.callSid, parsed.token)) {
+  // The raw request target must be the exact canonical path the cell route
+  // rendered (no query string, the CallSid encoded the one way), so the
+  // signature below covers exactly what was requested.
+  const canonical = parsed && `${LIVE_WS_PREFIX}${encodeURIComponent(parsed.callSid)}/${parsed.token}`;
+  if (!parsed || (req && req.url) !== canonical || !liveSignatureValid(req, parsed.callSid, parsed.token)) {
     logger.warn('[voice-live] rejected ws upgrade: missing/invalid Twilio signature');
     return destroySocket(socket);
   }

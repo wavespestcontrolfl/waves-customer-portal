@@ -2621,24 +2621,29 @@ function gptLiveCellFor(digits) {
 }
 
 // The default applies only when the variable is absent. A set value that is
-// not a plain non-negative number ("", "$1", "-1", "five") is a mistake: null,
-// and the reservation refuses the call rather than guess a cap.
+// not a plain, finite non-negative number ("", "$1", "-1", "five", 400 digits
+// that overflow to Infinity) is a mistake: null, and the reservation refuses
+// the call rather than guess a cap.
 function gptLiveMaxUsd() {
   const raw = process.env.VOICE_GPT_LIVE_TEST_MAX_USD;
   if (raw === undefined) return GPT_LIVE_DEFAULT_MAX_USD;
   const text = String(raw).trim();
-  return /^\d+(\.\d+)?$/.test(text) ? Number(text) : null;
+  const value = Number(text);
+  return /^\d+(\.\d+)?$/.test(text) && Number.isFinite(value) ? value : null;
 }
 
 // Reserve one call's worst-case OpenAI cost (live-bridge PER_CALL_RESERVE_USD:
 // the 10 minute cap plus the backend cap) BEFORE a stream token exists, and
 // stamp the call_log row the WS upgrade requires. One transaction-scoped lock
 // makes the ledger read, the ledger claim and the stamp one step, so two calls
-// cannot both spend the same balance. The claim is single-use per CallSid (the
-// ledger's primary key, and a stamp only on a row with no gpt_live yet), so a
-// repeated cell request never mints a second token. Returns false when the
-// reservation does not fit under the cap; a database error, or a call already
-// claimed, throws and the caller refuses the call (fail closed).
+// cannot both spend the same balance. The claim is one per CallSid (the
+// ledger's primary key). A Twilio retry of the same cell request (its first
+// TwiML lost) re-issues the grant: same row, same reservation, and the stamp
+// names the new token's digest, so the lost token stops working and the new
+// one still burns once and admits the row once. Returns false when the
+// reservation does not fit under the cap; a database error, a call whose
+// reservation was already used or released, or a retry with another cell
+// throws and the caller refuses the call (fail closed).
 async function reserveGptLiveCall(callSid, { cell, voice, token }) {
   const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
   const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
@@ -2651,6 +2656,8 @@ async function reserveGptLiveCall(callSid, { cell, voice, token }) {
       .whereNull('cost_usd')
       .whereRaw("created_at < now() - (? * interval '1 second')", [GPT_LIVE_ADMIT_WINDOW_S])
       .update({ cost_usd: 0, settled_at: trx.fn.now() });
+    const existing = await trx(GPT_LIVE_LEDGER).where({ call_sid: callSid }).first('admitted_at', 'cost_usd');
+    if (existing) return reissueGptLiveGrant(trx, callSid, existing, { cell, voice, token });
     const row = await trx(GPT_LIVE_LEDGER).first(trx.raw(GPT_LIVE_SPENT_SQL));
     if (Number(row && row.usd) + PER_CALL_RESERVE_USD > maxUsd) return false;
     const claimed = await trx(GPT_LIVE_LEDGER)
@@ -2667,6 +2674,21 @@ async function reserveGptLiveCall(callSid, { cell, voice, token }) {
     if (!updated) throw new Error('no unstamped call_log row for this call');
     return true;
   });
+}
+
+// A retried cell request for a call that already holds a reservation. Only a
+// reservation still unused (never admitted, not released or settled) with the
+// same cell gets the new token's digest; anything else throws (fail closed).
+// Runs inside reserveGptLiveCall's transaction, under its lock.
+async function reissueGptLiveGrant(trx, callSid, existing, { cell, voice, token }) {
+  if (existing.admitted_at || existing.cost_usd !== null) throw new Error('call already used its GPT-Live reservation');
+  const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
+  const updated = await trx('call_log')
+    .where({ twilio_call_sid: callSid })
+    .whereRaw("metadata->'gpt_live'->>'cell' = ? AND metadata->'gpt_live'->>'voice' = ?", [cell, voice])
+    .update({ metadata: trx.raw("jsonb_set(metadata, '{gpt_live,stream_token_sha256}', to_jsonb(?::text))", [callTokenDigest(token)]) });
+  if (!updated) throw new Error('no matching GPT-Live stamp to re-issue');
+  return true;
 }
 
 // Twilio's own stop at 10 minutes, in case the bridge never closes. Fail-soft:

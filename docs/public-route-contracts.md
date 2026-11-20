@@ -7902,7 +7902,8 @@ number gate or the dry-run invariant is security-critical).
 `<Connect action="…/relay-sandbox/live-complete"><Stream url="wss://HOST/ws/voice-live/CALLSID/TOKEN"/></Connect>`
 (Twilio forbids a query string on a `<Stream>` url, so the CallSid and the per-call minted token are path segments).
 `live-complete` is a POST TwiML webhook, Twilio-signature validated at the mount, refused with a 403 `<Hangup/>` unless
-`To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`, and answers a bare `<Hangup/>`. The WebSocket upgrade first checks
+`To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`, and answers a bare `<Hangup/>`. The WebSocket upgrade first requires the
+raw request target to be exactly the canonical `/ws/voice-live/{encoded CallSid}/{token}` (no query string), then checks
 Twilio's handshake signature (`X-Twilio-Signature` over the exact wss URL, `liveStreamUrl` in relay-protocol.js, with
 `TWILIO_AUTH_TOKEN`; missing or invalid = refused before any database read), then runs the relay's door in the same
 order: the token must verify for that CallSid, the call_log row must be sandbox-sourced and carry the
@@ -7917,6 +7918,9 @@ reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_l
 under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
 within the token's life), and refuses the call
 when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.
+A Twilio retry of the same cell request for a call whose reservation is still unused re-issues the grant: no new
+reservation, and the stamp's digest moves to the new token (the lost token stops working); a used, released or
+settled reservation, or another cell, is refused.
 Reply delay and cost land on `call_log.metadata.gpt_live`; the call's words are never stored.)
 `/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —
 the voice URL of the staff-only "Waves Tech" voice line, `TECH_VOICE_NUMBER`,
