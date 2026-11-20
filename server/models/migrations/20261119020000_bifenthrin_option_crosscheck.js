@@ -6,7 +6,8 @@
  *
  * Pricing is DB-authoritative (db-bridge loads pricing_config over constants.js), so the persisted rows must follow the code:
  *  1. onetime_preslab {talstar_p,bifen_it}: Talak 96 fl oz at 41.57 -> Crosscheck Plus 128 fl oz at 30.90, plus label, catalog
- *     link, package label and warnings. margin_divisor, product_oz_per_10_sqft and positioning are kept.
+ *     link, package label and warnings (a Talak warning moves to its Crosscheck Plus wording; an admin's own entry stays).
+ *     margin_divisor, product_oz_per_10_sqft and positioning are kept.
  *  2. onetime_trenching {talstar_p,bifen_it}: the same bottle, label and warnings; the rate fields are kept.
  * Each product moves in every place db-bridge reads one from: the products map, a legacy product_costs map and the top-level key
  * (its overlays read (products || product_costs)[key] || row[key]), so the quote follows whichever one the bridge reads.
@@ -16,7 +17,8 @@
  * admin seed's Talak product (41.57 / 96 with its rate fields: what ensureTable in routes/admin-pricing-config.js inserted from
  * 2026-10-25 until this change, when it creates the table), with or without an admin's edits since, and an admin's price for that
  * bottle (pre-push audit at the fifth push: the seed was matched whole, so a seed with an edited margin kept the Talak cost). Its
- * bottle fields follow the code's bottle, and its other values (margin, rates, anything added) stay. One already on Crosscheck is
+ * bottle fields follow the code's bottle, and its other values (margin, rates, anything added) stay, its positioning and its own
+ * warnings included (pre-push audit at the eleventh push). One already on Crosscheck is
  * left alone silently (re-run); one with a label of its own that an admin changed is left alone with a warning. A missing table,
  * row or key is never an error.
  *
@@ -792,10 +794,17 @@ const carriesOtherBottle = (product, plan) => !ownLabel(product) && (SHADOWING_A
   || BOTTLE_FIELDS.some((field) => field in plan.to && product[field] !== undefined && !isDeepStrictEqual(product[field], plan.to[field])));
 const isOldBottle = (product, plan) => holds(product, plan.from) || carriesOtherBottle(product, plan);
 
-function toCrosscheck(product, values) {
+// The product on the new bottle: the bottle's fields follow the code's, and its other values stay, an admin's own positioning and
+// warnings included. A Talak warning moves to its Crosscheck Plus wording in place, and every other entry stays (pre-push audit at
+// the eleventh push); a product with none takes the code's.
+function toCrosscheck(product, plan) {
   const next = { ...product };
   for (const alias of SHADOWING_ALIASES) delete next[alias];
-  return { ...next, ...values };
+  const { warnings, positioning, ...bottle } = plan.to;
+  const moved = Array.isArray(next.warnings)
+    ? next.warnings.map((warning) => (plan.from.warnings.includes(warning) ? warnings[plan.from.warnings.indexOf(warning)] : warning))
+    : warnings;
+  return { ...next, ...bottle, positioning: next.positioning ?? positioning, warnings: moved };
 }
 
 const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -816,12 +825,13 @@ function rewriteRow(configKey, data, plan) {
     const target = place === null ? next : { ...source };
     for (const key of OPTION_KEYS) {
       const product = source[key];
-      if (!isObject(product) || holds(product, plan.to)) continue; // none here, or already Crosscheck (a re-run): not ours
+      // None here, or already what the rewrite writes (a re-run, an admin's own warnings kept): not ours.
+      if (!isObject(product) || isDeepStrictEqual(toCrosscheck(product, plan), product)) continue;
       if (!isOldBottle(product, plan)) {
         console.warn(`${LOG} ${configKey}.${placeName(place, key)} was edited since the Talak swap - leaving the admin's values alone`);
         continue;
       }
-      target[key] = toCrosscheck(product, plan.to);
+      target[key] = toCrosscheck(product, plan);
       changed = true;
     }
     if (place !== null) next[place] = target;

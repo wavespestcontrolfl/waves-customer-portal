@@ -7153,6 +7153,9 @@ function priceTrenching(property = {}, options = {}, replay) {
   const ozPer10LFPerFtDepth = roundMoney(productOzPerFinishedGallon * gallonsPer10LFPerFtDepth * volumeFactor);
   const labelOzPer10LFPerFtDepth = roundMoney((product.labelHalfVolumeOzPerFinishedGallon * product.labelFinishedGallonsPer10LFPerFtDepth) / 2);
   const offLabelAmount = halfVolumeLabel && Math.abs(ozPer10LFPerFtDepth - labelOzPer10LFPerFtDepth) > 1e-9;
+  // The label's reduced volume is that dilution at the label's amount, whether this engine halved the volume or a configured volume
+  // already did (pre-push audit at the eleventh push: 2 fl oz a gallon at a configured 2 gal passed with a checked label box).
+  const labelReducedVolume = labelStrongerDilution && !offLabelAmount;
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
   const trenchDepthFt = optionPositiveNumber(options, 'trenchDepthFt', cfg.defaultTrenchDepthFt || 1);
@@ -7176,7 +7179,7 @@ function priceTrenching(property = {}, options = {}, replay) {
     ...rateResolution.warnings,
     ...warrantyResolution.warnings,
   ];
-  if (volumeFactor < 1) {
+  if (labelReducedVolume) {
     // The label allows a reduced volume only where the soil will not accept the labeled volume and a continuous barrier can still
     // be achieved (pre-push audit 29). Only this engine knows whether it applies the volume adjustment (the configured dilution and
     // bottle), so this warning names both conditions on the line, and the line stays in review (reduced_volume_confirmation_required).
@@ -7207,7 +7210,7 @@ function priceTrenching(property = {}, options = {}, replay) {
   // A reduced volume stays in review at every rate, a counted label check included: the estimate tool's label box confirms the
   // label rate and trench depth, never a volume, because the tool cannot see the configured dilution that decides it (pre-push
   // audits 30 and at the second push: a configured high rate of 1.5 fl oz per gallon keeps the full volume).
-  if (volumeFactor < 1) {
+  if (labelReducedVolume) {
     manualReviewReasons.push('reduced_volume_confirmation_required');
   } else if (offLabelAmount) {
     manualReviewReasons.push('off_label_amount_confirmation_required');

@@ -377,6 +377,16 @@ describe('termite measurement overrides and safeguards', () => {
       // The line names the dilution it priced, the high rate's, not the standard 0.06% (pre-push audit at the ninth push).
       expect(standardAtTwo.concentrationLabel).toBe('high_rate');
       expect(offChart.concentrationLabel).toBe('high_rate');
+      // The label's reduced volume configured outright (2 gal at 2 fl oz a gallon) puts down the label's amount: it is the volume
+      // adjustment, so it stays in review as one, whatever the label check (pre-push audit at the eleventh push).
+      trenching.finishedGallonsPer10LFPerFtDepth = 2; // 400 LF x 0.2 x 0.5 ft = 40 gallons, not halved again
+      const configuredReduced = trench({});
+      expect(configuredReduced).toMatchObject({ finishedGallons: 40, productOz: 80, labelConfirmed: true, requiresManualReview: true });
+      expect(configuredReduced.manualReviewReasons).toContain('reduced_volume_confirmation_required');
+      expect(configuredReduced.manualReviewReasons).not.toContain('off_label_amount_confirmation_required');
+      expect(configuredReduced.warnings.join(' ')).toMatch(/reduced finished volume, the same active ingredient per foot/);
+      expect(trench()).toMatchObject({ finishedGallons: 40, productOz: 80 }); // the high rate's 2 fl oz there too
+      expect(trench().manualReviewReasons).toContain('reduced_volume_confirmation_required');
       trenching.finishedGallonsPer10LFPerFtDepth = 4; // the chart's volume: a standard rate moved off 1 fl oz is off the label too
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 0.8;
       expect(trench({}).manualReviewReasons).toContain('off_label_amount_confirmation_required');

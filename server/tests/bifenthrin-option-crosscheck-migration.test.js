@@ -1241,6 +1241,30 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
     });
 
+    // Such a product keeps an admin's own positioning and warnings: its Talak warning moves to the Crosscheck Plus wording in place,
+    // and a re-run changes nothing and warns about nothing (pre-push audit at the eleventh push).
+    test('a product with no label of its own keeps an admin\'s positioning and warnings; its Talak warning moves in place', async () => {
+      const officeNote = 'Office: call the builder before the slab pour.';
+      const preslab = { ...SEED_PRESLAB, positioning: 'premium_repellent', warnings: [TALAK_WARNING, officeNote] };
+      const trench = { ...SEED_TRENCH, warnings: [officeNote] };
+      const db = world({ preslab: preslabRow(preslab, SEED_PRESLAB), trench: trenchRow(trench, SEED_TRENCH), catalog: [], vendors: [] });
+      const original = JSON.stringify(db.pricing_config);
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual({
+        ...PRESLAB_REWRITTEN, positioning: 'premium_repellent', warnings: [CROSSCHECK_PRESLAB.warnings[0], officeNote],
+      });
+      expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual(PRESLAB_REWRITTEN);
+      expect(productOf(db, 'onetime_trenching', 'talstar_p')).toEqual({ ...TRENCH_REWRITTEN, warnings: [officeNote] });
+      expect(warn).not.toHaveBeenCalled();
+      const after = snapshot(db);
+      await migration.up(knex);
+      expect(snapshot(db)).toBe(after);
+      expect(warn).not.toHaveBeenCalled();
+      await migration.down(knex);
+      expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
+    });
+
     // Only another bottle's figures or name move a product with no label of its own: one with none, or with Crosscheck Plus's own,
     // already quotes Crosscheck Plus, and is left as it is, with no warning about another bottle.
     test('a product with no label of its own and no other bottle\'s figures is left alone', async () => {
