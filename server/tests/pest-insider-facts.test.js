@@ -200,7 +200,12 @@ describe('identifier species (the portal species catalog)', () => {
     for (const s of SPECIES) {
       const entry = getEntry(s.slug);
       expect(entry.links.site_page).toBe(`/pest-identifier/${s.slug}/`);
-      expect(s).toEqual({ slug: entry.slug, name: entry.common_name, category: entry.site_category, fact: entry.copy.fact, note: entry.copy.blurb });
+      expect(s).toEqual({
+        slug: entry.slug, name: entry.common_name, category: entry.site_category, fact: entry.copy.fact, note: entry.copy.blurb,
+        scientific: entry.scientific_name, verdict: entry.verdict,
+      });
+      // the four verdicts the website's identifier shows (pestIdentifier.ts VERDICT_META)
+      expect(['ally', 'harmless', 'watch', 'call']).toContain(s.verdict);
     }
   });
 

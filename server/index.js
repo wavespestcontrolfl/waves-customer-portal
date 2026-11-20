@@ -820,6 +820,17 @@ app.use('/og', require('./routes/og-preview'));
 app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
+// Waves Pest Insider fact cards and top pictures (services/pest-insider/
+// cards.js, heroes.js) are pictures inside emails. A mail app that loads
+// pictures straight into its own view, with no image proxy, is another
+// origin, and helmet's same-origin CORP would block them there (same reason
+// as routes/public-map-image.js). After helmet, before both static mounts
+// that serve the folders.
+app.use(['/pest-insider/cards', '/pest-insider/heroes'], (req, res, next) => {
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  next();
+});
+
 // Public assets used by server-rendered customer pages. In production Vite
 // copies these into client/dist; in local API-only dev they still need to be
 // served from client/public so SSR pages can render shared brand artwork.
