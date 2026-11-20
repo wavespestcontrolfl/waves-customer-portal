@@ -111,4 +111,21 @@ async function resolveZoneByCoords(dbc, lat, lng, opts) {
   return nearestZoneByCoords(zones, la, ln, opts);
 }
 
-module.exports = { resolveEstimateZone, zoneSlugOf, resolveZoneByCoords, nearestZoneByCoords };
+// A lead booking's zone (the lead assessment link, owner rule B): the zone its
+// booking address resolves to, as its list read it (resolveEstimateZone: the
+// address's city decides, its text only without one); else the zone that lists
+// the customer's own city on file, the city a visit with no zone stamp is read
+// by later (zone-day-funnel.js zoneStopDays). Returns { zone, fromCustomer }
+// (fromCustomer: the customer's city decided). createSelfBooking checks and
+// stamps this zone with its own customer row; the link builds its re-check and
+// its fresh times from the address that decided. Throws on query failure.
+async function leadBookingZone(dbc, address, customerCity) {
+  const zone = await resolveEstimateZone(dbc, address);
+  const city = String(customerCity || '').trim().toLowerCase();
+  if (zone || !city) return { zone, fromCustomer: false };
+  const zones = await dbc('service_zones').select('id', 'cities', 'zone_name');
+  const cityZone = zones.find((z) => (z.cities || []).some((c) => String(c || '').toLowerCase() === city)) || null;
+  return { zone: cityZone, fromCustomer: !!cityZone };
+}
+
+module.exports = { resolveEstimateZone, leadBookingZone, zoneSlugOf, resolveZoneByCoords, nearestZoneByCoords };

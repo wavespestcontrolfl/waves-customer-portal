@@ -31,7 +31,7 @@ const {
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { resolveZoneRouteDaySlug } = require('../services/scheduling/zone-route-days');
-const { resolveEstimateZone } = require('../services/slot-zone');
+const { resolveEstimateZone, leadBookingZone } = require('../services/slot-zone');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
@@ -3471,17 +3471,16 @@ async function createSelfBooking(payload = {}) {
     // city its name contains, as its list did. Only with the far-south funnel on
     // (GATE_SOUTH_ZONE_DAY_FUNNEL): off, no list resolved a zone, and the
     // customer's city decides as before. The customer's city also decides when
-    // that address resolves to no zone: a visit with no zone stamp is read later
-    // by its customer's city (zone-day-funnel.js zoneStopDays), so the far-south
+    // that address resolves to no zone (slot-zone.js leadBookingZone): a visit
+    // with no zone stamp is read later by its customer's city, so the far-south
     // check and the stamp read that city, from this booking's own customer row,
     // which the fence's fingerprint re-checks (owner rule B, pre-push P1s on
     // 3e6fd14320 and 3b494d3581).
-    const addressZone = callbackVisit?.zoneAddress && funnelOn()
-      ? await resolveEstimateZone(db, callbackVisit.zoneAddress)
-      : null;
-    const zone = addressZone || (await db('service_zones').select('*')).find(z => (z.cities || []).some(c =>
-      c.toLowerCase() === (customer.city || '').toLowerCase()
-    ));
+    const zone = callbackVisit?.zoneAddress && funnelOn()
+      ? (await leadBookingZone(db, callbackVisit.zoneAddress, customer.city)).zone
+      : (await db('service_zones').select('*')).find(z => (z.cities || []).some(c =>
+        c.toLowerCase() === (customer.city || '').toLowerCase()
+      )) || null;
 
     // ALLOWLIST, never echo: the persisted/displayed label derives from the
     // slot_sig-VERIFIED serviceKey first, then from allowlist-matching the

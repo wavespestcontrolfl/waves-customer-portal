@@ -216,7 +216,8 @@ const ASSESSMENT_EXPECTED_IDENTITY = Object.freeze({ catalogServiceKey: ASSESSME
 const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
 const { parseRawAddress, leadAddressFields, premiseUnitKey } = require('../utils/address-normalizer');
 const { buildRescheduleLink } = require('../services/reschedule-link');
-const { truckMayTakeDate } = require('../services/scheduling/zone-day-funnel');
+const { truckMayTakeDate, perTruckLive, funnelOn } = require('../services/scheduling/zone-day-funnel');
+const { leadBookingZone } = require('../services/slot-zone');
 
 // Per-lead advisory-lock namespace for the commit's provisioning/booking
 // critical section (see the file header and the commit handler below).
@@ -2225,12 +2226,21 @@ async function sendSlotTaken(res, { location, address = null, range, config, cat
   return res.status(409).json(body);
 }
 
-// The picked slot re-checked at a location that differs from the one it
-// was offered for — the MATCHED slot object (technician/end_time can differ
-// by location), or null when it is not open there. `address` is that
-// location's address: per truck the far-south rule drops the same openings
-// as on the commit's own rebuild (zone-day-funnel.js dropOtherTruckDays).
-async function revalidateSlotAt(location, { date, time, config, catalog, leadId, address }) {
+// The slot a booking takes at its final location and zone address: the
+// picked `slot` (the anti-forgery build's, at the typed location and address)
+// when nothing that decides it changed, else that start re-checked there — the
+// MATCHED slot object (technician/end_time can differ by location), or null
+// when it is not open there. `address` is the address whose zone the booking
+// checks: per truck the far-south rule drops the same openings as on the
+// commit's own rebuild (zone-day-funnel.js dropOtherTruckDays). Re-checked
+// when the location `moved`, and per truck (both far-south gates on) when the
+// customer's city decides the zone (`zoneMoved`, slot-zone.js leadBookingZone):
+// that zone can leave the hour to another truck, which the re-check books
+// (pre-push P1 on 46fd83d04f). With one truck a one-day build funnels to
+// itself, so a same-pin re-check would only repeat the first build (pre-push
+// P1 on 2b747741a9).
+async function revalidateSlotAt(location, { slot, moved, zoneMoved, date, time, config, catalog, leadId, address }) {
+  if (!moved && !(zoneMoved && perTruckLive() && funnelOn())) return slot;
   let refreshedDay = null;
   try {
     refreshedDay = await buildAvailabilityForLead(location, {
@@ -2696,18 +2706,21 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // always uses the global `db` connection and can do real network I/O
     // of its own (a gated weather-outlook call), neither of which may run
     // while that lock is held.
-    // The booking's zone inputs (its far-south check and stamp, and a 409's
-    // fresh times) take the profile's own address there. At the same pin they
-    // stay the typed address, as the list and the next commit's own check read
-    // it, also when the matched profile has another city on file:
-    // createSelfBooking takes its own customer row's city only when that
-    // address resolves to no zone, as a visit with no zone stamp is read later
-    // (owner rule B, pre-push P1s on 3e6fd14320 and 3b494d3581).
+    // The booking address is the profile's own there; at the same pin it stays
+    // the typed address, as the list and the next commit's own check read it.
+    // createSelfBooking reads its zone from that address, else from its
+    // customer's city on file (slot-zone.js leadBookingZone; owner rule B,
+    // pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f). When the city
+    // decides, the re-check and a 409's fresh times build from the profile's
+    // own address, the zone the booking checks, so a refreshed time is one
+    // the next commit books.
     const bookingAddress = locationMoved ? customerAddressFields(custRow) : resolved.address;
-    const bookingSlot = locationMoved
-      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: bookingAddress })
-      : slot;
-    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: bookingAddress, range, config, catalog, leadId: lead.id });
+    const { fromCustomer } = await leadBookingZone(db, zoneFunnelInputs(bookingAddress), custRow.city);
+    const zoneSource = fromCustomer ? customerAddressFields(custRow) : bookingAddress;
+    const bookingSlot = await revalidateSlotAt(bookingLocation, {
+      slot, moved: locationMoved, zoneMoved: fromCustomer, date, time, config, catalog, leadId: lead.id, address: zoneSource,
+    });
+    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: zoneSource, range, config, catalog, leadId: lead.id });
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps
@@ -2746,7 +2759,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
-      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress, range, config, catalog, verified });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress: zoneSource, range, config, catalog, verified });
     }
 
     return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));

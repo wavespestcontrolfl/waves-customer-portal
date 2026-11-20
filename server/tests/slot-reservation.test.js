@@ -517,6 +517,8 @@ describe('slot reservation helpers', () => {
       ['venice', [SARASOTA, VENICE], VENICE],
       ['venice_north_port', [SARASOTA, VENICE], VENICE],
       ['Venice', [SARASOTA, VENICE], VENICE],
+      // No zone row carries Venice any more: the compound stamp still names the funneled slug it extends.
+      ['venice_north_port', [SARASOTA], { zone_name: 'venice', cities: [] }],
       ['sarasota', [SARASOTA, VENICE], SARASOTA],
       ['port charlotte', [SARASOTA, VENICE], { zone_name: 'port charlotte', cities: [] }],
     ])('a hold stamped %s: the stamp decides the zone, never the estimate\'s current address', async (stamp, zones, expected) => {

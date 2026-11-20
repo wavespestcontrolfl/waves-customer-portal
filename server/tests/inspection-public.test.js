@@ -63,9 +63,13 @@ jest.mock('../services/scheduling/parse-when', () => ({
 // The commit's far-south truck re-check (owner rule B per truck): its own behavior is
 // estimate-slots-zone-day-funnel.test.js's; here only what the commit hands it.
 const mockTruckMayTakeDate = jest.fn(async () => true);
+// The two far-south gates the commit's re-check reads (feature-gates is mocked down to two names here).
+const mockFarSouthGates = { perTruck: false, funnel: false };
 jest.mock('../services/scheduling/zone-day-funnel', () => ({
   ...jest.requireActual('../services/scheduling/zone-day-funnel'),
   truckMayTakeDate: (...args) => mockTruckMayTakeDate(...args),
+  perTruckLive: () => mockFarSouthGates.perTruck,
+  funnelOn: () => mockFarSouthGates.funnel,
 }));
 
 const mockBookingConfig = jest.fn(async () => ({}));
@@ -252,6 +256,8 @@ afterEach(() => {
   insertCalls.length = 0;
   gateState.live = true;
   gateState.reviewLive = false;
+  mockFarSouthGates.perTruck = false;
+  mockFarSouthGates.funnel = false;
   mockLoserBlockers.mockClear();
   mockLoserBlockers.mockImplementation(async () => []);
   mockGeocode.mockClear();
@@ -1985,6 +1991,43 @@ describe('POST /:token commit', () => {
       expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(typed);
       expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe('tech-1');
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: typed.zoneFunnelAddress, city: 'Bradenton' });
+    });
+
+    // Owner rule B per truck (pre-push P1 on 46fd83d04f): the typed city is in no zone while the matched profile's city
+    // on file is (slot-zone.js leadBookingZone). createSelfBooking checks and stamps the profile city's zone, so the
+    // re-check (per truck only: a one-day build funnels to itself with one truck) and a 409's fresh times build from
+    // the profile's own address: the re-check books the truck that zone allows, and a refreshed time is one the next
+    // commit books. The booking's own zone address stays the typed one; it falls back itself, on its own customer row.
+    test.each([
+      ['per truck', { perTruck: true, funnel: true }, ['Laurel', 'Nokomis', 'Nokomis'], 'tech-2'],
+      ['one truck', { perTruck: false, funnel: true }, ['Laurel', 'Nokomis'], 'tech-1'],
+      ['the funnel off', { perTruck: true, funnel: false }, ['Laurel', 'Nokomis'], 'tech-1'],
+    ])('the typed city in no zone, the profile\'s city in one (%s): the re-check and the fresh times read the profile\'s city', async (_label, gates, builtCities, bookedTech) => {
+      Object.assign(mockFarSouthGates, gates);
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis'] }];
+      firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'Nokomis', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      });
+      listResults.scheduled_services = [];
+      const nineAm = (tech) => ({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: tech }] }] });
+      mockBuildAvailability
+        .mockResolvedValueOnce(nineAm('tech-1')) // the anti-forgery build, at the typed address
+        .mockResolvedValueOnce(nineAm('tech-2')); // the re-check (per truck), else the 409's fresh times
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Laurel, FL 34209' });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.body.code).toBe('SLOT_TAKEN');
+      expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(builtCities);
+      expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject({ zoneFunnelAddress: '123 Palm Ave, Nokomis, FL, 34209', zoneFunnelCity: 'Nokomis' });
+      expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe(bookedTech);
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its

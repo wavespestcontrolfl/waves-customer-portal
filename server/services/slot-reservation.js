@@ -877,11 +877,14 @@ async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = nul
 // A hold's zone stamp (zoneSlugOf of the zone reserveSlot resolved) back to its service_zones row, whose cities the
 // stop read matches unstamped rows by. A stamp no row carries any more still names its zone by its slug.
 async function stampedZone(conn, stamp) {
-  const { stampNamesZone } = require('./scheduling/zone-day-funnel');
+  const { stampNamesZone, funnelZoneSlugs } = require('./scheduling/zone-day-funnel');
   const zones = await conn('service_zones').select('id', 'cities', 'zone_name');
-  // The stop read's own rule: a legacy compound stamp ('venice_north_port') names its zone, as the stop read counts it.
+  // The stop read's own rule: a legacy compound stamp ('venice_north_port') names its zone, as the stop read counts it,
+  // also when no zone row carries that zone any more: then it names the funneled slug it extends (slugMatchesZone's
+  // pool; pre-push P1 on 46fd83d04f).
   const slug = String(stamp).toLowerCase();
-  return zones.find((z) => stampNamesZone(slug, zoneSlugOf(z))) || { zone_name: stamp, cities: [] };
+  const funnelSlug = [...funnelZoneSlugs()].find((f) => stampNamesZone(slug, f));
+  return zones.find((z) => stampNamesZone(slug, zoneSlugOf(z))) || { zone_name: funnelSlug || stamp, cities: [] };
 }
 
 // A fresh gate read right before a write. A make-room hold whose gate went off while the locks were waited on is the
