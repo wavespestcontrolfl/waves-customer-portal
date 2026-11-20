@@ -1111,7 +1111,7 @@ describe('assertPlanStartAcceptEligible', () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409 });
   });
 
-  test('an unreadable state fails closed; the check takes the comms key, then the property-preferences key, then the customer row (codex pre-push P1: the converter\'s order)', async () => {
+  test('an unreadable state fails closed with its own retry code (codex pre-push P1: the page keeps the held time); the check takes the comms key, then the property-preferences key, then the customer row (codex pre-push P1: the converter\'s order)', async () => {
     const ops = [];
     await actualRestart.assertPlanStartAcceptEligible(fakeTrx(ops), ESTIMATE);
     const commsAt = ops.findIndex((o) => o.startsWith('raw:') && o.includes('customer-comms:cust-1'));
@@ -1123,7 +1123,8 @@ describe('assertPlanStartAcceptEligible', () => {
     expect(customerAt).toBeGreaterThan(prefsAt);
     expect(rowsAt).toBeGreaterThan(customerAt);
     const failingTrx = fakeTrx(null, () => { throw new Error('pg down'); });
-    await expect(actualRestart.assertPlanStartAcceptEligible(failingTrx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
+    // A failed read is not a changed account: never the code the page answers by releasing the hold.
+    await expect(actualRestart.assertPlanStartAcceptEligible(failingTrx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_RECHECK_RETRY' });
   });
 });
 

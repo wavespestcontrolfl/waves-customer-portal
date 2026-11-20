@@ -748,6 +748,22 @@ describe('buildReportCrossSell', () => {
     expect(await loadEstimateSeed(pagedEstimates(onlyDimensionless).database, 'cust-1', street)).toBeNull();
   });
 
+  test('an address corrected between the reads never seeds the former home: the pricing read checks its own address (codex pre-push P1)', async () => {
+    const { loadEstimateSeed } = _private;
+    const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(SEED_HERE);
+    const moveAfterList = (reads, all) => {
+      if (reads === 1) all.find((row) => row.id === 'est-moved').address = '9 Other Rd, Venice, FL 34285';
+    };
+    const rows = [
+      seedRow('est-older', SEED_HERE, 'accepted', 5, { engineInputs: { homeSqFt: 1800, lotSqFt: 7000, stories: 1 } }),
+      seedRow('est-moved', SEED_HERE, 'accepted', 9),
+    ];
+    expect(await loadEstimateSeed(pagedEstimates(rows, { afterRead: moveAfterList }).database, 'cust-1', street)).toMatchObject({ homeSqFt: 1800 });
+    // With no other estimate at the home, nothing seeds.
+    const lone = [seedRow('est-moved', SEED_HERE, 'accepted', 9)];
+    expect(await loadEstimateSeed(pagedEstimates(lone, { afterRead: moveAfterList }).database, 'cust-1', street)).toBeNull();
+  });
+
   test('a row that leaves the accepted set after the address list never seeds: the next accepted row does (codex pre-push r27 P1)', async () => {
     const { loadEstimateSeed } = _private;
     const rows = [

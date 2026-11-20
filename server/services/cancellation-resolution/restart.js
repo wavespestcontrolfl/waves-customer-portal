@@ -1624,7 +1624,9 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     }
   } catch (err) {
     logger.warn(`[plan-start] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);
-    throw refuse('We could not re-verify this estimate just now — please try again in a moment.');
+    // A failed read is not a changed account (codex pre-push P1): its own code tells the estimate
+    // page to keep the held time and the payment choice for the retry this message asks for.
+    throw Object.assign(refuse('We could not re-verify this estimate just now — please try again in a moment.'), { code: 'PLAN_START_RECHECK_RETRY' });
   }
   const changed = () => refuse('This account changed since this estimate was created — please go back to your portal for a current price.');
   // A plan_start estimate without its quoted families (or its customer) is malformed — never accept it.

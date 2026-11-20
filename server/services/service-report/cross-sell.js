@@ -408,9 +408,11 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     .orderBy('created_at', 'desc')
     .orderBy('id', 'desc')
     .select('id', 'address', 'status');
-  const candidates = listed.filter((row) => {
-    if (row.status !== 'accepted') return false;
-    const street = linkage.normalizedEstimateStreet(row.address);
+  // The estimate's address keys to the home being priced. Both reads apply it:
+  // the pricing JSON is read with its own address (codex pre-push P1), so an
+  // address corrected between the reads never seeds the former home.
+  const atThisHome = (address) => {
+    const street = linkage.normalizedEstimateStreet(address);
     if (!street || !linkage.sameScopeKey(street, scopeStreet)) return false;
     // A street-only key (no city, no zip) wildcard-matches EVERY
     // same-street property under sameScopeKey's lenient locality rule
@@ -423,19 +425,22 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // Same shared-locality proof as the visit stamp (PR r6): disjoint
     // locality fields (city-only vs zip-only) must not match across cities.
     return scopeKeysShareLocality(street, scopeStreet);
-  });
+  };
+  const candidates = listed.filter((row) => row.status === 'accepted' && atThisHome(row.address));
   let pick = null;
   for (let at = 0; !pick && at < candidates.length; at += SEED_PAGE_SIZE) {
     const batch = candidates.slice(at, at + SEED_PAGE_SIZE);
     const bodies = await database('estimates')
       .whereIn('id', batch.map((row) => row.id))
       .where({ customer_id: customerId, status: 'accepted' })
-      .select('id', 'estimate_data');
-    const dataById = new Map(bodies.map((body) => [body.id, body.estimate_data]));
+      .select('id', 'address', 'estimate_data');
+    const bodyById = new Map(bodies.map((body) => [body.id, body]));
     // The batch keeps the listed order, so the first surviving row is the
     // most recently accepted same-property estimate.
     for (const row of batch) {
-      const estData = parseJsonColumn(dataById.get(row.id));
+      const body = bodyById.get(row.id);
+      if (!body || !atThisHome(body.address)) continue;
+      const estData = parseJsonColumn(body.estimate_data);
       // engineInputs / inputs (admin + agent saves) or the public quote's
       // singular engineInput — the normalized request it priced, which is
       // where its footprint-trust stamp lives (Codex #6398 r20).
