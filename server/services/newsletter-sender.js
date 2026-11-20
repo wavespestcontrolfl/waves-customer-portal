@@ -2195,7 +2195,8 @@ async function plannedSendOutcome(issue, send, now, trx) {
  * that came after the send was marked failed, as after a lost SendGrid response; the webhook's
  * reconcileNewsletterSendStatus then sets it 'sent') becomes 'sent': quietly if nobody was told it
  * failed (failureAlertAt), else with one correction (alert 'recovered', told once by its own mark,
- * recoveredToldAt). It is then read as any 'sent' one is. Otherwise what nobody was told yet: a
+ * recoveredToldAt). It is then read as any 'sent' one is; a correction that reached no one is owed
+ * only while it holds (nobody left to resume, and no block told since). Otherwise what nobody was told yet: a
  * 'failed' one (its reason), a 'sent' one whose finished send has readers a Resume would still
  * mail (a provider block after SendGrid accepted the batch resets a reader's delivery), which
  * stays 'sent' (alert 'blocked', told once by its own mark, blockedToldAt, so the issue is still
@@ -2203,35 +2204,36 @@ async function plannedSendOutcome(issue, send, now, trx) {
  * or a 'sent' one no reader got after all (every one bounced, was dropped or was blocked), which
  * becomes 'failed', also after a 'blocked' alert. Null when there is nothing to change or tell.
  */
+const recoveredReason = (got) => `went out after all: ${got} readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume`;
+
 async function settledOutcome(issue, send, trx) {
   const diagnostics = issueDiagnostics(issue);
-  if (issue.status === 'failed' && send?.status === 'sent') {
+  const sendSent = send?.status === 'sent';
+  if (issue.status === 'failed' && sendSent) {
     const { got, left } = await ledgerProgress(trx, send);
     if (got > 0 && left === 0) {
       const failureToldAt = await failureAlertAt(trx, issue.id, diagnostics);
       if (!failureToldAt) return { status: 'sent', reason: null };
-      return {
-        status: 'sent',
-        reason: `went out after all: ${got} readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume`,
-        alert: 'recovered',
-        // The failure was told; this correction is not yet.
-        failureToldAt,
-      };
+      // The failure was told; this correction is not yet.
+      return { status: 'sent', reason: recoveredReason(got), alert: 'recovered', failureToldAt };
     }
   }
   if (diagnostics.outcomeToldAt) return null;
   if (issue.status === 'failed') return { status: 'failed', reason: issue.reason || 'did not go out', alert: 'outcome' };
-  if (issue.status !== 'sent' || send?.status !== 'sent') return null;
-  // A correction an earlier minute could not deliver.
-  if (diagnostics.failureToldAt && !diagnostics.recoveredToldAt) return { status: 'sent', reason: issue.reason, alert: 'recovered' };
+  if (issue.status !== 'sent' || !sendSent) return null;
   const { got, left, refused } = await ledgerProgress(trx, send);
   // No reader got it after all: after its send ended and the issue was marked sent, every reader's
   // mail server bounced it or SendGrid dropped it (final), or it was blocked (a Resume retries those).
   // The outcome a scheduled issue whose send ended this way gets (plannedSendOutcome).
-  if (got === 0 && (left > 0 || refused > 0)) return { status: 'failed', reason: 'did not go out: its send ended, and no reader got it', alert: 'outcome' };
-  // Nobody left to resume: a 'sent' issue carries no reason, so a blocked one, told or not, clears,
-  // quietly (no write when it is already clear).
-  if (left === 0) return { status: 'sent', reason: null };
+  if (got === 0 && left + refused > 0) return { status: 'failed', reason: 'did not go out: its send ended, and no reader got it', alert: 'outcome' };
+  if (left === 0) {
+    // A correction an earlier minute could not deliver, in words from the counts now: owed only
+    // while nobody is left to resume and no block was told since it (that alert said it went out).
+    const correctionOwed = diagnostics.failureToldAt && !diagnostics.recoveredToldAt && !diagnostics.blockedToldAt;
+    // Else nobody left to resume: a 'sent' issue carries no reason, so a blocked one, told or not,
+    // clears, quietly (no write when it is already clear).
+    return correctionOwed ? { status: 'sent', reason: recoveredReason(got), alert: 'recovered' } : { status: 'sent', reason: null };
+  }
   const reason = `went out to ${got} readers, but ${left} readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them`;
   // Told once: later minutes only keep the counts current.
   return diagnostics.blockedToldAt ? { status: 'sent', reason } : { status: 'sent', reason, alert: 'blocked' };
@@ -2373,7 +2375,8 @@ const ISSUE_CHANGE_LOOKBACK_SQL = "updated_at >= now() - ?::int * interval '1 da
  *   that finished, or late delivery confirmations) becomes 'sent', with one correction if the
  *   owner was told it failed. This step owns that change: the send's finalize leaves a 'failed'
  *   row alone. It is then read as any 'sent' issue is, for the lookback from its last change: a
- *   correction that reached no one is retried, and a block or a failure after it gets its own alert;
+ *   correction that reached no one is retried while it holds, and a block or a failure after it
+ *   gets its own alert. So is one that became 'sent' quietly (nobody was told it failed);
  * - a 'sent' issue no reader got after all (every reader's mail server bounced or blocked it, or
  *   SendGrid dropped it) becomes 'failed', with one alert.
  * A hard bounce, and a message SendGrid dropped for an address on its unsubscribe list, is final
@@ -2397,11 +2400,10 @@ async function settlePlannedIssues(now = new Date()) {
         .whereRaw(RECOVERED_SEND_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS]);
     })
     .select('id', 'send_id');
-  // A sent issue that recovered from a told failure: its correction, if an earlier minute could not
-  // deliver it, and the checks any sent issue gets. By its own last change (the issue's updated_at),
-  // so one that came from a Resume long after the issue is read too.
+  // A sent issue by its own last change (the issue's updated_at), whatever it was told: one that
+  // recovered from a failure, told or quiet, from a Resume long after the issue is read too (its
+  // correction while that is owed, and the checks any sent issue gets).
   const corrections = await db('pest_insider_issues').where({ status: 'sent' })
-    .whereRaw("diagnostics->>'failureToldAt' is not null")
     .whereRaw(ISSUE_CHANGE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
     .select('id', 'send_id');
   // One settle per issue a minute, also when it is on two lists.
