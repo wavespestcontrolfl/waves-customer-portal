@@ -41,9 +41,8 @@ describe('the reviewed card list', () => {
     const dir = path.join(__dirname, '../..', CARD_DIR);
     const files = fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
     expect(Object.values(CARDS).map((c) => c.file).filter((f) => !files.includes(f))).toEqual([]);
-    // every file is a card picture by name: <fact>-<hash>.png for a card in the list
-    const ids = Object.keys(CARDS).map((id) => id.toLowerCase());
-    expect(files.filter((f) => !(/^([a-z]\d\d)-[0-9a-f]{10}\.png$/.test(f) && ids.includes(f.slice(0, 3))))).toEqual([]);
+    // every file is a card picture by name (<fact>-<hash>.png); a retired fact's pictures may stay
+    expect(files.filter((f) => !/^[a-z]\d\d-[0-9a-f]{10}\.png$/.test(f))).toEqual([]);
     for (const [id, card] of Object.entries(CARDS)) {
       expect(card.file).toMatch(new RegExp(`^${id.toLowerCase()}-[0-9a-f]{10}\\.png$`));
       expect(card.url).toBe(`${CARD_BASE_URL}${card.file}`);

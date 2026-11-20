@@ -64,16 +64,19 @@ describe('the top picture list', () => {
     const files = listed(dir);
     expect(Object.values(HEROES).map((h) => h.file).filter((f) => !files.includes(f))).toEqual([]);
     for (const hero of Object.values(HEROES)) expect(jpegSize(fs.readFileSync(path.join(dir, hero.file)))).toEqual([1164, 652]);
-    // every file is a top picture by name: <fact>-<hash>.jpg for a fact in the list
-    const ids = Object.keys(HEROES).map((id) => id.toLowerCase());
-    expect(files.filter((f) => !(/^([a-z]\d\d)-[0-9a-f]{10}\.jpg$/.test(f) && ids.includes(f.slice(0, 3))))).toEqual([]);
+    // every file is a top picture by name (<fact>-<hash>.jpg); a retired fact's pictures may stay
+    expect(files.filter((f) => !/^[a-z]\d\d-[0-9a-f]{10}\.jpg$/.test(f))).toEqual([]);
   });
 
-  test('the drawing script never removes a published picture, and writes only with --execute', () => {
+  test('the drawing scripts never change or remove a published picture, and write only with --execute', () => {
     for (const file of ['ops/agents/pest-insider-heroes.js', 'ops/agents/pest-insider-cards.js']) {
       const src = fs.readFileSync(path.join(ROOT, file), 'utf8');
-      expect({ file, removes: /\b(unlinkSync|rmSync|rmdirSync|unlink|rm)\(/.test(src) }).toEqual({ file, removes: false });
-      expect(src).toContain("args.includes('--execute')");
+      expect({ file, removes: /\b(unlinkSync|rmSync|rmdirSync|unlink|rm|renameSync)\(/.test(src) }).toEqual({ file, removes: false });
+      // a picture file is created once (flag wx), never overwritten
+      const pictureWrites = src.match(/fs\.writeFileSync\(path\.join\(outDir[^\n]*/g) || [];
+      expect(pictureWrites.length).toBe(1);
+      expect(pictureWrites[0]).toContain("{ flag: 'wx' }");
+      expect(src).toContain("const execute = args.includes('--execute');");
       expect(src).toContain('MUTATES (dry-run default');
     }
   });

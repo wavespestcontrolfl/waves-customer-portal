@@ -28,7 +28,7 @@ const { buildIssue, NEWSLETTER_TYPE } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
 const { SPECIES, planIssue } = require('../services/pest-insider/plan');
 const { postUrl } = require('../services/pest-insider/posts');
-const { POST_LINK_TEXT, withToolBlock } = require('../services/pest-insider/render');
+const { POST_LINK_TEXT, withToolBlock, escapeHtml } = require('../services/pest-insider/render');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { loadTools, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 const { HEROES, heroFor } = require('../services/pest-insider/heroes');
@@ -92,9 +92,11 @@ describe('buildIssue', () => {
     const missing = [];
     for (const id of Object.keys(HEROES)) {
       usePlan(factById(id));
-      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE });
+      // a fact that needs a send-time recheck builds only once a person re-read its source
+      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, recheckedFactIds: [id] });
       const first = r.ok && /<img src="([^"]+)" alt="([^"]*)"/.exec(r.issue.html_body);
-      if (!first || first[1] !== heroFor(id).url || first[2] !== factById(id).title) missing.push(id);
+      // the alt text is the title, escaped (R01's title has quotes)
+      if (!first || first[1] !== heroFor(id).url || first[2] !== escapeHtml(factById(id).title)) missing.push(`${id}: ${r.ok ? 'no picture' : r.reason}`);
     }
     expect(Object.keys(HEROES).length).toBeGreaterThan(0);
     expect(missing).toEqual([]);

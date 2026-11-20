@@ -12,18 +12,20 @@
  *   node ops/agents/pest-insider-heroes.js --import <dir> [--execute] [--only T03]
  *
  *     (none)          dry run: lists what would be drawn or taken; nothing written
- *     --execute       write into the repo (the portal folder, or for --import
- *                     the art folder and the heroes file)
+ *     --execute       draw the pictures whose file is not there yet (with
+ *                     --import: write the art files and the heroes file)
  *     --import <dir>  take new art: each <dir>/<fact>.png (lower-case id,
  *                     wide) is cut to 1164x652, saved as
  *                     ops/agents/pest-insider-art/<fact>.webp, and its hash
  *                     goes into the heroes file. Then draw with --execute.
- *     --out <dir>     draw into another folder instead (a preview; no --execute needed)
+ *     --out <dir>     the folder to draw into (a preview) instead of the portal's
  *     --only ids      only these facts
  *
- * It never removes a picture. A sent email and the issue archive keep the
- * exact picture URLs they were sent with, so an old file stays until a
- * person removes it, once no sent issue uses it.
+ * A file, once drawn, is never drawn again, changed or removed: a sent
+ * email and the issue archive keep the exact picture URLs they were sent
+ * with. A picture that must look different gets a new name (new art, a new
+ * title, or HERO_DESIGN bumped); an old file stays until a person removes
+ * it, once no sent issue uses it.
  *
  * The art: ChatGPT on the owner's plan (owner 2026-11-19: "just use
  * chatgpt"), through Codex on the Mac with Codex's built-in image tool, never
@@ -153,9 +155,9 @@ async function draw(H) {
   const { HEROES, HERO_DIR, HERO_WIDTH, HERO_HEIGHT, ART_DIR } = H;
   const outDir = path.resolve(opt('--out') || path.join(repoRoot, HERO_DIR));
   const wanted = Object.entries(HEROES).filter(([key]) => !only || only.has(key));
-  if (!execute && !opt('--out')) {
+  if (!execute) {
     for (const [id, hero] of wanted) console.log(`${id}  ${hero.file}  ${fs.existsSync(path.join(outDir, hero.file)) ? 'drawn' : 'would draw'}`);
-    console.log('Dry run: nothing written. Add --execute to draw into the portal folder.');
+    console.log(`Dry run: nothing written. Add --execute to draw into ${outDir}.`);
     return;
   }
   fs.mkdirSync(outDir, { recursive: true });
@@ -163,6 +165,7 @@ async function draw(H) {
   const page = await browser.newPage({ viewport: { width: HERO_WIDTH, height: HERO_HEIGHT }, deviceScaleFactor: 2 });
   let failed = 0;
   for (const [id, hero] of wanted) {
+    if (fs.existsSync(path.join(outDir, hero.file))) { console.log(`${id}  ${hero.file}  already drawn; kept`); continue; }
     let artUrl = null;
     if (hero.art) {
       const art = fs.readFileSync(path.join(repoRoot, ART_DIR, hero.artFile));
@@ -176,7 +179,7 @@ async function draw(H) {
     if (!size) { console.error(`${id}: the title does not fit`); failed += 1; continue; }
     const shot = await page.screenshot({ clip: { x: 0, y: 0, width: HERO_WIDTH, height: HERO_HEIGHT } });
     const jpg = await sharp(shot).jpeg({ quality: 82, mozjpeg: true }).toBuffer();
-    fs.writeFileSync(path.join(outDir, hero.file), jpg);
+    fs.writeFileSync(path.join(outDir, hero.file), jpg, { flag: 'wx' });
     console.log(`${id}  ${hero.file}  ${hero.art ? 'art' : 'no art'}  title ${size}px  ${Math.round(jpg.length / 1024)} KB`);
   }
   await browser.close();

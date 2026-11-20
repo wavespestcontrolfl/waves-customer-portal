@@ -10,13 +10,15 @@
  *   node ops/agents/pest-insider-cards.js [--execute] [--out <dir>] [--only A01,T03]
  *
  *     (none)        dry run: lists each card's file and whether it is drawn yet
- *     --execute     draw into the portal folder
- *     --out <dir>   draw into another folder instead (a preview; no --execute needed)
+ *     --execute     draw the cards whose file is not there yet
+ *     --out <dir>   the folder to draw into (a preview) instead of the portal's
  *     --only ids    only these cards
  *
- * It never removes a picture. A sent email and the issue archive keep the
- * exact picture URLs they were sent with, so an old file stays until a
- * person removes it, once no sent issue uses it.
+ * A file, once drawn, is never drawn again, changed or removed: a sent
+ * email and the issue archive keep the exact picture URLs they were sent
+ * with. A card that must look different gets a new name (its words change,
+ * or CARD_DESIGN is bumped); an old file stays until a person removes it,
+ * once no sent issue uses it.
  *
  * The drawing loads Anton and Inter from Google Fonts. A card is refused
  * when either font did not load, so no card ships in a fallback font. Each
@@ -43,7 +45,7 @@ const args = process.argv.slice(2);
 const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
 const repoRoot = path.resolve(__dirname, '../..');
 const outDir = path.resolve(opt('--out') || path.join(repoRoot, CARD_DIR));
-const execute = args.includes('--execute') || Boolean(opt('--out'));
+const execute = args.includes('--execute');
 const only = opt('--only') ? new Set(opt('--only').split(',').map((s) => s.trim())) : null;
 
 // How strongly the thin edge line and the unlit month chips show, per color
@@ -150,7 +152,7 @@ async function fitText(page, layout) {
   const wanted = Object.entries(CARDS).filter(([id]) => !only || only.has(id));
   if (!execute) {
     for (const [id, card] of wanted) console.log(`${id}  ${card.file}  ${fs.existsSync(path.join(outDir, card.file)) ? 'drawn' : 'would draw'}`);
-    console.log('Dry run: nothing written. Add --execute to draw into the portal folder.');
+    console.log(`Dry run: nothing written. Add --execute to draw into ${outDir}.`);
     return;
   }
   fs.mkdirSync(outDir, { recursive: true });
@@ -158,6 +160,7 @@ async function fitText(page, layout) {
   const page = await browser.newPage({ viewport: { width: CARD_WIDTH, height: CARD_HEIGHT }, deviceScaleFactor: 2 });
   let failed = 0;
   for (const [id, card] of wanted) {
+    if (fs.existsSync(path.join(outDir, card.file))) { console.log(`${id}  ${card.file}  already drawn; kept`); continue; }
     await page.setContent(cardHtml(card), { waitUntil: 'networkidle' });
     const fonts = await page.evaluate(fontsLoaded, ['40px Anton', '700 17px Inter']);
     if (!fonts) { console.error(`${id}: Anton or Inter did not load; not drawn`); failed += 1; continue; }
@@ -166,7 +169,7 @@ async function fitText(page, layout) {
     // Clear corners: the card keeps its round shape in every mail app, Outlook too.
     const shot = await page.screenshot({ clip: { x: 0, y: 0, width: CARD_WIDTH, height: CARD_HEIGHT }, omitBackground: true });
     const png = await sharp(shot).png({ palette: true, quality: 95, effort: 10, compressionLevel: 9 }).toBuffer();
-    fs.writeFileSync(path.join(outDir, card.file), png);
+    fs.writeFileSync(path.join(outDir, card.file), png, { flag: 'wx' });
     console.log(`${id}  ${card.file}  ${card.layout}  big ${size}px  ${Math.round(png.length / 1024)} KB`);
   }
   await browser.close();
