@@ -28,6 +28,8 @@
  */
 
 const { decodeHTML } = require('entities');
+const REFERENCE_NAMES = require('entities/lib/maps/entities.json');
+const LEGACY_REFERENCE_NAMES = require('entities/lib/maps/legacy.json');
 
 // HTML's white space: tab, line feed, form feed, carriage return (a line feed once a browser reads it) and space.
 // JavaScript's \s holds more (a no-break space), which HTML reads as part of a name or a value.
@@ -97,14 +99,21 @@ const flatCss = (css) => css.replace(CSS_SKIP_RE, (skipped) => (skipped[0] === '
 // a function (var(), attr()), which can stand for any value. Each run is read once, so no style can make it slow.
 const HIDING_RE = /^\s*[-\w]*(?:display|visibility)\s*:[\s\S]*(?:none|hidden|collapse|\()/i;
 const hidingStyle = (css) => css.includes('\\') || flatCss(css).split(/[;{}]/).some((run) => HIDING_RE.test(run));
+// An attribute value with its character references decoded as a browser decodes them in an attribute: as in text
+// (decodeHTML), except that a named reference without its ";" is kept as written unless it is a whole legacy name
+// (one HTML lets go without ";") before anything but "=": "&quotA", "&quot=" and "&notit;" stay, "&quot " does not.
+// Each reference kept is written "&amp;" first, so decodeHTML keeps it.
+const decodeAttribute = (value) => decodeHTML(value.replace(/&([A-Za-z0-9]+)(?=([;=]?))/g, (reference, name, next) => (
+  (next === ';' && Object.hasOwn(REFERENCE_NAMES, name)) || (next === '' && Object.hasOwn(LEGACY_REFERENCE_NAMES, name))
+    ? reference : `&amp;${name}`)));
 // Whether a start tag's attributes hide its element: hidden or popover (shown only once a script opens it), or a
-// style attribute that can (hidingStyle), read with its character references decoded.
+// style attribute that can (hidingStyle), read with its character references decoded (decodeAttribute).
 const hides = (attributes) => attributes.some(({ name, value }) => name === 'hidden' || name === 'popover'
-  || (name === 'style' && hidingStyle(decodeHTML(value))));
+  || (name === 'style' && hidingStyle(decodeAttribute(value))));
 // The class and id names of a start tag: ".name" for each class and "#name" for its id, in lower case (a page in
 // quirks mode matches them in any case).
 const namesOf = (attributes) => attributes.flatMap(({ name, value }) => {
-  const text = decodeHTML(value).toLowerCase();
+  const text = decodeAttribute(value).toLowerCase();
   if (name === 'class') return text.split(/[\t\n\f\r ]+/).filter(Boolean).map((token) => `.${token}`);
   return name === 'id' ? [`#${text}`] : [];
 });
@@ -166,6 +175,8 @@ function readTag(html, i, page) {
   const known = /^[A-Za-z][A-Za-z0-9]*$/.test(name) ? name.toLowerCase() : null;
   const read = readAttributes(html, stop);
   if (!read) return null;
+  // Every start tag's class and id names count for the style sheets: a script's, a style's and the title's too.
+  if (!endTag) namesOf(read.attributes).forEach((named) => page.names.add(named));
   if (!endTag && TEXT_ELEMENTS.has(known)) {
     const close = textElementEnd(html, read.end, known);
     if (close && known === 'style') page.sheets.push(html.slice(read.end, close.contentEnd));
@@ -173,7 +184,6 @@ function readTag(html, i, page) {
   }
   // A browser ignores an end tag's attributes.
   if (REFUSED_ELEMENTS.has(known) || !page.tags.has(known) || (!endTag && hides(read.attributes))) return null;
-  if (!endTag) namesOf(read.attributes).forEach((named) => page.names.add(named));
   return { text: endTag ? `</${known}>` : `<${known}>`, end: read.end };
 }
 

@@ -75,15 +75,18 @@ describe('plainPage', () => {
       // A CSS escape can spell any style ("\6e one" is "none"), and a function can stand for any value.
       '<td style="display:\\6e one">x', '<td style="--state:none; display:var(--state)">x', '<td style="content-visibility: var(--v)">x',
       // An unquoted url() keeps a "/*" as part of its address, and a quoted one is a string: neither opens a comment.
-      '<td style="background:url(/icons/*/dot.png); display:none">x', "<td style='background: url(\"a)b\"); display: none'>x"];
+      '<td style="background:url(/icons/*/dot.png); display:none">x', "<td style='background: url(\"a)b\"); display: none'>x",
+      // In an attribute, a reference without its ";" before a letter, a digit or "=" stays as written: no quote opens.
+      '<td style="font-family: &quotA; display: none">x', '<td style="font-family: &quot=x; display: none">x'];
     for (const cell of hiding) expect(plain(`<table><tr><td>Routine</td>${cell}</table>`)).toBeNull();
     // Other styles read as before; a string or a comment is not a declaration, and a comment parts two words; an end
     // tag's attributes do nothing.
     expect(plain('<td style="font-size: 13px; overflow: hidden; list-style-type: none; content: \'display: none\'">A</td hidden>'
       + '<td style="dis/**/play: none /* display: none */">B'
       // "-url(" is a function, not a url(): its "/*" opens a comment. A line break does not end a declaration.
-      + '<td style="x: -url(/*); display: none; y: */; display: block">C<td style="color: red\n display: none">D'))
-      .toBe('<td>A</td><td>B<td>C<td>D');
+      + '<td style="x: -url(/*); display: none; y: */; display: block">C<td style="color: red\n display: none">D'
+      // A whole legacy reference before a space is decoded in an attribute too: these quotes hold the declaration.
+      + '<td style="font-family: &quot x; display: none &quot;">G')).toBe('<td>A</td><td>B<td>C<td>D<td>G');
     // Each declaration is read once: a long style with no ";" reads quickly.
     const started = Date.now();
     expect(plain(`<td style="${'display:'.repeat(40000)}">E`)).toBe('<td>E');
@@ -105,7 +108,9 @@ describe('plainPage', () => {
       '<style>td { display: \\6e one }</style><td>x', '<style>@import "a.css";</style><td>x',
       // Read left to right, as CSS reads it: a "/*" in a string opens no comment, and a quote in a comment opens no string.
       '<style>td::after { content: "/*" } td.c { display: none } /* " */</style><td class=c>x',
-      '<style>/* " */ td.c { display: none } /* " */</style><td class=c>x'];
+      '<style>/* " */ td.c { display: none } /* " */</style><td class=c>x',
+      // A script's, a style's and the title's class and id names count too.
+      '<style>.marker + table { display: none }</style><script class=marker></script><table><tr><td>x</table>'];
     for (const cell of hiding) expect(plain(`<table><tr><td>Routine</td>${cell}</table>`)).toBeNull();
     // A hiding rule whose selector names a class or an id no element has hides nothing (the state's pages hold two);
     // a sheet's "<!--" and "-->" are no part of a selector, and a string or a comment is not a declaration.
