@@ -74,7 +74,7 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    for (const key of ['GATE_MOVING_FLOW', 'GATE_MOVING_PAUSE', 'GATE_MOVING_STOP_AT_MOVE_OUT', 'GATE_MOVING_ESTIMATE', 'GATE_MOVING_APPLY', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
+    for (const key of ['GATE_MOVING_PAUSE', 'GATE_MOVING_STOP_AT_MOVE_OUT', 'GATE_MOVING_ESTIMATE', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
     // Three connections: the test's transaction, the job's move fence, and a rival fence holder.
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 3 } });
     Moves = require('../services/customer-moves');
@@ -133,12 +133,10 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_MOVING_FLOW = 'true';
     process.env.GATE_MOVING_PAUSE = 'true';
     process.env.GATE_CUSTOMER_PROPERTIES = 'true';
     delete process.env.GATE_MOVING_STOP_AT_MOVE_OUT;
     delete process.env.GATE_MOVING_ESTIMATE;
-    delete process.env.GATE_MOVING_APPLY;
     trx = await database.transaction();
     mockConnection = trx;
   });
@@ -586,7 +584,6 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
 
     // The customer adds the new address; the office makes the new-home estimate and the customer accepts it.
     process.env.GATE_MOVING_ESTIMATE = 'true';
-    process.env.GATE_MOVING_APPLY = 'true';
     const [{ id: newHouseId }] = await trx('customer_properties').insert({
       customer_id: customerId, is_primary: false, active: true, occupancy_type: 'unknown',
       address_line1: NEW_HOUSE.line1, city: NEW_HOUSE.city, state: NEW_HOUSE.state, zip: NEW_HOUSE.zip,
@@ -663,7 +660,6 @@ postgres('moving PR 2b: the move pause (live Postgres)', () => {
   test('the old-house stop never stops a plan the move\'s new-home estimate booked, and Apply move then finds nothing left to stop', async () => {
     process.env.GATE_MOVING_STOP_AT_MOVE_OUT = 'true';
     process.env.GATE_MOVING_ESTIMATE = 'true';
-    process.env.GATE_MOVING_APPLY = 'true';
     const s = await seed({ move: WITH_ADDRESS });
     const [{ id: newHouseId }] = await trx('customer_properties').insert({
       customer_id: customerId, is_primary: false, active: true, occupancy_type: 'unknown',

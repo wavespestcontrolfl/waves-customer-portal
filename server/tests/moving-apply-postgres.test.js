@@ -1,5 +1,5 @@
 // Moving PR B2 against real PostgreSQL (one rolled-back transaction per test), dark behind
-// GATE_MOVING_APPLY: the Apply move preview, the confirm that makes the new home primary and
+// Apply move: the preview, the confirm that makes the new home primary and
 // stops the old house's plans after move-out (no customer text, no fee), the refusals, a resumed
 // Apply after a failed step, and the termite pickup task. Sends, charges and texts nothing: the
 // reminder sender and the admin bell writer are spies, and the cancellation follow-through runs
@@ -66,7 +66,7 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    for (const key of ['GATE_MOVING_FLOW', 'GATE_MOVING_ESTIMATE', 'GATE_MOVING_APPLY', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
+    for (const key of ['GATE_MOVING_ESTIMATE', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
     Moves = require('../services/customer-moves');
     Reminders = require('../services/appointment-reminders');
@@ -147,9 +147,7 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_MOVING_FLOW = 'true';
     process.env.GATE_MOVING_ESTIMATE = 'true';
-    process.env.GATE_MOVING_APPLY = 'true';
     process.env.GATE_CUSTOMER_PROPERTIES = 'true';
     trx = await database.transaction();
     mockConnection = trx;
@@ -387,13 +385,8 @@ postgres('moving PR B2: Apply move (live Postgres)', () => {
     expect((await trx('service_requests').where({ id: requestId }).first('status')).status).toBe('new');
   });
 
-  test('refusals: gate off, estimate not accepted, no move-out date, prepay, paid visits, tenant, unresolved plan', async () => {
+  test('refusals: estimate not accepted, no move-out date, prepay, paid visits, tenant, unresolved plan', async () => {
     let s = await seed();
-    process.env.GATE_MOVING_APPLY = 'false';
-    expect(await Moves.applyAction(s.move)).toBeNull();
-    await expect(Moves.applyMovePreview(customerId, s.move.id)).rejects.toMatchObject({ code: 'gate_off', status: 404 });
-    process.env.GATE_MOVING_APPLY = 'true';
-
     await trx('estimates').where({ id: s.estimateId }).update({ status: 'sent' });
     expect(await Moves.applyAction(s.move)).toBeNull();
     await expect(Moves.applyMovePreview(customerId, s.move.id)).rejects.toMatchObject({ code: 'estimate_not_accepted' });

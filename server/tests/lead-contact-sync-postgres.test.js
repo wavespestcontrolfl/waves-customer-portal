@@ -1,5 +1,5 @@
 // CI's DB-gated pass runs this against PostgreSQL: the lead contact sync end to end
-// (services/lead-contact-sync.js, GATE_LEAD_STATUS_FOLLOWS_CONTACT). It holds the SQL
+// (services/lead-contact-sync.js). It holds the SQL
 // predicates the JavaScript fake in lead-contact-sync.test.js cannot: a text a person sent
 // versus an automated one, a connected call versus a voicemail, the live-lead filter, and the
 // real status writer (markLeadContactedFromEvidence) with its first-response stamp. Fixture
@@ -67,7 +67,7 @@ jest.setTimeout(30000);
     duration_seconds: 120, created_at: AT(10), updated_at: AT(10), ...fields,
   });
   const read = (id) => database('leads').where({ id }).first();
-  const sync = (mode = 'true') => runLeadContactSync({ dbi: database, now: NOW, mode });
+  const sync = () => runLeadContactSync({ dbi: database, now: NOW });
 
   test('a delivered staff text after first contact moves the lead and stamps response minutes from the text\'s time', async () => {
     const l = await lead();
@@ -276,19 +276,6 @@ jest.setTimeout(30000);
     const result = await sync();
     expect(result.skipped.reopened_by_person).toBe(1);
     expect((await read(l.id)).status).toBe('new');
-  });
-
-  test('gate off and gate shadow write nothing', async () => {
-    const l = await lead();
-    await staffText();
-    expect(await sync('off')).toEqual({ skipped: 'gate_off' });
-    const shadow = await sync('shadow');
-    expect(shadow.moved).toBe(1);
-    expect(shadow.byEvidence).toEqual({ staff_text: 1 });
-    const row = await read(l.id);
-    expect(row.status).toBe('new');
-    expect(row.response_time_minutes).toBe(null);
-    expect(await database('lead_activities')).toHaveLength(0);
   });
 
   test('a second run moves nothing more', async () => {

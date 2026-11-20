@@ -140,6 +140,20 @@ describe('holdUnverifiedLead', () => {
     expect(mockState.inserts[1].row.description).toContain('Saw our yard sign at: 12 Sample Sign Ct');
   });
 
+  test('a quiz request keeps its answers on the row and names them in the note', async () => {
+    await holdUnverifiedLead({
+      intake: intakeFor({ ...BODY, timeline: 'this_week', quiz: { kind: 'lawn', seeing: 'weeds', property: 'house', typed: 'ignored' } }),
+    });
+    expect(JSON.parse(mockState.inserts[0].row.extracted_data).quiz).toEqual({ kind: 'lawn', seeing: 'weeds', property: 'house' });
+    expect(mockState.inserts[1].row.description).toContain(' Lawn Quiz: Weeds, house, wants it this week.');
+  });
+
+  test('a request with no quiz adds no quiz line', async () => {
+    await holdUnverifiedLead({ intake: intakeFor(BODY) });
+    expect(JSON.parse(mockState.inserts[0].row.extracted_data).quiz).toBeUndefined();
+    expect(mockState.inserts[1].row.description).not.toMatch(/Quiz/);
+  });
+
   test('a long message is cut by code point, never mid-emoji', async () => {
     await holdUnverifiedLead({ intake: intakeFor({ ...BODY, message: `${'a'.repeat(999)}\u{1F41C}\u{1F41C}` }) });
     const kept = JSON.parse(mockState.inserts[0].row.extracted_data).message;

@@ -792,7 +792,7 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
 });
 
 describe('sendEstimateNow — the app-sent new-home estimate (GATE_MOVING_AUTO_SEND)', () => {
-  const GATES = ['GATE_MOVING_FLOW', 'GATE_MOVING_ESTIMATE', 'GATE_MOVING_AUTO_ESTIMATE', 'GATE_MOVING_AUTO_SEND'];
+  const GATES = ['GATE_MOVING_ESTIMATE', 'GATE_MOVING_AUTO_ESTIMATE', 'GATE_MOVING_AUTO_SEND'];
   const saved = {};
   beforeEach(() => {
     for (const gate of GATES) { saved[gate] = process.env[gate]; process.env[gate] = 'true'; }
