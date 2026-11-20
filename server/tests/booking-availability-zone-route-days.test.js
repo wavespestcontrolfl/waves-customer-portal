@@ -177,12 +177,19 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
 
   // An address in a town no zone lists takes the trusted customer's city on file, the zone its booking falls back to
   // (slot-zone.js leadBookingZone), so the list never offers a time that booking's zone check refuses (pre-push P1 on
-  // aa30bd86f1). With no customer city it stays in no zone and gets the full list, as before.
-  test.each([['Venice', [D1]], [null, [D, D1, D2]]])('an address in no zone, the customer\'s city on file %s', async (customerCity, dates) => {
+  // aa30bd86f1). Only for that customer's own property (pre-push P1 on 1ef6ba1b16): on another street the city on
+  // file named the old address, and phase 1 books that street with its own city. With no customer city, or on another
+  // street, the address stays in no zone and gets the full list, as before.
+  test.each([
+    ['Venice, at that address', { city: 'Venice' }, [D1]],
+    ['empty', { city: null }, [D, D1, D2]],
+    ['Venice, for another street', { city: 'Venice', address_line1: '1 Other Test St' }, [D, D1, D2]],
+  ])('an address in no zone, the customer\'s city on file %s', async (_label, edit, dates) => {
     stopRows = [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null }];
+    const customer = { address_line1: VENICE.line1, zip: VENICE.zip, ...edit };
     const built = await require('../routes/inspection-public')._test.buildAvailabilityForLead(
       { lat: 27.12, lng: -82.44 },
-      { rangeFrom: D, rangeTo: D2, config: CONFIG, duration: 60, offer: true, address: { ...VENICE, city: 'Laurel' }, customer: { city: customerCity } },
+      { rangeFrom: D, rangeTo: D2, config: CONFIG, duration: 60, offer: true, address: { ...VENICE, city: 'Laurel' }, customer },
     );
     expect(datesOf(built)).toEqual(dates);
   });

@@ -868,6 +868,10 @@ const customerAddressFields = (cust) => ({
 // pin): phase 1 books another street on a corrected or another profile, with the typed city, so the city on file
 // there named the old street, and its zone would drop another truck's opening the booking admits (pre-push P1 on
 // 1ef6ba1b16). Phase 1 makes the profile it books this lead's trusted one, so a retry's list reads that profile.
+// The commit's zone re-check compares with the same city (zoneFallbackCity).
+const zoneFallbackCity = (customer, address, coords) => (
+  customer && address && profileMatchesAddress(customer, address, coords) ? customer.city : null
+);
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
@@ -910,7 +914,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     ...(zoneInputs ? {
       zoneFunnelAddress: zoneInputs.address,
       zoneFunnelCity: zoneInputs.city,
-      zoneFunnelCustomerCity: customer && profileMatchesAddress(customer, address, coords) ? customer.city : null,
+      zoneFunnelCustomerCity: zoneFallbackCity(customer, address, coords),
     } : {}),
   });
 }
@@ -2813,7 +2817,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // no zone.
     // Every build here passes that address and this customer, so it reads the
     // same zone. When the city decides and is not the city the first build
-    // read, the slot is re-checked; a 409 answers fresh times only as
+    // read (zoneFallbackCity: none for another street), the slot is re-checked; a 409 answers fresh times only as
     // nextCommitRefresh says. With the funnel off the booking reads no zone
     // address, so nothing is looked up here. A failed lookup re-checks nothing
     // (logged); the booking still checks its own zone under its date lock
@@ -2827,7 +2831,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       : { fromCustomer: false };
     const nextCommit = { lead, verified, resolved, custRow, bookingAddress, bookingLocation, locationMoved };
     const bookingSlot = await revalidateSlotAt(bookingLocation, {
-      slot, moved: locationMoved, zoneMoved: fromCustomer && custRow.city !== checkedCustomer?.city, zone: bookingZone,
+      slot, moved: locationMoved, zoneMoved: fromCustomer && custRow.city !== zoneFallbackCity(checkedCustomer, resolved.address, resolved.location), zone: bookingZone,
       date, time, config, catalog, leadId: lead.id, address: bookingAddress, customer: custRow,
     });
     if (!bookingSlot) return sendSlotTaken(res, { ...(await nextCommitRefresh(nextCommit)), range, config, catalog, leadId: lead.id });

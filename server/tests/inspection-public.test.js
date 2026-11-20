@@ -2426,6 +2426,39 @@ describe('POST /:token commit', () => {
       expect((await require('../services/slot-zone').leadBookingZone(db, zoneAddress, booking.authedCustomer.city)).zone).toBeNull();
     });
 
+    // Pre-push P1 on 1ef6ba1b16, its other half: the trusted prospect (with visits, so never corrected in place) is on
+    // another street, so the list and the commit's first build read no city fallback, and the first build gives the hour
+    // to tech-1. Phase 1 books the account's sibling at the typed street, at its own pin, whose city on file (Nokomis,
+    // the prospect's too) decides the far-south zone. The commit compares that city with the one its first build read
+    // (none), so it re-checks per truck and books the zone truck, tech-2.
+    test('a typed address in no zone on a sibling\'s street: the first build reads no city, the re-check books the zone truck', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
+      firstResults.leads = { ...LEAD_ROW, customer_id: null };
+      firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
+      listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-prospect' }) }];
+      const prospect = { id: 'cust-prospect', account_id: 'acct-p', phone: '9415550101', address_line1: '1 Typo St', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34275', latitude: 27.4, longitude: -82.5 };
+      const sibling = { id: 'cust-sibling', account_id: 'acct-p', phone: '9415550101', address_line1: '5 Sibling St', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34275', latitude: 27.45, longitude: -82.55 };
+      firstResults.customers = (q) => (q.conds.id === 'cust-sibling' ? sibling : prospect);
+      listResults.customers = [prospect, sibling];
+      listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-old' }] : []);
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockImplementation(async () => ({ location: { lat: 27.45, lng: -82.55 } })); // the sibling's own pin
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: [{
+          start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM',
+          technician_id: a.zoneFunnelCustomerCity === 'Nokomis' ? 'tech-2' : 'tech-1',
+        }] }],
+      }));
+      const smsToken = mintLeadConsultationToken(LEAD_ID, undefined, require('../utils/lead-consultation-token').smsChannelFor(LEAD_ROW.phone));
+
+      const booked = await callPost(smsToken, { date: FUTURE_DATE, time: '09:00', address: '5 Sibling St, Laurel, FL 34275' });
+
+      expect(booked.statusCode).toBe(200);
+      expect(mockBuildAvailability.mock.calls.map(([a]) => a.zoneFunnelCustomerCity)).toEqual([null, 'Nokomis']);
+      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ technician_id: 'tech-2', authedCustomer: { id: 'cust-sibling' } });
+    });
+
     // Pre-push P1 on e88162fc27: with no address typed, the page's retry sends none again, and the next commit's
     // resolver (resolveServiceAddress) reads the trusted profile phase 1 linked. The refusal builds no times of its
     // own: the page reloads its list (GET), which reads that profile and its address, so the times it offers are built
