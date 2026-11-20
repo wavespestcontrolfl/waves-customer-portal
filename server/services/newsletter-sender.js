@@ -7,7 +7,8 @@
  *   SQL-expressible (applied directly in buildSubscriberQuery):
  *     { sources?: string[], tags?: string[], customersOnly?: boolean,
  *       leadsOnly?: boolean, region_zone?: string[], subscriber_ids?: number[],
- *       holdout?: 'pest-insider' }   (holdout: also re-checked per batch at dispatch)
+ *       holdout?: 'pest-insider', address_keys?: { [id]: string } }
+ *   (holdout and address_keys: re-checked per batch at dispatch)
  *   Service-line / membership (NOT a column — resolved to a customer_id set
  *   via newsletter-audience-profiles, then injected as a whereIn):
  *     { has_service?: string[], missing_service?: string[],
@@ -475,25 +476,48 @@ function buildSubscriberQuery(segmentFilter, customerIds = null) {
   return narrowToPlannedAudience(q, f);
 }
 
-// Holdouts a send's segment_filter can name (segment_filter.holdout): customers
-// a planned issue must never reach. The plan already left them out; the
-// per-chunk re-check in sendCampaign asks again on each recipient's CURRENT
-// customer link, so a lead that became a held-out customer after the plan, or
-// a relink to another customer, is skipped on a first send and on a resume.
+// Planned audiences a send's segment_filter can name (segment_filter.holdout):
+// a planned issue's own rules, which the per-chunk re-check in sendCampaign
+// asks again right before each batch, on a first send and on a resume.
+// - heldOut(customerId): customers the issue must never reach, asked on each
+//   recipient's CURRENT customer link, so a lead that became a held-out
+//   customer after the plan, or a relink to another customer, is skipped.
+// - addressKey(email): the key of an address. segment_filter.address_keys
+//   holds, by subscriber id, the key of the address the plan qualified; a
+//   recipient about to be mailed at any other address is skipped, because the
+//   plan chose that mailbox, not whatever address the row carries now.
 const SEND_HOLDOUTS = Object.freeze({
-  'pest-insider': (customerId) => require('./pest-insider/audience').isHeldOut(customerId),
+  'pest-insider': Object.freeze({
+    heldOut: (customerId) => require('./pest-insider/audience').isHeldOut(customerId),
+    addressKey: (email) => require('./pest-insider/audience').addressKey(email),
+  }),
 });
 
-// The holdout check a send names, or null when it names none.
+// The planned-audience rules a send names, or null when it names none.
 function sendHoldout(segmentFilter) {
   const name = segmentFilter?.holdout;
   return name != null && Object.hasOwn(SEND_HOLDOUTS, name) ? SEND_HOLDOUTS[name] : null;
 }
 
+// True when a recipient still belongs to its planned issue: not held out on
+// the customer linked now, and about to be mailed at the address the plan
+// qualified. A missing or malformed address_keys keeps nobody.
+function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerId, email) {
+  if (plan.heldOut(customerId)) return false;
+  const keys = segmentFilter?.address_keys;
+  if (!keys || typeof keys !== 'object' || Array.isArray(keys)) return false;
+  const id = String(subscriberId);
+  return Object.hasOwn(keys, id) && typeof keys[id] === 'string' && keys[id] === plan.addressKey(email);
+}
+
 // The keys a planned issue's segment_filter carries (a Waves Pest Insider
 // issue's audience, fixed when the issue is planned: see
 // services/pest-insider/audience.js).
-// - holdout: a SEND_HOLDOUTS name. One the sender does not know matches nobody.
+// - holdout: a SEND_HOLDOUTS name. One the sender does not know matches
+//   nobody, and so does a send that names one with no subscriber_ids: a
+//   planned issue never falls back to the whole list.
+// - address_keys: { [subscriber id]: key of the address the plan qualified },
+//   read by the per-chunk re-check in sendCampaign (keepsPlannedAudience).
 // - subscriber_ids: an exact list of newsletter_subscribers ids. Absent or
 //   null = no constraint. Present = only those ids, still under every rule in
 //   buildSubscriberQuery. A present-but-unusable value (not an array, an empty
@@ -505,7 +529,7 @@ function sendHoldout(segmentFilter) {
 const PG_INTEGER_MAX = 2147483647;
 function narrowToPlannedAudience(q, { subscriber_ids: ids, holdout }) {
   if (holdout != null && !Object.hasOwn(SEND_HOLDOUTS, holdout)) return q.whereRaw('1 = 0');
-  if (ids == null) return q;
+  if (ids == null) return holdout != null ? q.whereRaw('1 = 0') : q;
   const usable = Array.isArray(ids) && ids.length > 0
     && ids.every((id) => Number.isInteger(id) && id > 0 && id <= PG_INTEGER_MAX);
   return usable ? q.whereRaw('newsletter_subscribers.id = ANY(?::int[])', [ids]) : q.whereRaw('1 = 0');
@@ -1128,11 +1152,15 @@ async function sendCampaign(sendId, opts = {}) {
       const freshCustomerBySub = new Map((await excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
       ))).select('id', 'customer_id')).map((r) => [r.id, r.customer_id ?? null]));
-      // A send that names a holdout (a planned Waves Pest Insider issue) also
-      // skips anyone whose customer, as linked right now, is held out.
-      const heldOut = sendHoldout(send.segment_filter);
-      const stillEligible = heldOut
-        ? new Map([...freshCustomerBySub].filter(([, customerId]) => !heldOut(customerId)))
+      // A send that names a planned audience (a Waves Pest Insider issue) also
+      // skips anyone held out on the customer linked right now, and anyone
+      // about to be mailed at an address the plan did not qualify.
+      const plan = sendHoldout(send.segment_filter);
+      const mailedAddressBySub = new Map(chunkToSend.map((s) => [s.id, s.email]));
+      const stillEligible = plan
+        ? new Map([...freshCustomerBySub].filter(([subscriberId, customerId]) => keepsPlannedAudience(
+          plan, send.segment_filter, subscriberId, customerId, mailedAddressBySub.get(subscriberId),
+        )))
         : freshCustomerBySub;
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
       if (ineligible.length) {
@@ -1146,7 +1174,7 @@ async function sendCampaign(sendId, opts = {}) {
         // terminalized is not counted as skipped here as well.
         skippedIneligible += skippedNow;
         skippedAtDispatch += skippedNow;
-        logger.info(`[newsletter] send ${send.id} skipped ${skippedNow}/${ineligible.length} recipient(s) no longer eligible at dispatch (archived customer / not active / held out)`);
+        logger.info(`[newsletter] send ${send.id} skipped ${skippedNow}/${ineligible.length} recipient(s) no longer eligible at dispatch (archived customer / not active / held out / address changed since the plan)`);
         chunkToSend = chunkToSend.filter((s) => stillEligible.has(s.id));
         claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean);
         if (!chunkToSend.length) continue;

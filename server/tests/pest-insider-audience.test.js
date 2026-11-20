@@ -16,7 +16,7 @@ const crypto = require('crypto');
 const NewsletterSubscribers = require('../services/newsletter-subscribers');
 const { buildSubscriberQuery } = require('../services/newsletter-sender');
 const {
-  isHeldOut, selectIssueAudience, audienceSegmentFilter, WARM_DAYS, HOLDOUT_PERCENT, HOLDOUT_SALT, HOLDOUT_NAME,
+  isHeldOut, addressKey, selectIssueAudience, audienceSegmentFilter, WARM_DAYS, HOLDOUT_PERCENT, HOLDOUT_SALT, HOLDOUT_NAME,
 } = require('../services/pest-insider/audience');
 
 // Runs a knex where-builder callback against a recorder: each call as [method, ...args], with a
@@ -88,16 +88,21 @@ describe('selectIssueAudience', () => {
 
   test('keeps leads and kept customers, drops held-out customers, and counts each', async () => {
     buildSubscriberQuery.mockReturnValue(fakeQuery([
-      { id: 4, customer_id: KEPT[0] },
-      { id: 7, customer_id: HELD[0] },
-      { id: 9, customer_id: null },
-      { id: '12', customer_id: KEPT[1] },
-      { id: 15, customer_id: HELD[1] },
+      { id: 4, customer_id: KEPT[0], email: 'four@example.invalid' },
+      { id: 7, customer_id: HELD[0], email: 'seven@example.invalid' },
+      { id: 9, customer_id: null, email: 'Nine@Example.invalid' },
+      { id: '12', customer_id: KEPT[1], email: 'twelve@example.invalid' },
+      { id: 15, customer_id: HELD[1], email: 'fifteen@example.invalid' },
     ]));
     const audience = await selectIssueAudience({ asOf: new Date('2026-12-02T12:00:00Z') });
-    expect(audience).toEqual({ subscriberIds: [4, 9, 12], counts: { warm: 5, heldOut: 2, recipients: 3 } });
+    expect(audience).toEqual({
+      subscriberIds: [4, 9, 12],
+      // The key of the address that qualified, for each kept reader.
+      addressKeys: { 4: addressKey('four@example.invalid'), 9: addressKey('nine@example.invalid'), 12: addressKey('twelve@example.invalid') },
+      counts: { warm: 5, heldOut: 2, recipients: 3 },
+    });
     expect(buildSubscriberQuery).toHaveBeenCalledWith(null);
-    expect(captured.select).toEqual(['newsletter_subscribers.id', 'newsletter_subscribers.customer_id']);
+    expect(captured.select).toEqual(['newsletter_subscribers.id', 'newsletter_subscribers.customer_id', 'newsletter_subscribers.email']);
     expect(captured.orderBy).toEqual(['newsletter_subscribers.id', 'asc']);
   });
 
@@ -119,8 +124,9 @@ describe('selectIssueAudience', () => {
         ['from', 'sendgrid_webhook_events as opened'],
         ['where', 'opened.event_type', 'open'],
         ['whereRaw', 'lower(opened.email) = lower(newsletter_subscribers.email)'],
-        ['where', 'opened.created_at', '>=', since],
-        ['where', 'opened.created_at', '<=', asOf],
+        // The open's own time; a row logged before occurred_at existed falls back to its log time.
+        ['whereRaw', 'coalesce(opened.occurred_at, opened.created_at) >= ?', [since]],
+        ['whereRaw', 'coalesce(opened.occurred_at, opened.created_at) <= ?', [asOf]],
       ]],
     ]);
   });
@@ -128,15 +134,24 @@ describe('selectIssueAudience', () => {
   test('no warm reader gives an empty list, which the sender matches to nobody', async () => {
     buildSubscriberQuery.mockReturnValue(fakeQuery([]));
     const audience = await selectIssueAudience();
-    expect(audience).toEqual({ subscriberIds: [], counts: { warm: 0, heldOut: 0, recipients: 0 } });
-    expect(audienceSegmentFilter(audience)).toEqual({ subscriber_ids: [], holdout: 'pest-insider' });
+    expect(audience).toEqual({ subscriberIds: [], addressKeys: {}, counts: { warm: 0, heldOut: 0, recipients: 0 } });
+    expect(audienceSegmentFilter(audience)).toEqual({ subscriber_ids: [], holdout: 'pest-insider', address_keys: {} });
   });
 });
 
-test('audienceSegmentFilter copies the ids and names the holdout the sender checks again at dispatch', () => {
-  const audience = { subscriberIds: [1, 2] };
+test('audienceSegmentFilter copies the ids and address keys and names the holdout the sender checks again at dispatch', () => {
+  const audience = { subscriberIds: [1, 2], addressKeys: { 1: 'key-1', 2: 'key-2' } };
   const filter = audienceSegmentFilter(audience);
   audience.subscriberIds.push(3);
+  audience.addressKeys[3] = 'key-3';
   expect(HOLDOUT_NAME).toBe('pest-insider');
-  expect(filter).toEqual({ subscriber_ids: [1, 2], holdout: 'pest-insider' });
+  expect(filter).toEqual({ subscriber_ids: [1, 2], holdout: 'pest-insider', address_keys: { 1: 'key-1', 2: 'key-2' } });
+});
+
+test('addressKey: one fixed key per mailbox, whatever the case or spaces; none for an empty address', () => {
+  // Pinned: a new prefix gives every address a new key, and a queued issue would then skip everyone.
+  expect(addressKey('a@b.com')).toBe('bf6a6e734818ab4c5a2eb5612e010e04');
+  expect(addressKey('  A@B.COM ')).toBe(addressKey('a@b.com'));
+  expect(addressKey('a@b.co')).not.toBe(addressKey('a@b.com'));
+  for (const empty of ['', '   ', null, undefined]) expect(addressKey(empty)).toBeNull();
 });

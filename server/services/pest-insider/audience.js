@@ -7,8 +7,13 @@
  * every event on a tracked Waves email: a Waves newsletter, an automation step, a template
  * message. So a repeat open counts (the delivery and message rows keep only the FIRST open),
  * and the open belongs to the address that opened it: an open by a former address, before an
- * address correction, never qualifies the new one. A later phase widens this to every
- * opted-in reader.
+ * address correction, never qualifies the new one. The window is on the open's own time
+ * (occurred_at, SendGrid's event timestamp); a row logged before that column existed uses the
+ * time the webhook logged it. A later phase widens this to every opted-in reader.
+ *
+ * The plan keeps, for each reader, a key of the address that qualified (address_keys), and the
+ * sender mails a reader only at that address: if the subscriber's address changes before the
+ * send, on a first send or a resume, that reader is skipped.
  *
  * Holdout: a fixed 10% of customer-linked subscribers never get an issue, so the issues'
  * effect on renewals and add-ons can be measured against them. Membership is a hash of the
@@ -24,8 +29,8 @@
  * unsubscribes after the issue is planned still gets nothing.
  *
  * The issue's newsletter_sends row carries the result as segment_filter { subscriber_ids,
- * holdout } (audienceSegmentFilter); buildSubscriberQuery mails only those ids and fails
- * closed on a malformed or empty list, or on a holdout name it does not know.
+ * holdout, address_keys } (audienceSegmentFilter); buildSubscriberQuery mails only those ids
+ * and fails closed on a malformed, empty or missing list, or on a holdout name it does not know.
  */
 'use strict';
 
@@ -38,6 +43,8 @@ const HOLDOUT_PERCENT = 10;
 const HOLDOUT_SALT = 'waves-pest-insider-holdout-v1';
 // The name the send's segment_filter gives this holdout (newsletter-sender.js SEND_HOLDOUTS).
 const HOLDOUT_NAME = 'pest-insider';
+// Changing the prefix gives every address a new key: a queued issue would then skip everyone.
+const ADDRESS_KEY_PREFIX = 'waves-pest-insider-address-v1';
 
 /** True when this customer is in the fixed holdout group. A subscriber with no customer never is. */
 function isHeldOut(customerId) {
@@ -47,11 +54,21 @@ function isHeldOut(customerId) {
 }
 
 /**
+ * A fixed key for a mailbox address (trimmed, lower-cased), or null for an empty one. The plan
+ * stores it per reader instead of the address; the sender compares it with the address it is
+ * about to mail.
+ */
+function addressKey(email) {
+  const normalized = String(email ?? '').trim().toLowerCase();
+  if (!normalized) return null;
+  return crypto.createHash('sha256').update(`${ADDRESS_KEY_PREFIX}:${normalized}`).digest('hex').slice(0, 32);
+}
+
+/**
  * The warm readers as a query: every subscriber the send path would mail whose CURRENT address
- * has an open event in the SendGrid webhook log from `since` through `until` (both inclusive),
- * so a plan made for a past moment counts only the opens before it. The log's time is when the
- * webhook recorded the event, seconds after the open. Ordered by id; selects the id and the
- * linked customer only.
+ * has an open event in the SendGrid webhook log from `since` through `until` (both inclusive,
+ * on the open's own time), so a plan made for a past moment counts only the opens before it.
+ * Ordered by id; selects the id, the linked customer and the address.
  */
 function warmAudienceQuery({ since, until }) {
   // Lazy: the sender pulls the whole newsletter stack; the planner loads this only when it runs.
@@ -65,18 +82,19 @@ function warmAudienceQuery({ since, until }) {
           .from('sendgrid_webhook_events as opened')
           .where('opened.event_type', 'open')
           .whereRaw('lower(opened.email) = lower(newsletter_subscribers.email)')
-          .where('opened.created_at', '>=', since)
-          .where('opened.created_at', '<=', until);
+          .whereRaw('coalesce(opened.occurred_at, opened.created_at) >= ?', [since])
+          .whereRaw('coalesce(opened.occurred_at, opened.created_at) <= ?', [until]);
       });
     })
-    .select('newsletter_subscribers.id', 'newsletter_subscribers.customer_id')
+    .select('newsletter_subscribers.id', 'newsletter_subscribers.customer_id', 'newsletter_subscribers.email')
     .orderBy('newsletter_subscribers.id', 'asc');
 }
 
 /**
  * The issue's audience as of `asOf`: subscriber ids (ascending) and the counts behind them.
  * Runs the send path's archived-link relink sweep first, as every audience read does.
- * @returns {Promise<{ subscriberIds: number[], counts: { warm: number, heldOut: number, recipients: number } }>}
+ * addressKeys holds, by subscriber id, the key of the address that qualified.
+ * @returns {Promise<{ subscriberIds: number[], addressKeys: Object<string, string>, counts: { warm: number, heldOut: number, recipients: number } }>}
  */
 async function selectIssueAudience({ asOf = new Date() } = {}) {
   const db = require('../../models/db');
@@ -86,23 +104,29 @@ async function selectIssueAudience({ asOf = new Date() } = {}) {
   const warm = await warmAudienceQuery({ since: new Date(asOf.getTime() - WARM_DAYS * DAY_MS), until: asOf });
 
   const subscriberIds = [];
+  const addressKeys = {};
   let heldOut = 0;
   for (const row of warm) {
-    if (isHeldOut(row.customer_id)) heldOut += 1;
-    else subscriberIds.push(Number(row.id));
+    if (isHeldOut(row.customer_id)) {
+      heldOut += 1;
+    } else {
+      const id = Number(row.id);
+      subscriberIds.push(id);
+      addressKeys[id] = addressKey(row.email);
+    }
   }
-  return { subscriberIds, counts: { warm: warm.length, heldOut, recipients: subscriberIds.length } };
+  return { subscriberIds, addressKeys, counts: { warm: warm.length, heldOut, recipients: subscriberIds.length } };
 }
 
 /**
- * The segment_filter that makes the send path mail exactly this audience, with the holdout
- * checked again at send time.
+ * The segment_filter that makes the send path mail exactly this audience, each reader at the
+ * address that qualified, with the holdout checked again at send time.
  */
 function audienceSegmentFilter(audience) {
-  return { subscriber_ids: [...audience.subscriberIds], holdout: HOLDOUT_NAME };
+  return { subscriber_ids: [...audience.subscriberIds], holdout: HOLDOUT_NAME, address_keys: { ...audience.addressKeys } };
 }
 
 module.exports = {
-  isHeldOut, warmAudienceQuery, selectIssueAudience, audienceSegmentFilter,
+  isHeldOut, addressKey, warmAudienceQuery, selectIssueAudience, audienceSegmentFilter,
   WARM_DAYS, HOLDOUT_PERCENT, HOLDOUT_SALT, HOLDOUT_NAME,
 };

@@ -1,9 +1,10 @@
 /**
  * The Waves Pest Insider warm audience on real Postgres (services/pest-insider/audience.js,
  * warmAudienceQuery): an open event in the SendGrid webhook log, on the subscriber's CURRENT
- * address, inside the window, under every send-path rule. Covers what the toSQL shape test
- * cannot: a repeat open inside the window counts when the first open was before it, an open
- * by a former address does not qualify a corrected one, and both window bounds hold.
+ * address, inside the window on the open's own time, under every send-path rule. Covers what
+ * the toSQL shape test cannot: a repeat open inside the window counts when the first open was
+ * before it, an open by a former address does not qualify a corrected one, a batch logged late
+ * counts by when the open happened, and both window bounds hold.
  * Self-skips unless DATABASE_URL is set (CI's DB-gated suites step).
  * Safe on a shared database: synthetic rows, asserted by id, removed after.
  */
@@ -39,10 +40,13 @@ postgres('warmAudienceQuery (real Postgres)', () => {
     ids[name] = row.id;
   }
 
-  async function logged(email, eventType, when) {
+  // An event SendGrid reported at `when` and the webhook logged at `loggedAt` (the same moment
+  // unless a late batch); occurredAt null = a row logged before the column existed.
+  async function logged(email, eventType, when, { loggedAt = when, occurredAt = when } = {}) {
     const eventId = `pi-warm-${tag}-${created.events.length}`;
     await db('sendgrid_webhook_events').insert({
-      event_id: eventId, event_type: eventType, email, status: 'processed', processed_at: when, created_at: when, updated_at: when,
+      event_id: eventId, event_type: eventType, email, status: 'processed',
+      occurred_at: occurredAt, processed_at: loggedAt, created_at: loggedAt, updated_at: loggedAt,
     });
     created.events.push(eventId);
   }
@@ -70,6 +74,12 @@ postgres('warmAudienceQuery (real Postgres)', () => {
     await logged(address('atStart'), 'open', since);
     await subscriber('atEnd');
     await logged(address('atEnd'), 'open', until);
+    // A late batch: opened before the window, logged inside it. The open's own time decides.
+    await subscriber('lateBatch');
+    await logged(address('lateBatch'), 'open', at(since, -1), { loggedAt: at(since, 2) });
+    // Logged before occurred_at existed: the log time stands in.
+    await subscriber('legacyRow');
+    await logged(address('legacyRow'), 'open', at(until, -3), { occurredAt: null });
     // The send path's own rules still apply: an unsubscribed reader who opened is left out.
     await subscriber('unsubscribed', { status: 'unsubscribed' });
     await logged(address('unsubscribed'), 'open', at(until, -2));
@@ -85,6 +95,6 @@ postgres('warmAudienceQuery (real Postgres)', () => {
     const mine = new Set(created.subscribers);
     const warm = (await warmAudienceQuery({ since, until })).map((row) => row.id).filter((id) => mine.has(id));
     const byId = (a, b) => a - b;
-    expect(warm).toEqual([ids.recent, ids.repeat, ids.mixedCase, ids.atStart, ids.atEnd].sort(byId));
+    expect(warm).toEqual([ids.recent, ids.repeat, ids.mixedCase, ids.atStart, ids.atEnd, ids.legacyRow].sort(byId));
   });
 });

@@ -49,6 +49,14 @@ describe('subscriber_ids', () => {
   });
 
   test.each([
+    ['with no list', {}],
+    ['with a null list', { subscriber_ids: null }],
+  ])('a send that names the holdout %s matches nobody, never the whole list', (_label, filter) => {
+    const { sql } = shapeOf({ ...filter, holdout: 'pest-insider' });
+    expect(sql).toMatch(/1 = 0/);
+  });
+
+  test.each([
     ['an unknown name', 'pest-insider-v2'],
     ['an inherited property name', 'toString'],
     ['a number', 5],
@@ -85,14 +93,14 @@ describe('warmAudienceQuery', () => {
     const { sql, bindings } = warmAudienceQuery({ since, until }).toSQL();
     expect(bindings.slice(0, base.bindings.length)).toEqual(base.bindings);
     expect(bindings.slice(-3)).toEqual(['open', since, until]);
-    // One group, ANDed with every send-path rule before it.
+    // One group, ANDed with every send-path rule before it, on the open's own time.
     expect(sql).toContain(' and (exists (select 1 from "sendgrid_webhook_events" as "opened" where "opened"."event_type" = ?'
       + ' and lower(opened.email) = lower(newsletter_subscribers.email)'
-      + ' and "opened"."created_at" >= ? and "opened"."created_at" <= ?)) order by');
+      + ' and coalesce(opened.occurred_at, opened.created_at) >= ? and coalesce(opened.occurred_at, opened.created_at) <= ?)) order by');
     // The address alone decides: a subscriber-id match would let a former address's open qualify a corrected one.
     expect(sql.slice(base.sql.length)).not.toMatch(/subscriber_id/);
     // The send path query opens with its WITH clauses; the main select after them reads two columns.
-    expect(sql).toContain(') select "newsletter_subscribers"."id", "newsletter_subscribers"."customer_id" from "newsletter_subscribers" where ');
+    expect(sql).toContain(') select "newsletter_subscribers"."id", "newsletter_subscribers"."customer_id", "newsletter_subscribers"."email" from "newsletter_subscribers" where ');
     expect(sql).toMatch(/order by "newsletter_subscribers"\."id" asc$/);
   });
 });
