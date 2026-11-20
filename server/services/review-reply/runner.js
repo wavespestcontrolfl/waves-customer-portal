@@ -958,6 +958,11 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       return { outcome: 'skipped', reason: code };
     }
     if (transientStale) code = 'account_read_failed';
+    // Google showed an owner reply on an earlier try that was not recorded
+    // here. A later failure that learns nothing new (a 403 or 404 on the live
+    // read, a busy lock) does not undo that: the row keeps reconcile_failed,
+    // so its retry, its park bell and the Monday list still say check Google.
+    if (merged.auto_reply_reason === CODES.RECONCILE_FAILED) code = CODES.RECONCILE_FAILED;
     const attempts = (merged.auto_reply_attempts || 0) + 1;
     // Every transient class (lock contention, unexpected) shares ONE retry
     // ceiling (MAX_ATTEMPTS); a Google failure that Google may still accept

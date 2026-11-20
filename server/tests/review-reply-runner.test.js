@@ -679,6 +679,25 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockNotify.mock.calls.find((c) => c[3]?.metadata?.reason === 'reconcile_failed')?.[1]).toBe('Review reply needs reconciling');
   });
 
+  test('a later failure that learns nothing new keeps reconcile_failed: a 403 on the live read retries and parks as reconcile_failed, never google_failed', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const fp = Runner.reviewFingerprint(row());
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
+    mockPublish.mockRejectedValueOnce(googleFailure(403));
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 2 });
+    state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
+    // jsonb reads back as an object (the fake keeps the written string).
+    state.rows[0].auto_reply_grounding = JSON.parse(state.rows[0].auto_reply_grounding);
+    mockPublish.mockRejectedValueOnce(googleFailure(404));
+    mockNotify.mockClear();
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 3 });
+    expect(mockNotify.mock.calls.find((c) => c[3]?.metadata?.reason === 'reconcile_failed')?.[1]).toBe('Review reply needs reconciling');
+    expect(mockNotify.mock.calls.some((c) => c[1] === 'Review reply needs you')).toBe(false);
+    expect(mockDraft).not.toHaveBeenCalled();
+  });
+
   test('a failed live-reply reconciliation retries instead of closing the row as already_replied (codex r74)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     state.rows = [row()];
