@@ -47,6 +47,7 @@ const { HOLD_FLAG, isDisputeHoldReason, embedPriorHoldReason, withoutPriorHoldRe
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
 const { pairCustomersAtSameAddress } = require('./customer-address-match');
+const { sameStreetAddress } = require('./estimator-engine/address-compare');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { isResidenceProperty } = require('./customer-properties');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
@@ -1534,14 +1535,22 @@ function newSodBeforeImage(row) {
 //   addressless one that takes the loser's whole address, has the loser's home after the merge. A loser with no
 //   street address (no address, or one without a house number: a PO box, a bare street name; normalizeStreetKey,
 //   the household matcher's rule) is unknown: false. Two customers can share a mailing address and not a home.
+//   The two homes compare by the canonical comparator the duplicates queue confirms one household with
+//   (sameStreetAddress, requireExactUnit; pairCustomersAtSameAddress): the house number stays apart from the street
+//   ("12 34th St" is not "123 4th St"), street words compare canonically ("Street"/"St", "Northeast"/"NE"), a unit
+//   on one side only is another home, and a ZIP or a city on both sides must agree. (homesDiffer squashes the
+//   street to bare letters and digits, which is right for an address edit's typing, not for two records.)
 // - winnerStays: the kept customer's own home is unchanged, by the test an address edit uses (homesDiffer, as in
 //   propagateCustomerAddressChange). A backfilled unit or a first address changes it, so their own timer is
 //   settled as an address edit would settle it (cleared), never kept on a home it was not entered for.
 function timerPremiseOf(winner, loser) {
   const fanout = require('./customer-address-fanout');
   const after = { ...winner, ...predictWinnerBackfills(winner, loser).backfills };
+  // One customer row's address as one line, the household matcher's form (customer-address-match).
+  const line = (row) => [row?.address_line1, row?.address_line2, row?.city, row?.zip].filter(Boolean).join(', ');
   return {
-    loserFollows: !!normalizeStreetKey(loser?.address_line1) && !fanout.homesDiffer(after, loser),
+    loserFollows: !!normalizeStreetKey(loser?.address_line1)
+      && sameStreetAddress(line(after), line(loser), { requireExactUnit: true }),
     winnerStays: !fanout.homesDiffer(winner, after),
   };
 }
@@ -1601,6 +1610,22 @@ function movedPrefTimerToUndo(recorded, returnedPrefIds) {
     || { row_id: recorded.moved_pref_new_sod?.row_id || (Array.isArray(movedIds) ? movedIds[0] : null), before: controllerTimerOf(null) };
   if (!entry.row_id || !returnedPrefIds.has(entry.row_id)) return null;
   return { ...entry, left: entry.kept ? entry.before : clearedControllerTimer() };
+}
+
+// Two preference rows fold (both customers have one; mergeSingletonPrefRow): the fold can overwrite or clear the kept
+// customer's timer, and it deletes the other row with its timer. Such a merge is never auto-undone (the undo refuses
+// and says to restore by hand from the journal), so the journal keeps both timers as they were, each with its owner
+// and row: { kept_customer, merged_away }, each { customer_id, row_id, brand, model, app }. null when the two rows
+// do not both exist (nothing folds) or neither holds a timer. Read under the property-preferences locks, before the
+// FK sweep folds the rows.
+async function snapshotFoldedPrefTimers(trx, winnerId, loserId) {
+  const rows = await trx('property_preferences').whereIn('customer_id', [winnerId, loserId]).forUpdate()
+    .select('id', 'customer_id', ...CONTROLLER_TIMER_FIELDS);
+  const rowOf = (customerId) => rows.find((row) => String(row.customer_id) === String(customerId));
+  const [kept, mergedAway] = [rowOf(winnerId), rowOf(loserId)];
+  if (!kept || !mergedAway || !(hasControllerTimer(kept) || hasControllerTimer(mergedAway))) return null;
+  const entry = (row) => ({ customer_id: row.customer_id, row_id: row.id, ...controllerTimerOf(row) });
+  return { kept_customer: entry(kept), merged_away: entry(mergedAway) };
 }
 
 // A whole record on a preferences row the undo returns (the new-sod record, the sprinkler timer). It changed
@@ -3704,6 +3729,8 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // loser's timer follows only to that home, and the kept customer's own timer stays only while the merge leaves
     // their home unchanged (a backfilled unit or a first address is a move for it, as for an address edit).
     const timerPremise = timerPremiseOf(winner, loser);
+    // Both customers' timers, with their owners, before the sweep folds two preference rows (journaled below).
+    const foldedPrefTimers = await snapshotFoldedPrefTimers(trx, winnerId, loserId);
     // The loser's moved preferences row whose new-sod record the merge cleared ({ row_id, before }), for the undo.
     let movedPrefNewSod = null;
     const collisionHandlers = [];
@@ -4560,6 +4587,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // The kept customer's own timer the merge cleared because only they had a preferences row and the
         // backfill changed their home (settleKeptPrefTimer): { row_id, before, home_changed_at }, or null.
         kept_customer_timer: keptPrefTimer,
+        // Both sprinkler timers as they were before two preference rows folded (snapshotFoldedPrefTimers):
+        // { kept_customer, merged_away }, or null. A fold is never auto-undone; a restore by hand reads this.
+        folded_pref_timers: foldedPrefTimers,
         // The winner's ORIGINAL customer-level autopay fields for the exact
         // columns the most-restrictive block overwrote ({ before, applied }),
         // or null when the merge left the winner's autopay alone.

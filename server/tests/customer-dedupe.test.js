@@ -718,6 +718,12 @@ describe('mergeSingletonPrefRow', () => {
       }
     });
 
+    it('the house number stays apart from the street, and street words compare canonically', async () => {
+      const at = (address_line1) => ({ address_line1, city: 'Bradenton', zip: '34205' });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('12 34th St W'), loserAddr: at('123 4th St W') })).toEqual({ [CLEARED]: X2_TEXT });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('100 1st St NE'), loserAddr: at('100 1st Street Northeast') })).toEqual({ [ADOPTED]: X2_TEXT });
+    });
+
     it('two rows fold at the same PO box: a mailing address, not a home, so the loser\'s timer is dropped', async () => {
       const PO_BOX = { address_line1: 'PO Box 42', city: 'Bradenton', zip: '34205' };
       expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }], { winnerAddr: PO_BOX, loserAddr: PO_BOX })).toEqual({ [DROPPED]: X2_TEXT });
@@ -1908,7 +1914,7 @@ describe('executeMerge', () => {
   // for the same home.
   describe('the new-sod record on a preferences row that moves whole to a winner with none', () => {
     const MOVED_ROW = { id: 'pp-1', sod_laid_on: new Date('2026-10-01T00:00:00Z'), sod_covers: 'part', sod_area: 'back lawn by the pool cage', sod_rooted_on: null };
-    async function merge(loserAddr, { hasRecord = true, timer = {}, timerReadFails = false, collide = false, noLoserRow = false, winnerAddr = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' } } = {}) {
+    async function merge(loserAddr, { hasRecord = true, timer = {}, timerReadFails = false, collide = false, noLoserRow = false, foldRows = null, winnerAddr = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' } } = {}) {
       const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', ...winnerAddr };
       const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', ...loserAddr };
       const { trx, state } = buildTrx({ winner, loser, fkRows: [{ table_name: 'property_preferences', column_name: 'customer_id' }] });
@@ -1920,7 +1926,11 @@ describe('executeMerge', () => {
           if (timerReadFails && q.args('first').includes('irrigation_controller_brand')) throw Object.assign(new Error('column does not exist'), { code: '42703' });
           return { ...(hasRecord ? MOVED_ROW : { id: 'pp-1', sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null }), ...timer };
         }
-        if (q.called('select')) return noLoserRow ? [] : [{ id: 'pp-1' }];
+        if (q.called('select')) {
+          // foldRows: both customers' rows as the timer snapshot before a fold reads them.
+          if (foldRows && q.args('select').includes('irrigation_controller_brand')) return foldRows;
+          return noLoserRow ? [] : [{ id: 'pp-1' }];
+        }
         if (q.called('update')) {
           // collide: the kept customer has a row too, so the repoint hits the unique key and the rows fold.
           if (collide && q.args('update')[0].customer_id === WINNER) throw Object.assign(new Error('duplicate key'), { code: '23505' });
@@ -2079,6 +2089,10 @@ describe('executeMerge', () => {
             [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { winnerAddr: { address_line1: null, city: null, zip: null } }, { loserFollows: true, winnerStays: false }],
             // The same PO box: a shared mailing address, not a home.
             [{ address_line1: 'P.O. Box 42', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: 'P.O. Box 42', city: 'Bradenton', zip: '34205' } }, { loserFollows: false, winnerStays: true }],
+            // The house number stays apart from the street: 123 4th St is not 12 34th St, in the same ZIP.
+            [{ address_line1: '123 4th St W', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '12 34th St W', city: 'Bradenton', zip: '34205' } }, { loserFollows: false, winnerStays: true }],
+            // Street words compare canonically: 100 1st Street Northeast is 100 1st St NE.
+            [{ address_line1: '100 1st Street Northeast', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '100 1st St NE', city: 'Bradenton', zip: '34205' } }, { loserFollows: true, winnerStays: true }],
           ]) {
             fold.mockClear();
             const { recorded } = await merge(loserAddr, { ...options, collide: true, timer: X2 });
@@ -2086,6 +2100,41 @@ describe('executeMerge', () => {
             expect(recorded.moved_pref_timer).toBe(null); // nothing moved whole
             expect(recorded.collision_handlers).toContain('property_preferences'); // never auto-undone
           }
+        } finally {
+          handlers.property_preferences = original;
+        }
+      });
+
+      it('two rows fold: both timers are journaled as they were, with their owners, for a restore by hand', async () => {
+        const handlers = dedupe._test.UNIQUE_COLLISION_HANDLERS;
+        const original = handlers.property_preferences;
+        handlers.property_preferences = jest.fn(async () => 'merged 0 fields into winner row, dropped loser row');
+        const RAIN_BIRD = { irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
+        const UNIT_4 = { address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' };
+        try {
+          const { recorded } = await merge(UNIT_4, {
+            collide: true,
+            foldRows: [{ id: 'pp-2', customer_id: WINNER, ...RAIN_BIRD }, { id: 'pp-1', customer_id: LOSER, ...X2 }],
+          });
+          expect(recorded.folded_pref_timers).toEqual({
+            kept_customer: { customer_id: WINNER, row_id: 'pp-2', ...RAIN_BIRD },
+            merged_away: { customer_id: LOSER, row_id: 'pp-1', ...X2 },
+          });
+          expect(recorded.collision_handlers).toContain('property_preferences');
+          // Only one side holds a timer: both rows are still journaled, the empty one as empty.
+          const oneSide = await merge(UNIT_4, {
+            collide: true,
+            foldRows: [{ id: 'pp-2', customer_id: WINNER, ...NO_TIMER }, { id: 'pp-1', customer_id: LOSER, ...X2 }],
+          });
+          expect(oneSide.recorded.folded_pref_timers.kept_customer).toEqual({ customer_id: WINNER, row_id: 'pp-2', ...NO_TIMER });
+          // Neither holds a timer, or only one customer has a row (nothing folds): nothing to keep.
+          const neither = await merge(UNIT_4, {
+            collide: true,
+            foldRows: [{ id: 'pp-2', customer_id: WINNER, ...NO_TIMER }, { id: 'pp-1', customer_id: LOSER, ...NO_TIMER }],
+          });
+          expect(neither.recorded.folded_pref_timers).toBe(null);
+          const single = await merge(UNIT_4, { foldRows: [{ id: 'pp-1', customer_id: LOSER, ...X2 }] });
+          expect(single.recorded.folded_pref_timers).toBe(null);
         } finally {
           handlers.property_preferences = original;
         }
