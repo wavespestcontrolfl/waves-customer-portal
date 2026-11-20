@@ -135,8 +135,11 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
   if (candidates.length === 1 && candidates[0].name) {
     // The match is saved before any Google write: Retract finds the reply by
     // this name. A failed save posts nothing (null: NO_RESOURCE, retried).
+    // Compare-and-set on the empty slot: a name the sync attached while this
+    // lookup ran wins, and the publish uses that name.
     try {
-      await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name });
+      const saved = await conn('google_reviews').where({ id: review.id }).whereNull('gbp_review_name').update({ gbp_review_name: candidates[0].name });
+      if (!saved) return (await conn('google_reviews').where({ id: review.id }).first('gbp_review_name'))?.gbp_review_name || null;
     } catch (e) {
       logger.warn(`GBP resource name not saved for review ${review.id}: ${require('../notification-service').safeErrorSummary(e)}`);
       return null;
