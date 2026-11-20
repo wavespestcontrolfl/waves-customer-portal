@@ -12255,14 +12255,6 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // under this key (the booking.js resolve → lock → re-resolve idiom).
       let acceptPreLockedCommsId = estimate.customer_id || null;
       if (acceptPreLockedCommsId) {
-        // A plan start accept re-checks the account under the property-preferences key, and the
-        // global order takes that key BEFORE the comms key (prefs advisory → comms → combined →
-        // customers row; admin-customers.js). Taken after it, the accept could deadlock with a
-        // staff tier, rate or billing edit for the same customer (codex pre-push P1). Other
-        // accepts keep main's order; the converter's later acquire is then a re-entrant no-op.
-        if (estimate.source === 'plan_start') {
-          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(acceptPreLockedCommsId)]);
-        }
         await lockCustomerComms(trx, acceptPreLockedCommsId);
       } else if (estimate.customer_phone) {
         const { match: acceptCommsPreMatch } = await matchAcceptCustomerByPhone(estimate, trx);

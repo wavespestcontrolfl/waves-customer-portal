@@ -1604,16 +1604,19 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     // The home the mint priced (codex pre-push P0): a staff address change rewrites the address
     // column above on an open quote, but never this key.
     pricedHome = planStart?.premisesKey;
-    // The property-preferences key, then the customers row FOR UPDATE, then
-    // the reads. The accept handler already took the property-preferences key
-    // and then the comms key for this estimate's customer, in the global order
-    // (codex pre-push P1), so both acquires here are re-entrant no-ops; they
-    // still cover a row whose customer changed since the handler's read. The
-    // converter that runs after this check takes the property-preferences key
-    // before its own customers row lock, so taking the row here first would
-    // deadlock against a turf-profile save that holds that key and waits for
-    // the row (codex pre-push P1). The whole row, as the mint reads it: the
-    // premises proof needs the address and the multi-home flag.
+    // Comms advisory key, then the property-preferences key, then the
+    // customers row FOR UPDATE, then the reads: the order every recurring
+    // accept already takes, because the converter that runs after this check
+    // takes the property-preferences key before its own customers row lock
+    // (codex pre-push P1). Taking the row here first would deadlock against a
+    // turf-profile save that holds that key and waits for the row; the
+    // converter's second acquire is a re-entrant no-op. Staff tier, rate and
+    // billing edits take these two keys the other way (admin-customers.js);
+    // every recurring accept on main shares that gap, so a plan-start-only
+    // order would trade it for a deadlock against an ordinary accept (codex
+    // pre-push r33/r34). All accepts move together, in their own change. The
+    // whole row, as the mint reads it: the premises proof needs the address
+    // and the multi-home flag.
     await lockCustomerComms(trx, customerId);
     if (customerId) {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
