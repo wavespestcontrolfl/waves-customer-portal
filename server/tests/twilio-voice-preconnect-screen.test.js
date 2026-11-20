@@ -137,6 +137,8 @@ describe('buildPreconnectChallengeTwiML', () => {
     for (const g of gathers) {
       expect(g).toContain('action="/api/webhooks/twilio/voice?screened=1"');
       expect(g).toContain('numDigits="1"');
+      // "Press any key" includes '#', Twilio's default finish key.
+      expect(g).toContain('finishOnKey=""');
     }
   });
 

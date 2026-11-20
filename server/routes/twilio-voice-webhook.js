@@ -896,6 +896,10 @@ function buildPreconnectChallengeTwiML(numberConfig = null) {
     input: 'dtmf',
     numDigits: 1,
     timeout: 6,
+    // '#' is Twilio's default finish key: pressed alone it ends the Gather
+    // with no digits, so the caller falls through toward voicemail. The
+    // second try says "press any key", so '#' must count as a key too.
+    finishOnKey: '',
     action: '/api/webhooks/twilio/voice?screened=1',
     method: 'POST',
   };
