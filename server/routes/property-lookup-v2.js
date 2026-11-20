@@ -233,7 +233,8 @@ async function stampLookupAttempt(address, status, reason = null, attemptId) {
 // deliberately default-mode only: refresh must go live, cacheOnly must not
 // block on a live pipeline, and persist:false is a documented
 // write-nothing mode that must not adopt a persisting run's behavior (nor
-// donate its result to one). Joiners get a structuredClone so one caller's
+// donate its result to one). strictCacheReads is out for the same reason
+// (lookupCoalesceKey). Joiners get a structuredClone so one caller's
 // mutations never alias into another's result; a failure propagates to
 // every joiner — the same outcome each would have bought separately.
 // Fail-open: several suites mock lookup-cache without the addressKey
@@ -314,6 +315,10 @@ function suiteUnitKeyForProfile(address, profile) {
 
 function lookupCoalesceKey(address, options) {
   if (options.refresh || options.cacheOnly === true || options.persist === false) return null;
+  // A strict-read run throws where a default run answers "no corrections" or
+  // a miss, so the two never share a run: a strict caller must not adopt a
+  // default result, and a default caller must not inherit a strict failure.
+  if (options.strictCacheReads === true) return null;
   if (typeof cacheAddressKey !== 'function') return null;
   try {
     const hash = cacheAddressKey(address)?.hash;
@@ -475,9 +480,15 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   // A verified-fresh row answers without re-running geocode/search/vision —
   // faster, free, and day-to-day consistent. options.refresh forces a live
   // lookup (still re-applying verified overrides and re-saving at the end).
-  const verifiedOverrides = await getVerifiedOverrides(address);
+  // options.strictCacheReads: a caller that prices with nobody watching (the
+  // plan start offer) must not read a failed cache or correction read as "no
+  // row" or "no corrections": a cached home served without its corrections
+  // prices on sizes staff already fixed. Both reads then throw
+  // LOOKUP_CACHE_READ_FAILED. Every other caller keeps the null answer.
+  const strictCacheReads = options.strictCacheReads === true;
+  const verifiedOverrides = await getVerifiedOverrides(address, { strict: strictCacheReads });
   if (!options.refresh) {
-    let cached = await getCachedLookup(address);
+    let cached = await getCachedLookup(address, { strict: strictCacheReads });
     if (cached && cachedAggregateResolvesToOwnUnit(cached.property_record, address)) {
       // Cached before own-numbered units could be resolved out of a stacked
       // association: every unit in this aggregate carries its own street

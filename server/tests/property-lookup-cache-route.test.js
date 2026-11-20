@@ -333,3 +333,63 @@ describe('performPropertyLookup cacheOnly', () => {
     expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
   });
 });
+
+// strictCacheReads: the plan start offer prices a home with nobody watching.
+// The default reads answer a failure as "no corrections" or "no row"; under
+// this option both reads throw, so an outage never becomes a price on sizes
+// staff already corrected, and never a "this home has no saved lookup".
+describe('performPropertyLookup strictCacheReads', () => {
+  const STRICT = { cacheOnly: true, persist: false, strictCacheReads: true };
+  const DEFAULT = { cacheOnly: true, persist: false };
+  // A correction made BEFORE the data was cached: the row is still a hit.
+  const corrected = () => cachedRow({
+    verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } },
+  });
+  // The correction read selects one column; the cache read selects the row.
+  const tableWith = ({ row, failOverrides = false, failCache = false }) => {
+    const builder = fakeTable({ row });
+    builder.first = async (...columns) => {
+      const overrideRead = columns.includes('verified_overrides');
+      if (overrideRead ? failOverrides : failCache) {
+        throw Object.assign(new Error(`connection lost near "${ADDRESS}"`), { code: '57P01' });
+      }
+      return row;
+    };
+    return builder;
+  };
+
+  it('a healthy strict read serves the cached home with its corrections, as the default does', async () => {
+    mockDbHandler = () => tableWith({ row: corrected() });
+    const strict = await performPropertyLookup(ADDRESS, STRICT);
+    const normal = await performPropertyLookup(ADDRESS, DEFAULT);
+    expect(strict.meta.cache).toBe('hit');
+    expect(strict.enriched.lotSqFt).toBe(7200);
+    expect(normal.enriched.lotSqFt).toBe(7200);
+  });
+
+  it('a failed correction read followed by a cache hit: the default serves the UNCORRECTED home, strict throws', async () => {
+    mockDbHandler = () => tableWith({ row: corrected(), failOverrides: true });
+    // The gap this option closes: the stored lot is 10,043 and staff corrected it to 7,200.
+    const normal = await performPropertyLookup(ADDRESS, DEFAULT);
+    expect(normal.meta.cache).toBe('hit');
+    expect(normal.enriched.lotSqFt).toBe(10043);
+
+    const error = await performPropertyLookup(ADDRESS, STRICT).catch((err) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.code).toBe('LOOKUP_CACHE_READ_FAILED');
+    expect(error.message).not.toContain('Rock Creek');
+  });
+
+  it('a failed cache read: the default answers a miss, strict throws', async () => {
+    mockDbHandler = () => tableWith({ row: corrected(), failCache: true });
+    expect(await performPropertyLookup(ADDRESS, DEFAULT)).toBeNull();
+    await expect(performPropertyLookup(ADDRESS, STRICT)).rejects.toMatchObject({ code: 'LOOKUP_CACHE_READ_FAILED' });
+  });
+
+  it('a strict miss is still null, and no live provider runs', async () => {
+    mockDbHandler = () => tableWith({ row: null });
+    expect(await performPropertyLookup(ADDRESS, STRICT)).toBeNull();
+    expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
