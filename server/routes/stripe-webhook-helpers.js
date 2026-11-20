@@ -106,6 +106,15 @@ function savedCardCreditAdjustment({ attempt, invoice }) {
   };
 }
 
+// Older paid receipts can omit either representation of a component. Every
+// recorded value must agree with the signed amount before replay can use credit.
+function receiptAmountMatches(expectedCents, recordedCents, recordedDollars) {
+  if (recordedCents != null && Number(recordedCents) !== expectedCents) return false;
+  if (recordedDollars == null) return true;
+  return /^\d+(?:\.\d{1,2})?$/.test(String(recordedDollars))
+    && Math.round(Number(recordedDollars) * 100) === expectedCents;
+}
+
 // The replacement charge was submitted with a fixed base and surcharge.
 // Compare both in cents before the webhook changes the invoice's total.
 function authenticatedSavedCardAmountMatches(paymentIntent, attempt, amountDue, paidReceipt = null) {
@@ -114,24 +123,15 @@ function authenticatedSavedCardAmountMatches(paymentIntent, attempt, amountDue, 
   const submittedBase = Math.round(Number(metadata.base_amount) * 100);
   const submittedSurcharge = Math.round(Number(metadata.card_surcharge ?? 0) * 100);
   const captured = paymentIntent.amount_received;
-  if (paidReceipt) {
-    // Older paid rows may lack a breakdown. Every component they do carry
-    // must agree with the signed capture before replay can debit credit.
-    for (const [field, column, cents] of [
-      ['base_amount', 'base_amount_cents', submittedBase],
-      ['card_surcharge', 'surcharge_amount_cents', submittedSurcharge],
-    ]) {
-      if (paidReceipt[column] != null && Number(paidReceipt[column]) !== cents) return false;
-      const dollars = paidReceipt.metadata?.[field];
-      if (dollars != null && (!/^\d+(?:\.\d{1,2})?$/.test(String(dollars))
-        || Math.round(Number(dollars) * 100) !== cents)) return false;
-    }
-  }
+  const receipt = paidReceipt || {};
+  const receiptMetadata = receipt.metadata || {};
   return Number.isSafeInteger(captured) && captured > 0 && paymentIntent.amount === captured
     && Number.isSafeInteger(submittedSurcharge) && submittedSurcharge >= 0
     && submittedBase === Math.round(amountDue * 100)
     && submittedBase + submittedSurcharge === captured
-    && (attempt.amount == null || Math.round(Number(attempt.amount) * 100) === captured);
+    && (attempt.amount == null || Math.round(Number(attempt.amount) * 100) === captured)
+    && receiptAmountMatches(submittedBase, receipt.base_amount_cents, receiptMetadata.base_amount)
+    && receiptAmountMatches(submittedSurcharge, receipt.surcharge_amount_cents, receiptMetadata.card_surcharge);
 }
 
 function invoicePaymentIntentBlocksFallback({

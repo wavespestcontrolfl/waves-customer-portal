@@ -153,7 +153,7 @@ function shouldTreatSavedCardFailureAsAmbiguous({ chargeSubmitted, error }) {
 
 async function promoteStaleSavedCardClaim(attempt, database = db) {
   if (attempt?.status !== 'claimed' || !savedCardClaimIsStale(attempt)) return false;
-  return database('stripe_invoice_charge_attempts')
+  const promoted = await database('stripe_invoice_charge_attempts')
     .where({ id: attempt.id, status: 'claimed' })
     .whereNull('resolved_at')
     .update({
@@ -161,6 +161,8 @@ async function promoteStaleSavedCardClaim(attempt, database = db) {
       error_message: 'Saved-card charge claim exceeded the active window; outcome requires reconciliation',
       updated_at: new Date(),
     });
+  if (promoted > 0) attempt.status = 'ambiguous';
+  return promoted;
 }
 
 async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
@@ -227,37 +229,35 @@ function invoiceChargeConflict(err, checkout) {
 // resolved authentication decline before collecting, posting a manual payment,
 // or changing coverage. A webhook recording the existing Stripe charge can
 // still reconcile that same payment.
-async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false, checkout = false, excludeChargeAttemptId = null } = {}) {
+async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, options) {
+  const { readOnly, checkout, excludeChargeAttemptId } = options || {};
   let chargeAttempt = await blockingInvoiceChargeAttempt(invoiceId, database, checkout, excludeChargeAttemptId);
-  if (checkout && chargeAttempt?.status === 'failed') {
+  if (checkout && chargeAttempt && chargeAttempt.status === 'failed') {
     throw Object.assign(new Error('An earlier card payment is awaiting verification. Please contact us before trying again.'), {
       code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: chargeAttempt.id, statusCode: 409, savedCardPending: true,
     });
   }
-  if (chargeAttempt) {
-    let ambiguous = chargeAttempt.status === 'ambiguous';
-    if (!ambiguous && readOnly) {
+  const staleClaim = chargeAttempt && chargeAttempt.status !== 'ambiguous' && savedCardClaimIsStale(chargeAttempt);
+  if (staleClaim) {
+    const submitted = savedCardClaimWasSubmitted(chargeAttempt);
+    if (readOnly) {
       // Nothing is released or promoted here, and a stale PRE-submit claim
       // stays fenced: the original worker can still commit its submission
       // after we looked, so a read cannot conclude "released". Stale +
       // submitted reads as ambiguous (what the writing path promotes it to);
       // stale pre-submit and fresh both read as in progress.
-      if (savedCardClaimIsStale(chargeAttempt) && savedCardClaimWasSubmitted(chargeAttempt)) chargeAttempt.status = 'ambiguous';
-    } else if (!ambiguous && savedCardClaimIsStale(chargeAttempt)) {
-      if (!savedCardClaimWasSubmitted(chargeAttempt)) {
-        const released = await releaseStalePreSubmitSavedCardClaim(chargeAttempt, database).catch((releaseErr) => {
-          logger.error(`[stripe] could not release stale pre-submit saved-card claim ${chargeAttempt.id}: ${releaseErr.message}`);
-          return 0;
-        });
-        if (released > 0) chargeAttempt = checkout ? await blockingInvoiceChargeAttempt(invoiceId, database, checkout) : null;
-      } else {
-        const promoted = await promoteStaleSavedCardClaim(chargeAttempt, database).catch((promoteErr) => {
-          logger.error(`[stripe] could not promote stale saved-card claim ${chargeAttempt.id}: ${promoteErr.message}`);
-          return 0;
-        });
-        ambiguous = promoted > 0;
-        if (ambiguous) chargeAttempt.status = 'ambiguous';
-      }
+      if (submitted) chargeAttempt.status = 'ambiguous';
+    } else if (submitted) {
+      await promoteStaleSavedCardClaim(chargeAttempt, database).catch((promoteErr) => {
+        logger.error(`[stripe] could not promote stale saved-card claim ${chargeAttempt.id}: ${promoteErr.message}`);
+        return 0;
+      });
+    } else {
+      const released = await releaseStalePreSubmitSavedCardClaim(chargeAttempt, database).catch((releaseErr) => {
+        logger.error(`[stripe] could not release stale pre-submit saved-card claim ${chargeAttempt.id}: ${releaseErr.message}`);
+        return 0;
+      });
+      if (released > 0) chargeAttempt = checkout ? await blockingInvoiceChargeAttempt(invoiceId, database, checkout) : null;
     }
   }
   if (chargeAttempt) {
@@ -381,7 +381,6 @@ async function claimInvoiceSavedCardCharge({
           return 0;
         });
         ambiguous = promoted > 0;
-        if (ambiguous) blocking.status = 'ambiguous';
       }
     }
     const conflict = new Error(ambiguous
@@ -676,6 +675,105 @@ async function resolveNoFundsSavedCardChargeAttempt({
   });
 }
 
+function failedSavedCardOwnerMatches({ lockedCustomerId, customerId, originalCustomerId, changedMessage }) {
+  const ownerMatches = String(lockedCustomerId) === String(customerId);
+  if (!ownerMatches && originalCustomerId) throw new Error(changedMessage);
+  return ownerMatches;
+}
+
+async function failedSavedCardInvoiceEligible({ trx, invoice, customerId, stripePaymentIntentId, originalCustomerId }) {
+  if (!invoice) return false;
+  if (originalCustomerId
+    && !await require('./invoice-payment-authentication').invoiceHasRecordedOwner(invoice, originalCustomerId, trx)) return false;
+  const ownerMatches = failedSavedCardOwnerMatches({
+    lockedCustomerId: invoice.customer_id,
+    customerId,
+    originalCustomerId,
+    changedMessage: 'Saved-card invoice owner changed while locking the cancellation; retry',
+  });
+  const status = String(invoice.status || '').toLowerCase();
+  const collectible = status === 'processing' || isInvoiceCollectibleStatus(status);
+  const processingIntentMatches = status !== 'processing'
+    || !invoice.stripe_payment_intent_id
+    || String(invoice.stripe_payment_intent_id) === String(stripePaymentIntentId);
+  return ownerMatches && collectible && processingIntentMatches;
+}
+
+async function failedSavedCardAttemptHasDurableOrigin({
+  trx,
+  attempt,
+  invoice,
+  customerId,
+  invoiceId,
+  stripePaymentIntentId,
+  requestIdempotencyKey,
+  bankReturnAmountCents,
+}) {
+  const submittedByOriginalCreate = Boolean(attempt.submitted_at
+    && requestIdempotencyKey
+    && attempt.idempotency_key === requestIdempotencyKey);
+  if (attempt.worker_payment_intent_id || submittedByOriginalCreate) return true;
+
+  // Pre-migration ACH debits lack worker intent provenance. Their original
+  // worker-created payment row, exact method/amount and processing invoice are
+  // the independent durable proof that authorizes terminal failure recovery.
+  const matchingBankAmount = Number.isInteger(bankReturnAmountCents)
+    && bankReturnAmountCents > 0
+    && Math.round(Number(attempt.amount) * 100) === bankReturnAmountCents;
+  const submittedBankMethod = attempt.payment_method_id && (attempt.status === 'ambiguous' || attempt.submitted_at);
+  const processingBankInvoice = String(invoice.status).toLowerCase() === 'processing'
+    && invoice.payment_method === 'us_bank_account'
+    && invoice.stripe_payment_intent_id === stripePaymentIntentId;
+  if (matchingBankAmount && submittedBankMethod && processingBankInvoice) {
+    const debit = await trx('payments')
+      .where({ processor: 'stripe', customer_id: customerId, payment_method_id: attempt.payment_method_id,
+        stripe_payment_intent_id: stripePaymentIntentId, amount: attempt.amount })
+      .whereIn('status', ['processing', 'failed'])
+      .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+      .forUpdate().first('id');
+    if (debit) return true;
+  }
+
+  // A webhook can beat the worker's response binding. Only a fresh attempt,
+  // timed from submission when recorded and otherwise from claim creation, is
+  // retryable; a timeout marker or an old/invalid start stays held.
+  const startedAt = new Date(attempt.submitted_at || attempt.created_at || '').getTime();
+  const withinRetryWindow = Date.now() - startedAt < SAVED_CARD_WORKER_WEBHOOK_RETRY_MS;
+  if (attempt.worker_create_timed_out_at || !withinRetryWindow) return false;
+  throw Object.assign(new Error('Saved-card failure awaits its original worker PaymentIntent'), {
+    code: 'SAVED_CARD_WORKER_INTENT_PENDING',
+  });
+}
+
+function failedSavedCardCreditDisposition({ attempt, invoice, stripePaymentIntentId, canceledCheckoutId, round2 }) {
+  const delta = Math.max(0, round2(attempt.credit_applied_delta));
+  const target = Math.max(0, round2(attempt.credit_applied_total));
+  const original = Math.max(0, round2(target - delta));
+  const current = Math.max(0, round2(invoice.credit_applied));
+  const pointer = invoice.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+  const canceledPredecessor = Boolean(pointer && pointer === canceledCheckoutId);
+  const replacementCheckout = Boolean(pointer && pointer !== String(stripePaymentIntentId) && !canceledPredecessor);
+  const releasable = Math.min(delta, Math.max(0, round2(current - original)));
+  // A replacement checkout was priced after this credit was applied. It now
+  // backs that checkout, so returning it would make the confirmable amount low.
+  const creditToRelease = replacementCheckout ? 0 : releasable;
+  return {
+    canceledPredecessor,
+    current,
+    creditToRelease,
+  };
+}
+
+function failedSavedCardCanceledCheckoutId(attempt) {
+  return attempt?.canceled_checkout_payment_intent_id
+    ? String(attempt.canceled_checkout_payment_intent_id)
+    : null;
+}
+
+function matchesRecordedIntent(recordedIntentId, expectedIntentId) {
+  return !recordedIntentId || recordedIntentId === expectedIntentId;
+}
+
 async function resolveFailedInvoiceSavedCardChargeAttempt({
   attemptId,
   invoiceId,
@@ -705,10 +803,12 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       invoiceId,
       customerId,
     );
-    if (String(stableCustomerId || '') !== String(customerId)) {
-      if (originalCustomerId) throw new Error('Saved-card invoice owner changed while locking the failure; retry');
-      return false;
-    }
+    if (!failedSavedCardOwnerMatches({
+      lockedCustomerId: stableCustomerId || '',
+      customerId,
+      originalCustomerId,
+      changedMessage: 'Saved-card invoice owner changed while locking the failure; retry',
+    })) return false;
     // Codex pre-push P2 (round 2 of the owner's audit): lock the customer
     // row before the invoice row — postCreditMovement below also locks the
     // customer, and this function's old invoice-then-customer order could
@@ -722,32 +822,19 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
     const attemptAllocationSnapshot = await trx('stripe_invoice_charge_attempts')
       .where({ id: attemptId, invoice_id: invoiceId })
       .first('canceled_checkout_payment_intent_id');
-    const canceledCheckoutSnapshot = attemptAllocationSnapshot?.canceled_checkout_payment_intent_id
-      ? String(attemptAllocationSnapshot.canceled_checkout_payment_intent_id)
-      : null;
+    const canceledCheckoutSnapshot = failedSavedCardCanceledCheckoutId(attemptAllocationSnapshot);
     const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
     const invoice = await lockInvoicePaymentIntentAllocation(trx, {
       id: invoiceId,
-      piId: invoiceSnapshot?.stripe_payment_intent_id || null,
-      additionalPiIds: canceledCheckoutSnapshot ? [canceledCheckoutSnapshot] : [],
+      piId: invoiceSnapshot?.stripe_payment_intent_id,
+      additionalPiIds: [canceledCheckoutSnapshot],
       customerId,
       combinedCustomerLocked: true,
       targetForUpdate: true,
     });
-    if (!invoice) return false;
-    if (originalCustomerId
-      && !await require('./invoice-payment-authentication').invoiceHasRecordedOwner(invoice, originalCustomerId, trx)) return false;
-    if (String(invoice.customer_id) !== String(customerId)) {
-      if (originalCustomerId) throw new Error('Saved-card invoice owner changed while locking the cancellation; retry');
-      return false;
-    }
-    const invoiceStatus = String(invoice.status || '').toLowerCase();
-    if (invoiceStatus !== 'processing' && !isInvoiceCollectibleStatus(invoiceStatus)) return false;
-    if (invoiceStatus === 'processing'
-      && invoice.stripe_payment_intent_id
-      && String(invoice.stripe_payment_intent_id) !== String(stripePaymentIntentId)) {
-      return false;
-    }
+    if (!await failedSavedCardInvoiceEligible({
+      trx, invoice, customerId, stripePaymentIntentId, originalCustomerId,
+    })) return false;
 
     const attempt = await trx('stripe_invoice_charge_attempts')
       .where({ id: attemptId, invoice_id: invoiceId })
@@ -756,71 +843,30 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       .forUpdate()
       .first('id', 'status', 'created_at', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'worker_create_timed_out_at', 'payment_method_id', 'amount', 'credit_applied_delta', 'credit_applied_total', 'canceled_checkout_payment_intent_id');
     if (!attempt) return false;
-    const lockedCanceledCheckout = attempt.canceled_checkout_payment_intent_id
-      ? String(attempt.canceled_checkout_payment_intent_id)
-      : null;
+    const lockedCanceledCheckout = failedSavedCardCanceledCheckoutId(attempt);
     if (lockedCanceledCheckout !== canceledCheckoutSnapshot) {
       throw Object.assign(new Error('Saved-card canceled checkout changed while locking the failure; retry'), {
         code: 'SAVED_CARD_CANCELED_CHECKOUT_CHANGED',
       });
     }
-    if (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId) return false;
-    if (attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== stripePaymentIntentId) return false;
-    const originalCreateFailed = Boolean(attempt.submitted_at && requestIdempotencyKey
-      && attempt.idempotency_key === requestIdempotencyKey);
-    // Pre-migration ACH debits can return days later without a create request
-    // key. The original worker alone inserts the bank ledger row with its
-    // saved payment_method_id. A webhook-only stamp or card cancellation
-    // cannot take this path. The caller matched the signed attempt metadata.
-    let bankLedger = null;
-    if (!attempt.worker_payment_intent_id && !originalCreateFailed && Number.isInteger(bankReturnAmountCents)
-      && bankReturnAmountCents > 0 && Math.round(Number(attempt.amount) * 100) === bankReturnAmountCents
-      && attempt.payment_method_id && (attempt.status === 'ambiguous' || attempt.submitted_at) && invoiceStatus === 'processing'
-      && invoice.payment_method === 'us_bank_account' && invoice.stripe_payment_intent_id === stripePaymentIntentId) {
-      bankLedger = await trx('payments')
-        .where({ processor: 'stripe', customer_id: customerId, payment_method_id: attempt.payment_method_id,
-          stripe_payment_intent_id: stripePaymentIntentId, amount: attempt.amount })
-        .whereIn('status', ['processing', 'failed'])
-        .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
-        .forUpdate().first('id');
-    }
-    if (!attempt.worker_payment_intent_id && !originalCreateFailed && !bankLedger) {
-      // Even the invoice's pointer may have been written by a processing
-      // webhook. A timed-out worker cannot supply further proof. Acknowledge
-      // that observation while retaining the ambiguous claim and its credit.
-      const startedAt = new Date(attempt.submitted_at || attempt.created_at || '').getTime();
-      if (attempt.worker_create_timed_out_at || !Number.isFinite(startedAt)
-        || Date.now() - startedAt >= SAVED_CARD_WORKER_WEBHOOK_RETRY_MS) return false;
-      // Stripe can deliver failure before the original create returns. Retry
-      // the signed event after the worker has bound its exact response. No
-      // invoice, reserved credit or attempt state has changed in this path.
-      throw Object.assign(new Error('Saved-card failure awaits its original worker PaymentIntent'), {
-        code: 'SAVED_CARD_WORKER_INTENT_PENDING',
-      });
-    }
+    if (!matchesRecordedIntent(attempt.stripe_payment_intent_id, stripePaymentIntentId)
+      || !matchesRecordedIntent(attempt.worker_payment_intent_id, stripePaymentIntentId)) return false;
+    if (!await failedSavedCardAttemptHasDurableOrigin({
+      trx, attempt, invoice, customerId, invoiceId, stripePaymentIntentId,
+      requestIdempotencyKey, bankReturnAmountCents,
+    })) return false;
 
     // A timeout ambiguity may have committed the credit reservation even
     // though the Stripe PI ultimately failed. Return only the portion this
     // attempt reserved; any pre-existing or later credit remains applied.
     const { postCreditMovement, round2 } = require('./customer-credit');
-    const delta = Math.max(0, round2(attempt.credit_applied_delta || 0));
-    const target = Math.max(0, round2(attempt.credit_applied_total || 0));
-    const original = Math.max(0, round2(target - delta));
-    const current = Math.max(0, round2(invoice.credit_applied || 0));
-    let creditToRelease = Math.min(delta, Math.max(0, round2(current - original)));
-    const canceledPredecessor = invoice.stripe_payment_intent_id
-      && lockedCanceledCheckout
-      && String(invoice.stripe_payment_intent_id) === lockedCanceledCheckout;
-    const replacementCheckout = !canceledPredecessor && invoice.stripe_payment_intent_id
-      && String(invoice.stripe_payment_intent_id) !== String(stripePaymentIntentId);
-    if (replacementCheckout && creditToRelease > 0) {
-      // The replacement was priced after this credit was applied. Resolve the
-      // canceled attempt but leave the credit on the invoice: it is now ordinary
-      // applied credit backing that checkout, and returning it would leave the
-      // confirmable amount too low. This gives the one-shot webhook a terminal,
-      // replay-independent outcome without canceling a valid replacement.
-      creditToRelease = 0;
-    }
+    const credit = failedSavedCardCreditDisposition({
+      attempt,
+      invoice,
+      stripePaymentIntentId,
+      canceledCheckoutId: lockedCanceledCheckout,
+      round2,
+    });
     if (lockedCanceledCheckout) {
       // The saved-card worker canceled this checkout at Stripe before create,
       // but a later local rollback can restore sibling stamps even when the
@@ -829,22 +875,22 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       // above, so clear every stale collectible stamp without touching a live
       // replacement checkout.
       await PayCombined.clearPaymentIntentStamps(trx, lockedCanceledCheckout);
-      if (canceledPredecessor) invoice.stripe_payment_intent_id = null;
+      if (credit.canceledPredecessor) invoice.stripe_payment_intent_id = null;
     }
-    if (creditToRelease > 0) {
+    if (credit.creditToRelease > 0) {
       await postCreditMovement({
         customerId,
-        delta: creditToRelease,
+        delta: credit.creditToRelease,
         source: 'adjustment',
         invoiceId,
         note: `Account credit released after failed saved-card attempt ${attempt.id}`,
         createdBy: 'system:saved_card_reconciliation',
       }, trx);
-      invoice.credit_applied = round2(current - creditToRelease);
+      invoice.credit_applied = round2(credit.current - credit.creditToRelease);
     }
 
     await trx('invoices').where({ id: invoiceId }).update({
-      status: invoiceStatus === 'processing'
+      status: String(invoice.status || '').toLowerCase() === 'processing'
         ? nextInvoiceStatusAfterFailedPayment(invoice)
         : invoice.status,
       ...(invoice.stripe_payment_intent_id === stripePaymentIntentId ? { stripe_payment_intent_id: null } : {}),
