@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 const devContext = createRequire(import.meta.url)('../scripts/dev/context.js');
 const coverageFloorFiles = createRequire(import.meta.url)('./coverage-floor-files.json');
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://localhost:3001';
 
@@ -43,6 +44,22 @@ export default defineConfig({
       this.emitFile({ type: 'asset', fileName: 'build-assets.json', source: JSON.stringify(assets) });
     },
   }, fieldViewAssetsPlugin(), {
+    // Every production build names itself in index.html: a short hash of the
+    // page as built, which lists the hashed entry files, so any code change
+    // moves it. The server stamps the live name on each staff API answer
+    // (server/middleware/portal-build-header.js), and an open staff tab
+    // compares it with its own (src/lib/portalVersion.js).
+    // After the Field view step, so its asset list is part of the hash.
+    name: 'waves-portal-build',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler(html) {
+        const build = createHash('sha256').update(html).digest('hex').slice(0, 12);
+        return html.replace(/<\/head>/i, `  <meta name="portal-build" content="${build}">\n  </head>`);
+      },
+    },
+  }, {
     name: 'waves-preview-checkout',
     apply: 'serve',
     configureServer(server) {
@@ -53,7 +70,7 @@ export default defineConfig({
       });
     },
   }],
-  resolve: { alias: { ...capShimAlias, '@proposal-bid': fileURLToPath(new URL('../shared/proposal-bid.cjs', import.meta.url)), '@estimate-copy-claims': fileURLToPath(new URL('../shared/estimate-copy-claims.cjs', import.meta.url)), '@estimate-monthly-average': fileURLToPath(new URL('../shared/estimate-monthly-average.cjs', import.meta.url)), '@estimate-purchased-warranty': fileURLToPath(new URL('../shared/estimate-purchased-warranty.cjs', import.meta.url)), '@estimate-termite-scope': fileURLToPath(new URL('../shared/estimate-termite-scope.cjs', import.meta.url)), '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)), '@legacy-visit-money-submission': fileURLToPath(new URL('../shared/legacy-visit-money-submission.cjs', import.meta.url)), '@pricing-regime-marker': fileURLToPath(new URL('../shared/pricing-regime-marker.cjs', import.meta.url)), '@kpi-targets': fileURLToPath(new URL('../shared/kpi-targets.cjs', import.meta.url)), '@bid-kit-catalog': fileURLToPath(new URL('../shared/bid-kit-catalog.cjs', import.meta.url)), '@bid-checklist-kit-map': fileURLToPath(new URL('../shared/bid-checklist-kit-map.cjs', import.meta.url)), '@lawn-water-card': fileURLToPath(new URL('../shared/lawn-water-card.cjs', import.meta.url)), '@commercial-agreement-terms': fileURLToPath(new URL('../shared/commercial-agreement-terms.cjs', import.meta.url)) } },
+  resolve: { alias: { ...capShimAlias, '@proposal-bid': fileURLToPath(new URL('../shared/proposal-bid.cjs', import.meta.url)), '@estimate-copy-claims': fileURLToPath(new URL('../shared/estimate-copy-claims.cjs', import.meta.url)), '@estimate-monthly-average': fileURLToPath(new URL('../shared/estimate-monthly-average.cjs', import.meta.url)), '@estimate-call-today': fileURLToPath(new URL('../shared/estimate-call-today.cjs', import.meta.url)), '@estimate-purchased-warranty': fileURLToPath(new URL('../shared/estimate-purchased-warranty.cjs', import.meta.url)), '@estimate-termite-scope': fileURLToPath(new URL('../shared/estimate-termite-scope.cjs', import.meta.url)), '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)), '@legacy-visit-money-submission': fileURLToPath(new URL('../shared/legacy-visit-money-submission.cjs', import.meta.url)), '@pricing-regime-marker': fileURLToPath(new URL('../shared/pricing-regime-marker.cjs', import.meta.url)), '@kpi-targets': fileURLToPath(new URL('../shared/kpi-targets.cjs', import.meta.url)), '@bid-kit-catalog': fileURLToPath(new URL('../shared/bid-kit-catalog.cjs', import.meta.url)), '@bid-checklist-kit-map': fileURLToPath(new URL('../shared/bid-checklist-kit-map.cjs', import.meta.url)), '@lawn-water-card': fileURLToPath(new URL('../shared/lawn-water-card.cjs', import.meta.url)), '@commercial-agreement-terms': fileURLToPath(new URL('../shared/commercial-agreement-terms.cjs', import.meta.url)), '@taurus-concentration': fileURLToPath(new URL('../shared/taurus-concentration.cjs', import.meta.url)) } },
   // Vitest reads this block. The global setup shims window.matchMedia (jsdom
   // omits it) so tests can mount the liquid-glass scene, which now renders on
   // every customer surface.
@@ -126,7 +143,7 @@ export default defineConfig({
   // Rollup's static analysis to fail with "X is not exported by …" errors.
   // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
   optimizeDeps: {
-    include: ['@estimate-copy-claims', '@estimate-monthly-average', '@proposal-bid', '@estimate-purchased-warranty', '@estimate-termite-scope', '@lawn-scores', '@lawn-water-card', '@legacy-visit-money-submission', '@pricing-regime-marker', '@kpi-targets', '@bid-kit-catalog', '@bid-checklist-kit-map', '@commercial-agreement-terms', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction', '@waves/invoice-property-groups'],
+    include: ['@estimate-copy-claims', '@estimate-monthly-average', '@estimate-call-today', '@proposal-bid', '@estimate-purchased-warranty', '@estimate-termite-scope', '@lawn-scores', '@lawn-water-card', '@legacy-visit-money-submission', '@pricing-regime-marker', '@kpi-targets', '@bid-kit-catalog', '@bid-checklist-kit-map', '@commercial-agreement-terms', '@taurus-concentration', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction', '@waves/invoice-property-groups'],
   },
   build: {
     outDir: 'dist',
@@ -138,7 +155,7 @@ export default defineConfig({
     // Ensure @rollup/plugin-commonjs also processes the linked CJS package
     // during production builds, complementing the optimizeDeps.include above.
     commonjsOptions: {
-      include: [/shared\/estimate-copy-claims\.cjs$/, /shared\/estimate-monthly-average\.cjs$/, /shared\/proposal-bid\.cjs$/, /shared\/estimate-purchased-warranty\.cjs$/, /shared\/estimate-termite-scope\.cjs$/, /shared\/lawn-scores\.cjs$/, /shared\/lawn-water-card\.cjs$/, /shared\/legacy-visit-money-submission\.cjs$/, /shared\/pricing-regime-marker\.cjs$/, /shared\/kpi-targets\.cjs$/, /shared\/bid-kit-catalog\.cjs$/, /shared\/bid-checklist-kit-map\.cjs$/, /shared\/commercial-agreement-terms\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /invoice-property-groups/, /node_modules/],
+      include: [/shared\/estimate-copy-claims\.cjs$/, /shared\/estimate-monthly-average\.cjs$/, /shared\/estimate-call-today\.cjs$/, /shared\/proposal-bid\.cjs$/, /shared\/estimate-purchased-warranty\.cjs$/, /shared\/estimate-termite-scope\.cjs$/, /shared\/lawn-scores\.cjs$/, /shared\/lawn-water-card\.cjs$/, /shared\/legacy-visit-money-submission\.cjs$/, /shared\/pricing-regime-marker\.cjs$/, /shared\/kpi-targets\.cjs$/, /shared\/bid-kit-catalog\.cjs$/, /shared\/bid-checklist-kit-map\.cjs$/, /shared\/commercial-agreement-terms\.cjs$/, /shared\/taurus-concentration\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /invoice-property-groups/, /node_modules/],
     },
   },
 });

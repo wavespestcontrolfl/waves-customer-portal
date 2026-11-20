@@ -40,6 +40,7 @@ import { formatETDateTime } from "../../lib/timezone";
 import { ASK_RECENTS_KEY } from "../../lib/adminAuth";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
 import AdminPageFinder from "./AdminPageFinder";
+import useAskDraftHold from "../../hooks/useAskDraftHold";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // Thread id the operator dismissed with "New chat" — a reload must not
@@ -453,6 +454,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const [recents, setRecents] = useState(() => loadRecents(userId));
   const [attachments, setAttachments] = useState([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  useAskDraftHold(prompt, attachments.length, attachmentsLoading);
   // Why picked files did not attach (unreadable, or past the photo limit).
   const [attachmentNotice, setAttachmentNotice] = useState(null);
   const [dragY, setDragY] = useState(0);

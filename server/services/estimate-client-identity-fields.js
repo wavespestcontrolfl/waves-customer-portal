@@ -26,6 +26,7 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'commercialFloorsArmed',
   'rodentBaitLegacyReplay',
   'rodentWaveguardPostureReplay',
+  'wholeHomeSealReplay',
   'catalogPricing',
   // The GATE_LAWN_V13 bahia review exemption: a stored estimate replayed as sold
   // (savedEstimateReplay), minus the service lines that same replay ADDS

@@ -12,6 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
+const { hasIncludedReentryGuarantee, includedReentryGuaranteeFields } = require('../../../shared/estimate-purchased-warranty.cjs');
 const { isMistingSelection, mistingCustomerFacts } = require('../../utils/mosquito-misting-system');
 const { authoritativeEstimateResult, proposalIsAuthoritative, storedAreaAddOnRows, storedMistingRows } = require('../estimate-result-container');
 
@@ -266,6 +267,11 @@ const SERVICE_LABEL = {
   german_roach_initial: 'German Roach Initial Service (3-Visit)',
   pest_initial_roach: 'Cockroach Treatment Service',
   stinging: 'Stinging Insect',
+  // The keys the bee/wasp pricers emit (priceStingingInsect / calculateStingingPrice).
+  // Without them the line kept its raw key as its name, and the customer estimate
+  // page titled a beehive quote "One-Time Pest Control" (EST-2026-1312, 2026-11-19).
+  stinging_insect: 'Stinging Insect',
+  stinging_insect_v2: 'Stinging Insect',
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',
   rodent_sanitation: 'Rodent Sanitation',
@@ -1243,6 +1249,9 @@ function mapV1ToLegacyShape(v1Result) {
         ...(li.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: li.debrisRemovalIncluded === true } : {}),
         ...(Number(li.creditableWithinDays) > 0 ? { creditableWithinDays: Number(li.creditableWithinDays) } : {}),
         ...(li.includesScreening !== undefined ? { includesScreening: li.includesScreening === true } : {}),
+        // Whole-home exclusion (GATE_EXCLUSION_WHOLE_HOME): the included 1-year re-entry guarantee.
+        ...includedReentryGuaranteeFields(li),
+        ...(hasIncludedReentryGuarantee(li) && Number(li.wholeHomeMinimum) > 0 ? { wholeHomeMinimum: Number(li.wholeHomeMinimum) } : {}),
         // Trapping allowance the copy pack renders (owner ruling 2026-09-26;
         // codex #4932 pre-push P1 — without it a new quote read as legacy
         // unlimited callbacks).
@@ -1530,6 +1539,8 @@ function mapV1ToLegacyShape(v1Result) {
           ...(s.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: s.debrisRemovalIncluded === true } : {}),
           ...(Number(s.creditableWithinDays) > 0 ? { creditableWithinDays: Number(s.creditableWithinDays) } : {}),
           ...(s.includesScreening !== undefined ? { includesScreening: s.includesScreening === true } : {}),
+          ...includedReentryGuaranteeFields(s),
+          ...(hasIncludedReentryGuarantee(s) && Number(s.wholeHomeMinimum) > 0 ? { wholeHomeMinimum: Number(s.wholeHomeMinimum) } : {}),
           ...(s.includedFollowUps !== undefined ? { includedFollowUps: s.includedFollowUps } : {}),
           ...(s.includedCallbacks !== undefined ? { includedCallbacks: s.includedCallbacks } : {}),
           ...(typeof s.unlimitedCallbacks === 'boolean' ? { unlimitedCallbacks: s.unlimitedCallbacks } : {}),

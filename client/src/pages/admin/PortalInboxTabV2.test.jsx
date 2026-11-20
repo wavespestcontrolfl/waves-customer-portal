@@ -549,7 +549,7 @@ describe("Portal inbox tab: answers in the portal", () => {
         ], hasMore: true };
       }
       if (url.startsWith("/admin/portal-inbox/messages/thread-1?before=")) {
-        return { messages: [{ id: "msg-1", direction: "inbound", body: "First question.", createdAt: "2026-10-01T15:00:00.000Z", adminUserId: null }], hasMore: false };
+        return { messages: [{ id: "msg-1", direction: "inbound", body: "First question.", createdAt: "2026-10-01T15:00:00.000Z", adminUserId: null, photos: [{ url: "https://bucket.example/p1" }] }], hasMore: false };
       }
       return updated(url);
     });
@@ -563,6 +563,9 @@ describe("Portal inbox tab: answers in the portal", () => {
     expect(within(thread).getByText((_, el) => el.textContent === "Is the lawn treatment safe for my dog?\nShe is a puppy." && el.children.length === 0)).toBeInTheDocument();
     fireEvent.click(within(thread).getByRole("button", { name: "Show earlier messages" }));
     expect(await within(thread).findByText("First question.")).toBeInTheDocument();
+    // A customer's photo shows in the thread as a thumbnail that opens the photo.
+    expect(within(thread).getAllByRole("img").map((img) => img.getAttribute("src"))).toEqual(["https://bucket.example/p1"]);
+    expect(within(thread).getByRole("img").closest("a")).toHaveAttribute("href", "https://bucket.example/p1");
     expect(adminFetch).toHaveBeenCalledWith(`/admin/portal-inbox/messages/thread-1?before=${encodeURIComponent("2026-11-03T15:00:00.000Z")}`);
     expect(within(thread).queryByRole("button", { name: "Show earlier messages" })).toBeNull();
   });

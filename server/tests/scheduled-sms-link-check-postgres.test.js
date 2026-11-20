@@ -1,7 +1,9 @@
 /**
  * The scheduled-text dispatcher re-runs the writer's customer-link check right before it sends an operator text
  * (scheduled-sms-delivery.js scheduledLinkRefusal). A row queued before the writer's guard shipped, or whose
- * customer's phone changed after queueing, can still carry another customer's bearer link. These tests run the real
+ * customer's phone changed after queueing, can still carry another customer's bearer link. It re-runs the writer's
+ * website-line check the same way (scheduledWebsiteLineRefusal): a website-only line texts only someone who already
+ * called or texted it, and the contact fan-out can move a queued text to a new phone. These tests run the real
  * cron tick against a dedicated, migrated PostgreSQL database (its rows removed after each test) with only the provider
  * send mocked. Synthetic names and 555 numbers only.
  */
@@ -79,10 +81,10 @@ postgres('scheduled text link check at send time (real PostgreSQL)', () => {
     return `${HOST}/pay/${token}`;
   }
   // A row in the shape the writer queues: no entry_point, operator-authored, due now.
-  async function queue(c, body, metadata = { human_authored: true }) {
+  async function queue(c, body, metadata = { human_authored: true }, columns = {}) {
     const [row] = await database('sms_log').insert({
       customer_id: c.id, direction: 'outbound', from_phone: '+19415550199', to_phone: c.phone, message_body: body,
-      status: 'scheduled', message_type: 'manual', scheduled_for: new Date(0), metadata: JSON.stringify(metadata),
+      status: 'scheduled', message_type: 'manual', scheduled_for: new Date(0), metadata: JSON.stringify(metadata), ...columns,
     }).returning('id');
     return row.id || row;
   }
@@ -217,5 +219,52 @@ postgres('scheduled text link check at send time (real PostgreSQL)', () => {
 
     expect(check).not.toHaveBeenCalled();
     expect(await alertsFor(id)).toHaveLength(0);
+  });
+
+  describe('a text queued from a website-only line', () => {
+    const WEB_LINE = '+19412542617';
+    // The customer's phone texted the line, so the office could queue a reply from it.
+    const contactedLine = (c) => database('sms_log').insert({
+      customer_id: c.id, direction: 'inbound', from_phone: c.phone, to_phone: WEB_LINE, message_body: 'Synthetic question.', status: 'received',
+    });
+
+    test('the customer\'s phone changed after queueing: the fan-out moves the text to a number that never contacted the line, so it is blocked with one alert', async () => {
+      const mine = await customer();
+      await contactedLine(mine);
+      const id = await queue(mine, 'Synthetic reply.', { human_authored: true }, { from_phone: WEB_LINE });
+      const newPhone = '+12025550143';
+      await database('customers').where({ id: mine.id }).update({ phone: newPhone });
+      const moved = await require('../services/customer-contact-fanout').propagateCustomerPhoneChange(
+        { before: { id: mine.id, phone: mine.phone }, after: { id: mine.id, phone: newPhone } }, database,
+      );
+      expect(moved.scheduledSms).toBe(1);
+      expect(await rowOf(id)).toMatchObject({ to_phone: newPhone, from_phone: WEB_LINE });
+
+      await tick();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const row = await rowOf(id);
+      expect(row.status).toBe('blocked');
+      expect(row.metadata).toMatchObject({ blocked_code: 'WEBSITE_LINE_REFUSED', blocked_reason: 'website_line_first_contact' });
+      const alerts = await alertsFor(id);
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0].title).toBe('Comms — send the text to Fixture S from another line');
+      expect(alerts[0].body).toBe('It was set to go from a website-only line that this number never called or texted, so it was not sent.');
+      const written = JSON.stringify(alerts[0]);
+      for (const digits of [mine.phone.slice(-7), '5550143']) expect(written).not.toContain(digits);
+    });
+
+    test('a reply to the number that texted the line goes out from the line, with no alert', async () => {
+      const mine = await customer();
+      await contactedLine(mine);
+      const id = await queue(mine, 'Synthetic reply.', { human_authored: true }, { from_phone: WEB_LINE });
+
+      await tick();
+
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendCustomerMessage.mock.calls[0][0]).toMatchObject({ to: mine.phone, metadata: expect.objectContaining({ fromNumber: WEB_LINE }) });
+      expect((await rowOf(id)).status).toBe('sent');
+      expect(await alertsFor(id)).toHaveLength(0);
+    });
   });
 });

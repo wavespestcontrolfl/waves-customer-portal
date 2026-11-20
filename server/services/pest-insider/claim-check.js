@@ -437,6 +437,42 @@ function titleProblem(title, subject, fact, source) {
   return subjectFormatProblem(subject) || sentenceProblem(title, { ...source, units: null }) || openerProblem(title, source) || creditProblem(title, fact);
 }
 
+// "A tool we'd use" lines (tools.js) have no source but the tool's own
+// generic name (letters only, reviewed), so they carry no number, month,
+// season, time word or name, and a unit word only when the name has it
+// ("Soil moisture meter"). Amazon's name is only in the renderer's fixed
+// link text and sentence (BRAND_RE bans it here). Owner 2026-11-19, on
+// Amazon links in this email: never "buy to support us". So a line says
+// what the tool shows or does, and has no sales word (neither has the tool's
+// name, the link text: tools.js). A line is one plain sentence: letters,
+// spaces, commas, apostrophes and hyphens, then one period, so it can carry
+// no link, address, number, tag or markup (pre-push PR 3 r3: a URL in a line
+// would turn clickable in the text part).
+const PLAIN_SENTENCE = /^[A-Z][A-Za-z ,'-]*[a-z]\.$/;
+const SALES_RE = /\b(?:buy|buying|bought|purchas\w*|orders?|ordering|support\w*|commissions?|earn\w*|affiliates?|deals?|discount\w*|coupons?|sale|sales|bargains?)\b|\bhelps? us\b/i;
+const salesWordProblem = (text) => (SALES_RE.test(text) ? 'a sales word (tool copy never asks the reader to buy)' : null);
+
+// The only capitalized words in a tool line: a plain opener as its first
+// word, or a word of the tool's own name. The names sentenceProblem allows
+// in all newsletter copy ("Florida", "Waves") are not the tool's source, so
+// they do not pass here (pre-push PR 3 r5: "It works across Florida."). Every
+// run of letters with a capital counts, so a hyphen or an apostrophe hides
+// none ("south-Florida").
+function toolCapsProblem(text, name) {
+  const nameWords = new Set(name.toLowerCase().split(' '));
+  const runs = text.split(/[^A-Za-z]+/).filter(Boolean);
+  const word = runs.find((run, i) => /[A-Z]/.test(run) && !(i === 0 && OPENERS.has(run.toLowerCase())) && !nameWords.has(run.toLowerCase()));
+  return word ? `a capitalized word that is not an opener or a word of the tool's name: ${word}` : null;
+}
+
+function toolLineProblem(text, tool) {
+  if (!text) return 'empty sentence';
+  if (!PLAIN_SENTENCE.test(text)) return 'not one plain sentence: letters, spaces, commas, apostrophes and hyphens, then one period (no link, address, number or symbol)';
+  const name = String(tool.name || '');
+  return sentenceProblem(text, { units: null, labels: [], facts: name, names: name })
+    || toolCapsProblem(text, name) || salesWordProblem(text);
+}
+
 // "What's this?" is the species entry's own fact, checked a sentence at a time.
 function idItemProblems(idText, species) {
   const source = speciesSource(species);
@@ -482,5 +518,5 @@ function checkIssueCopy({ leadFact, species }) {
 
 module.exports = {
   checkIssueCopy, sentenceProblem, creditProblem, quantityPairs, copyProblem, canonical, subjectFormatProblem, bannedReason, factSource, speciesSource,
-  SERVICE_EMOJI, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES,
+  toolLineProblem, salesWordProblem, SERVICE_EMOJI, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES,
 };

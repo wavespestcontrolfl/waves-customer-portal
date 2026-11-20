@@ -33,6 +33,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
+import { hasIncludedReentryGuarantee } from "@estimate-purchased-warranty";
 import { buildLinePriceOverridesPayload, overridableLines } from "../../lib/linePriceOverrides";
 import "../../styles/estimate-workflow.css";
 import { addressAskNotice, filterAddressAsks } from "../../lib/addressAsks";
@@ -50,6 +51,7 @@ import {
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "../../lib/lookupPrefill";
+import { COMMERCIAL_SUITE_SOURCE_LABELS, sizedSuite } from "../../lib/commercialSuiteSize";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import AreaAddOnsGroup, { PerApplicationPrice } from "../../components/admin/AreaAddOnsGroup";
 import { isFootprintFreeSelection } from "../../lib/estimate-footprint";
@@ -445,18 +447,11 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
 // Home Sq Ft field when the lookup sized a suite instead of the whole
 // building — where the number came from, and the building total for
 // context. Returns null when the lookup carries no suite-size result.
-// Only two sizing sources exist (a web-search leg is never a size source —
-// AGENTS.md: an LLM proposes intent, it never picks a price/size field).
-const COMMERCIAL_SUITE_SOURCE_LABELS = {
-  listing_verified_text: "a public listing for this suite",
-  license_seats: "state restaurant license",
-  verified: "tech-verified measurement",
-  suite_type_default: "typical size for this business type",
-};
-
+// The source labels live in lib/commercialSuiteSize.js, shared with the
+// property card.
 function commercialSuiteSizeNote(enrichedProfile) {
-  const suite = enrichedProfile?.suiteSize;
-  if (!suite || !(Number(suite.value) > 0)) return null;
+  const suite = sizedSuite(enrichedProfile);
+  if (!suite) return null;
   const sourceLabel = COMMERCIAL_SUITE_SOURCE_LABELS[suite.source] || suite.source;
   const seatsNote = suite.source === "license_seats" && suite.seats != null ? ` (${suite.seats} seats)` : "";
   const buildingNote = Number(enrichedProfile?.suiteBuildingTotalSqFt) > 0
@@ -465,6 +460,21 @@ function commercialSuiteSizeNote(enrichedProfile) {
   const nameNote = suite.businessName ? ` — ${suite.businessName}` : "";
   const linkNote = suite.source === "listing_verified_text" && suite.url ? ` Listing: ${suite.url} — confirm on site.` : "";
   return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}${linkNote}`;
+}
+
+// Read-only roof evidence line (owner 2026-11-19): the county's own roof words
+// and the photo's tile-style read, beside the collapsed "TILE roof" above.
+// Nothing here is priced yet. Returns null when the lookup carries neither.
+// Reads the lookup profile the estimate was built from (engineRequest.profile):
+// the engine's echoed E.property does not carry these fields.
+function roofEvidenceLine(property) {
+  const raw = property?.countyRoofRaw;
+  const county = [raw?.material, raw?.structure].filter(Boolean).join(" ");
+  const style = ["BARREL", "FLAT"].includes(property?.roofTileStyle)
+    ? property.roofTileStyle.toLowerCase()
+    : "";
+  const parts = [county && `Roof: ${county}`, style && `photo: ${style}`].filter(Boolean);
+  return parts.length ? parts.join(" \u00b7 ") : null;
 }
 
 function adminFetch(path, options = {}) {
@@ -1296,6 +1306,85 @@ function SelectV2({ k, options, id = `estimate-${k}`, ...rest }) {
   </Select>;
 }
 
+// Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): the point types the tech looks at.
+// The keys are saved on the estimate as exclusionChecklist; the counts stay in the count fields.
+const EXCLUSION_CHECKLIST_POINTS = [
+  { key: "roof_returns_joints", label: "Roof returns and joints" },
+  { key: "plumbing_vent_stacks", label: "Plumbing vent stacks" },
+  { key: "ac_line_set_wall_penetrations", label: "AC line set and wall penetrations" },
+  { key: "dryer_bath_kitchen_exhaust_j_vents", label: "Dryer, bath and kitchen exhaust vents and J-vents" },
+  { key: "soffit_gaps_soffit_fascia_joints", label: "Soffit gaps and soffit-to-fascia joints" },
+  { key: "gable_ridge_vents", label: "Gable and ridge vents" },
+  { key: "eave_gaps", label: "Eave gaps" },
+  { key: "garage_door_corners_weather_seal", label: "Garage door corners and weather seal" },
+  { key: "chimney_flue", label: "Chimney or flue" },
+  { key: "other_utility_penetrations", label: "Other utility penetrations" },
+];
+
+// A new estimate never inherits the last customer's seal scope or checked points.
+export function exclusionScopeReset() {
+  return { exclSealScope: "spot", exclusionChecklist: [] };
+}
+
+// A saved Whole home pick cannot be regenerated while the server has not confirmed the gate is on
+// (the read is pending or failed, or the gate is off): the request would silently price a spot seal
+// and drop the included guarantee. Returns the reason shown to staff, or "" when generating is fine.
+export function wholeHomeRegenerateBlock(form, available) {
+  if (!form?.svcExclusion || form.exclSealScope !== "whole_home" || available === true) return "";
+  return "Whole home seal is not confirmed available yet, so this estimate would price as a spot seal. Wait for it to load, or change Seal scope to Spot seal.";
+}
+
+// The included re-entry guarantee a generated whole-home quote carries: its yearly renewal price.
+function wholeHomeGuaranteeRenewal(estimate) {
+  const rows = [...(estimate?.oneTime?.items || []), ...(estimate?.oneTime?.specItems || [])];
+  const row = rows.find((r) => hasIncludedReentryGuarantee(r));
+  return row ? { renewal: Number(row.guaranteeRenewalPrice) || null } : null;
+}
+
+// The Seal scope choice and, for Whole home, the point checklist and the included guarantee note.
+function ExclusionSealScope({ estimate, blockedReason = "", commercial = false }) {
+  const { form, set } = useContext(FormCtx);
+  const picked = Array.isArray(form.exclusionChecklist) ? form.exclusionChecklist : [];
+  const guarantee = form.exclSealScope === "whole_home" ? wholeHomeGuaranteeRenewal(estimate) : null;
+  return (
+    <>
+      <Field label="Seal scope" id="estimate-exclSealScope" className="mb-4">
+        <SelectV2
+          k="exclSealScope"
+          options={[
+            { value: "spot", label: "Spot seal — the active points" },
+            { value: "whole_home", label: commercial ? "Whole home" : "Whole home — every point, 1-year re-entry guarantee included" },
+          ]}
+        />
+      </Field>
+      {blockedReason && <div className="text-14 text-zinc-600" data-testid="exclusion-whole-home-blocked">{blockedReason}</div>}
+      {form.exclSealScope === "whole_home" && (
+        <div data-testid="exclusion-whole-home" className="space-y-2">
+          <p className="text-14 text-zinc-400 font-medium">Check these points (enter the counts below)</p>
+          {EXCLUSION_CHECKLIST_POINTS.map(({ key, label }) => (
+            <Checkbox
+              key={key}
+              id={`estimate-exclusionChecklist-${key}`}
+              label={label}
+              checked={picked.includes(key)}
+              onChange={() => set("exclusionChecklist", picked.includes(key) ? picked.filter((k) => k !== key) : [...picked, key])}
+            />
+          ))}
+          {commercial ? (
+            // The engine sends commercial exclusion to a manual quote: no whole-home price or guarantee to promise.
+            <div className="text-14 text-zinc-600" data-testid="exclusion-commercial-note">Commercial: manual quote</div>
+          ) : (
+            <div className="text-14 text-zinc-600" data-testid="exclusion-guarantee-note">
+              1-year re-entry guarantee included
+              {guarantee?.renewal ? ` — renews at $${guarantee.renewal} a year.` : " — the renewal price shows once the estimate is generated."}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 function CheckboxV2({ k, label }) {
   const { form, toggle } = useContext(FormCtx);
   return <div className="mb-1"><Checkbox id={`estimate-${k}`} label={label} checked={!!form[k]} onChange={() => toggle(k)} /></div>;
@@ -1825,6 +1914,8 @@ export default function EstimateToolViewV2({
     exclMeshSoftLF: "0",
     exclMeshConcreteLF: "0",
     exclWaive: "NO",
+    exclSealScope: "spot",
+    exclusionChecklist: [],
     rodentTrappingEmergency: false,
     sanitationTier: "standard",
     sanitationArea: "",
@@ -1950,6 +2041,8 @@ export default function EstimateToolViewV2({
       ...EMPTY_PROPERTY_MEASUREMENTS,
       ...Object.fromEntries(PROPERTY_FORM_FIELDS.map((field) => [field, defaults[field] ?? ""])),
       propertyId: "", _manualFields: [], _unitCountEdited: false,
+      // The seal scope and checked points belong to the property they were picked for.
+      ...exclusionScopeReset(),
     };
   }
 
@@ -3641,6 +3734,9 @@ export default function EstimateToolViewV2({
   // Explicit true only: a 404, a transport failure or an older server keeps the choice
   // hidden rather than offering a service the engine would refuse with a 400.
   const [deadAnimalAvailable, setDeadAnimalAvailable] = useState(false);
+  // Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): explicit true from the rodent_waveguard row read below,
+  // so a 404, a failed read or an older server hides the Seal scope choice and sends nothing new.
+  const [exclusionWholeHomeAvailable, setExclusionWholeHomeAvailable] = useState(false);
   // Bahia as a NEW lawn plan (GATE_LAWN_V13 has no bahia program, so the server parks it for review).
   // Only an explicit false hides the option; an older server or a failed read keeps it, and a
   // reopened estimate that already carries bahia still shows it.
@@ -3749,7 +3845,7 @@ export default function EstimateToolViewV2({
         if (r.status === 404) return { ok: true, data: null };
         if (!r.ok) return { ok: false, data: null };
         const body = await r.json();
-        return { ok: true, data: body?.data ?? null };
+        return { ok: true, data: body?.data ?? null, wholeHome: body?.exclusionWholeHome === true };
       } catch {
         return { ok: false, data: null };
       }
@@ -3761,6 +3857,7 @@ export default function EstimateToolViewV2({
         fetchRow("rodent_waveguard"),
       ]);
       if (!active) return;
+      setExclusionWholeHomeAvailable(waveguardRow.wholeHome === true);
       // ALL THREE rows or nothing (codex #3591 r55 local P1): applying a
       // partial set leaves module defaults beside live values — the sidebar
       // could advertise a Silver/discounted posture the server's disabled
@@ -3968,8 +4065,10 @@ export default function EstimateToolViewV2({
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),
-      // Same address, same service property: the link stays.
+      // Same address, same service property: the link and the seal scope stay.
       propertyId: f.propertyId,
+      exclSealScope: f.exclSealScope,
+      exclusionChecklist: f.exclusionChecklist,
       _homeSqFtEdited: false,
       _lotSqFtEdited: false,
       _storiesEdited: false,
@@ -4371,6 +4470,11 @@ export default function EstimateToolViewV2({
     if (generating) return null;
     // An open scope question blocks pricing (the server refuses it too).
     if (scopeQuestion) return null;
+    const wholeHomeBlock = wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable);
+    if (wholeHomeBlock) {
+      alert(wholeHomeBlock);
+      return null;
+    }
     // Snapshot the invalidation version. Inputs stay editable while the
     // calculate call is in flight, so an edit that lands mid-flight must make
     // this generate discard its result (it was priced from pre-edit inputs).
@@ -4703,6 +4807,10 @@ export default function EstimateToolViewV2({
         exclMeshSoftLF: parseInt(form.exclMeshSoftLF, 10) || 0,
         exclMeshConcreteLF: parseInt(form.exclMeshConcreteLF, 10) || 0,
         exclWaiveInspection: form.exclWaive === "YES",
+        // Only for a Whole home pick while the gate is on: every other request is byte-for-byte what it was.
+        ...(exclusionWholeHomeAvailable && form.exclSealScope === "whole_home"
+          ? { exclSealScope: "whole_home", exclusionChecklist: Array.isArray(form.exclusionChecklist) ? form.exclusionChecklist : [] }
+          : {}),
         rgTrappingCompleted: !!form.rgTrappingCompleted,
         rgExclusionCompleted: !!form.rgExclusionCompleted,
         rgSanitationBaseline: !!form.rgSanitationBaseline,
@@ -6139,6 +6247,20 @@ export default function EstimateToolViewV2({
                 </Button>{" "}
               </div>{" "}
               <StatusLine status={satelliteStatus} />
+              {/* Above the property card: for a business inside a shared
+                  parcel the card below is all "Not found" until this is
+                  answered, and read alone it looks like a failed lookup
+                  (owner report 2026-11-19). */}
+              <ScopeQuestionPrompt
+                profile={enrichedProfile}
+                question={scopeQuestion}
+                // Only the answer the server applied reads as chosen; while
+                // the question is open none stands.
+                answer={!scopeQuestion ? (enrichedProfile?.occupancyAnswer || "") : ""}
+                notice={scopeQuestion === SCOPE_STALE_NOTICE ? SCOPE_STALE_NOTICE : ""}
+                busy={lookupStatus.type === "loading"}
+                onAnswer={answerScope}
+              />
               {enrichedProfile && (
                 <PropertyLookupResult
                   profile={enrichedProfile}
@@ -6151,16 +6273,6 @@ export default function EstimateToolViewV2({
                   verification={verifySaveState}
                 />
               )}
-              <ScopeQuestionPrompt
-                profile={enrichedProfile}
-                question={scopeQuestion}
-                // Only the answer the server applied reads as chosen; while
-                // the question is open none stands.
-                answer={!scopeQuestion ? (enrichedProfile?.occupancyAnswer || "") : ""}
-                notice={scopeQuestion === SCOPE_STALE_NOTICE ? SCOPE_STALE_NOTICE : ""}
-                busy={lookupStatus.type === "loading"}
-                onAnswer={answerScope}
-              />
               {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
                 <div className="mb-2.5 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
                   {enrichedProfile.fieldVerifyFlags.map((flag, i) => (
@@ -8444,6 +8556,9 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion Service" />
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
+                  {(exclusionWholeHomeAvailable || form.exclSealScope === "whole_home") && (
+                    <ExclusionSealScope estimate={estimate} commercial={commercialDetected} blockedReason={wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable)} />
+                  )}
                   <p className="text-14 text-zinc-400 font-medium">Wire Mesh Points</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <Field label="Standard — $75/pt" id="estimate-exclStandardWireMesh" className="mb-4">
@@ -9037,6 +9152,12 @@ export default function EstimateToolViewV2({
                             {E.property?.constructionMaterial} |{" "}
                             {E.property?.foundationType} foundation |{" "}
                             {E.property?.roofType} roof
+                          </>
+                        )}
+                        {roofEvidenceLine(E.engineRequest?.profile) && (
+                          <>
+                            <br />
+                            {roofEvidenceLine(E.engineRequest?.profile)}
                           </>
                         )}
                         {E.property?.estimatedValue && (

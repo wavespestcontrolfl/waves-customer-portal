@@ -32,14 +32,13 @@ const DATE = etDateString(addETDays(new Date(), 10));
 const TECH = 'tech';
 
 const ENV_KEYS = [
-  'GATE_DRIVE_TIME_CALIBRATION', 'GATE_SCHEDULING_CAPACITY', 'GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES',
+  'GATE_SCHEDULING_CAPACITY', 'GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES',
   'SELF_SERVE_ARRIVAL_GRACE_MINUTES', 'GATE_BOOK_ARRIVAL_GRACE', 'GATE_BOOK_CAPACITY_COMMIT',
 ];
 const saved = {};
 beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
 beforeEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   process.env.GATE_SCHEDULING_CAPACITY = 'true';
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';

@@ -249,6 +249,24 @@ function requestCancelPlanMeta(row) {
     return meta && meta.cancel_plan ? meta.cancel_plan : null;
   } catch { return null; }
 }
+// The reason of an accepted cancel: the pick and note the operator ACCEPTED
+// (the request's metadata and description), so a repair retry from a blank
+// or changed dialog never replaces them. An acceptance written before the
+// pick was recorded keeps its note; its pick is its case's (none if no case).
+// A failed case read never blocks the repair (visits and billing outrank a
+// reporting column): the pick reads as none and the AI reads the note.
+async function acceptedCancelReason(request) {
+  const note = request.description || null;
+  const durable = requestCancelPlanMeta(request) || {};
+  if (Object.prototype.hasOwnProperty.call(durable, 'reasonCode')) return { code: durable.reasonCode || null, note };
+  try {
+    const row = await db('cancellation_cases').where({ service_request_id: request.id }).first('reason_code');
+    return { code: (row && row.reason_code) || null, note };
+  } catch (err) {
+    logger.warn(`[admin-cancellation] case reason lookup failed for request ${request.id} (pick unknown; repair continues): ${err.message}`);
+    return { code: null, note };
+  }
+}
 // A cancel request records the prepay term it acts on (metadata.cancel_plan
 // .prepayTermId, written at acceptance). It belongs ONLY to that term: a
 // stale open request from an earlier term (the customer reactivated and
@@ -1866,6 +1884,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // exact note — a fresh request would skip their failed side effects
   // forever (and per-request dedupe keys would double-bell).
   let request = openAcceptance;
+  // The cancel reason (churn columns, AI input, case): a reused acceptance
+  // keeps the one it accepted; a new one is this dialog's. Read here, before
+  // the acceptance, so nothing sits between the acceptance and the wind-down.
+  const acceptedReason = request
+    ? await acceptedCancelReason(request)
+    : { code: input.reasonCode || null, note: input.note || null };
   let priorOutcome = null;
   // The FIRST attempt's recorded prepay facts (term id, disposition,
   // decision outcome, recorded/proposed refund): a repair retry after the
@@ -1968,6 +1992,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           cancel_plan: {
             scope: wholeAccount ? [] : [...scope].sort(),
             waiveLateFee: input.waiveLateFee,
+            // The accepted reason pick: the churn reason a repair retry keeps
+            // (acceptedCancelReason), whatever its dialog says.
+            reasonCode: input.reasonCode || null,
             // The accepted communication choice: a repair retry must not
             // text a customer the original operator explicitly chose not
             // to contact.
@@ -1999,13 +2026,17 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   const errors = [];
   let result = null;
   try {
-    const reasonParts = [input.reasonCode, input.note].filter(Boolean);
+    const reasonParts = [acceptedReason.code, acceptedReason.note].filter(Boolean);
     result = await processCancellationRequest({
       customerId,
       // The recorded reason feeds customers.churn_reason_detail and the AI
       // churn classification — boilerplate here misclassifies every
       // admin-driven churn (the Pareto reads the customer columns).
       reason: reasonParts.length ? reasonParts.join(' — ') : `Admin cancellation request ${request.id}`,
+      // The office's accepted pick is the churn code as is (no AI call); with
+      // no pick, or the pick 'other', the AI reads the accepted note.
+      churnReasonCode: acceptedReason.code,
+      churnReasonText: acceptedReason.note,
       // What the cancelled ROWS carry — and the public tracker echoes to
       // anyone holding a shared link (track-public cancellation.reason):
       // fixed customer-safe copy, never the operator's internal note or
@@ -2254,8 +2285,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       customerId,
       serviceRequestId: request.id,
       families: Array.isArray(result?.scope) && result.scope.length ? result.scope : (wholeAccount ? [] : scope),
-      reasonCode: input.reasonCode,
-      reasonText: input.note || null,
+      reasonCode: acceptedReason.code,
+      reasonText: acceptedReason.note,
       resolution: null,
       resolutionOutcome: null,
       snapshot: caseSnapshotBody,

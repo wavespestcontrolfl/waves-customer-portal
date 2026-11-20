@@ -99,6 +99,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { websiteLineRefusal } = require('./website-line-contact');
 const { phoneIdentityKey } = require('../utils/phone');
 const { lockSmsPhone, lockCustomerComms } = require('../utils/customer-comms-lock');
 const { OPEN_ESTIMATE_STATUSES } = require('./estimate-automation-duplicates');
@@ -643,6 +644,29 @@ function managedLineForCall(call) {
   const alertLine = TWILIO_NUMBERS.internalAlertLine();
   if (alertLine && candidate === alertLine.number) return null;
   return candidate;
+}
+
+// The line the booking text rides to destinationPhone. A website-only line
+// texts only someone who already called or texted it (website-line-contact.js):
+// a later call from anyone else would read as a website lead. This call is
+// that contact only when the destination dialed the line: an inbound call from
+// it to the line. An outbound call proves no contact, and a spoken second
+// number may have none, so both need the contact check. A refusal, or a failed
+// read, gives null, so deriveOutboundNumber picks a shared line.
+async function bookingTextLine(call, destinationPhone) {
+  const line = managedLineForCall(call);
+  if (!line) return null;
+  const destination = phoneIdentityKey(destinationPhone);
+  const dialedByDestination = !String(call?.direction || '').startsWith('outbound')
+    && destination && phoneIdentityKey(call.from_phone) === destination
+    && phoneIdentityKey(call.to_phone) === phoneIdentityKey(line);
+  if (dialedByDestination) return line;
+  try {
+    return (await websiteLineRefusal(line, destinationPhone)) ? null : line;
+  } catch (err) {
+    logger.warn(`[call-booking-link-text] website-line contact read failed for call ${call.id}; a shared line sends: ${err.message}`);
+    return null;
+  }
 }
 
 // Mirrors the canonical pipeline's own final-flags derivation
@@ -2007,7 +2031,7 @@ async function dispatchClaimedCall(conn, call, now) {
   // committing between neverSendRecheck returning ok and messages.create()
   // would have left a marker (and an 'ambiguous', never-resent status) for
   // an SMS that was never actually attempted.
-  const managedLine = managedLineForCall(call);
+  const managedLine = await bookingTextLine(call, destinationPhone);
   // The customers withSmsHandoff locks, handed to neverSendRecheck so a marked
   // row's records test can tell a customer the handoff did not lock.
   const lockedCustomerIds = new Set();
@@ -2626,6 +2650,7 @@ module.exports = {
   callEndFor,
   conversationSeconds,
   managedLineForCall,
+  bookingTextLine,
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,

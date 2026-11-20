@@ -3079,6 +3079,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     ),
     foundationType: inferFoundation(rc, ai),
     roofType: mergeField(rc?.roofType, ai?.roofMaterial, 'UNKNOWN'),
+    // Roof-style evidence for a later barrel-vs-flat tile price (owner
+    // 2026-11-19). Read-only: the county's own words (roofType above folds
+    // them into TILE), the style hint derived from them, and the photo's
+    // style read (only meaningful beside a TILE read). Nothing prices off these.
+    ...roofStyleEvidence(rc, ai),
     garageType: rc?.garageType || '',
     garageSpaces: rc?.garageSpaces || 0,
     hasAttachedGarage: detectAttachedGarage(rc),
@@ -4265,6 +4270,14 @@ function classifyAge(yearBuilt) {
   return 'MODERN';
 }
 
+function roofStyleEvidence(rc, ai) {
+  return {
+    countyRoofRaw: rc?.countyRoofRaw || null,
+    roofStyleHint: rc?.roofStyleHint || null,
+    roofTileStyle: ai?.roofMaterial === 'TILE' ? (ai.roofTileStyle || null) : null,
+  };
+}
+
 function mergeField(rcValue, aiValue, fallback) {
   // Property records take priority if they have data; satellite AI fills gaps.
   if (rcValue && rcValue !== 'UNKNOWN') return rcValue;
@@ -5398,6 +5411,12 @@ function isAssociationCommercialJob({ commercialRiskType = null, commercialSubty
     || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
 }
 
+// The Seal scope pick of the admin estimate tool, as services.exclusion fields: {} without a Whole home
+// pick. The pick passes through; the estimate engine makes the one GATE_EXCLUSION_WHOLE_HOME decision.
+function wholeHomeSealFields(options, home) {
+  return options.exclSealScope === 'whole_home' ? { sealScope: 'whole_home', ...home } : {};
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -6020,9 +6039,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     };
   }
   if (sel.has('EXCLUSION')) {
+    // Whole-home seal (GATE_EXCLUSION_WHOLE_HOME, dark): an all-zero count still prices the home-size
+    // minimum, so the pick alone selects the V2 shape. Gate off = the field is never read.
+    const wholeHomeSeal = wholeHomeSealFields(o, { homeSqFt, stories, roofType: p.roofType });
     const hasV2Fields = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
       o.exclStandardBirdBox || o.exclTileHighBirdBox || o.exclCustomBirdBox ||
-      o.exclMeshSoftLF || o.exclMeshConcreteLF);
+      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope);
     if (hasV2Fields) {
       services.exclusion = {
         pricingVersion: 'v2',
@@ -6035,6 +6057,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         meshConcreteLF: o.exclMeshConcreteLF || 0,
         waiveInspection: !!o.exclWaiveInspection,
         urgency, afterHours,
+        ...wholeHomeSeal,
       };
     } else {
       services.exclusion = {
@@ -6711,8 +6734,16 @@ function dropInvalidOptionalHedgeRead(normalized) {
   if (v != null && !(Number.isFinite(v) && v >= 0)) delete normalized.estimatedHedgeLinearFt;
 }
 
+// Optional, tile-only read (owner 2026-11-19): a missing answer stays missing,
+// any present value outside the enum becomes UNKNOWN.
+function normalizeRoofTileStyle(value) {
+  const text = String(value ?? '').trim().toUpperCase();
+  return ['BARREL', 'FLAT'].includes(text) ? text : 'UNKNOWN';
+}
+
 function normalizeSatelliteAnalysis(analysis = {}) {
   const normalized = { ...analysis };
+  if (normalized.roofTileStyle != null) normalized.roofTileStyle = normalizeRoofTileStyle(normalized.roofTileStyle);
   if (normalized.imperviousSurfacePercent == null && normalized.imperviosSurfacePercent != null) {
     normalized.imperviousSurfacePercent = normalized.imperviosSurfacePercent;
   }
@@ -6761,6 +6792,7 @@ Return ONLY valid JSON with these fields:
   "fenceType": "NONE" | "PRIVACY_WOOD" | "PRIVACY_VINYL" | "CHAIN_LINK" | "ALUMINUM" | "PARTIAL" | "UNKNOWN",
   "fenceNotes": "string",
   "roofMaterial": "TILE" | "SHINGLE" | "METAL" | "FLAT" | "UNKNOWN",
+  "roofTileStyle": "BARREL" | "FLAT" | "UNKNOWN" (ONLY when roofMaterial is TILE, otherwise omit it: BARREL = rounded S-shaped or half-pipe tile rows whose open ends show at the eave, FLAT = flat interlocking concrete tiles with a smooth, even surface),
   "roofNotes": "string",
   "constructionVisible": "CBS" | "WOOD_FRAME" | "METAL" | "BRICK" | "UNKNOWN",
   "shrubDensity": "LIGHT" | "MODERATE" | "HEAVY" (density of ornamental shrubs/hedges in the landscape beds: LIGHT = sparse foundation plantings with open mulch between them, MODERATE = typical SWFL foundation beds, HEAVY = packed hedges or mass plantings, or beds wrapping most of the home),
@@ -6862,5 +6894,6 @@ module.exports._private = {
   // (ops/agents/satellite-vision-model-bakeoff.js) so a model is scored
   // against the same validator the lookup applies.
   normalizeSatelliteAnalysis,
+  normalizeRoofTileStyle,
   isValidSatelliteVisionAnalysis,
 };

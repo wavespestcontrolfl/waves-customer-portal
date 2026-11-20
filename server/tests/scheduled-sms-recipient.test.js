@@ -52,8 +52,9 @@ test.each([false, true])('scheduled replay uses trusted row identities and regis
     SCHEDULED_SMS_MAX_ATTEMPTS: 3,
     require: () => ({ ...dayPromiseStub, ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay }),
   });
+  // The resolved recipient rides along: the website-line check judges the number the replay sends to.
   expect(dispatchScheduledSms).toHaveBeenCalledWith(expect.objectContaining({ id: 'queue-row' }),
-    expect.objectContaining({ entry_point: 'fixture' }), expect.any(Function), 'appointment', 3);
+    expect.objectContaining({ entry_point: 'fixture' }), expect.any(Function), 'appointment', 3, 'fixture-phone');
   expect(dispatchDeferredReplay).toHaveBeenCalledWith('fixture', expect.objectContaining({
     scheduled_sms_log_id: 'queue-row', customer_id: 'row-customer',
   }), expect.any(Function));

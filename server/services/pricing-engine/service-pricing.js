@@ -9824,6 +9824,66 @@ function priceExclusion(options = {}) {
   };
 }
 
+// Whole-home seal terms (owner 2026-11-19). Null for a spot seal, so every caller keeps the
+// spot-seal path byte for byte. A whole-home seal swaps the job floor for a home-size minimum
+// and includes the 1-year re-entry guarantee in the price. The gate (GATE_EXCLUSION_WHOLE_HOME)
+// is decided once, in the estimate engine (wholeHomeSealInputs); the pricer only prices the pick.
+function wholeHomeSealTerms(options = {}) {
+  if (options.sealScope !== 'whole_home') return null;
+  const sized = Number(options.homeSqFt) > 0;
+  const sqFt = sized ? Number(options.homeSqFt) : 2000;
+  // The same home-size table the spot-seal pricer reads: Settings (pricing_config
+  // onetime_exclusion.minimums_by_home_sqft, hydrated by db-bridge) reaches whole-home quotes.
+  // A saved estimate's quote-time minimum (frozenMinimum) beats the live table; older rows without one use it.
+  const frozen = Number(options.frozenMinimum) > 0 ? Number(options.frozenMinimum) : null;
+  const minimum = frozen ?? _bracketLookup(sqFt, SPECIALTY.exclusion.minimumsByHomeSqFt, 'maxSqFt').minimum;
+  return {
+    minimum, homeSqFt: sqFt, sized, stories: options.stories, roofType: options.roofType, frozenRenewal: options.frozenRenewal,
+  };
+}
+
+// The job floor: a whole-home seal's home-size minimum, else the spot-seal floor.
+function exclusionJobFloor(cfg, wholeHome, totalLinearMeshLF) {
+  if (wholeHome) return wholeHome.minimum;
+  return totalLinearMeshLF > 0 ? cfg.floors.includesLinearMesh : cfg.floors.pointOnly;
+}
+
+// The included re-entry guarantee keys of a whole-home result ({} for a spot seal). The renewal
+// price is the tier priceRodentGuarantee charges for the same home.
+function wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLinearMeshLF) {
+  if (!wholeHome) return {};
+  return {
+    // No measured home size: the minimum rests on a guessed 2,000 sq ft, so the estimator's
+    // guessed-size guard (footprintWasDefaulted) makes staff enter the size before the quote goes out.
+    ...(wholeHome.sized ? {} : { footprintWasDefaulted: true }),
+    sealScope: 'whole_home',
+    includesReentryGuarantee: true,
+    reentryGuaranteeMonths: RODENT.exclusionV2.wholeHomeReentryGuaranteeMonths,
+    // The renewal price the quote carried (frozenRenewal) beats the live tier price.
+    guaranteeRenewalPrice: Number(wholeHome.frozenRenewal) > 0 ? Number(wholeHome.frozenRenewal) : priceRodentGuarantee({
+      homeSqFt: wholeHome.homeSqFt,
+      stories: wholeHome.stories,
+      roofType: wholeHome.roofType,
+      equivalentExclusionPoints,
+      totalLinearMeshLF,
+    }).price,
+    // The quote-time minimum rides the saved row so a replay can restore it (estimate-whole-home-replay.js).
+    wholeHomeMinimum: wholeHome.minimum,
+  };
+}
+
+// The minimum row's name for the floor that lifted the price.
+function exclusionMinimumRowText(wholeHome, floor) {
+  if (!wholeHome) {
+    return { component: 'job_minimum', label: 'Rodent Exclusion — Job Minimum', detail: `Exclusion jobs carry a $${floor} minimum.` };
+  }
+  return {
+    component: 'whole_home_minimum',
+    label: 'Rodent Exclusion — Whole-home seal minimum',
+    detail: `Whole-home seal minimum for a ${wholeHome.homeSqFt.toLocaleString('en-US')} sq ft home.`,
+  };
+}
+
 // ============================================================
 // RODENT EXCLUSION V2 (unified mesh-point + bird-box + linear-mesh)
 // ============================================================
@@ -9848,6 +9908,7 @@ function priceRodentExclusionV2(options = {}) {
   } = options;
 
   const cfg = RODENT.exclusionV2;
+  const wholeHome = wholeHomeSealTerms(options);
   const ins = RODENT.inspection || { fee: cfg.inspectionFee, waiveIfApprovedTotalOver: 995 };
 
   const stdPts = Math.max(0, Number(standardWireMeshPoints) || 0);
@@ -9878,9 +9939,7 @@ function priceRodentExclusionV2(options = {}) {
     birdBoxSubtotal +
     linearMeshSubtotal;
 
-  const floor = totalLinearMeshLF > 0
-    ? cfg.floors.includesLinearMesh
-    : cfg.floors.pointOnly;
+  const floor = exclusionJobFloor(cfg, wholeHome, totalLinearMeshLF);
 
   const installPrice = Math.max(floor, Math.round(rawInstall));
   const installWithUrgency = applyUrgency(installPrice, urgency, afterHours);
@@ -9903,6 +9962,8 @@ function priceRodentExclusionV2(options = {}) {
     Math.ceil(totalLinearMeshLF / w.linearMeshLFPer);
 
   const totalItems = stdPts + advPts + stdBoxes + tileBoxes + custBoxes;
+
+  const guaranteeFields = wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLinearMeshLF);
 
   const parts = [];
   if (stdPts + advPts > 0)
@@ -9956,6 +10017,7 @@ function priceRodentExclusionV2(options = {}) {
       price: cents(price),
       detail: componentDetail,
       pricingVersion: 'RODENT_EXCLUSION_V2_MESH_BIRD_BOX',
+      ...guaranteeFields,
     });
   };
   const unitParts = (pairs) => pairs.filter(([count]) => count > 0)
@@ -9982,10 +10044,11 @@ function priceRodentExclusionV2(options = {}) {
         [hardLF, `LF hard @ $${cfg.linearMesh.hardRatePerLF}/LF`],
       ]));
   }
-  if (componentLineItems.length > 0) {
+  // A whole-home seal with no counted points still quotes its home-size minimum as a row.
+  if (componentLineItems.length > 0 || wholeHome) {
     if (floorDelta > 0) {
-      pushComponent('job_minimum', 'Rodent Exclusion — Job Minimum', floorDelta,
-        `Exclusion jobs carry a $${floor} minimum.`);
+      const minimumRow = exclusionMinimumRowText(wholeHome, floor);
+      pushComponent(minimumRow.component, minimumRow.label, floorDelta, minimumRow.detail);
     } else if (roundingDelta !== 0) {
       const last = componentLineItems[componentLineItems.length - 1];
       last.price = cents(last.price + roundingDelta);
@@ -10041,6 +10104,7 @@ function priceRodentExclusionV2(options = {}) {
     equivalentExclusionPoints,
     warrantyEligible: true,
     exclusionCompleted: total > 0,
+    ...guaranteeFields,
   };
 }
 

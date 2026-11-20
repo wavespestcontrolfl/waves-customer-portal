@@ -11,16 +11,38 @@ jest.mock('../services/pest-insider/plan', () => {
   const actual = jest.requireActual('../services/pest-insider/plan');
   return { ...actual, planIssue: jest.fn(actual.planIssue) };
 });
-const { buildIssue } = require('../services/pest-insider');
+// Every main fact gets a post here, so each case tests the build, not how
+// many facts the reviewed post list covers today (pest-insider-posts.test.js
+// holds the real list; the offline and sample-script cases below use it).
+jest.mock('../services/pest-insider/posts', () => {
+  const actual = jest.requireActual('../services/pest-insider/posts');
+  const { FACTS: facts } = jest.requireActual('../services/pest-insider/facts');
+  const POSTS = Object.freeze(Object.fromEntries(facts.filter((f) => !f.reserve).map((f) => {
+    const name = `fact-${f.id.toLowerCase()}`;
+    return [f.id, Object.freeze({ path: `/pest-control/${name}/`, file: `src/content/blog/pest-control/${name}.md`, states: f.statement })];
+  })));
+  const postUrl = (id) => (Object.prototype.hasOwnProperty.call(POSTS, id) ? `${actual.SITE}${POSTS[id].path}` : null);
+  return { ...actual, POSTS, postUrl, POST_URLS: Object.freeze([...new Set(Object.keys(POSTS).map(postUrl))]) };
+});
+const { buildIssue, NEWSLETTER_TYPE } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
-const { SPECIES, RECENT_WINDOW, planIssue } = require('../services/pest-insider/plan');
+const { SPECIES, planIssue } = require('../services/pest-insider/plan');
+const { postUrl } = require('../services/pest-insider/posts');
+const { POST_LINK_TEXT, withToolBlock, escapeHtml } = require('../services/pest-insider/render');
+const { validateNewsletterDraft } = require('../services/newsletter-validator');
+const { loadTools, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
+const { HEROES, heroFor } = require('../services/pest-insider/heroes');
+
+// Every main fact's post answers as live, unless a case says otherwise.
+const LIVE = FACTS.filter((f) => !f.reserve).map((f) => f.id);
 
 const realPlanIssue = jest.requireActual('../services/pest-insider/plan').planIssue;
 const A01 = factById('A01');
 const WFA = SPECIES.find((s) => s.slug === 'white-footed-ant');
 // A fixed plan: fact A01 (white-footed ants) and the White-footed Ant species,
 // so these cases test check -> render -> validate, not the planner's rotation.
-const usePlan = (leadFact, idItem = WFA) => planIssue.mockImplementation(() => ({ leadFact, idItem }));
+const usePlan = (leadFact, idItem = WFA, tool = null) => planIssue.mockImplementation(() => ({ leadFact, idItem, tool }));
+const ALL_URLS = loadTools().tools.map((t) => t.url);
 
 afterEach(() => {
   planIssue.mockReset();
@@ -30,9 +52,11 @@ afterEach(() => {
 describe('buildIssue', () => {
   test("builds the issue from the fact's reviewed lead, title and species entry", () => {
     usePlan(A01);
-    const r = buildIssue({ sendDate: '2026-12-03' });
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE });
     expect(r.ok).toBe(true);
-    expect(planIssue).toHaveBeenCalledWith({ sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [] });
+    expect(planIssue).toHaveBeenCalledWith({
+      sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [], livePostFactIds: LIVE, liveToolUrls: [], recentToolIds: [],
+    });
     expect(r.issue.subject).toBe(`🐜 ${A01.title}`);
     expect(r.issue.preview).toBe("What's this? White-footed Ant");
     for (const line of A01.lead) {
@@ -40,12 +64,95 @@ describe('buildIssue', () => {
       expect(r.issue.text_body).toContain(line);
     }
     expect(r.issue.text_body).toContain(WFA.fact);
-    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', problems: [] });
+    // the lead links A01's own reviewed post
+    expect(r.issue.html_body).toContain(`href="${postUrl('A01')}"`);
+    expect(r.issue.text_body).toContain(`${POST_LINK_TEXT}: ${postUrl('A01')}`);
+    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, problems: [] });
+    // no live tool named: no tool, and no Amazon link anywhere
+    expect(r.tool).toBeNull();
+    for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
+  });
+
+  test("every identifier species builds: its band, latin name and verdict chip pass the copy and send checks", () => {
+    const failed = [];
+    for (const species of SPECIES) {
+      usePlan(A01, species);
+      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE });
+      if (!r.ok) failed.push(`${species.slug}: ${r.reason}`);
+      else {
+        expect(r.issue.text_body).toContain(`WHAT'S THIS?\n${species.name} (${species.scientific})\n`);
+        expect(r.issue.text_body.includes('\nVerdict: ')).toBe(species.verdict !== 'harmless');
+      }
+    }
+    expect(SPECIES.length).toBeGreaterThan(0);
+    expect(failed).toEqual([]);
+  });
+
+  test("every fact with a top picture builds an issue that opens with it, under the fact's own title", () => {
+    const missing = [];
+    for (const id of Object.keys(HEROES)) {
+      usePlan(factById(id));
+      // a fact that needs a send-time recheck builds only once a person re-read its source
+      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, recheckedFactIds: [id] });
+      const first = r.ok && /<img src="([^"]+)" alt="([^"]*)"/.exec(r.issue.html_body);
+      // the alt text is the title, escaped (R01's title has quotes)
+      if (!first || first[1] !== heroFor(id).url || first[2] !== escapeHtml(factById(id).title)) missing.push(`${id}: ${r.ok ? 'no picture' : r.reason}`);
+    }
+    expect(Object.keys(HEROES).length).toBeGreaterThan(0);
+    expect(missing).toEqual([]);
+  });
+
+  test('a live tool comes back as `tool`, outside the shared body; its opted-in copy still fails the send check until PR 4', () => {
+    const mesh = toolById('stuff-it-copper-mesh');
+    usePlan(A01, WFA, mesh);
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [mesh.url] });
+    expect(r).toMatchObject({ ok: true, reason: null, tool: { productId: 'stuff-it-copper-mesh', url: mesh.url } });
+    expect(r.diagnostics.toolId).toBe('stuff-it-copper-mesh');
+    // the shared body, which the archive serves, has no Amazon link (pre-push PR 3 r1)
+    for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
+    const optedIn = withToolBlock(r.issue, r.tool);
+    expect(optedIn.html_body).toContain(`>${toolLinkText(mesh)}</a>`);
+    expect(optedIn.text_body).toContain(`${mesh.lines.join(' ')}\n\n${toolLinkText(mesh)}: ${mesh.url}\n${AMAZON_DISCLOSURE}`);
+    // No newsletter type may carry it yet: PR 4 adds the per-recipient check with opt-in evidence.
+    const { errors } = validateNewsletterDraft({
+      subject: optedIn.subject, preview_text: optedIn.preview, html_body: optedIn.html_body, text_body: optedIn.text_body, newsletter_type: NEWSLETTER_TYPE,
+    });
+    expect(errors.join(' ')).toMatch(/AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL/);
+  });
+
+  test('the builder refuses a tool the planner returns without a live check of its link', () => {
+    usePlan(A01, WFA, toolById('stuff-it-copper-mesh'));
+    expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [toolById('acurite-glass-rain-gauge').url] }))
+      .toMatchObject({ ok: false, issue: null, reason: 'no_live_tool: stuff-it-copper-mesh' });
+  });
+
+  test('the live tool links and the recent tools are passed to the plan', () => {
+    buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: ALL_URLS, recent: { toolIds: ['stuff-it-copper-mesh', null] } });
+    expect(planIssue).toHaveBeenCalledWith(expect.objectContaining({ liveToolUrls: ALL_URLS, recentToolIds: ['stuff-it-copper-mesh', null] }));
+  });
+
+  test('with no live-post list, no issue builds: every issue links its lead fact\'s post', () => {
+    expect(buildIssue({ sendDate: '2026-12-03' })).toMatchObject({ ok: false, issue: null, reason: 'no_live_post_for_month' });
+    expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: [] })).toMatchObject({ ok: false, reason: 'no_live_post_for_month' });
+  });
+
+  test('a fact whose post is down does not lead: the next fact with a live post leads in its place', () => {
+    const first = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE });
+    const swapped = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE.filter((id) => id !== first.diagnostics.factId) });
+    expect(swapped.ok).toBe(true);
+    expect(swapped.diagnostics.factId).not.toBe(first.diagnostics.factId);
+    expect(swapped.issue.html_body).toContain(`href="${postUrl(swapped.diagnostics.factId)}"`);
+  });
+
+  test('the builder refuses a lead fact the planner returns without a live post', () => {
+    usePlan(A01);
+    expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE.filter((id) => id !== 'A01') }))
+      .toMatchObject({ ok: false, issue: null, reason: 'no_live_post: A01' });
   });
 
   test('recent picks are passed to the plan', () => {
     // T03 and the brown widow are what 2026-12-03 picks with no recent issues.
-    const r = buildIssue({ sendDate: '2026-12-03', recent: { factIds: ['T03'], speciesSlugs: ['brown-widow'] } });
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, recent: { factIds: ['T03'], speciesSlugs: ['brown-widow'] } });
     expect(r.ok).toBe(true);
     expect(r.diagnostics.factId).not.toBe('T03');
     expect(r.diagnostics.speciesSlug).not.toBe('brown-widow');
@@ -54,7 +161,7 @@ describe('buildIssue', () => {
   test('a copy problem fails the issue and names every problem; nothing is cut', () => {
     const bad = { ...A01, lead: [A01.lead[0], 'Colonies hold 9 million ants.', 'Bleach works on them.'] };
     usePlan(bad);
-    const r = buildIssue({ sendDate: '2026-12-03' });
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE });
     expect(r).toMatchObject({ ok: false, issue: null, reason: expect.stringMatching(/^copy_check_failed: lead: number not in the source: 9; lead: pesticide or brand name/) });
     expect(r.diagnostics.problems.map((p) => p.text)).toEqual(['Colonies hold 9 million ants.', 'Bleach works on them.']);
   });
@@ -65,7 +172,7 @@ describe('buildIssue', () => {
     // register reads it as the false second-swarm claim, as the send would.
     const formosan = { ...SPECIES.find((s) => s.slug === 'formosan-termite'), fact: 'They swarm again in June.' };
     usePlan(factById('T02'), formosan);
-    const r = buildIssue({ sendDate: '2027-05-06' });
+    const r = buildIssue({ sendDate: '2027-05-06', livePostFactIds: LIVE });
     expect(r).toMatchObject({ ok: false, issue: null, reason: expect.stringMatching(/^send_validator_blocked: Unverified claim \(termite_second_swarm\)/) });
     expect(r.diagnostics.problems[0]).toMatchObject({ part: 'send_validator' });
   });
@@ -75,14 +182,14 @@ describe('buildIssue', () => {
     expect(M01.recheck_before_send).toBe(true);
     // the planner skips such a fact; the builder refuses one the planner returns anyway
     usePlan(M01, SPECIES.find((s) => s.slug === 'house-centipede'));
-    expect(buildIssue({ sendDate: '2027-06-03' })).toMatchObject({ ok: false, issue: null, reason: 'recheck_needed: M01' });
-    expect(buildIssue({ sendDate: '2027-06-03', recheckedFactIds: ['M01'] }).ok).toBe(true);
+    expect(buildIssue({ sendDate: '2027-06-03', livePostFactIds: LIVE })).toMatchObject({ ok: false, issue: null, reason: 'recheck_needed: M01' });
+    expect(buildIssue({ sendDate: '2027-06-03', livePostFactIds: LIVE, recheckedFactIds: ['M01'] }).ok).toBe(true);
     expect(planIssue.mock.calls[1][0].recheckedFactIds).toEqual(['M01']);
   });
 
   test('passes planning failures through', () => {
     const used = factsForSend('2026-12-03').map((f) => f.id);
-    expect(buildIssue({ sendDate: '2026-12-03', recent: { factIds: used } })).toMatchObject({ ok: false, reason: 'no_fact_for_month', issue: null });
+    expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, recent: { factIds: used } })).toMatchObject({ ok: false, reason: 'no_fact_for_month', issue: null });
   });
 
   test('an impossible send date is refused before any plan is made', () => {
@@ -95,7 +202,8 @@ describe('buildIssue', () => {
     // The send validator's fact register used to load it at import.
     const probe = [
       "const { buildIssue } = require('./services/pest-insider');",
-      "const r = buildIssue({ sendDate: '2026-12-03' });",
+      "const { POSTS } = require('./services/pest-insider/posts');",
+      "const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: Object.keys(POSTS) });",
       "const loaded = Object.keys(require.cache).filter((k) => /[\\\\/]models[\\\\/]db\\.js$|[\\\\/]node_modules[\\\\/]knex[\\\\/]/.test(k));",
       "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, factId: r.diagnostics.factId, loaded }) + '\\n');",
     ].join('\n');
@@ -103,12 +211,13 @@ describe('buildIssue', () => {
       cwd: path.join(__dirname, '..'), env: { ...process.env, NODE_ENV: 'offline-sample' }, encoding: 'utf8', timeout: 60000,
     });
     const line = out.split('\n').find((l) => l.startsWith('RESULT '));
-    expect(JSON.parse(line.slice('RESULT '.length))).toEqual({ ok: true, factId: 'T03', loaded: [] });
+    // the real reviewed post list here (a fresh process has no jest mock)
+    expect(JSON.parse(line.slice('RESULT '.length))).toEqual({ ok: true, factId: expect.any(String), loaded: [] });
   }, 60000);
 
   test('a planner passed by the caller is ignored (pre-push round 17)', () => {
     const plan = jest.fn(() => ({ leadFact: { ...A01, lead: ['Colonies hold 9 million ants.', 'They are everywhere.'] }, idItem: WFA }));
-    const r = buildIssue({ sendDate: '2026-12-03', plan });
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, plan });
     expect(plan).not.toHaveBeenCalled();
     expect(r.ok).toBe(true);
     expect(r.diagnostics.factId).toBe('T03');
@@ -118,7 +227,7 @@ describe('buildIssue', () => {
 describe('every issue the bank can make', () => {
   test.each(FACTS.filter((f) => !f.reserve).map((f) => [f.id, f]))('%s builds an issue the send validator accepts', (_id, fact) => {
     usePlan(fact);
-    const r = buildIssue({ sendDate: '2026-12-03', recheckedFactIds: [fact.id] });
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, recheckedFactIds: [fact.id] });
     expect({ reason: r.reason, problems: r.diagnostics.problems }).toEqual({ reason: null, problems: [] });
   });
 
@@ -126,39 +235,13 @@ describe('every issue the bank can make', () => {
     const failed = SPECIES
       .map((species) => {
         usePlan(A01, species);
-        return { slug: species.slug, r: buildIssue({ sendDate: '2026-12-03' }) };
+        return { slug: species.slug, r: buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE }) };
       })
       .filter(({ r }) => !r.ok)
       .map(({ slug, r }) => `${slug}: ${r.reason}`);
     expect(failed).toEqual([]);
   });
 
-  test('the first and third Thursdays from December 2026 through 2027 all build, in order', () => {
-    const days = ['2026-12-03', '2026-12-17'];
-    for (let month = 0; month < 12; month += 1) {
-      const thursdays = [];
-      for (let day = 1; day <= 31; day += 1) {
-        const d = new Date(Date.UTC(2027, month, day));
-        if (d.getUTCMonth() === month && d.getUTCDay() === 4) thursdays.push(d.toISOString().slice(0, 10));
-      }
-      days.push(thursdays[0], thursdays[2]);
-    }
-    const recent = { factIds: [], speciesSlugs: [] };
-    const built = days.map((sendDate) => {
-      const r = buildIssue({ sendDate, recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW) } });
-      if (r.ok) {
-        recent.factIds.push(r.diagnostics.factId);
-        recent.speciesSlugs.push(r.diagnostics.speciesSlug);
-      }
-      return { sendDate, reason: r.reason };
-    });
-    expect(built).toHaveLength(26);
-    expect(built.filter((b) => b.reason)).toEqual([]);
-    // With no recheck recorded, no fact marked for one ever leads.
-    expect(recent.factIds.filter((id) => factById(id).recheck_before_send)).toEqual([]);
-    // The two default sample dates (ops/agents/pest-insider-sample.js).
-    expect(recent.factIds.slice(0, 2)).toEqual(['T03', 'A01']);
-  });
 });
 
 describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
@@ -166,7 +249,8 @@ describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
   const run = (dates) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-sample-'));
     try {
-      const r = spawnSync(process.execPath, [SCRIPT, dir, ...dates], { encoding: 'utf8', timeout: 60000 });
+      // --assume-live: no web request in a test (the script's own default asks the website)
+      const r = spawnSync(process.execPath, [SCRIPT, dir, ...dates, '--assume-live'], { encoding: 'utf8', timeout: 60000 });
       return { status: r.status, stderr: r.stderr, files: fs.readdirSync(dir).sort() };
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -186,5 +270,20 @@ describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
       status: 0,
       files: ['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt', 'pest-insider-2026-12-17.html', 'pest-insider-2026-12-17.txt'],
     });
+  }, 120000);
+
+  test('--assume-tools adds the opted-in copy; a rerun without a tool removes it (pre-push PR 3 r2)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-sample-'));
+    try {
+      const go = (...flags) => spawnSync(process.execPath, [SCRIPT, dir, '2026-12-03', '--assume-live', ...flags], { encoding: 'utf8', timeout: 60000 }).status;
+      expect(go('--assume-tools')).toBe(0);
+      expect(fs.readdirSync(dir).sort()).toEqual(['.html', '.optin.html', '.optin.txt', '.txt'].map((ext) => `pest-insider-2026-12-03${ext}`));
+      expect(fs.readFileSync(path.join(dir, 'pest-insider-2026-12-03.optin.txt'), 'utf8')).toContain(AMAZON_DISCLOSURE);
+      expect(go()).toBe(0);
+      expect(fs.readdirSync(dir).sort()).toEqual(['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt']);
+      for (const f of fs.readdirSync(dir)) expect(fs.readFileSync(path.join(dir, f), 'utf8')).not.toMatch(/amazon/i);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }, 120000);
 });

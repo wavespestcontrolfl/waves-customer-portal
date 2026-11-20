@@ -1523,6 +1523,11 @@ const RODENT = {
       includesLinearMesh: r(295),
     },
 
+    // Whole-home seal (GATE_EXCLUSION_WHOLE_HOME, owner 2026-11-19): a home-size
+    // minimum replaces the job floor above. The table is SPECIALTY.exclusion
+    // .minimumsByHomeSqFt (pricing_config onetime_exclusion.minimums_by_home_sqft).
+    wholeHomeReentryGuaranteeMonths: 12,
+
     wireMeshPoints: {
       standard: r(75),
       advancedRoofHigh: r(150),

@@ -31,7 +31,6 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-delete process.env.GATE_DRIVE_TIME_CALIBRATION;
 
 const { raiseAdminAlertWithReopen, closeAdminAlertKeys } = require('../services/admin-alert-episodes');
 const { composeAdminAlert, raiseAdminAlert } = require('../services/admin-alert-compose');

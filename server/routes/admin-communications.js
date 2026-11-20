@@ -4,6 +4,7 @@ const db = require('../models/db');
 const ClickGuard = require('../services/review-click-guard');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { websiteLineRefusal } = require('../services/website-line-contact');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -404,7 +405,7 @@ async function sendSmsHandler(req, res, next) {
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
   let prepLinkSends = null;
-  // Verified moving links (GATE_MOVING_FLOW) — a real send is the link's delivery.
+  // Verified moving links — a real send is the link's delivery.
   let movingLinkMoveIds = null;
   // Composer-carried contract signing links: a prepared link is ACTIVATED
   // (delivered state stamped, windowed from the send) before the provider
@@ -568,6 +569,9 @@ async function sendSmsHandler(req, res, next) {
     // A technician texts from an office line or its own tech line only; any
     // other line is ignored and the default office line is used.
     const fromNumber = technicianAllowedFromNumber(req, requestedFromNumber);
+    // A website-only line texts only someone who already called or texted it.
+    const websiteLineBlock = await websiteLineRefusal(fromNumber, to);
+    if (websiteLineBlock) return res.status(400).json({ error: websiteLineBlock, code: 'WEBSITE_LINE_FIRST_CONTACT' });
     let trustedCustomerId;
     if (customerId) {
       const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
@@ -3346,18 +3350,15 @@ async function reserviceLinkHandler(req, res) {
 router.post('/reservice-link', requireAdmin, (req, res) => reserviceLinkHandler(req, res));
 
 // POST /api/admin/communications/moving-link  { customerId?, phone }
-// Composer helper (owner 2026-11-02, dark behind GATE_MOVING_FLOW): the
+// Composer helper (owner 2026-11-02): the
 // customer's /moving/:token short link for insertion into the SMS body. With a
 // selected customer, the full 10-digit phone must match it (as /reservice-link).
 // Without one (a new text opened from Customer 360 by phone), the number must
 // belong to exactly one customer profile; the composer adopts that customer.
 // Opens the customer's move if there is none; sends nothing (the operator's
-// own send is the only text). 404 while the gate is dark.
+// own send is the only text).
 async function movingLinkHandler(req, res) {
   try {
-    if (!require('../config/feature-gates').movingFlowLive()) {
-      return res.status(404).json({ error: 'Moving links are not enabled' });
-    }
     const last10 = fullPhoneLast10(req.body?.phone);
     if (!last10) {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
@@ -3972,8 +3973,6 @@ router.get('/link-library', async (req, res) => {
       // Codex #4709 r3 P1: the composer omits "Free consultation" while
       // GATE_LEAD_INSPECTION_LINK is dark.
       consultationLinksEnabled: featureGates.leadInspectionLinkLive(),
-      // GATE_MOVING_FLOW: the composer omits "Moving link" while it is dark.
-      movingLinksEnabled: featureGates.movingFlowLive(),
     });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);

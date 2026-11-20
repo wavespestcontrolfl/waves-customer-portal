@@ -23,10 +23,11 @@
  *   - one application = one distinct service record (a record with several
  *     Taurus rows is one application, at its highest concentration).
  *
- * Concentrations: before TAURUS_LOW_RATE_SINCE the owner mixed 3.2 fl oz in a
- * 4-gal tank (0.06%), so those rows count as 0.06% ("high"). Later rows count as
- * 0.03% ("low") unless the row says otherwise (a fl_oz/gal rate over 0.4, or a
- * dilution_rate of 0.06% or more).
+ * Concentrations (shared/taurus-concentration.cjs): before TAURUS_LOW_RATE_SINCE
+ * the owner mixed 3.2 fl oz in a 4-gal tank (0.06%), so those rows count as 0.06%
+ * ("high") unless a recorded dilution or a tank concentration says 0.03%. Later rows
+ * count as 0.03% ("low") unless the row says otherwise (a dilution of 0.06% or more,
+ * a per-gallon rate over 0.4 fl oz/gal, or more product than the 1.6 fl oz house mix).
  *
  * A visit scheduled in a different ET year than today (a December visit closed in
  * January) is checked against BOTH years and counts as eligible only when both say
@@ -38,16 +39,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 
-// The owner's 2026 mix (3.2 fl oz per 4 gal, 0.06%) ran until ruling "A" (2026-11-19) set 1.6 fl oz; the first
-// application date counted at 0.03% unless the row says otherwise.
-const TAURUS_LOW_RATE_SINCE = '2026-11-20';
-
-// 1.6 fl oz per 4 gal = 0.4 fl oz/gal = 0.03%; a fl_oz/gal rate above that is the 0.06% mix.
-const LOW_RATE_MAX_FL_OZ_PER_GAL = 0.4;
-// The house mix's Taurus amount (fl oz). Assumes one 4-gal tank per home (owner mix: 1.6 fl oz per 4 gal): a larger
-// amount is read as the old 0.06% tank (3.2 fl oz), even when the row carries no rate or dilution.
-const HOUSE_TAURUS_FL_OZ = 1.6;
-const HIGH_DILUTION_PERCENT = 0.06;
+// The concentration rule (the date of the 0.03% ruling, the house mix, units) lives in the shared module, so the
+// close-out warning (client lib/taurus-yearly-limit.js) reads an application as this count does.
+const { TAURUS_LOW_RATE_SINCE, taurusConcentration } = require('../../shared/taurus-concentration.cjs');
 
 // The close-out picker's own identity rule (client lib/taurus-yearly-limit.js: /^taurus\s*sc\b/i on the trimmed name).
 const TAURUS_NAME_PATTERN = '^\\s*taurus\\s*sc\\M';
@@ -95,40 +89,17 @@ function etYearBounds(now = new Date()) {
   return yearBoundsOf(Number(etDateString(now).slice(0, 4)));
 }
 
-const unitKey = (unit) => String(unit || '').trim().toLowerCase().replace(/[\s.]+/g, '_');
-const isFlOz = (unit) => ['oz', 'fl_oz', 'floz'].includes(unitKey(unit));
-// A recorded tank concentration in fl oz per gallon: "fl_oz/gal" / "oz/gal", or the per-100-gallon units the
-// completion API also accepts ("fl_oz/100gal" / "oz/100gal"), divided by 100. null for any other unit.
-const PER_GAL_UNITS = { 'fl_oz/gal': 1, 'oz/gal': 1, 'floz/gal': 1, 'fl_oz/100gal': 100, 'oz/100gal': 100, 'floz/100gal': 100 };
-const flOzPerGal = (value, unit) => {
-  const divisor = PER_GAL_UNITS[unitKey(unit)];
-  const n = Number(value);
-  return divisor && Number.isFinite(n) && n > 0 ? n / divisor : null;
-};
-const TSP_PER_FL_OZ = 6;
-const flOzAmount = (value, unit) => {
-  if (unitKey(unit) === 'tsp') { const t = Number(value); return Number.isFinite(t) && t > 0 ? t / TSP_PER_FL_OZ : 0; }
-  const n = Number(value);
-  return isFlOz(unit) && Number.isFinite(n) && n > 0 ? n : 0;
-};
-
-/** 'high' (a 0.06% application) or 'low' (0.03%) for one ledger row. */
+/** 'high' (a 0.06% application) or 'low' (0.03%) for one ledger row (shared/taurus-concentration.cjs). */
 function applicationConcentration(row) {
-  // A recorded concentration decides when the row has one, on any date: a dilution, else a fl oz per gallon
-  // rate (a visit closed out on the rollout day at 0.4 fl oz/gal is 0.03%).
-  // Only an explicit percentage ("0.06%") is a dilution: the column is text, and other text ("0.4 fl oz/gal",
-  // a range, a bare number) is not read as a percent; the recorded rate decides then.
-  const percent = /^\s*(\d+(?:\.\d+)?)\s*%\s*$/.exec(String(row.dilution_rate ?? ''));
-  const dilution = percent ? Number(percent[1]) : NaN;
-  if (Number.isFinite(dilution) && dilution > 0) return dilution >= HIGH_DILUTION_PERCENT ? 'high' : 'low';
-  const perGal = flOzPerGal(row.application_rate, row.rate_unit);
-  if (perGal != null) return perGal > LOW_RATE_MAX_FL_OZ_PER_GAL ? 'high' : 'low';
-  // No recorded concentration: a row before the 0.03% ruling is the owner's earlier 0.06% mix.
-  if ((dateOnlyString(row.application_date) || '') < TAURUS_LOW_RATE_SINCE) return 'high';
-  // Later, an amount above the house mix (a bare oz / fl oz quantity, or a bare oz rate
-  // that is the tank amount) is read as the old 0.06% tank (one 4-gal tank per home).
-  const amounts = [flOzAmount(row.quantity_applied, row.quantity_unit), flOzAmount(row.application_rate, row.rate_unit)];
-  return amounts.some((amount) => amount > HOUSE_TAURUS_FL_OZ) ? 'high' : 'low';
+  return taurusConcentration({
+    dilution: row.dilution_rate,
+    rate: row.application_rate,
+    rateUnit: row.rate_unit,
+    amount: row.quantity_applied,
+    amountUnit: row.quantity_unit,
+    // A row with no date is read as the older (0.06%) mix.
+    beforeRuling: (dateOnlyString(row.application_date) || '') < TAURUS_LOW_RATE_SINCE,
+  });
 }
 
 /**
@@ -179,8 +150,10 @@ async function yearAnswer(knex, visit, bounds) {
 /**
  * @param {{ id?: string|null, customer_id?: string|null, property_id?: string|null, scheduled_date?: string|Date|null }} visit
  *   the scheduled_services row being completed
- * @returns {Promise<{ high: number, low: number, count: number, eligible: boolean, eligibleHigh: boolean, year: number } | null>}
- *   `eligible`: another 0.03% application fits; `eligibleHigh`: another 0.06% one fits. null when the history is
+ * @returns {Promise<{ high: number, low: number, count: number, eligible: boolean, eligibleHigh: boolean, year: number, beforeRuling: boolean } | null>}
+ *   `eligible`: another 0.03% application fits; `eligibleHigh`: another 0.06% one fits; `beforeRuling`: this visit's
+ *   application may be dated before TAURUS_LOW_RATE_SINCE (the close-out warning then reads it as the count will,
+ *   shared/taurus-concentration.cjs). null when the history is
  *   unknown (no customer, or the read failed): the close-outs then leave Taurus off the house mix and say so; none blocks.
  */
 async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
@@ -197,6 +170,9 @@ async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
       ...shown,
       eligible: answers.every((a) => a.eligible),
       eligibleHigh: answers.every((a) => a.eligibleHigh),
+      // The completion writers date the ledger row the visit day or today: either one before the ruling (the
+      // conservative answer).
+      beforeRuling: [day, etDateString(now)].some((d) => /^\d{4}-\d{2}-\d{2}$/.test(d || '') && d < TAURUS_LOW_RATE_SINCE),
     };
   } catch (err) {
     // No driver message: it can echo SQL and bound values.

@@ -47,12 +47,50 @@ describe('wiring', () => {
     expect(read('../services/call-recording-processor.js')).not.toContain('call-phone-yes-accept');
   });
 
-  test('the cards accept nothing and send nothing', () => {
+  test("filing accepts nothing and sends nothing; the tap runs only the office's own accept and sends nothing itself", () => {
     const service = read('../services/call-phone-yes-accept.js');
+    const at = service.indexOf('// ── The tap: "Accept as pay per application" ──');
+    expect(at).toBeGreaterThan(0);
+    const filing = service.slice(0, at);
+    const tap = service.slice(at);
     for (const word of ['markEstimateManuallyAccepted', 'convertEstimate', 'sendSms', 'sendEmail', 'twilio', 'sendgrid', 'sendInvoice',
       'notifyAdmin', 'sendCustomerMessage', 'sendMembershipStarted', '.update({ source_estimate_id', 'estimated_price:']) {
-      expect(service).not.toContain(word);
+      expect(filing).not.toContain(word);
     }
+    // The tap: the office's own accept (it sends the membership email itself, as Mark accepted does), no send of its own.
+    expect(tap).toContain('Manual.markEstimateManuallyAccepted({');
+    for (const word of ['convertEstimate', 'sendSms', 'sendEmail', 'twilio', 'sendgrid', 'sendInvoice', 'notifyAdmin', 'sendCustomerMessage', 'sendMembershipStarted']) {
+      expect(tap).not.toContain(word);
+    }
+  });
+
+  test('the tap\'s link step takes its locks in order: property-preferences, the customers row, the triage lock, the booking call, the estimates (then the send check), the catalog, then the call\'s visits (the booked one read from them) before the counts', () => {
+    const service = read('../services/call-phone-yes-accept.js');
+    const inOrder = (text, needles) => {
+      const order = needles.map((needle) => text.indexOf(needle));
+      expect(order.every((at) => at > 0)).toBe(true);
+      expect([...order].sort((a, b) => a - b)).toEqual(order);
+    };
+    inOrder(service.slice(service.indexOf('function linkVisitStep('), service.indexOf('function priceSeriesStep(')), [
+      "['property-preferences', String(customerId)]",
+      "trx('customers').where({ id: customerId }).forUpdate()",
+      "lockNoWaitOrStop(trx, [TRIAGE_LOCK_NAMESPACE, bookingCallId], 'call_busy')",
+      "trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().noWait()",
+      'await lockCustomerEstimates(trx, customerId);',
+      "require('./scheduling/catalog-lock').lockCatalogIdentity(trx)",
+      "visitsCallBooked(trx, bookingCallId, customerId).orderBy('id').forUpdate().noWait()",
+      'callVisits.find((v) => String(v.id) === String(visit.id))',
+      "require('./call-prepay-choice').liveVisitsOfCall(trx, bookingCallId, customerId)",
+      'await callVisitsOnCalendar(trx, bookingCallId, customerId)',
+    ]);
+    // No second lock on the booked visit by id: a visit moved off the call is not in the locked set, and a take by id
+    // would wait on its row while the step holds the accept's locks.
+    expect(service.slice(service.indexOf('function linkVisitStep('), service.indexOf('function priceSeriesStep('))).not.toContain('where({ id: visit.id }).forUpdate()');
+    // The send check reads after the estimates' lock, so a claim cannot land between the read and the commit.
+    inOrder(service.slice(service.indexOf('async function lockCustomerEstimates('), service.indexOf('function linkVisitStep(')), [
+      '.forShare().noWait()',
+      'estimateBeingSent(trx, customerId, new Date())',
+    ]);
   });
 
   test("the caller's word comes from one module: the cards keep no copy of its rules", () => {

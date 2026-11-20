@@ -85,11 +85,12 @@ import {
 } from "lucide-react";
 import { useLocation, useNavigate, useOutletContext } from "react-router-dom";
 import EmailPage from "./EmailPage";
-import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
+import { ALL_NUMBERS, NUMBER_LABEL_MAP, REPLY_LINE_NUMBERS } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import LiveCallPanelV2 from "./LiveCallPanelV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
 import PortalInboxTabV2 from "./PortalInboxTabV2";
+import { MessageMediaV2 } from "../../components/admin/MessageMediaV2";
 import MessengerTabV2 from "./MessengerTabV2";
 import OwedTabV2 from "./OwedTabV2";
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
@@ -304,11 +305,14 @@ function getCustomerOptionName(customer) {
   );
 }
 
+// Every Waves line a thread can be on: the picker's lines plus the reply-only
+// lines (REPLY_LINE_NUMBERS), so a Text back or a thread on one of those
+// replies from that same line.
+const KNOWN_WAVES_NUMBERS = [...ALL_NUMBERS.flatMap((group) => group.numbers), ...REPLY_LINE_NUMBERS].map((n) => n.number);
+
 function findKnownWavesNumber(value) {
   if (!value) return "";
-  return ALL_NUMBERS.flatMap((group) => group.numbers.map((n) => n.number)).find(
-    (number) => phoneKey(number) === phoneKey(value),
-  ) || "";
+  return KNOWN_WAVES_NUMBERS.find((number) => phoneKey(number) === phoneKey(value)) || "";
 }
 
 const TABS = [
@@ -538,57 +542,6 @@ function SmsDeliveryReceiptV2({ status, readAt }) {
 function TypeBadgeV2({ type }) {
   if (!type) return null;
   return <Badge tone="neutral">{type.replace(/_/g, " ")}</Badge>;
-}
-
-export function MessageMediaV2({ media = [], inverted = false }) {
-  // A signed media URL that fails to load (expired signature, offline) left a
-  // blank image box inside the bubble — on an outbound (dark) bubble that
-  // reads as a big empty black rectangle. Swap failed loads for a labeled
-  // chip that still links to the attachment.
-  const [failed, setFailed] = useState({});
-  const items = Array.isArray(media) ? media.filter((m) => m?.url) : [];
-  if (!items.length) return null;
-  return (
-    <div className="mt-2 grid grid-cols-2 gap-1.5">
-      {items.map((item, idx) => (
-        <a
-          key={item.key || item.url || idx}
-          href={item.url}
-          target="_blank"
-          rel="noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className={cn(
-            "block overflow-hidden rounded-sm border-hairline u-focus-ring",
-            inverted
-              ? "border-white/30 bg-white/10"
-              : "border-zinc-300 bg-white",
-          )}
-        >
-          {" "}
-          {failed[item.url] ? (
-            <span
-              className={cn(
-                "flex items-center justify-center h-12 px-2 text-14",
-                inverted ? "text-white/80" : "text-ink-secondary",
-              )}
-            >
-              {item.fileName || "Attachment"}
-            </span>
-          ) : (
-            <img
-              src={item.url}
-              alt={item.fileName || `SMS attachment ${idx + 1}`}
-              className="h-28 w-full object-cover"
-              loading="lazy"
-              onError={() =>
-                setFailed((f) => ({ ...f, [item.url]: true }))
-              }
-            />
-          )}{" "}
-        </a>
-      ))}
-    </div>
-  );
 }
 
 // The newest inbound row of a thread, as the reply context a thread-level
@@ -979,7 +932,7 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
   } re-service here: ${url}`;
 }
 
-// Moving link text (owner 2026-11-02, GATE_MOVING_FLOW): fixed words, no price.
+// Moving link text (owner 2026-11-02): fixed words, no price.
 export function buildMovingPrefill({ firstName, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;
@@ -1365,11 +1318,9 @@ export function SmsTab({
   const [insertingReservice, setInsertingReservice] = useState(false);
   // Same contract for the standing re-service link (free between-visit
   // callback booking) — a bearer credential tracked per recipient.
-  // The moving link (GATE_MOVING_FLOW): same contract as the re-service link, with
-  // local state. movingLinkGone hides the entry once the server answers 404.
+  // The moving link: same contract as the re-service link, with local state.
   const [insertingMoving, setInsertingMoving] = useState(false);
   const [insertedMoving, setInsertedMoving] = useState(null);
-  const [movingLinkGone, setMovingLinkGone] = useState(false);
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
@@ -1414,7 +1365,7 @@ export function SmsTab({
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
   useEffect(() => { if (linkRequest > 0) setShowLinkSheet(true); }, [linkRequest]);
-  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled, consultationLinksEnabled, movingLinksEnabled } = useLinkLibrary(active && showLinkSheet);
+  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled, consultationLinksEnabled } = useLinkLibrary(active && showLinkSheet);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
@@ -2763,10 +2714,9 @@ export function SmsTab({
     }
   }, [insertedReservice, msgBody, toNumber, selectedCustomerId]);
 
-  // Insert the selected customer's moving link (GATE_MOVING_FLOW). The server
-  // opens the customer's move if there is none and answers 404 while the gate
-  // is dark, which hides the entry. Nothing is sent: the operator's own send is
-  // the only text.
+  // Insert the selected customer's moving link. The server opens the
+  // customer's move if there is none. Nothing is sent: the operator's own send
+  // is the only text.
   const handleInsertMovingLink = async () => {
     const requestRecipient = toNumber.trim();
     if (!requestRecipient || insertingMoving) return;
@@ -2824,10 +2774,7 @@ export function SmsTab({
       });
       setSendResult({ ok: true, text: "Moving link added." });
     } catch (e) {
-      if (e && e.status === 404 && /not enabled/i.test(e.message || "")) {
-        setMovingLinkGone(true);
-        setSendResult({ ok: false, text: "Moving links are not turned on." });
-      } else if (!movingContextChanged()) {
+      if (!movingContextChanged()) {
         setSendResult({ ok: false, text: e.message });
       }
     } finally {
@@ -3161,12 +3108,11 @@ export function SmsTab({
     () => [
       ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim()))
         && (l.key !== "receipt" || receiptLinksEnabled)
-        && (l.key !== "consultation" || consultationLinksEnabled)
-        && (l.key !== "moving" || (movingLinksEnabled && !movingLinkGone))),
+        && (l.key !== "consultation" || consultationLinksEnabled)),
       ...HOW_TO_GUIDE_LINKS,
       ...(libraryLinks || []),
     ],
-    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled, consultationLinksEnabled, movingLinksEnabled, movingLinkGone],
+    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled, consultationLinksEnabled],
   );
 
   const handleInsertSheetPick = (link, channel = null) => {
@@ -3252,8 +3198,7 @@ export function SmsTab({
     const sorted = [...messages].sort(
       (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
     );
-    const allNums = new Set();
-    ALL_NUMBERS.forEach((g) => g.numbers.forEach((n) => allNums.add(n.number)));
+    const allNums = new Set(KNOWN_WAVES_NUMBERS);
     sorted.forEach((m) => {
       let contactPhone, ourNumber;
       if (m.direction === "inbound") {
@@ -3680,12 +3625,14 @@ export function SmsTab({
               ))}
             </optgroup>
           ))}
-          {/* A thread-locked From resolved from server config (e.g. a GBP
-              tracking line) may not be in the client list — render it so
-              the locked select doesn't show blank. */}
-          {threadLock && fromNumber
+          {/* The From may not be in the client list: a thread-locked line
+              resolved from server config (e.g. a GBP tracking line), or a
+              reply-only line (REPLY_LINE_NUMBERS) still set after Override.
+              Render it, so the select always shows the line Send uses and
+              never a blank or another line. */}
+          {fromNumber
             && !ALL_NUMBERS.some((g) => g.numbers.some((n) => n.number === fromNumber)) && (
-            <option value={fromNumber}>{threadLock.label}</option>
+            <option value={fromNumber}>{threadLock?.label || NUMBER_LABEL_MAP[fromNumber] || fromNumber}</option>
           )}
         </Select>
         </Field>

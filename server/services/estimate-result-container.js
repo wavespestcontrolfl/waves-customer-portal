@@ -124,6 +124,25 @@ function storedTermiticideRows(estimateData, options, line) {
 const storedPreSlabTermiticideRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, PRE_SLAB_ROWS);
 const storedTrenchingRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, TRENCHING_ROWS);
 
+// The stored rows of the rodent exclusion (whole-home terms replay, GATE_EXCLUSION_WHOLE_HOME), from the same
+// authoritative container and under every shape a row rides in, like the area add-on rows above.
+function exclusionRowsIn(container) {
+  const { isRodentExclusionRow } = require('../../shared/estimate-purchased-warranty.cjs');
+  const nested = container.results && container.results.oneTime;
+  return [
+    container.oneTime && container.oneTime.items, container.oneTime && container.oneTime.specItems,
+    nested && nested.items, nested && nested.specItems,
+    container.specItems, container.quoteRequiredItems, container.lineItems,
+  ].filter(Array.isArray).flat().filter((row) => isRecord(row) && isRodentExclusionRow(row));
+}
+function storedRodentExclusionRows(estimateData, options = {}) {
+  const data = parseStoredData(estimateData);
+  if (!data) return [];
+  const containers = [data.result, data.engineResult].filter(isRecord);
+  if (containers.length && !containers.some((container) => exclusionRowsIn(container).length)) return [];
+  return exclusionRowsIn(storedEstimateContainer(data, options) || data);
+}
+
 // The commercial engine ids and their residential label-mapped twins are the SAME charge in two
 // spellings: canonicalized for the duplicate key only (each line keeps its own serviceKey).
 const DEDUPE_FAMILY = {
@@ -237,5 +256,5 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
 const proposalIsAuthoritative = (data) => data?.proposal?.enabled === true;
 
 module.exports = {
-  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedPreSlabTermiticideRows, storedTrenchingRows, storedMistingRows,
+  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedPreSlabTermiticideRows, storedTrenchingRows, storedMistingRows, storedRodentExclusionRows, exclusionRowsIn,
 };
