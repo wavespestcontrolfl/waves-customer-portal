@@ -99,7 +99,7 @@ describe('notification trigger push tags', () => {
     expect(TRIGGER_REGISTRY.waiting_summary.techVisible).toBeUndefined();
   });
 
-  // GATE_OWNER_NUDGE_BANNER (owner 2026-11-04, "banner").
+  // Owner 2026-11-04, "banner".
   test('open_visits_nudge carries the text\'s words, opens the tech close-out page and has no bell-row rule beyond fyi', () => {
     const built = TRIGGER_REGISTRY.open_visits_nudge.build({
       headline: '3 visits from today are still open',
@@ -1069,8 +1069,8 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     }
   });
 
-  // GATE_OWNER_NUDGE_BANNER: pushOnly + onlyUserIds reaches only the named admin, never a bell row, only while its gate is on.
-  test.each([['true', 1], [undefined, 0]])('GATE_OWNER_NUDGE_BANNER=%p: the pushOnly open_visits_nudge banner sends %p push(es) to the owner alone, never a bell row', async (gate, pushes) => {
+  // pushOnly + onlyUserIds reaches only the named admin, never a bell row.
+  test('the pushOnly open_visits_nudge banner sends one push to the owner alone, never a bell row', async () => {
     const PushService = require('../services/push-notifications');
     const bellPolicy = require('../services/notification-bell-policy');
     const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
@@ -1079,7 +1079,6 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     ));
     NotificationService.notifyAdmin.mockClear();
     PushService.sendToAdminUsers.mockClear();
-    if (gate) process.env.GATE_OWNER_NUDGE_BANNER = gate;
     try {
       const stats = await triggerNotification(
         'open_visits_nudge',
@@ -1087,11 +1086,8 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
         { pushOnly: true, adminOnly: true, onlyUserIds: ['owner-1'] },
       );
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(pushes);
-      if (!pushes) {
-        expect(stats.policySilenced).toBe(true);
-        return;
-      }
+      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+      expect(stats.policySilenced).toBeFalsy();
       const [adminIds, payloadFor] = PushService.sendToAdminUsers.mock.calls[0];
       expect(adminIds).toEqual(['owner-1']);
       expect(payloadFor('owner-1')).toMatchObject({
@@ -1099,7 +1095,6 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
         tag: 'waves-open_visits_nudge-2026-11-04', sound: 'waves-reminder.caf', priority: 'normal',
       });
     } finally {
-      delete process.env.GATE_OWNER_NUDGE_BANNER;
       gateSpy.mockRestore();
     }
   });
@@ -1419,7 +1414,7 @@ describe('bell banner triggers', () => {
     expect(keys.indexOf('messenger_reply')).toBe(keys.indexOf('sms_reply') + 1);
   });
 
-  test('new_lead_email (GATE_RING_NEW_CONTACTS) builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
+  test('new_lead_email builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
     const lead = TRIGGER_REGISTRY.new_lead_email;
     expect(lead).toEqual(expect.objectContaining({ category: 'new_lead', priority: 'high', group: 'Leads & Sales', adminRoleOnly: true }));
     expect(lead.rule).toEqual({ area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 });

@@ -502,7 +502,7 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=messenger',
     }),
   },
-  // The phone banner for a new-lead email (GATE_RING_NEW_CONTACTS, bell-banners.js kind new_lead_email, owner 2026-11-04
+  // The phone banner for a new-lead email (bell-banners.js kind new_lead_email, owner 2026-11-04
   // "ring new"). The bell row is the plain 'new_lead' category row email-actions.js already writes, which carries no
   // triggerKey of its own (the writer names this kind with notifyAdmin's bannerKind), so no sweep closes it and its
   // rule is the retention expiry. `build` takes the written row's own words as alertTitle/alertBody/alertLink.
@@ -1320,7 +1320,7 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
-  // The owner's 7 PM open-visit nudge as a phone banner (GATE_OWNER_NUDGE_BANNER, owner 2026-11-04 "banner"): the same words
+  // The owner's 7 PM open-visit nudge as a phone banner (owner 2026-11-04 "banner"): the same words
   // the text carries, a tap opens the tech close-out page. services/tech-open-visit-nudge.js sends it pushOnly to the owner's
   // own admin user, so it writes no bell row (rule: fyi) and the owner can switch it off in Push Settings. p = { headline,
   // lines: [visit line], day }; the nudge module builds the words (customer first name + last initial only).

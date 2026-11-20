@@ -1,7 +1,8 @@
-// GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04): with the gate on, a push_first
-// notice reaches a customer whose app has an active device however long ago the
-// app was opened, and the text still goes whenever no device accepts. Gate off
-// keeps the 72 hour rule. A contact's device never counts for the holder.
+// App first on any device (owner 2026-11-04): a push_first notice reaches a
+// customer whose app has an active device however long ago the app was opened,
+// and the text still goes whenever no device accepts. A contact's device never
+// counts for the holder. The companion push and an explicit App choice keep the
+// 72 hour rule.
 
 const mockDevices = [];
 const mockProofRows = [];
@@ -97,7 +98,7 @@ const send = (overrides = {}) => PushRouting.attemptPushFirst({
   ...overrides,
 });
 
-const ENV_KEYS = ['GATE_APP_FIRST_ANY_DEVICE', 'GATE_APP_FIRST_STALE_TEXT', 'GATE_CUSTOMER_APP_NOTIFICATIONS'];
+const ENV_KEYS = ['GATE_APP_FIRST_STALE_TEXT', 'GATE_CUSTOMER_APP_NOTIFICATIONS'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -117,8 +118,7 @@ afterEach(() => {
 const device = (extra = {}) => ({ id: 'd-1', customer_id: 'c-1', platform: 'ios', active: true, contact_phone_key: null, updated_at: hoursAgo(240), ...extra });
 
 describe('reachability without a recent check-in (legacy device query)', () => {
-  it('gate on: a device last seen 10 days ago takes the push, no text, and the heartbeat floor is dropped', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('a device last seen 10 days ago takes the push, no text, and the heartbeat floor is dropped', async () => {
     mockDevices.push(device());
     const result = await send();
     expect(result.delivered).toBe(true);
@@ -127,37 +127,19 @@ describe('reachability without a recent check-in (legacy device query)', () => {
     expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBe(true);
   });
 
-  it('gate off: the same stale device falls back to the text (72 hour rule)', async () => {
-    mockDevices.push(device());
-    const result = await send();
-    expect(result).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
-    expect(mockSendToCustomer).not.toHaveBeenCalled();
-  });
-
-  it('gate off: a fresh device still gets the push, with the heartbeat floor', async () => {
-    mockDevices.push(device({ updated_at: hoursAgo(2) }));
-    const result = await send();
-    expect(result.delivered).toBe(true);
-    expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeInstanceOf(Date);
-    expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBeUndefined();
-  });
-
-  it('gate on: a contact device never counts as the holder having the app', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('a contact device never counts as the holder having the app', async () => {
     mockDevices.push(device({ contact_phone_key: '9415550999' }));
     const result = await send();
     expect(result).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
     expect(mockSendToCustomer).not.toHaveBeenCalled();
   });
 
-  it('gate on: an inactive device does not count', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('an inactive device does not count', async () => {
     mockDevices.push(device({ active: false }));
     expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
   });
 
-  it('gate on: no device accepting the push returns not delivered, so the text goes', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('no device accepting the push returns not delivered, so the text goes', async () => {
     mockDevices.push(device());
     mockSendToCustomer.mockResolvedValue({ sent: 0 });
     expect(await send()).toMatchObject({ delivered: false, deliveryOutcome: 'not_sent' });
@@ -168,8 +150,7 @@ describe('reachability without a recent check-in (legacy device query)', () => {
 describe('reachability with GATE_CUSTOMER_APP_NOTIFICATIONS (account device status)', () => {
   beforeEach(() => { process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true'; });
 
-  it('gate on: reachable counts, fresh does not matter', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('reachable counts, fresh does not matter', async () => {
     mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
     expect((await send()).delivered).toBe(true);
     expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeUndefined();
@@ -178,31 +159,22 @@ describe('reachability with GATE_CUSTOMER_APP_NOTIFICATIONS (account device stat
     expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
   });
 
-  it('gate on: app notifications switched off for the account still means text', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('app notifications switched off for the account still means text', async () => {
     mockCustomerStatus.mockResolvedValue({ enabled: false, registered: true, fresh: false, reachable: true });
     expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
     expect(mockSendToCustomer).not.toHaveBeenCalled();
   });
 
-  it('gate on: no configured provider (reachable false) means text', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('no configured provider (reachable false) means text', async () => {
     mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: false });
     expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
-  });
-
-  it('gate off: a stale device is not enough', async () => {
-    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
-    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
-    expect(mockCustomerStatus.mock.calls[0][2]).toBeUndefined();
   });
 });
 
 describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text too, and the app alert still goes (owner 2026-11-18)', () => {
   const DAY_MS = 24 * 3600000;
-  beforeEach(() => { process.env.GATE_APP_FIRST_ANY_DEVICE = 'true'; });
 
-  it('both gates on: a device last seen 40 days ago is not reachable: stale_app_text, no push before the text (twilio.js sends the text, then the alert)', async () => {
+  it('with the stale-text gate on: a device last seen 40 days ago is not reachable: stale_app_text, no push before the text (twilio.js sends the text, then the alert)', async () => {
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
     mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
     expect(await send()).toMatchObject({ delivered: false, deliveryOutcome: 'not_sent', reason: 'stale_app_text', staleAppCompanion: true });
@@ -210,7 +182,7 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockProofRows).toHaveLength(0);
   });
 
-  it('both gates on: a holder with no phone app at all is no_fresh_device with no flag, as today', async () => {
+  it('with the stale-text gate on: a holder with no phone app at all is no_fresh_device with no flag, as today', async () => {
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
     expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
     expect(await send()).not.toHaveProperty('staleAppCompanion');
@@ -250,12 +222,8 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(await send()).not.toHaveProperty('staleAppCompanion');
   });
 
-  it('no stale-app flag with the new gate off, or with the any-device gate off', async () => {
+  it('no stale-app flag with the new gate off', async () => {
     mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
-    expect(await send()).not.toHaveProperty('staleAppCompanion');
-    delete process.env.GATE_APP_FIRST_ANY_DEVICE;
-    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    expect(await send()).toMatchObject({ reason: 'no_fresh_device' });
     expect(await send()).not.toHaveProperty('staleAppCompanion');
   });
 
@@ -374,7 +342,7 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBeUndefined();
   });
 
-  it('both gates on: a device last seen 10 days ago still takes the push, with a 30-day floor and phone apps only', async () => {
+  it('with the stale-text gate on: a device last seen 10 days ago still takes the push, with a 30-day floor and phone apps only', async () => {
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
     mockDevices.push(device());
     expect((await send()).delivered).toBe(true);
@@ -386,7 +354,7 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(Math.abs(Date.now() - opts.holderMinUpdatedAt.getTime() - 30 * DAY_MS)).toBeLessThan(60000);
   });
 
-  it('new gate off: a device last seen 40 days ago takes the push as today, no floor', async () => {
+  it('stale-text gate off: a device last seen 40 days ago takes the push as today, no floor', async () => {
     mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
     expect((await send()).delivered).toBe(true);
     expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeUndefined();
@@ -400,17 +368,10 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockSendToCustomer).not.toHaveBeenCalled();
   });
 
-  it('new gate off: a browser-only holder is still reachable as today, and no check-in is stamped', async () => {
+  it('stale-text gate off: a browser-only holder is still reachable as today, and no check-in is stamped', async () => {
     mockDevices.push(device({ platform: 'web', updated_at: hoursAgo(40 * 24) }));
     expect((await send()).delivered).toBe(true);
     expect(JSON.parse(mockProofRows[0].metadata)).not.toHaveProperty('app_checked_in_at');
-  });
-
-  it('new gate on without GATE_APP_FIRST_ANY_DEVICE: the 72 hour rule, unchanged', async () => {
-    delete process.env.GATE_APP_FIRST_ANY_DEVICE;
-    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    mockDevices.push(device({ updated_at: hoursAgo(10 * 24) }));
-    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
   });
 
   it('account device status: routing asks plainly; the floor is customerStatus\'s own', async () => {
@@ -421,7 +382,7 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
   });
 
-  it('the proof row carries the check-in of the phone that accepted the push, with the new gate off too', async () => {
+  it('the proof row carries the check-in of the phone that accepted the push, with the stale-text gate off too', async () => {
     const checkedIn = hoursAgo(40 * 24);
     mockDevices.push(device({ updated_at: checkedIn }));
     mockSendToCustomer.mockResolvedValue({ sent: 1, acceptedCheckedInAt: checkedIn });
@@ -459,7 +420,6 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
 
 describe('a push-routed reminder leaves the proof the reminder sweep reads', () => {
   it('writes a sent sms_log row of the reminder type, linked to the notice event, and reports an accepted push id', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
     mockDevices.push(device());
     const result = await send({ messageType: 'reminder_72h', notificationEventKey: 'reminder_72h:visit-1' });
     expect(result).toMatchObject({ delivered: true, deliveryOutcome: 'accepted' });
@@ -477,20 +437,14 @@ describe('a push-routed reminder leaves the proof the reminder sweep reads', () 
 describe('collapse tag: two visits never replace each other on the phone (Codex #7581 r1)', () => {
   const { pushTag } = PushRouting._test;
 
-  it('gate off: the type-wide tag, as before', () => {
-    expect(pushTag('appointment_reminder', { appointmentId: 'visit-1', eventKey: 'k' })).toBe('push-routed:appointment_reminder');
-  });
-
-  it('gate on: names the visit, else the invoice, else the notice event, else the type alone', () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('names the visit, else the invoice, else the notice event, else the type alone', () => {
     expect(pushTag('appointment_reminder', { appointmentId: 'visit-1', invoiceId: 'inv-1', eventKey: 'k' })).toBe('push-routed:appointment_reminder:visit-1');
     expect(pushTag('receipt', { invoiceId: 'inv-1', eventKey: 'k' })).toBe('push-routed:receipt:inv-1');
     expect(pushTag('tech_arrived', { eventKey: 'arrived:visit-2' })).toBe('push-routed:tech_arrived:arrived:visit-2');
     expect(pushTag('tech_arrived', {})).toBe('push-routed:tech_arrived');
   });
 
-  it('gate on: reminders for two visits reach the device with different tags', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('reminders for two visits reach the device with different tags', async () => {
     mockDevices.push(device());
     await send({ appointmentId: 'visit-1', notificationEventKey: 'reminder_24h:visit-1' });
     await send({ appointmentId: 'visit-2', notificationEventKey: 'reminder_24h:visit-2' });
@@ -511,8 +465,7 @@ describe('no bearer link reaches a device that may be stale (Codex security #758
     expect(linkFreeBody('wavespestcontrol.com/l/x')).toBe('Open the Waves app for the details.');
   });
 
-  it('gate on: the push, and its proof row, carry the link-free body and open the signed-in tab', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('the push, and its proof row, carry the link-free body and open the signed-in tab', async () => {
     mockDevices.push(device());
     await send({ messageType: 'reminder_72h', body: REMINDER, notificationEventKey: 'reminder_72h:visit-1' });
     const pushed = mockSendToCustomer.mock.calls[0][1];
@@ -522,24 +475,17 @@ describe('no bearer link reaches a device that may be stale (Codex security #758
     expect(mockProofRows[0].message_body).toBe(pushed.body);
   });
 
-  it('gate on: a report push opens the Documents tab, never the report token page', async () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('a report push opens the Documents tab, never the report token page', async () => {
     mockDevices.push(device());
     await send({ messageType: 'service_report_v1', body: 'Hi Jane, your Waves Lawn Care report is ready: wavespestcontrol.com/l/Rp2' });
     expect(mockSendToCustomer.mock.calls[0][1].url).toBe('/?tab=documents');
     expect(mockSendToCustomer.mock.calls[0][1].body).toBe('Hi Jane, your Waves Lawn Care report is ready.');
   });
 
-  it('gate off: a fresh device gets the text as is', async () => {
-    mockDevices.push(device({ updated_at: hoursAgo(1) }));
-    await send({ messageType: 'tech_en_route', body: 'Hi Jane, Matt from Waves is on the way.\n\nTrack: wavespestcontrol.com/l/t' });
-    expect(mockSendToCustomer.mock.calls[0][1].body).toBe('Hi Jane, Matt from Waves is on the way.\n\nTrack: wavespestcontrol.com/l/t');
-  });
 });
 
 describe('only the customer switches back to text (explicit-choice markers)', () => {
   beforeEach(() => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
     mockDevices.push(device());
   });
 
@@ -562,13 +508,6 @@ describe('only the customer switches back to text (explicit-choice markers)', ()
     expect((await send({ messageType: 'reminder_72h' })).delivered).toBe(true);
   });
 
-  it('gate off: the marker changes nothing', async () => {
-    delete process.env.GATE_APP_FIRST_ANY_DEVICE;
-    mockDevices.length = 0;
-    mockDevices.push(device({ updated_at: hoursAgo(2) }));
-    mockPrefs = { service_reminder_24h_channel: 'sms', service_reminder_24h_channel_explicit: true };
-    expect((await send()).delivered).toBe(true);
-  });
 });
 
 describe("a technician's On-my-way tap keeps the customer's channel (useCustomerChannel)", () => {
@@ -580,36 +519,26 @@ describe("a technician's On-my-way tap keeps the customer's channel (useCustomer
     operatorInitiated: true, useCustomerChannel: true, ...overrides,
   });
 
-  it('gate on: a tapped en-route notice routes push_first like an automated one', () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('a tapped en-route notice routes push_first like an automated one', () => {
     expect(route()).toBe('push_first');
   });
 
-  it('gate on: a tapped reminder follows the any-device policy too', () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('a tapped reminder follows the any-device policy too', () => {
     expect(route({ messageType: 'appointment_reminder' })).toBe('push_first');
   });
 
-  it('gate off: the operator lock stands (byte-identical)', () => {
-    expect(route()).toBe('sms_only');
-    expect(route({ messageType: 'appointment_reminder' })).toBe('sms_only');
-  });
-
-  it('gate on: an operator send WITHOUT the mark still stays a text (staff chose Text)', () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('an operator send WITHOUT the mark still stays a text (staff chose Text)', () => {
     expect(route({ useCustomerChannel: undefined })).toBe('sms_only');
     expect(route({ useCustomerChannel: 'true' })).toBe('sms_only');
     expect(route({ messageType: 'receipt', useCustomerChannel: false })).toBe('sms_only');
   });
 
-  it('gate on: an admin-attributed send with the mark follows the policy; without it, a text', () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('an admin-attributed send with the mark follows the policy; without it, a text', () => {
     expect(route({ operatorInitiated: false, adminAttributed: true })).toBe('push_first');
     expect(route({ operatorInitiated: false, adminAttributed: true, useCustomerChannel: false })).toBe('sms_only');
   });
 
-  it('gate on: the mark never lifts the other text-only rules', () => {
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
+  it('the mark never lifts the other text-only rules', () => {
     expect(route({ humanAuthored: true })).toBe('sms_only');
     expect(route({ hasMedia: true })).toBe('sms_only');
     expect(route({ bundledReview: true, messageType: 'service_complete' })).toBe('sms_only');

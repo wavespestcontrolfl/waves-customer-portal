@@ -1,4 +1,4 @@
-// GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): a text from a number with no customer record to a location or
+// Owner 2026-11-04, "ring new": a text from a number with no customer record to a location or
 // Google profile line rings the one-row-per-sender new_lead bell, and the quiet Activity row is skipped only when the
 // ring landed. Real webhook control flow; synthetic persistence and inert delivery seams (as in
 // twilio-webhook-tracking-no-shell.test.js).
@@ -39,7 +39,6 @@ mockDb.raw = (sql) => ({ sql });
 jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (key) => key === 'webhooks', gateEnvValue: () => false, smsCourtesyAfterTemplateLive: () => false,
-  ringNewContactsLive: () => process.env.GATE_RING_NEW_CONTACTS === 'true',
 }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -94,11 +93,9 @@ const quietRows = () => recordOwnerAlert.mock.calls.filter(([kind]) => kind === 
 beforeEach(() => {
   jest.clearAllMocks();
   mockState.sms = []; mockState.sequence = 0; mockState.read = false;
-  process.env.GATE_RING_NEW_CONTACTS = 'true';
   sendCustomerMessage.mockResolvedValue({ sent: true });
   triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
 });
-afterEach(() => { delete process.env.GATE_RING_NEW_CONTACTS; });
 
 test.each([
   ['a location line', parrish, 'the Parrish (Pest) line'],
@@ -125,13 +122,6 @@ test('a ring that did not land, or threw, leaves the quiet row as the fallback',
   triggerNotification.mockRejectedValueOnce(new Error('bell down'));
   await receive('Hello?', parrish, '+12025550102');
   expect(quietRows()).toHaveLength(2);
-});
-
-test('gate off: no ring, the quiet row as before', async () => {
-  delete process.env.GATE_RING_NEW_CONTACTS;
-  await receive('Do you treat for ants?', parrish);
-  expect(leadRings()).toHaveLength(0);
-  expect(quietRows()).toHaveLength(1);
 });
 
 test('a courtesy closer after our text neither rings nor writes a quiet row', async () => {

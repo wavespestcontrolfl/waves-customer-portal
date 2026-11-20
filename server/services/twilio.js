@@ -1009,7 +1009,7 @@ const TwilioService = {
         humanAuthored: options.humanAuthored === true,
         operatorInitiated: options.operatorInitiated === true,
         // The sender's "keep the customer's channel" mark (a technician's
-        // On-my-way tap): with GATE_APP_FIRST_ANY_DEVICE on it lifts the
+        // On-my-way tap): it lifts the
         // operator lock above (push-channel-routing.js decidePushRoute).
         useCustomerChannel: options.useCustomerChannel === true,
         // IB send_sms / comms composer stamp adminUserId without the
