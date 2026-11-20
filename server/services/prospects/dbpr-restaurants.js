@@ -150,15 +150,23 @@ function hasEveryColumn(row, kind) {
   return REQUIRED_COLUMNS[kind].every((column) => column in row);
 }
 
+// Notes a copy's visit number against its visit: the highest one any copy gives wins.
+function noteHighest(highest, key, number) {
+  if (key && number) highest.set(key, Math.max(highest.get(key) || 0, number));
+}
+
 /**
  * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row cut short, or a row
- * in the area with a bad report id, date (or one after `today`, when given) or violation-35 count, is skipped and
- * counted in counts.malformed; a row in the area that passes counts in counts.valid, cited or not.
+ * in the area with a bad report id, date (or one after `today`, when given), violation-35 count or visit number, is
+ * skipped and counted in counts.malformed; a row in the area that passes counts in counts.valid, cited or not.
+ * Every copy of a visit in the area whose visit number reads, cited or not, valid or not, raises the record's visit
+ * number: a visit any copy names as a later visit (a callback listed once more as visit 1) is never a first visit.
  */
 function parseInspectionRows(rows, counts = {}, today = null) {
   counts.malformed ??= 0;
   counts.valid ??= 0;
   const out = [];
+  const highestVisit = new Map();
   for (const row of rows) {
     if (!hasEveryColumn(row, 'inspection')) {
       counts.malformed += 1;
@@ -174,6 +182,7 @@ function parseInspectionRows(rows, counts = {}, today = null) {
     const eventDate = parseUsDate(row['Inspection Date']);
     const cited = wholeNumber(row['Violation 35']);
     const visitNumber = visitNumberOf(row['Visit Number']);
+    noteHighest(highestVisit, sourceKey, visitNumber);
     // A row without both report ids is left out: its report could never be read, and once stored it would block a
     // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
     if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || (today && eventDate > today) || cited === null
@@ -209,7 +218,10 @@ function parseInspectionRows(rows, counts = {}, today = null) {
       },
     });
   }
-  return out;
+  return out.map((record) => {
+    const highest = highestVisit.get(record.source_key);
+    return highest ? { ...record, detail: { ...record.detail, visitNumber: highest } } : record;
+  });
 }
 
 /**

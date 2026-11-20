@@ -137,6 +137,24 @@ describe('parseInspectionRows', () => {
       expect(counts).toEqual({ malformed: 1, valid: 1 });
     }
   });
+
+  test('every copy of a visit, cited or not, raises its visit number: a callback listed twice is never a first visit', () => {
+    const withVisit = (line, number) => line.replace('"34208","1","1","Food"', `"34208","1","${number}","Food"`);
+    const visits = (lines) => svc.parseInspectionRows(parseDbprCsv(inspCsv(lines))).map((r) => [r.source_key, r.detail.visitNumber]);
+    const cited = inspRow({ visit: '9020' });
+    const uncited = (number, options = {}) => withVisit(inspRow({ visit: '9020', v35: 0, ...options }), number);
+    expect(uncited('2')).toContain('"34208","1","2","Food"');
+    // Cited as visit 1, listed again as visit 2 with no citation: visit 2, in either order.
+    expect(visits([cited, uncited('2')])).toEqual([['9020', 2]]);
+    expect(visits([uncited('2'), cited])).toEqual([['9020', 2]]);
+    // A copy that is malformed (a bad date) still names the later visit.
+    expect(visits([cited, uncited('2', { date: '13/45/2026' })])).toEqual([['9020', 2]]);
+    // A blank copy changes nothing; a numbered copy fills a blank one; another visit's copy changes nothing.
+    expect(visits([cited, uncited('')])).toEqual([['9020', 1]]);
+    expect(visits([withVisit(cited, ''), uncited('1')])).toEqual([['9020', 1]]);
+    expect(visits([withVisit(cited, ''), uncited('')])).toEqual([['9020', null]]);
+    expect(visits([cited, withVisit(inspRow({ visit: '9021', v35: 0 }), '2')])).toEqual([['9020', 1]]);
+  });
 });
 
 describe('parseLicenseRows and the phone rule', () => {
