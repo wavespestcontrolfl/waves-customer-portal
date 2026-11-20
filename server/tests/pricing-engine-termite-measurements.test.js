@@ -298,10 +298,11 @@ describe('termite measurement overrides and safeguards', () => {
     // A custom dilution is a manual override (sent to review). The chart's own dilution typed in prices what the high rate does
     // (pre-push audit 12), at either rate; a stronger one is off the chart and keeps the full volume, with no label-adjustment
     // warning (pre-push audit 20).
+    // The label names the dilution the volume was priced at: the high rate's, at either rate (pre-push audit 28).
     expect(trench({ applicationRate: 'high', customProductOzPerFinishedGallon: 2 }))
-      .toMatchObject({ finishedGallons: 40, productOz: 80, requiresManualReview: true });
+      .toMatchObject({ finishedGallons: 40, productOz: 80, requiresManualReview: true, concentrationLabel: 'high_rate' });
     expect(trench({ customProductOzPerFinishedGallon: 2 }))
-      .toMatchObject({ finishedGallons: 40, productOz: 80, requiresManualReview: true });
+      .toMatchObject({ finishedGallons: 40, productOz: 80, requiresManualReview: true, concentrationLabel: 'high_rate' });
     const offChart = trench({ customProductOzPerFinishedGallon: 4 });
     expect(offChart).toMatchObject({ finishedGallons: 80, productOz: 320, requiresManualReview: true });
     expect(offChart.warnings.join(' ')).not.toMatch(/reduced finished volume/);

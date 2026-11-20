@@ -51,8 +51,8 @@
  * its own package size, or none (best_price null, needs_pricing, 'no_valid_price'). When no current quote can be scaled to the
  * catalog (a pack it cannot read, with no per-oz figure), the recalculation keeps the catalog price marked stale (needs_pricing),
  * and so does every later one, while job costing reads best_price as it stands (calculateInventoryCost). So a catalog it leaves
- * on the stale price gets the owner's $30.90 per 128 fl oz at its own package size instead, still marked (pre-push audits 25 and
- * 26). Clearing it would not hold: with no catalog price, the next recalculation writes that quote's raw pack price as current.
+ * on the stale price gets the owner's $30.90 per 128 fl oz at its own package size instead, and the owner's $30.90 as its cached
+ * pack price, still marked (pre-push audits 25, 26 and 28). Clearing it would not hold: with no catalog price, the next recalculation writes that quote's raw pack price as current.
  * The pre-slab and mosquito links read only a priced row (needs_pricing false) backed by an eligible quote, inside their band, so
  * quotes keep the config's or code's 30.90 / 128 for every config shape. A catalog row that still holds the stale price at its
  * package size with no such quote (a price written without a recalculation, a SiteOne row already at $30.90 included) gets the
@@ -402,13 +402,15 @@ async function staleQuotes(knex, productId, siteOne, now) {
 // When no current quote can be scaled to the catalog, the recalculation keeps the catalog price marked stale (needs_pricing), and
 // so does every later one (recalcBestPriceLocked); job costing reads best_price as it stands (calculateInventoryCost). So a catalog
 // it left on the stale price gets the owner's $30.90 per 128 fl oz at its own package size, scaled from whole cents and rounded once
-// to the nearest cent ($23.18 at 96 oz), with the mark kept: the links still skip it (pre-push audits 25 to 27). A stale-sized price
-// it wrote as current is an independent offer's own price, and stays. True when it replaced one.
+// to the nearest cent ($23.18 at 96 oz), with the mark kept: the links still skip it (pre-push audits 25 to 27). Its cached pack
+// price, which the job card shows as the "Order more" price, becomes the owner's 1 gal $30.90 with it (pre-push audit 28). A
+// stale-sized price it wrote as current is an independent offer's own price, and stays. True when it replaced one.
 async function repriceKeptStalePrice(knex, productId, now) {
   const catalog = await knex('products_catalog').where({ id: productId }).first();
   if (!catalog || catalog.best_price_status === 'current' || !holdsStalePrice(catalog)) return false;
   const bestPrice = Math.round((Math.round(NEW_PRICE * 100) * num(catalog.unit_size_oz)) / STALE_SIZE_OZ) / 100;
-  await knex('products_catalog').where({ id: productId }).update({ best_price: bestPrice, best_price_updated_at: now });
+  await knex('products_catalog').where({ id: productId })
+    .update({ best_price: bestPrice, best_price_amount_cached: NEW_PRICE, best_price_updated_at: now });
   return true;
 }
 

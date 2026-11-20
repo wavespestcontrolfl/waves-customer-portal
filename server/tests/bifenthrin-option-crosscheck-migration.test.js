@@ -646,7 +646,8 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       const knex = fakeKnex(db);
       await migration.up(knex);
       expect(db.vendor_pricing[1]).toEqual(UNREAD_PACK); // its own offer: never expired
-      const owners = { best_price: price, best_price_status: 'stale', needs_pricing: true };
+      // The cached pack price (the job card's "Order more" price) moves with it (pre-push audit 28).
+      const owners = { best_price: price, best_price_amount_cached: 30.9, best_price_status: 'stale', needs_pricing: true };
       expect(db.products_catalog[0]).toMatchObject(owners);
       expect(db.vendor_pricing.map((quote) => quote.is_best_price)).toEqual([false, false]); // the recalculation cleared the winner flag
       // Job costing reads the owner's $0.2414 an oz (to a tenth of a cent: $23.18 / 96 rounds to $0.2415).
@@ -665,6 +666,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       await migration.down(knex);
       expect(db.products_catalog[0]).toMatchObject({ best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
       expect(Number(db.products_catalog[0].best_price)).toBe(Number(catalogRow(catalog).best_price));
+      expect(Number(db.products_catalog[0].best_price_amount_cached)).toBe(58.42);
       expect(db.vendor_pricing.map((quote) => quote.is_best_price)).toEqual([true, false]); // the winner's flag is back with it
       expect(db.pricing_config_audit).toEqual([]);
     });
@@ -681,11 +683,14 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
       expect(warnings).toMatch(/price left alone/);
       expect(warnings).not.toMatch(STALE_WARNING);
-      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_price_status: 'stale', needs_pricing: true });
+      expect(db.products_catalog[0])
+        .toMatchObject({ best_price: 30.9, best_price_amount_cached: 30.9, best_price_status: 'stale', needs_pricing: true });
       expect(auditKeys(db)).toContain('inventory:lesco_crosscheck_plus_stale');
       await migration.down(knex);
       expect(db.vendor_pricing[0]).toEqual(unread);
-      expect(db.products_catalog[0]).toMatchObject({ best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
+      expect(db.products_catalog[0]).toMatchObject({
+        best_vendor_pricing_id: 'v1', best_price: '58.42', best_price_amount_cached: '58.4200', needs_pricing: false, best_price_status: 'current',
+      });
       expect(db.pricing_config_audit).toEqual([]);
     });
 
