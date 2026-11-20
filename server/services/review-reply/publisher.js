@@ -55,6 +55,10 @@ const CODES = {
 };
 
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
+// The RECONCILE_FAILED message. Before 2026-11-20 the runner parked an
+// exhausted reconciliation as google_failed with this message, so the Monday
+// bell reads it to mark such a row "check Google first".
+const RECONCILE_FAILED_MSG = 'Google shows an owner reply but recording it failed';
 // Total deadline for each Google call. The runner processes rows serially
 // under a fleet-wide cron lease; a request that connects but never completes
 // must fail (retryable) instead of holding every later row and tick.
@@ -168,7 +172,7 @@ async function recordLiveOwnerReply(reviewId, live, fresh) {
     // landed (its posted provenance and Retract). A transient error keeps
     // the row's state and retries; the next live read reconciles again.
     logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`);
-    throw new ReviewReplyError(CODES.RECONCILE_FAILED, `Google shows an owner reply but recording it failed: ${e.message}`, { status: 503, cause: e });
+    throw new ReviewReplyError(CODES.RECONCILE_FAILED, `${RECONCILE_FAILED_MSG}: ${e.message}`, { status: 503, cause: e });
   });
   // A landed write that parked (review / account facts moved since the
   // draft) needs a person: the retrying edited-after-post bell (codex r54).
@@ -790,6 +794,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
 
 module.exports = {
   CODES,
+  RECONCILE_FAILED_MSG,
   ReviewReplyError,
   resolveGbpReviewName,
   publishReviewReply,

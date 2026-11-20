@@ -220,6 +220,7 @@ async function loadParkedReviews({ database = db } = {}) {
   const { WAVES_LOCATIONS } = require('../config/locations');
   const { whereNeedsRealReply } = require('./review-reply/draft-prefix');
   const { RECONCILE_REASONS } = require('./review-reply/runner');
+  const { RECONCILE_FAILED_MSG } = require('./review-reply/publisher');
   const rows = await database('google_reviews')
     .where('auto_reply_status', 'parked')
     .whereIn('location_id', WAVES_LOCATIONS.map((l) => l.id))
@@ -228,7 +229,7 @@ async function loadParkedReviews({ database = db } = {}) {
     .whereNull('missing_since')
     .modify((q) => whereNeedsRealReply(q))
     .orderByRaw('review_created_at ASC NULLS LAST, id ASC')
-    .select('id', 'reviewer_name', 'review_created_at', 'location_id', 'auto_reply_reason');
+    .select('id', 'reviewer_name', 'review_created_at', 'location_id', 'auto_reply_reason', 'auto_reply_error');
   const locationNames = new Map(WAVES_LOCATIONS.map((l) => [l.id, l.name]));
   return {
     count: rows.length,
@@ -236,7 +237,10 @@ async function loadParkedReviews({ database = db } = {}) {
       name: r.reviewer_name,
       at: r.review_created_at,
       location: locationNames.get(r.location_id) || null,
-      checkGoogle: RECONCILE_REASONS.has(r.auto_reply_reason) || r.auto_reply_reason === 'reconcile_failed',
+      // A reply may already be on Google. Before 2026-11-20 an exhausted
+      // reconciliation parked as google_failed; only its message tells.
+      checkGoogle: RECONCILE_REASONS.has(r.auto_reply_reason) || r.auto_reply_reason === 'reconcile_failed'
+        || (r.auto_reply_reason === 'google_failed' && String(r.auto_reply_error || '').startsWith(RECONCILE_FAILED_MSG)),
     })),
   };
 }
