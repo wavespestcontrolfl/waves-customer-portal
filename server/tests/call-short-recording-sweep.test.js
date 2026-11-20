@@ -242,8 +242,9 @@ describe('the sweep query text', () => {
         expect(sql({})).not.toContain('processing_generation');
       });
     }
+    // Overtaken (a newer generation), a timer runs only on a state still owed a pass (an allow-list, round 9).
     expect(sql({ scheduledGeneration: 4 })).toContain(
-      `("processing_generation" <= 4 or "processing_status" is null or "processing_status" not in ('processed', 'voicemail', 'spam'))`,
+      `("processing_generation" <= 4 or "processing_status" is null or "processing_status" in ('pending', 'processing', 'no_transcription', 'extraction_failed'))`,
     );
     expect(sql({ sweep: true })).toContain(`"updated_at" < NOW() - INTERVAL '10 minutes'`);
   });
@@ -292,8 +293,19 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   // (generation 1) and finished it before the timer fired.
   const SID_SWEPT_VOICEMAIL = sid('sd'); // 8 s
   const SID_SWEPT_SPAM = sid('se'); // 8 s
+  const SID_SWEPT_CUSTOMER_FAILED = sid('sf'); // 8 s: the office reviews a creation failure, nothing retries it
+  const SID_SWEPT_LEAD_FAILED = sid('sg'); // 8 s
+  // Also overtaken at generation 1, but still owed a pass, so the timer's fence lets them through.
+  const SID_OVERTAKEN_FIRST = sid('sh'); // 8 s, NULL: another pass deferred and restored its first-pass state
+  const SID_OVERTAKEN_RETRY = sid('si'); // 60 s, no_transcription after 1 try
+  const SID_OVERTAKEN_CLAIM = sid('sj'); // 8 s, a pass holds it now (the claim's heartbeat rule decides)
+  // Inserted by the first-recording test only.
+  const SID_RESET_NO_RECORDING = sid('sk');
+  const SID_RESET_HAD_RECORDING = sid('sl');
+  const SID_RESET_VOICEMAIL = sid('sm');
   const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP, SID_SHORT_DIED, SID_SHORT_VOICEMAIL,
-    SID_PAN_RETRY, SID_PAN_FINISHED, SID_LONG_VOICEMAIL, SID_SWEPT_VOICEMAIL, SID_SWEPT_SPAM];
+    SID_PAN_RETRY, SID_PAN_FINISHED, SID_LONG_VOICEMAIL, SID_SWEPT_VOICEMAIL, SID_SWEPT_SPAM, SID_SWEPT_CUSTOMER_FAILED, SID_SWEPT_LEAD_FAILED,
+    SID_OVERTAKEN_FIRST, SID_OVERTAKEN_RETRY, SID_OVERTAKEN_CLAIM, SID_RESET_NO_RECORDING, SID_RESET_HAD_RECORDING, SID_RESET_VOICEMAIL];
   const REC = 'RE' + '9'.repeat(32);
   const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
 
@@ -341,6 +353,14 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     await insertCall(SID_PAN_FINISHED, { seconds: 4, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...PAN_QUARANTINED, processing_status: 'voicemail' });
     await insertCall(SID_SWEPT_VOICEMAIL, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'voicemail', processing_generation: 1 });
     await insertCall(SID_SWEPT_SPAM, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'spam', processing_generation: 1 });
+    await insertCall(SID_SWEPT_CUSTOMER_FAILED, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'customer_creation_failed', processing_generation: 1 });
+    await insertCall(SID_SWEPT_LEAD_FAILED, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'lead_creation_failed', processing_generation: 1 });
+    await insertCall(SID_OVERTAKEN_FIRST, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_generation: 1 });
+    await insertCall(SID_OVERTAKEN_RETRY, { seconds: 60, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'no_transcription', extraction_attempts: 1, processing_generation: 1 });
+    await insertCall(SID_OVERTAKEN_CLAIM, {
+      seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_generation: 1,
+      processing_status: 'processing', processing_started_at: minutesAgo(1), processing_heartbeat_at: minutesAgo(1),
+    });
   });
 
   afterAll(async () => {
@@ -398,6 +418,8 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   test.each([
     ['voicemail', SID_SWEPT_VOICEMAIL],
     ['spam', SID_SWEPT_SPAM],
+    ['customer_creation_failed', SID_SWEPT_CUSTOMER_FAILED],
+    ['lead_creation_failed', SID_SWEPT_LEAD_FAILED],
   ])('a webhook timer scheduled before the sweep finished the call as %s refuses it and changes nothing, gate on or off', async (status, target) => {
     for (const value of [undefined, 'true']) {
       await withGate(value, async () => {
@@ -405,6 +427,45 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
         const row = await db('call_log').where({ twilio_call_sid: target }).first('processing_status', 'processing_token', 'processing_generation');
         expect(row).toEqual({ processing_status: status, processing_token: null, processing_generation: 1 });
       });
+    }
+  });
+
+  // The allow-list on real rows (round 9): overtaken, a timer may still take a first-pass state, a claim or a retry
+  // state; never a verdict or a creation failure. Not overtaken, the fence takes no part.
+  test('an overtaken timer\'s fence admits only a row still owed a pass', async () => {
+    const overtaken = [SID_SWEPT_VOICEMAIL, SID_SWEPT_SPAM, SID_SWEPT_CUSTOMER_FAILED, SID_SWEPT_LEAD_FAILED,
+      SID_OVERTAKEN_FIRST, SID_OVERTAKEN_RETRY, SID_OVERTAKEN_CLAIM];
+    const admitted = async (scheduledGeneration) => (await db('call_log').whereIn('twilio_call_sid', overtaken)
+      .where(function claim() { processor.whereUnattendedClaim(this, { scheduledGeneration }); })
+      .pluck('twilio_call_sid')).sort();
+    expect(await admitted(0)).toEqual([SID_OVERTAKEN_FIRST, SID_OVERTAKEN_RETRY, SID_OVERTAKEN_CLAIM].sort());
+    expect(await admitted(1)).toEqual([...overtaken].sort());
+  });
+
+  // Every writer that installs a first recording resets a retry state in the same statement (round 9). The rule
+  // reads the row before the write: a row with a recording already, or in another state, keeps its status and count.
+  test('the first-recording reset: a retry state with no recording becomes a first pass; nothing else changes', async () => {
+    const { firstRecordingReset } = require('../config/call-extraction-retry');
+    const noRecording = { recording_sid: null, recording_url: null };
+    await insertCall(SID_RESET_NO_RECORDING, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 30, ...noRecording, processing_status: 'no_transcription', extraction_attempts: 2 });
+    await insertCall(SID_RESET_HAD_RECORDING, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 30, processing_status: 'no_transcription', extraction_attempts: 2 });
+    await insertCall(SID_RESET_VOICEMAIL, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 30, ...noRecording, processing_status: 'voicemail', extraction_attempts: 1 });
+    const sids = [SID_RESET_NO_RECORDING, SID_RESET_HAD_RECORDING, SID_RESET_VOICEMAIL];
+    try {
+      await db('call_log').whereIn('twilio_call_sid', sids).update({
+        recording_sid: REC,
+        recording_url: `https://api.twilio.com/2010-04-01/Accounts/ACfixture/Recordings/${REC}.mp3`,
+        ...firstRecordingReset((sql) => db.raw(sql)),
+      });
+      const rows = await db('call_log').whereIn('twilio_call_sid', sids).select('twilio_call_sid', 'processing_status', 'extraction_attempts');
+      const by = Object.fromEntries(rows.map((r) => [r.twilio_call_sid, [r.processing_status, r.extraction_attempts]]));
+      expect(by).toEqual({
+        [SID_RESET_NO_RECORDING]: [null, 0],
+        [SID_RESET_HAD_RECORDING]: ['no_transcription', 2],
+        [SID_RESET_VOICEMAIL]: ['voicemail', 1],
+      });
+    } finally {
+      await db('call_log').whereIn('twilio_call_sid', sids).del();
     }
   });
 

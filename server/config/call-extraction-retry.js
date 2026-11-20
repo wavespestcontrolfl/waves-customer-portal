@@ -74,6 +74,8 @@ function sweepLengthOk(row, now = Date.now()) {
 // (call-commitments' exhaustedExtractionSql) and the promise-chaser bell, so a
 // linked estimate, a parent's cards or a chaser alert never wait on a retry
 // that will not come (pre-push Codex P1, round 7).
+// The rule is about a failure ON that recording: a first recording installed
+// on a row in a retry state resets the row to a first pass (below).
 // Every JS caller selects processing_status and SHORT_RETRY_COLUMNS.
 const SHORT_RETRY_COLUMNS = ['recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription_metadata'];
 const RETRY_STATES = ['no_transcription', 'extraction_failed'];
@@ -103,6 +105,26 @@ function shortRetrySettledSql(t = 'call_log') {
     + ` AND (${t}.transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true')`;
 }
 
+// A recording installed on a row that had none starts that audio's FIRST
+// pass. A retry state on such a row came from a pass that had no audio (the
+// live-text pass), so every writer that installs a first recording (the
+// recording webhook's attach and its Studio branch, recording recovery)
+// resets it to NULL with a fresh attempt budget in the same statement, as a
+// replaced recording already is. Otherwise the claim's short-retry rule above
+// would refuse every automatic pass on a late recording of 10 s or less, and
+// the sweep's retry floor would skip it (pre-push Codex P1, round 9). SQL
+// reads every SET expression against the row as it was before the write, so
+// a row in another state, or one that already had a recording (a duplicate
+// delivery), keeps its status and its count.
+const FIRST_RECORDING_RESET_WHEN = `processing_status IN (${RETRY_STATES.map((s) => `'${s}'`).join(', ')})`
+  + " AND NULLIF(btrim(recording_url), '') IS NULL";
+const FIRST_RECORDING_STATUS_SQL = `CASE WHEN ${FIRST_RECORDING_RESET_WHEN} THEN NULL ELSE processing_status END`;
+const FIRST_RECORDING_ATTEMPTS_SQL = `CASE WHEN ${FIRST_RECORDING_RESET_WHEN} THEN 0 ELSE extraction_attempts END`;
+// The two columns for a writer's update: firstRecordingReset((sql) => db.raw(sql)).
+function firstRecordingReset(raw) {
+  return { processing_status: raw(FIRST_RECORDING_STATUS_SQL), extraction_attempts: raw(FIRST_RECORDING_ATTEMPTS_SQL) };
+}
+
 module.exports = {
   CALL_EXTRACTION_MAX_ATTEMPTS,
   EXTRACTION_RETRY_WINDOW_DAYS,
@@ -114,4 +136,7 @@ module.exports = {
   SHORT_RETRY_COLUMNS,
   shortRetrySettled,
   shortRetrySettledSql,
+  FIRST_RECORDING_STATUS_SQL,
+  FIRST_RECORDING_ATTEMPTS_SQL,
+  firstRecordingReset,
 };

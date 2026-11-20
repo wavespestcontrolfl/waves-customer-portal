@@ -1013,7 +1013,9 @@ function isImplausibleTranscript(transcription, recordingSeconds) {
 // under this cap (≥10 min between attempts via the sweep's age gate), which
 // rides out transient provider errors. At the cap a blocking triage item is
 // filed so the call can't die silently.
-const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, sweepLengthSql, shortRetrySettledSql } = require('../config/call-extraction-retry');
+const {
+  CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, sweepLengthSql, shortRetrySettledSql, firstRecordingReset,
+} = require('../config/call-extraction-retry');
 
 // Human-readable "confirm before dispatch" reasons surfaced by the address /
 // identity bridge below. Shown on the lead's AI-triage activity so Virginia
@@ -4633,11 +4635,16 @@ function whereSweepCandidate(qb) {
 //   (pre-push Codex P0, round 8). An operator's Process (`operator`) and
 //   Reprocess (`force`, the other claim branch) still run it.
 // - `scheduledGeneration` (the recording webhook's timers): the
-//   processing_generation the timer saw when it was scheduled. A pass that
-//   claimed the row since (a higher generation) and left a finished verdict
-//   made the timer stale: the claim refuses, so a call the sweep finished as
-//   voicemail or spam before the timer fired is not run again (pre-push Codex
-//   P1, round 8). Any other state is still owed a pass, as before.
+//   processing_generation the webhook's own write left on the row. A pass
+//   that claimed the row since (a higher generation) overtook the timer, so
+//   the timer runs only on a state that is still owed a pass: a first-pass
+//   state (NULL or pending, which a deferral restores), a claim (the heartbeat
+//   rule above decides), or a retry state (the cap, the backoff and the
+//   short-retry rule decide). A finished verdict, a creation failure the
+//   office reviews, or any other state refuses it, so a call the sweep
+//   finished before the timer fired is not run again (pre-push Codex P1,
+//   rounds 8 and 9).
+const OVERTAKEN_TIMER_STATES = ['pending', 'processing', 'no_transcription', 'extraction_failed'];
 function whereUnattendedClaim(qb, opts = {}) {
   if (opts.sweep) qb.where(function sweepStillSelects() { whereSweepCandidate(this); });
   if (!opts.operator) qb.whereRaw(`NOT ${shortRetrySettledSql()}`);
@@ -4645,7 +4652,7 @@ function whereUnattendedClaim(qb, opts = {}) {
     qb.where(function noVerdictSinceScheduled() {
       this.where('processing_generation', '<=', Number(opts.scheduledGeneration))
         .orWhereNull('processing_status')
-        .orWhereNotIn('processing_status', [...COMPLETED_STATUSES]);
+        .orWhereIn('processing_status', OVERTAKEN_TIMER_STATES);
     });
   }
   return qb;
@@ -11700,9 +11707,10 @@ const CallRecordingProcessor = {
           .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
           // The fences for an unattended pass (whereUnattendedClaim): a sweep
           // pass re-checks the sweep's candidate rule; no automatic pass takes
-          // a short call's failed retry state; a webhook timer never runs a
-          // call a newer pass finished while it waited. Each refusal leaves
-          // the row untouched instead of running the paid pipeline again.
+          // a short call's failed retry state; a webhook timer that a newer
+          // pass overtook runs only on a row still owed a pass. Each refusal
+          // leaves the row untouched instead of running the paid pipeline
+          // again.
           .where(function unattendedClaim() { whereUnattendedClaim(this, opts); })
           .update({
             processing_status: 'processing',
@@ -25997,7 +26005,11 @@ const CallRecordingProcessor = {
         recording_sid: recording.sid,
         recording_duration_seconds: parseInt(recording.duration || call.duration_seconds || 0),
         transcription_status: 'pending',
-        processing_status: call.processing_status || null,
+        // The recording starts its first pass: a retry state left by a pass
+        // with no audio resets with a fresh budget, decided on the row as
+        // written, never on this read (config/call-extraction-retry,
+        // firstRecordingReset; pre-push Codex P1, round 9).
+        ...firstRecordingReset((sql) => db.raw(sql)),
         updated_at: new Date(),
       });
 
