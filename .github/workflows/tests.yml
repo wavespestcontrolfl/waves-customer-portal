@@ -52,6 +52,9 @@ concurrency:
 permissions:
   contents: read
 
+# Installs and Jest compiles are cached between runs (2026-11-20, owner *a*):
+# .github/actions/npm-install and .github/actions/jest-cache-restore. Kept only
+# if 20 first-try PR runs show the median run 30 s or more faster.
 jobs:
   server:
     runs-on: ubuntu-latest
@@ -111,8 +114,12 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
-          cache: npm
-      - run: npm ci
+      - uses: ./.github/actions/npm-install
+      - name: Restore Jest's compiled files
+        id: jest-cache
+        uses: ./.github/actions/jest-cache-restore
+        with:
+          name: server
       - parallel:
           - name: Migrate from an empty database
             env:
@@ -365,6 +372,15 @@ jobs:
         run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
       - name: Wait for the two background lanes (fails if either failed)
         wait-all:
+      - name: Save Jest's compiled files for this job's later runs today
+        # Only when today's cache missed. A red run's compiled files are as good
+        # as a green run's, so only a cancel skips this.
+        if: ${{ !cancelled() && steps.jest-cache.outputs.hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.jest-cache.outputs.dir }}
+          key: ${{ steps.jest-cache.outputs.key }}
 
   # The second half of the old `server` job's Postgres work (2026-11-20). It
   # runs on a runner of its own, in parallel with `server`, so neither job
@@ -430,8 +446,12 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
-          cache: npm
-      - run: npm ci
+      - uses: ./.github/actions/npm-install
+      - name: Restore Jest's compiled files
+        id: jest-cache
+        uses: ./.github/actions/jest-cache-restore
+        with:
+          name: server-pg
       - parallel:
           - name: Migrate the first server
             env:
@@ -785,6 +805,15 @@ jobs:
         run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js server/tests/invoice-property-history-db.test.js server/tests/customer-properties-db.test.js server/tests/intelligence-bar-properties-db.test.js server/tests/intelligence-bar-inventory-db.test.js server/tests/intelligence-bar-customer-estimates-db.test.js server/tests/intelligence-bar-billing-reader-db.test.js
       - name: Wait for the two background lanes (fails if either failed)
         wait-all:
+      - name: Save Jest's compiled files for this job's later runs today
+        # Only when today's cache missed. A red run's compiled files are as good
+        # as a green run's, so only a cancel skips this.
+        if: ${{ !cancelled() && steps.jest-cache.outputs.hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.jest-cache.outputs.dir }}
+          key: ${{ steps.jest-cache.outputs.key }}
 
   # Step 2 of the two-step design, on runners of their own (2026-11-01): the
   # DB-gated suites set the length of every run while they shared the
@@ -845,8 +874,12 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
-          cache: npm
-      - run: npm ci
+      - uses: ./.github/actions/npm-install
+      - name: Restore Jest's compiled files
+        id: jest-cache
+        uses: ./.github/actions/jest-cache-restore
+        with:
+          name: server-db-${{ matrix.part }}
       - parallel:
           - name: Migrate the first server
             env:
@@ -890,6 +923,15 @@ jobs:
             | xargs npx jest --ci --silent --runInBand --shard=${{ matrix.second }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js --testTimeout=15000
       - name: Wait for both lanes (fails if either failed)
         wait-all:
+      - name: Save Jest's compiled files for this job's later runs today
+        # Only when today's cache missed. A red run's compiled files are as good
+        # as a green run's, so only a cancel skips this.
+        if: ${{ !cancelled() && steps.jest-cache.outputs.hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.jest-cache.outputs.dir }}
+          key: ${{ steps.jest-cache.outputs.key }}
 
   # Step 1 of the two-step design: the full jest suite WITHOUT DATABASE_URL
   # (no Postgres service here, on purpose). It was the long pole of the whole
@@ -915,8 +957,12 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
-          cache: npm
-      - run: npm ci
+      - uses: ./.github/actions/npm-install
+      - name: Restore Jest's compiled files
+        id: jest-cache
+        uses: ./.github/actions/jest-cache-restore
+        with:
+          name: server-unit-${{ matrix.shard }}
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
@@ -924,6 +970,15 @@ jobs:
         # The default 5 s test timeout is raised to 15 s because a third worker slows
         # cold module loads; a test that sets its own timeout keeps it.
         run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js --config='{"workerIdleMemoryLimit":"2GB","testTimeout":15000}'
+      - name: Save Jest's compiled files for this job's later runs today
+        # Only when today's cache missed. A red run's compiled files are as good
+        # as a green run's, so only a cancel skips this.
+        if: ${{ !cancelled() && steps.jest-cache.outputs.hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.jest-cache.outputs.dir }}
+          key: ${{ steps.jest-cache.outputs.key }}
 
   client:
     runs-on: ubuntu-latest
@@ -934,8 +989,7 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
-          cache: npm
-      - run: npm ci
+      - uses: ./.github/actions/npm-install
       - name: Worktree and managed startup checks
         run: npm run test:dev-workflow
       - name: Customer app coverage floor (the tests related to the gated files)
@@ -967,8 +1021,7 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
-          cache: npm
-      - run: npm ci
+      - uses: ./.github/actions/npm-install
       - name: Client tests (vitest)
         working-directory: client
         run: npx vitest run --silent --shard=${{ matrix.shard }}/3
@@ -1200,8 +1253,7 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
-          cache: npm
-      - run: npm ci
+      - uses: ./.github/actions/npm-install
       - name: Blog schema vendor check
         run: npm run verify:blog-schema
       - name: Portal brand gate

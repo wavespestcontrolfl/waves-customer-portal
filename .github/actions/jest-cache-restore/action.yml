@@ -1,0 +1,40 @@
+name: Restore Jest's compiled files
+description: >-
+  Restores Jest's cache folder (compiled test and source files, file map) for
+  one job, saved earlier the same UTC day. The job saves it with
+  actions/cache/save as its last step when this restore missed, using the
+  `dir` and `key` outputs. Jest keys every cached file on its content and
+  config, so a saved file that changed since is compiled again, never reused.
+# 2026-11-20 (owner *a*): without this, every Jest job compiled every file it
+# loads from scratch. One cache per job per day: no restore-keys, so a cache
+# never grows past one run's files; the first run of each UTC day is cold.
+inputs:
+  name:
+    description: The job's cache name, unique per job and shard (e.g. server-unit-3).
+    required: true
+outputs:
+  dir:
+    description: Jest's default cache folder on this runner.
+    value: ${{ steps.where.outputs.dir }}
+  key:
+    description: The key to save under when `hit` is not 'true'.
+    value: ${{ steps.restore.outputs.cache-primary-key }}
+  hit:
+    description: "'true' when today's cache for this job was restored."
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Jest cache folder and day
+      id: where
+      shell: bash
+      # Jest's own default (jest-config getCacheDirectory): <real tmpdir>/jest_<uid in base 36>.
+      run: |
+        echo "dir=$(node -p "require('path').join(require('fs').realpathSync(require('os').tmpdir()), 'jest_' + process.getuid().toString(36))")" >> "$GITHUB_OUTPUT"
+        echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+    - name: Restore today's Jest cache for this job
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.where.outputs.dir }}
+        key: jest-v1-${{ inputs.name }}-${{ hashFiles('package-lock.json') }}-${{ steps.where.outputs.day }}
