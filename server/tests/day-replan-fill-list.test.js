@@ -387,7 +387,7 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     // A visit kept by date alone is booked; a due date with no time yet is the night dispatch's to place (isUnplacedDueDate).
     const dateOnly = planVisit('date-only', '2040-09-14', { window_start: null });
     const unplaced = planVisit('unplaced', '2040-09-13', { window_start: null, recurring_dispatch_due_date: '2040-09-13' });
-    loadGapCandidate.mockResolvedValue(loaded(row));
+    loadGapCandidate.mockImplementation(async (id) => (id === 'date-only' ? loaded(dateOnly, { window_start: null, window_end: null }) : loaded(row)));
     const { conn, calls, planCalls } = fakeConn({ plan: [row, unplaced, dateOnly, planVisit('shakedown', '2040-09-13', { first_name: 'Shakedown', last_name: 'Test' })] });
     const { visits, counts } = await _internals.movableVisits(conn, blocks);
     expect(visits.map((v) => v.row.id)).toEqual(['v1', 'date-only']);
@@ -465,6 +465,22 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     const { conn } = fakeConn({ plan: rows, inactive: { termite: [TECH] } });
     const byId = Object.fromEntries((await _internals.movableVisits(conn, blocks)).visits.map((v) => [v.row.id, v.candidate]));
     expect([byId.combo.deactivated, byId.pest.deactivated]).toEqual([[TECH], []]);
+  });
+
+  test('a visit that a move changed between the scan and its load is left out: its day, its hour or its placement', async () => {
+    const rows = [planVisit('moved', '2040-09-13'), planVisit('retimed', '2040-09-13'), planVisit('unplaced', '2040-09-13', { window_start: null }),
+      planVisit('kept', '2040-09-13'), planVisit('date-only', '2040-09-13', { window_start: null })];
+    const changed = {
+      moved: { scheduled_date: '2040-09-15' },
+      retimed: { window_start: '09:00', window_end: '10:00' },
+      unplaced: { window_start: null, window_end: null, recurring_dispatch_due_date: '2040-09-13' },
+      'date-only': { window_start: null, window_end: null },
+    };
+    loadGapCandidate.mockImplementation(async (id) => loaded(rows.find((row) => row.id === id), changed[id]));
+    const { conn } = fakeConn({ plan: rows });
+    const { visits, counts } = await _internals.movableVisits(conn, blocks);
+    expect(visits.map((v) => v.row.id)).toEqual(['kept', 'date-only']);
+    expect(counts.checked).toBe(5);
   });
 
   test('a seasonal visit moves only inside its season: never into January', async () => {

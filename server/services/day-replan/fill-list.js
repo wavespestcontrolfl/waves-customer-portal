@@ -33,7 +33,9 @@
  * first visit) on the days before its own, with its add-on services in the capability, plan hold and mowing-day rules
  * (planVisitCandidate). Left out: a visit whose 24-hour reminder will not go out (owner 2026-11-07 lock), and one that
  * shares its day with another live visit of the same customer (a move would split that visit). Every booked customer
- * was told a day: staff call first.
+ * was told a day: staff call first. A staff move of a plan visit moves its later visits too, as every staff date move
+ * of a plan visit does (rebooker.js movesAsSeries, GATE_ADMIN_COLLECTIVE_MOVE; a lawn round one-off moves alone), and
+ * the move screen says so before the move commits (SeriesMoveNotice.jsx). The list only suggests the move.
  *
  * Nothing here is paid: no geocoding and no road times.
  */
@@ -78,6 +80,8 @@ const toMin = (hhmm) => {
   const [h, m] = String(hhmm).slice(0, 5).split(':').map(Number);
   return h * 60 + m;
 };
+// A visit's booked hour in minutes, or null for a date-only visit.
+const startMin = (row) => (row.window_start ? toMin(row.window_start) : null);
 const fullName = (row) => [row.first_name, row.last_name].map((p) => String(p || '').trim()).filter(Boolean).join(' ') || null;
 const testContact = (row, customerId) => isInternalTestContact({ customerId, firstName: row.first_name, lastName: row.last_name,
   email: row.email, phone: row.phone });
@@ -194,7 +198,9 @@ async function openLeads(conn, now) {
 
 /**
  * A booked plan visit as a gap candidate, or null when the gap tool refuses it (loadGapCandidate: locked or excluded, a
- * stopped or lapsed plan, an inactive customer). A new stop, open only on the days up to MOVE_UP_DAYS before its own:
+ * stopped or lapsed plan, an inactive customer) or when a move changed it between the scan and this read (its day, its
+ * hour, or its placement: the line would name a day or hour the visit no longer holds). A new stop, open only on the
+ * days up to MOVE_UP_DAYS before its own:
  * - a lawn round visit only where the move stays a one-off (lawn-rounds.js roundsRowMoveIsOneOff: inside its round and
  *   at most 7 days from its regular date; any other move shifts its series);
  * - a seasonal visit only in its season (recurring-appointment-seeder.js clampDateToSeason keeps the date: no seasonal
@@ -208,6 +214,8 @@ async function openLeads(conn, now) {
 async function planVisitCandidate(conn, row, day, addOns) {
   const loaded = await loadGapCandidate(row.id, conn);
   if (loaded.unavailable) return null;
+  if (dateOnlyString(loaded.service.scheduled_date) !== day || startMin(loaded.service) !== startMin(row)
+    || isUnplacedDueDate(loaded.service)) return null;
   const extra = addOns.filter((a) => String(a.scheduled_service_id) === String(row.id))
     .map((a) => ({ service_type: a.service_name, service_id: a.service_id, service_key_snapshot: a.service_key_snapshot }));
   const extraFamilies = [];
@@ -372,7 +380,7 @@ async function readCandidates(conn, blocks, now, estimates, result) {
   Object.assign(result.visits, counts);
   for (const { row, day, candidate } of visits) {
     candidates.push({ kind: 'visit', id: String(row.id), name: fullName(row), candidate,
-      from: { day, start: row.window_start ? toMin(row.window_start) : null } });
+      from: { day, start: startMin(row) } });
   }
   return candidates;
 }
