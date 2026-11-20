@@ -465,6 +465,20 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(snapshot({ events: db.price_approval_events, legacy: db.price_approvals })).toBe(closed);
     });
 
+    // The legacy lookup can queue a SiteOne price before the product has a quote from SiteOne, and approving it then inserts one at
+    // the approval's own price and pack (applyPriceApproval): a stale one is superseded too (pre-push audit at the ninth push).
+    test('a pending SiteOne approval for a product with no SiteOne quote yet is superseded; another vendor\'s stays', async () => {
+      const db = world({ vendors: [], catalog: [catalogRow({ best_price: '30.90', best_price_amount_cached: '30.9000' })] });
+      db.price_approvals = [
+        pendingLegacy('a58', '58.42', { new_quantity: '1 gal' }),
+        pendingLegacy('a31', '31.50', { new_quantity: '1 gal' }), // another price: an admin's call
+        pendingLegacy('a58other', '58.42', { new_quantity: '1 gal', vendor_id: 'ven2' }), // another vendor
+      ];
+      await migration.up(fakeKnex(db));
+      expect(statusOf(db.price_approvals)).toEqual({ a58: 'rejected', a31: 'pending', a58other: 'pending' });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/pending price approvals a58 would put a stale price/));
+    });
+
     test('a pending approval at the stale price beside a SiteOne row already at $30.90 is superseded alone; down() leaves it closed', async () => {
       const event = pendingEvent('e58', 's58');
       // A catalog the recalculation leaves at the same price: only the superseded approval makes the audit row.

@@ -7237,10 +7237,10 @@ function priceTrenching(property = {}, options = {}, replay) {
     positioning: product.positioning,
     applicationRate: rateResolution.applicationRate,
     requestedApplicationRate: rateResolution.requestedApplicationRate,
-    // The label's half-volume dilution is the high rate's, so it shows the high rate's label, a custom dilution typed at that
-    // figure included: the label names the dilution the volume was priced at (pre-push audit 28). Each bottle with a half-volume
-    // dilution names its high label in code.
-    concentrationLabel: rateResolution.applicationRate === 'high' || labelHalfVolume
+    // The label's half-volume dilution is the high rate's, so it shows the high rate's label at either rate, a custom dilution typed
+    // at that figure included, and at a configured volume off the chart too: the label names the dilution the line priced (pre-push
+    // audits 28 and at the ninth push). Each bottle with a half-volume dilution names its high label in code.
+    concentrationLabel: rateResolution.applicationRate === 'high' || labelStrongerDilution
       ? product.highConcentrationLabel || rateConfig.concentrationLabel
       : product.standardConcentrationLabel || rateConfig.concentrationLabel,
     trenchDepthFt,

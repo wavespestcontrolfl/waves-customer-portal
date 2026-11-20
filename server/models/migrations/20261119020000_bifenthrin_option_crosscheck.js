@@ -81,7 +81,8 @@
  * warning.
  * Pending approvals and the unit cost (pre-push audit at the sixth push): an approval queued before this change (the review
  * queue's price_approval_events, or the legacy price_approvals) that, approved, would put a stale gallon price back on one of the
- * product's SiteOne quotes (each approve handler's own writes over the quote it writes to, read as the recalculation reads it) is
+ * product's SiteOne quotes (each approve handler's own writes over the quote it writes to, read as the recalculation reads it; a
+ * legacy approval for SiteOne inserts that quote when the product has none from its vendor, pre-push audit at the ninth push) is
  * rejected as superseded, as the price worker supersedes its own stale reports; one at another price, or for another vendor, is an
  * admin's call, and stays. down() leaves a superseded approval closed: after a rollback its quote holds the stale price it offers or
  * a price entered since, so reopening it could only put an obsolete price back (pre-push audit at the seventh push). A catalog unit
@@ -573,12 +574,16 @@ const decided = (queue) => [queue.status, queue.by, queue.at, queue.note];
 const SUPERSEDED_NOTE = 'Superseded: the owner pays $30.90 for LESCO Crosscheck Plus (1 gal), and approving this would put a stale price back (migration 20261119020000).';
 
 // The quotes a pending approval would write, as each would then read (each approve handler's own writes): a legacy approval lands
-// on the product's first row from its vendor, in no set order, so on each of that vendor's SiteOne quotes; an event on the quote
-// it or its snapshot names. None when it names none of the product's SiteOne quotes.
-async function approvalWrites(knex, table, approval, siteOne) {
+// on the product's first row from its vendor, in no set order, so on each of that vendor's SiteOne quotes, and with no row from
+// its vendor it inserts one at its own price and pack, a SiteOne quote when its vendor is SiteOne (applyPriceApproval; pre-push
+// audit at the ninth push); an event on the quote it or its snapshot names (its handler never inserts one). None when it names
+// none of the product's SiteOne quotes.
+async function approvalWrites(knex, table, approval, siteOne, rows) {
   const { approvedPerOzFields, snapshotPricingFields } = inventory();
   if (table === 'price_approvals') {
-    return siteOne.filter((quote) => quote.vendor_id === approval.vendor_id).map((quote) => {
+    const fromVendor = (quote) => quote.vendor_id === approval.vendor_id;
+    const inserts = !rows.some(fromVendor) && (await isSiteOneRow(knex, { vendor_id: approval.vendor_id }));
+    return (inserts ? [{ vendor_id: approval.vendor_id, quantity: null }] : siteOne.filter(fromVendor)).map((quote) => {
       const quantity = approval.new_quantity || quote.quantity;
       return { ...quote, price: approval.new_price, quantity, ...approvedPerOzFields(approval.new_price, quantity) };
     });
@@ -597,14 +602,14 @@ async function staleApprovals(knex, productId, rows) {
   for (const quote of rows) if (await isSiteOneRow(knex, quote)) siteOne.push(quote);
   const found = [];
   for (const [table, queue] of Object.entries(QUEUES)) {
-    if (!siteOne.length || !(await knex.schema.hasTable(table))) continue;
+    if (!(await knex.schema.hasTable(table))) continue;
     const columns = [...decided(queue), ...queue.reads];
     if ((await existingColumns(knex, table, columns)).length < columns.length) {
       console.warn(`${LOG} ${CATALOG_NAME} (${productId}): ${table} lacks a column up() reads - its pending approvals are left alone`);
       continue;
     }
     for (const approval of await knex(table).where({ product_id: productId, [queue.status]: 'pending' }).forUpdate()) {
-      const writes = await approvalWrites(knex, table, approval, siteOne);
+      const writes = await approvalWrites(knex, table, approval, siteOne, rows);
       if (writes.some((quote) => staleGallonOf(quote) !== undefined)) found.push({ table, approval });
     }
   }

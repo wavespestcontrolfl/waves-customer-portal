@@ -355,11 +355,16 @@ describe('termite measurement overrides and safeguards', () => {
       expect(offChart.warnings.join(' ')).toMatch(/off the label volume chart/);
       expect(offChart.manualReviewReasons).not.toContain('reduced_volume_confirmation_required');
       expect(offChart.manualReviewReasons).toContain('off_chart_volume_confirmation_required');
-      expect(trench({}).manualReviewReasons || []).not.toContain('off_chart_volume_confirmation_required'); // 0.06% at 1 oz
+      const standardOffChart = trench({}); // the label's 0.06% (1 fl oz) off the chart: no off-chart review
+      expect(standardOffChart.manualReviewReasons || []).not.toContain('off_chart_volume_confirmation_required');
+      expect(standardOffChart.concentrationLabel).toBe('0.06%');
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 2; // the audit's case: the standard rate at 0.12%
       const standardAtTwo = trench({});
       expect(standardAtTwo).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true, requiresManualReview: true });
       expect(standardAtTwo.manualReviewReasons).toContain('off_chart_volume_confirmation_required');
+      // The line names the dilution it priced, the high rate's, not the standard 0.06% (pre-push audit at the ninth push).
+      expect(standardAtTwo.concentrationLabel).toBe('high_rate');
+      expect(offChart.concentrationLabel).toBe('high_rate');
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
       trenching.finishedGallonsPer10LFPerFtDepth = 4; // the chart's: 80 labeled gallons, halved
       const onChart = trench();
