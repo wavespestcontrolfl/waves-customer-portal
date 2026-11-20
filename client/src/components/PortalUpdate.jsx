@@ -12,8 +12,12 @@ import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/porta
 // page this tab loaded never reloads. The fallback drops nothing a move keeps:
 // App.jsx's RoutesErrorBoundary keys the route tree on the pathname, so every
 // page move already remounts the staff layout and all it holds in React state
-// (the Ask Waves prompt included). Work that outlives a move is in a module
-// or in storage, and registers a hold (reloadHolds.js).
+// (the Ask Waves prompt included). Work that outlives a move is in a module,
+// in storage or in a send still running, and holds the reload
+// (reloadHolds.js). A held move opens the next page in the old code. If the
+// deploy removed that page's code, the stale-chunk reload
+// (staleChunkReload.js, App.jsx's lazyWithRetry) still runs as it does
+// without this gate, held work or not; a follow-up PR makes it obey the holds.
 export function PortalUpdateGate({ fallback, children }) {
   const { pathname } = useLocation();
   const [gate, setGate] = useState({ pathname, reloading: false });
@@ -45,6 +49,9 @@ const HOLD_TEXT = {
   'photo-assessment': 'A photo assessment is still being sent.',
   'misting-layout': 'A misting layout is still being saved.',
   'zone-map': 'A treatment zone map is still being saved.',
+  'time-clock': 'A time-clock punch is still being sent.',
+  'visual-note': 'A visual note is still being saved.',
+  'bank-import': 'A bank statement is still being imported.',
   'page-use': 'Anything not saved on this page will be lost.',
   offline: 'This device is offline. A reload may show an error page.',
 };

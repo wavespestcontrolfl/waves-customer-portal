@@ -44,6 +44,7 @@ import SharedBillsPanel from "./tax/SharedBillsPanel";
 import ReturnTab from "./tax/ReturnTab";
 import SalesTaxTab from "./tax/SalesTaxTab";
 import Form1099Tab from "./tax/Form1099Tab";
+import { holdReloadWhileSending } from "../../lib/reloadHolds";
 function useTaxRead(path, setData, field) {
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -5532,7 +5533,7 @@ function PayrollBankLineNotes({ r, claimable, busy, act }) {
   );
 }
 
-function BankImportTab() {
+export function BankImportTab() {
   // 14px floor on this financial-review surface (repo minimum readable
   // size) — the shared inputStyle stays 12px for the legacy tabs
 
@@ -5730,6 +5731,11 @@ function BankImportTab() {
     // would force-import rows from the PREVIOUS statement. The token is
     // retained only across forceImportDuplicates retries.
     setDupUpload(null);
+    // The CSV is read before its upload starts, so no save is open yet. The
+    // import holds an out-of-date tab's reload until the upload settles, or
+    // until a failed read ends (lib/reloadHolds.js).
+    let settleImport;
+    holdReloadWhileSending("bank-import", () => new Promise((settle) => { settleImport = settle; }));
     const reader = new FileReader();
     reader.onload = () => {
       const payload = {
@@ -5738,7 +5744,7 @@ function BankImportTab() {
         filename: file.name,
         csv: String(reader.result || ""),
       };
-      act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
+      settleImport(act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
         if (!r) return;
         // hashes scope a later force-import to EXACTLY these skipped rows
         // (on a re-post every previously imported row conflicts too), and
@@ -5784,8 +5790,10 @@ function BankImportTab() {
                   .join("; ")}${r.duplicates > 3 ? "…" : ""}`
               : ""),
         });
-      });
+      }));
     };
+    // Runs after onload, or alone when the read fails.
+    reader.onloadend = () => settleImport();
     reader.readAsText(file);
   };
 
