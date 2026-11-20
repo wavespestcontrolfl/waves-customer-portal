@@ -36,7 +36,17 @@ test('App.jsx calls React.lazy only inside lazyWithRetry', () => {
   expect(app).toMatch(/export function lazyWithRetry\(factory\) \{\n {2}return lazy\(/);
 });
 
-test('main.jsx installs the page-use watcher next to the preload handler', () => {
+// The page-use watcher notes each use for the whole page load, so it starts
+// before React mounts, as the preload handler does: a use before a part's
+// code fails must count. Each is a top-level statement of main.jsx.
+test('main.jsx installs the page-use watcher and the preload handler before React mounts', () => {
   const main = fs.readFileSync(path.join(SRC, 'main.jsx'), 'utf8');
-  expect(main).toMatch(/window\.addEventListener\('vite:preloadError'[^\n]*\n(?:\/\/[^\n]*\n)*watchPageUse\(\);/);
+  const mount = main.search(/^ReactDOM\.createRoot\(/m);
+  const watcher = main.search(/^watchPageUse\(\);$/m);
+  const handler = main.search(/^window\.addEventListener\('vite:preloadError'/m);
+  expect(mount).toBeGreaterThan(-1);
+  expect(watcher).toBeGreaterThan(-1);
+  expect(handler).toBeGreaterThan(-1);
+  expect(watcher).toBeLessThan(mount);
+  expect(handler).toBeLessThan(mount);
 });
