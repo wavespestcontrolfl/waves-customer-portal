@@ -398,6 +398,26 @@ test('a failed issue whose send became sent (a Resume that finished, or delivery
   ]);
 });
 
+test.each([
+  ['told it failed', { outcomeToldAt: '2026-12-03T12:30:00.000Z' }, { episode: 1, failureToldAt: '2026-12-03T12:30:00.000Z' }],
+  ['whose failure alert reached no one yet: never the stale words that no reader got it', {}, { episode: 1 }],
+])('a failed issue (%s) whose send became sent with readers a Resume would still mail becomes sent, with the counts then and the blocked alert', async (_label, diagnostics, episode) => {
+  const failed = { ...ISSUE, status: 'failed', reason: 'did not go out: its send ended, and no reader got it', diagnostics };
+  const { writes } = fakeDb({ issues: [failed], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 80, left: 5 } });
+  const blocked = "went out to 80 readers, but 5 readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them";
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  // The blocked alert says it went out, so it is also the correction a told failure is owed.
+  expect(mockTrigger).toHaveBeenCalledTimes(1);
+  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+    errors: [blocked.charAt(0).toUpperCase() + blocked.slice(1)], outcome: true,
+  }), { dedupeKey: 'pest-insider-blocked:issue-1:1' });
+  expect(writes).toEqual([
+    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: blocked, diagnostics: newEpisode(episode) }) },
+    toldMark('issue-1', 'sent', IN_WINDOW, 'blockedToldAt'),
+  ]);
+});
+
 const RECOVERED_85 = 'went out after all: 85 readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume';
 // Recovered from a failure the owner was told at 12:30; the correction reached no one yet.
 const UNTOLD_CORRECTION = { ...ISSUE, status: 'sent', reason: RECOVERED_85, diagnostics: { episode: 1, failureToldAt: '2026-12-03T12:30:00.000Z' } };
