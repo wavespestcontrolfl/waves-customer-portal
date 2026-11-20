@@ -82,7 +82,9 @@ function BonusCard({ scoreboard }) {
         label="Next stay bonus"
         value={stayBonus ? dayLabel(stayBonus.dueDate) : 'None left'}
         note={stayBonus
-          ? `${stayBonus.years}-year bonus, about ${centsToDollars(stayBonus.estimateCents)}. ${ESTIMATE_NOTE}`
+          ? (stayBonus.estimateCents === null
+            ? `${stayBonus.years}-year bonus. Estimate starts ${dayLabel(stayBonus.earningsStart)}, when the 12 months of pay that count toward it begin.`
+            : `${stayBonus.years}-year bonus, about ${centsToDollars(stayBonus.estimateCents)}. ${ESTIMATE_NOTE}`)
           : 'The 1, 3 and 5 year stay bonuses are behind you, or your hire date is not on file.'}
       />
     </div>

@@ -57,9 +57,17 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.uuid('technician_id');
       t.text('kind').notNullable();
       t.text('status').notNullable();
+      t.text('source_type');
       t.date('earned_week_start').notNullable();
       t.date('covers_to');
       t.integer('amount_cents').notNullable();
+    });
+    await s.createTable('time_entry_daily_summary', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('technician_id');
+      t.date('work_date').notNullable();
+      t.decimal('total_shift_minutes', 10, 2);
+      t.decimal('unpaid_meal_minutes', 10, 2);
     });
     await s.createTable('review_incentive_payouts', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -86,7 +94,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
   });
 
   beforeEach(async () => {
-    for (const table of ['payroll_checks', 'payroll_runs', 'payroll_pay_lines', 'review_incentive_payouts', 'review_requests']) await db(table).del();
+    for (const table of ['payroll_checks', 'payroll_runs', 'payroll_pay_lines', 'review_incentive_payouts', 'review_requests', 'time_entry_daily_summary']) await db(table).del();
     scores.buildSeasonScore.mockReset().mockResolvedValue({
       complete: true, year: 2026, parts: PARTS, score: 91.5, rateBps: 400, settings: { version: 0, weights: WEIGHTS, cutLines: CUTS },
     });
@@ -104,13 +112,25 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       { run_id: run, technician_id: alpha, status: 'voided', week_start: '2026-04-13', gross_cents: 888888 }, // voided check
       { run_id: run, technician_id: beta, status: 'finalized', week_start: '2026-04-06', gross_cents: 777777 }, // someone else
     ]);
+    await db('time_entry_daily_summary').insert([
+      // the Aug 31 week: Mon 8 h inside the season, Tue-Wed 16 h after it (Tuesday's unpaid meal leaves 8 h paid)
+      { technician_id: alpha, work_date: '2026-08-31', total_shift_minutes: 480, unpaid_meal_minutes: 0 },
+      { technician_id: alpha, work_date: '2026-09-01', total_shift_minutes: 510, unpaid_meal_minutes: 30 },
+      { technician_id: alpha, work_date: '2026-09-02', total_shift_minutes: 480, unpaid_meal_minutes: 0 },
+      // the Feb 23 week (ends Mar 1): every hour before the season
+      { technician_id: alpha, work_date: '2026-02-24', total_shift_minutes: 480, unpaid_meal_minutes: 0 },
+      { technician_id: alpha, work_date: '2026-02-25', total_shift_minutes: 480, unpaid_meal_minutes: 0 },
+      { technician_id: beta, work_date: '2026-09-01', total_shift_minutes: 480, unpaid_meal_minutes: 0 },
+    ]);
     await db('payroll_pay_lines').insert([
       { technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2026-04-06', amount_cents: 20000 },
       { technician_id: alpha, kind: 'commission', status: 'open', earned_week_start: '2026-11-09', amount_cents: 10000 },
       { technician_id: alpha, kind: 'commission', status: 'voided', earned_week_start: '2026-05-04', amount_cents: 5000 },
       { technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2025-12-29', amount_cents: 4000 }, // a hand-made line of last year's week
-      { technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2025-12-29', covers_to: '2026-01-01', amount_cents: 2500 }, // paid Jan 1: this year, in the week of Dec 29
-      { technician_id: alpha, kind: 'commission', status: 'open', earned_week_start: '2026-12-14', covers_to: '2026-12-15', amount_cents: 7000 }, // dated after today
+      { technician_id: alpha, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2025-12-29', covers_to: '2026-01-01', amount_cents: 2500 }, // paid Jan 1: this year, in the week of Dec 29
+      { technician_id: alpha, kind: 'commission', source_type: 'commission_payment', status: 'open', earned_week_start: '2026-12-14', covers_to: '2026-12-15', amount_cents: 7000 }, // dated after today
+      { technician_id: alpha, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-01-05', covers_to: '2025-12-31', amount_cents: 6000 }, // ledger line: the payment day (last year) decides, not the pay week
+      { technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2026-07-06', covers_to: '2026-12-20', amount_cents: 1100 }, // hand-made line: its own pay week decides, though it covers a later span
       { technician_id: alpha, kind: 'review_bonus', status: 'paid', earned_week_start: '2026-04-06', amount_cents: 1500 }, // not commission
       { technician_id: beta, kind: 'commission', status: 'paid', earned_week_start: '2026-04-06', amount_cents: 33333 },
     ]);
@@ -140,9 +160,10 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.technician).toEqual({ id: alpha, name: 'Sample Alpha' });
     expect(board.season).toMatchObject({ year: 2026, status: 'final' });
     expect(scores.buildSeasonScore).toHaveBeenCalledWith(alpha, 2026, { start: '2026-03-01', end: '2026-08-31' }, expect.anything());
-    expect(board.seasonBonus.grossCents).toBe(150000); // Mar 2 + Aug 31 weeks only
+    // the Mar 2 week in full; the Aug 31 week (Aug 31 - Sep 6) by paid minutes: 480 of 480 + 480 + 480 (Tuesday's 510 less a 30 minute unpaid meal) = 1440 -> 50000 x 480 / 1440; the Feb 23 week (ends Mar 1) had no hours in the season
+    expect(board.seasonBonus.grossCents).toBe(100000 + Math.round((50000 * 480) / 1440));
     expect(board.reviews).toMatchObject({ count: 3, asks: 3, rateBps: 10000 });
-    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 32500, paidCents: 22500, pendingCents: 10000 });
+    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 33600, paidCents: 23600, pendingCents: 10000 });
     // hired 2025-12-01: the 1-year bonus is due 2026-12-01 from the pay of 2025-12-01 .. today: 100000+50000+70000+10000
     expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1, estimateCents: Math.round(230000 * 0.02) });
   });
@@ -154,8 +175,22 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.season).toMatchObject({ year: 2026, status: 'running' });
     expect(scores.buildSeasonScore).toHaveBeenCalledWith(alpha, 2026, { start: '2026-03-01', end: '2026-06-15' }, expect.anything());
     expect(scores.getSettings).toHaveBeenCalledWith('2026-06-15', expect.anything());
-    expect(board.seasonBonus.grossCents).toBe(100000); // the Aug 31 week has not happened yet
+    expect(board.seasonBonus.grossCents).toBe(100000); // the Aug 31 week has not happened yet; the Feb 23 week's hours were all before Mar 1
     expect(board.reviews).toMatchObject({ count: 1, asks: 2 }); // the Apr 10 review; asks of Apr 10 and May 10
+  });
+
+  test('a stay bonus whose 12 months of pay have not begun keeps its date and has no amount', async () => {
+    await seed();
+    const [gamma] = await db('technicians').insert({ name: 'Sample Gamma', hire_date: '2025-04-01' }).returning('id');
+    const board = await service.getScoreboard(gamma.id, { now: NOW });
+    expect(board.stayBonus).toMatchObject({ dueDate: '2028-04-01', years: 3, estimateCents: null, earningsStart: '2027-04-01' });
+  });
+
+  test('an edge week with no daily summaries falls back to days / 7', async () => {
+    await seed();
+    await db('time_entry_daily_summary').where({ technician_id: alpha }).del();
+    const board = await service.getScoreboard(alpha, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(100000 + 7143 + 1429);
   });
 
   test('another technician is never mixed in', async () => {

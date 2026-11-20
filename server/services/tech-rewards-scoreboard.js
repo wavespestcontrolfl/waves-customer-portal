@@ -29,8 +29,9 @@ const calc = require('./tech-rewards-calc');
 const scores = require('./tech-rewards-scores');
 const { ASK_TOUCH_SQL } = require('./review-outreach-templates');
 const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
+const { SOURCE_TYPE: COMMISSION_SOURCE_TYPE } = require('./payroll-commission');
 const { etDateString } = require('../utils/datetime-et');
-const { STAFF_TIME_ZONE } = require('../utils/staff-time-work-date');
+const { STAFF_TIME_ZONE, addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // The level ladder has no source yet: the calculator's entry level.
@@ -113,8 +114,12 @@ function stayBonusBlock(hireDate, today, priorPayCents) {
   const next = calc.stayBonus({ hireDate, asOf: today, priorTwelveMonthsPayCents: priorPayCents });
   if (!next) return null;
   const years = next.rateBps === calc.STAY_BONUS_1_YEAR_BPS ? 1 : next.rateBps === calc.STAY_BONUS_3_YEAR_BPS ? 3 : 5;
+  const earningsStart = yearBefore(next.dueDate);
+  const base = { dueDate: next.dueDate, years, rateBps: next.rateBps, estimate: true, earningsStart };
+  // the 12 months that earn this bonus have not begun: no amount to show yet (never $0.00), only the date
+  if (earningsStart > today) return { ...base, estimateCents: null };
   // the estimate is the pay recorded so far in the 12 months before the due date; the due date's own pay run decides
-  return { dueDate: next.dueDate, years, rateBps: next.rateBps, estimateCents: next.cents, estimate: true };
+  return { ...base, estimateCents: next.cents };
 }
 
 /**
@@ -182,24 +187,82 @@ async function readAskCount(conn, technicianId, season) {
   return Number(row?.n) || 0;
 }
 
-// Gross pay of the technician's finalized checks whose pay week starts in [from, to].
+const DAY_MS = 86400000;
+const dayNumber = (dateStr) => Math.floor(Date.parse(`${dateStr}T00:00:00Z`) / DAY_MS);
+// half-up a x b / c for non-negative integers
+const mulDivRound = (a, b, c) => Math.floor((2 * a * b + c) / (2 * c));
+
+/**
+ * The share of one pay week's gross that falls on [from, to]. `dayMinutes` are the week's paid minutes by
+ * work date ({ workDate, minutes }). With worked time on record the gross splits by the paid minutes on
+ * in-window dates over the week's paid minutes, so the dates the work was done decide it; a week with no
+ * worked time on record falls back to in-window days / 7. Half up, once per week.
+ */
+function weekShareCents(week, fromDay, toDay) {
+  const start = dayNumber(week.weekStart);
+  const days = Math.min(start + 6, toDay) - Math.max(start, fromDay) + 1;
+  if (days <= 0) return 0;
+  if (days >= 7) return week.grossCents;
+  const minutes = (week.dayMinutes || []).map((d) => ({ day: dayNumber(d.workDate), hundredths: Math.round(Number(d.minutes) * 100) || 0 }));
+  const total = minutes.reduce((sum, d) => sum + d.hundredths, 0);
+  if (total <= 0) return mulDivRound(week.grossCents, days, 7);
+  const inside = minutes.filter((d) => d.day >= fromDay && d.day <= toDay).reduce((sum, d) => sum + d.hundredths, 0);
+  return mulDivRound(week.grossCents, inside, total);
+}
+
+/**
+ * Gross pay EARNED in [from, to]: the work-week basis, not the pay date (the ruling measures work done
+ * Mar 1 - Aug 31, and weekly pay means August work is paid in September). `weeks` are finalized checks as
+ * { weekStart, grossCents, dayMinutes? }, a pay week being weekStart .. weekStart + 6. A week that straddles a
+ * window edge counts only the share earned on in-window dates (weekShareCents). D5-5 pay lines MUST use this
+ * helper (with readGross for the weeks) for the season bonus base and the stay bonus's prior 12 months, so the
+ * board and the pay line can never differ.
+ */
+function earnedGrossCents(weeks, from, to) {
+  const fromDay = dayNumber(from);
+  const toDay = dayNumber(to);
+  return weeks.reduce((total, week) => total + weekShareCents(week, fromDay, toDay), 0);
+}
+
+// The paid minutes by work date of one technician's week, from the daily summaries the weekly pay is summed from
+// (time-tracking.js computeWeeklySummaryInTransaction: shift minutes less the unpaid meal, never below 0).
+async function readDayMinutes(conn, technicianId, weekStart) {
+  const rows = await conn('time_entry_daily_summary')
+    .where({ technician_id: technicianId })
+    .where('work_date', '>=', weekStart)
+    .where('work_date', '<=', addStaffWorkDays(weekStart, 6))
+    .select(conn.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"),
+      conn.raw('GREATEST(COALESCE(total_shift_minutes, 0) - COALESCE(unpaid_meal_minutes, 0), 0) AS minutes'));
+  return rows.map((row) => ({ workDate: row.work_date, minutes: Number(row.minutes) || 0 }));
+}
+
+// The technician's finalized checks whose pay week overlaps [from, to] (with the day minutes of a week that
+// straddles an edge), then earnedGrossCents.
 async function readGross(conn, technicianId, from, to) {
-  const row = await conn('payroll_checks as c')
+  const rows = await conn('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
-    .whereRaw('c.week_start >= ?::date AND c.week_start <= ?::date', [from, to])
-    .sum({ gross: 'c.gross_cents' })
-    .first();
-  return toCents(row?.gross);
+    .whereRaw('c.week_start + 6 >= ?::date AND c.week_start <= ?::date', [from, to])
+    .select(conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents');
+  const weeks = [];
+  for (const row of rows) {
+    const week = { weekStart: row.week_start, grossCents: toCents(row.gross_cents) };
+    if (week.weekStart < from || addStaffWorkDays(week.weekStart, 6) > to) week.dayMinutes = await readDayMinutes(conn, technicianId, week.weekStart);
+    weeks.push(week);
+  }
+  return earnedGrossCents(weeks, from, to);
 }
 
 // Commission pay lines earned from Jan 1 to today: 'paid' on a finalized check, 'open' waiting for the next run.
-// A line is earned on the day of the payment it pays (covers_to); a hand-made line covers only its pay week.
+// The ledger's lines (payroll-commission.js) are earned on the day of the payment they pay (covers_to); a hand-made
+// line is earned in its own pay week (earned_week_start).
+const COMMISSION_EARNED_ON = 'CASE WHEN source_type = ? THEN covers_to ELSE earned_week_start END';
 async function readCommission(conn, technicianId, today) {
   const rows = await conn('payroll_pay_lines')
     .where({ technician_id: technicianId, kind: 'commission' })
     .whereIn('status', ['open', 'paid'])
-    .whereRaw('COALESCE(covers_to, earned_week_start) >= ?::date AND COALESCE(covers_to, earned_week_start) <= ?::date', [`${today.slice(0, 4)}-01-01`, today])
+    .whereRaw(`(${COMMISSION_EARNED_ON}) >= ?::date AND (${COMMISSION_EARNED_ON}) <= ?::date`,
+      [COMMISSION_SOURCE_TYPE, `${today.slice(0, 4)}-01-01`, COMMISSION_SOURCE_TYPE, today])
     .groupBy('status')
     .select('status', conn.raw('SUM(amount_cents) AS cents'));
   const by = Object.fromEntries(rows.map((row) => [row.status, toCents(row.cents)]));
@@ -220,7 +283,7 @@ async function readAll(conn, technicianId, today) {
     asks: await readAskCount(conn, technicianId, season),
     reviews: await readReviewCount(conn, technicianId, season),
     grossSeasonCents: await readGross(conn, technicianId, season.start, season.asOf),
-    priorYearGrossCents: due ? await readGross(conn, technicianId, yearBefore(due.dueDate), today) : 0,
+    priorYearGrossCents: due && due.estimateCents !== null ? await readGross(conn, technicianId, yearBefore(due.dueDate), today) : 0,
     commission: await readCommission(conn, technicianId, today),
   };
 }
@@ -243,4 +306,4 @@ async function listTechnicians(conn = db) {
   return rows.map((row) => ({ id: row.id, name: row.name }));
 }
 
-module.exports = { ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps };
+module.exports = { ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents };

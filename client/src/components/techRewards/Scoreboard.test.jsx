@@ -90,6 +90,14 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText(/running, the numbers so far/)).toBeInTheDocument();
   });
 
+  it('shows the stay bonus date but no amount while its 12 months of pay have not begun', () => {
+    const board = { ...BOARD, stayBonus: { dueDate: '2028-04-01', years: 3, rateBps: 400, estimateCents: null, estimate: true, earningsStart: '2027-04-01' } };
+    render(<Scoreboard board={{ status: 'ready', scoreboard: board }} />);
+    expect(screen.getByText('Apr 1, 2028')).toBeInTheDocument();
+    expect(screen.getByText(/3-year bonus\. Estimate starts Apr 1, 2027/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/about \$0\.00/);
+  });
+
   it('shows no customer data', () => {
     render(<Scoreboard board={{ status: 'ready', scoreboard: BOARD }} />);
     expect(document.body.textContent).not.toMatch(/customer name|address|@/i);
