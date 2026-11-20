@@ -624,7 +624,9 @@ describe('processDueAutoReplies — state machine', () => {
 
   test('a reconciliation that still fails on the last attempt parks as reconcile_failed, not google_failed, and a failed bell re-rings the same way', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 2 })];
+    // A reconcile retry carries the verified draft it stored; it reuses it and never drafts.
+    const fp = Runner.reviewFingerprint(row());
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 2, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
     const { ReviewReplyError } = require('../services/review-reply/publisher');
     mockPublish.mockRejectedValueOnce(new ReviewReplyError('reconcile_failed', 'Google shows an owner reply but recording it failed: connection reset', { status: 503 }));
     // The notifier is down: the bell fails and the row is stamped for the bell sweep.
@@ -653,6 +655,28 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockNotify).not.toHaveBeenCalled();
     expect(state.rows[0].auto_reply_error).not.toMatch(/bell_failed/);
     mockNotify.mockReset().mockResolvedValue({});
+  });
+
+  test('a reconcile_failed retry never drafts: it reuses the verified draft, and with none it parks for reconciliation', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const fp = Runner.reviewFingerprint(row());
+    const stored = { auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } };
+    // The retry goes straight to the publisher, whose live read finds the owner reply and records it.
+    state.rows = [row(stored)];
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('already_replied', 'This review already has a posted reply', { status: 409 }));
+    await Runner.processDueAutoReplies();
+    expect(mockDraft).not.toHaveBeenCalled();
+    expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied' });
+    // A stored draft that no longer verifies is not redrafted: the row parks for reconciliation, with its bell.
+    state.rows = [row({ ...stored, id: 'rc2' })];
+    mockVerify.mockReturnValueOnce('repetitive_opening');
+    mockNotify.mockClear();
+    await Runner.processDueAutoReplies();
+    expect(mockDraft).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed', auto_reply_claimed_until: null });
+    expect(mockNotify.mock.calls.find((c) => c[3]?.metadata?.reason === 'reconcile_failed')?.[1]).toBe('Review reply needs reconciling');
   });
 
   test('a failed live-reply reconciliation retries instead of closing the row as already_replied (codex r74)', async () => {

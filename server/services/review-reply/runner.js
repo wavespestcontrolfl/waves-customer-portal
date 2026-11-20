@@ -693,7 +693,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // provider_down with a perfectly good reply on the row). Only rows that
   // never produced a draft, or whose stored draft came from a different
   // prompt version, go back to the model.
-  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, 'gbp_not_configured', 'account_read_failed', 'google_uncertain_cleared', 'unexpected', 'runner_error']);
+  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, CODES.RECONCILE_FAILED, 'gbp_not_configured', 'account_read_failed', 'google_uncertain_cleared', 'unexpected', 'runner_error']);
   const storedGrounding = merged.auto_reply_grounding && typeof merged.auto_reply_grounding === 'object' ? merged.auto_reply_grounding : null;
   const reusable = merged.auto_reply_status === STATUS.FAILED
     && PUBLISH_RETRY_REASONS.has(merged.auto_reply_reason)
@@ -721,6 +721,15 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     } else {
       logger.info(`[review-auto-reply] stored draft for ${merged.id} no longer verifies (${verdict}) — redrafting`);
     }
+  }
+  // A reconcile retry (Google shows an owner reply that was not recorded
+  // here) never drafts: no new reply can go over that one. It reuses the
+  // verified draft, so the publisher's live read records the reply. With no
+  // reusable draft it parks for reconciliation (bell; Monday "check Google
+  // first"), and the sync records the reply when it reads it.
+  if (!reuseOk && intent !== 'post_now' && merged.auto_reply_status === STATUS.FAILED && merged.auto_reply_reason === CODES.RECONCILE_FAILED) {
+    if (await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: CODES.RECONCILE_FAILED })) await reconcileFailedBell(merged);
+    return { outcome: 'parked', reason: CODES.RECONCILE_FAILED };
   }
   if (!reuseOk) {
     // Draft (grounding is public-safe by construction).
@@ -981,7 +990,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         : code === CODES.LOCK_BUSY ? 'lock_busy'
           : code === 'account_read_failed' ? 'account_read_failed'
             // Google already shows an owner reply: keep the reason, so the
-            // Monday list never counts it as unanswered.
+            // Monday list marks it "check Google first".
             : code === CODES.RECONCILE_FAILED ? CODES.RECONCILE_FAILED
               : 'google_failed';
     if (!(await storeDraft(merged, draft, STATUS.PARKED, parkReason, { grounding: snapshot, fields: { auto_reply_attempts: attempts, auto_reply_error: String(err.message || err).slice(0, 1000) } }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
