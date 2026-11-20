@@ -76,7 +76,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseFirstAskEligible, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
+const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseFirstAskEligible, firstAskCustomerMoved, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
@@ -994,6 +994,26 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
     expect(frozenResumeCompletionState({ requestReview: true }).lateCloseReviewKept).toBe(false);
   });
 
+  describe('firstAskCustomerMoved: the first-ask choice is for the customer it was checked for', () => {
+    test('no check run, or the same customer (number or string): not moved', () => {
+      expect(firstAskCustomerMoved(null, { customer_id: 'c-1' })).toBe(false);
+      expect(firstAskCustomerMoved(undefined, null)).toBe(false);
+      expect(firstAskCustomerMoved('c-1', { customer_id: 'c-1' })).toBe(false);
+      expect(firstAskCustomerMoved(42, { customer_id: '42' })).toBe(false);
+    });
+    test('a different, missing or unreadable locked customer voids the choice', () => {
+      expect(firstAskCustomerMoved('c-1', { customer_id: 'c-2' })).toBe(true);
+      expect(firstAskCustomerMoved('c-1', { customer_id: null })).toBe(true);
+      expect(firstAskCustomerMoved('c-1', null)).toBe(true);
+    });
+    test('the commit applies it before the verdict, and a voided choice drops the lock', () => {
+      const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+      expect(src).toMatch(/const lateCloseEligible = !firstAskCustomerMoved\(firstAskLockCustomerId, lockedSvcRow\) && await require\('\.\/review-visit-day'\)\.lateCloseAskVerdict\(/);
+      expect(src).toMatch(/firstAskLockCustomerId = lockVisit\.customer_id \?\? null;/);
+      expect(src).toMatch(/if \(isBackfillCompletion && !lateCloseEligible\) reviewFirstAskLock = null;/);
+    });
+  });
+
   describe('lateCloseFirstAskEligible: the pre-read for the first-ask rule', () => {
     const input = { serviceId: 'svc-1', actor: { techRole: 'admin' } };
     const rows = (row) => jest.fn(() => ({ where: () => ({ first: async () => row }) }));
@@ -1014,7 +1034,7 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
     const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
     test('the decision is made once at the commit, from the locked row, and frozen with the normal expression', () => {
-      expect((src.match(/const lateCloseEligible = await require\('\.\/review-visit-day'\)\.lateCloseAskVerdict\(/g) || []).length).toBe(1);
+      expect((src.match(/const lateCloseEligible = !firstAskCustomerMoved\(firstAskLockCustomerId, lockedSvcRow\) && await require\('\.\/review-visit-day'\)\.lateCloseAskVerdict\(/g) || []).length).toBe(1);
       // The choice is resolved once, as the initial enrollment reads it (an omitted requestReview is no ask), and frozen as that boolean.
       // The same verdict immediate enrollment reads: a blocking client suppression or a refused re-service ask freezes false.
       expect(src).toMatch(/lateCloseReviewKept = lateCloseEligible === true && requestReview === true && reviewAskAllowed === true\s*\n\s*&& !\(reviewSuppression && reviewSuppression !== 'invoice_created'\);/);

@@ -182,8 +182,9 @@ async function lateCloseAskVerdict({
  */
 async function lateCloseAskKeptForVisit(serviceId, database = db, now = new Date()) {
   try {
+    // Inside a transaction (the first-ask pre-read rides the packet one) a failed read rolls back only its own savepoint.
     const visit = serviceId
-      ? await database('scheduled_services').where({ id: serviceId }).first(...IDENTITY_COLUMNS, 'arrived_at', 'scheduled_date')
+      ? await require('../utils/savepoint-read').savepointRead(database, (k) => k('scheduled_services').where({ id: serviceId }).first(...IDENTITY_COLUMNS, 'arrived_at', 'scheduled_date'))
       : null;
     return await lateCloseAskVerdict({
       isBackfill: true, visitOutcome: 'completed', systemQuietCloseout: false, recapReviewOnly: false, isInternalOnlyCompletion: false,

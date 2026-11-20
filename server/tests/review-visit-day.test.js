@@ -194,6 +194,21 @@ describe('lateCloseAskKeptForVisit: the preview read', () => {
     });
   });
 
+  test('inside a transaction a failed visit pre-read rolls back only its savepoint, and the transaction stays usable', async () => {
+    const raw = jest.fn(async () => ({}));
+    const failing = Object.assign(jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('relation does not exist'); } }) })), { isTransaction: true, raw });
+    expect(await lateCloseAskKeptForVisit('v1', failing, now)).toBe(false);
+    const sql = raw.mock.calls.map((c) => String(c[0]));
+    expect(sql[0]).toMatch(/^SAVEPOINT fail_soft_/);
+    expect(sql[1]).toMatch(/^ROLLBACK TO SAVEPOINT fail_soft_/);
+    expect(sql[2]).toMatch(/^RELEASE SAVEPOINT fail_soft_/);
+    // The same handle then reads a good visit normally.
+    raw.mockClear();
+    const good = Object.assign(visitDb({ ...IDENT, arrived_at: null, scheduled_date: '2026-11-18' }), { isTransaction: true, raw });
+    expect(await lateCloseAskKeptForVisit('v1', good, now)).toBe(true);
+    expect(raw.mock.calls.map((c) => String(c[0])).slice(0, 1)).toEqual([expect.stringMatching(/^SAVEPOINT fail_soft_/)]);
+  });
+
   test('no visit, no id, or a failed read is false', async () => {
     expect(await lateCloseAskKeptForVisit('v1', visitDb(null), now)).toBe(false);
     expect(await lateCloseAskKeptForVisit('', visitDb({ ...IDENT, scheduled_date: '2026-11-18' }), now)).toBe(false);

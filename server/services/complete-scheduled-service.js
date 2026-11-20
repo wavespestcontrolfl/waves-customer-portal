@@ -726,6 +726,14 @@ function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(
   return { active: true, serviceDate };
 }
 
+// The first-ask check ran for one customer before the visit row was locked. A locked visit that belongs to another customer
+// (or whose customer cannot be read) voids that choice: no "already reviewed" mark, no kept late-close ask. Exported for testability.
+function firstAskCustomerMoved(checkedCustomerId, lockedVisit) {
+  if (checkedCustomerId == null) return false;
+  const lockedId = lockedVisit?.customer_id;
+  return lockedId == null || String(lockedId) !== String(checkedCustomerId);
+}
+
 // Whether a backdated closeout of this visit would keep the review ask, asked BEFORE the visit row is loaded: the first
 // review ask rule (a never-asked customer's "no ask" needs a reason) then applies to it as to a normal completion. The same
 // read the panel's preview uses; the commit re-derives the verdict from the locked row, and a stricter answer there drops
@@ -3406,6 +3414,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior.
     let requestReview = requestReviewPosted;
     let reviewFirstAskLock = null;
+    // The customer the first-ask check ran for; the commit discards the choice when the locked visit belongs to another.
+    let firstAskLockCustomerId = null;
     let reviewTimingBody = completionInput.body || {};
     // A backdated closeout that keeps the ask (GATE_REVIEW_LATE_CLOSE_ASK) gets the same first-ask rule as a normal completion.
     const lateCloseFirstAsk = requestReviewPosted === false && backfill === true && visitOutcome === 'completed'
@@ -3420,6 +3430,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // `db` is the packet transaction in a visit-closeout records phase: the reads ride it.
       const lockVisit = await reviewRequest.firstAskLockVisit(completionInput.serviceId, db);
       if (lockVisit) {
+        firstAskLockCustomerId = lockVisit.customer_id ?? null;
         reviewFirstAskLock = await reviewRequest.firstAskLockChoice({
           customerId: lockVisit.customer_id, requestReview: requestReviewPosted, optOutReason: reviewOptOutReason,
         }, db);
@@ -7339,7 +7350,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           // THE verdict (review-visit-day.js lateCloseAskVerdict, also the panel preview's): the locked row against the
           // pre-lock row, a strict profile read, every closeout kind. Anything unknown fails closed.
-          const lateCloseEligible = await require('./review-visit-day').lateCloseAskVerdict({
+          const lateCloseEligible = !firstAskCustomerMoved(firstAskLockCustomerId, lockedSvcRow) && await require('./review-visit-day').lateCloseAskVerdict({
             isBackfill: isBackfillCompletion, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, recapReviewOnly,
             isInternalOnlyCompletion, deliverySuppressed: deliveryPosture.suppressCustomerComms,
             visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: completionEndedAt,
@@ -16585,6 +16596,7 @@ module.exports = {
   lateFormArrivalDay,
   backfillCompletionPlan,
   lateCloseFirstAskEligible,
+  firstAskCustomerMoved,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   backfillTimeOnSiteMinutes,
   BACKFILL_INFERRED_START_FIELDS,
