@@ -20,6 +20,7 @@ import {
 } from "../../ui";
 import SafeMarkdown from "../../SafeMarkdown";
 import { saveOfferDraft, sendOffer } from "./offerApi";
+import { useCoverWhile } from "./detailCover";
 import {
   describeSend,
   expiryLabel,
@@ -680,6 +681,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
 }
 
 export default function OfferDialog({ open, applicationId, contact, data, draft, seenOut = null, stale = false, onClose, onChanged, onSent }) {
+  useCoverWhile(open); // open over the applicant detail, it hides the replies
   const [busy, setBusy] = useState(false);
   const name = String(contact?.name || "Applicant");
   const status = (draft || data?.current)?.status;

@@ -70,11 +70,13 @@ export function sendOffer(applicationId, offerId, draftHash, expectedOut) {
 
 // Every write names the state the owner saw when the action started:
 // withdraw { expectedStatus, draftHash? (a draft needs it) }, revise { expectedStatus, startDate? }.
+// The withdraw's answer is the offer it closed: the very offer it named, now withdrawn (a discarded draft too).
 export function withdrawOffer(applicationId, offerId, expected) {
-  return offerRequest(`/admin/careers/${applicationId}/offer/${offerId}/withdraw`, {
-    method: "POST",
-    body: JSON.stringify(expected),
-  });
+  return offerRequest(
+    `/admin/careers/${applicationId}/offer/${offerId}/withdraw`,
+    { method: "POST", body: JSON.stringify(expected) },
+    (b) => b?.offer?.id === offerId && b.offer.status === "withdrawn",
+  );
 }
 
 // The answer is the new draft.

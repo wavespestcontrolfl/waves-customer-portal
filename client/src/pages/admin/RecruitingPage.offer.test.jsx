@@ -1074,6 +1074,75 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(calls.slice(from).filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1')).toEqual([]);
   });
 
+  // An open marks the replies it shows as read (no ?peek=1). A bell link for the applicant on screen does so only while
+  // no dialog covers the detail: with the offer form open over it, the read marks nothing, and the form stays open.
+  it('a bell link for the applicant on screen marks replies read only while no dialog covers the detail', async () => {
+    const { calls } = setupFetch({});
+    function Bell() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/?application=app-1')}>bell</button>;
+    }
+    render(<MemoryRouter><Bell /><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    const reads = () => calls.filter((c) => c.method === 'GET' && /^\/admin\/careers\/app-1(\?peek=1)?$/.test(c.path)).map((c) => c.path);
+    fireEvent.click(screen.getByText('bell'));
+    await waitFor(() => expect(reads()).toEqual(['/admin/careers/app-1', '/admin/careers/app-1']));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Offer' }));
+    await screen.findByLabelText('Hourly rate ($)');
+    fireEvent.click(screen.getByText('bell'));
+    await waitFor(() => expect(reads()).toEqual(['/admin/careers/app-1', '/admin/careers/app-1', '/admin/careers/app-1?peek=1']));
+    expect(screen.getByLabelText('Hourly rate ($)')).toBeInTheDocument();
+  });
+
+  // The card's own dialogs cover the detail too.
+  it('a bell link for the applicant on screen while the withdraw question is open marks no replies read', async () => {
+    const { calls } = setupFetch({}, { offer: offerPayload({ current: sent }), detail: detailFixture({ status: 'offer' }) });
+    function Bell() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/?application=app-1')}>bell</button>;
+    }
+    render(<MemoryRouter><Bell /><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    await screen.findByText(/Withdraw this offer for Jordan/);
+    const from = calls.length;
+    fireEvent.click(screen.getByText('bell'));
+    await waitFor(() => expect(calls.slice(from).map((c) => c.path)).toContain('/admin/careers/app-1?peek=1'));
+    expect(calls.slice(from).map((c) => c.path)).not.toContain('/admin/careers/app-1');
+    expect(screen.getByText(/Withdraw this offer for Jordan/)).toBeInTheDocument();
+  });
+
+  // A closed application's Offer move is the plain stage move: the offer read does not decide it.
+  it('a failed offer read leaves a closed application its Offer move, the plain stage move', async () => {
+    setupFetch({}, { offer: () => res(500, { error: 'Server error' }), detail: detailFixture({ status: 'rejected' }) });
+    await openDetail();
+    await screen.findByText('Server error');
+    const move = screen.getByRole('button', { name: 'Offer' });
+    expect(move).not.toBeDisabled();
+    fireEvent.click(move);
+    expect(await screen.findByRole('heading', { name: 'Move to Offer' })).toBeInTheDocument();
+  });
+
+  // The withdraw's answer is the offer it closed. A 200 without it says nothing sure: the card re-reads and says so.
+  it('a withdraw answered 200 without the withdrawn offer is a lost answer: the card re-reads and says so', async () => {
+    const { calls } = setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => res(200, {}) },
+      { offer: offerPayload({ current: sent }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    const readsBefore = calls.filter((c) => c.path === '/admin/careers/app-1/offer').length;
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const confirm = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(screen.queryByText(/Withdraw this offer for Jordan/)).toBeNull());
+    expect(within(screen.getByTestId('offer-card')).getByText('No answer came back. The card shows the offer as it reads now, but the action may still finish. If it did, a repeat is refused.')).toBeInTheDocument();
+    expect(calls.filter((c) => c.path === '/admin/careers/app-1/offer').length).toBeGreaterThan(readsBefore);
+  });
+
   it('a stage dialog opened while the re-read after an offer action is out holds Confirm when that re-read fails, until Try again reads', async () => {
     let current = offerRecord({ status: 'sent', timeline: [] });
     let holdRead = false;

@@ -4,6 +4,7 @@
  * Rows stack on a phone; time sits beside the label from the sm width up.
  */
 import React, { useEffect, useState } from "react";
+import { useCoverWhile } from "./detailCover";
 import {
   ActionFeedback,
   Badge,
@@ -256,6 +257,9 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
   const [error, setError] = useState(null);
   const [closing, setClosing] = useState(null); // the offer record being withdrawn or discarded
   const [signed, setSigned] = useState(null);
+  // Both open over the applicant detail and hide its replies.
+  useCoverWhile(Boolean(closing));
+  useCoverWhile(Boolean(signed));
   // Owner-only actions (send, revise, withdraw, discard) need the server's
   // viewer.ownerActions; none run while the page's last read of the offer or of the
   // application failed (stale), and an open question closes.
