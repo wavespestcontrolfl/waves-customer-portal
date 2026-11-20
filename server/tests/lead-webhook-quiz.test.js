@@ -8,7 +8,13 @@
  *    residential draft is priced for it;
  *  - the answers ride on extracted_data.quiz (kept when the AI triage
  *    replaces extracted_data, and never replaced by a model-returned key),
- *    both Customer 360 notes, the unverified hold and the new-lead bell.
+ *    both Customer 360 notes, the unverified hold and the new-lead bell;
+ *  - a quiz page that asked to continue on a price page gets an attach-only
+ *    token for the lead that request inserted (quizHandoffFor), and only
+ *    with the id of its form fill (normalizeSubmissionId). The route's own
+ *    rules (a hand-off or the draft estimate, never both; the draft for a
+ *    hand-off whose reply was lost) run on real rows in
+ *    lead-quiz-handoff-postgres.test.js.
  */
 
 jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(); return db; });
@@ -19,7 +25,12 @@ const path = require('path');
 const { _test } = require('../routes/lead-webhook');
 const { evaluateLeadEstimateAutomationReadiness } = require('../services/lead-estimate-automation');
 
-const { buildLeadWebhookIntake, commercialLeadFields, TRIAGE_REPLACE_EXTRACTED_SQL, triageExtractedForWrite } = _test;
+const { verifyLeadAttachToken, verifyLeadPrefillToken, ATTACH_TTL_SECONDS } = require('../utils/lead-prefill-token');
+
+const {
+  buildLeadWebhookIntake, commercialLeadFields, TRIAGE_REPLACE_EXTRACTED_SQL, triageExtractedForWrite, quizHandoffFor,
+  normalizeSubmissionId,
+} = _test;
 
 const quizBody = (extra = {}) => ({
   name: 'Pat Sample',
@@ -148,5 +159,72 @@ describe('the unverified hold keeps the quiz answers', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/lead-unverified-hold.js'), 'utf8');
     const stage = src.slice(src.indexOf('const stage = {'));
     expect(stage.slice(0, stage.indexOf('\n  };'))).toMatch(/\.\.\.\(intake\.quiz \? \{ quiz: intake\.quiz \} : \{\}\),/);
+  });
+});
+
+describe('quizHandoffFor: the price page hand-off in the response', () => {
+  const LEAD = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
+  const prevSecret = process.env.LEAD_PREFILL_SECRET;
+  beforeEach(() => { process.env.LEAD_PREFILL_SECRET = 'test-prefill-secret'; });
+  afterEach(() => {
+    if (prevSecret === undefined) delete process.env.LEAD_PREFILL_SECRET;
+    else process.env.LEAD_PREFILL_SECRET = prevSecret;
+  });
+  const homeLead = { id: LEAD, is_commercial: false, is_residential: true };
+  const handoff = (over = {}) => quizHandoffFor({ priceAsk: true, insertedLead: true, lead: homeLead, ...over });
+
+  test('the lead this request inserted gets an attach-only token for that lead', () => {
+    const out = handoff();
+    expect(out).toEqual({ lead_id: LEAD, token: expect.stringMatching(/^\d+\.[A-Za-z0-9_-]+$/), expires_in: ATTACH_TTL_SECONDS });
+    expect(verifyLeadAttachToken(LEAD, out.token)).toBe(true);
+    // It can never be exchanged for the lead's contact fields at /lead-prefill.
+    expect(verifyLeadPrefillToken(LEAD, out.token)).toBe(false);
+  });
+
+  test('none unless the page asked and the answers end on a price page', () => {
+    expect(handoff({ priceAsk: false })).toBeNull();
+    expect(handoff({ priceAsk: undefined })).toBeNull();
+    expect(handoff({ priceAsk: 'true' })).toBeNull();
+  });
+
+  test('none for a row the readiness gate marked commercial, whatever the quiz said', () => {
+    expect(handoff({ lead: { id: LEAD, is_commercial: true, is_residential: false } })).toBeNull();
+  });
+
+  test('none for a keyed lead: the price page would rewrite its label beside the old catalog key', () => {
+    expect(handoff({ lead: { ...homeLead, service_key: 'pest_quarterly' } })).toBeNull();
+    expect(handoff({ lead: { ...homeLead, service_key: null } })).not.toBeNull();
+  });
+
+  test('none for an attached lead or a missing lead row', () => {
+    expect(handoff({ insertedLead: false })).toBeNull();
+    expect(handoff({ insertedLead: 'yes' })).toBeNull();
+    expect(handoff({ lead: null })).toBeNull();
+    expect(handoff({ lead: {} })).toBeNull();
+    expect(quizHandoffFor()).toBeNull();
+  });
+
+  test('fails closed with no signing secret', () => {
+    const prevJwt = process.env.JWT_SECRET;
+    delete process.env.LEAD_PREFILL_SECRET;
+    delete process.env.JWT_SECRET;
+    try {
+      expect(handoff()).toBeNull();
+    } finally {
+      if (prevJwt !== undefined) process.env.JWT_SECRET = prevJwt;
+    }
+  });
+});
+
+describe('normalizeSubmissionId: the id of one form fill (offline_lead_id)', () => {
+  test('keeps the two shapes the site makes', () => {
+    expect(normalizeSubmissionId('0b8f4c1e-7a52-4f0e-9d3a-5c1e2f3a4b5c')).toBe('0b8f4c1e-7a52-4f0e-9d3a-5c1e2f3a4b5c');
+    expect(normalizeSubmissionId('mb3k9x2a-7f3k2m9q')).toBe('mb3k9x2a-7f3k2m9q');
+  });
+
+  test('anything else is no id, so the page gets no hand-off', () => {
+    for (const bad of [undefined, null, '', 'short', 'a'.repeat(65), 'has space 12345', "x' OR 1=1 --", 12345678, ['0b8f4c1e-7a52'], { id: '0b8f4c1e-7a52' }]) {
+      expect(normalizeSubmissionId(bad)).toBeNull();
+    }
   });
 });

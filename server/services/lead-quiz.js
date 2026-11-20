@@ -108,6 +108,20 @@ function quizIsCommercial(quiz) {
   return quiz?.property === 'business';
 }
 
+const QUIZ_HOMES = ['house', 'townhome', 'condo'];
+const QUIZ_CAN_WAIT = ['this_week', 'this_month', 'browsing'];
+
+/**
+ * True when the quiz ends on the price page: a named problem, at a home, that
+ * can wait. The site's ending rule (src/lib/quiz.ts `quizEnding`) picks the
+ * same case; every other answer ends on a call ("Today"), a commercial
+ * call-back ("Business") or an office review ("Unsure"), and never reaches a
+ * price. An unanswered question is not a yes: all three answers must be known.
+ */
+function quizContinuesToPrice(quiz, timeline) {
+  return quizNamesProblem(quiz) && QUIZ_HOMES.includes(quiz.property) && QUIZ_CAN_WAIT.includes(timeline);
+}
+
 module.exports = {
   QUIZ_SEEING,
   QUIZ_PROPERTY,
@@ -118,4 +132,5 @@ module.exports = {
   quizNamesProblem,
   quizNamesRequest,
   quizIsCommercial,
+  quizContinuesToPrice,
 };

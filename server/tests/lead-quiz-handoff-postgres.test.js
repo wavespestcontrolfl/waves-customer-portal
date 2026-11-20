@@ -1,12 +1,21 @@
 /**
- * Quiz hand-off, the price page's half, end to end on real rows: the public
- * routes themselves (the property lookup, the lead-prefill read-back, the
- * price calculation and its add-on step, the lead webhook's AI triage).
+ * Quiz hand-off, end to end on real rows: the public routes themselves (the
+ * lead webhook, the property lookup, the lead-prefill read-back, the price
+ * calculation and its add-on step).
  *
- * An attach token names one web-form lead (a quiz lead). With it, the price
- * page's lookup updates that lead instead of filing a second one, and the
- * price calculation then prices the same lead. This suite posts to the real
- * routes and reads the rows back:
+ * A quiz page whose answers end on a price page asks the lead webhook to
+ * continue there. The webhook gives an attach token for the lead it just
+ * filed, and no draft estimate. With the token, the price page's lookup
+ * updates that lead instead of filing a second one, and the price calculation
+ * then prices the same lead: one visitor, one lead, one estimate. This suite
+ * posts to the real routes and reads the rows back:
+ *  - the webhook gives the hand-off (and its record, and no draft) only to a
+ *    quiz page that asked, with the id of its form fill, whose answers end on
+ *    a price page, for a lead that same request inserted; every other
+ *    submission gets the draft as before;
+ *  - a hand-off whose reply was lost gets the form's draft when the same
+ *    form fill arrives again, once, and only while the lead is still at
+ *    intake;
  *  - the lookup continues the lead the token names: one lead, its type and
  *    its quiz answers kept; the price calculation's draft is the only
  *    estimate;
@@ -66,6 +75,7 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
   let base;
   let mintLeadAttachToken;
   let mintLeadPrefillToken;
+  let verifyLeadAttachToken;
   const phones = [];
   const prevSecret = process.env.LEAD_PREFILL_SECRET;
   const ADDRESS = '100 Synthetic Way, Bradenton, FL 34202';
@@ -80,7 +90,7 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
     process.env.LEAD_PREFILL_SECRET = 'quiz-handoff-suite-secret';
     db = require('../models/db');
-    ({ mintLeadAttachToken, mintLeadPrefillToken } = require('../utils/lead-prefill-token'));
+    ({ mintLeadAttachToken, mintLeadPrefillToken, verifyLeadAttachToken } = require('../utils/lead-prefill-token'));
     const app = express();
     app.use(express.json());
     app.use('/api/leads', require('../routes/lead-webhook'));
@@ -130,10 +140,10 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     .map((row) => [row.source, row.status]);
 
   // A lead as the lead webhook files it for a quiz hand-off, with the attach
-  // token the webhook gives for it. No draft estimate: the webhook's half of
-  // the hand-off (part 2) makes none for a submission it hands off, because
-  // the price calculation refuses its own draft while a lead_webhook draft
-  // sits on the phone. That half's cases post to the webhook itself.
+  // token the webhook gives for it, for the cases that change the lead before
+  // the price page sees it. No draft estimate: the webhook makes none for a
+  // submission it hands off ("the lead webhook's hand-off" below posts to the
+  // webhook itself).
   const quizLead = async (columns = {}) => {
     const contact = { phone: syntheticPhone(), email: `pat.${randomUUID().slice(0, 8)}@example.com` };
     const [row] = await db('leads').insert({
@@ -167,6 +177,149 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     name: 'Pat Synthetic', phone: syntheticPhone(), email: `pat.${randomUUID().slice(0, 8)}@example.com`, address: ADDRESS,
     interest: 'pest', specific_service: 'cockroach_control', service_interest: 'Cockroach Control',
     timeline: 'this_week', quiz: QUIZ, source: 'astro-pest-quiz',
+  });
+  // The same, asking to continue on a price page: the flag and the id of this
+  // form fill.
+  const priceAsk = (extra = {}) => ({ ...quizSubmission(), offline_lead_id: randomUUID(), price_handoff: true, ...extra });
+  // What the page's saved replay of that fill sends: the same id, no flag.
+  const replayOf = (body, extra = {}) => ({ ...body, price_handoff: undefined, ...extra });
+  const FORM_DRAFT = [['lead_webhook', 'draft']];
+  const handoffRecords = async (leadId) => (await db('lead_activities').where({ lead_id: leadId, activity_type: 'price_handoff' }))
+    .map((row) => parsed(row.metadata));
+
+  describe('the lead webhook\'s hand-off', () => {
+    test('asked, with answers that end on a price page: a hand-off for the new lead, its record, and no draft', async () => {
+      const body = priceAsk();
+      const filed = await post('/api/leads', body);
+      expect(filed.status).toBe(200);
+      const leads = await leadsOnPhone(body.phone);
+      expect(leads.map((row) => [row.lead_type, row.status, row.customer_id])).toEqual([['form_submission', 'new', filed.json.customerId]]);
+      expect(parsed(leads[0].extracted_data)).toMatchObject({ stage: INTAKE_STAGE, quiz: QUIZ, timeline: 'this_week' });
+      expect(filed.json.handoff).toEqual({ lead_id: leads[0].id, token: expect.any(String), expires_in: 7200 });
+      expect(verifyLeadAttachToken(leads[0].id, filed.json.handoff.token)).toBe(true);
+      expect(await estimatesOnPhone(body.phone)).toEqual([]);
+      expect(await handoffRecords(leads[0].id)).toEqual([{ submission_id: body.offline_lead_id }]);
+    }, 60000);
+
+    test('not asked, or no id for the form fill (every other form): the draft as before and no hand-off', async () => {
+      const notAsked = [
+        { price_handoff: undefined }, { price_handoff: false }, { price_handoff: 'true' }, { price_handoff: 1 },
+        { offline_lead_id: undefined }, { offline_lead_id: 'short' },
+      ];
+      for (const extra of notAsked) {
+        const body = priceAsk(extra);
+        const filed = await post('/api/leads', body);
+        expect(filed.status).toBe(200);
+        expect(filed.json.handoff).toBeUndefined();
+        const leads = await leadsOnPhone(body.phone);
+        expect(leads).toHaveLength(1);
+        expect(await estimatesOnPhone(body.phone)).toEqual(FORM_DRAFT);
+        expect(await handoffRecords(leads[0].id)).toEqual([]);
+      }
+    }, 120000);
+
+    test('asked, but the answers end on a call, a business call-back or an office review: the draft and no hand-off', async () => {
+      const elsewhere = [
+        { timeline: 'now' },
+        { quiz: { ...QUIZ, seeing: 'unsure' } },
+        { quiz: { ...QUIZ, property: 'business' } },
+        { quiz: { kind: 'pest', seeing: 'roaches' } },
+        { quiz: undefined },
+      ];
+      for (const answers of elsewhere) {
+        const body = priceAsk(answers);
+        const filed = await post('/api/leads', body);
+        expect(filed.status).toBe(200);
+        expect(filed.json.handoff).toBeUndefined();
+        expect(await estimatesOnPhone(body.phone)).toEqual(FORM_DRAFT);
+      }
+    }, 120000);
+
+    test('asked, but the submission joins an open call lead: no hand-off, and the draft is made after the lead step', async () => {
+      const body = priceAsk();
+      const callLeadId = randomUUID();
+      await db('leads').insert({
+        id: callLeadId, first_name: 'Pat', last_name: 'Synthetic', phone: `+1${body.phone}`, status: 'new',
+        lead_type: 'voicemail', first_contact_channel: 'call',
+      });
+      const filed = await post('/api/leads', body);
+      expect(filed.status).toBe(200);
+      expect(filed.json.handoff).toBeUndefined();
+      const leads = await leadsOnPhone(body.phone);
+      expect(leads.map((row) => [row.id, row.lead_type])).toEqual([[callLeadId, 'voicemail']]);
+      expect(parsed(leads[0].extracted_data).quiz).toEqual(QUIZ);
+      expect(await estimatesOnPhone(body.phone)).toEqual(FORM_DRAFT);
+      expect(await handoffRecords(callLeadId)).toEqual([]);
+    }, 60000);
+
+    test('the whole path: the price page continues the lead the webhook handed off, and its draft is the only estimate', async () => {
+      const body = priceAsk();
+      const { handoff } = (await post('/api/leads', body)).json;
+      const looked = await lookup(body, { prefill_lead_id: handoff.lead_id, prefill_token: handoff.token });
+      expect(looked).toMatchObject({ status: 200, json: { lead_id: handoff.lead_id } });
+      const priced = await calculate(body, handoff.lead_id);
+      expect(priced.status).toBe(200);
+      expect(priced.json).toMatchObject({ lead_id: handoff.lead_id, estimate_id: expect.any(String) });
+      const leads = await leadsOnPhone(body.phone);
+      expect(leads.map((row) => [row.id, row.lead_type])).toEqual([[handoff.lead_id, 'form_submission']]);
+      expect(parsed(leads[0].extracted_data)).toMatchObject({ stage: 'quote_calculated', quiz: QUIZ, timeline: 'this_week' });
+      expect(await estimatesOnPhone(body.phone)).toEqual([['quote_wizard', 'draft']]);
+    }, 120000);
+
+    test('the form\'s draft is why: with it on the phone, the price page gets no draft of its own', async () => {
+      const body = priceAsk({ price_handoff: undefined });
+      await post('/api/leads', body);
+      const looked = await lookup(body);
+      const priced = await calculate(body, looked.json.lead_id);
+      expect(priced.status).toBe(200);
+      expect(priced.json.estimate_id).toBeUndefined();
+      expect(await estimatesOnPhone(body.phone)).toEqual(FORM_DRAFT);
+    }, 120000);
+  });
+
+  describe('a hand-off whose reply was lost', () => {
+    test('the same form fill, sent again, gets the form\'s draft, once', async () => {
+      const body = priceAsk();
+      const first = await post('/api/leads', body);
+      expect(first.json.handoff).toBeDefined();
+      expect(await estimatesOnPhone(body.phone)).toEqual([]);
+
+      const replay = await post('/api/leads', replayOf(body));
+      expect(replay.status).toBe(200);
+      expect(replay.json.handoff).toBeUndefined();
+      expect(await estimatesOnPhone(body.phone)).toEqual(FORM_DRAFT);
+
+      // A second replay, and a retry that still carries the flag, add nothing.
+      await post('/api/leads', replayOf(body));
+      const retry = await post('/api/leads', body);
+      expect(retry.json.handoff).toBeUndefined();
+      expect(await estimatesOnPhone(body.phone)).toEqual(FORM_DRAFT);
+      expect((await leadsOnPhone(body.phone)).map((row) => row.id)).toEqual([first.json.handoff.lead_id]);
+    }, 120000);
+
+    test('another form fill, a continued lead and a closed lead get no draft from a repeat', async () => {
+      // Another fill: a different id, or none.
+      const other = priceAsk();
+      await post('/api/leads', other);
+      for (const extra of [{ offline_lead_id: randomUUID() }, { offline_lead_id: undefined }]) {
+        await post('/api/leads', replayOf(other, extra));
+        expect(await estimatesOnPhone(other.phone)).toEqual([]);
+      }
+
+      // A price page continued the lead: that page makes the estimate.
+      const continued = priceAsk();
+      const { handoff } = (await post('/api/leads', continued)).json;
+      await lookup(continued, { prefill_lead_id: handoff.lead_id, prefill_token: handoff.token });
+      await post('/api/leads', replayOf(continued));
+      expect(await estimatesOnPhone(continued.phone)).toEqual([]);
+
+      // The office closed the lead.
+      const closed = priceAsk();
+      const filed = await post('/api/leads', closed);
+      await db('leads').where({ id: filed.json.handoff.lead_id }).update({ status: 'lost' });
+      await post('/api/leads', replayOf(closed));
+      expect(await estimatesOnPhone(closed.phone)).toEqual([]);
+    }, 120000);
   });
 
   describe('the property lookup', () => {
