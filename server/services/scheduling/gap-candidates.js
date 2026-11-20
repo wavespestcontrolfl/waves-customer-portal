@@ -56,7 +56,8 @@ async function loadGapCandidate(serviceId, conn) {
  * (a seasonal mosquito program starts in season; a new-home estimate not before the move-in date) and the mowing-day
  * rule over every service the visit performs (a pest-first visit with lawn care too). `rainServices()` names those
  * services as the estimate page's rain ranking does (customer-rain-rank.js estimateServiceIdentities), for the fill
- * list's rain rule; it reads the catalog only for a service without a key. `{ unavailable:
+ * list's rain rule; it reads the catalog only for a service without a key, and a failed read throws (the fill list keeps
+ * that job out of rain; the page reads the label instead). `{ unavailable:
  * 'no_stored_location' }` when no stored location can stand in. A failed read throws.
  */
 async function estimateGapCandidate(estimate, conn, picker = {}) {
@@ -95,7 +96,7 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   // books its own visits in the profile's label.
   return { service, preferences, holds: [], siblingDates: [], deactivated,
     label: slots.formatServiceProfileLabel(performed) || profile.serviceLabel, prospective: true, dayOpen,
-    rainServices: () => require('./customer-rain-rank').estimateServiceIdentities(performed, { profile, db: conn }) };
+    rainServices: () => require('./customer-rain-rank').estimateServiceIdentities(performed, { profile, db: conn, strict: true }) };
 }
 
 /**

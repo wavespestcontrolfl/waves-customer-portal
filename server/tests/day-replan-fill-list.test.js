@@ -1001,6 +1001,10 @@ describe('fillList', () => {
     // Then the screens' own catalog read (withCatalogKeys): a line without a key whose label is a catalog name takes
     // that row's key (a misting refill is rain-safe).
     expect(await estimateRain([{ service: 'mosquito', label: 'Mosquito Misting System Refill' }])).toBe('in');
+    // A failed catalog lookup for a line without a key never reads its label alone: the job stays out of rain hours.
+    catalogLinkForProfile.mockRejectedValueOnce(new Error('link timeout'));
+    expect(await estimateRain([assessment])).toBe('out');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('rain class unread (link timeout)'));
     // A plan visit as the rain pass reads a booked row: its key snapshot (a bait station check is rain-safe, whatever
     // its name says), else the catalog key of its service id, else its name. An outdoor add-on makes it outdoor work.
     const visitRain = async (row, { key = 'rodent_bait_quarterly', addOns = [], catalog = [] } = {}) => {
