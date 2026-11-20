@@ -182,21 +182,17 @@ maybeDescribe('monday review bell (live Postgres)', () => {
         await review({ reviewer_name: '_stats' });
         await review({ location_id: 'retired-office' });
         await review({ auto_reply_status: 'queued' });
-        // A reply may already be live on Google: these have their own "needs reconciling" bell.
-        await review({ auto_reply_reason: 'google_uncertain' });
-        await review({ auto_reply_reason: 'persist_failed' });
-        await review({ auto_reply_reason: 'reconcile_failed' });
-        // ...until the sync reads Google with no owner reply: the park goes back to a person, and list 5 shows it again.
-        const cleared = await review({ auto_reply_reason: 'reconcile_failed', review_created_at: new Date('2001-01-01T12:00:00Z') });
-        const { syncReplyFields, applySyncReplyFields } = require('../services/review-reply/runner');
-        const synced = await db('google_reviews').where({ id: cleared }).first();
-        expect(await applySyncReplyFields(cleared, syncReplyFields(synced, { owner_reply: null }), { expectedReply: synced.review_reply ?? null })).toBe(1);
+        // A reply may already be on Google for these: listed with "check Google first". No park reason drops off the list.
+        await review({ auto_reply_reason: 'google_uncertain', review_created_at: new Date('2001-01-01T12:00:00Z') });
+        await review({ auto_reply_reason: 'persist_failed', review_created_at: new Date('2002-01-01T12:00:00Z') });
+        await review({ auto_reply_reason: 'reconcile_failed', review_created_at: new Date('2003-01-01T12:00:00Z') });
         const after = await Review._private.loadParkedReviews();
-        expect(after.count - before.count).toBe(3);
+        expect(after.count - before.count).toBe(5);
         // Only this case's rows: the shared CI database may hold other parked reviews.
         const mine = after.entries.filter((e) => e.name === `Monday Fixture ${RUN.slice(0, 8)}`);
-        expect(mine.map((e) => new Date(e.at).getUTCFullYear())).toEqual([2000, 2001, new Date(ago(2)).getUTCFullYear()]);
-        expect(mine.map((e) => e.location)).toEqual(['Lakewood Ranch', 'Lakewood Ranch', 'Lakewood Ranch']);
+        expect(mine.map((e) => new Date(e.at).getUTCFullYear())).toEqual([2000, 2001, 2002, 2003, new Date(ago(2)).getUTCFullYear()]);
+        expect(mine.map((e) => e.checkGoogle)).toEqual([false, true, true, true, false]);
+        expect(mine.map((e) => e.location)).toEqual(Array(5).fill('Lakewood Ranch'));
       } finally {
         await db('google_reviews').whereIn('id', ids).del();
       }

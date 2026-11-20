@@ -42,26 +42,21 @@ function whereHasRealReply(qb, column = 'review_reply') {
 }
 
 /**
- * Fields to write when Google shows NO owner reply for a row. A "[DRAFT]" is
- * never touched. A posted automatic reply that the owner deleted on Google
- * is closed out as retracted/removed_on_google so Retract is no longer
- * offered. A reconcile_failed park (Google showed an owner reply that this
- * row never recorded) moves to reconcile_cleared: that reply is gone, so the
- * review needs one again and stays with a person under a reason Monday list
- * 5 shows. Shared by the GBP sync and the publisher's overwrite-path live
- * check (one source of truth).
+ * Fields to write when Google shows NO owner reply for a row that has one
+ * locally. A "[DRAFT]" is never touched. A posted automatic reply that the
+ * owner deleted on Google is closed out as retracted/removed_on_google so
+ * Retract is no longer offered. Shared by the GBP sync and the publisher's
+ * overwrite-path live check (one source of truth).
  */
 function removedOwnerReplyFields(existing) {
-  const reconcileCleared = existing?.auto_reply_status === 'parked' && existing.auto_reply_reason === 'reconcile_failed'
-    ? { auto_reply_reason: 'reconcile_cleared' } : {};
-  if (isDraftReply(existing?.review_reply)) return reconcileCleared;
+  if (isDraftReply(existing?.review_reply)) return {};
   // Ours = posted, or posted-then-parked for a person after a reviewer edit.
   const ours = existing?.auto_reply_status === 'posted'
     || (existing?.auto_reply_status === 'parked' && existing?.auto_reply_reason === 'review_edited_after_post');
   if (ours && hasRealReply(existing.review_reply)) {
     return { review_reply: null, reply_updated_at: null, auto_reply_status: 'retracted', auto_reply_reason: 'removed_on_google' };
   }
-  return { review_reply: null, reply_updated_at: null, ...reconcileCleared };
+  return { review_reply: null, reply_updated_at: null };
 }
 
 module.exports = {

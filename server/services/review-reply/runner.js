@@ -31,7 +31,7 @@ const logger = require('../logger');
 const gbp = require('../google-business');
 const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
-const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix, removedOwnerReplyFields, whereNeedsRealReply, whereHasRealReply } = require('./draft-prefix');
+const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix, removedOwnerReplyFields, whereNeedsRealReply } = require('./draft-prefix');
 const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint, groundingCustomerId } = require('./grounding');
 const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
@@ -63,6 +63,7 @@ const GOOGLE_RETRY_DELAYS_MIN = [10, 30, 60, 180, 360, 720];
 const GOOGLE_TEMPORARY_STATUSES = new Set([404, 408, 429]);
 const googleMayAcceptLater = (cause) => cause?.timedOut === true || GOOGLE_TEMPORARY_STATUSES.has(cause?.googleStatus) || cause?.googleStatus >= 500;
 const PUBLISH_RETRYABLE_CODES = new Set([CODES.LOCK_BUSY, CODES.GOOGLE_FAILED, CODES.NO_RESOURCE, CODES.RECONCILE_FAILED, 'account_read_failed', 'unexpected']);
+const LAST_RETRY_MARGIN_MS = 60 * 60 * 1000;
 const IDENTITY_BACKOFF_MIN = 60;
 // Deploy-forward is a property of the REVIEW: nothing older than this at
 // first sight ever enters the lane, whichever insert path (GBP, Places, a
@@ -310,87 +311,28 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
 // Deploy-forward also bounds how long a row may WAIT in the lane (codex r74):
 // rows queued before a pause (gate off, location removed from scope) must
 // not auto-publish when automation resumes weeks later — a review of that
-// age first seen now would never enter the lane. An over-age row the agent
-// never tried (QUEUED, no attempts) leaves the lane silently (auto state
-// cleared, reason stamped): Post now still works on it, and the catch-up
-// enqueue will not re-queue it (same cutoff). An over-age row the agent DID
-// try (FAILED with a retry pending, or QUEUED again after a live review
-// change: review_changed keeps its attempts) PARKS (retry_expired) while its
-// review is still on Google and still has no real reply, and rings the same
-// "needs you" bell as any other park, instead of vanishing from the lane; a
-// tried row whose review is gone from Google or already answered leaves
-// silently. This is the backstop for the runner's early park, which already
-// parks a retry that would fall due past the window. At most DEFAULT_BATCH
-// rows park per sweep (each rings a bell); the rest park on later sweeps,
-// and the claim's own age check keeps them from posting meanwhile. A row
-// under a live claim, the runner's or a person's publish (Post now, the
-// Intelligence Bar), is left for the next sweep: its publisher owns it.
-// Returns how many rows left the lane (expired + parked).
+// age first seen now would never enter the lane. Over-age pending rows leave
+// the lane the same way (auto state cleared, reason stamped): Post now still
+// works on them, the catch-up enqueue will not re-queue them (same cutoff),
+// and a person sees them in the needs-reply queue.
 async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
   const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
-  const overAge = (statuses) => db('google_reviews')
-    .whereIn('auto_reply_status', statuses)
+  const n = await db('google_reviews')
+    .whereIn('auto_reply_status', [STATUS.QUEUED, STATUS.FAILED])
     .where('review_created_at', '<', cutoff)
     .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()])
-    .modify(whereNoLivePublishClaim);
-  const overAgeTried = () => overAge([STATUS.FAILED, STATUS.QUEUED])
-    .whereRaw('(auto_reply_status = ? OR COALESCE(auto_reply_attempts, 0) > 0)', [STATUS.FAILED]);
-  const counted = (n) => (Array.isArray(n) ? n.length : (n || 0));
-  const candidates = await overAgeTried()
-    .whereNull('missing_since')
-    .modify(whereNeedsRealReply)
-    .orderBy('review_created_at', 'asc')
-    .limit(DEFAULT_BATCH)
-    .select('id', 'location_id', 'star_rating', 'reviewer_name', 'auto_reply_status', 'auto_reply_attempts', 'auto_reply_reason', 'auto_reply_draft', 'auto_reply_error', 'review_reply');
-  let parked = 0;
-  for (const r of candidates) {
-    // reconcile_failed: Google already shows an owner reply that the
-    // publisher could not record here, so the row keeps that reason.
-    const reconcile = r.auto_reply_reason === CODES.RECONCILE_FAILED;
-    const reason = reconcile ? CODES.RECONCILE_FAILED : 'retry_expired';
-    // ONE statement per row, compare-and-set on the values just read: the
-    // park, the draft in an empty "[DRAFT]" slot (the Reviews card shows it,
-    // Post now checks it; a person's text is never replaced) and a pending
-    // bell stamp. A sync edit or a retry meanwhile (each changes the status,
-    // attempts, draft or error) makes the statement miss, so no stale draft
-    // comes back. The bell clears the stamp once it rings; a crash before
-    // that leaves the row for the failed-bell sweep.
-    const park = overAgeTried().where({ id: r.id }).whereNull('missing_since');
-    for (const col of ['auto_reply_status', 'auto_reply_attempts', 'auto_reply_draft', 'auto_reply_error', 'review_reply']) {
-      if (r[col] == null) park.whereNull(col); else park.where(col, r[col]);
-    }
-    const n = await park.update({
-      auto_reply_status: STATUS.PARKED, auto_reply_reason: reason, auto_reply_due_at: null, auto_reply_claimed_until: null,
-      auto_reply_error: withBellStamp(r.auto_reply_error, reason),
-      ...(r.review_reply == null && r.auto_reply_draft ? { review_reply: asDraft(r.auto_reply_draft), reply_updated_at: null } : {}),
-    });
-    if (!counted(n)) continue;
-    parked++;
-    if (reconcile) await reconcileFailedBell(r);
-    else await bell(r, { title: 'Review reply needs you', body: `${summarize(r)} — the reply agent ran out of time to post it.${r.auto_reply_draft ? ' The draft is saved on the review.' : ''}`, reason, action: true });
-  }
-  // Only a row no person needs leaves silently: a QUEUED row never tried, and
-  // a tried row whose review is gone from Google or already has a real reply.
-  // Any other tried row stays for the park above, so one that a publish
-  // released while the bells rang parks on a later sweep.
-  const expired = { auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: null };
-  const left = counted(await overAge([STATUS.QUEUED]).whereRaw('COALESCE(auto_reply_attempts, 0) = 0').update(expired))
-    + counted(await overAgeTried().whereNotNull('missing_since').update(expired))
-    + counted(await overAgeTried().whereNull('missing_since').modify(whereHasRealReply).update(expired));
-  const count = left + parked;
-  if (count) logger.info(`[review-auto-reply] ${count} pending review(s) older than ${cfg.maxQueueAgeHours}h left the lane unposted (${parked} parked for a person)`);
+    .update({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: null });
+  const count = Array.isArray(n) ? n.length : (n || 0);
+  if (count) logger.info(`[review-auto-reply] ${count} queued review(s) older than ${cfg.maxQueueAgeHours}h left the lane unposted (queue_expired)`);
   return count;
 }
 
-async function claimDueRows({ limit = DEFAULT_BATCH, now: fixedNow = null, force = null } = {}) {
-  const cfg = config();
-  if (!force) await expireOverAgeQueued({ now: fixedNow || new Date(), cfg });
-  // The claim reads the clock AFTER the sweep: its bells can take a while,
-  // and a row that ages past the cutoff meanwhile must not be claimed.
-  const now = fixedNow || new Date();
+async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = null } = {}) {
   const token = new Date(now.getTime() + CLAIM_MS).toISOString();
   const nowIso = now.toISOString();
+  const cfg = config();
   const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
+  if (!force) await expireOverAgeQueued({ now, cfg });
   // The claim re-checks the age itself (a row can age past the cutoff
   // between the expiry sweep and this statement).
   const forceClause = force ? "AND id = ? AND COALESCE(auto_reply_status, '') NOT IN ('skipped','retracted')" : `AND auto_reply_status IN ('queued','failed') AND auto_reply_due_at <= ? AND review_created_at >= ?`;
@@ -520,15 +462,11 @@ function reconcileFailedBell(row, detail = '') {
   return bell(row, { title: 'Review reply needs reconciling', body: `${summarize(row)} — Google shows a reply to this review that was not recorded here${detail}. Open Reviews and confirm it after the next sync.`, reason: CODES.RECONCILE_FAILED, action: true, link: `/admin/reviews?responded=all&review=${encodeURIComponent(row.id)}` });
 }
 const BELL_STAMP_RE = /(?:^| \|\| )bell_failed:([^|]*)$/;
-// auto_reply_error with one bell_failed stamp at its end (any earlier stamp replaced).
-function withBellStamp(error, reason, action = true) {
-  const prev = String(error || '').replace(BELL_STAMP_RE, '');
-  const stamp = `bell_failed:${reason}:${action ? 1 : 0}`;
-  return prev ? `${prev} || ${stamp}` : stamp;
-}
 async function stampBellFailed(reviewId, reason, { action = true, conn = db } = {}) {
   const cur = await conn('google_reviews').where({ id: reviewId }).first('auto_reply_error');
-  await conn('google_reviews').where({ id: reviewId }).update({ auto_reply_error: withBellStamp(cur?.auto_reply_error, reason, action) });
+  const prev = String(cur?.auto_reply_error || '').replace(BELL_STAMP_RE, '');
+  const stamp = `bell_failed:${reason}:${action ? 1 : 0}`;
+  await conn('google_reviews').where({ id: reviewId }).update({ auto_reply_error: prev ? `${prev} || ${stamp}` : stamp });
 }
 async function clearBellStamp(reviewId, { conn = db } = {}) {
   const cur = await conn('google_reviews').where({ id: reviewId }).first('auto_reply_error');
@@ -1020,16 +958,18 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     // next healthy sync will attach — retry on a longer backoff (and the
     // sync re-queues a parked row the moment it attaches the name).
     const backoffMin = code === CODES.NO_RESOURCE ? IDENTITY_BACKOFF_MIN : RETRY_BACKOFF_MIN;
-    // No delay left (undefined → NaN) parks. A retry the cron could no longer
-    // claim (past the queue-age window) parks now too, hours before
-    // expireOverAgeQueued would park it as the backstop, so a person is rung
-    // sooner.
+    // No delay left (undefined → NaN) parks. So does a retry due in the last
+    // hour of the queue-age window: expireOverAgeQueued clears an over-age
+    // row with no bell (deploy-forward, codex r74), so the 5-minute cron must
+    // claim the retry inside the window. The hour covers a busy batch and
+    // missed ticks; a longer outage clears the row with every other pending
+    // row, as before.
     const delayMin = code === CODES.GOOGLE_FAILED && googleMayAcceptLater(err.cause) ? GOOGLE_RETRY_DELAYS_MIN[attempts - 1] : (attempts < MAX_ATTEMPTS ? backoffMin * attempts : undefined);
     const dueMs = Date.now() + delayMin * 60000;
-    const claimableUntilMs = new Date(merged.review_created_at).getTime() + cfg.maxQueueAgeHours * 3600000;
+    const lastRetryMs = new Date(merged.review_created_at).getTime() + cfg.maxQueueAgeHours * 3600000 - LAST_RETRY_MARGIN_MS;
     // RECONCILE_FAILED (codex r74): Google shows an owner reply but the
     // local record of it failed — transient, retry; never "already replied".
-    if (PUBLISH_RETRYABLE_CODES.has(code) && dueMs < claimableUntilMs) {
+    if (PUBLISH_RETRYABLE_CODES.has(code) && dueMs < lastRetryMs) {
       const due = new Date(dueMs).toISOString();
       await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: (draft.reused && merged.auto_reply_drafted_at) || new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
       logger.warn(`[review-auto-reply] publish deferred for ${merged.id}: ${code} (${err.message})`);
@@ -1513,8 +1453,7 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
     }
     return { review_reply: null, reply_updated_at: null, auto_reply_status: STATUS.FAILED, auto_reply_reason: 'google_uncertain_cleared', auto_reply_due_at: now.toISOString(), auto_reply_claimed_until: null };
   }
-  // No owner reply on Google: ours is gone (owner deleted it there), or a
-  // reconcile_failed park's reply is gone (removedOwnerReplyFields).
+  // No owner reply on Google: ours is gone (owner deleted it there).
   return removedOwnerReplyFields(existing);
 }
 
@@ -1764,6 +1703,10 @@ async function retryFailedEditedBells({ limit = 20 } = {}) {
     const m = err.match(BELL_STAMP_RE);
     if (!m) continue;
     const [reason, actionFlag] = String(m[1]).split(':');
+    if (reason === CODES.RECONCILE_FAILED) {
+      if (await reconcileFailedBell(r)) n++;
+      continue;
+    }
     const action = actionFlag !== '0';
     // Re-ring with a generic body: the original wording is not stored, the
     // row state is what the person needs.
@@ -1914,6 +1857,7 @@ module.exports = {
   skipAutoReply,
   dismissCancelFields,
   whereNoReconcilePark,
+  RECONCILE_REASONS,
   whereNotAutoPosted,
   manualReplyCloseFields,
   whereNoLivePublishClaim,

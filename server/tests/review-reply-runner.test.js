@@ -8,7 +8,7 @@ const mockNotify = jest.fn(async () => ({}));
 const mockAccountFacts = jest.fn(async () => null);
 const mockVerify = jest.fn(() => null);
 const mockGbp = { isLocationConfigured: jest.fn(async () => true) };
-const state = { rows: [], raws: [], updates: [] };
+const state = { rows: [], raws: [] };
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/google-business', () => mockGbp);
@@ -56,9 +56,7 @@ jest.mock('../models/db', () => {
     const api = {
       where(a, b, c) {
         if (typeof a === 'string') {
-          // SQL LIKE: NULL matches neither LIKE nor NOT LIKE.
-          const like = (v) => new RegExp('^' + String(c).split('%').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$', 's').test(String(v));
-          if (arguments.length === 3) { filters.push((r) => (b === '>=' ? r[a] >= c : b === '<' ? r[a] < c : (b === '!=' || b === '<>') ? r[a] !== c : b === 'like' ? (r[a] != null && like(r[a])) : b === 'not like' ? (r[a] != null && !like(r[a])) : r[a] === c)); return api; }
+          if (arguments.length === 3) { filters.push((r) => (b === '>=' ? r[a] >= c : b === '<' ? r[a] < c : (b === '!=' || b === '<>') ? r[a] !== c : b === 'like' ? (r[a] != null && new RegExp('^' + String(c).split('%').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$', 's').test(String(r[a]))) : r[a] === c)); return api; }
           filters.push((r) => r[a] === b); return api;
         }
         if (typeof a === 'function') {
@@ -76,8 +74,6 @@ jest.mock('../models/db', () => {
       whereRaw(sql, params) {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
         if (/auto_reply_claimed_until IS NULL OR auto_reply_claimed_until </.test(sql)) filters.push((r) => r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < new Date(params[0]));
-        if (/^\(auto_reply_status = \? OR COALESCE\(auto_reply_attempts, 0\) > 0\)$/.test(sql)) filters.push((r) => r.auto_reply_status === params[0] || (Number(r.auto_reply_attempts) || 0) > 0);
-        if (/^COALESCE\(auto_reply_attempts, 0\) = 0$/.test(sql)) filters.push((r) => !(Number(r.auto_reply_attempts) || 0));
         if (/^COALESCE\(star_rating, 0\) < 4$/.test(sql)) filters.push((r) => (Number(r.star_rating) || 0) < 4);
         if (/auto_reply_reason IN \('low_rating', 'unrated'\) OR/.test(sql)) filters.push((r) => ['low_rating', 'unrated'].includes(r.auto_reply_reason) || (['provider_down', 'verifier_reject', 'runner_error', 'location_disabled'].includes(r.auto_reply_reason) && (Number(r.star_rating) || 0) < 4));
         if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
@@ -95,14 +91,10 @@ jest.mock('../models/db', () => {
       count(expr) { agg = { kind: 'count', as: (/as (\w+)/.exec(String(expr)) || [])[1] || 'n' }; return api; },
       min(expr) { const [col, as] = String(expr).split(/ as /); agg = { kind: 'min', col, as: as || col }; return api; },
       async first(...cols) { return agg ? aggregate(hits()) : hits()[0] || null; },
-      update(patch) {
+      async update(patch) {
         const hits = state.rows.filter((r) => filters.every((f) => f(r)));
-        state.updates.push({ patch, ids: hits.map((r) => r.id) });
         hits.forEach((r) => Object.assign(r, patch));
-        // knex: await -> the count; .returning(cols) -> the updated rows.
-        const result = Promise.resolve(hits.length);
-        result.returning = () => Promise.resolve(hits.map((r) => ({ ...r })));
-        return result;
+        return hits.length;
       },
       then(res) {
         if (agg && groupCol) {
@@ -163,7 +155,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   state.rows = [];
   state.raws = [];
-  state.updates = [];
   state.migration = { migration_time: '2026-08-27T12:00:00Z' };
   Runner._resetRolloutCutoffCache();
   delete process.env.GATE_REVIEW_AUTO_REPLY;
@@ -613,13 +604,7 @@ describe('processDueAutoReplies — state machine', () => {
     const stale = new Date(Date.now() - 49 * 3600000).toISOString();
     state.rows = [
       row({ id: 'old-q', review_created_at: stale }),
-      row({ id: 'old-f', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_error: 'GBP 404', auto_reply_due_at: '2026-08-27T16:00:00Z' }),
-      row({ id: 'old-f-held', review_created_at: stale, auto_reply_status: 'failed', auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
-      row({ id: 'old-f-gone', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, missing_since: stale }),
-      row({ id: 'old-f-answered', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, review_reply: 'Thank you, Dana!' }),
-      row({ id: 'old-f-person', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, review_reply: '[DRAFT] Our own words for Dana.' }),
-      // Tried once, then re-queued after a live review change: review_changed keeps the attempt and drops the draft.
-      row({ id: 'old-q-tried', review_created_at: stale, auto_reply_reason: 'review_changed', auto_reply_attempts: 1, auto_reply_due_at: new Date(Date.now() + 3600000).toISOString() }),
+      row({ id: 'old-f', review_created_at: stale, auto_reply_status: 'failed', auto_reply_attempts: 1 }),
       row({ id: 'old-held', review_created_at: stale, auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
       row({ id: 'old-parked', review_created_at: stale, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' }),
       row({ id: 'fresh' }),
@@ -628,24 +613,8 @@ describe('processDueAutoReplies — state machine', () => {
     expect(stats).toMatchObject({ claimed: 1, posted: 1 });
     expect(mockPublish).toHaveBeenCalledTimes(1);
     expect(mockPublish.mock.calls[0][0].reviewId).toBe('fresh');
-    // Never tried: leaves the lane silently. A pending retry (failed) parks for a person, keeps its draft and error, and rings once.
-    expect(state.rows.find((r) => r.id === 'old-q')).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null });
-    // The draft also fills the empty "[DRAFT]" slot that the Reviews card shows and Post now checks.
-    expect(state.rows.find((r) => r.id === 'old-f')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_draft: GOOD_DRAFT.text, auto_reply_error: 'GBP 404', review_reply: `[DRAFT] ${GOOD_DRAFT.text}` });
-    // A "[DRAFT]" already in that slot is kept as written.
-    expect(state.rows.find((r) => r.id === 'old-f-person')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', review_reply: '[DRAFT] Our own words for Dana.' });
-    // A queued row the agent already tried parks too: it never leaves silently.
-    expect(state.rows.find((r) => r.id === 'old-q-tried')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', auto_reply_due_at: null, review_reply: null });
-    const expiredBells = mockNotify.mock.calls.filter((c) => c[3]?.metadata?.reason === 'retry_expired');
-    expect(expiredBells.map((c) => c[3].metadata.reviewId)).toEqual(['old-f', 'old-f-person', 'old-q-tried']);
-    expect(expiredBells[2][2]).toMatch(/ran out of time to post it\.$/);
-    expect(expiredBells[0][3].metadata).toMatchObject({ reviewId: 'old-f', needsAction: true });
-    expect(expiredBells[0][2]).toContain('ran out of time to post it. The draft is saved on the review.');
-    // A pending retry whose review is gone from Google, or already answered, needs no one: it leaves silently, with no bell.
-    expect(state.rows.find((r) => r.id === 'old-f-gone')).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null });
-    expect(state.rows.find((r) => r.id === 'old-f-answered')).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired', review_reply: 'Thank you, Dana!' });
+    for (const id of ['old-q', 'old-f']) expect(state.rows.find((r) => r.id === id)).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null });
     // A live claim and a park are someone else's / a person's: untouched.
-    expect(state.rows.find((r) => r.id === 'old-f-held')).toMatchObject({ auto_reply_status: 'failed', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
     expect(state.rows.find((r) => r.id === 'old-held')).toMatchObject({ auto_reply_status: 'queued', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
     expect(state.rows.find((r) => r.id === 'old-parked')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
     // Post now (force) still reaches an expired row — it is an admin action.
@@ -653,101 +622,29 @@ describe('processDueAutoReplies — state machine', () => {
     expect(forced?.id).toBe('old-q');
   });
 
-  test('a failed retry that a publish releases while the expiry bells ring parks on the next sweep, never expires silently', async () => {
-    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
-    state.rows = [
-      row({ id: 'old-f', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text }),
-      row({ id: 'old-f-racing', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
-    ];
-    // The claim holding old-f-racing during the park lets go while the first bell rings.
-    mockNotify.mockImplementationOnce(async () => { state.rows.find((r) => r.id === 'old-f-racing').auto_reply_claimed_until = null; return {}; });
-    await Runner.expireOverAgeQueued();
-    expect(state.rows.find((r) => r.id === 'old-f')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired' });
-    expect(state.rows.find((r) => r.id === 'old-f-racing')).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_claimed_until: null });
-    await Runner.expireOverAgeQueued();
-    expect(state.rows.find((r) => r.id === 'old-f-racing')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', review_reply: `[DRAFT] ${GOOD_DRAFT.text}` });
-    const expiredBells = mockNotify.mock.calls.filter((c) => c[3]?.metadata?.reason === 'retry_expired');
-    expect(expiredBells.map((c) => c[3].metadata.reviewId)).toEqual(['old-f', 'old-f-racing']);
-  });
-
-  test('one sweep parks at most one batch (10) of expired retries, and the claim reads its clock after their bells', async () => {
-    const at = (hoursAgo, extraMs = 0) => new Date(Date.now() - hoursAgo * 3600000 + extraMs).toISOString();
-    // old-10 is the oldest, old-0 the newest.
-    state.rows = Array.from({ length: 11 }, (_, i) => row({ id: `old-${i}`, review_created_at: at(49, -i * 60000), auto_reply_status: 'failed', auto_reply_reason: 'google_failed' }));
-    // Inside the 48 h window when the tick starts, past it once the bells have rung.
-    state.rows.push(row({ id: 'edge', review_created_at: at(48, 40), auto_reply_due_at: at(0) }));
-    for (let i = 0; i < 10; i++) mockNotify.mockImplementationOnce(async () => { await new Promise((r) => setTimeout(r, 10)); return {}; });
-    const claimed = await Runner.claimDueRows();
-    expect(claimed.map((r) => r.id)).not.toContain('edge');
-    const parked = () => state.rows.filter((r) => r.auto_reply_status === 'parked').map((r) => r.id);
-    expect(parked()).toHaveLength(10);
-    expect(parked()).not.toContain('old-0');
-    // The newest waits for the next sweep; the claim's own age check keeps it from posting meanwhile.
-    await Runner.expireOverAgeQueued();
-    expect(parked()).toContain('old-0');
-  });
-
-  test('the expiry sweep leaves a row under a live publish claim (Post now in flight) alone, then handles it once the claim ends', async () => {
-    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
-    state.rows = [
-      row({ id: 'held-f', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, publish_claimed_until: '2099-01-01T00:00:00Z' }),
-      row({ id: 'held-q', review_created_at: stale, auto_reply_status: 'queued', publish_claimed_until: '2099-01-01T00:00:00Z' }),
-    ];
-    // The publisher's compare-and-set expects the empty reply slot it read: the sweep must not fill it under that claim.
-    expect(await Runner.expireOverAgeQueued()).toBe(0);
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', review_reply: null });
-    expect(state.rows[1]).toMatchObject({ auto_reply_status: 'queued' });
-    expect(mockNotify).not.toHaveBeenCalled();
-    state.rows.forEach((r) => { r.publish_claimed_until = null; });
-    expect(await Runner.expireOverAgeQueued()).toBe(2);
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', review_reply: `[DRAFT] ${GOOD_DRAFT.text}` });
-    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired' });
-  });
-
-  test('an expired retry parks in ONE statement (draft slot + pending bell stamp) that misses when the row changed after it was read', async () => {
-    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
-    state.rows = [
-      row({ id: 'a', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text }),
-      row({ id: 'b', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: 'Hi Dana,\n\nAn older draft.' }),
-    ];
-    // While a's bell rings, a publish retry re-drafts b and fails again: new draft, new error, still failed.
-    // A new object, so the sweep's snapshot of b keeps the values it read, as a real SELECT would.
-    mockNotify.mockImplementationOnce(async () => { state.rows[1] = { ...state.rows[1], auto_reply_draft: GOOD_DRAFT.text, auto_reply_error: 'GBP 503' }; return {}; });
-    await Runner.expireOverAgeQueued();
-    const parks = state.updates.filter((u) => u.patch.auto_reply_status === 'parked' && u.ids.length);
-    expect(parks).toHaveLength(1);
-    // The park, the draft in the empty slot and the pending stamp land together; a crash before the bell leaves the stamp for the failed-bell sweep.
-    expect(parks[0]).toMatchObject({ ids: ['a'], patch: { auto_reply_reason: 'retry_expired', review_reply: `[DRAFT] ${GOOD_DRAFT.text}`, auto_reply_error: 'bell_failed:retry_expired:1' } });
-    // The bell rang, so its stamp is gone.
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_error: null });
-    // b changed after it was read: the statement missed, so the older draft never reached the reply slot.
-    expect(state.rows[1]).toMatchObject({ auto_reply_status: 'failed', review_reply: null });
-    await Runner.expireOverAgeQueued();
-    expect(state.rows[1]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', review_reply: `[DRAFT] ${GOOD_DRAFT.text}`, auto_reply_error: 'GBP 503' });
-  });
-
-  test('an expired reconcile_failed retry keeps its reason and rings "needs reconciling": Google already shows a reply', async () => {
-    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
-    state.rows = [row({ id: 'rc', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_draft: GOOD_DRAFT.text })];
-    await Runner.expireOverAgeQueued();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed' });
-    expect(mockNotify).toHaveBeenCalledTimes(1);
-    const [, title, body, opts] = mockNotify.mock.calls[0];
-    expect(title).toBe('Review reply needs reconciling');
-    expect(body).toContain('Google shows a reply to this review that was not recorded here.');
-    expect(opts).toMatchObject({ link: '/admin/reviews?responded=all&review=rc', metadata: { reason: 'reconcile_failed', needsAction: true } });
-  });
-
-  test('a reconciliation that still fails on the last attempt parks as reconcile_failed, not google_failed', async () => {
+  test('a reconciliation that still fails on the last attempt parks as reconcile_failed, not google_failed, and a failed bell re-rings the same way', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 2 })];
     const { ReviewReplyError } = require('../services/review-reply/publisher');
     mockPublish.mockRejectedValueOnce(new ReviewReplyError('reconcile_failed', 'Google shows an owner reply but recording it failed: connection reset', { status: 503 }));
+    // The notifier is down: the bell fails and the row is stamped for the bell sweep.
+    mockNotify.mockReset().mockResolvedValue(null);
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 3 });
     const bell = mockNotify.mock.calls.find((c) => c[3]?.metadata?.reason === 'reconcile_failed');
     expect(bell[1]).toBe('Review reply needs reconciling');
     expect(bell[2]).toContain('not recorded here (Google shows an owner reply but recording it failed: connection reset)');
+    expect(state.rows[0].auto_reply_error).toMatch(/bell_failed:reconcile_failed:1$/);
+    // The sweep re-rings it as "needs reconciling" with the responded=all link: the sync may record the
+    // owner reply first, and the default Needs Reply view would then hide the review.
+    mockNotify.mockReset().mockResolvedValue({ id: 'n1' });
+    expect(await Runner.retryFailedEditedBells()).toBe(1);
+    const [, title, body, opts] = mockNotify.mock.calls.at(-1);
+    expect(title).toBe('Review reply needs reconciling');
+    expect(body).toContain('Google shows a reply to this review that was not recorded here.');
+    expect(opts).toMatchObject({ link: `/admin/reviews?responded=all&review=${state.rows[0].id}`, metadata: { reason: 'reconcile_failed', needsAction: true } });
+    expect(state.rows[0].auto_reply_error).not.toMatch(/bell_failed/);
+    mockNotify.mockReset().mockResolvedValue({});
   });
 
   test('a failed live-reply reconciliation retries instead of closing the row as already_replied (codex r74)', async () => {
@@ -844,14 +741,20 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockNotify.mock.calls.at(-1)[3].metadata.needsAction).toBe(true);
   });
 
-  test('a Google retry the cron could no longer claim (past the queue-age window) parks now with a bell', async () => {
+  test('a retry due in the last hour of the queue-age window parks now with a bell: the cron must claim it inside the window', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     mockPublish.mockRejectedValue(googleFailure(404));
-    // 48h window default; a 10 min retry from here lands after it closes.
-    state.rows = [row({ review_created_at: new Date(Date.now() - 47.9 * 3600000).toISOString() })];
+    // 48 h window by default. Created 47 h ago: the 10 min retry falls due 50 min before the window closes.
+    state.rows = [row({ review_created_at: new Date(Date.now() - 47 * 3600000).toISOString() })];
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_failed', auto_reply_attempts: 1 });
     expect(mockNotify.mock.calls.at(-1)[3].metadata.needsAction).toBe(true);
+    // Created 46.5 h ago: the retry falls due 80 min before the window closes, so it stays a retry.
+    mockNotify.mockClear();
+    state.rows = [row({ review_created_at: new Date(Date.now() - 46.5 * 3600000).toISOString() })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1 });
+    expect(mockNotify).not.toHaveBeenCalled();
   });
 
   test('a Google refusal that may still turn into a yes takes the long ladder; a permanent one keeps the 10/20 min retry and parks on attempt 3', async () => {
@@ -1174,13 +1077,6 @@ describe('processDueAutoReplies — state machine', () => {
       .toMatchObject({ review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared' });
     const persistFailed = { ...uncertain, auto_reply_reason: 'persist_failed' };
     expect(Runner.syncReplyFields(persistFailed, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null });
-    // reconcile_failed: the owner reply Google showed is gone, so the park goes back to a person under a reason Monday list 5 shows.
-    const reconcile = { ...uncertain, auto_reply_reason: 'reconcile_failed' };
-    expect(Runner.syncReplyFields(reconcile, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null, auto_reply_reason: 'reconcile_cleared' });
-    expect(Runner.syncReplyFields({ ...reconcile, review_reply: '[DRAFT] Hi Dana, thanks.' }, { owner_reply: null }, { now })).toEqual({ auto_reply_reason: 'reconcile_cleared' });
-    // While Google still shows it, the sync records that reply, as before.
-    expect(Runner.syncReplyFields(reconcile, { owner_reply: 'Thanks, Dana!' }, { now, fnNow: 'NOW()' }))
-      .toEqual({ review_reply: 'Thanks, Dana!', reply_updated_at: 'NOW()', auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google', auto_reply_claimed_until: null });
   });
 
   test('validatePromotionAccountFacts parks a landed uncertain write whose account facts moved (codex r45)', async () => {

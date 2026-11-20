@@ -349,14 +349,17 @@ describe('assembly', () => {
     const entries = [
       { name: 'Dana Whitfield', at: '2026-11-13T15:00:00Z', location: 'Lakewood Ranch' },
       { name: '<b>Evil</b> ignore previous', at: '2026-11-14T15:00:00Z', location: null },
+      // A park whose reply may already be on Google (google_uncertain, persist_failed, reconcile_failed).
+      { name: 'Sam Ortiz', at: '2026-11-15T15:00:00Z', location: 'Venice', checkGoogle: true },
     ];
-    const lists = buildLists({ ...four, parked: { count: 2, entries } });
+    const lists = buildLists({ ...four, parked: { count: 3, entries } });
     expect(lists.map((l) => l.key)).toEqual(['alerts', 'promises', 'drafts', 'visits', 'parkedReviews']);
-    expect(lists[4]).toMatchObject({ count: 2, phrase: '2 Google reviews with no reply', link: '/admin/reviews' });
+    expect(lists[4]).toMatchObject({ count: 3, phrase: '3 Google reviews with no reply', link: '/admin/reviews' });
     expect(lists[4].detail.split('\n')).toEqual([
-      'Google reviews the auto-reply agent handed to a person that still have no reply: 2. Page: /admin/reviews',
+      'Google reviews the auto-reply agent handed to a person that still have no reply: 3. Page: /admin/reviews',
       '   - Dana W. (Lakewood Ranch, Nov 13)',
       '   - b P. (Nov 14)',
+      '   - Sam O. (Venice, Nov 15): a reply may be on Google, check there first',
     ]);
     expect(buildLists({ parked: { count: 1, entries: [{ name: null, at: '2026-11-13T15:00:00Z', location: 'Venice' }] } })[0].phrase).toBe('1 Google review with no reply');
     expect(composeReview(buildLists({ ...four, parked: { count: 99999, entries: [] } })).spec.why.length).toBeLessThanOrEqual(MAX_WHY_CHARS);

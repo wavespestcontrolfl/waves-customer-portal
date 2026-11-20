@@ -208,13 +208,18 @@ async function loadOpenPastVisits({ now = new Date(), database = db, findStaleVi
 }
 
 // List 5. Reviews the auto-reply agent parked for a person that still have no
-// real reply (a "[DRAFT]" is not one), oldest first. The location rules are
-// review-low-rating-alert.js needsAnswerQuery's: an active location, a real
-// reviewer row, not dismissed, not gone from Google.
+// real reply recorded (a "[DRAFT]" is not one), oldest first. The location
+// rules are review-low-rating-alert.js needsAnswerQuery's: an active location,
+// a real reviewer row, not dismissed, not gone from Google. No park reason is
+// left out, so a park with no reply cannot drop off this list. A park whose
+// reply may already be on Google (google_uncertain or persist_failed: ours may
+// have landed; reconcile_failed: Google showed an owner reply not recorded
+// here) is listed with "check Google first"; the sync records a live reply
+// when it reads one, and the row then leaves the list.
 async function loadParkedReviews({ database = db } = {}) {
   const { WAVES_LOCATIONS } = require('../config/locations');
   const { whereNeedsRealReply } = require('./review-reply/draft-prefix');
-  const { whereNoReconcilePark } = require('./review-reply/runner');
+  const { RECONCILE_REASONS } = require('./review-reply/runner');
   const rows = await database('google_reviews')
     .where('auto_reply_status', 'parked')
     .whereIn('location_id', WAVES_LOCATIONS.map((l) => l.id))
@@ -222,19 +227,17 @@ async function loadParkedReviews({ database = db } = {}) {
     .where((q) => q.where('dismissed', false).orWhereNull('dismissed'))
     .whereNull('missing_since')
     .modify((q) => whereNeedsRealReply(q))
-    // google_uncertain / persist_failed: our reply may already be live on
-    // Google. reconcile_failed: Google already shows an owner reply that was
-    // not recorded here. Those parks ring their own "needs reconciling" bell,
-    // and the sync records a live reply when it reads one, so they are not
-    // listed as "no reply".
-    .modify((q) => whereNoReconcilePark(q))
-    .where((q) => q.whereNull('auto_reply_reason').orWhereNot('auto_reply_reason', 'reconcile_failed'))
     .orderByRaw('review_created_at ASC NULLS LAST, id ASC')
-    .select('id', 'reviewer_name', 'review_created_at', 'location_id');
+    .select('id', 'reviewer_name', 'review_created_at', 'location_id', 'auto_reply_reason');
   const locationNames = new Map(WAVES_LOCATIONS.map((l) => [l.id, l.name]));
   return {
     count: rows.length,
-    entries: rows.map((r) => ({ name: r.reviewer_name, at: r.review_created_at, location: locationNames.get(r.location_id) || null })),
+    entries: rows.map((r) => ({
+      name: r.reviewer_name,
+      at: r.review_created_at,
+      location: locationNames.get(r.location_id) || null,
+      checkGoogle: RECONCILE_REASONS.has(r.auto_reply_reason) || r.auto_reply_reason === 'reconcile_failed',
+    })),
   };
 }
 
@@ -291,7 +294,7 @@ function parkedReviewsList(parked) {
     phrase: `${parked.count} Google ${plural(parked.count, 'review', 'reviews')} with no reply`,
     detail: [
       `Google reviews the auto-reply agent handed to a person that still have no reply: ${parked.count}. Page: /admin/reviews`,
-      ...shown.map((e) => `   - ${reviewerLabel(e.name)} (${[e.location, shortDate(e.at)].filter(Boolean).join(', ')})`),
+      ...shown.map((e) => `   - ${reviewerLabel(e.name)} (${[e.location, shortDate(e.at)].filter(Boolean).join(', ')})${e.checkGoogle ? ': a reply may be on Google, check there first' : ''}`),
       ...(more > 0 ? [`   +${more} more`] : []),
     ].join('\n'),
     link: '/admin/reviews',
