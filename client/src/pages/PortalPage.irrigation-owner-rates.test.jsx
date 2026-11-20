@@ -62,7 +62,7 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
   it('a lawn customer sees the timer on file, and a new pick saves brand, model and a cleared app answer in one request', async () => {
     api.getPropertyPreferences.mockResolvedValue({
       preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' },
-      hasLawnCare: true,
+      hasLawnCare: true, hasLawnService: true,
     });
     // The server answers with the row it now holds.
     api.updatePropertyPreferences.mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...payload } }));
@@ -99,7 +99,7 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     }), `We could not save your timer. ${REFUSED}`, false],
     ['lost to a network failure', new Error('Failed to fetch'), 'Could not save. Please check your connection and try again.', true],
   ])('a timer whose save is %s stays on screen, and only a lost one is sent again', async (_case, failure, shown, sentAgain) => {
-    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: true });
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: true, hasLawnService: true });
     api.updatePropertyPreferences.mockRejectedValueOnce(failure)
       .mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...STAFF_RAIN_BIRD, ...payload } }));
     render(<PropertyTab customer={lawnCustomer} />);
@@ -122,7 +122,7 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
   // A batch that also carries another field saves that field and refuses the timer (a stale home): a 200 that names
   // the timer. The refused pick stays beside its reason, and the next save does not replace it.
   it('a timer refused beside a field that saved stays on screen with its reason', async () => {
-    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: true });
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: true, hasLawnService: true });
     const timerRefused = ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'].map((field) => ({ field, message: REFUSED }));
     const withoutTimer = (payload) => Object.fromEntries(Object.entries(payload).filter(([field]) => !field.startsWith('irrigationController')));
     api.updatePropertyPreferences
@@ -148,7 +148,7 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
   it('a timer change names the timer the screen showed before it; the server\'s refusal stays on screen', async () => {
     api.getPropertyPreferences.mockResolvedValue({
       preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: null },
-      hasLawnCare: true,
+      hasLawnCare: true, hasLawnService: true,
     });
     const CHANGED = 'The sprinkler timer on this account changed while this page was open. Reload, then set it again.';
     api.updatePropertyPreferences
@@ -179,7 +179,7 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
   it('a newer pick waiting behind a save in flight stays on screen when that save returns', async () => {
     api.getPropertyPreferences.mockResolvedValue({
       preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: null },
-      hasLawnCare: true,
+      hasLawnCare: true, hasLawnService: true,
     });
     let answerFirstSave;
     api.updatePropertyPreferences
@@ -209,7 +209,7 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
   it('after a save whose answer was lost, the queued answer names both timers the row may hold', async () => {
     api.getPropertyPreferences.mockResolvedValue({
       preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: null },
-      hasLawnCare: true,
+      hasLawnCare: true, hasLawnService: true,
     });
     let loseFirstAnswer;
     api.updatePropertyPreferences
@@ -235,7 +235,7 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
   it('a timer staff saved while the page was open replaces the old one after the next save', async () => {
     api.getPropertyPreferences.mockResolvedValue({
       preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' },
-      hasLawnCare: true,
+      hasLawnCare: true, hasLawnService: true,
     });
     // Staff set a Rain Bird in Customer 360 meanwhile: the next save answers with that row.
     api.updatePropertyPreferences.mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...payload, ...STAFF_RAIN_BIRD } }));
@@ -251,7 +251,7 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
   it('a timer staff saved just after the customer\'s pick replaces that pick when its save returns', async () => {
     api.getPropertyPreferences.mockResolvedValue({
       preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: null },
-      hasLawnCare: true,
+      hasLawnCare: true, hasLawnService: true,
     });
     api.updatePropertyPreferences.mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...payload, ...STAFF_RAIN_BIRD } }));
     render(<PropertyTab customer={lawnCustomer} />);
@@ -263,15 +263,17 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     expect(api.updatePropertyPreferences.mock.calls[0][0]).toMatchObject({ irrigationControllerModel: 'pro_c' });
   }, 15000);
 
-  // hasLawnCare also admits the Monday irrigation email's opt-ins (Weekly Inches, the watering plan). The card asks
-  // lawn-service customers only (hasLawnService).
+  // The card is a lawn surface: it follows the server's hasLawnService only (the Lawn Health card's rule, owner ruling
+  // 2026-08-28). hasLawnCare (Weekly Inches, the watering plan) also takes the Monday irrigation email's opt-ins and a
+  // tier or a turf type on file: a tier counts any two services, and a pest-only home can have a turf type.
   it.each([
-    ['no lawn service', false, { hasLawnCare: false }],
-    ['only the Monday irrigation email', false, { hasLawnCare: true, hasLawnService: false }],
-    ['lawn visits on record but no tier or turf type', true, { hasLawnCare: true, hasLawnService: true }],
-  ])('a customer with %s: the card shows = %s', async (_case, shown, flags) => {
+    ['no lawn service', false, { hasLawnCare: false }, {}],
+    ['only the Monday irrigation email', false, { hasLawnCare: true, hasLawnService: false }, {}],
+    ['a Gold tier and a turf type, but no lawn care', false, { hasLawnCare: true, hasLawnService: false }, { tier: 'Gold', property: { lawnType: 'St. Augustine' } }],
+    ['lawn care on record', true, { hasLawnCare: true, hasLawnService: true }, {}],
+  ])('a customer with %s: the card shows = %s', async (_case, shown, flags, customerFields) => {
     api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, ...flags });
-    render(<PropertyTab customer={{ ...lawnCustomer, tier: 'Bronze' }} />);
+    render(<PropertyTab customer={{ ...lawnCustomer, tier: 'Bronze', ...customerFields }} />);
     await screen.findByText('Controller Location');
     expect(screen.queryByText('Your sprinkler timer') !== null).toBe(shown);
   });

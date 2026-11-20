@@ -9336,11 +9336,10 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // Local shortcut OR the server's recurring-lawn-service evidence — a
   // standalone lawn-plan customer with no turf type on file used to get no
   // Weekly Inches field at all (found on a customer's phone 2026-08-27).
-  const lawnShortcut = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim();
-  const hasLawnCare = lawnShortcut || serverHasLawnCare === true;
-  // Lawn service itself. hasLawnCare also admits the Monday irrigation email's opt-ins (Weekly Inches and the
-  // watering plan); the sprinkler timer card asks lawn-service customers only.
-  const hasLawnService = lawnShortcut || serverHasLawnService === true;
+  const hasLawnCare = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim() || serverHasLawnCare === true;
+  // The sprinkler timer card is a lawn surface: the server's answer only, by the Lawn Health card's rule (owner ruling
+  // 2026-08-28). A tier counts any two services and a pest-only home can have a turf type on file, so neither counts.
+  const hasLawnService = serverHasLawnService === true;
   // Schema semantics (initial_schema.js): property_sqft IS the treated lawn
   // area and bed_sqft is the separate ornamental-bed measurement — never
   // subtract one from the other, that understates the service area.

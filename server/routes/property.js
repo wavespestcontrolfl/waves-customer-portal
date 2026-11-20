@@ -11,6 +11,7 @@ const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irriga
 const AwayWatch = require('../services/away-watch');
 const { yardPets } = require('../services/pet-name-line');
 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
+const { hasCustomerLawnCare } = require('../services/lawn-health-shared');
 const { movingPortalLive } = require('../config/feature-gates');
 
 // GATE_AWAY_WATCH: the Property tab shows its Away Watch section only when the server says so: the gate is live and
@@ -60,7 +61,6 @@ const {
   snakeToCamel,
   transformKeys,
   customerHasLawnCare,
-  customerLawnStanding,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage,
   prefsRenderStamp,
@@ -159,16 +159,19 @@ router.get('/pet-name-ask', async (req, res) => {
 
 router.get('/preferences', async (req, res, next) => {
   try {
-    const [prefs, lawn] = await Promise.all([
+    const [prefs, hasLawnCare, hasLawnService] = await Promise.all([
       db('property_preferences').where({ customer_id: req.customerId }).first(),
-      customerLawnStanding(req.customer).catch((err) => {
+      customerQualifiesForLawnInches(req.customer).catch((err) => {
         logger.warn(`[property] lawn evidence lookup failed for ${req.customerId}: ${err.message}`);
-        return { lawnService: false, lawnInches: false };
+        return false;
+      }),
+      // The sprinkler timer card is a lawn surface, so it follows the Lawn Health card's rule (owner ruling 2026-08-28:
+      // on lawn care itself; a tier or a turf type on file is not), not the wider Weekly Inches one above.
+      hasCustomerLawnCare(req.customerId).catch((err) => {
+        logger.warn(`[property] lawn care lookup failed for ${req.customerId}: ${err.message}`);
+        return false;
       }),
     ]);
-    // Weekly Inches and the watering plan (hasLawnCare) also take the Monday irrigation email's opt-ins; the sprinkler
-    // timer card (hasLawnService) asks lawn-service customers only.
-    const { lawnInches: hasLawnCare, lawnService: hasLawnService } = lawn;
 
     if (!prefs) {
       // Return empty defaults
