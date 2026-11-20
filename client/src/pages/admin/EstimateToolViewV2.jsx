@@ -5336,7 +5336,8 @@ export default function EstimateToolViewV2({
         setAddressUnverified({ source: 'county_roll', reason: 'County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.' });
         setConfirmAddress(false);
       }
-      setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", hasInputs: true });
+      // The address this save persisted, so the roof read stays linked to this estimate through non-address edits.
+      setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", address: String(form.address || "").trim(), hasInputs: true });
       if (!isEditRevision && moveRequestId) {
         const savedMove = moveSeed.data?.move || {};
         setMoveEstimate({ estimateId: id, moveId: moveRequestId, moveOutDate: savedMove.moveOutDate || null, moveInDate: savedMove.moveInDate || null });

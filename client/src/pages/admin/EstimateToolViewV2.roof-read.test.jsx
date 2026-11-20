@@ -147,6 +147,25 @@ describe("resets", () => {
     expect(roofPosts()).toHaveLength(2);
   });
 
+  it("keeps the read linked to the saved draft through a non-address edit", async () => {
+    // Codex #8113 r2 P2: the save records the address it persisted, so a contact edit after the save neither
+    // remounts the panel nor locks the tech's count.
+    renderNew();
+    tickExclusion();
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Generate Estimate", exact: true }));
+    fireEvent.click(await screen.findByRole("button", { name: "Save draft", exact: true }));
+    await screen.findByRole("button", { name: /Next estimate \(keep services\)/ });
+    fireEvent.click(await screen.findByTestId("roof-read-button"));
+    await screen.findByTestId("roof-read-result");
+    expect(JSON.parse(roofPosts()[0][1].body).estimate_id).toEqual(expect.any(String));
+    fireEvent.change(document.getElementById("estimate-customerName"), { target: { value: "Synthetic Renamed" } });
+    await waitFor(() => expect(document.getElementById("estimate-customerName")).toHaveValue("Synthetic Renamed"));
+    expect(screen.getByTestId("roof-read-result")).toBeInTheDocument();
+    expect(screen.getByTestId("roof-read-save")).not.toBeDisabled();
+    expect(roofPosts()).toHaveLength(1);
+  });
+
   it("offers no read when the lookup raises an address verify flag", async () => {
     verifyFlag = true;
     renderNew();
