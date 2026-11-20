@@ -7741,11 +7741,14 @@ or answers 200 with no list (its build failed), the page clears its times, the
 emailed time included, and asks the customer to reload the page: nothing vouches
 for the old ones, and the address behind them can have changed (`address_changed`,
 this answer's or the account-change one's, or phase one linked a profile at another
-address). A terminal state or the address form in that answer still replaces the
+address). A terminal state, the address form, or the GET's own no-times answers
+(`service_area_unavailable`, `booking_unavailable`) in that answer still replace the
 page. Any answer but a booking also drops a search still running, so its late times
 never land over the page. The reload runs under the page's request controller: a
 change of address while it runs supersedes it, and it then applies no list,
-clears nothing and shows no message. With the
+clears nothing and shows no message. A refusal that lands after a change of
+address (or a reload) belongs to the old page, and the page applies none of it: no
+times, no dropped address, no message. A booking always shows. With the
 funnel off, every refusal carries fresh times at the booking location, as
 before. No field,
 status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search

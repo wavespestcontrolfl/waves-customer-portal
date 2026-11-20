@@ -60,9 +60,23 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // the page-level refresh just needs the availability payload).
 // An inspection list answer (GET, or POST /availability, whose success has
 // no `state`) with no list though nothing else applies: not a terminal state,
-// not the address gate. Its slot build failed, so it refreshes nothing, and the
-// caller keeps or clears its own times (pre-push P1 on 4e9d76bcb1).
-const listMissing = (body) => (body.state ?? 'ok') === 'ok' && !body.needs_address && !body.availability;
+// not the address gate, and not the GET's own no-times answers
+// (`service_area_unavailable`, `booking_unavailable`), which replace the
+// calendar. Its slot build failed, so it refreshes nothing, and the caller
+// keeps or clears its own times (pre-push P1s on 4e9d76bcb1 and 6db4e39ca7).
+const listMissing = (body) => (body.state ?? 'ok') === 'ok' && !body.needs_address
+  && !body.service_area_unavailable && !body.booking_unavailable && !body.availability;
+
+// Inspection commit refusals that stay on the picker with an inline message,
+// never the raw error code or a generic failure line. address_unresolved: the
+// address didn't geocode at commit time (rare — usually caught earlier by the
+// address gate). service_area_unavailable: the service-area check itself
+// couldn't run — not a verdict, so they can retry rather than stop on the
+// out-of-area card.
+const INSPECTION_INLINE_REFUSALS = new Map([
+  ['address_unresolved', "We couldn't verify that address. Please text or call us and we'll get you booked."],
+  ['service_area_unavailable', "We couldn't confirm your service area just now. Please try again, or text or call us."],
+]);
 
 async function postInspectionAvailability(token, address, { signal } = {}) {
   const res = await fetch(`${API_BASE}/public/inspection/${token}/availability`, {
@@ -2221,6 +2235,9 @@ export default function ScheduleFlowPage({ flow }) {
     setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
+    // The page's requests now: a change of address, a reload or another token
+    // replaces this controller while the booking runs.
+    const pageRequests = loadAbortRef.current;
     const payload = cfg.payload({ slot: slotToBook, data, lane: selectedLane, details, pests: selectedPests, address: resolvedAddress });
     try {
       const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`, {
@@ -2233,6 +2250,11 @@ export default function ScheduleFlowPage({ flow }) {
         setResult({ ...body, ...resultMarks });
         return;
       }
+      // A refusal that lands after the page moved on belongs to the old page:
+      // the new list is on screen, and this answer's times, address and
+      // message are not for it (pre-push P1 on 6db4e39ca7). A booking above
+      // always shows.
+      if (loadAbortRef.current !== pageRequests) return;
       // Any answer but a booking supersedes the searches still running, as
       // onChangeAddress does: their times were built before it and could
       // land over what it shows (pre-push P1s on 8f40c19990 and 4e9d76bcb1).
@@ -2243,19 +2265,11 @@ export default function ScheduleFlowPage({ flow }) {
         setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
         return;
       }
-      // Inspection only: the address didn't geocode at commit time (rare —
-      // usually caught earlier by the address gate) — recoverable, stay on
-      // the picker with an inline message rather than showing the raw error
-      // code or a generic failure line.
-      if (inspectionLike && body.error === 'address_unresolved') {
-        setSubmitError("We couldn't verify that address. Please text or call us and we'll get you booked.");
-        return;
-      }
-      // Inspection only: the service-area check itself couldn't run — not a
-      // verdict, so stay on the picker and let them retry rather than
-      // stopping on the out-of-area card.
-      if (inspectionLike && body.error === 'service_area_unavailable') {
-        setSubmitError("We couldn't confirm your service area just now. Please try again, or text or call us.");
+      // Inspection only: an address that didn't geocode, or a service-area
+      // check that couldn't run, stays on the picker (INSPECTION_INLINE_REFUSALS).
+      const inlineRefusal = inspectionLike && INSPECTION_INLINE_REFUSALS.get(body.error);
+      if (inlineRefusal) {
+        setSubmitError(inlineRefusal);
         return;
       }
       // Inspection only: the commit answers any of GET's own terminal
