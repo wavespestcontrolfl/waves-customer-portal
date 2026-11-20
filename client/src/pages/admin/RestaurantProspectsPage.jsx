@@ -38,14 +38,23 @@ const COUNT_CELL = "align-middle max-[1100px]:text-left";
 
 const readDay = (value) => formatETDate(value, { month: "short", day: "numeric", year: "numeric" });
 
-// The line counts the two reasons a full read of the license files proves: new restaurants and new owners. The period
-// runs to today, but the list knows only what the last full read found (readAt: the weekly job's last run that read all
-// three state files without a failure), so the counts name that read. It gives no pest count: an inspection shows only
-// once its report has been read, so a count of them would say nothing about the period. Pest rows show in the list as
-// their reports are read.
+// The line counts the two reasons the license files give: new restaurants and new owners. The counts are what the
+// weekly reads have collected through the last full read (readAt: the weekly job's last run that read all three state
+// files without a failure), never the state's own totals: a read that failed or never ran leaves records the list
+// never saw (the state resets its files each July 1). It gives no pest count: an inspection shows only once its report
+// has been read, so a count of them would say nothing about the period. Pest rows show in the list as their reports
+// are read.
 export function summaryText(data) {
   const { counts, from, through, readAt } = data;
-  return `${plural(counts.new_restaurant, "new restaurant")} and ${plural(counts.new_owner, "new owner")} from ${shortDay(from)} to ${shortDay(through)}, as of the state files read on ${readDay(readAt)}.`;
+  return `The weekly reads through ${readDay(readAt)} have collected ${plural(counts.new_restaurant, "new restaurant")} and ${plural(counts.new_owner, "new owner")} dated ${shortDay(from)} to ${shortDay(through)}.`;
+}
+
+// The area note's last sentence. Until any inspection report has been read (reportsRead), the list can show no pest
+// findings at all, and the note says so.
+export function reportNote(data) {
+  return data.reportsRead
+    ? "An inspection shows once its report has been read."
+    : "No inspection report has been read yet, so the list shows no pest findings.";
 }
 
 // What the weekly job's state lets the page claim: a sentence when it limits what the rows prove, or null when the
@@ -151,7 +160,7 @@ export default function RestaurantProspectsPage({ embedded = false }) {
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
         New restaurants, new owners and inspections that found pests, from the state&apos;s public restaurant files. Manatee,
         Sarasota and Charlotte counties, without Punta Gorda. Food trucks are left out. The state files are read each Monday.
-        An inspection shows once its report has been read.
+        {data && ` ${reportNote(data)}`}
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Period">
@@ -164,14 +173,14 @@ export default function RestaurantProspectsPage({ embedded = false }) {
 
       {loading && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading restaurants…</div>}
       {error && <ActionFeedback error onRetry={load} className="mb-3">{error}</ActionFeedback>}
-      {/* The line says what the job's state lets the page claim (statusText). An empty list reads as nothing found
-          only when the counts show too: otherwise it proves nothing about the period. */}
+      {/* The line says what the job's state lets the page claim (statusText). The empty message shows only when the
+          counts show too. */}
       {data && (
         <>
           <p className="mb-3 text-ui-body text-zinc-900">{headlineText(data)}</p>
           {data.rows.length > 0 && <RestaurantTable rows={data.rows} />}
           {data.rows.length === 0 && !statusText(data) && (
-            <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()} so far.</div>
+            <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">No restaurants to show for the {period.label.toLowerCase()}.</div>
           )}
         </>
       )}

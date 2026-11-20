@@ -82,8 +82,9 @@ function readState(health) {
  * readUnfinishedSince and readFailedAt are the weekly job's state (readState): while a run has not finished, or after
  * one failed, the rows may mix two reads, since the job commits each file on its own. The rows and the state come from
  * one snapshot (a read-only REPEATABLE READ transaction), so a file committed between the two reads cannot split them.
+ * reportsRead says whether any inspection's report has been read, answered either way.
  * @returns {Promise<{ days: number, from: string, through: string, readAt: string|null,
- *   readUnfinishedSince: string|null,
+ *   readUnfinishedSince: string|null, reportsRead: boolean,
  *   readFailedAt: string|null, counts: { new_restaurant: number, new_owner: number, pest_finding: number },
  *   rows: object[] }>}
  */
@@ -92,7 +93,7 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
   const through = etDateString(now);
   const from = shiftDay(through, -(days - 1));
   const newSince = new Date(now.getTime() - NEW_DAYS * 24 * 60 * 60 * 1000);
-  const [rows, health] = await db.transaction((trx) => Promise.all([
+  const [rows, health, answered] = await db.transaction((trx) => Promise.all([
     trx('restaurant_prospects')
       .whereBetween('event_date', [from, through])
       .whereRaw("COALESCE(license_type_code, '') <> ?", [FOOD_TRUCK])
@@ -107,6 +108,8 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
         trx.raw("count(*) FILTER (WHERE kind = 'owner_change') OVER () AS total_new_owner"),
         trx.raw("count(*) FILTER (WHERE kind = 'inspection') OVER () AS total_pest_finding")),
     trx('job_health').where({ job_name: SYNC_JOB }).first('last_success_at', 'last_finished_at', 'last_started_at'),
+    // Whether any inspection report has been read (answered either way): until one has, no pest finding can show.
+    trx('restaurant_prospects').where({ kind: 'inspection' }).whereNotNull('pest_evidence').first('id'),
   ]), { isolationLevel: 'repeatable read', readOnly: true });
   const list = rows.map((row) => toRow(row, newSince));
   // No row means the period holds none. count() is a bigint: the driver gives a string.
@@ -116,7 +119,7 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
     new_owner: Number(totals.total_new_owner || 0),
     pest_finding: Number(totals.total_pest_finding || 0),
   };
-  return { days, from, through, ...readState(health), counts, rows: list };
+  return { days, from, through, ...readState(health), reportsRead: Boolean(answered), counts, rows: list };
 }
 
 module.exports = { PERIODS, listRestaurants };

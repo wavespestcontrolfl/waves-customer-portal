@@ -179,7 +179,7 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result).toEqual({
       days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null, readUnfinishedSince: null, readFailedAt: null,
-      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [],
+      reportsRead: false, counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [],
     });
   });
 
@@ -218,6 +218,20 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     // A failed first run, with no good read before it.
     await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_success_at: null, last_status: 'failed' });
     expect((await listRestaurants({ days: 30, now: NOW })).readFailedAt).toBe(later.toISOString());
+  });
+
+  test('reportsRead says whether any inspection report has been read, answered either way, in any period', async () => {
+    // Unread inspections, and an answer on a row of another kind, do not count.
+    await mockPg('restaurant_prospects').insert([
+      prospect({ kind: 'inspection', source_key: '9101', event_date: '2026-11-14', pest_evidence: null }),
+      prospect({ kind: 'inspection', source_key: '9102', event_date: '2026-11-13', pest_evidence: null }),
+      prospect({ source_key: 'NEW-1', event_date: '2026-11-12', pest_evidence: false }),
+    ]);
+    expect((await listRestaurants({ days: 30, now: NOW })).reportsRead).toBe(false);
+    // One answered inspection, 35B only and outside the period: a report has been read.
+    await mockPg('restaurant_prospects').insert(prospect({ kind: 'inspection', source_key: '9103', event_date: '2026-06-01', pest_evidence: false }));
+    const result = await listRestaurants({ days: 30, now: NOW });
+    expect([result.reportsRead, result.rows.map((row) => row.name).length]).toEqual([true, 1]);
   });
 
   test('the rows and the job state are read in one read-only REPEATABLE READ snapshot', async () => {
