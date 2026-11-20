@@ -8401,6 +8401,33 @@ describe('Yearly review ask at dispatch', () => {
     expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
   });
 
+  test('smsRecipientReachable: a cached non-SMS line type is unreachable while the proactive check is on; a failed suppression read never carries the phone', async () => {
+    const voip = { customers: [], messaging_suppression: [], phone_line_types: [{ phone: '+19410000199', line_type: 'fixedVoip' }] };
+    try {
+      db.mockImplementation(makeMock(voip));
+      expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
+      mockGates.proactiveLineTypeLookup = true;
+      db.mockImplementation(makeMock(voip));
+      expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: false, reason: 'non_sms_line_type' });
+      // A mobile number, or no cache row (no paid lookup here), stays reachable.
+      db.mockImplementation(makeMock({ ...voip, phone_line_types: [{ phone: '+19410000199', line_type: 'mobile' }] }));
+      expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
+      db.mockImplementation(makeMock({ ...voip, phone_line_types: [] }));
+      expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
+    } finally {
+      mockGates.proactiveLineTypeLookup = false;
+    }
+    // Knex puts bound values in its error text: the rethrown error drops them.
+    const base = makeMock({ customers: [] });
+    db.mockImplementation((t, ...rest) => (t === 'messaging_suppression'
+      ? { where: () => ({ first: async () => { throw Object.assign(new Error('select * from "messaging_suppression" where "phone" = $1 - +19410000199'), { code: '57P01' }); } }) }
+      : base(t, ...rest)));
+    const err = await ReviewService.smsRecipientReachable(cust('y-9')).then(() => null, (e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).not.toMatch(/0000199/);
+    expect(err.code).toBe('57P01');
+  });
+
   test('a tap 40 days ago retires the yearly row with no send', async () => {
     mockGates.reviewYearlyAsk = true;
     const mock = makeMock({ customers: [cust('y-4')], review_sequences: [yearly('y-4')], review_requests: [tap('y-4')] });

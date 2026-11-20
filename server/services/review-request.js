@@ -8535,7 +8535,8 @@ async function phoneIsSuppressed(phone, { failClosed = false } = {}) {
     const e164 = toE164(phone) || phone;
     return !!(await db("messaging_suppression").where({ phone: e164, active: true }).first());
   } catch (err) {
-    if (failClosed) throw err;
+    // Knex puts bound values (the phone) in its error message: rethrow without them.
+    if (failClosed) throw Object.assign(new Error(`suppression lookup failed (${err.code || "error"})`), { code: err.code });
     return false; // table may not exist → treat as not suppressed
   }
 }
@@ -8547,6 +8548,9 @@ async function smsRecipientReachable(customer) {
   const contact = await resolveServiceContactSmsRecipient(customer);
   if (!contact || !contact.phone) return { reachable: false, reason: "no_phone" };
   if (await phoneIsSuppressed(contact.phone, { failClosed: true })) return { reachable: false, reason: "phone_suppressed" };
+  // A number the line-type cache already marks non-SMS (landline / fixed VoIP) is rejected at send.
+  const { cachedLineTypeBlocks } = require("./messaging/validators/line-type");
+  if (await cachedLineTypeBlocks(contact.phone)) return { reachable: false, reason: "non_sms_line_type" };
   return { reachable: true, reason: null };
 }
 
