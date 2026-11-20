@@ -9,8 +9,10 @@
  *                     "Primary Phone Number" and "Mailing County Code" arrive swapped, so a phone is picked by shape.
  *
  * The state rebuilds the three files each morning, and each holds one fiscal year (July to June): on July 1 they
- * start over, and the state posts no CSV of the year before. So the job also runs daily on June 24-30
- * (scheduler.js): at most the last day of June goes unread.
+ * start over. The year before is not posted as these CSVs. Its archives are statewide XLSX files, checked
+ * 2026-11-20: inspections about 55 MB, new licenses posted about July 9, no ownership-change archive since 2022-23.
+ * Reading them is not worth one day of rows a year. So the job also runs daily on June 24-30 (scheduler.js), and
+ * at most the last day of June goes unread.
  *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
@@ -270,6 +272,9 @@ async function loadFile(kind, fetchText) {
   // A header with no rows is a download cut short, not a quiet week, so the file fails. (A file whose rows all fall
   // outside the area is fine. The first file of a fiscal year can also be empty: a run on July 1 reads as failed.)
   if (!rowsRead) throw new Error('empty file');
+  // Rows in the area that all fail to parse mean a changed format (a new date format, say), not a quiet week: the
+  // file fails. A file whose rows all fall outside the area still succeeds.
+  if (!records.length && counts.malformed) throw new Error('every row in the area malformed');
   return { records, malformed: counts.malformed };
 }
 

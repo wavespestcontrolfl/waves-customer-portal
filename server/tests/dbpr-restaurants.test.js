@@ -263,6 +263,17 @@ describe('syncRestaurantProspects', () => {
     expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 0, malformed: 0 }, owner_change: { kept: 1 } });
   });
 
+  test('a file whose rows in the area all fail to parse fails; a good row beside a bad one does not', async () => {
+    store = makeStore();
+    fetchText = makeFetch({
+      'newfood.csv': () => licCsv([licRow({ app: '7001', date: '2026-08-21' }), licRow({ app: '7002', date: '2026-08-22' })]),
+      'chgownr_food.csv': () => licCsv([licRow({ app: '7003', date: '2026-08-21' }), licRow({ app: '7004' })]),
+    });
+    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(result.failures).toBe(1);
+    expect(result.files).toMatchObject({ new_license: { failed: true }, owner_change: { kept: 1, malformed: 1 } });
+  });
+
   test('a file without a column the parsers need is refused whole, and the other files still load', async () => {
     store = makeStore();
     fetchText = makeFetch({
