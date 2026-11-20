@@ -1,9 +1,9 @@
 // A real Vite build of a part with its own stylesheet, with and without the
 // plugin, then the preload helper that build ships, run on a stand-in page.
 // With the plugin, an import that lists a stylesheet still loading waits for
-// it and fails with it, and the next import after a failure loads it again.
-// Vite alone skips a stylesheet it already started, and the part loads
-// without it.
+// it and fails with it, and the next import after a failure loads it again,
+// in the place of the failed link. Vite alone skips a stylesheet it already
+// started, and the part loads without it.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,12 +14,28 @@ import { patchStylesheetPreload, stylesheetRetryPlugin } from './stylesheetRetry
 
 const dirs = [];
 
-async function buildPart(plugins) {
+// A part with its own stylesheet.
+const PART = {
+  'entry.js': "export const loadPart = () => import('./part.js');\n",
+  'part.js': "import './part.css';\nexport default 'part';\n",
+  'part.css': '.part { color: teal; }\n',
+};
+// A part that lists two stylesheets: a shared one, then its own, which sets
+// the same rule. Another part imports the shared module too, so the build
+// gives it a file of its own.
+const PAIR = {
+  'entry.js': "export const loadPart = () => import('./part.js');\nexport const loadOther = () => import('./other.js');\n",
+  'part.js': "import { shared } from './shared.js';\nimport './part.css';\nexport default `part ${shared}`;\n",
+  'other.js': "import { shared } from './shared.js';\nexport default `other ${shared}`;\n",
+  'shared.js': "import './shared.css';\nexport const shared = 'shared';\n",
+  'shared.css': '.card { color: gray; }\n',
+  'part.css': '.card { color: teal; }\n',
+};
+
+async function buildPart(plugins, files = PART) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stylesheet-retry-'));
   dirs.push(dir);
-  fs.writeFileSync(path.join(dir, 'entry.js'), "export const loadPart = () => import('./part.js');\n");
-  fs.writeFileSync(path.join(dir, 'part.js'), "import './part.css';\nexport default 'part';\n");
-  fs.writeFileSync(path.join(dir, 'part.css'), '.part { color: teal; }\n');
+  Object.entries(files).forEach(([name, text]) => fs.writeFileSync(path.join(dir, name), text));
   await build({
     root: dir,
     configFile: false,
@@ -46,18 +62,20 @@ async function freshLoader(entry) {
   return (await import(`${entry}?copy=${copies}`)).loadPart;
 }
 
-// The page as the helper uses it: <link> elements in the head, each firing
-// load or error when the test says.
+// The page as the helper uses it: <link> elements in the head, in order,
+// each firing load or error when the test says. A selector names a link by
+// its attributes, as the helper writes it: link[href="..."][rel="..."].
 function standInPage() {
   const links = [];
+  const find = (selector) => {
+    const clauses = [...selector.matchAll(/\[(\w+)="([^"]*)"\]/g)];
+    return links.find((link) => selector.startsWith('link[') && clauses.every(([, name, value]) => link[name] === value)) ?? null;
+  };
   globalThis.window = { dispatchEvent: () => true };
   globalThis.document = {
-    head: { appendChild: (link) => links.push(link) },
+    head: { appendChild: (link) => links.push(link), querySelector: find },
     getElementsByTagName: () => links,
-    querySelector(selector) {
-      const match = /^link\[href="([^"]+)"\](\[rel="stylesheet"\])?$/.exec(selector);
-      return links.find((link) => match && link.href === match[1] && (!match[2] || link.rel === 'stylesheet')) ?? null;
-    },
+    querySelector: find,
     createElement() {
       const listeners = {};
       const link = {
@@ -65,6 +83,7 @@ function standInPage() {
         addEventListener: (type, listener) => { (listeners[type] ??= []).push(listener); },
         fire: (type) => (listeners[type] ?? []).forEach((listener) => listener()),
         remove: () => links.splice(links.indexOf(link), 1),
+        replaceWith: (other) => links.splice(links.indexOf(link), 1, other),
       };
       return link;
     },
@@ -83,11 +102,13 @@ async function settledSoon(promise) {
 
 let pluginEntry;
 let viteEntry;
+let pairEntry;
 let withPlugin;
 let viteAlone;
 beforeAll(async () => {
   pluginEntry = await buildPart([stylesheetRetryPlugin()]);
   viteEntry = await buildPart([]);
+  pairEntry = await buildPart([stylesheetRetryPlugin()], PAIR);
 }, 60000);
 beforeEach(async () => {
   withPlugin = await freshLoader(pluginEntry);
@@ -134,6 +155,27 @@ test('with the plugin, an import that lists a stylesheet still loading waits for
   await expect(fourth).resolves.toMatchObject({ default: 'part' });
   await expect(withPlugin()).resolves.toMatchObject({ default: 'part' });
   expect(stylesheets()).toHaveLength(1);
+});
+
+// The part's own stylesheet comes after the shared one and wins where both
+// set a rule. When the shared one failed and the part's loaded, the next load
+// of the shared one takes its old place, so the part's still comes after it.
+test('with the plugin, a stylesheet that failed loads again in its place: a stylesheet listed after it stays after it', async () => {
+  const stylesheets = standInPage();
+  const loadPair = await freshLoader(pairEntry);
+  const first = loadPair();
+  const [shared, own] = stylesheets();
+  expect(shared.href).toMatch(/^\/assets\/shared-.+\.css$/);
+  expect(own.href).toMatch(/^\/assets\/part-.+\.css$/);
+  shared.fire('error');
+  own.fire('load');
+  await expect(first).rejects.toThrow(`Unable to preload CSS for ${shared.href}`);
+  const second = loadPair();
+  const retried = stylesheets().find((link) => link !== own);
+  retried.fire('load');
+  await expect(second).resolves.toMatchObject({ default: 'part shared' });
+  expect(stylesheets()).toEqual([retried, own]);
+  expect(retried.href).toBe(shared.href);
 });
 
 test('Vite alone skips a stylesheet that failed at the next import, and the part loads without it', async () => {

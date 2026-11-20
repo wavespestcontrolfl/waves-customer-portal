@@ -83,8 +83,8 @@
 // without it, with no error. The build changes the helper
 // (lib/stylesheetRetry.js): an import that lists a stylesheet still loading
 // waits for it and fails with it, and a stylesheet that failed is forgotten,
-// so the next import that lists it loads it again, and fails as the first
-// did while it is still missing.
+// so the next import that lists it loads it again, in its old place, and
+// fails as the first did while it is still missing.
 
 import { decodedPath, isAdminPath, isFieldPath } from './adminBookmarkMeta';
 import { isWavesAdminApp } from '../native/platform';

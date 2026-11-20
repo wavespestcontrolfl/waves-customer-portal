@@ -33,10 +33,15 @@ export function PortalUpdateGate({ fallback, children }) {
   // route, a redirect included, until its session check ends. So a page that
   // a replace opens keeps the rules of the move: a receipt that replaces a
   // payment page that Back from Today opened keeps Today's bar.
+  // `from`: the page the move leaves, for the field-page rule. Once a move
+  // leaves a field page, each replace after it keeps that page, until the
+  // next push or Back: /admin -> Today -> the sign-in page -> the next page
+  // leaves Today, as Today -> the sign-in page does.
   const [gate, setGate] = useState({ pathname, origin: pathname, from: null, reloading: false });
   if (gate.pathname !== pathname) {
-    const origin = navigationType === 'REPLACE' ? gate.origin : gate.pathname;
-    const from = isFieldPath(origin) ? origin : gate.pathname;
+    const replace = navigationType === 'REPLACE';
+    const origin = replace ? gate.origin : gate.pathname;
+    const from = replace && isFieldPath(gate.from) ? gate.from : gate.pathname;
     // The stale-chunk reload follows the same rule (lib/staleChunkReload.js),
     // from this render on: the new page's code can fail before the move is
     // in view.

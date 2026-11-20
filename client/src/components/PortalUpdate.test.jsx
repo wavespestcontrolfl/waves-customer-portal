@@ -249,6 +249,41 @@ describe('PortalUpdateGate', () => {
     }
   });
 
+  // The tab opens /admin, which redirects to Today. The staff session then
+  // ends there: the layout replaces Today with the sign-in page, which
+  // replaces itself with the next page. Each replace after Today leaves Today.
+  test('a field page that a redirect opened keeps the tab through each replace after it, as through a sign-in; the next move reloads', async () => {
+    function SessionEnds() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/admin/login', { replace: true })}>Session ends</button>;
+    }
+    function SignIn() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/admin/dashboard', { replace: true })}>Sign in</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
+          <Routes>
+            <Route path="/admin" element={<Navigate to="/admin/today" replace />} />
+            <Route path="/admin/today" element={<SessionEnds />} />
+            <Route path="/admin/login" element={<SignIn />} />
+            <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
+            <Route path="/admin/pipeline" element={<Page name="Pipeline" />} />
+          </Routes>
+        </PortalUpdateGate>
+      </MemoryRouter>,
+    );
+    goLive('bbb222bbb222');
+    fireEvent.click(await screen.findByText('Session ends'));
+    fireEvent.click(await screen.findByText('Sign in'));
+    expect(await screen.findByText('Dashboard')).toBeTruthy();
+    await act(async () => {});
+    expect(reload).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Open Pipeline'));
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  });
+
   test('a move from a field page through an old alias keeps the tab, as its redirect continues that move', async () => {
     renderWithIndex('/admin/dashboard', '/admin/today/visit');
     goLive('bbb222bbb222');

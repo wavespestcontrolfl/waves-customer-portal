@@ -1026,6 +1026,43 @@ describe('on a staff page', () => {
     }
   });
 
+  // A move can enter a field page by a redirect and leave it by more
+  // replaces: the staff session ends on Today, and the sign-in page replaces
+  // itself with the next page. Each replace after Today keeps Today's bar.
+  test('a field page that a redirect opened keeps its bar through each replace after it: after a sign-in, the next page\'s missing code shows the retry screen and no reload', async () => {
+    function Landing() {
+      return <Navigate to="/admin/today" replace />;
+    }
+    function SessionEnds() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/admin/login', { replace: true })}>Session ends</button>;
+    }
+    function SignIn() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/admin/reports', { replace: true })}>Sign in</button>;
+    }
+    let failReports;
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
+    renderGate(['/admin/home'], {
+      pages: {
+        '/admin/home': Landing,
+        '/admin/today': SessionEnds,
+        '/admin/login': SignIn,
+        '/admin/reports': lazyWithRetry(() => new Promise((_, reject) => { failReports = reject; })),
+      },
+    });
+    const sessionEnds = await screen.findByRole('button', { name: 'Session ends' });
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/login', reload });
+    fireEvent.click(sessionEnds);
+    const signIn = await screen.findByRole('button', { name: 'Sign in' });
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/reports', reload });
+    fireEvent.click(signIn);
+    await waitFor(() => expect(failReports).toBeDefined());
+    await act(async () => { failReports(new TypeError('Failed to fetch dynamically imported module: /assets/ReportsPage-old.js')); });
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   // Back from a field page to a customer page whose code was asked for while
   // the field page was in view: that page keeps the staff rules through its
   // recovery, so the move from the field page still bars its reload.
