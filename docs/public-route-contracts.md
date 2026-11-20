@@ -2800,35 +2800,21 @@ Won / phone accept) and to booking from a linked not-yet-accepted estimate
 (409 before any appointment is written). Estimates accepted before the
 retirement are unaffected.
 
-Termite price-change requote (2026-11-19, the house bifenthrin moved to LESCO
-Crosscheck Plus): a replay of a sent estimate (`GET /:token/data`, the view,
-`PUT /accept` and every money gate that re-prices it) keeps the cost a pre-slab
-or trench line was quoted with when a stored row carries it: the pre-slab
-container cost and size, and the trench product surcharge (server-owned
+Termite bottle pins (2026-11-19, the house bifenthrin moved to LESCO Crosscheck
+Plus): a replay of a sent estimate (`GET /:token/data`, the view, `PUT /accept`
+and every money gate that re-prices it) keeps the cost a pre-slab or trench line
+was quoted with when a stored row carries it: the pre-slab container cost and
+size, and the trench product surcharge (server-owned
 `preSlabTermiticidePricingKnobs` / `trenchingTermiticidePricingKnobs`, like the
 termite station and misting pins). The engine uses a pin only for the product
-it was quoted with (for trenching, also the rate and product oz), and it marks
-the line a pin priced (`replayPinApplied`): a pre-slab line only when its
-container cost and size are the pin's own, a trench line only at the full
-finished volume (at a reduced volume the product oz cannot tell the job, so
-the pin keeps its surcharge but the line stays unmarked). When a replayed
-pre-slab or trench line lacks that mark (no stored row, a pin the engine
-skipped, or a match it cannot prove) and the replayed one-time total no longer
-matches the issued `onetime_total` to the cent (an issued $0.00 is a total like
-any other; a missing, NULL or blank total cannot show the price held), the
-pricing bundle carries `{
-quoteRequired: true, quoteRequiredReason: 'termiticide_price_changed_requote'
-}` with the friendly "Our termite treatment pricing has been updated since this
-quote was sent — call Waves and we’ll refresh your quote with current
-pricing." copy. Every gate that reads `resolveEstimateQuoteRequirement` then
-treats it as any other quote requirement, so the page shows the requote state
-instead of an acceptable price. A lapsed-membership reprice overwrites the
-issued totals this check reads, so a reprice that would move the issued
-one-time total while such a line lacks the mark fails closed instead
-(`membershipLapsedRequote`, as a reprice that could not run). A never-issued draft replays its pins like
-every other pin, so its first send and every later replay agree, and it is
-never held; a quote whose replayed total still matches its issued total is not
-held; a send snapshot that serves as sent is unchanged.
+it was quoted with (for trenching, also the rate and product oz); a cost set on
+the service still wins. A never-issued draft replays its pins like every other
+pin, so its first send and every later replay agree; a re-save in the estimate
+tool prices today's bottle. An estimate that kept only its engine inputs has no
+stored row, so no pin: it prices today's bottle, as the other pins do without
+their stored rows. On 2026-11-19 no open sent or viewed estimate held a slab
+or trench service. A send snapshot that serves as sent is unchanged. No new
+quote-required reason.
 
 Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
 or an annual-plan offer already delivered before the gate turned off): a

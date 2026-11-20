@@ -115,8 +115,7 @@ describe('public estimate one-time breakdown', () => {
           trenching: { measurements: { perimeterLF: 240, concreteLF: 0 }, labelConfirmed: true, warrantyTier },
         },
       } };
-      // A draft row carries both publication columns, null: a fixture without them reads as issued (estimateNeverIssued).
-      const estimate = { id: `ask-recurring-trench-${warrantyTier}`, status: 'draft', sent_at: null, viewed_at: null,
+      const estimate = { id: `ask-recurring-trench-${warrantyTier}`, status: 'draft',
         show_one_time_option: false, monthly_total: 55, onetime_total: 2400, estimate_data: data };
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const pricing = await buildPricingBundle(estimate, { monthlyBilled: true });
@@ -2994,10 +2993,10 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.oneTimeBreakdown.total).toBe(payload.anchorOneTimePrice);
   });
 
-  // The termiticide pins come only from stored rows (owner 2026-11-18 bottle swap), so an engineInputs-only estimate cannot replay
-  // the bottle it was quoted with: a 6,832 sq ft bifenthrin slab issued at $993 under the Talak bottle replays $743. Issued, it goes
-  // to review on every money gate's resolver; at its issued total, or never issued, it prices live (pre-push audit 13).
-  test('an issued engineInputs-only slab quote whose replayed total moved goes to review', async () => {
+  // The termiticide pins come only from stored rows (owner 2026-11-18 bottle swap). A 6,832 sq ft bifenthrin slab priced $993 under
+  // the Talak bottle replays $993 from its stored row, sent or a never-issued draft. An estimate that kept only its engine inputs has
+  // no row to pin from and prices today's $743, as the termite station and misting pins do without their rows.
+  test('a slab quote replays the bottle cost its stored row priced with; an engineInputs-only quote prices today\'s bottle', async () => {
     const slabQuote = (extra) => ({
       id: `estimate-public-inputs-only-slab-${extra.onetime_total}-${extra.status}`,
       estimate_data: {
@@ -3017,35 +3016,18 @@ describe('public estimate one-time breakdown', () => {
       viewed_at: null,
       ...extra,
     });
-    const issuedEarlier = slabQuote({ onetime_total: 993, status: 'sent' });
-    const moved = await buildPricingBundle(issuedEarlier);
-    expect(moved.source).toBe('engine_invocation');
-    expect(moved.oneTimeBreakdown.total).toBe(743);
-    expect(moved).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'termiticide_price_changed_requote' });
-    expect(resolveEstimateQuoteRequirement(moved, issuedEarlier.estimate_data))
-      .toMatchObject({ quoteRequired: true, reason: 'termiticide_price_changed_requote' });
-    for (const extra of [{ onetime_total: 743, status: 'sent' }, { onetime_total: '743.00', status: 'sent' }, { onetime_total: 993, status: 'draft' }]) {
-      const quote = slabQuote(extra);
-      const live = await buildPricingBundle(quote);
-      expect(live.oneTimeBreakdown.total).toBe(743);
-      expect(resolveEstimateQuoteRequirement(live, quote.estimate_data).quoteRequired).toBe(false);
-    }
-    // The totals must agree to the cent. An issued $0.00 is a total like any other, and a missing, NULL or blank one cannot show the
-    // price held, so each goes to review (pre-push audit 17).
-    for (const onetimeTotal of [743.01, '742.99', 0, '0.00', null, '', undefined]) {
-      const held = await buildPricingBundle(slabQuote({ onetime_total: onetimeTotal, status: 'sent' }));
-      expect(held.oneTimeBreakdown.total).toBe(743);
-      expect(held.quoteRequiredReason).toBe('termiticide_price_changed_requote');
-    }
-    // A stored row pins the slab (an agent draft's engineResult): it replays its sent $993, and a total that moved elsewhere is
-    // never a termiticide hold.
-    const pinned = slabQuote({ id: 'estimate-public-inputs-only-slab-pinned', onetime_total: 1000, status: 'sent' });
+    const inputsOnly = slabQuote({ onetime_total: 993, status: 'sent' });
+    const live = await buildPricingBundle(inputsOnly);
+    expect(live.source).toBe('engine_invocation');
+    expect(live.oneTimeBreakdown.total).toBe(743);
+    expect(resolveEstimateQuoteRequirement(live, inputsOnly.estimate_data).quoteRequired).toBe(false);
+    // A stored row pins the slab (an agent draft's engineResult): it replays its sent $993.
+    const pinned = slabQuote({ id: 'estimate-public-inputs-only-slab-pinned', onetime_total: 993, status: 'sent' });
     pinned.estimate_data.engineResult = { lineItems: [{
       service: 'pre_slab_termiticide', productKey: 'talstar_p', containerCost: 41.57, containerOz: 96, price: 993,
     }] };
     const kept = await buildPricingBundle(pinned);
     expect(kept.oneTimeBreakdown.total).toBe(993);
-    expect(kept.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
     expect(resolveEstimateQuoteRequirement(kept, pinned.estimate_data).quoteRequired).toBe(false);
     // A never-issued draft with the same stored row replays the pin too: its first send and every later replay read that row, so
     // the price it is sent at never moves after delivery (pre-push audit 16). A re-save in the estimate tool prices today's bottle.
@@ -3053,83 +3035,56 @@ describe('public estimate one-time breakdown', () => {
     draft.estimate_data.engineResult = pinned.estimate_data.engineResult;
     const firstSend = await buildPricingBundle(draft);
     expect(firstSend.oneTimeBreakdown.total).toBe(993);
-    expect(resolveEstimateQuoteRequirement(firstSend, draft.estimate_data).quoteRequired).toBe(false);
     const afterSend = await buildPricingBundle({ ...draft, id: `${draft.id}-sent`, status: 'sent', sent_at: '2026-11-20T15:00:00Z' });
     expect(afterSend.oneTimeBreakdown.total).toBe(993);
-    expect(afterSend.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
   });
 
-  // A stored pin prices the line only for the product, rate and product oz it was quoted with. A pin the engine skipped (another
-  // product, or a product oz a changed dilution moved) leaves the line at today's cost, so an issued quote whose total moved goes to
-  // review like a quote with no pin (pre-push audit 14).
-  test('an issued slab or trench quote whose stored pin the engine skipped goes to review', async () => {
+  // A stored pin prices the line only for the product it was quoted with (for trenching, also the rate and product oz): a pin for
+  // another product, or a product oz a changed dilution or footage moved, leaves the line at today's cost (pre-push audit 14).
+  test('a stored slab or trench pin prices the line only for what it was quoted with', async () => {
     const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
     const property = {
       propertyType: 'single_family', homeSqFt: 1800, lotSqFt: 7000, stories: 1, serviceZone: 'A', nearWater: 'NO', features: {},
     };
-    const issued = (id, services, lineItems, onetimeTotal) => ({
+    const issued = (id, services, lineItems) => ({
       id: `estimate-public-pin-skip-${id}`, status: 'sent', sent_at: '2026-11-10T15:00:00Z', viewed_at: null,
-      waveguard_tier: 'Bronze', onetime_total: onetimeTotal,
-      estimate_data: { engineInputs: { ...property, services }, engineResult: { lineItems } },
+      waveguard_tier: 'Bronze', onetime_total: 1,
+      estimate_data: { engineInputs: { ...property, services }, ...(lineItems ? { engineResult: { lineItems } } : {}) },
     });
+    const total = async (...args) => (await buildPricingBundle(issued(...args))).oneTimeBreakdown.total;
 
-    // Slab: the stored row quoted Termidor, the inputs price Crosscheck Plus ($30.90 / 128 oz), so the Termidor pin never applies.
-    // Either figure of the pin differing is enough: the cost, the size, or both. A Termidor pin never prices the line even when its
-    // figures equal today's Crosscheck ones.
+    // Slab: the stored row quoted Termidor, the inputs price Crosscheck Plus ($30.90 / 128 oz), so the Termidor pin never applies,
+    // even when its figures equal today's Crosscheck ones. A cost set on the service beats a pin that does apply.
     const slab = { preSlabTermiticide: { slabSqFt: 6832, productKey: 'talstar_p' } };
-    for (const [containerCost, containerOz] of [[41.57, 96], [41.57, 128], [30.90, 96], [30.90, 128]]) {
-      const slabRow = { service: 'pre_slab_termiticide', productKey: 'termidor_sc', containerCost, containerOz, price: 993 };
-      const slabSkipped = await buildPricingBundle(issued(`slab-${containerCost}-${containerOz}`, slab, [slabRow], 993));
-      expect(slabSkipped.oneTimeBreakdown.total).toBe(743);
-      expect(slabSkipped.quoteRequiredReason).toBe('termiticide_price_changed_requote');
+    const talakRow = [{ service: 'pre_slab_termiticide', productKey: 'talstar_p', containerCost: 41.57, containerOz: 96, price: 993 }];
+    for (const [containerCost, containerOz] of [[41.57, 96], [30.90, 128]]) {
+      const termidorRow = [{ service: 'pre_slab_termiticide', productKey: 'termidor_sc', containerCost, containerOz, price: 993 }];
+      expect(await total(`slab-${containerCost}-${containerOz}`, slab, termidorRow)).toBe(743);
     }
-    // A cost set on the service beats the pin, so the pin did not price the line: unmarked, held (pre-push audit 16).
     const customSlab = { preSlabTermiticide: { slabSqFt: 6832, productKey: 'talstar_p', customContainerCost: 30.9, customContainerOz: 128 } };
-    const customSkipped = await buildPricingBundle(issued('slab-custom', customSlab,
-      [{ service: 'pre_slab_termiticide', productKey: 'talstar_p', containerCost: 41.57, containerOz: 96, price: 993 }], 993));
-    expect(customSkipped.oneTimeBreakdown.total).toBe(743);
-    expect(customSkipped.quoteRequiredReason).toBe('termiticide_price_changed_requote');
-    // A pin for the product the inputs price applies, and the engine marks the line: a total that moved for another reason
-    // is not this hold's (the trench case below too).
-    const slabKept = await buildPricingBundle(issued('slab-kept', slab,
-      [{ service: 'pre_slab_termiticide', productKey: 'talstar_p', containerCost: 41.57, containerOz: 96, price: 993 }], 1));
-    expect(slabKept.oneTimeBreakdown.total).toBe(993);
-    expect(slabKept.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
+    expect(await total('slab-custom', customSlab, talakRow)).toBe(743);
+    expect(await total('slab-kept', slab, talakRow)).toBe(993);
 
-    // Trench: the stored surcharge replays only for the product oz the engine prices today, and the engine marks the line it
-    // priced with the pin. A pin skipped for another product oz (other footage, a changed dilution) holds even when both
-    // surcharges are the same $0: the figures alone cannot show the skip (pre-push audit 15).
+    // Trench: the stored surcharge replays only for the product oz the engine prices today.
     const trench = { trenching: { measurements: { perimeterLF: 240, concreteLF: 0 }, labelConfirmed: true } };
-    const live = generateEstimate({ ...property, services: trench }).lineItems.find((line) => line.service === 'trenching');
-    expect(live.replayPinApplied).toBeUndefined();
-    const trenchRow = (productOz, extra = 120) => [{
-      service: 'trenching', productKey: live.productKey, applicationRate: live.applicationRate, productOz,
-      productSurcharge: live.productSurcharge + extra, price: live.price + extra,
+    const fresh = generateEstimate({ ...property, services: trench }).lineItems.find((line) => line.service === 'trenching');
+    const trenchRow = (productOz) => [{
+      service: 'trenching', productKey: fresh.productKey, applicationRate: fresh.applicationRate, productOz,
+      productSurcharge: fresh.productSurcharge + 120, price: fresh.price + 120,
     }];
-    const trenchKept = await buildPricingBundle(issued('trench-kept', trench, trenchRow(live.productOz), 1));
-    expect(trenchKept.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
-    const trenchSkipped = await buildPricingBundle(issued('trench-skipped', trench, trenchRow(live.productOz + 1),
-      trenchKept.oneTimeBreakdown.total));
-    expect(trenchSkipped.oneTimeBreakdown.total).toBeLessThan(trenchKept.oneTimeBreakdown.total);
-    expect(trenchSkipped.quoteRequiredReason).toBe('termiticide_price_changed_requote');
-    const sameSurchargeSkipped = await buildPricingBundle(issued('trench-skipped-same-surcharge', trench,
-      trenchRow(live.productOz + 1, 0), trenchSkipped.oneTimeBreakdown.total + 200));
-    expect(sameSurchargeSkipped.oneTimeBreakdown.total).toBe(trenchSkipped.oneTimeBreakdown.total);
-    expect(sameSurchargeSkipped.quoteRequiredReason).toBe('termiticide_price_changed_requote');
+    const trenchLive = await total('trench-live', trench);
+    expect(await total('trench-kept', trench, trenchRow(fresh.productOz))).toBeGreaterThan(trenchLive);
+    expect(await total('trench-skipped', trench, trenchRow(fresh.productOz + 1))).toBe(trenchLive);
 
-    // A reduced volume (high-rate bifenthrin) cannot tell the job by its oz: an 800 LF quote's reduced oz is the full-volume oz a
-    // 400 LF quote stored before the volume adjustment. The pin keeps its surcharge but the line stays unmarked, so the same job at
-    // its issued total is kept and a moved total goes to review (pre-push audit 16).
+    // A reduced volume (high-rate bifenthrin) cannot tell the job by its oz alone, but the replay re-prices the stored inputs of the
+    // same estimate, so the pin keeps its surcharge and the same job keeps its sent price (pre-push audit 16).
     const high = { trenching: { measurements: { perimeterLF: 800, concreteLF: 0 }, productKey: 'talstar_p', applicationRate: 'high', labelConfirmed: true } };
-    const highLive = generateEstimate({ ...property, services: high }).lineItems.find((line) => line.service === 'trenching');
-    const highRow = [{ service: 'trenching', productKey: 'talstar_p', applicationRate: 'high', productOz: highLive.productOz, productSurcharge: 0, price: 1 }];
-    const highSame = await buildPricingBundle(issued('trench-high-same', high, highRow, 1));
-    const highTotal = highSame.oneTimeBreakdown.total;
-    expect(highTotal).toBeGreaterThan(1);
-    expect(highSame.quoteRequiredReason).toBe('termiticide_price_changed_requote');
-    const highKept = await buildPricingBundle(issued('trench-high-kept', high, highRow, highTotal));
-    expect(highKept.oneTimeBreakdown.total).toBe(highTotal);
-    expect(highKept.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
+    const highFresh = generateEstimate({ ...property, services: high }).lineItems.find((line) => line.service === 'trenching');
+    const highRow = [{
+      service: 'trenching', productKey: 'talstar_p', applicationRate: 'high', productOz: highFresh.productOz,
+      productSurcharge: highFresh.productSurcharge + 50, price: 1,
+    }];
+    expect(await total('trench-high-kept', high, highRow)).toBeGreaterThan(await total('trench-high-live', high));
   });
 
   test('detects nested legacy one-time-only estimates for acceptance flow', () => {

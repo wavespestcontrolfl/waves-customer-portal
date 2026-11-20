@@ -134,7 +134,6 @@ const {
   WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 const {
-  moneyCents,
   pricingBundleMatchesEstimateTotals,
   resolveStoredPestPricingVersion,
 } = require('../services/estimate-pricing-bundle-utils');
@@ -3662,8 +3661,6 @@ const FRIENDLY_QUOTE_REASONS = {
     'This estimate’s lawn plan uses a retired schedule — call Waves and we’ll refresh your quote with the current lawn plan options.',
   legacy_lawn_pricing_requote:
     'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.',
-  termiticide_price_changed_requote:
-    'Our termite treatment pricing has been updated since this quote was sent — call Waves and we’ll refresh your quote with current pricing.',
   retired_tree_shrub_cadence_requote:
     'Our tree & shrub programs have been updated since this quote was sent — call Waves and we’ll refresh your tree & shrub plan with current pricing.',
   retired_tree_shrub_cadence_selection:
@@ -9582,13 +9579,7 @@ async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = 
       replaySavedPricingKnobs: true,
       ...(verifiedWaiverKeys ? { setupWaiverPriorQualifyingServices: verifiedWaiverKeys } : {}),
     });
-    // The reprice overwrites the issued totals that the termiticide hold reads (termiticideRequoteNeeded). A reprice that moves
-    // the issued one-time total while a slab or trench line no pin priced cannot show it kept its quoted bottle cost, so it
-    // fails closed like a reprice that could not run (pre-push audit 18).
-    const termiticideMoved = reprice.recomputed && termiticideRequoteNeeded(
-      { [UNISSUED_ESTIMATE]: estimateNeverIssued(estimate) }, estimate, reprice.rawEngineResult, reprice.serverTotals?.onetimeTotal,
-    );
-    if (reprice.recomputed && !termiticideMoved) {
+    if (reprice.recomputed) {
       applyMembershipRepriceToEstimate(estimate, estData, reprice);
     } else {
       estData.membershipLapsedRequote = true;
@@ -9599,7 +9590,6 @@ async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = 
     // here to force a fresh recompute with the new-customer setup fee + annual
     // prepay restored.
     clearEstimatePricingCache(estimate.id);
-    if (termiticideMoved) return { ok: false, error: 'termiticide_price_changed_requote' };
     if (!reprice.recomputed) return { ok: false, error: reprice.reason || 'membership_lapsed_requote' };
   } catch (err) {
     logger.warn(`[estimate-public] membership snapshot reconcile skipped: ${err.message}`);
@@ -20583,28 +20573,6 @@ function extractEngineInputs(estData) {
   return out;
 }
 
-// Termiticide pins (owner 2026-11-18 bottle swap): savedFloorReplayOverrides below sets a slab or trench pin only from a stored
-// row (the pre-slab container cost and size, the trench product surcharge), and the engine marks the line it priced with that pin
-// (replayPinApplied). A replayed line without the mark cannot show it replayed the cost it was quoted with: an engineInputs-only
-// estimate keeps no stored row, the engine skips a pin for another product, rate or product oz (a changed dilution or footage, for
-// one), and a cost set on the service or a reduced trench volume leaves the match unproven. When the replayed one-time total also
-// no longer matches the issued one, the quote goes to review instead of selling a moved price. A never-issued draft is not sold
-// yet, so it is never held (pre-push audits 13 to 16). The totals must agree to the cent: an issued $0.00 is a total like any
-// other, and a missing, NULL or blank total cannot show the price held, so it goes to review too (pre-push audit 17).
-const TERMITICIDE_PIN_SERVICES = new Set(['pre_slab_termiticide', 'trenching']);
-function issuedOneTimeCents(estimate) {
-  const value = estimate?.onetime_total;
-  if (typeof value === 'number') return moneyCents(value);
-  return typeof value === 'string' && value.trim() !== '' ? moneyCents(value.trim()) : null;
-}
-function termiticideRequoteNeeded(estData, estimate, engineResult, replayedOneTimeTotal) {
-  if (estData?.[UNISSUED_ESTIMATE] === true) return false;
-  const lines = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
-  if (!lines.some((line) => TERMITICIDE_PIN_SERVICES.has(line?.service) && line.replayPinApplied !== true)) return false;
-  const issued = issuedOneTimeCents(estimate);
-  return issued == null || moneyCents(replayedOneTimeTotal) !== issued;
-}
-
 // Input-level floor overrides for an engine replay of this stored estimate.
 // Only keys with an actual saved signal are set (absence = replay live).
 function savedFloorReplayOverrides(estData) {
@@ -20630,7 +20598,9 @@ function savedFloorReplayOverrides(estData) {
   // quote its product surcharge. Both keys are set on every replay (undefined when the stored rows carry none), so a copy inside
   // the stored inputs never prices. A never-issued draft replays them too, like every pin above: its first send and every later
   // replay read the same stored row, so the price it was sent at never moves after delivery (pre-push audit 16). A re-save in the
-  // estimate tool prices today's bottle.
+  // estimate tool prices today's bottle. An estimate that kept only its engine inputs has no stored row, so no pin: it prices
+  // today's bottle, as the termite station, misting and tree and shrub pins above do without their stored rows. On 2026-11-19 no
+  // open sent or viewed estimate held a slab or trench service (migration 20261119020000).
   Object.assign(overrides, { preSlabTermiticidePricingKnobs: undefined, trenchingTermiticidePricingKnobs: undefined },
     require('../services/estimate-tree-shrub-knob-replay').termiticideReplayOverrides(estData));
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
@@ -30180,9 +30150,7 @@ async function buildPricingBundleInner(estimate) {
     });
   }
 
-  const termiticideRequote = termiticideRequoteNeeded(estData, estimate, anchorEngineResult, generatedOneTimeBreakdown.total);
   const payload = stampTreeShrubPalmCount(finalizePricingBundle(withManualDiscount({
-    ...(termiticideRequote ? { quoteRequired: true, quoteRequiredReason: 'termiticide_price_changed_requote' } : {}),
     frequencies,
     waveGuardTier: estimate.waveguard_tier || 'Bronze',
     anchorOneTimePrice,

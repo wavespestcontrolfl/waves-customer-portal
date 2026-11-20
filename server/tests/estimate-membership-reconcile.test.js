@@ -131,40 +131,6 @@ describe('reconcileFrozenMembershipSnapshot — frozen recurring flags', () => {
     expect(estimate.waveguard_tier).toBe('Bronze');
   });
 
-  // The reprice overwrites the issued totals the termiticide hold reads. A slab or trench line no pin priced (an engineInputs-only
-  // quote keeps no stored row) whose reprice moves the issued one-time total fails closed instead (pre-push audit 18).
-  test('a lapsed reprice that moves an unpinned slab line fails closed; a pinned, unmoved or never-issued one reprices', async () => {
-    isActivePlanCustomer.mockResolvedValue(false);
-    const slabLine = (extra = {}) => ({ service: 'pre_slab_termiticide', productKey: 'talstar_p', price: 743, ...extra });
-    const repriced = (lineItems, onetimeTotal) => serverRecomputeFromEstimateData.mockResolvedValue({
-      recomputed: true,
-      source: 'ENGINE_INPUTS',
-      serverResult: REPRICED_RESULT,
-      serverTotals: { monthlyTotal: 0, annualTotal: 0, onetimeTotal },
-      rawEngineResult: { lineItems },
-    });
-    repriced([slabLine()], 743);
-    const issued = estimateRow(frozenEstData(), { onetime_total: 993, sent_at: '2026-11-10T15:00:00Z' });
-    expect(await reconcileFrozenMembershipSnapshot(issued)).toEqual({ ok: false, error: 'termiticide_price_changed_requote' });
-    const held = JSON.parse(issued.estimate_data);
-    expect(held.membershipLapsedRequote).toBe(true);
-    expect(held.result.oneTime.total).toBe(127.5);
-    expect(issued.onetime_total).toBe(993);
-    expect(resolveEstimateQuoteRequirement(null, held).quoteRequired).toBe(true);
-
-    for (const [lineItems, onetimeTotal, overrides] of [
-      [[slabLine({ replayPinApplied: true, price: 993 })], 1100, {}],
-      [[slabLine()], 993, {}],
-      [[slabLine()], 743, { status: 'draft', sent_at: null, viewed_at: null }],
-    ]) {
-      repriced(lineItems, onetimeTotal);
-      const estimate = estimateRow(frozenEstData(), { onetime_total: 993, sent_at: '2026-11-10T15:00:00Z', ...overrides });
-      expect(await reconcileFrozenMembershipSnapshot(estimate)).toEqual({ ok: true });
-      expect(estimate.onetime_total).toBe(onetimeTotal);
-      expect(JSON.parse(estimate.estimate_data).membershipLapsedRequote).toBeUndefined();
-    }
-  });
-
   test('no trustworthy reprice → fail closed: membershipLapsedRequote set, stored result untouched', async () => {
     isActivePlanCustomer.mockResolvedValue(false);
     serverRecomputeFromEstimateData.mockResolvedValue({ recomputed: false, reason: 'NO_INPUTS' });

@@ -298,18 +298,13 @@ function serviceOptions(value) {
 // A replayed quote keeps the container cost its stored pre-slab row priced with (input.preSlabTermiticidePricingKnobs, set by
 // the server replay paths from estimate-tree-shrub-knob-replay), for the product that row quoted only, on either pricer: the
 // legacy wrapper (services.preSlabTermidor) resolves its product as a legacy payload, as pricePreSlabTermidor does. A cost set
-// on the service itself still wins. The line reports whether the pin priced it (replayPinApplied, on a replay only): the same
-// product, and the line's container cost and size are the pin's own (a cost set on the service that differs leaves it unmarked;
-// pre-push audit 16). The public bundle sends a quote whose line is unmarked, and whose total moved, to review.
-function preSlabReplayPinApplies(options, knobs, legacyWrapper = false) {
-  if (!knobs || typeof knobs !== 'object') return false;
+// on the service itself still wins.
+function withPreSlabReplayCost(options, knobs, legacyWrapper = false) {
+  if (!knobs || typeof knobs !== 'object') return options;
   const { productKey } = legacyWrapper
     ? normalizePreSlabTermiticideProduct(options.productKey || 'termidor_sc', { legacyPayload: true })
     : normalizePreSlabTermiticideProduct(options.productKey, { legacyPayload: !!options.legacyPayload });
-  return productKey === knobs.productKey;
-}
-function withPreSlabReplayCost(options, knobs, legacyWrapper = false) {
-  if (!preSlabReplayPinApplies(options, knobs, legacyWrapper)) return options;
+  if (productKey !== knobs.productKey) return options;
   const replayed = { ...options };
   if (!(Number(options.customContainerCost) > 0)) replayed.customContainerCost = knobs.containerCost;
   if (!(Number(options.customContainerOz) > 0)) replayed.customContainerOz = knobs.containerOz;
@@ -2031,16 +2026,10 @@ function generateEstimate(input) {
   const preSlabService = canonicalPreSlabService || legacyPreSlabService;
   if (preSlabService && !useCommercialManualQuote(preSlabService, 'pest_control', { scopedOneTime: true })) {
     const legacyWrapper = Boolean(legacyPreSlabService && !canonicalPreSlabService);
-    const preSlabBaseOptions = serviceOptions(preSlabService);
-    const preSlabKnobs = input.preSlabTermiticidePricingKnobs;
-    const preSlabOptions = withPreSlabReplayCost(preSlabBaseOptions, preSlabKnobs, legacyWrapper);
+    const preSlabOptions = withPreSlabReplayCost(serviceOptions(preSlabService), input.preSlabTermiticidePricingKnobs, legacyWrapper);
     const result = legacyWrapper
       ? pricePreSlabTermidor(property, preSlabOptions)
       : pricePreSlabTermiticide(property, preSlabOptions);
-    if (preSlabKnobs) {
-      result.replayPinApplied = preSlabReplayPinApplies(preSlabBaseOptions, preSlabKnobs, legacyWrapper)
-        && Number(result.containerCost) === Number(preSlabKnobs.containerCost) && Number(result.containerOz) === Number(preSlabKnobs.containerOz);
-    }
     lineItems.push(result);
   }
   // Commercial bed bug bypasses the manual lane only with EXPLICIT commercial

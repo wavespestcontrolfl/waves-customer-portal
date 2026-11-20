@@ -1081,21 +1081,20 @@ describe('a sent pre-slab quote keeps the container cost it priced with', () => 
   // A quote priced before the swap: the engine line under the Talak cost basis, as the engine wrote it then.
   const oldQuote = () => generateEstimate({ ...input(), preSlabTermiticidePricingKnobs: TALAK });
 
-  // The line is marked only when the pin priced it: the same product, and the pin's own container cost and size (pre-push audit 16).
+  // A figure set on the service wins; the pin fills only the figure the service leaves unset.
   test('the pin reproduces the earlier price, for the product it names only; a cost on the service still wins', () => {
     expect(slabLine(generateEstimate(input()))).toMatchObject({ price: 743 });
-    expect(slabLine(generateEstimate(input())).replayPinApplied).toBeUndefined();
-    expect(slabLine(oldQuote())).toMatchObject({ price: 993, containerCost: 41.57, containerOz: 96, replayPinApplied: true });
+    expect(slabLine(oldQuote())).toMatchObject({ price: 993, containerCost: 41.57, containerOz: 96 });
     expect(slabLine(generateEstimate({ ...input(), preSlabTermiticidePricingKnobs: { ...TALAK, productKey: 'termidor_sc' } })))
-      .toMatchObject({ price: 743, replayPinApplied: false });
+      .toMatchObject({ price: 743, containerCost: 30.9, containerOz: 128 });
     const custom = input({ customContainerCost: 30.9, customContainerOz: 128 });
-    expect(slabLine(generateEstimate({ ...custom, preSlabTermiticidePricingKnobs: TALAK }))).toMatchObject({ price: 743, replayPinApplied: false });
+    expect(slabLine(generateEstimate({ ...custom, preSlabTermiticidePricingKnobs: TALAK }))).toMatchObject({ price: 743 });
     const customSize = input({ customContainerOz: 128 });
-    expect(slabLine(generateEstimate({ ...customSize, preSlabTermiticidePricingKnobs: TALAK })).replayPinApplied).toBe(false);
+    expect(slabLine(generateEstimate({ ...customSize, preSlabTermiticidePricingKnobs: TALAK }))).toMatchObject({ containerCost: 41.57, containerOz: 128 });
     const customCost = input({ customContainerCost: 30.9 });
-    expect(slabLine(generateEstimate({ ...customCost, preSlabTermiticidePricingKnobs: TALAK })).replayPinApplied).toBe(false);
+    expect(slabLine(generateEstimate({ ...customCost, preSlabTermiticidePricingKnobs: TALAK }))).toMatchObject({ containerCost: 30.9, containerOz: 96 });
     const samePin = input({ customContainerCost: 41.57, customContainerOz: 96 });
-    expect(slabLine(generateEstimate({ ...samePin, preSlabTermiticidePricingKnobs: TALAK }))).toMatchObject({ price: 993, replayPinApplied: true });
+    expect(slabLine(generateEstimate({ ...samePin, preSlabTermiticidePricingKnobs: TALAK }))).toMatchObject({ price: 993 });
   });
 
   test.each([['preSlabTermidor'], ['pre_slab_termidor']])('the legacy %s service keeps the earlier price too, on the engine and the public replay', (key) => {
@@ -1218,20 +1217,17 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     expect(priced({ perimeterLF: 420 }, PIN).productSurcharge).toBe(0);
   });
 
-  // At a reduced volume the oz cannot tell the job: the high rate's 84 oz on 400 LF is also the full-volume oz a 200 LF quote stored
-  // before the volume adjustment, and that quote's 168 oz is the reduced oz of 800 LF. The pin still prices the line (the same job
-  // keeps its sent price) but the line stays unmarked, so a moved total goes to review. At the full volume it is marked (pre-push
-  // audit 16).
-  test('a reduced-volume line keeps the pinned surcharge unmarked; a full-volume line is marked', () => {
-    expect(priced({}, PIN)).toMatchObject({ price: 4943, productOz: 84, replayPinApplied: false });
-    expect(priced({ perimeterLF: 800 }, { ...PIN, productOz: 168, productSurcharge: 68 })).toMatchObject({ productOz: 168, productSurcharge: 68, replayPinApplied: false });
-    expect(priced({ perimeterLF: 420 }, PIN).replayPinApplied).toBe(false);
+  // At a reduced volume the oz alone cannot tell the job: the high rate's 84 oz on 400 LF is also the full-volume oz a 200 LF quote
+  // stored before the volume adjustment. A replay re-prices the stored inputs of the same estimate, so the pin prices the line and
+  // the same job keeps its sent price (pre-push audit 16). A pin for another product oz is skipped at any volume.
+  test('a reduced-volume line keeps the pinned surcharge; a pin for another product oz is skipped', () => {
+    expect(priced({}, PIN)).toMatchObject({ price: 4943, productOz: 84, productSurcharge: 15 });
+    expect(priced({ perimeterLF: 800 }, { ...PIN, productOz: 168, productSurcharge: 68 })).toMatchObject({ productOz: 168, productSurcharge: 68 });
     const standard = { applicationRate: 'standard' };
     const fresh = trenchLine(generateEstimate(input(standard)));
-    expect(fresh.replayPinApplied).toBeUndefined();
     const pin = { productKey: 'talstar_p', applicationRate: 'standard', productOz: fresh.productOz, productSurcharge: fresh.productSurcharge + 7 };
-    expect(priced(standard, pin)).toMatchObject({ productSurcharge: fresh.productSurcharge + 7, replayPinApplied: true });
-    expect(priced(standard, { ...pin, productOz: fresh.productOz + 1 })).toMatchObject({ price: fresh.price, replayPinApplied: false });
+    expect(priced(standard, pin)).toMatchObject({ productSurcharge: fresh.productSurcharge + 7 });
+    expect(priced(standard, { ...pin, productOz: fresh.productOz + 1 })).toMatchObject({ price: fresh.price, productSurcharge: fresh.productSurcharge });
   });
 
   // A replay re-prices the stored inputs, custom ones included, and each custom input still takes the rest of its cost basis from

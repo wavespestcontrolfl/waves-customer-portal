@@ -15,6 +15,10 @@
  * when it creates the table). One already on Crosscheck is left alone silently (re-run); one an admin changed is left alone with a
  * warning. A missing table, row or key is never an error.
  *
+ * Sent quotes: a replay keeps the slab container cost or trench product surcharge a stored row priced with (the pins in
+ * services/estimate-tree-shrub-knob-replay). An estimate that kept only its engine inputs has no stored row, so it prices the new
+ * bottle, as every replay pin does without its row. On 2026-11-19 no open sent or viewed estimate held a slab or trench service.
+ *
  * Step P (first, same transaction): production holds a stale SiteOne price for LESCO Crosscheck Plus ($58.42 per 1 gal, entered
  * 2026-09-30; the owner pays $30.90). db-bridge's pre-slab link takes a catalog price within [0.5x, 2x] of the config, and 58.42 is
  * 1.89x of 30.90, so a pre-slab link to that row unfixed would RAISE slab quotes. For each catalog row named LESCO Crosscheck Plus,
