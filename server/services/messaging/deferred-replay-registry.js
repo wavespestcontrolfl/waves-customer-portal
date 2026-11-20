@@ -389,8 +389,9 @@ const REGISTRY = {
     // The final check again at the true provider boundary: the customer can
     // accept or reach the card step after the recheck passed, while the
     // executor and the pipeline do their own work. Checkout in progress is a
-    // retryable refusal with its own retry time (nextAllowedAt); an accepted,
-    // closed or opened-unopened-reminder estimate is a terminal one.
+    // timed wait (nextAllowedAt): the executor refunds the attempt and waits
+    // (scheduler.js TIMED_WAIT_HOLDS). An accepted, closed or
+    // opened-unopened-reminder estimate is a terminal refusal.
     providerPreSendCheck(meta) {
       return async () => {
         if (!meta.estimate_id) return { ok: true };

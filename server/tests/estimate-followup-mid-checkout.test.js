@@ -336,15 +336,59 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
     expect(outcome.midCheckout).toBeUndefined();
   });
 
-  test('runs after the PDF fence; a PDF veto stops it first and is not read as a checkout hold', async () => {
+  // A PDF fence that vetoes with `reason`; returns the check the follow-up installed after it.
+  async function checkAfterPdfVeto(outcome, reason) {
+    const pdfCheck = jest.fn(async () => { throw Object.assign(new Error('pdf veto'), { providerBoundaryBlocked: true, reason }); });
+    mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; } };
+    return installedCheck(outcome);
+  }
+
+  test('runs after the PDF fence; a PDF veto on an open estimate stops the send and counts as a failed send', async () => {
+    arrange({ est: OPEN });
+    const outcome = {};
+    const check = await checkAfterPdfVeto(outcome, 'estimate_changed_since_render');
+    await expect(check()).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
+    expect(outcome).toEqual({});
+  });
+
+  // The customer accepts while the email is prepared: the PDF fence sees it first (estimate_not_open).
+  test('a PDF veto from the same acceptance still ends the job as final, not as a failed send', async () => {
+    arrange({ est: OPEN });
+    const outcome = {};
+    const check = await checkAfterPdfVeto(outcome, 'estimate_not_open');
+    arrange({ est: { ...OPEN, status: 'accepted' } });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_not_open' });
+    expect(outcome).toEqual({ finalReason: 'terminal-status:accepted' });
+  });
+
+  test('a PDF veto while the customer is mid-checkout is a wait, not a failed send', async () => {
+    arrange({ est: OPEN });
+    const outcome = {};
+    const check = await checkAfterPdfVeto(outcome, 'estimate_changed_since_render');
     arrange({ hold: { id: 'hold-1' }, est: OPEN });
-    const pdfCheck = jest.fn(async () => { throw Object.assign(new Error('pdf veto'), { providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' }); });
+    await expect(check()).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
+    expect(outcome).toEqual({ midCheckout: true });
+  });
+
+  test('the content checks share one snapshot; the final check runs after them in its own fresh one', async () => {
+    arrange({ est: OPEN });
+    const pdfCheck = jest.fn(async () => ({ ok: true }));
     mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; } };
     const outcome = {};
     const check = await installedCheck(outcome);
-
-    await expect(check()).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
-    expect(outcome.midCheckout).toBeUndefined();
+    const contentSnapshot = Object.assign((table) => db(table), { raw: db.raw, fn: db.fn });
+    db.transaction.mockClear();
+    db.transaction
+      .mockImplementationOnce(async (fn) => fn(contentSnapshot))
+      // The customer accepts after the content snapshot was taken: the final check still sees it.
+      .mockImplementationOnce(async (fn) => { arrange({ est: { ...OPEN, status: 'accepted' } }); return fn(db); });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_not_sendable' });
+    expect(pdfCheck).toHaveBeenCalledWith(expect.objectContaining({ snapshot: contentSnapshot }));
+    expect(db.transaction).toHaveBeenCalledTimes(2);
+    expect(db.transaction.mock.calls.map((c) => c[1])).toEqual([
+      { isolationLevel: 'repeatable read', readOnly: true }, { isolationLevel: 'repeatable read', readOnly: true },
+    ]);
+    expect(outcome).toEqual({ finalReason: 'terminal-status:accepted' });
   });
 
   test('without an outcome (the stage cron: legacy and payment-step sends) the same veto applies', async () => {

@@ -706,36 +706,45 @@ function checkoutBoundaryCheck(est, outcome, { stage = null, quotedExpiresAt = n
 
 // Composes that check after whatever handoff the send already has (the PDF
 // fence, the monthly-average check, both, or none), as averageProviderHandoff does.
-// Every check reads from ONE read-only snapshot (FINAL_CHECK_SNAPSHOT), so they
-// judge the same estimate revision: with separate reads, a price or recipient
-// edit between them could pass the content checks on the old row and the
-// checkout check on the new one. A snapshot that cannot open is a retryable
-// non-send, like any unreadable check.
+// The content checks read from ONE read-only snapshot (FINAL_CHECK_SNAPSHOT), so
+// they judge the same estimate revision. The final check runs after them, last,
+// in its own fresh snapshot: an acceptance or a visit-time hold that commits
+// while the PDF fingerprint or the average is recomputed is still seen. A content
+// veto (the PDF fence's estimate_not_open, a changed average) can come from the
+// same acceptance the final check reports, so the final check also classifies
+// it, and the caller ends the job or waits instead of counting a failed send. A
+// snapshot that cannot open is a retryable non-send, like any unreadable check.
 function checkoutProviderHandoff(est, outcome, inner = null, ctx = {}) {
   const check = checkoutBoundaryCheck(est, outcome, ctx);
-  const inOneSnapshot = (innerCheck) => async (args = {}) => {
+  const contentChecks = async (innerCheck, args) => {
     const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
     try {
-      return await db.transaction(async (snapshot) => {
-        if (innerCheck) await innerCheck({ ...args, snapshot });
-        return check({ ...args, snapshot });
-      }, FINAL_CHECK_SNAPSHOT);
+      await db.transaction((snapshot) => innerCheck({ ...args, snapshot }), FINAL_CHECK_SNAPSHOT);
     } catch (err) {
-      if (err.providerBoundaryBlocked || err.providerBoundaryCheckFailed) throw err;
+      if (err.providerBoundaryBlocked) {
+        // Classify only: the final check records a final reason or a wait on `outcome`.
+        await check(args).catch(() => {});
+        throw err;
+      }
+      if (err.providerBoundaryCheckFailed) throw err;
       const unavailable = new Error(`estimate ${est.id} send check unavailable: ${err.message}`);
       unavailable.providerBoundaryCheckFailed = true;
       unavailable.cause = err;
       throw unavailable;
     }
   };
+  const allChecks = (innerCheck) => async (args = {}) => {
+    if (innerCheck) await contentChecks(innerCheck, args);
+    return check(args);
+  };
   if (!inner) {
     return async (dispatch) => {
-      await dispatch(undefined, inOneSnapshot(null));
+      await dispatch(undefined, allChecks(null));
       return { ok: true };
     };
   }
   return (dispatch) => inner(async (database, innerCheck) => {
-    await dispatch(database, inOneSnapshot(innerCheck));
+    await dispatch(database, allChecks(innerCheck));
   });
 }
 
