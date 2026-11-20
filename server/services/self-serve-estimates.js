@@ -58,20 +58,29 @@ function isUndeliveredSelfServe(source, estimateData) {
 // a value it can read. The shape alone lets an ISO-looking but impossible
 // value (Feb 30) abort a whole query at the cast; pg_input_is_valid alone
 // accepts special literals such as 'now' and 'infinity' (codex pre-push P1).
-// The readers that read a stamp in SQL alone share it: the two watchers, and
-// estimate-draft-retire.js, whose rule it was. `expr` is SQL text built from
-// code constants. No ? in a pattern here: these strings go into raw SQL with
-// bindings.
+// estimate-draft-retire.js's rule, exactly as on main; deliveryInstantSql
+// builds on it. `expr` is SQL text built from code constants. No ? in a
+// pattern here: these strings go into raw SQL with bindings.
 function isoInstantSql(expr) {
   return `(${expr} ~ '^[0-9]{4}-' AND pg_input_is_valid(${expr}, 'timestamptz'))`;
 }
 
+// A clock time followed by Z or a numeric offset: the stamp names its own
+// zone. Without one, PostgreSQL reads it in the session's zone, so the same
+// row could read 4 or 5 hours apart on two connections (codex pre-push P1).
+// The clock time keeps a date-only stamp ('2005-07-04') from passing its
+// month-day as an offset. The send path always writes toISOString().
+const ZONED_STAMP_PATTERN = '[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+){0,1}){0,1} {0,1}(Z|[+-][0-9]{2}(:{0,1}[0-9]{2}){0,1})$';
+
 // The stamp deliveryState.<key> of the row under `alias` as a timestamptz,
-// NULL when absent or unreadable, so a bad stamp never aborts a query. `key`
-// is a code constant, never input.
+// for the readers that read it in SQL alone (the two watchers, the dashboard
+// service-line card's prefilter). NULL when absent, unreadable or without a
+// zone, so a bad stamp never aborts a query and every session reads the same
+// instant; a watcher then keeps its task open. `key` is a code constant,
+// never input.
 function deliveryInstantSql(alias, key) {
   const stamp = `(${alias}.estimate_data #>> '{deliveryState,${key}}')`;
-  return `(CASE WHEN ${isoInstantSql(stamp)} THEN ${stamp}::timestamptz END)`;
+  return `(CASE WHEN ${isoInstantSql(stamp)} AND ${stamp} ~ '${ZONED_STAMP_PATTERN}' THEN ${stamp}::timestamptz END)`;
 }
 
 // The reports date a send by firstDeliveredAt in SQL (the Intelligence Bar)

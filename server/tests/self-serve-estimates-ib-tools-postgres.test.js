@@ -138,21 +138,30 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(rows.filter((row) => row.flag)).toHaveLength(6);
   });
 
-  test('the reports read a first delivery only as a complete ISO instant, in SQL and JavaScript alike; the watchers read any real timestamp; no stamp aborts a query (codex pre-push P1)', async () => {
+  test('the reports read a first delivery only as a complete ISO instant, in SQL and JavaScript alike; the watchers read only a stamp that names its zone, the same in every session zone; no stamp aborts a query (codex pre-push P1s)', async () => {
     const { deliveryInstantSql, firstDeliveredAtMs, sentAtSql } = require('../services/self-serve-estimates');
     const iso = ['2005-07-04T15:00:00.000Z', '2005-07-04T15:00:00Z', '2005-07-04T11:00:00.5-04:00', '2005-07-04T15:00:00.123456Z'];
-    // Real timestamps PostgreSQL alone reads (JavaScript cannot, or reads
-    // them differently): the reports date such a send by sent_at; the watchers read them.
-    const pgOnly = ['2005-07-04 15:00:00 America/New_York', '2005-07-04T15:00:00', '2005-07-04', '2005-07-04T24:00:00Z'];
+    // A real timestamp with its zone that only PostgreSQL reads: the reports date such a send by sent_at; the watchers read it.
+    const pgZoned = ['2005-07-04T24:00:00Z', '2005-07-04 15:00:00-04'];
+    // Real timestamps with no numeric offset: the session zone would decide the instant, so no reader takes them.
+    const unzoned = ['2005-07-04 15:00:00 America/New_York', '2005-07-04T15:00:00', '2005-07-04'];
     // No instant for anyone: special literals, a day that does not exist, year 0.
     const none = ['now', 'infinity', 'today', '2005-02-30T15:00:00.000Z', '0000-01-01T00:00:00Z', 'not a date'];
-    const stamps = [...iso, ...pgOnly, ...none];
-    const { rows } = await trx.raw(`
+    const stamps = [...iso, ...pgZoned, ...unzoned, ...none];
+    const readIn = async (zone) => {
+      await trx.raw(`SET LOCAL TIME ZONE '${zone}'`);
+      return (await trx.raw(`
       SELECT e.stamp, ${deliveryInstantSql('e', 'lastDeliveredAt')} AS last_delivered, ${sentAtSql('e')} AS sent_anchor,
              ${sentAtSql('e')} IS DISTINCT FROM e.sent_at AS report_delivered
       FROM (SELECT s.stamp, 'plan_start'::text AS source, ?::timestamptz AS sent_at,
                    jsonb_build_object('deliveryState', jsonb_build_object('firstDeliveredAt', s.stamp, 'lastDeliveredAt', s.stamp)) AS estimate_data
-            FROM jsonb_array_elements_text(?::jsonb) AS s(stamp)) e`, [AT, JSON.stringify(stamps)]);
+            FROM jsonb_array_elements_text(?::jsonb) AS s(stamp)) e`, [AT, JSON.stringify(stamps)])).rows;
+    };
+    const instants = (list) => Object.fromEntries(list.map((row) => [row.stamp, [row.last_delivered?.getTime() ?? null, row.sent_anchor.getTime()]]));
+    const utc = await readIn('UTC');
+    const rows = await readIn('America/New_York');
+    // Every stamp reads as the same instant, or none, in both session zones.
+    expect(instants(rows)).toEqual(instants(utc));
     expect(rows.map((row) => row.stamp).sort()).toEqual([...stamps].sort());
     for (const row of rows) {
       const js = firstDeliveredAtMs({ deliveryState: { firstDeliveredAt: row.stamp } });
@@ -163,7 +172,7 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(read('report_delivered')).toEqual([...iso].sort());
     expect(stamps.filter((stamp) => firstDeliveredAtMs({ deliveryState: { firstDeliveredAt: stamp } }) != null).sort())
       .toEqual([...iso].sort());
-    expect(read('last_delivered')).toEqual([...iso, ...pgOnly].sort());
+    expect(read('last_delivered')).toEqual([...iso, ...pgZoned].sort());
   });
 
   test('the dashboard service-line card loads past an unreadable delivery stamp (codex pre-push P1)', async () => {
