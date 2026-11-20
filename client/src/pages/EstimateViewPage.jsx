@@ -7052,6 +7052,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           await enterContactReviewRef.current(body);
           return 'contact_review';
         }
+        // A refused plan quote (codex pre-push P1) is a no-booking answer too:
+        // the settle releases the hold and reloads, and the reload's /data
+        // marks the quote (estimate.quoteRefusal), so the page shows its banner.
+        if (STALE_QUOTE_CODES.has(body.code)) return 'no_booking';
         // The route's specialized no-booking bodies (codex r7 P2): staff can
         // reshape an estimate mid-checkout into a commercial-manual,
         // guarantee-only or trenching-review contract, and /extend preserves
@@ -7934,6 +7938,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           await enterContactReviewRef.current(body);
           return;
         }
+        // A refused plan quote holds no time (codex pre-push P1): the shared answer shows the portal banner.
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         const message = body.error || 'Unable to reserve this slot.';
         if (body.code === 'CUSTOMER_BUSY_RETRY') {
           // The matched customer row was being updated for a moment (nothing was reserved): retryable, with the

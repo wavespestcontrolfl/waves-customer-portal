@@ -78,7 +78,25 @@ describe('a refused plan quote (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED
       const next = pageSource.slice(request.index, request.index + 900);
       expect([request[1], next.includes(ANSWER)]).toEqual([request[1], true]);
     }
-    expect(pageSource.split(ANSWER).length - 1).toBe(5);
+    expect(pageSource.split(ANSWER).length - 1).toBe(6);
+  });
+
+  it('takes the same answer from the reserve, before its generic 409 copy (codex pre-push P1): no time is held on a refused quote', () => {
+    const reserve = pageSource.indexOf('fetch(`${API_BASE}/public/estimates/${token}/reserve`, {');
+    expect(reserve).toBeGreaterThan(-1);
+    const generic = pageSource.indexOf("const message = body.error || 'Unable to reserve this slot.';", reserve);
+    const answer = pageSource.indexOf(`if (${ANSWER}) return;`, reserve);
+    expect(answer).toBeGreaterThan(reserve);
+    expect(answer).toBeLessThan(generic);
+  });
+
+  it('reads a refused quote on a hold extension as a no-booking answer: the settle releases the hold and reloads into the banner', () => {
+    const extend = pageSource.indexOf('/reserve/${encodeURIComponent(scheduledServiceId)}/extend`');
+    const ok = pageSource.indexOf('if (r.ok) {', extend);
+    const line = pageSource.indexOf("if (STALE_QUOTE_CODES.has(body.code)) return 'no_booking';", extend);
+    expect(line).toBeGreaterThan(ok);
+    // In the extend helper itself: before its catch-all expiry answer.
+    expect(line).toBeLessThan(pageSource.indexOf("return 'expired';", extend));
   });
 
   it('shows the banner from the first load when /data marks the quote (codex pre-push P1)', () => {

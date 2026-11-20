@@ -519,9 +519,9 @@ describe('area add-ons reserve only in one-time mode (GATE_AREA_ADDONS on)', () 
 // add-on estimate with a linked appointment (checkout bypasses /reserve) minted a SetupIntent and saved the customer's card,
 // and only then did the accept refuse. The same refusal now comes first, before any Stripe work.
 // A customer's own plan quote that staff changed (the one-time option or invoice billing on): its accept refuses it
-// (estimate-public.js), so neither card step asks for a card. Both answer the accept's own 409, and the page shows its
-// refused-quote banner (codex pre-push P1).
-describe('a plan quote that staff changed takes no card (codex pre-push P1)', () => {
+// (estimate-public.js), so no route here holds a time or asks for a card. Each answers the accept's own 409, on the first
+// read and on every locked or post-Stripe re-read, and the page shows its refused-quote banner (codex pre-push P1 x4).
+describe('a plan quote that staff changed takes no time and no card (codex pre-push P1 x4)', () => {
   const { staffChangedQuoteRefusal } = require('../services/cancellation-resolution/restart');
   const planQuote = (overrides = {}) => ({
     id: 'est-plan-q', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, monthly_total: 88, customer_id: 'cust-1',
@@ -594,6 +594,108 @@ describe('a plan quote that staff changed takes no card (codex pre-push P1)', ()
       expect(at).toBeGreaterThan(route.indexOf('contactReviewState(estimate, { estData, quoteRequirement })'));
       expect(at).toBeLessThan(route.indexOf('sendRecheckedIntentResponse('));
     }
+  });
+
+  const HOLD = '11111111-1111-4111-8111-111111111111';
+  const TRX = { isTransaction: true, raw: jest.fn(async () => ({})) }; // raw: the SAVEPOINT statements
+  const { estimatePublicBlockingState } = require('../routes/estimate-public');
+  const internals = () => require('../routes/estimate-slots-public')._internals;
+
+  test.each(['bill_by_invoice', 'show_one_time_option'])('with %s on, every slot route refuses it on the first read: slot list, date search, reserve, extend', async (column) => {
+    slotReservation.extendReservation.mockClear();
+    currentEstimate = planQuote({ [column]: true });
+    for (const [label, call] of [
+      ['available-slots', () => fetch(`${base}/${TOKEN}/available-slots`)],
+      ['find-slots', () => post('find-slots', { query: 'next week please' })],
+      ['reserve', () => post('reserve', { slotId: '2030-01-01_09-00_unassigned' })],
+      ['extend', () => fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' })],
+    ]) {
+      const res = await call();
+      expect([label, res.status]).toEqual([label, 409]);
+      expect([label, await res.json()]).toEqual([label, expected(currentEstimate)]);
+    }
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(findEstimateSlots).not.toHaveBeenCalled();
+    expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+    expect(slotReservation.extendReservation).not.toHaveBeenCalled();
+    // The projected first read carries the fields the rule reads.
+    for (const cols of firstArgsHistory) expect(cols).toEqual(expect.arrayContaining(['source', 'bill_by_invoice', 'show_one_time_option']));
+    expect(firstArgsHistory.length).toBeGreaterThan(0);
+  });
+
+  test('the texting AI\'s slot gate offers no time for it; a clean plan quote passes the gate', async () => {
+    const { slotBrowseRefusal, offerableEstimateSlots } = internals();
+    const changed = planQuote({ bill_by_invoice: true });
+    await expect(slotBrowseRefusal(changed)).resolves.toEqual({ status: 409, body: expected(changed) });
+    await expect(slotBrowseRefusal(planQuote())).resolves.toBeNull();
+    currentEstimate = changed;
+    const acceptance = require('../routes/estimate-public').resolveEstimateAcceptance;
+    acceptance.mockClear();
+    await expect(offerableEstimateSlots('est-plan-q', 'cust-1')).resolves.toBeNull();
+    expect(acceptance).not.toHaveBeenCalled();
+  });
+
+  test('the locked reserve and extend rows refuse it too, an extend\'s busy skip included', async () => {
+    currentEstimate = planQuote();
+    const changed = planQuote({ show_one_time_option: true });
+    let reserveRefusal;
+    slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
+      reserveRefusal = await args.revalidateEstimate(changed, TRX, { date: '2030-01-01' });
+      const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = reserveRefusal; throw err;
+    });
+    const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    expect(reserved.status).toBe(409);
+    expect(await reserved.json()).toEqual(expected(changed));
+    expect(reserveRefusal).toEqual({ status: 409, body: expected(changed) });
+    let extendPredicate;
+    slotReservation.extendReservation.mockImplementationOnce(async (args) => { extendPredicate = args.revalidateEstimate; return { scheduledServiceId: HOLD, expiresAt: null }; });
+    expect((await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' })).status).toBe(200);
+    await expect(extendPredicate(changed, TRX)).resolves.toEqual({ status: 409, body: expected(changed) });
+    // A briefly held customer row skips only the park decision on an extend: the plan-quote rule reads the row alone.
+    const busy = () => estimatePublicBlockingState.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+    busy();
+    await expect(extendPredicate(changed, TRX)).resolves.toEqual({ status: 409, body: expected(changed) });
+    busy();
+    await expect(extendPredicate(planQuote(), TRX)).resolves.toBeNull();
+    // A reserve keeps its retryable busy answer.
+    busy();
+    await expect(internals().lockedContactReviewRefusal(changed, TRX)).resolves.toMatchObject({ status: 409, body: { code: 'CUSTOMER_BUSY_RETRY' } });
+  });
+
+  test('a change that lands while Stripe mints: the post-Stripe re-read refuses it, so no client secret leaves the server', async () => {
+    const holds = require('../services/estimate-card-holds');
+    holds.resolveCardHoldPolicy.mockReturnValue({ required: true, enforced: true, noShowFeeAmount: 49, cancelWindowHours: 24 });
+    try {
+      currentEstimate = planQuote();
+      holds.createCardHoldSetupIntentForEstimate.mockImplementationOnce(async () => {
+        currentEstimate = planQuote({ bill_by_invoice: true }); // the staff write commits during the mint
+        return { clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 };
+      });
+      const res = await post('card-hold-intent', {});
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(text).not.toContain('cs_SECRET');
+      expect(JSON.parse(text)).toEqual(expected(currentEstimate));
+      expect(holds.createCardHoldSetupIntentForEstimate).toHaveBeenCalledTimes(1);
+      // The recurring route's exit runs the same re-read, and retires its minted intent first (pinned above by source).
+      await expect(internals().postMintRefusal({ id: 'est-plan-q' }, { requestedServiceMode: '' })).resolves.toEqual({ status: 409, body: expected(currentEstimate) });
+      // Control: still clean at the re-read -> the secret is returned.
+      currentEstimate = planQuote();
+      holds.createCardHoldSetupIntentForEstimate.mockResolvedValueOnce({ clientSecret: 'cs_SECRET', setupIntentId: 'seti_2', noShowFeeAmount: 49, cancelWindowHours: 24 });
+      const ok = await post('card-hold-intent', {});
+      expect(ok.status).toBe(200);
+      expect((await ok.json()).clientSecret).toBe('cs_SECRET');
+    } finally {
+      holds.resolveCardHoldPolicy.mockReset();
+    }
+  });
+
+  test('order: the blocking state answers first (as in the accept), then the plan-quote rule', async () => {
+    const { slotBlockingRefusal } = internals();
+    const changed = planQuote({ show_one_time_option: true });
+    estimatePublicBlockingState.mockResolvedValueOnce({ state: 'quote_required' });
+    await expect(slotBlockingRefusal(changed, {})).resolves.toEqual({ status: 409, body: { error: 'Estimate is no longer active' } });
+    await expect(slotBlockingRefusal(changed, {})).resolves.toEqual({ status: 409, body: expected(changed) });
   });
 });
 

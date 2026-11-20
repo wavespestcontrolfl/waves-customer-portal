@@ -2154,10 +2154,17 @@ legacy renderer and the GrowthBook holdback, and the `/api/estimates` mount redi
 quote, so the page shows the banner and offers no booking from the first load. `POST
 /:token/card-hold-intent` and `/recurring-card-intent` answer the same 409 after the park decision and
 before any policy answer or Stripe call, and mint nothing; a recurring replace request's named
-capture is retired first (the existing 503 when Stripe cannot confirm). The page answers that 409 from
-every card step (the modal mint, the replace-method call and the inline pre-mint) with the same
-banner. The office's stuck-booking alert treats both codes as routine, since the banner walks the
-customer back to the portal. A re-check that cannot read its state, or that finds the
+capture is retired first (the existing 503 when Stripe cannot confirm). Every slot route answers the
+same 409 too, through the router's two shared checks: `GET /:token/available-slots`, `POST
+/:token/find-slots`, `POST /:token/reserve` and its `extend`, after the blocking state and before every
+shortcut, on the first read and again on the locked row (an extend that skips the park decision on a
+busy customer row still applies this rule, which reads the row alone). Both card steps apply it again
+on the row they re-read after Stripe answers, so a change that lands during the mint withholds the
+client secret (the recurring step retires its minted intent first). The texting AI offers no time for
+such a quote. The page answers that 409 from every card step (the modal mint, the replace-method call
+and the inline pre-mint) and from the reserve with the same banner, and reads it on a hold extension
+as a no-booking answer (release the hold, then reload into the banner). The office's stuck-booking
+alert treats both codes as routine, since the banner walks the customer back to the portal. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never
 waits on it while it holds the comms key), answers 409
 `{ error, code: 'PLAN_START_RECHECK_RETRY' }` with a retry line and writes nothing; the estimate page
