@@ -8077,6 +8077,9 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
   // The home stamp the form rendered from (irrigation_home_changed_at). A sod
   // date set after the home changed is refused unless the save echoes it back.
   const renderStampRef = useRef(null);
+  // The sprinkler timers a failed save of this editor sent: they may have landed, so the next save names them beside
+  // the timer the form opened with (controllerTimerSeen).
+  const timerTriedRef = useRef([]);
   // Read-only hold lines for the saved sod record from GET /new-sod.
   const [sodInfo, setSodInfo] = useState(null);
   const sodSeq = useRef(0);
@@ -8107,6 +8110,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
     const snapshot = accessPrefsDraftFromRow(prefs);
     initialDraftRef.current = snapshot;
     renderStampRef.current = prefs?.irrigation_home_changed_at ?? null;
+    timerTriedRef.current = [];
     setDraft(snapshot);
     setFieldErrors({});
     setErr("");
@@ -8126,16 +8130,26 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
     if ([...ACCESS_PREFS_SOD_KEYS, ...ACCESS_PREFS_TIMER_KEYS].some((k) => dirtyKeys.includes(k))) {
       body.confirmedAsOf = renderStampRef.current;
     }
-    // The timer this form opened with (or last saved), as brand|model|app: the server sets the timer only over that
-    // one, so a change the customer made while the form was open is never overwritten.
-    if (ACCESS_PREFS_TIMER_KEYS.some((k) => dirtyKeys.includes(k))) {
-      const shown = accessPrefsSavePayload(initialDraftRef.current, ACCESS_PREFS_TIMER_KEYS);
-      body.controllerTimerSeen = ACCESS_PREFS_TIMER_KEYS.map((k) => shown[k] ?? "").join("|");
+    // The timers the row may hold, as brand|model|app: the one this form opened with (or last saved), and any a failed
+    // save sent. The server sets the timer only over one of them, so a change the customer made while the form was
+    // open is never overwritten.
+    const sendsTimer = ACCESS_PREFS_TIMER_KEYS.some((k) => dirtyKeys.includes(k));
+    const timerKey = (values) => {
+      const shown = accessPrefsSavePayload(values, ACCESS_PREFS_TIMER_KEYS);
+      return ACCESS_PREFS_TIMER_KEYS.map((k) => shown[k] ?? "").join("|");
+    };
+    if (sendsTimer) body.controllerTimerSeen = [...new Set([timerKey(initialDraftRef.current), ...timerTriedRef.current])];
+    let response;
+    try {
+      response = await adminFetch(
+        `/admin/customers/${customerId}/property-preferences`,
+        { method: "PUT", body: JSON.stringify(body) },
+      );
+    } catch (e) {
+      // No refusal from the server (a lost answer, a 5xx): the timer may have landed.
+      if (sendsTimer && !Array.isArray(e?.body?.rejected)) timerTriedRef.current = [...timerTriedRef.current, timerKey(draft)];
+      throw e;
     }
-    const response = await adminFetch(
-      `/admin/customers/${customerId}/property-preferences`,
-      { method: "PUT", body: JSON.stringify(body) },
-    );
     return { failed: accessPrefsRejectedMap(response?.rejected), preferences: response?.preferences };
   };
 

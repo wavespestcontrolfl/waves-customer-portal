@@ -80,7 +80,7 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 8000 });
     // The save names the timer the screen showed before the change: the server sets the timer only over that one.
     expect(api.updatePropertyPreferences).toHaveBeenCalledWith(expect.objectContaining({
-      irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: null, controller_timer_seen: 'hunter|x2|yes',
+      irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: null, controller_timer_seen: ['hunter|x2|yes'],
     }));
     expect(screen.getByText('Hunter Pro-C')).toBeInTheDocument();
     // A timer is not a watering input: recording one does not reload the week's plan.
@@ -107,13 +107,14 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     expect(await screen.findByText(shown, {}, { timeout: 8000 })).toBeInTheDocument();
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
     expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
-    expect(api.updatePropertyPreferences.mock.calls[0][0].controller_timer_seen).toBe('||');
+    expect(api.updatePropertyPreferences.mock.calls[0][0].controller_timer_seen).toEqual(['||']);
 
     fireEvent.change(screen.getByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch' } });
     await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 8000 });
     expect(api.updatePropertyPreferences.mock.calls[1][0].irrigationControllerModel).toBe(sentAgain ? 'x2' : undefined);
-    // A lost change goes again with the timer it was made against; a refused one leaves nothing behind.
-    expect(api.updatePropertyPreferences.mock.calls[1][0].controller_timer_seen).toBe(sentAgain ? '||' : undefined);
+    // A lost change goes again naming the timer it was made against and the one it sent (that save may have landed);
+    // a refused one leaves nothing behind.
+    expect(api.updatePropertyPreferences.mock.calls[1][0].controller_timer_seen).toEqual(sentAgain ? ['||', 'hunter|x2|'] : undefined);
     expect(await screen.findByText('Property details saved.')).toBeInTheDocument();
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
   }, 20000);
@@ -162,13 +163,13 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
     await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 8000 });
     expect(api.updatePropertyPreferences.mock.calls[0][0]).toMatchObject({
-      irrigationControllerModel: 'pro_c', irrigationControllerApp: 'yes', controller_timer_seen: 'hunter|x2|',
+      irrigationControllerModel: 'pro_c', irrigationControllerApp: 'yes', controller_timer_seen: ['hunter|x2|'],
     });
     expect(await screen.findByText('Property details saved.')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'No' }));
     await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 8000 });
-    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({ irrigationControllerApp: 'no', controller_timer_seen: 'hunter|pro_c|yes' });
+    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({ irrigationControllerApp: 'no', controller_timer_seen: ['hunter|pro_c|yes'] });
     expect(await screen.findByText(`We could not save your timer. ${CHANGED}`, {}, { timeout: 8000 })).toBeInTheDocument();
     expect(screen.getByText('Hunter Pro-C')).toBeInTheDocument();
   }, 20000);
@@ -196,11 +197,39 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     await act(async () => { answerFirstSave(); });
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
     // The X2 was picked while the screen showed the Pro-C on its way to the server.
-    expect(api.updatePropertyPreferences.mock.calls[0][0].controller_timer_seen).toBe('hunter|x2|');
+    expect(api.updatePropertyPreferences.mock.calls[0][0].controller_timer_seen).toEqual(['hunter|x2|']);
 
     expect(await screen.findByText('Could not save. Please check your connection and try again.', {}, { timeout: 8000 })).toBeInTheDocument();
-    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({ irrigationControllerModel: 'x2', controller_timer_seen: 'hunter|pro_c|' });
+    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({ irrigationControllerModel: 'x2', controller_timer_seen: ['hunter|pro_c|'] });
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
+  }, 20000);
+
+  // Pro-C picked over an X2; Yes tapped while that save is out; the save lands but its answer is lost. The retry
+  // carries the answer and names both timers the row may hold, so the server takes it over either one.
+  it('after a save whose answer was lost, the queued answer names both timers the row may hold', async () => {
+    api.getPropertyPreferences.mockResolvedValue({
+      preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: null },
+      hasLawnCare: true,
+    });
+    let loseFirstAnswer;
+    api.updatePropertyPreferences
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { loseFirstAnswer = () => reject(new Error('Failed to fetch')); }))
+      .mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...payload } }));
+    render(<PropertyTab customer={lawnCustomer} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change my timer' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Pro-C/ }));
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 8000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
+    await act(async () => { loseFirstAnswer(); });
+
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 8000 });
+    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({
+      irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: 'yes',
+      controller_timer_seen: ['hunter|x2|', 'hunter|pro_c|'],
+    });
+    expect(await screen.findByText('Property details saved.', {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.getByText('Hunter Pro-C')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'true');
   }, 20000);
 
   it('a timer staff saved while the page was open replaces the old one after the next save', async () => {

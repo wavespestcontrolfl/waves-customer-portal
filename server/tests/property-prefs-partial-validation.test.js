@@ -256,6 +256,17 @@ describe('PUT /api/property/preferences — the sprinkler timer on file', () => 
     expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
   });
 
+  // Pro-C picked over an X2, its save landed but the answer was lost, and Yes was tapped meanwhile: the retry names
+  // both timers the row may hold, and the row holding either one takes it.
+  test('after a save that may have landed, a change naming both timers saves over either one', async () => {
+    const answered = { irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: 'yes', controller_timer_seen: ['hunter|x2|', 'hunter|pro_c|'] };
+    for (const model of ['x2', 'pro_c']) {
+      db._state.row = { id: 'pref-1', customer_id: 'cust-1', irrigation_controller_brand: 'hunter', irrigation_controller_model: model, irrigation_controller_app: null };
+      expect((await putPrefs(answered)).status).toBe(200);
+      expect(timerOf(db._state.row)).toEqual(['hunter', 'pro_c', 'yes']);
+    }
+  });
+
   test('a page that showed another timer cannot set one: the timer changed while it was open', async () => {
     db._state.row = { id: 'pref-1', customer_id: 'cust-1', irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
     for (const seen of [{ controller_timer_seen: 'hunter|x2|' }, {}]) {

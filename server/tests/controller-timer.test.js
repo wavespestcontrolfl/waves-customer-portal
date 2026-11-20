@@ -111,6 +111,11 @@ test('a timer change lands only over the timer the form showed: a page left open
   expect(settle({ irrigation_zones: 6 }, { seen: null })).toEqual({ rejected: [], left: { irrigation_zones: 6 } });
   // A move outranks it: the reason names the home.
   expect(settle({ ...X2 }, { stored: RAIN_BIRD, seen: 'hunter|x2|yes', fresh: false }).rejected[0].message).toMatch(/home on this account changed/);
+  // A page names every timer the row may hold: after a save that may have landed, the old one and the one it sent.
+  const PRO_C = timerColumns(['hunter', 'pro_c', null]);
+  const answer = { ...PRO_C, irrigation_controller_app: 'yes' };
+  for (const stored of [X2, PRO_C]) expect(settle({ ...answer }, { stored, seen: ['hunter|x2|yes', 'hunter|pro_c|'] }).rejected).toEqual([]);
+  expect(settle({ ...answer }, { stored: RAIN_BIRD, seen: ['hunter|x2|yes', 'hunter|pro_c|'] }).rejected).toHaveLength(3);
   // A timer equal to the one stored changes nothing: the retry of a save that landed but whose answer was lost.
   expect(settle({ ...X2, irrigation_zones: 6 }, { stored: X2, seen: '||' })).toEqual({ rejected: [], left: { ...X2, irrigation_zones: 6 } });
   expect(settle({ ...X2 }, { stored: X2, seen: null }).rejected).toEqual([]);
@@ -119,9 +124,12 @@ test('a timer change lands only over the timer the form showed: a page left open
 test('the timer a form saw comes from either writer\'s field, as brand|model|app', () => {
   expect(controllerTimerKey(X2)).toBe('hunter|x2|yes');
   expect(controllerTimerKey(null)).toBe('||');
-  expect(controllerTimerSeen({ controller_timer_seen: 'hunter|x2|yes' })).toBe('hunter|x2|yes');
-  expect(controllerTimerSeen({ controllerTimerSeen: '||' })).toBe('||');
-  for (const body of [{}, null, { controller_timer_seen: 7 }, { controllerTimerSeen: null }]) expect(controllerTimerSeen(body)).toBeNull();
+  expect(controllerTimerSeen({ controller_timer_seen: ['hunter|x2|yes', 'hunter|pro_c|'] })).toEqual(['hunter|x2|yes', 'hunter|pro_c|']);
+  expect(controllerTimerSeen({ controllerTimerSeen: '||' })).toEqual(['||']);
+  for (const body of [
+    {}, null, { controller_timer_seen: 7 }, { controllerTimerSeen: null }, { controller_timer_seen: [] },
+    { controller_timer_seen: ['||', 7] }, { controller_timer_seen: Array(9).fill('||') }, { controller_timer_seen: 'x'.repeat(65) },
+  ]) expect(controllerTimerSeen(body)).toBeNull();
 });
 
 test('a write rendered against a home the customer has left is rejected, a clear included', () => {

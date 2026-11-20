@@ -771,7 +771,7 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     // the form opened with: the server sets the timer only over that one.
     expect(bodies[0]).toEqual({
       irrigationControllerBrand: 'rain_bird', irrigationControllerModel: null, irrigationControllerApp: null, confirmedAsOf: null,
-      controllerTimerSeen: 'hunter|x2|yes',
+      controllerTimerSeen: ['hunter|x2|yes'],
     });
   });
 
@@ -815,7 +815,42 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     // it opened with.
     expect(bodies[0]).toEqual({
       irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'no',
-      confirmedAsOf: '2026-11-10T15:00:00.000Z', controllerTimerSeen: 'hunter|x2|yes',
+      confirmedAsOf: '2026-11-10T15:00:00.000Z', controllerTimerSeen: ['hunter|x2|yes'],
     });
+  });
+
+  it('after a save that got no answer, the next save also names the timer that save sent: it may have landed', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        bodies.push(JSON.parse(options.body));
+        if (bodies.length === 1) return Promise.reject(new TypeError('Failed to fetch'));
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({ irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const select = (label) => screen.getByText(label).closest('label').querySelector('select');
+    fireEvent.change(select('Runs From Phone App'), { target: { value: 'no' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
+    fireEvent.change(select('Runs From Phone App'), { target: { value: 'unknown' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[0].controllerTimerSeen).toEqual(['hunter|x2|yes']);
+    expect(bodies[1].controllerTimerSeen).toEqual(['hunter|x2|yes', 'hunter|x2|no']);
+    expect(bodies[1].irrigationControllerApp).toBe('unknown');
   });
 });

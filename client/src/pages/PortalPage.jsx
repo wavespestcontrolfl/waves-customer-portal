@@ -8779,9 +8779,10 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // The customer's own timer pick that the server refused: it stays on screen beside the reason, and no save response
   // replaces it, until a later pick is sent and taken.
   const timerRefusedRef = useRef(false);
-  // The timer this screen showed before its first queued timer change (sprinklerTimerKey). The save sends it as
-  // controller_timer_seen, and the server sets the timer only over that one: a page left open never puts back a timer
-  // someone else replaced, and an app answer never lands on another box.
+  // The timers the row may hold as far as the queued timer changes know (sprinklerTimerKey values): the one this screen
+  // showed before the first of them, and the timer of a failed save that went back in the queue (it may have landed). The save
+  // sends them as controller_timer_seen, and the server sets the timer only over one of them: a page left open never
+  // puts back a timer someone else replaced, and an app answer never lands on another box.
   const timerSeenRef = useRef(null);
   const saveQueueRef = useRef(Promise.resolve());
   // Identity these edits belong to. The whole portal tree remounts on any
@@ -8970,12 +8971,15 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             delete kept.controller_timer_seen;
             return kept;
           };
-          // Re-queue UNDER newer edits (a field re-edited since this PUT left wins). A timer change goes back with the
-          // timer it was made against, which is older than that of any timer change queued since.
+          // Re-queue UNDER newer edits (a field re-edited since this PUT left wins). A timer change goes back naming the
+          // timers its save named and the timer it sent: a save with no answer may have landed, and any timer change
+          // queued since was made over it.
           const requeue = (fields) => {
             if (!Object.keys(fields).length) return;
             pendingRef.current = { ...fields, ...pendingRef.current };
-            if (SPRINKLER_TIMER_FIELDS.some((field) => field in fields)) timerSeenRef.current = savingTimerSeen;
+            if (SPRINKLER_TIMER_FIELDS.some((field) => field in fields)) {
+              timerSeenRef.current = [...new Set([...(savingTimerSeen || []), sprinklerTimerKey(toSave)])];
+            }
           };
           if (rejectedFields.length) {
             if (rejectedFields.some((r) => SPRINKLER_TIMER_FIELDS.includes(r.field))) timerRefusedRef.current = true;
@@ -9542,7 +9546,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         app={prefs.irrigationControllerApp}
         error={fieldErrors.irrigationControllerBrand || fieldErrors.irrigationControllerModel || fieldErrors.irrigationControllerApp}
         onChange={(fields) => {
-          if (!SPRINKLER_TIMER_FIELDS.some((field) => field in pendingRef.current)) timerSeenRef.current = sprinklerTimerKey(prefs);
+          if (!SPRINKLER_TIMER_FIELDS.some((field) => field in pendingRef.current)) timerSeenRef.current = [sprinklerTimerKey(prefs)];
           Object.entries(fields).forEach(([field, value]) => updateField(field, value));
         }}
       />}
