@@ -2513,9 +2513,10 @@ describe('POST /:token commit', () => {
       ['its stored pin and address unchanged', true, {}],
       ['a new pin since phase 1', false, { latitude: 27.5, longitude: -82.6 }],
       ['a new address since phase 1', false, { address_line1: '9 Home St' }],
+      ['another profile at that pin and address', false, { id: 'cust-0', account_id: 'acct-0' }],
     ])('a typed address whose booking moved to the trusted profile, %s: address_changed %s', async (_label, expected, edit) => {
       mockFarSouthGates.funnel = true;
-      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.leads = { ...LINKED_LEAD, customer_id: edit.id || 'cust-9' };
       firstResults.call_log = { from_phone: '+19415550101' };
       const adopted = {
         address_line1: '123 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.1, longitude: -82.2,
