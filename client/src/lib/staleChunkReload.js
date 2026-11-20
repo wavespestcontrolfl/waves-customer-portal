@@ -49,9 +49,7 @@
 // move from a field page opened (staffTab), and a page that never reloads by
 // itself bars the reload whether it is in view or at the address. A redirect
 // continues the move it ends, so until the move's last page is in view, the
-// page the move started on counts too (moveUnderWayFrom). A redirect is a
-// replace before any use of the page in view: after a use, a replace starts
-// a new move from that page (PortalUpdateGate). A page whose code
+// page the move started on counts too (moveUnderWayFrom). A page whose code
 // is missing reloads only while the address names that page: after Back, its
 // reload would open the next page. Two paths name one page when they decode
 // alike, case kept (samePage).
@@ -256,12 +254,11 @@ export function onPageUse(listener) {
 // tap, a key or a field change anywhere but on a Reload control. A page keeps
 // unsaved work in many ways: a field, a toggle, a picked slot, a signature on
 // a canvas, a shape drawn on a map. No list of controls names them all, so
-// after any use a reload asks once first. It reads the record alone. The
-// staff rules ask it: the Reload bar, on a staff page; the staff retry
+// after any use a reload asks once first. Only the staff rules ask this, so
+// it reads the record alone: the Reload bar, on a staff page; the staff retry
 // screen (App.jsx); and a page whose code is missing, asked for on a staff
 // tab (reloadForMissingCode), which keeps the staff rules once in view, a
-// customer page included. PortalUpdateGate asks it at a replace, which after
-// a use starts a new move. A page move ends the use once it is in view
+// customer page included. A page move ends the use once it is in view
 // (notePageInView). Both paths read the page in view, so they share one
 // spelling.
 export function usedOnPageInView() {

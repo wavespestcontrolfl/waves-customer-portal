@@ -15,7 +15,7 @@ import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests
 import { registerReloadHold } from '../lib/reloadHolds';
 import { countDeviceWrite } from '../lib/deviceWrites';
 import { PAGE_USE_EVENTS } from '../lib/portalReload';
-import { watchPageUse } from '../lib/staleChunkReload';
+import { usedOnPageInView, watchPageUse } from '../lib/staleChunkReload';
 import { PortalReloadPrompt, PortalUpdateBar, PortalUpdateGate } from './PortalUpdate';
 
 let holding = false;
@@ -90,13 +90,23 @@ function Where() {
   return <output data-testid="where">{useLocation().pathname}</output>;
 }
 
-function renderWithIndex(landing, start = '/admin/pipeline', entries = [start]) {
+// Like the staff layout (AdminLayoutV2): it renders no route, the /admin
+// index's redirect included, until its session check ends.
+// verifyStaffSession ends it.
+let verifyStaffSession = null;
+function VerifyingIndex({ landing }) {
+  const [verified, setVerified] = useState(false);
+  useEffect(() => { verifyStaffSession = () => setVerified(true); }, []);
+  return verified ? <Navigate to={landing} replace /> : <p>Verifying staff access…</p>;
+}
+
+function renderWithIndex(landing, start = '/admin/pipeline', entries = [start], index = <Navigate to={landing} replace />) {
   return render(
     <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
       <Where />
       <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
         <Routes>
-          <Route path="/admin" element={<Navigate to={landing} replace />} />
+          <Route path="/admin" element={index} />
           <Route path="/admin/pipeline" element={<Home />} />
           <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
           <Route path="/admin/today" element={<Page name="Today" />} />
@@ -215,15 +225,28 @@ describe('PortalUpdateGate', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a move from a field page through the /admin index keeps the tab, as field work can still be on its way; the next move reloads', async () => {
-    renderWithIndex('/admin/dashboard', '/admin/today/visit');
-    goLive('bbb222bbb222');
-    fireEvent.click(screen.getByText('Home'));
-    expect(await screen.findByText('Dashboard')).toBeTruthy();
-    await act(async () => {});
-    expect(reload).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText('Open Pipeline'));
-    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  // The index redirects only once the staff session check ends, so a tap can
+  // come first. That tap is a use of the page, and the redirect still
+  // continues the move from the field page.
+  test('a move from a field page through the /admin index keeps the tab, also after a tap while the index waits for the staff session check; the next move reloads', async () => {
+    const stop = watchPageUse();
+    try {
+      renderWithIndex('/admin/dashboard', '/admin/today/visit', undefined, <VerifyingIndex landing="/admin/dashboard" />);
+      goLive('bbb222bbb222');
+      fireEvent.click(screen.getByText('Home'));
+      const verifying = screen.getByText('Verifying staff access…');
+      fireEvent.pointerDown(verifying);
+      fireEvent.click(verifying);
+      expect(usedOnPageInView()).toBe(true);
+      act(() => verifyStaffSession());
+      expect(await screen.findByText('Dashboard')).toBeTruthy();
+      await act(async () => {});
+      expect(reload).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByText('Open Pipeline'));
+      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    } finally {
+      stop();
+    }
   });
 
   test('a move from a field page through an old alias keeps the tab, as its redirect continues that move', async () => {

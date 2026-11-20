@@ -992,12 +992,12 @@ describe('on a staff page', () => {
     }
   });
 
-  // A replace after a use of the page in view is not a redirect: the move
-  // ended on that page (PortalUpdateGate). A payment page that Back from
-  // Today opened is paid there, and its receipt replaces it: the receipt
-  // opens from the payment page, not from Today, so its missing code reloads
-  // once by itself when nothing holds the tab.
-  test('Back from Today to a payment page, paid there, then its receipt by replace: the receipt\'s missing code reloads once, as no move from Today would', async () => {
+  // Every replace continues the move it follows, also after a use of the
+  // page (PortalUpdateGate): a use cannot tell a redirect from a replace the
+  // person caused. A payment page that Back from Today opened is paid there,
+  // and its receipt replaces it: the receipt keeps Today's bar, so its
+  // missing code shows the retry screen and never reloads by itself.
+  test('Back from Today to a payment page, paid there, then its receipt by replace: the receipt keeps Today\'s bar, so its missing code shows the retry screen and no reload', async () => {
     const stop = watchPageUse();
     try {
       function PayPage() {
@@ -1019,8 +1019,8 @@ describe('on a staff page', () => {
       tap(pay);
       await waitFor(() => expect(failReceipt).toBeDefined());
       await act(async () => { failReceipt(new TypeError('Failed to fetch dynamically imported module: /assets/ReceiptPage-old.js')); });
-      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
-      expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
     } finally {
       stop();
     }
