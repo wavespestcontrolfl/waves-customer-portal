@@ -27,7 +27,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const { filterCollidingSlots, stopDatesInRange } = estimateSlotAvailability._internals;
 
-const ENV_KEYS = ['GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY', 'GATE_SLOT_TRAVEL_GAP', 'GATE_DRIVE_TIME_CALIBRATION'];
+const ENV_KEYS = ['GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY', 'GATE_SLOT_TRAVEL_GAP'];
 const saved = {};
 beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
 beforeEach(() => {
@@ -59,7 +59,6 @@ describe('arrival-route hour-mode fixed blocks', () => {
   const blocker = (overrides) => stop('blocker', '09:00', 27.54, { window_end: '12:00', ...overrides });
   const future = () => new Date(Date.now() + 60_000);
 
-  beforeAll(() => { process.env.GATE_DRIVE_TIME_CALIBRATION = 'true'; });
 
   test.each([
     ['another technician stop', { technician_id: 'other' }],

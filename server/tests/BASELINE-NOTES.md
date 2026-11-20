@@ -8,6 +8,16 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-11-19 stinging-insect line name (label only, no price change)
+
+`v1adapter_stinging_wasp_ground_tier2` stored its line name as the raw engine
+key `stinging_insect`: the mapper's `SERVICE_LABEL` had `stinging` /
+`stinging_v2` but not the keys the pricers emit, so the customer estimate page
+titled the line "One-Time Pest Control" (EST-2026-1312). The label table now
+names `stinging_insect` and `stinging_insect_v2` "Stinging Insect". Both
+v1-adapter baselines changed that one `name` value by hand; every price is
+unchanged, so no `pricing_changelog` entry.
+
 ## 2026-08-04 lawn 500-sqft re-grid + basic/4x retirement
 
 Owner directives 2026-08-04 (accepted/expired funnel review): lawn brackets

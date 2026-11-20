@@ -24,6 +24,7 @@ const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { stripEmoji } = require('../utils/strip-emoji');
 const { agentName } = require('./voice-agent/relay-protocol');
 const { soundForTrigger } = require('./alert-sounds');
+const { validCalendarDate, parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 // Lookarounds keep the match from starting or ending inside a longer
@@ -112,11 +113,13 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
   const cleanTitle = (value) => stripEmoji(String(value || 'Notification')) || String(value || 'Notification');
   const cleanBody = (value) => (value === null || value === undefined ? value : stripEmoji(value));
   if (trigger.allowContactDetails) {
-    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body) };
+    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body),
+      ...(built.pushTitle ? { pushTitle: cleanTitle(built.pushTitle) } : {}) };
   }
   return {
     ...built,
     title: cleanTitle(redactSensitiveText(built.title || 'Notification')),
+    ...(built.pushTitle ? { pushTitle: cleanTitle(redactSensitiveText(built.pushTitle)) } : {}),
     body: built.body === null || built.body === undefined ? built.body : cleanBody(redactSensitiveText(built.body)),
     ...(built.detail ? { detail: cleanBody(redactSensitiveText(built.detail)) } : {}),
   };
@@ -258,7 +261,14 @@ const TRIGGER_REGISTRY = {
       const bodyParts = [
         `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
       ];
-      if (p.service) bodyParts.push(`Wants ${p.service}`);
+      // A quiz lead names its three tap answers (fixed tokens from
+      // services/lead-quiz.js, e.g. "Roaches, condo, wants it today"). They
+      // stand in for the service line only when all three are known and name
+      // a problem (quizNamesRequest); a "Not sure" or partly answered quiz
+      // keeps the service line, so the bell never reads only "Ants" or only
+      // "wants it today".
+      if (p.service && !(p.quizAnswers && p.quizNamesRequest)) bodyParts.push(`Wants ${p.service}`);
+      if (p.quizAnswers) bodyParts.push(p.quizAnswers);
       if (p.phone) bodyParts.push(`Phone: ${maskPhone(p.phone)}`);
       if (p.message) bodyParts.push(p.leadId ? 'Message included on lead record' : 'Message in the SMS inbox');
       return {
@@ -502,7 +512,7 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=messenger',
     }),
   },
-  // The phone banner for a new-lead email (GATE_RING_NEW_CONTACTS, bell-banners.js kind new_lead_email, owner 2026-11-04
+  // The phone banner for a new-lead email (bell-banners.js kind new_lead_email, owner 2026-11-04
   // "ring new"). The bell row is the plain 'new_lead' category row email-actions.js already writes, which carries no
   // triggerKey of its own (the writer names this kind with notifyAdmin's bannerKind), so no sweep closes it and its
   // rule is the retention expiry. `build` takes the written row's own words as alertTitle/alertBody/alertLink.
@@ -537,7 +547,7 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=calls',
     }),
   },
-  // The reminder banner for a lead's call request (GATE_LEAD_CALL_REMINDER, owner 2026-11-05, "remind"). A missed
+  // The reminder banner for a lead's call request (owner 2026-11-05, "remind"). A missed
   // press-1 ring ("Missed call request") and a night call-back bell reach only the portal bell; one still open after
   // one business hour, with nobody reaching the lead since, sends this ONE banner (services/lead-call-reminder.js,
   // run by the alert-relevance sweep). pushOnly: the bell row already exists and is not rewritten, so `rule` is the
@@ -679,9 +689,12 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
-      // GATE_MISSED_CALL_ALERT_DETAIL: the producer adds line / duration /
-      // next visit to the payload only with the gate on; without them this is
-      // the original sentence, character for character.
+      // A quiet call's bell row is titled likely robocall; its push goes only
+      // when no bell row was written, and keeps the ordinary caller title
+      // (missed-call-bell.js pushName; pre-push audit r23).
+      ...(p.pushName ? { pushTitle: `Missed call — ${p.pushName}` } : {}),
+      // The producer adds line / duration / next visit to the payload; without
+      // them this is the original sentence.
       body: require('./missed-call-alert-detail').formatMissedCallBody(p),
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
@@ -1320,7 +1333,26 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
-  // The owner's 7 PM open-visit nudge as a phone banner (GATE_OWNER_NUDGE_BANNER, owner 2026-11-04 "banner"): the same words
+  // The 9:00 AM ET "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1): how many viewed
+  // estimates are on its Call today list, and a tap opens the Estimates page on its Call today filter. services/estimate-call-today-push.js
+  // sends it pushOnly, so it writes no bell row (rule: fyi) and each admin can switch it off in Push Settings. The words
+  // are counts only, never a customer name or phone (a lock screen shows them). p = { count, day }.
+  estimate_call_today: {
+    label: 'Morning list: estimates to call today',
+    category: 'alert',
+    priority: 'normal',
+    group: 'Alerts',
+    rule: { area: 'Estimates', severity: 'fyi', who: 'person', expiryDays: 7 },
+    build: (p) => {
+      const count = Number(p.count) || 0;
+      return {
+        title: count === 1 ? 'Call today: 1 estimate' : `Call today: ${count} estimates`,
+        body: 'Follow up on these recently active estimates.',
+        link: '/admin/estimates?view=call_today',
+      };
+    },
+  },
+  // The owner's 7 PM open-visit nudge as a phone banner (owner 2026-11-04 "banner"): the same words
   // the text carries, a tap opens the tech close-out page. services/tech-open-visit-nudge.js sends it pushOnly to the owner's
   // own admin user, so it writes no bell row (rule: fyi) and the owner can switch it off in Push Settings. p = { headline,
   // lines: [visit line], day }; the nudge module builds the words (customer first name + last initial only).
@@ -1449,11 +1481,23 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'waiting_summary') {
     return `waves-waiting_summary-${payload.day || 'unknown-day'}`;
   }
+  // One "Call today" banner per ET day, like the morning summary.
+  if (triggerKey === 'estimate_call_today') {
+    return `waves-estimate_call_today-${payload.day || 'unknown-day'}`;
+  }
   // One nudge banner per technician-day claim: a repeat replaces the same day's banner, tomorrow's never replaces today's.
   if (triggerKey === 'open_visits_nudge') {
     return `waves-open_visits_nudge-${payload.day || 'unknown-day'}`;
   }
   return `waves-${triggerKey}`;
+}
+
+// A push that is true for one ET day only expires with that day (push-notifications.js webPushTtl, apns.js, fcm.js): a
+// phone that reconnects days later never shows an old "Call today" count. The end of the day is the next ET midnight.
+function pushExpiryFor(triggerKey, payload = {}) {
+  if (triggerKey !== 'estimate_call_today' || !validCalendarDate(payload.day)) return {};
+  const nextDay = etDateString(addETDays(parseETDateTime(`${payload.day}T12:00`), 1));
+  return { expiresAt: parseETDateTime(`${nextDay}T00:00`).toISOString() };
 }
 
 // GATE_ALERT_REGISTRY_LABELS (owner 2026-11-05, admin-alert plan S1): the labels a registry type's rule already declares,
@@ -1531,6 +1575,13 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     let activeAdmins = [];
+    // Set when the recipient lookup or the push dispatch THREW, so a caller that must tell a failed push from a disabled one
+    // (estimate-call-today-push.js) can: both leave `push: null`. Additive field on the returned stats; no other caller reads it.
+    let pushFailed = null;
+    // Set as the first device's banner is built, right before its provider send (sendToAdminUsers builds each
+    // device's banner just before sending it): from then on a throw may come after a handoff. A throw before it
+    // (the subscription lookup) reached no provider: pushFailed 'before_handoff'.
+    let pushHandoffStarted = false;
     try {
       let recipientQuery = db('technicians').where({ active: true });
       // Delivery follows the same fail-closed model as the persisted feed
@@ -1570,6 +1621,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
+      pushFailed = 'recipient_lookup';
       if (dedupeKey) return { bellWritten: false, push: null, retryable: true };
     }
 
@@ -1710,6 +1762,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     const stats = { bellWritten, push: null,
       ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
     };
+    if (pushFailed) stats.pushFailed = pushFailed;
     if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
     if (dedupedNoPush) return { ...stats, deduped: true };
@@ -1819,12 +1872,14 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
+            pushHandoffStarted = true;
             const wantsSound = wantsSoundByUser.get(adminUserId);
             const badgeInfo = badgeByUser.get(adminUserId);
             // A technician recipient gets its own copy when the trigger names techOmit keys.
             const shown = techCopy && !adminRoleIds.has(adminUserId) ? techCopy : built;
             return {
-              title: shown.title,
+              // pushTitle: a push-only title (customer_missed_call); the bell row keeps title.
+              title: shown.pushTitle || shown.title,
               body: shown.body,
               url: built.link || '/admin',
               // promise_chaser: the push tag IS the bell's own dedupeKey
@@ -1846,6 +1901,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)) || triggerKey === 'portal_ask' || Boolean(payload.alertRowId),
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
               ...(pushCall && adminRoleIds.has(adminUserId) ? pushCall : {}),
+              ...pushExpiryFor(triggerKey, payload),
             };
           },
           { beforeDispatch, ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
@@ -1855,6 +1911,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
     } catch (e) {
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
+      stats.pushFailed = pushHandoffStarted ? 'push_dispatch' : 'before_handoff';
       // A resumed event owns its retry: a failure before any handoff (the
       // subscription lookup) must not read as a delivered push.
       if (dedupeKey) { stats.push = null; stats.retryable = true; stats.error = e.message; }
@@ -1891,6 +1948,7 @@ module.exports = {
     maskEmail,
     maskPhone,
     pushTagFor,
+    pushExpiryFor,
     PRIORITY_VIBRATE,
     redactSensitiveText,
     registryLabels,

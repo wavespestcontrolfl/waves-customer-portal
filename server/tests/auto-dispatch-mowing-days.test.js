@@ -40,17 +40,15 @@ const { analyzeGapCandidate } = require('../services/scheduling/gap-candidates')
 const { _internals: { evaluatePlacement, standingConflict } } = require('../services/auto-dispatch');
 
 const GATE = 'GATE_AUTO_DISPATCH_MOWING_DAYS';
-const SAVED = { mowing: process.env[GATE], drive: process.env.GATE_DRIVE_TIME_CALIBRATION, shared: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
+const SAVED = { mowing: process.env[GATE], shared: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
 function restore(name, value) {
   if (value === undefined) delete process.env[name]; else process.env[name] = value;
 }
 beforeAll(() => {
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
 });
 afterAll(() => {
   restore(GATE, SAVED.mowing);
-  restore('GATE_DRIVE_TIME_CALIBRATION', SAVED.drive);
   restore('GATE_AUTO_DISPATCH_SHARED_MODEL', SAVED.shared);
 });
 beforeEach(() => {

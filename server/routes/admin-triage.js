@@ -48,7 +48,7 @@ const NOT_A_VERDICT_MESSAGES = {
   text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve (or Line can get texts).',
   name_spelling_differs: 'This card is a name-spelling check, not a call verdict — fix the name on the record if the spelling is theirs, then use Resolve or Dismiss.',
   call_prepay_choice: 'This card offers to accept the customer\u2019s estimate as annual prepay, not a call verdict — use Accept as annual prepay, or Resolve or Dismiss.',
-  call_phone_yes: 'This card asks the office to accept the customer\u2019s estimate, not a call verdict — accept it from the estimate, then use Resolve or Dismiss.',
+  call_phone_yes: 'This card asks the office to accept the customer\u2019s estimate, not a call verdict — use Accept as pay per application, or accept it from the estimate, then use Resolve or Dismiss.',
 };
 
 
@@ -611,6 +611,7 @@ router.get('/', async (req, res) => {
     stampSaveContactNote(items);
     stampFamilyCardActions(items, req.techRole === 'admin');
     await stampCallPrepayActions(items, req.techRole === 'admin');
+    stampCallPhoneYesActions(items, req.techRole === 'admin');
 
     res.json({ items, counts });
   } catch (err) {
@@ -1953,6 +1954,16 @@ async function stampCallPrepayActions(items, isAdmin = false) {
   }
 }
 
+// GATE_CALL_PHONE_YES_ACCEPT: the list only marks the open call_phone_yes cards whose one tap ("Accept as pay per
+// application") an admin can use, with no reads. Each card reads what its tap can do RIGHT NOW when it shows
+// (GET /:id/call-phone-yes, below), so open phone-yes cards never slow the rest of the inbox.
+function stampCallPhoneYesActions(items, isAdmin = false) {
+  if (!isAdmin || require('../config/feature-gates').callPhoneYesAcceptLive?.() !== true) return;
+  for (const item of items) {
+    if (item.reason_code === 'call_phone_yes' && OPEN_STATES.includes(item.status)) item.call_phone_yes_tap = true;
+  }
+}
+
 const httpError = (status, message, code) => Object.assign(new Error(message), { status, code });
 const must = (ok, status, message, code) => { if (!ok) throw httpError(status, message, code); };
 
@@ -2112,6 +2123,76 @@ router.post('/:id/accept-call-prepay', requireAdmin, async (req, res) => {
     // Code/name only: a knex message embeds bound values.
     logger.error(`[admin-triage] accept-call-prepay failed: ${err.code || err.name || 'error'}`);
     return res.status(500).json({ error: 'Failed to accept as annual prepay' });
+  }
+});
+
+// GET /api/admin/triage/:id/call-phone-yes
+// What the tap on one open call_phone_yes card can do right now (GATE_CALL_PHONE_YES_ACCEPT, admin only), read live:
+// { can_accept, preview_token, estimate_id, visit_id, visit_date, message }. The card asks when it shows; the accept
+// below checks everything again.
+router.get('/:id/call-phone-yes', requireAdmin, async (req, res) => {
+  try {
+    must(require('../config/feature-gates').callPhoneYesAcceptLive?.() === true, 404, 'Not found');
+    must(UUID_RE.test(req.params.id), 400, 'Invalid card id');
+    const item = await db('triage_items').where({ id: req.params.id }).first();
+    must(item, 404, 'Triage item not found');
+    must(item.reason_code === 'call_phone_yes' && item.call_log_id, 400, 'Not a phone-yes card');
+    if (!OPEN_STATES.includes(item.status)) return res.json({ can_accept: false, preview_token: null, message: null });
+    try {
+      return res.json(await require('../services/call-phone-yes-accept').tapStateOf(item));
+    } catch (err) {
+      logger.warn(`[admin-triage] phone-yes tap read failed for card ${item.id}: ${err.code || err.name || 'error'}`);
+      return res.json({ can_accept: false, preview_token: null, message: 'The estimate could not be read just now. Reload and try again.' });
+    }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    logger.error(`[admin-triage] call-phone-yes read failed: ${err.code || err.name || 'error'}`);
+    return res.status(500).json({ error: 'Failed to read the card' });
+  }
+});
+
+// POST /api/admin/triage/:id/accept-call-phone-yes   { expected_updated_at, preview_token }
+// Accept as pay per application (GATE_CALL_PHONE_YES_ACCEPT, call_phone_yes cards): the call booked a pest visit while the
+// customer had an open estimate. Runs the office's own accept (markEstimateManuallyAccepted, standard billing, as Mark
+// accepted does), links the visit the call booked to the estimate inside it so the plan is booked from that visit, prices
+// the plan's visits at the per-visit amount, and resolves the card in the same transaction. The customer gets what Mark
+// accepted sends (the membership email), nothing more. Every refusal is a plain message and changes nothing. Admin only;
+// the version the screen showed must still be the card's (409 otherwise), checked here and again under the card's lock.
+router.post('/:id/accept-call-phone-yes', requireAdmin, async (req, res) => {
+  try {
+    must(require('../config/feature-gates').callPhoneYesAcceptLive?.() === true, 404, 'Not found');
+    must(UUID_RE.test(req.params.id), 400, 'Invalid card id');
+    const item = await db('triage_items').where({ id: req.params.id }).first();
+    must(item, 404, 'Triage item not found');
+    must(OPEN_STATES.includes(item.status), 409, `Item already ${item.status}`);
+    must(item.reason_code === 'call_phone_yes' && item.call_log_id, 400, 'Not a phone-yes card');
+    must(req.body?.expected_updated_at && new Date(req.body.expected_updated_at).getTime() === new Date(item.updated_at).getTime(),
+      409, 'Card changed since it was displayed — reload and review the latest', 'STALE_CARD_VERSION');
+    const out = await require('../services/call-phone-yes-accept').acceptPhoneYesCard({
+      item,
+      adminUserId: req.technicianId || null,
+      previewToken: typeof req.body?.preview_token === 'string' ? req.body.preview_token : null,
+      expectedUpdatedAt: req.body.expected_updated_at,
+      // The card's own Resolve, inside the accept's transaction (a savepoint): a card another admin closed or changed since
+      // this screen loaded rolls the whole accept back, so no plan starts from a card that is no longer open.
+      resolveCard: async (trx) => (await transitionCore({
+        id: item.id, nextStatus: 'resolved', note: 'accepted as pay per application', assignedTo: req.technicianId,
+        expectedUpdatedAt: req.body.expected_updated_at, requireVersion: true, conn: trx,
+      })).outcome,
+    });
+    if (!out.ok) return res.status(409).json({ error: out.message, code: out.reason });
+    // How long the card waited for a person: the measure the later automatic step is judged on.
+    const openMinutes = Math.round((Date.now() - new Date(item.created_at).getTime()) / 60000);
+    logger.info(`[admin-triage] accept-call-phone-yes card=${item.id} call=${item.call_log_id} estimate=${out.estimateId} plan_visits=${out.seriesIds.length} card_open_min=${openMinutes}`);
+    return res.json({
+      ok: true, id: item.id, status: 'resolved', estimate_id: out.estimateId, visit_id: out.visitId,
+      plan_visits: out.seriesIds.length, amount: out.amount, warnings: out.warnings,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    // Code/name only: a knex message embeds bound values.
+    logger.error(`[admin-triage] accept-call-phone-yes failed: ${err.code || err.name || 'error'}`);
+    return res.status(500).json({ error: 'Failed to accept as pay per application' });
   }
 });
 

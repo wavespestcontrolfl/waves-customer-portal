@@ -1,0 +1,51 @@
+// The quiz pages' tap answers on a lead (extracted_data.quiz, which the lead
+// webhook stores from a fixed allowlist of tokens). The Leads screen shows a
+// label for a known token and nothing for anything else, so a value the
+// webhook did not allowlist is never shown. The third answer, "How soon?", is
+// the lead's declared timeline and has its own line.
+const QUIZ_NAMES = { pest: "Pest Quiz", lawn: "Lawn Quiz" };
+// Each quiz's own nine tiles, as the webhook allowlists them
+// (server/services/lead-quiz.js QUIZ_SEEING): a lawn tile on a pest quiz is
+// not an answer and prints nothing.
+const QUIZ_SEEING_LABELS = {
+  pest: {
+    ants: "Ants",
+    roaches: "Roaches",
+    spiders: "Spiders",
+    rodents: "Rodents",
+    termites: "Termites",
+    wasps: "Wasps",
+    mosquitoes: "Mosquitoes",
+    bedbugs: "Bed bugs",
+    unsure: "Not sure",
+  },
+  lawn: {
+    weeds: "Weeds",
+    patches: "Patches",
+    thinning: "Thinning",
+    yellowing: "Yellowing",
+    bugs: "Lawn bugs",
+    fungus: "Fungus",
+    shrubs: "Shrubs",
+    palms: "Palms",
+    unsure: "Not sure",
+  },
+};
+const QUIZ_PROPERTIES = ["house", "townhome", "condo", "business"];
+
+// A label for the map's OWN key only: "constructor" or "__proto__" is not a
+// token, and must not read a function off the object's prototype.
+const labelFor = (labels, token) =>
+  typeof token === "string" && Object.prototype.hasOwnProperty.call(labels, token) ? labels[token] : null;
+
+// { name: "Pest Quiz", answers: "Roaches, condo" }, or null when the lead is
+// not a quiz lead.
+export function quizAnswerLine(quiz) {
+  const name = quiz && typeof quiz === "object" ? labelFor(QUIZ_NAMES, quiz.kind) : null;
+  if (!name) return null;
+  const answers = [
+    labelFor(QUIZ_SEEING_LABELS[quiz.kind], quiz.seeing),
+    QUIZ_PROPERTIES.includes(quiz.property) ? quiz.property : null,
+  ].filter(Boolean);
+  return { name, answers: answers.join(", ") };
+}
