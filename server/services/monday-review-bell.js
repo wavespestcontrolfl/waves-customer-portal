@@ -4,7 +4,7 @@
 // "build all", B2; builds item 6 of the 2026-09-30 notification rules: "a
 // needs-you row unread 14 days goes into a Monday summary").
 //
-// Four lists get old without any bell ringing for them. Each is computed fresh
+// Five lists get old without any bell ringing for them. Each is computed fresh
 // on every run, and a line appears only when its count is above zero:
 //   1. Needs-you alerts nobody has read for 14+ days. The retention sweep marks
 //      a bell row done after 30 idle days (admin-alert-retention.js), so this is
@@ -22,6 +22,11 @@
 //   3. Completed visits whose only invoice is a draft nobody sent (the
 //      dashboard's "unsent drafts" rule, same 3-day floor and same exclusions).
 //   4. Past-dated visits still open (stale-visit-sweep findStaleVisits).
+//   5. Google reviews with no reply that the auto-reply agent handed to a
+//      person (auto_reply_status 'parked'). Its own "needs you" bell falls off
+//      after 3 quiet days, so this is the live check that a parked review
+//      cannot sit unseen. Fails open: if it cannot be read, the week goes out
+//      without it and a warning is logged.
 //
 // One needs-you row per Monday (dedupeKey monday-review:<ET date>) with a
 // detail line per list and the page that opens it. Older monday-review rows
@@ -82,7 +87,7 @@ function parseMeta(metadata) {
 }
 
 // ---------------------------------------------------------------------------
-// The four loaders. Each returns { count, ... } and reads only.
+// The five loaders. Each returns { count, ... } and reads only.
 // ---------------------------------------------------------------------------
 
 // List 1. A needs-you row (needs-me's reading) that is not done, was never
@@ -202,6 +207,29 @@ async function loadOpenPastVisits({ now = new Date(), database = db, findStaleVi
   return { count: visits.length, priced: Math.round(priced * 100) / 100, oldestDate: oldestDate(visits) };
 }
 
+// List 5. Reviews the auto-reply agent parked for a person that still have no
+// real reply (a "[DRAFT]" is not one), oldest first. The location rules are
+// review-low-rating-alert.js needsAnswerQuery's: an active location, a real
+// reviewer row, not dismissed, not gone from Google.
+async function loadParkedReviews({ database = db } = {}) {
+  const { WAVES_LOCATIONS } = require('../config/locations');
+  const { whereNeedsRealReply } = require('./review-reply/draft-prefix');
+  const rows = await database('google_reviews')
+    .where('auto_reply_status', 'parked')
+    .whereIn('location_id', WAVES_LOCATIONS.map((l) => l.id))
+    .where((q) => q.whereNull('reviewer_name').orWhereNot('reviewer_name', '_stats'))
+    .where((q) => q.where('dismissed', false).orWhereNull('dismissed'))
+    .whereNull('missing_since')
+    .modify((q) => whereNeedsRealReply(q))
+    .orderByRaw('review_created_at ASC NULLS LAST, id ASC')
+    .select('id', 'reviewer_name', 'review_created_at', 'location_id');
+  const locationNames = new Map(WAVES_LOCATIONS.map((l) => [l.id, l.name]));
+  return {
+    count: rows.length,
+    entries: rows.map((r) => ({ name: r.reviewer_name, at: r.review_created_at, location: locationNames.get(r.location_id) || null })),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Assembly (pure)
 // ---------------------------------------------------------------------------
@@ -234,9 +262,37 @@ function fellOffList(alerts) {
   };
 }
 
+// A reviewer's name is free text from Google: first name and last initial only
+// (letters, marks, apostrophe, hyphen, period), else "A reviewer".
+function reviewerLabel(name) {
+  const parts = String(name || '').replace(/[^\p{L}\p{M}'.\- ]/gu, ' ').split(/\s+/).filter((p) => /\p{L}/u.test(p));
+  if (!parts.length) return 'A reviewer';
+  const first = [...parts[0]].slice(0, 20).join('');
+  return parts.length > 1 ? `${first} ${[...parts[parts.length - 1]][0].toUpperCase()}.` : first;
+}
+
+// List 5: parked Google reviews with no reply, last in the owner's order. [] when none (the caller spreads it).
+function parkedReviewsList(parked) {
+  if (!(parked?.count > 0)) return [];
+  const { ENTRY_SHOWN } = require('./monday-review-fell-off');
+  const shown = (parked.entries || []).slice(0, ENTRY_SHOWN);
+  const more = parked.count - shown.length;
+  return [{
+    key: 'parkedReviews',
+    count: parked.count,
+    phrase: `${parked.count} Google ${plural(parked.count, 'review', 'reviews')} with no reply`,
+    detail: [
+      `Google reviews the auto-reply agent handed to a person that still have no reply: ${parked.count}. Page: /admin/reviews`,
+      ...shown.map((e) => `   - ${reviewerLabel(e.name)} (${[e.location, shortDate(e.at)].filter(Boolean).join(', ')})`),
+      ...(more > 0 ? [`   +${more} more`] : []),
+    ].join('\n'),
+    link: '/admin/reviews',
+  }];
+}
+
 // The lists with a count above zero, in the owner's order, each with the short
 // phrase for the "why" and the detail text.
-function buildLists({ alerts, promises, drafts, visits }) {
+function buildLists({ alerts, promises, drafts, visits, parked }) {
   const lists = [];
   if (alerts?.kind === 'fell-off') {
     if (alerts.count > 0) lists.push(fellOffList(alerts));
@@ -281,6 +337,7 @@ function buildLists({ alerts, promises, drafts, visits }) {
       link: '/admin/dashboard',
     });
   }
+  lists.push(...parkedReviewsList(parked));
   return lists;
 }
 
@@ -339,12 +396,14 @@ const defaultLoaders = {
   promises: loadOverduePromises,
   drafts: loadDraftOnlyVisits,
   visits: loadOpenPastVisits,
+  parked: loadParkedReviews,
 };
 
 /**
  * Monday cron entry point. Returns { count, outcome }: raised | unchanged | suppressed | closed | clear.
  * A read failure throws (runExclusive records it in job_health) and closes
- * nothing. `loaders` replaces the four list readers (tests).
+ * nothing. `loaders` replaces the five list readers (tests). The parked-reviews list fails
+ * open like the fell-off list: an unreadable list goes out without it.
  */
 async function runMondayReview({ now = new Date(), database = db, loaders = {} } = {}) {
   const read = { ...defaultLoaders, ...loaders };
@@ -352,7 +411,11 @@ async function runMondayReview({ now = new Date(), database = db, loaders = {} }
   const [alerts, promises, drafts, visits] = [
     await read.alerts(ctx), await read.promises(ctx), await read.drafts(ctx), await read.visits(ctx),
   ];
-  const lists = buildLists({ alerts, promises, drafts, visits });
+  const parked = await read.parked(ctx).catch((err) => {
+    logger.warn(`[monday-review] parked-reviews list not read; this week goes out without it: ${require('./notification-service').safeErrorSummary(err)}`);
+    return null;
+  });
+  const lists = buildLists({ alerts, promises, drafts, visits, parked });
   const dedupeKey = `${KEY_PREFIX}${etDateString(now)}`;
   if (!lists.length) {
     const closed = await closeReviewRows({ database, now, resolution: NOTHING, reason: 'count_zero' });
@@ -380,8 +443,8 @@ module.exports = {
   runMondayReview,
   KEY_PREFIX,
   _private: {
-    loadUnreadAlerts, loadOverduePromises, loadDraftOnlyVisits, loadOpenPastVisits,
-    buildLists, composeReview, closeReviewRows, shortDate,
+    loadUnreadAlerts, loadOverduePromises, loadDraftOnlyVisits, loadOpenPastVisits, loadParkedReviews,
+    reviewerLabel, buildLists, composeReview, closeReviewRows, shortDate,
     UNREAD_DAYS, DRAFT_FLOOR_DAYS, REPLACED, NOTHING,
   },
 };

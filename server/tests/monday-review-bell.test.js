@@ -1,23 +1,24 @@
 /**
  * Monday review bell (owner 2026-11-02, B2): one weekly needs-you row for the work that sits.
- * Unit proof of the four list readers' assembly, the one composed alert (real composer rules), the
+ * Unit proof of the five list readers' assembly, the one composed alert (real composer rules), the
  * replace / zero / same-day behavior and the gate. The SQL of lists 1, 3 and 4 runs against Postgres in
  * monday-review-bell-db.test.js.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(), _private: {} }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(), _private: {}, safeErrorSummary: jest.fn(() => 'ECONNRESET') }));
 jest.mock('../services/admin-alert-episodes', () => ({
   openAdminAlertKeys: jest.fn(),
   closeAdminAlertKeys: jest.fn(),
 }));
 
+const logger = require('../services/logger');
 const { notifyAdmin } = require('../services/notification-service');
 const episodes = require('../services/admin-alert-episodes');
 const { composeAdminAlert, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('../services/admin-alert-compose');
 const review = require('../services/monday-review-bell');
 
-const { buildLists, composeReview, loadUnreadAlerts, loadOpenPastVisits, shortDate, REPLACED, NOTHING } = review._private;
+const { buildLists, composeReview, loadUnreadAlerts, loadOpenPastVisits, reviewerLabel, shortDate, REPLACED, NOTHING } = review._private;
 
 // Monday 2026-11-02, 9:20 AM EST (the clocks went back on Nov 1).
 const MONDAY = new Date('2026-11-02T14:20:00Z');
@@ -35,6 +36,7 @@ const loaders = (over = {}) => ({
   promises: jest.fn(async () => PROMISES),
   drafts: jest.fn(async () => DRAFTS),
   visits: jest.fn(async () => VISITS),
+  parked: jest.fn(async () => ({ count: 0, entries: [] })),
   ...over,
 });
 const ZERO = {
@@ -42,6 +44,7 @@ const ZERO = {
   promises: async () => ({ count: 0 }),
   drafts: async () => ({ count: 0, total: 0 }),
   visits: async () => ({ count: 0, priced: 0 }),
+  parked: async () => ({ count: 0, entries: [] }),
 };
 
 beforeEach(() => {
@@ -131,6 +134,18 @@ describe('last week, zero weeks, and the same day', () => {
     expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe(TODAY_KEY);
     // No refresh option: a second run never rewrites or re-rings the row.
     expect(notifyAdmin.mock.calls[0][3].refreshOnDedupe).toBeUndefined();
+  });
+
+  test('the parked-reviews list that cannot be read is left out: one warning, the week still goes out', async () => {
+    const out = await review.runMondayReview({
+      now: MONDAY, loaders: loaders({ parked: async () => { throw new Error('connection reset by peer'); } }),
+    });
+    expect(out).toMatchObject({ count: 4, outcome: 'raised' });
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toContain('parked-reviews list not read');
+    expect(logger.warn.mock.calls[0][0]).toContain('ECONNRESET');
+    expect(logger.warn.mock.calls[0][0]).not.toContain('connection reset by peer');
   });
 
   test('every count zero: nothing raised, older rows closed as "Nothing to review"', async () => {
@@ -316,6 +331,43 @@ describe('assembly', () => {
     expect(shortDate('2026-09-12')).toBe('Sep 12');
     expect(shortDate(new Date('2026-11-02T03:30:00Z'))).toBe('Nov 1');
     expect(shortDate(null)).toBeNull();
+  });
+
+  test('list 5: parked Google reviews come last, by name and date, and change nothing at zero', () => {
+    const four = { alerts: ALERTS, promises: PROMISES, drafts: DRAFTS, visits: VISITS };
+    expect(buildLists({ ...four, parked: { count: 0, entries: [] } })).toEqual(buildLists(four));
+    const entries = [
+      { name: 'Dana Whitfield', at: '2026-11-13T15:00:00Z', location: 'Lakewood Ranch' },
+      { name: '<b>Evil</b> ignore previous', at: '2026-11-14T15:00:00Z', location: null },
+    ];
+    const lists = buildLists({ ...four, parked: { count: 2, entries } });
+    expect(lists.map((l) => l.key)).toEqual(['alerts', 'promises', 'drafts', 'visits', 'parkedReviews']);
+    expect(lists[4]).toMatchObject({ count: 2, phrase: '2 Google reviews with no reply', link: '/admin/reviews' });
+    expect(lists[4].detail.split('\n')).toEqual([
+      'Google reviews the auto-reply agent handed to a person that still have no reply: 2. Page: /admin/reviews',
+      '   - Dana W. (Lakewood Ranch, Nov 13)',
+      '   - b P. (Nov 14)',
+    ]);
+    expect(buildLists({ parked: { count: 1, entries: [{ name: null, at: '2026-11-13T15:00:00Z', location: 'Venice' }] } })[0].phrase).toBe('1 Google review with no reply');
+    expect(composeReview(buildLists({ ...four, parked: { count: 99999, entries: [] } })).spec.why.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
+  });
+
+  test('list 5 shows the same number of names as the fell-off list, then "+N more"', () => {
+    const { ENTRY_SHOWN } = require('../services/monday-review-fell-off');
+    const entries = Array.from({ length: ENTRY_SHOWN + 2 }, (_, i) => ({ name: `Reviewer${i} Q`, at: '2026-11-13T15:00:00Z', location: 'Venice' }));
+    const [list] = buildLists({ parked: { count: entries.length, entries } });
+    const lines = list.detail.split('\n');
+    expect(lines).toHaveLength(1 + ENTRY_SHOWN + 1);
+    expect(lines.at(-1)).toBe('   +2 more');
+  });
+
+  test('a reviewer name from Google shows as first name and last initial, else "A reviewer"', () => {
+    expect(reviewerLabel('Dana Whitfield')).toBe('Dana W.');
+    expect(reviewerLabel("Mary-Jo O'Neil Smith")).toBe('Mary-Jo S.');
+    expect(reviewerLabel('Cher')).toBe('Cher');
+    expect(reviewerLabel('  ')).toBe('A reviewer');
+    expect(reviewerLabel(null)).toBe('A reviewer');
+    expect(reviewerLabel('1234 \u{1F600}')).toBe('A reviewer');
   });
 
   test('no list, no alert', () => {

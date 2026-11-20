@@ -52,6 +52,11 @@ const MAX_ATTEMPTS = 3;
 const MANUAL_VERSIONS = new Set(['human', 'agent_ops']);
 const CLAIM_MS = 10 * 60 * 1000;
 const RETRY_BACKOFF_MIN = 10;
+// A Google refusal (GBP 404/5xx) is usually temporary: two parked reviews in
+// 2026-09/11 posted fine by hand once Google recovered. Retry it for about a
+// day (6 retries, 7 attempts) on a widening ladder before a person is rung.
+const GOOGLE_RETRY_DELAYS_MIN = [10, 30, 60, 180, 360, 720];
+const PUBLISH_RETRYABLE_CODES = new Set([CODES.LOCK_BUSY, CODES.GOOGLE_FAILED, CODES.NO_RESOURCE, CODES.RECONCILE_FAILED, 'account_read_failed', 'unexpected']);
 const IDENTITY_BACKOFF_MIN = 60;
 // Deploy-forward is a property of the REVIEW: nothing older than this at
 // first sight ever enters the lane, whichever insert path (GBP, Places, a
@@ -933,16 +938,23 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     }
     if (transientStale) code = 'account_read_failed';
     const attempts = (merged.auto_reply_attempts || 0) + 1;
-    // Every transient class (lock contention, Google failure, unexpected)
-    // shares ONE retry ceiling; after it the row parks for a person.
+    // Every transient class (lock contention, unexpected) shares ONE retry
+    // ceiling (MAX_ATTEMPTS); a Google failure follows its own longer ladder.
+    // After the ceiling the row parks for a person.
     // NO_RESOURCE is usually a Places-fallback row whose GBP identity the
     // next healthy sync will attach — retry on a longer backoff (and the
     // sync re-queues a parked row the moment it attaches the name).
     const backoffMin = code === CODES.NO_RESOURCE ? IDENTITY_BACKOFF_MIN : RETRY_BACKOFF_MIN;
+    // No delay left (undefined → NaN) parks. A retry the cron could no longer
+    // claim (past the queue-age window, where expireOverAgeQueued would drop
+    // it silently) parks now too, so a person is rung instead.
+    const delayMin = code === CODES.GOOGLE_FAILED ? GOOGLE_RETRY_DELAYS_MIN[attempts - 1] : (attempts < MAX_ATTEMPTS ? backoffMin * attempts : undefined);
+    const dueMs = Date.now() + delayMin * 60000;
+    const claimableUntilMs = new Date(merged.review_created_at).getTime() + cfg.maxQueueAgeHours * 3600000;
     // RECONCILE_FAILED (codex r74): Google shows an owner reply but the
     // local record of it failed — transient, retry; never "already replied".
-    if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === CODES.NO_RESOURCE || code === CODES.RECONCILE_FAILED || code === 'account_read_failed' || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
-      const due = new Date(Date.now() + backoffMin * attempts * 60000).toISOString();
+    if (PUBLISH_RETRYABLE_CODES.has(code) && dueMs < claimableUntilMs) {
+      const due = new Date(dueMs).toISOString();
       await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: (draft.reused && merged.auto_reply_drafted_at) || new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
       logger.warn(`[review-auto-reply] publish deferred for ${merged.id}: ${code} (${err.message})`);
       return { outcome: 'retry', reason: code };

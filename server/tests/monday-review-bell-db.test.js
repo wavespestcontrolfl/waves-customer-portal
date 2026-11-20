@@ -160,6 +160,39 @@ maybeDescribe('monday review bell (live Postgres)', () => {
     });
   });
 
+  describe('list 5: parked Google reviews with no reply', () => {
+    test('counts parked reviews with no real reply, oldest first, and none of the rows that do not belong', async () => {
+      const before = await Review._private.loadParkedReviews();
+      const ids = [];
+      const review = async (over = {}) => {
+        const id = randomUUID();
+        ids.push(id);
+        await db('google_reviews').insert({
+          id, google_review_id: id, reviewer_name: `Monday Fixture ${RUN.slice(0, 8)}`, location_id: 'bradenton', star_rating: 5,
+          review_created_at: ago(2), review_text: 'Synthetic review', auto_reply_status: 'parked', ...over,
+        });
+        return id;
+      };
+      try {
+        await review({ review_created_at: new Date('2000-01-01T12:00:00Z') });
+        await review({ review_reply: '[DRAFT] Hi, thanks.' }); // a draft is not a reply
+        await review({ review_reply: 'Thank you!' }); // answered
+        await review({ dismissed: true });
+        await review({ missing_since: ago(1) });
+        await review({ reviewer_name: '_stats' });
+        await review({ location_id: 'retired-office' });
+        await review({ auto_reply_status: 'queued' });
+        const after = await Review._private.loadParkedReviews();
+        expect(after.count - before.count).toBe(2);
+        const times = after.entries.map((e) => new Date(e.at).getTime());
+        expect(times).toEqual([...times].sort((a, b) => a - b));
+        expect(after.entries.find((e) => new Date(e.at).getFullYear() === 2000)).toMatchObject({ location: 'Lakewood Ranch' });
+      } finally {
+        await db('google_reviews').whereIn('id', ids).del();
+      }
+    });
+  });
+
   describe('list 2: overdue promises', () => {
     test('reads without error and without writing (no callback card preparation)', async () => {
       const out = await Review._private.loadOverduePromises({ now: NOW });
