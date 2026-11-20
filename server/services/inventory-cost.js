@@ -9,9 +9,7 @@
  *      inventory unit): the deducted amount is converted into that unit.
  *   2. Else products_catalog.best_price is the price of ONE package holding
  *      unit_size_oz ounces: the amount used is priced as its share of that
- *      package. A package price the inventory marked needs_pricing (a price
- *      it cannot trust, which the estimate bridge's catalog links skip too)
- *      does not count.
+ *      package.
  *
  * Neither applies → { unitCost: null, costUsed: null }. A caller must treat
  * that as "uncosted", never multiply the amount by a package price.
@@ -36,7 +34,7 @@ function calculateInventoryCost({ product, deductedAmount, inventoryUnit, amount
     }
   }
 
-  const bestPrice = product?.best_price != null && product.needs_pricing !== true ? Number(product.best_price) : null;
+  const bestPrice = product?.best_price != null ? Number(product.best_price) : null;
   const unitSizeOz = product?.unit_size_oz != null ? Number(product.unit_size_oz) : null;
   const amountUnitDef = INVENTORY_UNITS[normalizeInventoryUnit(amountUnit)];
   const canonicalOzUnit = amountUnitDef?.dimension === 'volume' ? 'fl_oz' : 'oz';

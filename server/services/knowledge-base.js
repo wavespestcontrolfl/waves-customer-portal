@@ -211,8 +211,7 @@ function cogsUnitCost(p) {
   for (const line of usable ? [unitLine(true), unitLine(false)] : [unitLine(false)]) {
     if (!line.warning && Number.isFinite(line.cost) && line.cost > 0) return line.cost;
   }
-  // A package price the inventory marked needs_pricing (costLineFromUsage skips it too) is no price.
-  const price = p.needs_pricing === true ? NaN : parseFloat(p.best_price);
+  const price = parseFloat(p.best_price);
   if (!Number.isFinite(price) || price <= 0) return null;
   const count = packCountForUsage(p.container_size, p.usage_unit);
   if (count) return price / count;
@@ -1001,7 +1000,7 @@ const KnowledgeBaseService = {
       const usage = await db('service_product_usage')
         .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
         .select('service_product_usage.*', 'products_catalog.name as product_name',
-          'products_catalog.best_price', 'products_catalog.needs_pricing', 'products_catalog.active_ingredient',
+          'products_catalog.best_price', 'products_catalog.active_ingredient',
           'products_catalog.unit_size_oz', 'products_catalog.cost_per_unit', 'products_catalog.cost_unit',
           'products_catalog.container_size')
         .orderBy('service_type');

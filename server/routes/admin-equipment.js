@@ -563,14 +563,13 @@ async function calculateMixCosts(products, tankSizeGal, coverageSqft) {
     // component that can't produce a usable positive price AND size is
     // UNKNOWN (r5-push P1) — a missing row, a missing/zero best_price, or a
     // missing container size all otherwise contributed $0 while the totals
-    // presented as complete. A price the inventory marked needs_pricing (one it
-    // cannot trust, which job costing skips too) is UNKNOWN as well.
+    // presented as complete.
     if (p.product_id) {
       costUnknown = true;
       const catalogProduct = await db('products_catalog')
         .where({ id: p.product_id })
         .first();
-      if (catalogProduct && catalogProduct.needs_pricing !== true && parseFloat(catalogProduct.best_price) > 0) {
+      if (catalogProduct && parseFloat(catalogProduct.best_price) > 0) {
         // cost_per_oz from best price / total oz in container.
         // Column is products_catalog.unit_size_oz (there is no size_oz);
         // best_price is the price for one unit_size_oz container. A

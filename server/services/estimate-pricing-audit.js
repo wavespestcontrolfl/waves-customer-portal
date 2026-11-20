@@ -704,7 +704,6 @@ async function loadInventoryCostRows() {
       'products_catalog.cost_per_unit',
       'products_catalog.cost_unit',
       'products_catalog.best_price',
-      'products_catalog.needs_pricing',
       'products_catalog.unit_size_oz',
       'products_catalog.best_vendor',
     );

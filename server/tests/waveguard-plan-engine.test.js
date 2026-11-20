@@ -529,16 +529,6 @@ describe('waveguard-plan-engine helpers', () => {
     });
   });
 
-  // A package price the inventory marked needs_pricing is one it cannot trust (job and service-usage costing skip it too): the
-  // plan's material cost leaves the line unpriced, and a per-unit cost still prices it (pre-push audit 15).
-  test('calculateProductAmount leaves a package price marked needs_pricing unpriced', () => {
-    const product = { name: 'Prodiamine 65 WDG', default_rate_per_1000: 0.37, rate_unit: 'oz', best_price: 68.43, container_size: '5 lb', needs_pricing: true };
-    expect(calculateProductAmount({ product, lawnSqft: 10000, carrierGalPer1000: 1 }))
-      .toMatchObject({ amount: 3.7, materialCost: null, materialCostSource: null });
-    expect(calculateProductAmount({ product: { ...product, cost_per_unit: 0.5, cost_unit: 'oz' }, lawnSqft: 10000, carrierGalPer1000: 1 }))
-      .toMatchObject({ materialCost: 1.85, materialCostSource: 'inventory_cost_per_unit' });
-  });
-
   test('parseVisitNutrientTargets reads protocol N rate notes', () => {
     expect(parseVisitNutrientTargets('LAST N before blackout. N app @ 0.75 lb N/1K.')).toMatchObject({
       targetNPer1000: 0.75,

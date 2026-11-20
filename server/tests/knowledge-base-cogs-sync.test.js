@@ -65,18 +65,6 @@ describe('KB COGS sync lines', () => {
     expect(cogsTotalLine([{ fixed: 5, per1000: 0 }, null])).toBe('Total COGS per application: $5.00 (excludes 1 product with no normalized price)');
   });
 
-  // A package price the inventory marked needs_pricing (job and service-usage costing skip it too) is no price here:
-  // the line says the cost is unavailable instead of pricing the stale package; a per-unit cost still prices it (pre-push audit 15).
-  test('a package price marked needs_pricing is called out, not priced', () => {
-    const bottle = cogsLineForUsage(row({ needs_pricing: true }));
-    expect(bottle.term).toBeNull();
-    expect(bottle.line).toContain('cost unavailable');
-    const oz = cogsLineForUsage(row({ best_price: '161.30', unit_size_oz: '32', usage_amount: null, usage_unit: 'oz', usage_per_1000sf: '0.125', needs_pricing: true }));
-    expect(oz.term).toBeNull();
-    const perUnit = cogsLineForUsage(row({ cost_per_unit: '2', cost_unit: 'oz', usage_amount: '3', usage_unit: 'oz', needs_pricing: true }));
-    expect(perUnit.term.fixed).toBe(6);
-  });
-
   test('counted usage prices one piece of a counted pack', () => {
     const tube = cogsLineForUsage(row({ best_price: '28.94', container_size: '4 x 30g tubes', unit_size_oz: '4.23', usage_unit: 'tube' }));
     expect(tube.line).toContain('@ $7.24/tube = $7.24');

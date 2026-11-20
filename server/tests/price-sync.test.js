@@ -158,36 +158,4 @@ describe('syncPricesToEstimator', () => {
     ]);
     expect(tankRead.update).not.toHaveBeenCalled();
   });
-
-  // A package price the inventory marked needs_pricing is one it cannot trust (the estimate links and job costing skip it too):
-  // the mix is skipped like one with an unpriced product and never written, never recosted on the untrusted price (pre-push
-  // audit 15). Like every skipped mix it keeps its last cost and is reported in `skipped` (main's contract above; audit 18).
-  test('skips (never writes) a mix whose product price is marked needs_pricing', async () => {
-    const products = [
-      ...PRODUCTS,
-      { id: 'P4', name: 'Synthetic bifenthrin', best_price: 58.42, unit_size_oz: 128, category: 'pest', needs_pricing: true },
-    ];
-    const tankRead = chain({ result: [mix({
-      cost_per_tank: 0.91,
-      products: JSON.stringify([
-        { product_id: 'P1', oz_per_tank: 2, cost_in_tank: 0 },
-        { product_id: 'P4', oz_per_tank: 2, cost_in_tank: 0.91 },
-      ]),
-    })] });
-    const productsRead = chain({ result: products });
-    setDbQueues({
-      products_catalog: [productsRead],
-      tank_mixes: [tankRead], // a write would exhaust the queue and throw
-    });
-
-    const result = await syncPricesToEstimator({ dryRun: false });
-
-    expect(result.mixes_updated).toBe(0);
-    expect(result.skipped).toEqual([
-      { mix: 'Mix A', blockers: [{ product_id: 'P4', reason: 'needs_pricing' }] },
-    ]);
-    expect(tankRead.update).not.toHaveBeenCalled();
-    // The catalog query reads the mark with the price (a stubbed row carries it either way).
-    expect(productsRead.select.mock.calls[0]).toContain('needs_pricing');
-  });
 });

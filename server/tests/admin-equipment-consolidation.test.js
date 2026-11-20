@@ -363,45 +363,4 @@ describe('equipment/fleet consolidation schema guards', () => {
       expect(body.tank_mix.id).toBe('mix-1');
     });
   });
-
-  // A package price the inventory marked needs_pricing is one it cannot trust (job costing skips it too): the
-  // component is cost-unknown and the mix reads incomplete, never costed on the untrusted price (pre-push audit 15).
-  test('tank mix costing leaves a package price marked needs_pricing cost-unknown', async () => {
-    const inserts = [];
-    db.mockImplementation((table) => {
-      const q = makeThenableQuery([]);
-      if (table === 'products_catalog') {
-        q.first = jest.fn(async () => ({ id: 'prod-1', best_price: 256, unit_size_oz: 64, needs_pricing: true }));
-        return q;
-      }
-      if (table === 'tank_mixes') {
-        q.insert = jest.fn((row) => {
-          inserts.push(row);
-          q.returning = jest.fn(async () => [{ id: 'mix-1', name: row.name, ...row }]);
-          return q;
-        });
-        return q;
-      }
-      throw new Error(`Unexpected table ${table}`);
-    });
-
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/equipment/tank-mixes`, {
-        method: 'POST',
-        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: 'Test Mix',
-          tank_size_gal: 100,
-          coverage_sqft: 10000,
-          products: [{ product_id: 'prod-1', oz_per_tank: 10 }],
-        }),
-      });
-      const body = await res.json();
-
-      expect(res.status).toBe(201);
-      expect(inserts[0].cost_per_tank).toBe(0);
-      expect(JSON.parse(inserts[0].products)[0]).toMatchObject({ cost_per_oz: 0, cost_in_tank: 0, cost_unknown: true });
-      expect(body.tank_mix.cost_incomplete).toBe(true);
-    });
-  });
 });
