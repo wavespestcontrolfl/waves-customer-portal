@@ -160,13 +160,16 @@ export function canonicalTermiticideProducts(form) {
   return next;
 }
 
-// savedInputs = the stored form snapshot as saved; form = the form a reopen restores from it.
+// savedInputs = the stored form snapshot as saved; form = the form a reopen restores from it. The form it returns always carries
+// today's bottle mark, so a check ticked from here on counts for the bottle it is ticked for: a saved null or an earlier bottle's
+// mark would otherwise ride along, and the server would not count the operator's new check (pre-push audit 22).
 export function clearPriorBottleLabelChecks(savedInputs, form) {
-  if (!savedInputs || savedInputs._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE) return { form, cleared: [] };
+  const marked = form._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE ? form : { ...form, _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE };
+  if (!savedInputs || savedInputs._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE) return { form: marked, cleared: [] };
   const stale = LABEL_CHECKS.filter(({ productField, checkField, resolve }) =>
     BIFENTHRIN_OPTION_KEYS.has(resolve(form[productField])) && !!form[checkField]);
-  if (stale.length === 0) return { form, cleared: [] };
-  const next = { ...form };
+  if (stale.length === 0) return { form: marked, cleared: [] };
+  const next = { ...marked };
   for (const { checkField } of stale) next[checkField] = false;
   return { form: next, cleared: stale.map(({ name }) => name) };
 }

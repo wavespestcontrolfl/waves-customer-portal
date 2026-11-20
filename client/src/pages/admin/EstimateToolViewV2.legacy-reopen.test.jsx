@@ -145,6 +145,23 @@ describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck P
     expect(reviewAndSend()).toBeEnabled();
   });
 
+  // A saved null or an earlier bottle's mark never rides along: the reopened form carries today's mark, so the check the operator
+  // ticks again counts on the server, also when the saved box was already clear (pre-push audit 22).
+  it.each([
+    ['a null mark, its check cleared', { ...PRESLAB, _bifenthrinLabelBottle: null }, true],
+    ["an earlier bottle's mark, its box already clear", { ...PRESLAB, preslabLabelConfirmed: false, _bifenthrinLabelBottle: 'atticus_talak' }, false],
+  ])('reopens %s with the Crosscheck Plus mark, and a check ticked again is sent for it', async (_label, inputs, cleared) => {
+    reopen(inputs, HOUSE);
+    if (cleared) expect(await screen.findByText(/pre-slab label check was for the earlier bifenthrin bottle/)).toBeInTheDocument();
+    await waitFor(() => expect(labelCheck()).not.toBeChecked());
+    fireEvent.click(labelCheck());
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options)
+      .toMatchObject({ preslabLabelConfirmed: true, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
+  });
+
   it('clears a label check when another product is chosen, so a check is never carried to a bottle it was not made for', async () => {
     reopen({ ...PRESLAB, preslabProductKey: 'termidor_sc', _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
     await waitFor(() => expect(labelCheck()).toBeChecked());

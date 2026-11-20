@@ -7068,11 +7068,17 @@ const CROSSCHECK_PLUS_NAMES = new Set(['crosscheckplus', 'lescocrosscheckplus', 
 // The bottle a configured product names: every name it carries, its catalog link (pre-slab) and its label (a trenching product
 // has no link). Each comes from pricing_config over the code field by field, so a partial overlay can mix them (a Talak label over
 // the code's Crosscheck Plus link): every name present must be one of this bottle's.
-const namesCrosscheckPlus = (product = {}) => {
+const namesBottle = (product, bottleNames) => {
   const names = [product.catalogProductName, product.label]
     .map((name) => String(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean);
-  return names.length > 0 && names.every((name) => CROSSCHECK_PLUS_NAMES.has(name));
+  return names.length > 0 && names.every((name) => bottleNames.has(name));
 };
+const namesCrosscheckPlus = (product = {}) => namesBottle(product, CROSSCHECK_PLUS_NAMES);
+// The earlier bottle under the same keys, Atticus Talak 7.9 F (EPA 91234-145), by its code label and catalog name. Its label carries
+// the same Volume Adjustment Chart as Crosscheck Plus, so the trench half volume holds for it too (priceTrenching).
+const TALAK_79F_NAMES = new Set(['talak79f', 'talak79fbifenthrin', 'atticustalak79f', 'atticustalak79fbifenthrin']);
+// A bottle whose label was read for the trench half volume: a product an admin renamed to any other bottle keeps the full volume.
+const namesHalfVolumeLabel = (product = {}) => namesCrosscheckPlus(product) || namesBottle(product, TALAK_79F_NAMES);
 function labelCheckCounts(options, productKey, product) {
   if (!optionBooleanTrue(options.labelConfirmed)) return false;
   return !BIFENTHRIN_TERMITICIDE_KEYS.has(productKey)
@@ -7128,8 +7134,9 @@ function priceTrenching(property = {}, options = {}, replay) {
   // dilution in code (labelHalfVolumeOzPerFinishedGallon), and the cut applies to it only: the high rate's, or the same one typed as
   // a custom dilution (pre-push audit 12). Any other dilution is off the chart, whatever the configured rates (a standard and high
   // pair moved together keeps their ratio, not the label's dilution): it keeps the full volume, as on main, and a custom one stays
-  // a manual override sent to review (pre-push audits 20 and 21).
-  const labelHalfVolume = product.labelHalfVolumeOzPerFinishedGallon > 0
+  // a manual override sent to review (pre-push audits 20 and 21). The code field outlives a config rename, so the configured product
+  // must still name a bottle whose label was read (Crosscheck Plus or Talak 7.9 F; pre-push audit 22).
+  const labelHalfVolume = product.labelHalfVolumeOzPerFinishedGallon > 0 && namesHalfVolumeLabel(product)
     && Math.abs(productOzPerFinishedGallon - product.labelHalfVolumeOzPerFinishedGallon) < 1e-9;
   const volumeFactor = labelHalfVolume ? 0.5 : 1;
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);

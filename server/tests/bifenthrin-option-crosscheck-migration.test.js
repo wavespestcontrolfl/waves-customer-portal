@@ -97,7 +97,7 @@ const vendorRow = (extra = {}) => ({
   id: 'v1', product_id: 'p1', vendor_id: 'ven1', vendor_sku: 'D00001542', price: '58.42', previous_price: '57.17',
   quantity: '1 gal', price_amount: '58.4200', landed_cost: '58.42', price_per_oz: '0.4564', normalized_unit_price: '0.4564',
   landed_unit_price: '0.4564', unit_normalized: 'oz', is_active: true, approval_status: 'approved', is_best_price: true,
-  price_type: 'manual', source_type: 'manual', last_checked_at: STALE_AT, ...extra,
+  price_type: 'manual', source_type: 'manual', last_checked_at: STALE_AT, latest_snapshot_id: null, ...extra,
 });
 const catalogRow = (extra = {}) => ({
   id: 'p1', name: 'LESCO Crosscheck Plus', active: true, needs_pricing: false, best_price: '58.42', best_vendor: 'SiteOne',
@@ -303,8 +303,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
     test('an install without the snapshot table or the link column gets no snapshot, and the price still moves', async () => {
       const noTable = world();
       await migration.up(fakeKnex(noTable));
-      expect(noTable.vendor_pricing[0].price).toBe(30.9);
-      expect(noTable.vendor_pricing[0]).not.toHaveProperty('latest_snapshot_id');
+      expect(noTable.vendor_pricing[0]).toMatchObject({ price: 30.9, latest_snapshot_id: null });
       const noLink = world({ vendors: [vendorRow({ latest_snapshot_id: 's0' })] });
       noLink.price_snapshots = [{ id: 's0' }];
       noLink.__missingColumns = ['vendor_pricing.latest_snapshot_id'];

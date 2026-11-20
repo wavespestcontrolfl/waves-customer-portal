@@ -275,6 +275,23 @@ describe('termite measurement overrides and safeguards', () => {
       products.talstar_p.productOzPerFinishedGallonAtHighRate = savedHigh;
       products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
     }
+    // The half volume is a fact of a label that was read. The code field outlives a config rename, so a product renamed to another
+    // bottle keeps the full volume; the earlier Talak 7.9 F label carries the same chart (pre-push audit 22).
+    const savedLabel = products.talstar_p.label;
+    try {
+      for (const other of ['Crosscheck G - Bifenthrin', 'Bifen I/T']) {
+        products.talstar_p.label = other;
+        const renamed = trench({ applicationRate: 'high' });
+        expect(renamed).toMatchObject({ finishedGallons: 80, productOz: 160 });
+        expect(renamed.warnings.join(' ')).not.toMatch(/reduced finished volume/);
+      }
+      for (const read of ['Talak 7.9 F - Bifenthrin', 'LESCO Cross Check Plus']) {
+        products.talstar_p.label = read;
+        expect(trench({ applicationRate: 'high' })).toMatchObject({ finishedGallons: 40, productOz: 80 });
+      }
+    } finally {
+      products.talstar_p.label = savedLabel;
+    }
     const taurus = priceTrenching({}, { measurements, productKey: 'taurus_sc', applicationRate: 'high', labelConfirmed: true });
     expect(taurus).toMatchObject({ finishedGallons: 80, productOz: 128 });
     expect(taurus.warnings).toContain('High/problem-soil rate increases chemical usage and requires label confirmation.');

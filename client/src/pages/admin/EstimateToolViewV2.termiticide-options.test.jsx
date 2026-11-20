@@ -29,22 +29,38 @@ describe("termiticide product options", () => {
 describe("label checks saved for the earlier bifenthrin bottle", () => {
   const saved = (extra) => ({ preslabProductKey: "talstar_p", preslabLabelConfirmed: true, trenchingProductKey: "bifen_it", trenchingLabelConfirmed: true, ...extra });
 
+  // Every form a reopen restores carries today's bottle mark, so a check ticked after the reopen counts (pre-push audit 22).
+  const mark = { _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE };
+
   it("clears both bifenthrin label checks on a form saved without the bottle mark", () => {
     const inputs = saved();
     const { form, cleared } = clearPriorBottleLabelChecks(inputs, { ...inputs, notes: "kept" });
     expect(cleared).toEqual(["pre-slab", "trenching"]);
-    expect(form).toMatchObject({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false, preslabProductKey: "talstar_p", trenchingProductKey: "bifen_it", notes: "kept" });
+    expect(form).toMatchObject({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false, preslabProductKey: "talstar_p", trenchingProductKey: "bifen_it", notes: "kept", ...mark });
   });
 
   it("keeps the checks a form made for Crosscheck Plus, and fipronil checks, and unchecked boxes", () => {
-    const marked = saved({ _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE });
-    expect(clearPriorBottleLabelChecks(marked, marked)).toEqual({ form: marked, cleared: [] });
+    const marked = saved(mark);
+    const same = clearPriorBottleLabelChecks(marked, marked);
+    expect(same).toEqual({ form: marked, cleared: [] });
+    expect(same.form).toBe(marked); // a form already marked comes back as is
     const fipronil = saved({ preslabProductKey: "termidor_sc", trenchingProductKey: "taurus_sc" });
-    expect(clearPriorBottleLabelChecks(fipronil, fipronil)).toEqual({ form: fipronil, cleared: [] });
+    expect(clearPriorBottleLabelChecks(fipronil, fipronil)).toEqual({ form: { ...fipronil, ...mark }, cleared: [] });
     const unchecked = saved({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false });
-    expect(clearPriorBottleLabelChecks(unchecked, unchecked)).toEqual({ form: unchecked, cleared: [] });
+    expect(clearPriorBottleLabelChecks(unchecked, unchecked)).toEqual({ form: { ...unchecked, ...mark }, cleared: [] });
     const form = { preslabProductKey: "talstar_p", preslabLabelConfirmed: true };
-    expect(clearPriorBottleLabelChecks(null, form)).toEqual({ form, cleared: [] });
+    expect(clearPriorBottleLabelChecks(null, form)).toEqual({ form: { ...form, ...mark }, cleared: [] });
+  });
+
+  it("replaces a saved null or an earlier bottle's mark with today's, whether or not a check was cleared", () => {
+    for (const earlier of [null, "atticus_talak"]) {
+      const checked = saved({ _bifenthrinLabelBottle: earlier });
+      expect(clearPriorBottleLabelChecks(checked, checked)).toEqual({
+        form: { ...checked, preslabLabelConfirmed: false, trenchingLabelConfirmed: false, ...mark }, cleared: ["pre-slab", "trenching"],
+      });
+      const clear = saved({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false, _bifenthrinLabelBottle: earlier });
+      expect(clearPriorBottleLabelChecks(clear, clear)).toEqual({ form: { ...clear, ...mark }, cleared: [] });
+    }
   });
 
   it("resolves a saved alias such as talak or Crosscheck Plus to its key before it decides, fipronil aliases included", () => {
@@ -53,7 +69,7 @@ describe("label checks saved for the earlier bifenthrin bottle", () => {
     expect(cleared).toEqual(["pre-slab", "trenching"]);
     expect(form).toMatchObject({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false, preslabProductKey: "talak" });
     const fipronil = saved({ preslabProductKey: "termidor", trenchingProductKey: "taurus" });
-    expect(clearPriorBottleLabelChecks(fipronil, fipronil)).toEqual({ form: fipronil, cleared: [] });
+    expect(clearPriorBottleLabelChecks(fipronil, fipronil)).toEqual({ form: { ...fipronil, ...mark }, cleared: [] });
   });
 
   it("restores a saved alias as its option key, so the picker and the label panel show the product the engine prices", () => {
