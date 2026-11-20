@@ -414,7 +414,7 @@ const LAWN_TALK_RE = /\b(?:lawn|grass|turf|sod|yard|weeds?|weedy|crabgrass|dolla
 // For { lane: 'reservice' } (GATE_RESERVICE_ASKS): what a customer says about
 // the problem behind a re-service. Pest or lawn talk, the product they
 // treated with, or who in the home it affects (a pet, a child, an allergy).
-const PRODUCT_TALK_RE = /\b(?:spray(?:s|ed|ing)?|treat(?:s|ed|ing|ment|ments)?|chemicals?|pesticides?|insecticides?|herbicides?|products?|granul\w*|poison\w*|powders?|bifenthrin|fipronil|permethrin|deltamethrin|cypermethrin|dinotefuran|imidacloprid|indoxacarb|abamectin|hydramethylnon|boric|borate|pyrethrin\w*|termidor|talstar|taurus|talak|advion|alpine|demand|gentrol|delta\s+dust)\b/i;
+const PRODUCT_TALK_RE = /\b(?:spray(?:s|ed|ing)?|treat(?:s|ed|ing|ment|ments)?|chemicals?|pesticides?|insecticides?|herbicides?|products?|granul\w*|poison\w*|powders?|bifenthrin|fipronil|permethrin|deltamethrin|cypermethrin|dinotefuran|imidacloprid|indoxacarb|abamectin|hydramethylnon|boric|borate|pyrethrin\w*|termidor|talstar|taurus|talak|crosscheck|advion|alpine|demand|gentrol|delta\s+dust)\b/i;
 const CARE_TALK_RE = /\b(?:pets?|dogs?|pupp(?:y|ies)|cats?|kittens?|kids?|children|child|bab(?:y|ies)|toddlers?|infants?|pregnan\w*|allerg\w*|asthma|sick)\b/i;
 const reserviceTalk = (sentence) => pestTalk(sentence) || LAWN_TALK_RE.test(sentence)
   || PRODUCT_TALK_RE.test(sentence) || CARE_TALK_RE.test(sentence);

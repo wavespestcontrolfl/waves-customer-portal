@@ -13,7 +13,8 @@ const KEY = 'fixture_v13_lawn_may';
 const TET = 'Tetrino Insecticide';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
   'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_CHINCH_TETRINO_RATE'];
-const NOTE = "Chinch bugs mapped here: Tetrino at the label's high rate, 0.735 fl oz per 1,000 sq ft.";
+const NOTE = "High current chinch pressure plus mapped history: Tetrino at the label's high rate, 0.735 fl oz per 1,000 sq ft.";
+const HIGH_SCOUT = { selectedConditionalProductNames: [TET], tetrinoTarget: 'chinch', tetrinoCurrentObservations: '12 counted at the damaged edge', tetrinoPressure: 'high' };
 const caps = require('../config/lawn-v13-count-caps');
 const day = etDateString(addETDays(new Date(), -1));
 
@@ -82,7 +83,7 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
       await knex('property_application_history').insert({ customer_id: visit.customerId, product_id: tetId, application_date: date, application_rate: rate, rate_unit: rate == null ? null : 'fl oz' });
     }
   }
-  const plan = (visit) => buildPlanForService(visit.id, { db: knex, includeCompletionDefaults: true });
+  const plan = (visit, options = {}) => buildPlanForService(visit.id, { db: knex, includeCompletionDefaults: true, ...HIGH_SCOUT, ...options });
   const tetOf = (list) => list.find((item) => item.product?.name === TET);
   const limitsSpy = () => jest.spyOn(require('../services/application-limits'), 'checkLimits');
   const limitedRate = (spy) => spy.mock.calls.find((call) => call[1] && call[4]?.proposed)?.[4].proposed.ratePer1000;
@@ -95,13 +96,26 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
       expect(item.mix).toMatchObject({ rateSource: 'protocol_rate', ratePer1000: 0.735, rateUnit: 'fl oz', amountUnit: 'fl oz' });
       expect(item.mix.amount).toBeCloseTo(7.35, 2);
       expect(item.gateNotes).toContainEqual({ key: 'chinchTetrinoRate', severity: 'note', text: NOTE });
-      expect(item.raw).toMatch(/^Tetrino Insecticide — 0\.735 fl oz per 1,000 sq ft, sunny turf only.*, chinch bugs mapped$/);
+      expect(item.raw).toMatch(/^Tetrino Insecticide — 0\.735 fl oz per 1,000 sq ft, .*high current chinch pressure plus mapped history$/);
       const defaulted = tetOf(result.completionDefaults.items);
       expect(defaulted.mix.ratePer1000).toBe(0.735);
       expect(defaulted.mix.amount).toBeCloseTo(7.35, 2);
       expect(defaulted.gateNotes).toContainEqual(expect.objectContaining({ key: 'chinchTetrinoRate', text: NOTE }));
       expect(limitedRate(spy)).toBe(0.735);
     } finally { spy.mockRestore(); }
+  });
+
+  test('sunlight and an active or resolved map alone never select Tetrino; ordinary current chinch evidence selects only 0.367', async () => {
+    for (const area of [{ type: 'chinch' }, { type: 'chinch', status: 'cleared', clearedDaysAgo: 10 }]) {
+      const visit = await mayVisit([area]);
+      const historyOnly = await buildPlanForService(visit.id, { db: knex, includeCompletionDefaults: true, selectedConditionalProductNames: [TET] });
+      const held = tetOf(historyOnly.mixCalculator.conditionalOptions);
+      expect(held).toMatchObject({ selected: false, fieldHold: 'tetrino_scout_evidence_required' });
+      expect(tetOf(historyOnly.completionDefaults.items)).toBeUndefined();
+      const ordinary = await plan(visit, { tetrinoPressure: 'ordinary' });
+      expect(tetOf(ordinary.mixCalculator.items).mix.ratePer1000).toBe(0.367);
+      expect(JSON.stringify(tetOf(ordinary.mixCalculator.items).gateNotes)).not.toContain('chinchTetrinoRate');
+    }
   });
 
   test('chinch resolved 10 days ago and 364 days ago still raises; 366 days ago does not', async () => {
@@ -136,7 +150,7 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
     for (const result of [gateOff, areasOff]) {
       const item = tetOf(result.mixCalculator.items);
       expect(item.mix.ratePer1000).toBe(0.367);
-      expect(item.raw).toMatch(/^Tetrino Insecticide — 0\.367 fl oz per 1,000 sq ft, sunny turf only/);
+      expect(item.raw).toMatch(/^Tetrino Insecticide — 0\.367 fl oz per 1,000 sq ft, optional after/);
       expect(JSON.stringify(result)).not.toContain('chinchTetrinoRate');
     }
     // The same visit with the gate off equals the same visit at a lawn whose chinch is not mapped: nothing else moved.
@@ -161,7 +175,7 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
 
   test('inside a transaction (packet closeout) the plan reads the areas through a savepoint and still raises', async () => {
     const visit = await mayVisit([{ type: 'chinch' }]);
-    const result = await knex.transaction((trx) => buildPlanForService(visit.id, { db: trx, includeCompletionDefaults: true }));
+    const result = await knex.transaction((trx) => buildPlanForService(visit.id, { db: trx, includeCompletionDefaults: true, ...HIGH_SCOUT }));
     expect(tetOf(result.mixCalculator.items).mix.ratePer1000).toBe(0.735);
   });
 
@@ -171,8 +185,8 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
     const spy = jest.spyOn(areas, 'hasAreaOfType').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     try {
       await expect(plan(visit)).rejects.toThrow('db down');
-      await expect(buildPlanForService(visit.id, { db: knex, strict: true, completionDefaultsEnabled: false })).rejects.toThrow('db down');
-      const lenient = await buildPlanForService(visit.id, { db: knex, completionDefaultsEnabled: false });
+      await expect(buildPlanForService(visit.id, { db: knex, strict: true, completionDefaultsEnabled: false, ...HIGH_SCOUT })).rejects.toThrow('db down');
+      const lenient = await buildPlanForService(visit.id, { db: knex, completionDefaultsEnabled: false, ...HIGH_SCOUT });
       expect(tetOf(lenient.mixCalculator.items).mix.ratePer1000).toBe(0.367);
       expect(JSON.stringify(lenient)).not.toContain('chinchTetrinoRate');
     } finally { spy.mockRestore(); }
@@ -196,7 +210,7 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
       const result = await planned([{ type: 'chinch' }], [['2027-01-05', 0.735], ['2027-02-16', 0.3]]);
       const item = tetOf(result.mixCalculator.items);
       expect(item.mix.ratePer1000).toBe(0.367);
-      expect(item.raw).toMatch(/^Tetrino Insecticide \u2014 0\.367 fl oz per 1,000 sq ft, sunny turf only/);
+      expect(item.raw).toMatch(/^Tetrino Insecticide \u2014 0\.367 fl oz per 1,000 sq ft, optional after/);
       expect(JSON.stringify(item.gateNotes)).not.toContain('chinchTetrinoRate');
       expect(tetOf(result.completionDefaults.items).mix.ratePer1000).toBe(0.367);
       expect(result.propertyGate.blocks.map((block) => block.code)).not.toContain('lawn_v13_annual_limit');

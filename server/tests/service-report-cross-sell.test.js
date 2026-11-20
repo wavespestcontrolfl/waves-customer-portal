@@ -231,6 +231,178 @@ describe('buildReportCrossSell', () => {
     expect(result.currentServices).toBeUndefined();
   });
 
+  // GATE_CAGE_TWO_SIZES (owner 2026-11-19, "hold"): a cage the old four sizes call
+  // Large still shows the quote CTA, not a price, although the lookup now says Medium.
+  describe('GATE_CAGE_TWO_SIZES keeps the quote CTA for a Large-by-four-sizes cage', () => {
+    const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
+    let prior;
+    beforeAll(() => { prior = process.env[TWO_SIZES]; });
+    afterAll(() => {
+      if (prior === undefined) delete process.env[TWO_SIZES];
+      else process.env[TWO_SIZES] = prior;
+    });
+    beforeEach(() => { delete process.env[TWO_SIZES]; });
+
+    const cageLookup = (legacy) => async () => ({
+      enriched: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+        pool: 'YES', poolSource: 'county', poolCage: 'YES', poolCageSqft: legacy === 'LARGE' ? 750 : 500,
+        poolCageSize: 'MEDIUM', poolCageLegacySize: legacy,
+      },
+      propertyRecord: {},
+    });
+    const offer = (legacy) => buildReportCrossSell(
+      SERVICE(),
+      dbFor({ serviceTypes: ['Lawn Care'], turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' } }),
+      { propertyLookup: cageLookup(legacy) },
+    );
+
+    test('gate on: the pest offer is the unpriced CTA for Large, and priced for Medium', async () => {
+      process.env[TWO_SIZES] = 'true';
+      const held = await offer('LARGE');
+      expect(held.serviceKey).toBe('pest_control');
+      expect(held.mode).toBe('quote_cta');
+      expect(held.option).toBeNull();
+      const medium = await offer('MEDIUM');
+      expect(medium.mode).toBe('priced');
+      expect(medium.option.perVisit).toBeGreaterThan(0);
+    });
+
+    test('gate off: the same lookup prices as before', async () => {
+      const result = await offer('LARGE');
+      expect(result.serviceKey).toBe('pest_control');
+      expect(result.mode).toBe('priced');
+    });
+
+    // A lawn-only accepted estimate never priced the cage (it only moves pest). On a lookup miss the
+    // seed's cage size is held on the seed's OWN cage evidence.
+    describe('a seeded cage on a lookup miss', () => {
+      const seededOffer = (profile, size = 'medium') => buildReportCrossSell(
+        SERVICE(),
+        dbFor({
+          serviceTypes: ['Lawn Care'],
+          turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+          estimates: [{
+            id: 'est-cage', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+            estimate_data: JSON.stringify({
+              engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: size } },
+              engineRequest: { profile },
+            }),
+          }],
+        }),
+        { propertyLookup: missLookup },
+      );
+
+      test('gate on: a seeded Medium whose stored area is 750 sq ft shows the quote CTA', async () => {
+        process.env[TWO_SIZES] = 'true';
+        const held = await seededOffer({ poolCageSqft: 750 });
+        expect(held.serviceKey).toBe('pest_control');
+        expect(held.mode).toBe('quote_cta');
+        expect(held.option).toBeNull();
+      });
+
+      test('gate on: a stored area of 500 sq ft prices', async () => {
+        process.env[TWO_SIZES] = 'true';
+        const priced = await seededOffer({ poolCageSqft: 500 });
+        expect(priced.mode).toBe('priced');
+        expect(priced.option.perVisit).toBeGreaterThan(0);
+      });
+
+      test('gate off: the same 750 sq ft seed prices as before', async () => {
+        const priced = await seededOffer({ poolCageSqft: 750 });
+        expect(priced.mode).toBe('priced');
+      });
+
+      // A draft-shaped seed has features but no engineRequest and no enriched: no cage evidence at all.
+      test('a draft-shaped seed (no engineRequest, no enriched) is the quote CTA with the gate on and prices with it off', async () => {
+        const draftOffer = () => buildReportCrossSell(
+          SERVICE(),
+          dbFor({
+            serviceTypes: ['Lawn Care'],
+            turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+            estimates: [{
+              id: 'est-draft', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+              estimate_data: JSON.stringify({
+                engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'medium' } },
+              }),
+            }],
+          }),
+          { propertyLookup: missLookup },
+        );
+        process.env[TWO_SIZES] = 'true';
+        const held = await draftOffer();
+        expect(held.mode).toBe('quote_cta');
+        expect(held.option).toBeNull();
+        delete process.env[TWO_SIZES];
+        expect((await draftOffer()).mode).toBe('priced');
+      });
+
+      // A website quote stores the visitor's profile as `enriched`, while its saved size came from the
+      // server's re-read. That older profile never releases the hold of a saved Large.
+      test('a website seed saved Large with a stale Medium profile is the quote CTA with the gate off and on', async () => {
+        const websiteOffer = () => buildReportCrossSell(
+          SERVICE(),
+          dbFor({
+            serviceTypes: ['Lawn Care'],
+            turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+            estimates: [{
+              id: 'est-website', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+              estimate_data: JSON.stringify({
+                engineInput: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'large' } },
+                enriched: { poolCage: 'YES', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' },
+              }),
+            }],
+          }),
+          { propertyLookup: missLookup },
+        );
+        const off = await websiteOffer();
+        expect(off.serviceKey).toBe('pest_control');
+        expect(off.mode).toBe('quote_cta');
+        expect(off.option).toBeNull();
+        process.env[TWO_SIZES] = 'true';
+        const on = await websiteOffer();
+        expect(on.serviceKey).toBe('pest_control');
+        expect(on.mode).toBe('quote_cta');
+        expect(on.option).toBeNull();
+      });
+
+      test('gate off (rollback): a seed written under two sizes (area 750, legacy Large, saved Medium) is the quote CTA', async () => {
+        const held = await seededOffer({ poolCageSqft: 750, poolCageLegacySize: 'LARGE' });
+        expect(held.mode).toBe('quote_cta');
+        expect(held.option).toBeNull();
+      });
+    });
+
+    test('loadEstimateSeed reads cageEvidence from engineRequest.profile, falls back to enriched, else null', async () => {
+      const { loadEstimateSeed } = _private;
+      const street = require('../services/estimate-property-linkage')
+        .normalizedEstimateStreet('123 Gulf Dr, Sarasota, FL 34236');
+      const seedFor = (estimateData) => loadEstimateSeed(dbFor({
+        estimates: [{
+          id: 'est-evidence', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+          estimate_data: { engineInputs: { homeSqFt: 2100, lotSqFt: 8000, stories: 1 }, ...estimateData },
+        }],
+      }), 'cust-1', street);
+      expect((await seedFor({ engineRequest: { profile: { poolCageSqft: 750, poolCageLegacySize: 'large' } }, enriched: { poolCageSqft: 300 } })).cageEvidence)
+        .toEqual({ poolCageSqft: 750, poolCageLegacySize: 'LARGE' });
+      expect((await seedFor({ engineRequest: { profile: { homeSqFt: 2100 } }, enriched: { poolCageSqft: '640' } })).cageEvidence)
+        .toEqual({ poolCageSqft: 640 });
+      expect((await seedFor({ enriched: { poolCageLegacySize: 'OVERSIZED', poolCageSize: 'LARGE' } })).cageEvidence)
+        .toEqual({ poolCageLegacySize: 'OVERSIZED' });
+      // The legacy key's PRESENCE marks a seed written under two sizes: kept even with a null value.
+      expect((await seedFor({ engineRequest: { profile: { poolCageLegacySize: null, poolCageSize: 'MEDIUM' } } })).cageEvidence)
+        .toEqual({ poolCageLegacySize: null });
+      expect((await seedFor({ engineRequest: { profile: { poolCageSqft: 600, poolCageLegacySize: 'bogus' } } })).cageEvidence)
+        .toEqual({ poolCageSqft: 600, poolCageLegacySize: null });
+      // A non-size legacy value still marks the profile as two-size era; the later profile is not read.
+      expect((await seedFor({ engineRequest: { profile: { poolCageSqft: 0, poolCageLegacySize: 'NONE' } }, enriched: { poolCageSqft: 640 } })).cageEvidence)
+        .toEqual({ poolCageLegacySize: null });
+      for (const none of [{}, { engineRequest: { profile: { poolCageSqft: 0 } }, enriched: { poolCageSqft: 'abc' } }]) {
+        expect((await seedFor(none)).cageEvidence).toBeNull();
+      }
+    });
+  });
+
   describe('engineContext is opt-in mint material, never public payload (click-to-estimate lane)', () => {
     const args = () => ({
       serviceTypes: ['Pest Control'],

@@ -40,6 +40,9 @@ jest.mock('../services/pest-pressure/store', () => ({
 }));
 jest.mock('../services/service-report/report-data', () => ({
   buildReportV1Data: jest.fn(),
+  // The pdf / static modes strip live-only fields in place.
+  stripLiveOnlyScheduleFields: jest.fn(),
+  stripLiveOnlyReportProductCopy: jest.fn(),
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: jest.fn().mockResolvedValue({}),
@@ -228,6 +231,43 @@ describe('GET /reports/:token/data view tracking', () => {
       expect(res.status).toBe(200);
       expect(body.internalOnly).toBe(true);
       expect(body.staffViewer).toBe(true);
+    });
+  });
+});
+
+// The PDF payload names the writer-rules state it was built in: the report
+// page shows it on its root, and the PDF renderer prints only once it matches
+// the state the PDF key was computed under (pdf.js reportPdfReadySelector).
+describe('GET /reports/:token/data: the writer-rules state of a PDF payload', () => {
+  const gate = process.env.GATE_REPORT_WRITER_RULES;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    buildReportV1Data.mockResolvedValue({
+      typedReport: { headline: 'Rodent activity was high today.' },
+      pestPressure: null,
+      pdfUrl: `/api/reports/${VALID_TOKEN}`,
+    });
+  });
+  afterAll(() => {
+    if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+    else process.env.GATE_REPORT_WRITER_RULES = gate;
+  });
+
+  test('a PDF payload names the state it was built in; a live payload names none', async () => {
+    for (const [value, state] of [['true', 'on'], ['false', 'off']]) {
+      process.env.GATE_REPORT_WRITER_RULES = value;
+      mockDb({ deliveryMode: 'auto_send' });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=pdf`);
+        expect(res.status).toBe(200);
+        expect((await res.json()).writerRules).toBe(state);
+      });
+    }
+    mockDb({ deliveryMode: 'auto_send' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).writerRules).toBeUndefined();
     });
   });
 });

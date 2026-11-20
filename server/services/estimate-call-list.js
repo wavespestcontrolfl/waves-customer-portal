@@ -66,6 +66,84 @@ async function lastCalledAtByEstimateId(database, estimates, nowMs = Date.now())
   return out;
 }
 
+// Hard ceiling for limit=all list fetches. The estimates pipeline computes all-time KPIs client-side from this list; if
+// the table ever outgrows this cap the analytics silently truncate to the newest rows, so keep generous headroom
+// (pricing-risk batch is pure compute after one inventory preload).
+const ESTIMATE_LIST_LIMIT = 2000;
+const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
+
+// Short-link click telemetry per estimate, one batched query. One estimate can hold several short_codes rows when
+// /send runs again (a re-send or a follow-up), so the click counts are SUMMED and the last-clicked time is the MAX.
+// Bot taps are filtered upstream in public-shortlinks, so the numbers are real customer taps. The list route reads
+// both fields and the Call today push reads last_clicked_at, so the page and the push count the same clicks.
+async function clickStatsByEstimateId(database, ids) {
+  if (!ids.length) return new Map();
+  const rows = await database('short_codes')
+    .where({ entity_type: 'estimates' })
+    .whereIn('entity_id', ids)
+    .groupBy('entity_id')
+    .select('entity_id')
+    .sum({ click_count: 'click_count' })
+    .max({ last_clicked_at: 'last_clicked_at' });
+  return new Map(rows.map((r) => [r.entity_id, r]));
+}
+
+/**
+ * The base row selection of GET /admin/estimates: ONE home for the list route and the 9 AM Call today push, so the
+ * push counts only rows the Estimates page can load. The page loads sentOnly rows (limit=all, the newest
+ * ESTIMATE_LIST_LIMIT by created_at) plus drafts; the caller applies the limit (`.limit(ESTIMATE_LIST_LIMIT)`) or a page.
+ *
+ * @param {Function} database  knex-like handle
+ * @param {{status?: string, sentOnly?: boolean, sources?: string[]|null, archived?: 'hide'|'only'|'all'}} [filters]
+ *   archived 'hide' (default) drops archived rows, 'only' keeps only them, 'all' keeps both.
+ */
+function estimateListQuery(database, { status, sentOnly = false, sources = null, archived = 'hide' } = {}) {
+  let query = database('estimates')
+    .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
+    .select('estimates.*', 'technicians.name as created_by_name')
+    // The id breaks created_at ties, so every caller's limit cuts at the same rows (the push's narrow select and the
+    // page's full one must count the same 2,000).
+    .orderBy('estimates.created_at', 'desc')
+    .orderBy('estimates.id', 'desc');
+  if (status) query = query.where('estimates.status', status);
+  if (sentOnly) {
+    query = query.where(function () {
+      this.whereNotNull('estimates.sent_at')
+        .orWhereIn('estimates.status', SENT_ONLY_DELIVERY_ATTEMPT_STATUSES);
+    });
+  }
+  if (sources) query = query.whereIn('estimates.source', sources);
+  if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
+  else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
+  return query;
+}
+
+/**
+ * The fields the "Call today" rule reads (shared/estimate-call-today.cjs), in the shape the list API sends.
+ * ONE mapping for the list route and the 9 AM push, so the page and the push judge the same row.
+ * viewedAt and lastViewedAt stay null on a row that was never sent (the list's own rule).
+ *
+ * @param {object} row  estimates row (snake_case columns)
+ * @param {{lastClickedAt?: *, lastCalledAt?: *, undeliveredSelfServe?: boolean}} [extra]  the two values read in
+ *   batches (short_codes, call_log), and the self-serve rule's answer for the row (services/self-serve-estimates.js)
+ */
+function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, undeliveredSelfServe = false } = {}) {
+  const hasBeenSent = !!row.sent_at;
+  return {
+    status: row.status,
+    customerPhone: row.customer_phone,
+    archivedAt: row.archived_at,
+    viewedAt: hasBeenSent ? row.viewed_at : null,
+    lastViewedAt: hasBeenSent ? row.last_viewed_at : null,
+    lastClickedAt: lastClickedAt || null,
+    lastFollowUpAt: row.last_follow_up_at,
+    lastCalledAt: lastCalledAt || null,
+    // A self-serve quote nobody delivered (plan restart, plan start) never makes the list: the
+    // zero-follow-up contract (services/self-serve-estimates.js). The caller passes the rule's answer.
+    undeliveredSelfServe: Boolean(undeliveredSelfServe),
+  };
+}
+
 /**
  * May PATCH /api/admin/estimates/:id stamp a staff loss reason on this row WITHOUT a status change?
  * Only on a row whose status is `expired` (the request leaves the
@@ -79,4 +157,4 @@ function staffReasonOnExpiredAllowed(estimate, body = {}) {
   return (estimate.disposition || '') !== 'expired_unsent';
 }
 
-module.exports = { lastCalledAtByEstimateId, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };
+module.exports = { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };

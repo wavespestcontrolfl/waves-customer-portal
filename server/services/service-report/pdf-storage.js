@@ -74,7 +74,12 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // shell (white masthead, ruled sections, blue page accent and quiet footer).
 // Stored unsigned PDFs must re-render; signed/executed files remain pinned by
 // their separate immutable document lifecycles.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p14-field-document-20261025';
+// p15: a lawn PDF whose summary is the technician's report (summarySource
+// 'technician_report') prints that report whole, not cut to the reconciled
+// first sentence (ServiceReportDocument). Cached p14 objects carry the cut
+// text, so they re-render on next open. Supersedes p14, whose bust it
+// subsumes.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p15-whole-technician-report-20261119';
 
 const s3 = new S3Client({
   region: config.s3?.region,

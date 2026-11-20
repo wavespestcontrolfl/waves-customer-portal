@@ -465,6 +465,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   let roofType = null;
   let palmCount = positiveNumber(customer.palm_count);
   let lookupMeta = null;
+  // GATE_CAGE_TWO_SIZES: the lookup's own two-size answer, set only when today's four sizes
+  // would have held this cage for a person to quote (customerCageHold). Else null.
+  let lookupCageHoldSize = null;
   // Feature defaults, NOT observations: the profile carries no feature
   // columns, so these stand only until the lookup answers. treeCount is
   // deliberately ABSENT, not 0 — priceTreeShrub treats any supplied count
@@ -516,6 +519,8 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       const lookup = await propertyLookup(address);
       const p = lookup?.enriched || {};
       const record = lookup?.propertyRecord || lookup?.rentcast || {};
+      lookupCageHoldSize = require('./property-lookup/office-cage-start').customerCageHold(p)
+        ? String(p.poolCageSize || '').toLowerCase() : null;
       source = homeSqFt || lotSqFt ? 'customer_profile_plus_property_lookup' : 'property_lookup';
       lookupMeta = {
         used: true,
@@ -934,6 +939,25 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     }
     if (seedMayFill('foundationType')) foundationType = foundationType || propertySeed.foundationType || null;
     if (seedMayFill('roofType')) roofType = roofType || propertySeed.roofType || null;
+  }
+
+  // GATE_CAGE_TWO_SIZES: keep today's manual-quote hold. The engine adds
+  // large_pool_cage for poolCageReview. The flag follows the SAME evidence as the size:
+  // when the lookup decided the size it decides the flag too (true by the current rule,
+  // else any seeded flag, such as a stale website-quote one, is removed); when the seed
+  // supplied the size, the seed's own flag travels with it.
+  if (lookupFeatureKeys.has('poolCageSize')) {
+    const { poolCageReview: _seededFlag, ...lookupBacked } = features;
+    features = lookupCageHoldSize && String(lookupBacked.poolCageSize || '').toLowerCase() === lookupCageHoldSize
+      ? { ...lookupBacked, poolCageReview: true }
+      : lookupBacked;
+  }
+  // A seeded cage size is priced and held by ONE resolver under this call's gate, from the seed's own
+  // cage evidence (null evidence included: a lawn-only estimate never priced the cage). Only while the
+  // priced size is the seed's own, not lookup-backed.
+  if (!lookupFeatureKeys.has('poolCageSize') && propertySeed?.features
+    && String(features.poolCageSize || '').toLowerCase() === String(propertySeed.features.poolCageSize || '').toLowerCase()) {
+    features = require('./property-lookup/office-cage-start').seededCageFeatures(features, propertySeed.cageEvidence);
   }
 
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);

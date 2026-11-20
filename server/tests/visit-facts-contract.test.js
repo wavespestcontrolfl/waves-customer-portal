@@ -419,13 +419,11 @@ describe('visit facts contract registry', () => {
         if (!fields.has(key)) problems.push(`${line}: REQUIRED_FINDINGS_FIELDS.${def.typedForm} names ${key}, not a field of the form`);
       }
       // Mirrors typedFactFields()'s own inclusion rule exactly (independent
-      // re-derivation, not a call into it): a pesticideOnly internal field
-      // (pollinator_status / irac_frac_logged) is CONDITIONALLY required —
-      // validateTreeShrubTypedCompliance enforces it whenever a pesticide
-      // product is on the visit — which REQUIRED_FINDINGS_FIELDS has no way
-      // to express, so it must be included here too or a bypass of
-      // typedFactFields's own filter would go undetected (codex follow-up on
-      // #5190).
+      // re-derivation, not a call into it): every pesticideOnly internal
+      // field is CONDITIONALLY required by its pesticideComplianceWhen
+      // branch. REQUIRED_FINDINGS_FIELDS has no way to express those
+      // product/evidence predicates, so the fields must be included here too
+      // or a bypass of typedFactFields's own filter would go undetected.
       const expected = cfg.findingsFields
         .filter((f) => !f.internal || required.has(f.key) || f.pesticideOnly)
         .map((f) => f.key)
@@ -524,24 +522,52 @@ describe('visit facts contract registry', () => {
     expect(problems).toEqual([]);
   });
 
-  test('each pesticideOnly compliance fact names the predicate its own validation branch uses', () => {
-    const closeout = readRepoFile('server/services/tree-shrub-closeout.js') || '';
+  test('each pesticideOnly compliance fact names its server predicate and served client branch', () => {
     const PREDICATES = ['hasInsectProduct', 'needsIracFracLog'];
+    const CLIENT_WHEN = ['insect', 'rotation', 'insect_live', 'insect_preventive'];
     const problems = [];
     for (const [line, def] of typedLines) {
       const cfg = PROJECT_TYPES[def.typedForm];
       for (const field of (cfg?.findingsFields || []).filter((f) => f.pesticideOnly)) {
         const fact = def.facts.find((f) => f.key === field.key);
-        const reader = fact?.readers.find((r) => r.file === 'server/services/tree-shrub-closeout.js');
+        const reader = fact?.readers.find((r) => r.section.startsWith('Pesticide compliance gate'));
+        const schemaReader = fact?.readers.find((r) => r.readerSymbol === 'pesticideComplianceWhen');
+        const clientReader = fact?.readers.find((r) => r.readerSymbol === 'typedPesticideFieldApplies');
+        const submitReader = fact?.readers.find((r) => r.readerSymbol === 'missingTypedPesticideCompliance');
         const named = reader && (reader.section.match(new RegExp(`\\((${PREDICATES.join('|')})\\)`)) || [])[1];
+        const readerSource = readRepoFile(reader?.file) || '';
         // The validation branch that blocks on this field: the blank-line
-        // separated block holding its first pushBlock(..., '<field>').
-        const at = closeout.search(new RegExp(`pushBlock\\([^;]*'${field.key}'\\)`));
-        const branch = at < 0 ? '' : closeout.slice(closeout.lastIndexOf('\n\n', at), at);
+        // separated block holding its first pushBlock(..., '<field>'). The
+        // three mutually-exclusive insect evidence fields delegate to
+        // validatePestTreatmentEvidence; in that reader, the function-level
+        // hasInsectProduct guard is their common validation branch.
+        const delegatedAt = readerSource.indexOf('function validatePestTreatmentEvidence');
+        const directAt = readerSource.search(new RegExp(`pushBlock\\([^;]*'${field.key}'\\)`));
+        const branch = delegatedAt >= 0
+          ? readerSource.slice(delegatedAt, readerSource.indexOf('\n}\n', delegatedAt))
+          : directAt < 0 ? '' : readerSource.slice(readerSource.lastIndexOf('\n\n', directAt), directAt);
         const used = PREDICATES.filter((p) => new RegExp(`\\b${p}\\b`).test(branch));
         if (!named) problems.push(`${line}.${field.key}: server reader does not name its condition`);
         else if (used.length !== 1 || used[0] !== named) {
           problems.push(`${line}.${field.key}: registry names ${named}, validation branch uses ${used.join(', ') || 'none'}`);
+        }
+        if (!CLIENT_WHEN.includes(field.pesticideComplianceWhen)) {
+          problems.push(`${line}.${field.key}: project-types.js lacks a recognized pesticideComplianceWhen`);
+        } else if (fact?.pesticideComplianceWhen !== field.pesticideComplianceWhen) {
+          problems.push(`${line}.${field.key}: registry client branch ${fact?.pesticideComplianceWhen || 'missing'} does not match project-types.js ${field.pesticideComplianceWhen}`);
+        }
+        if (!schemaReader?.section.includes(`pesticideComplianceWhen=${field.pesticideComplianceWhen}`)) {
+          problems.push(`${line}.${field.key}: served-schema reader does not name its client branch`);
+        }
+        if (!clientReader?.section.includes(`pesticideComplianceWhen=${field.pesticideComplianceWhen}`)) {
+          problems.push(`${line}.${field.key}: shared client reader does not name its branch`);
+        }
+        if (!submitReader?.section.includes('Primary and companion')) {
+          problems.push(`${line}.${field.key}: pre-submit reader does not cover primary and companion forms`);
+        }
+        const evidence = ['insect_target', 'insect_life_stage', 'insect_preventive_reason'].includes(field.key);
+        if (evidence && !schemaReader?.section.includes('GATE_TS_PEST_CHECK off omits')) {
+          problems.push(`${line}.${field.key}: served-schema reader does not pin the gate-off omission`);
         }
       }
     }

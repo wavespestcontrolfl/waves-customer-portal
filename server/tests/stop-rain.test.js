@@ -24,6 +24,19 @@ describe('attachStopRain', () => {
     expect(services.map((s) => s.rainAtStop)).toEqual([10, 55, null, null, null, null, null]);
   });
 
+  it('reads a stop whose stored zone has no forecast point from the zone zoneOf names', () => {
+    // 11-19: stops stamped zone 'bradenton' (a location id, no forecast point) showed no rain.
+    const services = [
+      { id: 'a', zone: 'bradenton', status: 'confirmed', windowStart: '09:00' },
+      { id: 'b', zone: 'venice', status: 'confirmed', windowStart: '08:00' },
+    ];
+    const zoneOf = (s) => (s.zone === 'bradenton' ? 'lakewood_ranch' : s.zone);
+    attachStopRain(services, DATE, { venice: hours, lakewood_ranch: hours }, zoneOf);
+    expect(services.map((s) => s.rainAtStop)).toEqual([55, 10]);
+    attachStopRain(services, DATE, { venice: hours, lakewood_ranch: hours });
+    expect(services.map((s) => s.rainAtStop)).toEqual([null, 10]);
+  });
+
   it('builds a null key for a malformed date or window', () => {
     expect(hourKey(DATE, '09:00')).toBe('2026-10-24T09');
     expect(hourKey('tomorrow', '09:00')).toBeNull();

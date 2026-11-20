@@ -364,6 +364,24 @@ function estimateRequiresFieldVerification(estData) {
 //     multi-property customer's legacy estimate could otherwise price the
 //     wrong premises).
 // Fill-only semantics are enforced downstream in resolvePropertyContext.
+// The accepted estimate's own cage evidence (GATE_CAGE_TWO_SIZES "hold"): the county cage area
+// and/or the four-size answer (and the legacy key's presence) from its stored profile,
+// engineRequest.profile first, then enriched. Null when neither has any. A seeded cage size is held on THIS evidence, because a
+// lawn-only estimate never priced the cage (it only moves pest).
+function seedCageEvidence(estData) {
+  const { fourBandCageSize, validFour, hasLegacyKey } = require('../property-lookup/cage-sizes');
+  for (const profile of [estData?.engineRequest?.profile, estData?.enriched]) {
+    if (!profile || typeof profile !== 'object') continue;
+    const evidence = {};
+    if (fourBandCageSize(profile.poolCageSqft) !== null) evidence.poolCageSqft = Number(profile.poolCageSqft);
+    // The key's PRESENCE marks a profile written under two sizes (cage-sizes.js reads it that
+    // way), so it is copied even when its value is null or not a size.
+    if (hasLegacyKey(profile)) evidence.poolCageLegacySize = validFour(profile.poolCageLegacySize);
+    if (Object.keys(evidence).length > 0) return evidence;
+  }
+  return null;
+}
+
 async function loadEstimateSeed(database, customerId, scopeStreet) {
   if (!scopeStreet) return null;
   // Accepted rows only, and all of them (codex pre-push, GATE_PORTAL_PLAN_START
@@ -488,6 +506,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     constructionMaterial: cleanString(inputs.constructionMaterial),
     foundationType: cleanString(inputs.foundationType),
     roofType: cleanString(inputs.roofType),
+    cageEvidence: seedCageEvidence(pick.estData),
   };
   const hasAnyDimension = seed.homeSqFt || seed.lotSqFt || seed.lawnSqFt || seed.bedArea || seed.stories;
   return hasAnyDimension ? seed : null;

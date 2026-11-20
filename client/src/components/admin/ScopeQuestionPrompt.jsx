@@ -34,6 +34,11 @@ const SUGGESTION_HINTS = {
   building: "Looks like a stand-alone building.",
 };
 
+// Shown under an open question, while its buttons can be pressed. True for
+// every source of the question (an unresolved lookup, a server 409, an answer
+// whose lookup failed): pricing is blocked in all of them.
+export const OPEN_QUESTION_NEXT_STEP = "Choose an answer to continue. The estimate cannot be priced until you do.";
+
 const ANSWERS = [
   { value: "suite", label: "Just their space" },
   { value: "building", label: "The whole building" },
@@ -76,6 +81,8 @@ export default function ScopeQuestionPrompt({ profile, question, answer, busy, o
         </>
       )}
       {question && <p className="m-0 mt-1 font-medium">{question}</p>}
+      {/* The open question is the next step, not a detail. */}
+      {question && !busy && <p className="m-0 mt-1 text-14 text-zinc-900">{OPEN_QUESTION_NEXT_STEP}</p>}
       {hint && <p className="m-0 mt-1 text-14 text-zinc-600">{hint}</p>}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         {ANSWERS.map((a) => (

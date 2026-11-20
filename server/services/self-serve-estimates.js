@@ -47,6 +47,13 @@ function selfServeOr(alias, selfServeSql, otherSql) {
   return `(CASE WHEN ${alias}.source IN (${SELF_SERVE_SOURCES_SQL}) THEN ${selfServeSql} ELSE ${otherSql} END)`;
 }
 
+// isUndeliveredSelfServe as a SQL boolean, for a reader that selects the flag
+// rather than load estimate_data (the 9 AM Call today push reads 2,000 rows).
+// A source-NULL row gives NULL, which reads as false.
+function undeliveredSelfServeSql(alias) {
+  return `(${alias}.source IN (${SELF_SERVE_SOURCES_SQL}) AND (${deliveryStampSql(alias)}) IS NULL)`;
+}
+
 // The instant a row counts as sent. A self-serve row counts at its first real
 // delivery: its sent_at is the mint stamp, and the admin send path rewrites
 // sent_at on every later attempt, suppressed ones too (codex pre-push r16 P1),
@@ -70,5 +77,6 @@ function countableViewAtSql(alias) {
 }
 
 module.exports = {
-  SELF_SERVE_ESTIMATE_SOURCES, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, sentAtSql, countableViewAtSql,
+  SELF_SERVE_ESTIMATE_SOURCES, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
+  sentAtSql, countableViewAtSql,
 };

@@ -429,9 +429,13 @@ export const ADMIN_MOBILE_TABS = MOBILE_TAB_IDS.map((itemId) =>
 // The bottom tabs one login sees: owner-only tabs for the owner, the
 // technician tab (Today) for technicians. The tab bar and the Settings tab's
 // page list both read this rule, so a page is either a tab or a Settings row.
-export function getAdminMobileTabs(role) {
+// Field view (an admin's own switch, saved on the phone): Today takes the
+// Dashboard tab's slot, so Dashboard is no tab and the Settings page lists it.
+export function getAdminMobileTabs(role, { fieldView = false } = {}) {
+  const fieldAdmin = fieldView === true && role === "admin";
   return ADMIN_MOBILE_TABS.filter((item) => (!item.adminOnly || role === "admin")
-    && (!item.technicianTab || role === "technician"));
+    && (!item.technicianTab || role === "technician" || fieldAdmin)
+    && !(fieldAdmin && item.id === "dashboard"));
 }
 
 // The grouped shell reuses the canonical destinations and their individual
@@ -579,7 +583,7 @@ export function isPathAdminOnly(pathname) {
   return !allowed;
 }
 
-export function isAdminNavItemActive(item, pathname, search = "") {
+export function isAdminNavItemActive(item, pathname, search = "", { fieldView = false } = {}) {
   const itemPathname = pathnameFor(item?.path);
   if (!itemPathname) return false;
   if (pathname === itemPathname) return true;
@@ -603,6 +607,8 @@ export function isAdminNavItemActive(item, pathname, search = "") {
         .filter(({ to }) => !MOBILE_TAB_PATHS.has(pathnameFor(to)))
         .map(({ to }) => ({ path: to })),
     ];
+    // With Field view on, Dashboard is a Settings row, so this tab owns it.
+    if (fieldView) owned.push(ADMIN_NAV_ITEMS.dashboard);
     return owned.some((moreItem) => {
       const morePathname = pathnameFor(moreItem.path);
       return (

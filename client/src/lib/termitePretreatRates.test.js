@@ -11,6 +11,12 @@ describe("lookupPretreatProduct", () => {
     expect(lookupPretreatProduct("Talstar P Professional")?.label).toBe("Talstar P");
   });
 
+  it("matches LESCO Crosscheck Plus, the house bifenthrin (label pages 29-32: 0.06%)", () => {
+    expect(lookupPretreatProduct("LESCO Crosscheck Plus")).toMatchObject({ label: "LESCO Crosscheck Plus", kind: "soil_liquid", concentrationPct: "0.060" });
+    expect(computePretreatChemistry({ productName: "lesco crosscheck plus", squareFootage: "1,800", linearFeet: "220", trenchDepthFt: "0.5" }))
+      .toMatchObject({ status: "ok", concentrationPct: "0.060", gallons: 224 });
+  });
+
   it("does not match unrelated products or prefixes without a word break", () => {
     expect(lookupPretreatProduct("Termidor HE")).toBeNull();
     expect(lookupPretreatProduct("Taurus SC")).toBeNull();

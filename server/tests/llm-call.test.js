@@ -644,6 +644,30 @@ describe('dispatchWithFallback', () => {
     if (savedAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = savedAnthropic;
   });
 
+  test('on the Mac job the fact-check lanes keep the Anthropic route: a Claude failure never reaches the paid fallback', async () => {
+    const savedRunner = process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+    try {
+      jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ status: 'completed', output_text: '{"ok":true}' }) });
+      mockAnthropicCreate.mockRejectedValue(Object.assign(new Error('overloaded'), { status: 529 }));
+      const policy = { primary: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }, fallback: { provider: PROVIDER.OPENAI, model: OPENAI_BEST } };
+      const payload = (laneId) => ({ laneId, text: 'review', jsonMode: true });
+      process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+      for (const lane of ['editorial_review', 'editorial_repair', 'editorial_plan_review', 'fact_check_gate']) {
+        const result = await dispatchWithFallback(policy, payload(lane));
+        expect(result).toMatchObject({ ok: false });
+        expect(result.failures.map((failure) => failure.provider)).toEqual([PROVIDER.ANTHROPIC]);
+      }
+      expect(global.fetch).not.toHaveBeenCalled();
+      // A lane outside the fact check, and the same lane off the Mac job, still fall back.
+      await expect(dispatchWithFallback(policy, payload('sms_draft'))).resolves.toMatchObject({ ok: true, provider: PROVIDER.OPENAI });
+      delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+      await expect(dispatchWithFallback(policy, payload('editorial_review'))).resolves.toMatchObject({ ok: true, provider: PROVIDER.OPENAI });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      if (savedRunner === undefined) delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER; else process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = savedRunner;
+    }
+  });
+
   test('preserves the requested model and exposes the winning provider model separately', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,

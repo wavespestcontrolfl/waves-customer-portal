@@ -25,7 +25,7 @@ const {
   makeSection,
   parseJsonMaybe,
   renderOutlineHtml,
-  resolveJurisdictionId,
+  resolveOutlineJurisdictionId,
   resolveSeasonBand,
   validateContent,
 } = require('./lawn-service-outline');
@@ -144,11 +144,12 @@ const PEST_COPY = Object.freeze({
 
 // The product list: catalog rows read by name at build time (decision D1-B, as on the lawn outline), never a typed-in
 // name. The dinotefuran row is inside only (walkthrough 2026-10-03: "we never use alpine outside except for mud
-// daubers"); the catalog renames it Atticus Antapex WSG (#6863), so either name is read. Left out: the granular bait
+// daubers"); the catalog renames it Atticus Antapex WSG (#6863), so either name is read. The house bifenthrin is LESCO Crosscheck
+// Plus (owner ruling 2026-11-18; it replaced Atticus Talak 7.9 F). Left out: the granular bait
 // (owner 2026-10-24 "we dont really use this on pest visits"), the surfactant, the German roach and rodent products.
 const PEST_PRODUCTS = Object.freeze([
   { step: 'barrier', names: ['Taurus SC'] },
-  { step: 'barrier', names: ['Atticus Talak 7.9 F'] },
+  { step: 'barrier', names: ['LESCO Crosscheck Plus'] },
   { step: 'treat', names: ['Atticus Antapex WSG', 'Alpine WSG'], inside: true },
   { step: 'insects', names: ['Advion Ant Bait Gel'] },
 ].map((product) => Object.freeze(product)));
@@ -238,7 +239,7 @@ async function buildPestOutline({ db, estimate, input = {}, now = new Date() }) 
   const month = Number(input.month || currentMonthNumber(now));
   const seasonBand = resolveSeasonBand(month);
   // Pest has no fertilizer rule, but the packet records its rule area as every outline does (validateContent).
-  const jurisdictionId = input.jurisdictionId || resolveJurisdictionId(estimate.address);
+  const jurisdictionId = resolveOutlineJurisdictionId(input, estimate, estimateData);
   const jurisdictionRule = await loadFertilizerRule(db, jurisdictionId);
   const ruleJurisdictionId = jurisdictionRule?.jurisdiction_id || jurisdictionId;
   const scope = planScope(estimateData);

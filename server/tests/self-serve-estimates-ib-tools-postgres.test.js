@@ -119,6 +119,17 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(delta('estimates_accepted')).toBe(2);
   });
 
+  test('the SQL form of the rule agrees with the row form on every seeded row (the 9 AM Call today push reads the SQL form)', async () => {
+    const { undeliveredSelfServeSql, isUndeliveredSelfServe } = require('../services/self-serve-estimates');
+    await seed();
+    const rows = await trx('estimates as e').where('e.service_interest', SERVICE)
+      .select('e.source', 'e.estimate_data', trx.raw(`${undeliveredSelfServeSql('e')} AS flag`));
+    expect(rows).toHaveLength(10);
+    for (const row of rows) expect(Boolean(row.flag)).toBe(isUndeliveredSelfServe(row.source, row.estimate_data));
+    // The three undelivered self-serve rows; a source-NULL row and an unreadable stamp are not among them.
+    expect(rows.filter((row) => row.flag)).toHaveLength(3);
+  });
+
   test('a suppressed resend never moves a delivered self-serve quote across a reporting boundary (codex pre-push r16 P1)', async () => {
     // Staff delivered it March 30; a suppressed April 2 resend rewrote sent_at; the customer accepted April 5.
     const funnel = (from, to) => executeDashboardTool('get_estimate_funnel', { date_from: from, date_to: to });

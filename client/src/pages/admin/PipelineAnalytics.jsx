@@ -11,9 +11,14 @@ import {
 import { classifyEstimateForPipeline } from "./EstimatePage";
 import { Button, Card } from "../../components/ui";
 import { etParts } from "../../lib/timezone";
+// The "Call today" rule lives in shared/estimate-call-today.cjs so the 9 AM push counts the same list.
+import {
+  HOUR,
+  lastEngagementMs,
+  isCallTodayEstimate,
+} from "@estimate-call-today";
 
 const DAY = 86400000;
-const HOUR = 3600000;
 const DATE_RANGES = [
   { key: "all", label: "All" },
   { key: "7d", label: "7d" },
@@ -100,20 +105,6 @@ export function withinDateRange(iso, range, nowMs = Date.now()) {
   return true;
 }
 
-// Most recent customer touch on the estimate. First-view timestamps alone
-// misclassify customers who re-open or click days later, so idle-time checks
-// must key off the latest of view/re-view/click.
-export function lastEngagementMs(estimate) {
-  const stamps = [
-    estimate?.lastViewedAt,
-    estimate?.viewedAt,
-    estimate?.lastClickedAt,
-  ]
-    .map((iso) => (iso ? new Date(iso).getTime() : NaN))
-    .filter((ts) => !Number.isNaN(ts));
-  return stamps.length ? Math.max(...stamps) : null;
-}
-
 // When the offer left the pipeline: acceptance, decline, or expiry date.
 // Fallbacks cover rows that predate the timestamp columns. Returns null for
 // still-open offers.
@@ -157,25 +148,6 @@ export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
   if (last == null) return false;
   const age = nowMs - last;
   return age > 48 * HOUR && age < 168 * HOUR;
-}
-
-// Call today = the hot window the 48h "Going cold" check misses: a VIEWED
-// offer whose last customer touch was 2h–48h ago and that nobody has phoned or followed up on since.
-// The upper edge is inclusive and isGoingColdEstimate starts strictly past 48h, so the two never
-// share an offer (and the 7d+ overdue bucket sits further out still). Needs a phone to call.
-export function isCallTodayEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== "viewed" || estimate.archivedAt || estimate.undeliveredSelfServe) return false;
-  if (!String(estimate.customerPhone || "").trim()) return false;
-  const last = lastEngagementMs(estimate);
-  if (last == null) return false;
-  const age = nowMs - last;
-  if (age < 2 * HOUR || age > 48 * HOUR) return false;
-  // Any contact AFTER the customer's last touch takes the offer off the list.
-  for (const contact of [estimate.lastCalledAt, estimate.lastFollowUpAt]) {
-    const ts = contact ? new Date(contact).getTime() : NaN;
-    if (!Number.isNaN(ts) && ts > last) return false;
-  }
-  return true;
 }
 
 // Pick reason = an offer the expiry sweep closed after the customer opened

@@ -154,8 +154,7 @@ const VAN_WEB_ADDRESS = 'gowavesfl.com';
 // catch-all is never a free "not sure" (Codex r3 P2 on #4822).
 const WRONG_VAN_BODIES = new Set(['mercedes_sprinter', 'ram_promaster', 'high_roof_van', 'box_truck', 'pickup_or_car', 'other_make']);
 const VAN_BODY_VALUES = new Set(['ford_transit_medium_roof', 'unsure', ...WRONG_VAN_BODIES]);
-function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false } = {}) {
-  const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
+function buildScreenPrompt({ avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false } = {}) {
   const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
   const shape = allowUniformLogo
     ? '{"readable_text": string[], "logos_or_brand_marks": string[], "technicians": [{"facing": "camera" | "side" | "away", "cap_front_visible": boolean, "chest_visible": boolean, "logo_on": string[], "placket_x": number | null, "chest_badges_x": number[]}], "waves_logo_elsewhere": string[], "uniform_logo_lettering": string[], "forbidden_scenes": number[], "notes": string}'
@@ -183,7 +182,7 @@ EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — 
 - logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.${vanFieldNote}${uniformLogoRule}
 - forbidden_scenes: the NUMBERS of the FORBIDDEN items below the image clearly depicts (e.g. [1]). Empty array if none${forbidden.length ? '' : ' (there are none to check)'}.
 - notes: one short sentence.
-${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}
+
 ${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t, i) => `${i + 1}. "${t}"`).join('; ')}.` : ''}`;
 }
 // The van's own question — asked only when the van wrap reference was
@@ -297,19 +296,17 @@ function matchExclusion(detection, exclusions) {
 // The verdict from a parsed answer — pure, so the screen itself stays the
 // guard + dispatch + parse (Codex r3 P2 on #4761: complexity).
 // `van` is the van question's answer (null: none asked, or no van in frame).
-function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUniformLogo = false, van = null } = {}) {
+function screenVerdict(parsed, { avoidDepicting = [], allowUniformLogo = false, van = null } = {}) {
   const { reasons: logoReasons, misplaced } = allowUniformLogo ? uniformLogoReasons(parsed) : { reasons: [], misplaced: [] };
   const { reasons: vanReasons, flagged: vanFlagged } = vanWrapReasons(van);
   const logos = allowUniformLogo ? [...misplaced, ...parsed.logos.filter((t) => !isAllowedUniformLogo(t))] : parsed.logos;
   const attributed = new Set(allowUniformLogo ? parsed.uniformLettering.filter(isLogoWord).map(normalizeText) : []);
-  const { strayText, incomplete, missing } = matchCaptions(parsed.readableText, allowedText, attributed);
+  const strayText = strayTextOf(parsed.readableText, attributed);
   const reasons = [...logoReasons, ...vanReasons];
   // misplaced marks are already in logoReasons; the rest are true brand marks
   const brandMarks = logos.slice(misplaced.length);
   if (brandMarks.length) reasons.push(`logo or brand mark: ${brandMarks.slice(0, 3).join(', ')}`);
   if (strayText.length) reasons.push(`readable text: ${strayText.slice(0, 3).join(', ')}`);
-  if (incomplete.length) reasons.push(`incomplete caption: ${incomplete.slice(0, 3).map((c) => `"${c}"`).join(', ')}`);
-  if (missing.length) reasons.push(`missing caption: ${missing.slice(0, 3).map((c) => `"${c}"`).join(', ')}`);
   // A brief's exclusion the provider ignored (an irrigation repair scene on
   // a post that says Waves does not repair irrigation) fails the screen
   // like a logo would (Codex r8 P2 on #3964). Only exclusions the caller
@@ -318,20 +315,20 @@ function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUni
   const named = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
   const forbidden = [...new Set(parsed.forbidden.map((t) => matchExclusion(t, named)).filter(Boolean))];
   if (forbidden.length) reasons.push(`forbidden scene: ${forbidden.slice(0, 3).join('; ')}`);
-  // violations counts what actually failed — stray strings, missing or
-  // incomplete captions, logos, van wrap faults, forbidden scenes — never an
-  // allowed caption the image rendered correctly; the caller ranks two failed
-  // candidates on it (Codex r11 P2 on #3964).
-  const violations = logoReasons.length + vanReasons.length + brandMarks.length + strayText.length + incomplete.length + missing.length + forbidden.length;
+  // violations counts what actually failed — stray strings, logos, van wrap
+  // faults, forbidden scenes; the caller ranks two failed candidates on it
+  // (Codex r11 P2 on #3964).
+  const violations = logoReasons.length + vanReasons.length + brandMarks.length + strayText.length + forbidden.length;
   const placements = allowUniformLogo ? [...parsed.technicians.flatMap((p) => [...p.logoOn.map(classifyPlacement).filter((t) => t !== 'chest' || !chestSides(p).length), ...chestSides(p).map((side) => `${side} chest`)]), ...parsed.elsewhere.map((t) => `elsewhere: ${t}`)] : [];
   return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: [...logos, ...vanFlagged], forbidden, reasons, violations, placements };
 }
 
 /**
- * screenGeneratedImage({ buffer, mimeType, allowedText, avoidDepicting, timeoutMs })
+ * screenGeneratedImage({ buffer, mimeType, avoidDepicting, timeoutMs })
  * → { ok, checked, readableText, logos, forbidden, reasons, violations }
- *   ok=false when the image carries a logo / brand mark, or readable text
- *   beyond the captions the caller allowed (an infographic's own labels).
+ *   ok=false when the image carries a logo / brand mark or any readable
+ *   text. No caller may allow a caption: the one style that carried text
+ *   (the AI infographic) is retired (owner 2026-11-19).
  */
 // Belt to the prompt's braces: a model that lists the uniform logo under
 // logos_or_brand_marks anyway. Dropped only when the detection names "Waves"
@@ -445,43 +442,16 @@ function vanWrapReasons(van) {
   if (wrongWeb.length) fail(`wrong web address on the van: ${wrongWeb.slice(0, 3).join(', ')}`, wrongWeb.map((t) => `wrong web address on the van: ${t}`));
   return { reasons, flagged };
 }
-// The caption match (Codex r1/r4 P2s on #3964): an allowed caption may come
-// back split ("1", "OFF") or joined. A detected string is the caption's only
-// when it is a contiguous, in-order run of ONE allowed caption — never a
-// superset ("1 OFF SALE"), never a reordering ("Ants Stop How To") — and the
-// fragments read for a caption must together cover all of it, in reading
-// order: "Ants" alone for "How to Stop Ants" is an incomplete caption, and
-// ["Ants", "How to Stop"] never covers it. `attributed` holds the uniform
-// logo's own lettering (by the model's attribution), never stray.
-function matchCaptions(readableText, allowedText, attributed = new Set()) {
-  const allowedSeqs = allowedText.map((c) => normalizeText(c).split(' ').filter(Boolean)).filter((seq) => seq.length);
-  const covered = allowedSeqs.map(() => new Set());
-  const cursor = allowedSeqs.map(() => 0);
-  const runAt = (tokens, seq, from) => {
-    for (let i = from; i + tokens.length <= seq.length; i += 1) {
-      if (tokens.every((tok, j) => seq[i + j] === tok)) return i;
-    }
-    return -1;
-  };
-  const strayText = readableText.filter((t) => {
-    const tokens = normalizeText(t).split(' ').filter(Boolean);
-    if (!tokens.length || attributed.has(tokens.join(' '))) return false;
-    let matched = false;
-    allowedSeqs.forEach((seq, c) => {
-      const at = runAt(tokens, seq, cursor[c]);
-      if (at < 0) return;
-      matched = true;
-      for (let j = 0; j < tokens.length; j += 1) covered[c].add(at + j);
-      cursor[c] = at + tokens.length;
-    });
-    return !matched;
+// Readable text that fails the screen: every detected string except the
+// uniform logo's own lettering (`attributed`, by the model's attribution).
+function strayTextOf(readableText, attributed = new Set()) {
+  return readableText.filter((t) => {
+    const key = normalizeText(t).split(' ').filter(Boolean).join(' ');
+    return Boolean(key) && !attributed.has(key);
   });
-  const incomplete = allowedSeqs.map((seq, c) => (covered[c].size && covered[c].size < seq.length ? allowedText[c] : null)).filter(Boolean);
-  const missing = allowedSeqs.map((seq, c) => (covered[c].size === 0 ? allowedText[c] : null)).filter(Boolean);
-  return { strayText, incomplete, missing };
 }
 
-async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false, timeoutMs = null } = {}) {
+async function screenGeneratedImage({ buffer, mimeType = 'image/webp', avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false, timeoutMs = null } = {}) {
   const open = { ok: true, checked: false, readableText: [], logos: [], forbidden: [], reasons: [], violations: 0 };
   if (!Buffer.isBuffer(buffer) || !buffer.length) return open;
   // timeoutMs bounds the whole vision chain (both legs) — the caller passes
@@ -513,7 +483,7 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       // The per-technician answer (technicians[], placements, lettering) is
       // several times the plain one; a truncated JSON would fail OPEN as
       // unusable, so give it room (pre-push fallback P1 on 8860b77737).
-      ask(buildScreenPrompt({ allowedText, avoidDepicting, allowUniformLogo, allowVanWrap }), allowUniformLogo ? SCREEN_MAX_TOKENS_WITH_LOGO : SCREEN_MAX_TOKENS, (text) => !!parseScreen(text, screenOpts)),
+      ask(buildScreenPrompt({ avoidDepicting, allowUniformLogo, allowVanWrap }), allowUniformLogo ? SCREEN_MAX_TOKENS_WITH_LOGO : SCREEN_MAX_TOKENS, (text) => !!parseScreen(text, screenOpts)),
       allowVanWrap ? ask(buildVanScreenPrompt(), VAN_SCREEN_MAX_TOKENS, (text) => !!parseVanScreen(text)) : null,
     ]);
     const failed = [res, vanRes].find((r) => r && !r.ok);
@@ -527,7 +497,7 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
       return open;
     }
-    return screenVerdict(parsed, { allowedText, avoidDepicting, allowUniformLogo, van: vanAnswer.van });
+    return screenVerdict(parsed, { avoidDepicting, allowUniformLogo, van: vanAnswer.van });
   } catch (err) {
     logger.warn(`[hero-alt-vision] image screen threw — accepting image (fail-open): ${err.message}`);
     return open;
@@ -535,4 +505,4 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
 }
 
 module.exports = { describeHeroForAlt, sanitizeAlt, buildAltPrompt, screenGeneratedImage, buildScreenPrompt, parseScreen };
-module.exports._internals = { SCREEN_MAX_TOKENS, SCREEN_MAX_TOKENS_WITH_LOGO, VAN_SCREEN_MAX_TOKENS, VAN_PHONE_DIGITS, VAN_WEB_ADDRESS, isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, vanWrapReasons, buildVanScreenPrompt, parseVanScreen, isVanPhone, isVanWebAddress, matchCaptions, isLogoWord, UNIFORM_LOGO_DESCRIPTION };
+module.exports._internals = { SCREEN_MAX_TOKENS, SCREEN_MAX_TOKENS_WITH_LOGO, VAN_SCREEN_MAX_TOKENS, VAN_PHONE_DIGITS, VAN_WEB_ADDRESS, isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, vanWrapReasons, buildVanScreenPrompt, parseVanScreen, isVanPhone, isVanWebAddress, strayTextOf, isLogoWord, UNIFORM_LOGO_DESCRIPTION };

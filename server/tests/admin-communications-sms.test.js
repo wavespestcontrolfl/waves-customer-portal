@@ -54,6 +54,8 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
 jest.mock('../services/autopay-setup-link', () => ({ KIND: 'customer', setupLinkIneligibility: jest.fn() }));
+// The website-only line check (website-line-contact.js) has its own suites; here it answers per test.
+jest.mock('../services/website-line-contact', () => ({ websiteLineRefusal: jest.fn(async () => null) }));
 // The card funnel + its marker finalizer, re-run / invoked by the composer send.
 jest.mock('../services/appointment-card-request', () => ({
   LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
@@ -461,6 +463,21 @@ describe('admin communications SMS route', () => {
       expect(mockTranslationClaim).toHaveBeenCalledWith(expect.objectContaining({ trialId: 7, to: '+15551234567', dbi: expect.anything() }));
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
+  });
+
+  test('a website-only line the recipient never called or texted is refused with its code, and nothing is sent', async () => {
+    const { websiteLineRefusal } = require('../services/website-line-contact');
+    websiteLineRefusal.mockResolvedValueOnce('WEBSITE_LINE_REFUSAL');
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'A plain synthetic text.', messageType: 'manual', fromNumber: '+19412542617' }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'WEBSITE_LINE_REFUSAL', code: 'WEBSITE_LINE_FIRST_CONTACT' });
+    });
+    expect(websiteLineRefusal).toHaveBeenCalledWith('+19412542617', '+15551234567');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('a suggested reply whose facts changed is refused with 409 before the thread lock, and nothing is sent', async () => {

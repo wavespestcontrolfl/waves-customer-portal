@@ -5931,7 +5931,8 @@ function classifyAppointmentTag(serviceType) {
   return require('../services/appointment-tagger').classifyAppointmentType(serviceType).tag;
 }
 
-function getZone(city, zip) {
+// `fallback` is the zone for a city and ZIP no rule matches.
+function getZone(city, zip, fallback = 'lakewood_ranch') {
   const c = (city || '').toLowerCase();
   const z = zip || '';
   if (['parrish', 'ellenton'].includes(c) || z === '34219') return 'parrish';
@@ -5953,7 +5954,7 @@ function getZone(city, zip) {
     'englewood', 'port charlotte', 'punta gorda', 'murdock',
     'rotonda west', 'placida', 'boca grande',
   ].includes(c)) return 'venice_north_port';
-  return 'lakewood_ranch';
+  return fallback;
 }
 
 const ZONE_COLORS = {
@@ -5981,6 +5982,27 @@ const ZONE_COORDS = {
   sarasota: { lat: 27.3364, lng: -82.5307 },
   venice_north_port: { lat: 27.0998, lng: -82.4543 },
 };
+
+// The forecast zone of a day-board stop, read from its scheduled_services row:
+// the stored zone, never the card's display zone, which defaults to Lakewood
+// Ranch for a city and ZIP no rule places. A stored zone with a forecast point
+// stays; else the row's city and ZIP place the stop, else the stored zone read
+// as a place name by the same rules (self-booking stores the service zone's
+// first name: 'bradenton', 'venice', 'port charlotte'; a board zone key such
+// as 'bradenton_south' is not a place name); a stop none of these place has
+// no forecast zone (owner 2026-11-02, "leave the rain for all";
+// 11-19: 18 of 84 stops, stored 'bradenton', showed no rain). The day query
+// fills each missing stamp field from the primary address, so a stamp for
+// another property reads only its own city and ZIP ("no pin beats a wrong
+// pin", services/stamped-address.js).
+function stopForecastZone(row) {
+  if (ZONE_COORDS[row.zone]) return row.zone;
+  const ownAddress = require('../services/stamped-address').stampedAddressDiverges(row);
+  const city = ownAddress ? row.service_address_city : row.city;
+  // getZone matches 5-digit ZIPs exactly: '34211-1234' reads as '34211'.
+  const zip = require('../services/customer-properties').normalizeZip(ownAddress ? row.service_address_zip : row.zip);
+  return getZone(city, zip, ZONE_COLORS[row.zone] ? null : getZone(row.zone, null, null));
+}
 
 // Completion reuses a non-void invoice already attached to the visit
 // (pre-minted Charge Now / accept-minted first-visit with setup fee / payer
@@ -6769,6 +6791,9 @@ router.get('/', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+        // The primary address on file, for the rain step's stopForecastZone
+        // (stampedAddressDiverges): kept on the row only, never in the response.
+        'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
         // Visit coordinates for map-centered tools (treatment-zone mapper):
         // stamped visit coords win; the customer mirror only backfills a
         // NON-divergent stamp — a divergent stamp with no coords must degrade
@@ -7427,7 +7452,10 @@ router.get('/', async (req, res, next) => {
     const { attachStopRain, zoneHourlyOutlooks, weatherNow } = require('../services/scheduling/stop-rain');
     attachStopRain(enriched, date, {});
     try {
-      const zonesPresent = [...new Set(enriched.map((s) => s.zone))].filter((z) => ZONE_COORDS[z]);
+      // From the raw rows: `enriched` carries only the display zone.
+      const forecastZoneById = new Map(services.map((s) => [s.id, stopForecastZone(s)]));
+      const forecastZoneOf = (stop) => forecastZoneById.get(stop.id) || null;
+      const zonesPresent = [...new Set(enriched.map(forecastZoneOf))].filter((z) => ZONE_COORDS[z]);
       const [outlook, perZone, hourlyByZone, officeWeather] = await Promise.all([
         rainOutlookPromise,
         Promise.all(zonesPresent.map(async (z) => {
@@ -7442,7 +7470,7 @@ router.get('/', async (req, res, next) => {
       const officeChance = outlook?.[date]?.rainChance;
       rainChance = Number.isFinite(officeChance) ? officeChance : null;
       if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);
-      attachStopRain(enriched, date, hourlyByZone);
+      attachStopRain(enriched, date, hourlyByZone, forecastZoneOf);
     } catch { /* rain outlook is optional */ }
 
     await attachOfficeToldFields(req, enriched);
@@ -26578,10 +26606,10 @@ router.get('/:id/card-request', async (req, res, next) => {
     if (!(await technicianOwnsScheduledService(req, req.params.id))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
-    const { isSecureCardLaneReady } = require('../services/appointment-card-request');
+    const { isSecureCardLaneReady, visitCardLinkClosedReason } = require('../services/appointment-card-request');
     const visit = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'card_link_sent_at');
+      .first('id', 'customer_id', 'card_link_sent_at', 'status', 'scheduled_date');
     if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
     const request = await db('appointment_card_requests')
       .where({ scheduled_service_id: visit.id })
@@ -26599,6 +26627,10 @@ router.get('/:id/card-request', async (req, res, next) => {
       enabled: await isSecureCardLaneReady(),
       autopayActive,
       cardLinkSentAt: visit.card_link_sent_at || null,
+      // Non-null once the visit can no longer take a card link (tech en route
+      // or on site, done, cancelled, or a past date): the panel shows why in
+      // place of a send button the funnel would refuse.
+      closedReason: visitCardLinkClosedReason(visit),
       request: request
         ? {
           status: request.status,
@@ -26626,6 +26658,10 @@ router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
     if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
     const { requestCardForAppointment } = require('../services/appointment-card-request');
     const result = await requestCardForAppointment({ scheduledServiceId: visit.id, trigger: 'admin' });
+    // A skip answers 200 and writes no row, so this line is the only record
+    // of why an office tap sent nothing (2026-11-19: read from body size).
+    // The code before ':' only: an error or provider suffix is free text.
+    logger.info(`[schedule] office card-link tap for ${visit.id}: ${result.action} (${String(result.reason || '').split(':')[0]})`);
     res.json({ requested: result.requested, action: result.action, reason: result.reason });
   } catch (err) { next(err); }
 });
@@ -30443,6 +30479,7 @@ module.exports.buildAppointmentPricing = buildAppointmentPricing;
 // new-caller booking route (admin-schedule-new-caller.js), which books by
 // address before a customer exists.
 module.exports.getZone = getZone;
+module.exports.stopForecastZone = stopForecastZone;
 module.exports.newCallerRowFields = newCallerRowFields;
 // The percent-discount exclusion predicate (termite bond, rodent bait,
 // bed bug, Bora-Care, pre-slab, ...) — consumed lazily by the IB

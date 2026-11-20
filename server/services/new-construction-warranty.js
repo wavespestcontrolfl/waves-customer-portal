@@ -469,6 +469,8 @@ const SOIL_LIQUIDS = {
   'termidor sc': { product: 'Termidor SC', ingredient: 'fipronil' },
   'taurus sc': { product: 'Taurus SC', ingredient: 'fipronil' },
   'talstar p': { product: 'Talstar P', ingredient: 'bifenthrin' },
+  // The house bifenthrin since owner 2026-11-18 (label pages 29-32: pre-construction soil barriers at 0.06%).
+  'lesco crosscheck plus': { product: 'LESCO Crosscheck Plus', ingredient: 'bifenthrin' },
   'premise 2': { product: 'Premise 2', ingredient: 'imidacloprid' },
 };
 function soilLiquid(treatment) {
@@ -476,9 +478,11 @@ function soilLiquid(treatment) {
   if (!known) {
     throw bad(`This warranty covers the soil liquids ${Object.values(SOIL_LIQUIDS).map((item) => item.product).join(', ')}. The certificate names "${treatment.product}".`, 409);
   }
-  // Exactly the product's one ingredient, optionally with its percent
-  // ("Fipronil 9.1%"); "fipronil + bifenthrin" is a different product.
-  const ingredientPattern = new RegExp(`^${known.ingredient}(\\s*\\d+(\\.\\d+)?\\s*%)?$`, 'i');
+  // Exactly the product's one ingredient, optionally with its percent after
+  // or before it ("Fipronil 9.1%", or "7.9% Bifenthrin" as the catalog spells
+  // LESCO Crosscheck Plus); "fipronil + bifenthrin" is a different product.
+  const percent = '\\d+(\\.\\d+)?\\s*%';
+  const ingredientPattern = new RegExp(`^(${known.ingredient}(\\s*${percent})?|${percent}\\s*${known.ingredient})$`, 'i');
   if (treatment.active_ingredient && !ingredientPattern.test(treatment.active_ingredient)) {
     throw bad(`The certificate's active ingredient (${treatment.active_ingredient}) does not match ${known.product} (${known.ingredient}). Fix the certificate first.`, 409);
   }

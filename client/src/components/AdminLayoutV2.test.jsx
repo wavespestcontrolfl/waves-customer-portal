@@ -155,6 +155,17 @@ describe("AdminLayoutV2", () => {
     expect(tabs).toEqual(["Dashboard", "Schedule", "Customers", "Messages", "Settings"]);
   });
 
+  it("puts Today in Dashboard's tab slot for an admin whose Field view is on", async () => {
+    viewport.mobile = true;
+    localStorage.setItem("waves_admin_navigation:1", JSON.stringify({ version: 2, fieldView: true }));
+    render(<MemoryRouter initialEntries={["/admin/schedule"]}><Routes><Route element={<AdminLayoutV2 />}>
+      <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+    </Route></Routes></MemoryRouter>);
+    await screen.findByText("Schedule content");
+    const tabs = within(screen.getByRole("navigation", { name: "Primary" })).getAllByRole("link").map((link) => link.textContent);
+    expect(tabs).toEqual(["Today", "Schedule", "Customers", "Messages", "Settings"]);
+  });
+
   // A top-level menu row is a link (workspace with a default page) or a
   // button (workspace that only expands); either counts as "shown".
   const hasMenuRow = (root, name) =>

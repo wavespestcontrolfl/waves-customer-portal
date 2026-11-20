@@ -13,6 +13,14 @@
  * off, no query runs and nothing is dropped. Any lookup failure, or a visit with no zone stamp and no city,
  * fails OPEN (today's behavior), logged.
  *
+ * Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19 "build south"): for a single visit, a far-south stop holds
+ * its date only for its own technician, and an unassigned far-south stop holds it for every technician. The slot's
+ * technician decides at candidate time; at apply time, the receiving technician and the one the move transaction
+ * writes. A grouped visit (visit_id) keeps the fleet's view: its unit move commits each member's date on that
+ * member's current technician and re-points it after (visit-groups alignMember), and grouping is retired (owner
+ * 2026-10-22), so only older visits carry one. Off, the date is the fleet's (one truck) for every visit.
+ * The per-truck view comes from the same funnel read (getZoneFunnelDays techDays, zone-day-funnel.js onZoneDay).
+ *
  * Two places enforce it, so a date move of any kind is covered:
  *   - candidate time (candidate-slots.js HARD_FILTERS 'south_day_kept'): score moves, mowing-day moves,
  *     conflict moves, the 05:00 catch-up run (same job) and the dry-window starts all pass candidateFromSlot.
@@ -35,20 +43,26 @@ const zoneFields = (row, fallback = {}) => ({
 // The funnel module, read at call time (a suite that mocks feature-gates whole must not break a bare require).
 const funnel = () => require('../scheduling/zone-day-funnel');
 
-// Funneled zone rows plus the dates in the window (`window()` -> [dateFrom, dateTo]) that hold a live stop in one;
-// null when a lookup fails. { zones: [], dates: empty } when the funnel is off (no query).
+// Funneled zone rows plus the dates in the window (`window()` -> [dateFrom, dateTo]) that hold a live stop in one,
+// and their per-truck view (`techDays`: date -> technician ids, null = unassigned; null with GATE_MULTI_TECH_CONFIRM
+// off); null when a lookup fails. { zones: [], dates: empty, techDays: null } when the funnel is off (no query).
 async function readSouth(dbc, window) {
   try {
     const f = funnel();
     const [dateFrom, dateTo] = window();
     const zones = await f.funnelZoneRows(dbc);
     const dates = new Set();
+    let techDays = null;
     for (const estimateZone of zones) {
-      const { days, failed } = await f.getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo });
+      const { days, techDays: zoneTechs, failed } = await f.getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo });
       if (failed || !days) return null;
       days.forEach((d) => dates.add(d));
+      if (zoneTechs) {
+        techDays = techDays || new Map();
+        zoneTechs.forEach((ids, d) => techDays.set(d, new Set([...(techDays.get(d) || []), ...ids])));
+      }
     }
-    return { zones, dates };
+    return { zones, dates, techDays };
   } catch (err) {
     logger.warn(`[auto-dispatch] south-day rule off for this read (failing open): ${err.message}`);
     return null;
@@ -70,8 +84,13 @@ class SouthDays {
   }
 }
 
+// The per-truck view (`techDays`) for a single visit only; null = the fleet's (the gate off, or a grouped visit).
+// Apply time also passes the fresh row: a visit grouped in either keeps the fleet's view.
+const truckView = (state, ...rows) => (rows.some((row) => row && row.visit_id) ? null : state.techDays);
+
 // This visit's rule for the evaluation, or null (rule off, visit far-south, or zone unresolved: no filter).
-// `dates` = far-south stop dates; `ownDate` = the visit's current date (a same-day re-time is never dropped).
+// `dates` = far-south stop dates, `techDays` = their per-truck view (truckView); `ownDate` = the visit's current
+// date (a same-day re-time is never dropped).
 async function ruleFor(service, ctx) {
   const state = await (ctx.southDays || new SouthDays()).read(ctx.db, ctx);
   if (!state || !state.zones.length) return null;
@@ -80,22 +99,28 @@ async function ruleFor(service, ctx) {
     logger.info(`[auto-dispatch] south-day rule skipped for visit ${service.id}: no zone stamp and no city (failing open)`);
     return null;
   }
-  return south ? null : { dates: state.dates, ownDate: toDateStr(service.scheduled_date) };
+  return south ? null : { dates: state.dates, techDays: truckView(state, service), ownDate: toDateStr(service.scheduled_date) };
 }
 
-// HARD filter test: the candidate date is another day that holds a far-south stop.
-const blocks = (dateStr, rule) => !!rule && dateStr !== rule.ownDate && rule.dates.has(dateStr);
+// HARD filter test: the candidate date is another day that holds a far-south stop of the slot's technician
+// (`techId`; per truck only, else any far-south stop holds the date).
+const blocks = (dateStr, rule, techId = null) => !!rule && dateStr !== rule.ownDate
+  && funnel().onZoneDay(dateStr, techId, rule.dates, rule.techDays);
 
-// Apply time, inside the move transaction: the destination date's far-south stops as stored now. Same fail-open
-// as the candidate side. `row` = the row being moved; `service` = the pass-1 snapshot (zone fields fallback).
-async function assertDestinationClear(trx, row, service, dateStr, refuse) {
+// Apply time, inside the move transaction: the destination date's far-south stops as stored now, for each technician
+// the visit can sit with on that date (`techIds`; null = unassigned, which any far-south stop holds; a grouped visit
+// has the fleet's view, truckView). Same fail-open as the candidate side. `row` = the row being moved; `service` = the
+// pass-1 snapshot (zone fields fallback).
+async function assertDestinationClear(trx, row, service, dateStr, refuse, techIds = [null]) {
   let held = false;
   try {
     if (dateStr === toDateStr(row.scheduled_date)) return;
     const state = await readSouth(trx, () => [dateStr, dateStr]);
     if (!state || !state.zones.length) return;
     const south = funnel().rowInFunnelZones(zoneFields(row, service), state.zones);
-    held = south === false && state.dates.has(dateStr);
+    const techDays = truckView(state, row, service);
+    const ids = techIds.length ? techIds : [null];
+    held = south === false && ids.some((techId) => funnel().onZoneDay(dateStr, techId, state.dates, techDays));
   } catch (err) {
     logger.warn(`[auto-dispatch] south-day apply check off (failing open): ${err.message}`);
     return;

@@ -3626,6 +3626,8 @@ module.exports = {
   sameHouseNumberStreet,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
+  // Shared with call-phone-yes-word.js: a price the caller said no to is no yes.
+  callerDeclinedThePrice,
   isAuthorizedWdoArrangerBooking,
   isAuthorizedFamilyMemberBooking,
   isWdoInspectionRequest,
@@ -3639,6 +3641,8 @@ module.exports = {
   applyWholeStructureUnitWaiver,
   applyBusinessWholeBuildingUnitWaiver,
   orientTranscriptForOutbound,
+  // Shared with call-phone-yes-word.js: an outbound call's roles are known only when staff introduce themselves.
+  STAFF_INTRO_RE,
   BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
   waiverCarriesToCandidate,
   reconstructWaivedAddressValidation,
