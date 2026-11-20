@@ -5,7 +5,7 @@
 #
 # Two-step design (load-bearing — do not flatten into one step):
 #   1. The full jest suite runs WITHOUT DATABASE_URL (the `server-unit` job,
-#      three parallel shards). Several suites change
+#      four parallel shards). Several suites change
 #      semantics when it is set: the pricing golden masters
 #      (pricing-engine.regression, pricing-engine-v1-adapter.regression) sync
 #      live pricing_config and diff against a baseline captured from PROD's
@@ -14,7 +14,8 @@
 #   2. The self-skipping DB-gated suites run WITH DATABASE_URL (the
 #      `server-db` job) against the migrated database, serially
 #      (--runInBand: they share tables and clash under parallel workers),
-#      as two halves, each on its own Postgres server.
+#      as four lanes on two `server-db` jobs, each lane on its own
+#      Postgres server.
 #      products-catalog-label-fields is
 #      excluded — like the golden masters it pins prod-parity data
 #      (admin-corrected EPA reg numbers), which a fresh seed cannot satisfy.
@@ -647,14 +648,29 @@ jobs:
       - name: Wait for the two background lanes (fails if either failed)
         wait-all:
 
-  # Step 2 of the two-step design, on a runner of its own (2026-11-01): the
+  # Step 2 of the two-step design, on runners of their own (2026-11-01): the
   # DB-gated suites set the length of every run while they shared the
-  # `server` job's 4 vCPU (14.6 of its 16.3 min, median of 160 runs). They
-  # run as two halves, each serial against its own server; `jest --shard`
-  # gives every file to exactly one half.
+  # `server` job's 4 vCPU (14.6 of its 16.3 min, median of 160 runs).
+  # Since 2026-11-20 they run as four lanes on two jobs, two lanes per runner
+  # (a third and fourth jest lane on one 4-vCPU runner slowed every lane,
+  # 2026-11-01), each lane serial against its own server. Two halves split by
+  # path hash ran 6.3 and 9.2 min (medians of 134 runs, Nov 19-20); `--shard`
+  # with the time-balanced sequencer gives every file to exactly one lane,
+  # balanced by server/tests/helpers/ci-shard-timings.json.
   server-db:
+    name: server-db (${{ matrix.part }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: 1
+            first: 1
+            second: 2
+          - part: 2
+            first: 3
+            second: 4
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -702,7 +718,7 @@ jobs:
             env:
               DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
             run: npx knex migrate:latest --knexfile server/knexfile.js
-      - name: DB-gated suites, first half (serial, against the migrated database)
+      - name: DB-gated suites, lane ${{ matrix.first }} of 4 (serial, against the migrated database)
         id: db-gated
         background: true
         working-directory: server
@@ -716,8 +732,8 @@ jobs:
           grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand --shard=1/2
-      - name: DB-gated suites, second half (serial, against the migrated database)
+            | xargs npx jest --ci --silent --runInBand --shard=${{ matrix.first }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js
+      - name: DB-gated suites, lane ${{ matrix.second }} of 4 (serial, against the migrated database)
         id: db-gated-2
         background: true
         working-directory: server
@@ -727,23 +743,25 @@ jobs:
           grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand --shard=2/2
-      - name: Wait for both halves (fails if either failed)
+            | xargs npx jest --ci --silent --runInBand --shard=${{ matrix.second }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js
+      - name: Wait for both lanes (fails if either failed)
         wait-all:
 
   # Step 1 of the two-step design: the full jest suite WITHOUT DATABASE_URL
   # (no Postgres service here, on purpose). It was the long pole of the whole
-  # run (~16 of the server job's ~22 minutes), so it runs as three parallel
-  # shards. `jest --shard` splits the test files deterministically: every file
-  # runs in exactly one shard. fail-fast is off so one red shard does not
-  # cancel the others and hide their failures.
+  # run (~16 of the server job's ~22 minutes), so it runs as four parallel
+  # shards (three until 2026-11-20). `--shard` with the time-balanced sequencer
+  # (server/tests/helpers/time-balanced-sequencer.js) splits the test files by
+  # recorded time: every file runs in exactly one shard. Split by path hash,
+  # the three shards ran 342, 287 and 502 s on 2026-11-20. fail-fast is off so
+  # one red shard does not cancel the others and hide their failures.
   server-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     env:
       NODE_ENV: test
       JWT_SECRET: ci-only-test-secret
@@ -761,7 +779,7 @@ jobs:
         # Three workers on the 4-vCPU runner: shards took 3-7 min against 5-8 with two.
         # The default 5 s test timeout is raised to 15 s because a third worker slows
         # cold module loads; a test that sets its own timeout keeps it.
-        run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB","testTimeout":15000}'
+        run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js --config='{"workerIdleMemoryLimit":"2GB","testTimeout":15000}'
 
   client:
     runs-on: ubuntu-latest
