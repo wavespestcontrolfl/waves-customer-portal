@@ -2795,11 +2795,12 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // With the funnel on, createSelfBooking reads its zone from that address,
     // else from its customer's city on file (slot-zone.js leadBookingZone;
     // owner rule B, pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f).
-    // Phase 1 keeps the profile's city when that city decides the zone of a
-    // typed address that matches the profile (provisionLinkedCustomer;
-    // pre-push P1s on 850a6a79f0, 7a682696f6 and 63e29d5511), so that city
-    // stays the one the first build read. A place the area check refuses is
-    // not kept, so that booking reads no zone.
+    // Phase 1 keeps the profile's city when that city decides the far-south
+    // zone of a typed address that matches the profile
+    // (provisionLinkedCustomer; pre-push P1s on 850a6a79f0, 7a682696f6,
+    // 63e29d5511 and f344681474), so that city stays the one the first build
+    // read. A place the area check refuses is not kept, so that booking reads
+    // no zone.
     // Every build here passes that address and this customer, so it reads the
     // same zone. When the city decides and is not the city the first build
     // read, the slot is re-checked; a 409 answers fresh times only as
