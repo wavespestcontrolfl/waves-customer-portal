@@ -1633,7 +1633,8 @@ describe('revertMerge', () => {
       const journal = baseJournal();
       if (keptTimer !== undefined) journal.repointed_ids.kept_customer_timer = keptTimer;
       journal.winner_backfills = { email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only', ...backfills };
-      const winner = { ...baseWinner(), ...winnerOwn, ...backfills };
+      // winnerOwn last: a test can model a backfilled value staff changed or removed since the merge.
+      const winner = { ...baseWinner(), ...backfills, ...winnerOwn };
       const tables = { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } };
       if (prefsRow) tables.property_preferences = { stillOnWinner: [], firstRow: { id: 'pp-9', customer_id: WINNER, ...prefsRow } };
       const { trx, state } = buildRevertTrx({ journal, winner, loser: baseLoser(), tables });
@@ -1680,7 +1681,7 @@ describe('revertMerge', () => {
     // preferences row) journaled it as kept_customer_timer: the undo that takes that home back puts it back.
     const timerWrites = (state) => state.flagRestores.filter((r) => r.table === 'property_preferences' && 'irrigation_controller_brand' in r.payload);
     // The home the cleared timer describes: the kept customer's own address before the merge (OWN_STREET).
-    const CLEARED_BY_MERGE = { row_id: 'pp-9', before: X2, home: { address_line1: '100 Sample St', address_line2: null, city: 'Bradenton', zip: null } };
+    const CLEARED_BY_MERGE = { row_id: 'pp-9', before: X2, home: { address_line1: '100 Sample St', address_line2: null, city: 'Bradenton', state: null, zip: null } };
     const EMPTY_SINCE_MERGE = { ...NO_TIMER, irrigation_home_changed_at: new Date('2026-07-30T04:00:00.000Z') };
     it('the merge cleared the kept customer\'s own timer: the undo that takes the inherited unit back puts it back on their empty row', async () => {
       const { error, state } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, OWN_STREET, CLEARED_BY_MERGE);
@@ -1699,25 +1700,46 @@ describe('revertMerge', () => {
       expect(timerWrites(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-9', customer_id: WINNER }, payload: X2 }]);
     });
 
-    // homesDiffer reads a blank city or ZIP as no evidence; the restore needs the place on file to match too
-    // (pre-push P1, 2026-11-20): the timer goes back only on the same home with the same ZIP and city.
+    // The timer goes back only when the address after the undo is exactly the one it described: the same text in each
+    // of the five columns a merge can backfill (pre-push P1s, 2026-11-20). homesDiffer is not used for this.
+    const skipsKeptTimer = (result, reason) => expect(result.skipped).toContainEqual({ key: 'property_preferences.kept_customer_sprinkler_timer', reason });
     it.each([
       ['the same street in another town since (a ZIP on file then, only a city now)', { address_line1: '100 Sample St', city: null, zip: '34205' }, { address_line1: '100 Sample St', city: 'Tampa', zip: null }],
       ['a blank city filled in since (the safe side)', { address_line1: '100 Sample St', city: null, zip: '34205' }, { address_line1: '100 Sample St', city: 'Bradenton', zip: '34205' }],
+      ['a state corrected since, with no ZIP on file', { address_line1: '100 Sample St', city: 'Bradenton', state: 'FL', zip: null }, { address_line1: '100 Sample St', city: 'Bradenton', state: 'GA', zip: null }],
     ])('%s: nothing is put back, and the undo says so', async (_label, ownBefore, ownNow) => {
-      const entry = { ...CLEARED_BY_MERGE, home: { address_line2: null, ...ownBefore } };
+      const entry = { ...CLEARED_BY_MERGE, home: { address_line2: null, state: null, ...ownBefore } };
       const { error, state, result } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, ownNow, entry);
       expect(error).toBeUndefined();
       expect(timerWrites(state)).toEqual([]);
-      expect(result.skipped).toContainEqual({ key: 'property_preferences.kept_customer_sprinkler_timer', reason: 'home_changed_since_merge' });
+      skipsKeptTimer(result, 'home_changed_since_merge');
     });
 
-    it('the same home with the same ZIP and city on file: the timer goes back', async () => {
+    it('the same address with the same ZIP and city on file: the timer goes back', async () => {
       const own = { address_line1: '100 Sample St', city: 'Bradenton', zip: '34205' };
-      const entry = { ...CLEARED_BY_MERGE, home: { ...own, address_line2: null } };
+      const entry = { ...CLEARED_BY_MERGE, home: { ...own, address_line2: null, state: null } };
       const { error, state } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, own, entry);
       expect(error).toBeUndefined();
       expect(timerWrites(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-9', customer_id: WINNER }, payload: X2 }]);
+    });
+
+    // The undo judges the journaled timer on every undo, not only one that takes back an inherited address.
+    it('staff removed the inherited unit before the undo (it leaves the address alone): the timer still goes back on the address it described', async () => {
+      const { error, state } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, { ...OWN_STREET, address_line2: null }, CLEARED_BY_MERGE);
+      expect(error).toBeUndefined();
+      expect(timerWrites(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-9', customer_id: WINNER }, payload: X2 }]);
+    });
+
+    it('a move since that the undo leaves alone, or a timer entered since on their row: nothing is put back, and the undo says so', async () => {
+      const moved = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, { address_line1: '200 Other Ave', address_line2: null, city: 'Bradenton' }, CLEARED_BY_MERGE);
+      expect(moved.error).toBeUndefined();
+      expect(timerWrites(moved.state)).toEqual([]);
+      skipsKeptTimer(moved.result, 'home_changed_since_merge');
+      // A ZIP-only undo keeps their home, so a timer entered since is no refusal: it stays, and the old one is reported.
+      const entered = await revertWithPrefs({ ...NO_TIMER, irrigation_controller_brand: 'rain_bird' }, { zip: '34205' }, OWN_STREET, CLEARED_BY_MERGE);
+      expect(entered.error).toBeUndefined();
+      expect(timerWrites(entered.state)).toEqual([]);
+      skipsKeptTimer(entered.result, 'winner_value_changed_since_merge');
     });
 
     it('a journal entry without the home it describes: nothing is put back, and the undo says so', async () => {
@@ -1740,14 +1762,13 @@ describe('revertMerge', () => {
       expect(result.skipped).toContainEqual({ key: 'property_preferences.kept_customer_sprinkler_timer', reason: 'home_changed_since_merge' });
     });
 
-    it('a timer entered since still REFUSES; a journaled row that is not theirs now, or an undo that keeps their home, writes nothing', async () => {
+    it('a timer entered since still REFUSES an undo that changes their home; a journaled row that is not theirs now writes nothing', async () => {
       const refused = await revertWithPrefs({ ...NO_TIMER, irrigation_controller_brand: 'rain_bird' }, { address_line2: 'Apt 4' }, OWN_STREET, CLEARED_BY_MERGE);
       expect(refused.error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer is on file for the kept customer/) });
-      for (const [backfills, entry] of [[{ address_line2: 'Apt 4' }, { ...CLEARED_BY_MERGE, row_id: 'pp-other' }], [{ zip: '34205' }, CLEARED_BY_MERGE]]) {
-        const { error, state } = await revertWithPrefs(EMPTY_SINCE_MERGE, backfills, OWN_STREET, entry);
-        expect(error).toBeUndefined();
-        expect(timerWrites(state)).toEqual([]);
-      }
+      const { error, state, result } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, OWN_STREET, { ...CLEARED_BY_MERGE, row_id: 'pp-other' });
+      expect(error).toBeUndefined();
+      expect(timerWrites(state)).toEqual([]);
+      skipsKeptTimer(result, 'row_missing_or_moved');
     });
   });
 

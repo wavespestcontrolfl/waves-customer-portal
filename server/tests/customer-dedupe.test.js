@@ -2084,7 +2084,7 @@ describe('executeMerge', () => {
         );
         expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
         // The home the cleared timer describes: their own address before the merge, not the backfilled one.
-        expect(recorded.kept_customer_timer).toEqual({ row_id: 'pp-1', before: X2, home: { address_line1: '100 Main St', address_line2: null, city: 'Bradenton', zip: '34205' } });
+        expect(recorded.kept_customer_timer).toEqual({ row_id: 'pp-1', before: X2, home: { address_line1: '100 Main St', address_line2: null, city: 'Bradenton', state: null, zip: '34205' } });
         expect(recorded.moved_pref_timer).toBe(null);
         expect(result.repointed['property_preferences.kept_customer_sprinkler_timer_cleared']).toBe(1);
       });
@@ -2094,7 +2094,7 @@ describe('executeMerge', () => {
           { address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' },
           { noLoserRow: true, timer: X2, winnerAddr: { address_line1: null, city: null, zip: null } },
         );
-        expect(recorded.kept_customer_timer).toEqual({ row_id: 'pp-1', before: X2, home: { address_line1: null, address_line2: null, city: null, zip: null } });
+        expect(recorded.kept_customer_timer).toEqual({ row_id: 'pp-1', before: X2, home: { address_line1: null, address_line2: null, city: null, state: null, zip: null } });
       });
 
       it('only the kept customer has a row and their home does not change: their timer stays and nothing is journaled', async () => {
