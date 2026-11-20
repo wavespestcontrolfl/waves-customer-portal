@@ -47,17 +47,9 @@ export function summaryText(data) {
   return `${parts} from ${shortDay(from)} to ${shortDay(through)}.`;
 }
 
-// The pest half of the line: nothing to qualify while no report has been answered (the line says when they show),
-// else the inspections whose pest answer is not known yet.
+// While no inspection report has been answered (pestRead false), the line says when pest findings show.
 export function pestText(data) {
-  if (!data.pestRead) return "Pest findings show once the inspection reports are read.";
-  return unknownText(Number(data.pestUnknown || 0));
-}
-
-// The period's inspections whose pest answer is not known yet (a report still to be read, or one that could not be
-// read): while any remain, the pest count may be low, so the line says so.
-export function unknownText(count) {
-  return count > 0 ? `Pests are not known yet for ${plural(count, "inspection")}.` : "";
+  return data.pestRead ? "" : "Pest findings show once the inspection reports are read.";
 }
 
 // readAt is the weekly job's last run that read all three state files without a failure.
@@ -168,7 +160,7 @@ export default function RestaurantProspectsPage({ embedded = false }) {
         <>
           <p className="mb-3 text-ui-body text-zinc-900">{headlineText(data)}</p>
           {data.rows.length === 0
-            ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()}{!data.pestRead || data.pestUnknown > 0 ? " so far" : ""}.</div>
+            ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()}{data.pestRead ? "" : " so far"}.</div>
             : <RestaurantTable rows={data.rows} />}
         </>
       )}

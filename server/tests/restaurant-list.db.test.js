@@ -157,21 +157,17 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     expect(result.counts).toEqual({ new_restaurant: 1000, new_owner: 2, pest_finding: 1 });
   });
 
-  test('pestUnknown counts the unanswered first visits the reads answer for: never a callback or a row with no visit number', async () => {
+  test('the pest count holds answered 35A inspections only: unread ones, callbacks and 35B-only answers are left out', async () => {
     const unread = (over) => prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: null, ...over });
     await mockPg('restaurant_prospects').insert([
-      unread({ detail: JSON.stringify({ visitNumber: 1 }) }), // a first visit still to be read: counts
-      unread({ detail: JSON.stringify({ visitNumber: 1 }), detail_attempts: 3 }), // could not be read: counts
-      unread({ detail: JSON.stringify({}) }), // no visit number stored: the reads skip it, left out
-      unread({ detail: JSON.stringify({ visitNumber: 2 }) }), // a callback: never answered, left out
-      unread({ license_type_code: '2014', detail: JSON.stringify({ visitNumber: 1 }) }), // a food truck: left out
-      unread({ event_date: '2026-10-20', detail: JSON.stringify({ visitNumber: 1 }) }), // before the period: left out
-      prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: false }), // answered, 35B only: left out
+      unread({ detail: JSON.stringify({ visitNumber: 1 }) }), // still to be read
+      unread({ detail: JSON.stringify({ visitNumber: 1 }), detail_attempts: 3 }), // could not be read
+      unread({ detail: JSON.stringify({ visitNumber: 2 }) }), // a callback
+      prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: false }), // answered, 35B only
       prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: true, detail: JSON.stringify({ findings: ROACHES }) }),
     ]);
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result.pestRead).toBe(true);
-    expect(result.pestUnknown).toBe(2);
     expect(result.counts.pest_finding).toBe(1);
     expect(result.rows.map((row) => row.reason)).toEqual(['pest_finding']);
   });
@@ -191,7 +187,7 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result).toEqual({
       days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null,
-      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, pestRead: false, pestUnknown: 0, rows: [],
+      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, pestRead: false, rows: [],
     });
   });
 

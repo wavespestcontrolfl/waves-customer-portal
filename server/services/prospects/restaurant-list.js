@@ -7,8 +7,8 @@
  *   new_owner       an ownership change (kind owner_change)
  *   pest_finding    an inspection whose public report holds a 35A finding (kind inspection, pest_evidence true)
  * Food trucks (license type 2014, mobile food vehicles) are left out: there is no building to treat. An inspection
- * whose report is not read yet (pest_evidence NULL), or that cites 35B only (a door or an opening), is left out too;
- * pestUnknown counts the inspections still without a pest answer, so a pest count of 0 never reads as checked.
+ * whose report is not read yet (pest_evidence NULL), or that cites 35B only (a door or an opening), is left out too.
+ * pestRead says whether any report has been answered yet: until one has, a pest count counts nothing.
  * It sends nothing and calls no AI. Public business records only.
  */
 
@@ -57,44 +57,27 @@ function toRow(row, newSince) {
   };
 }
 
-// The period's inspections whose pest answer is not known (pest_evidence NULL): a report still to be read, or one that
-// could not be read. The rule is the reads' own: they answer a stored first visit only (visit number 1), so a
-// callback, or a row with no visit number stored, is neither read nor counted. The file import stores the visit
-// numbers and fills old rows before any read runs. Food trucks are left out, as from the list.
-function pestUnknownQuery(from, through) {
-  return db('restaurant_prospects')
-    .whereBetween('event_date', [from, through])
-    .whereRaw("COALESCE(license_type_code, '') <> ?", [FOOD_TRUCK])
-    .where({ kind: 'inspection' })
-    .whereNull('pest_evidence')
-    .whereRaw("detail->>'visitNumber' = '1'")
-    .count({ n: '*' })
-    .first();
-}
-
 // Whether any inspection report has been answered yet (pest_evidence set, in any period). Until the report reads run
-// and answer one, a pest count counts nothing, so the page shows none. The reads import the file before they read a
-// page, and that import stores every current visit number, so pestUnknown is shown only once those are stored.
+// and answer one, a pest count counts nothing, so the page shows none.
 function pestReadQuery() {
   return db('restaurant_prospects').where({ kind: 'inspection' }).whereNotNull('pest_evidence').first('id');
 }
 
 /**
  * The list for the last `days` days by the row's own date (a license's approval day, an inspection's day), Eastern,
- * today included; newest first, at most ROW_LIMIT rows. counts cover the whole period, past the cap too. pestUnknown
- * is the period's inspections whose pest answer is not known (pestUnknownQuery); pestRead says whether any report
- * has been answered yet (pestReadQuery). readAt is when the weekly job last read all three files without a failure
- * (null before its first good run).
+ * today included; newest first, at most ROW_LIMIT rows. counts cover the whole period, past the cap too. pestRead
+ * says whether any report has been answered yet (pestReadQuery). readAt is when the weekly job last read all three
+ * files without a failure (null before its first good run).
  * @returns {Promise<{ days: number, from: string, through: string, readAt: string|null,
  *   counts: { new_restaurant: number, new_owner: number, pest_finding: number }, pestRead: boolean,
- *   pestUnknown: number, rows: object[] }>}
+ *   rows: object[] }>}
  */
 async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
   if (!PERIODS.includes(days)) throw new Error('unknown period');
   const through = etDateString(now);
   const from = shiftDay(through, -(days - 1));
   const newSince = new Date(now.getTime() - NEW_DAYS * 24 * 60 * 60 * 1000);
-  const [rows, unknown, answered, health] = await Promise.all([
+  const [rows, answered, health] = await Promise.all([
     db('restaurant_prospects')
       .whereBetween('event_date', [from, through])
       .whereRaw("COALESCE(license_type_code, '') <> ?", [FOOD_TRUCK])
@@ -108,7 +91,6 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
         db.raw("count(*) FILTER (WHERE kind = 'new_license') OVER () AS total_new_restaurant"),
         db.raw("count(*) FILTER (WHERE kind = 'owner_change') OVER () AS total_new_owner"),
         db.raw("count(*) FILTER (WHERE kind = 'inspection') OVER () AS total_pest_finding")),
-    pestUnknownQuery(from, through),
     pestReadQuery(),
     db('job_health').where({ job_name: SYNC_JOB }).first('last_success_at'),
   ]);
@@ -127,7 +109,6 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
     readAt: health && health.last_success_at ? new Date(health.last_success_at).toISOString() : null,
     counts,
     pestRead: Boolean(answered),
-    pestUnknown: Number((unknown && unknown.n) || 0),
     rows: list,
   };
 }
