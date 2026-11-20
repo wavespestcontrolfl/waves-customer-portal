@@ -44,11 +44,14 @@ async function callbackCreditByTechnician(conn, { start, endDate, distinctVisits
        AND sr.id <> cb.id
        AND sr.is_callback IS NOT TRUE
        AND sr.technician_id IS NOT NULL${performedSourcesOnly ? `
+       AND sr.status = 'completed'
        AND COALESCE(sr.structured_notes->>'visitOutcome', '') <> 'customer_declined'` : ''}
        AND (sr.service_date < cb.service_date
             OR (sr.service_date = cb.service_date AND sr.created_at < cb.created_at))
        AND sr.service_date >= cb.service_date - CAST(? AS integer)
-     WHERE cb.is_callback = true
+     WHERE cb.is_callback = true${performedSourcesOnly ? `
+       AND cb.status = 'completed'
+       AND COALESCE(cb.structured_notes->>'visitOutcome', '') <> 'customer_declined'` : ''}
        AND cb.service_date >= ?
        AND cb.service_date <= ?
      ORDER BY cb.id, sr.service_date DESC NULLS LAST, sr.created_at DESC NULLS LAST

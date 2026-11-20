@@ -21,6 +21,8 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 
+const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+
 const WINDOW = { from: '2026-03-01', to: '2026-08-31' };
 const WEIGHTS = { onTime: 30, audit: 20, callbacks: 20, truck: 10, ownerRating: 20 };
 const CUTS = { top: 95, mid: 85, low: 75 };
@@ -79,6 +81,11 @@ describe('tech rewards scores input checks', () => {
       t.uuid('service_id');
       t.text('service_type');
       t.timestamp('completed_at', { useTz: true });
+    });
+    await db.schema.withSchema(mockSchema).createTable('customers', (t) => {
+      t.uuid('id').primary();
+      t.text('first_name');
+      t.text('last_name');
     });
     await db.schema.withSchema(mockSchema).createTable('projects', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -193,6 +200,7 @@ describe('tech rewards scores input checks', () => {
     await db('tech_protocol_audits').del();
     await db('tech_owner_ratings').del();
     await db('equipment_checks').del();
+    await db('customers').del();
     await db('messaging_audit_log').del();
     await db('service_completion_attempts').del();
     await db('projects').del();
@@ -433,6 +441,28 @@ describe('tech rewards scores input checks', () => {
       expect(await scores.readOnTime(tech, WINDOW)).toBe(66.67);
     });
 
+    test('onTime: an internal test customer visit owes no report; a suppressed summary pair is not a late report', async () => {
+      const testCustomer = INTERNAL_TEST_CUSTOMER_IDS[0];
+      await db('customers').insert({ id: testCustomer, first_name: 'Fixture', last_name: 'Demo' });
+      await visit(tech, { customer_id: testCustomer }); // linked and unlinked records of a test customer are both out
+      await visit(tech, { customer_id: testCustomer, scheduled_service_id: (await scheduled(tech)).id });
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull(); // nothing owed
+      const real = await visit(tech);
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${real.id}:primary`, status: 'sent', sent_at: ts('2026-04-10T16:00:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+      // a combined visit whose summary text AND email were both suppressed: closeout-status says not required
+      const pairVisit = async (statuses) => {
+        const [{ id: visitId }] = await db('service_visits').insert({ summary_token_issued_at: ts('2026-04-10T15:00:00Z') }).returning('id');
+        const [{ id: packetId }] = await db('visit_completion_packets').insert({ visit_id: visitId }).returning('id');
+        await db('visit_effects').insert(['completion_sms', 'completion_email'].map((effect_type, i) => ({ visit_id: visitId, effect_type, status: statuses[i], sent_at: null })));
+        await db('visit_completion_packet_items').insert({ packet_id: packetId, service_record_id: (await visit(tech)).id });
+      };
+      await pairVisit(['suppressed', 'suppressed']);
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100); // exempt
+      await pairVisit(['suppressed', 'failed']); // only one suppressed: still owed, no send, late
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(50);
+    });
+
     test('audit: match share of audited visits in the window months', async () => {
       expect(await scores.readAudit(tech, WINDOW)).toBeNull();
       const add = async (month, result, technicianId = tech) => db('tech_protocol_audits').insert({
@@ -522,6 +552,21 @@ describe('tech rewards scores input checks', () => {
       // the callback corrects tech's performed visit (not other's declined one): 1 callback in 2 visits
       expect(await scores.readCallbacks(tech, WINDOW)).toBe(0);
       expect(await scores.readCallbacks(other, WINDOW)).toBeNull(); // only a declined visit: no data
+    });
+
+    test('callbacks: an incomplete visit is no source and an incomplete re-service is no callback', async () => {
+      const customer_id = randomUUID();
+      await visit(tech, { customer_id, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') }); // performed the service
+      await visit(other, { customer_id, service_date: '2026-04-10', created_at: ts('2026-04-10T14:00:00Z'), status: 'incomplete' });
+      await visit(tech, { customer_id: randomUUID(), service_date: '2026-04-02', created_at: ts('2026-04-02T14:00:00Z') });
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(100);
+      // a re-service closed as incomplete is not a completed callback
+      await visit(other, { customer_id, service_date: '2026-04-15', is_callback: true, status: 'incomplete' });
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(100);
+      // a completed re-service after the incomplete visit is charged to the technician who performed the service
+      await visit(other, { customer_id, service_date: '2026-04-20', is_callback: true });
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0); // 1 callback in 2 visits, clamped
+      expect(await scores.readCallbacks(other, WINDOW)).toBeNull();
     });
 
     test('every read takes an uppercase technician id like the lowercase one', async () => {

@@ -462,7 +462,7 @@ function readableTimestamp(raw) {
 // visit link is judged on its own notes. `ss` is the visit row the shared fragments correlate on.
 const EVIDENCE_EXEMPT_SQL = `
   SELECT r.id AS record_id, r.scheduled_service_id,
-         CASE WHEN ss.id IS NULL THEN
+         (${internalTestVisitSql('r')}) OR CASE WHEN ss.id IS NULL THEN
                 NOT (r.status = 'completed'
                      AND COALESCE(r.structured_notes->>'backfill', 'false') <> 'true'
                      AND COALESCE(r.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
@@ -519,6 +519,16 @@ const EVIDENCE_SENDS_SQL = `
     JOIN visit_effects e ON e.visit_id = p.visit_id AND e.effect_type IN ('completion_sms', 'completion_email')
    WHERE e.status = 'sent'
   UNION ALL
+  -- the combined visit's summary pair (text + email) both suppressed: closeout-status reads that as
+  -- not required (visitSummaryDeliveryFact), so no delivery is owed through it
+  SELECT sib.record_id, 'summary_suppressed', NULL::timestamptz, NULL
+    FROM sib
+    JOIN visit_completion_packet_items i ON i.service_record_id = sib.sib_id AND i.status = 'done'
+    JOIN visit_completion_packets p ON p.id = i.packet_id AND p.status IN ('processing', 'done')
+    JOIN visit_effects e ON e.visit_id = p.visit_id AND e.effect_type IN ('completion_sms', 'completion_email')
+   GROUP BY sib.record_id, p.visit_id
+  HAVING COUNT(*) = 2 AND COUNT(*) FILTER (WHERE e.status = 'suppressed') = 2
+  UNION ALL
   SELECT record_id, 'completion_text', NULL::timestamptz,
          COALESCE(structured_notes->>'completionSmsDeferredDeliveredAt', structured_notes->>'sentSmsAt')
     FROM sib WHERE structured_notes->>'completionSmsStatus' = 'sent'
@@ -534,7 +544,8 @@ const EVIDENCE_SENDS_SQL = `
 /**
  * Delivery evidence for completed service_records ids. Returns a Map of record id (lowercase) to
  *   { exempt, firstConfirmedSendAt, confirmedWithoutTime }
- *   exempt                 no customer report is owed (see above), or the only outcome is a consent block
+ *   exempt                 no customer report is owed (see above, internal test customers included), or the
+ *                          only outcome is a consent block or a suppressed summary pair (closeout-status: not required)
  *   firstConfirmedSendAt   the earliest readable time of any confirmed send (Date) or null
  *   confirmedWithoutTime   some confirmed send has no readable time (stored time missing or malformed)
  * A record with no evidence at all is { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false }.
@@ -553,7 +564,7 @@ async function deliveryEvidenceForRecords(recordIds, knex = db) {
   for (const row of sends.rows) {
     const id = String(row.record_id).toLowerCase();
     const entry = out.get(id);
-    if (row.kind === 'consent_blocked') { blocked.add(id); continue; }
+    if (row.kind === 'consent_blocked' || row.kind === 'summary_suppressed') { blocked.add(id); continue; }
     confirmed.add(id);
     const at = row.kind === 'completion_text' ? readableTimestamp(row.text_at)
       : (row.at ? new Date(row.at) : null);
