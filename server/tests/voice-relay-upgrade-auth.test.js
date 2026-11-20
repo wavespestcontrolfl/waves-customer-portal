@@ -648,6 +648,13 @@ describe('ws upgrade — GPT-Live path', () => {
     expect(runLiveBridge).toHaveBeenCalledTimes(1);
   });
 
+  test('a handshake Twilio signed over the trailing-slash form of the URL is accepted', async () => {
+    mockHandleUpgrade.mockImplementation((req, socket, head, cb) => cb({}));
+    const socket = await upgradeLive(liveUrl(), { signature: sign(`${liveUrl()}/`) });
+    expect(socket.destroy).not.toHaveBeenCalled();
+    expect(runLiveBridge).toHaveBeenCalledTimes(1);
+  });
+
   test('a bad, missing, wrong-call or malformed token destroys the socket', async () => {
     const good = mintLive(LIVE_SID);
     for (const url of [

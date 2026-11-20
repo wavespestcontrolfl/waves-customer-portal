@@ -164,6 +164,7 @@ class LiveBridge {
     this.ready = false; // session.started seen: caller audio may flow
     this.admitted = false; // this bridge claimed the call's ledger row
     this.admission = null;
+    this.admissionDone = false;
     this.startSent = false; // session.start left the bridge: OpenAI may bill from here
     this.startSeen = false; // the Twilio start frame is handled once, whatever it holds
 
@@ -216,6 +217,7 @@ class LiveBridge {
     this.admission = Promise.resolve()
       .then(() => this.deps.admit(this.callSid))
       .then((ok) => { this.admitted = ok === true; return this.admitted; })
+      .finally(() => { this.admissionDone = true; })
       .catch(() => { this.noteError('admit_failed'); return false; });
     this.capTimer = setTimeout(() => { void this.finalize('cap'); }, this.deps.sessionCapMs);
     if (this.capTimer.unref) this.capTimer.unref();
@@ -484,9 +486,13 @@ class LiveBridge {
     await this.closeOpenAi();
     try { this.twilio.close(); } catch { /* already closed */ }
     // Whether this bridge owns the ledger row. A database still stalled after
-    // closeWaitMs counts as not admitted: no ledger write, and if the claim
-    // lands later the row keeps its whole reservation (fail closed).
+    // closeWaitMs counts as not admitted: no ledger write now. If the claim
+    // lands later, OpenAI was never opened (it opens only after admission), so
+    // that row is settled at $0 then and frees its reservation.
     await waitAtMost(this.admission, this.deps.closeWaitMs);
+    if (!this.admissionDone) {
+      void this.admission.then((ok) => (ok ? this.settleLedger(0) : null));
+    }
     try {
       await this.writeSummary(reason);
     } catch (err) {
@@ -560,19 +566,22 @@ class LiveBridge {
     };
   }
 
+  // Never throws: a failed write leaves the reservation standing (fail closed).
+  async settleLedger(costUsd) {
+    try {
+      await this.deps.db()('voice_gpt_live_spend').where({ call_sid: this.callSid }).update({ cost_usd: costUsd, settled_at: new Date() });
+    } catch (err) {
+      logger.warn(`[voice-live] ledger settle failed callSid=${this.callSid} code=${errCode(err)}`);
+    }
+  }
+
   async writeSummary(reason) {
     const db = this.deps.db();
     const summary = this.summary(reason);
     // The ledger first: it is the budget. A settled cost frees the rest of the
     // reservation; an unsettled call leaves its row alone (it keeps it all). A
     // bridge that never claimed the row leaves it to the cell route's release.
-    if (summary.cost_usd !== undefined && this.admitted) {
-      try {
-        await db('voice_gpt_live_spend').where({ call_sid: this.callSid }).update({ cost_usd: summary.cost_usd, settled_at: new Date() });
-      } catch (err) {
-        logger.warn(`[voice-live] ledger settle failed callSid=${this.callSid} code=${errCode(err)}`);
-      }
-    }
+    if (summary.cost_usd !== undefined && this.admitted) await this.settleLedger(summary.cost_usd);
     const merged = JSON.stringify(summary);
     await db('call_log').where({ twilio_call_sid: this.callSid }).update({
       metadata: db.raw(

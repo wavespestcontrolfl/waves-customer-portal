@@ -195,9 +195,10 @@ async function readLiveStamp(callSid) {
 }
 
 // Twilio signs the Media Streams handshake: X-Twilio-Signature over the exact
-// wss URL the cell route rendered (a GET: no params). Checked before any
-// database read or token burn, so a forged request leaves the token usable for
-// Twilio's own connect. No auth token, no header or a bad one: refused.
+// wss URL the cell route rendered (a GET: no params), or that URL with a
+// trailing slash (Twilio's signature guidance names both forms). Checked
+// before any database read or token burn, so a forged request leaves the token
+// usable for Twilio's own connect. No auth token, no header or a bad one: refused.
 function liveSignatureValid(req, callSid, token) {
   const authToken = process.env.TWILIO_AUTH_TOKEN;
   const headers = (req && req.headers) || {};
@@ -205,7 +206,8 @@ function liveSignatureValid(req, callSid, token) {
   if (!authToken || typeof signature !== 'string' || !signature) return false;
   const { publicWsHost, liveStreamUrl } = require('./relay-protocol');
   const url = liveStreamUrl(publicWsHost(headers.host), callSid, token);
-  return require('twilio').validateRequest(authToken, signature, url, {});
+  const { validateRequest } = require('twilio');
+  return validateRequest(authToken, signature, url, {}) || validateRequest(authToken, signature, `${url}/`, {});
 }
 
 // Only the token the cell route issued (and stamped by digest) opens the paid

@@ -720,6 +720,19 @@ describe('reservation admission', () => {
     expect(summaryOf(t)).toMatchObject({ close_reason: 'start_timeout', openai_contacted: false });
   });
 
+  test('an admission that lands after the call ended settles that row at $0 (OpenAI never opened)', async () => {
+    let admitNow;
+    const admit = () => new Promise((resolve) => { admitNow = resolve; });
+    const t = setup({ deps: { admit, startDeadlineMs: 20, closeWaitMs: 20 } });
+    await t.twilioStart();
+    await waitFor(() => t.update.mock.calls.length > 0);
+    expect(t.ledgerUpdate).not.toHaveBeenCalled();
+    admitNow(true); // the stalled claim finally commits
+    await flush();
+    expect(t.openaiFactory).not.toHaveBeenCalled();
+    expect(t.ledgerUpdate).toHaveBeenCalledWith({ cost_usd: 0, settled_at: expect.any(Date) });
+  });
+
   test('a reservation not admitted (released, settled, or a database error) opens no OpenAI session and leaves the ledger alone', async () => {
     for (const admit of [jest.fn(async () => false), jest.fn(async () => { throw new Error('db down'); })]) {
       const t = setup({ deps: { admit } });
