@@ -3098,8 +3098,9 @@ a `protocol` inside it that cannot be read, since it hides the outcome and the
 frozen typed cards this rule checks; absent `service_data` reads as none), a `cleaned`
 note signed ` — <first name>` (the identity snapshot's name, never a generic
 label). The note, and every list value and finding field below on such a
-record, passes `noteRecordCopyViolations`: `customerCopyViolations` and any
-time a technician can give: any word that names hours, minutes or seconds, with
+record, passes `noteRecordCopyViolations`: `customerCopyViolations`, the
+completion access-code check (`COMPLETION_ACCESS_CODE_RE`, which also names
+"Side access 4417 for the yard"), and any time a technician can give: any word that names hours, minutes or seconds, with
 or without a figure ("30+ minutes", "eighteen minutes", "½ hour", "a few
 minutes"); a figure with h or m; a clock time in any marked form ("3:30", any
 pm or a.m., "four am", "3 o'clock", "half past three", "four in the
@@ -3109,9 +3110,19 @@ overnight, tonight, tomorrow, noon or midnight. AGENTS.md bans a fixed re-entry 
 written in more ways than any list names, so a marker alone decides (the unit
 word, the clock marker, the time word before an hour) and each match withholds
 the copy. A count after such a time word ("at 3 stations") is withheld too.
-Days stay legal (the next visit, when results show), and so do the ordinal
-"second", "am" after anything but a number, and a part of the day with no
-hour. Otherwise it is what the report builds with no free text (the lawn visit
+Days stay legal (the next visit, when results show), except in a sentence
+that names drying or re-entry ("dry", "re-enter", "keep … off", "stay …
+inside", "off-limits", "avoid") or the people and pets a re-entry line is
+about: there any day word withholds the copy (a unit from a day up, a weekday,
+"today", a part of the day or a meal), so "until dry" is the only time such a
+sentence may give. A full stop ends that sentence only before a capital letter
+or the end ("1.5 days", "approx. 2 days" stay in it); a line break does not.
+"Keep an eye out" is no keep-off. The ordinal "second" and "am" after
+anything but a number stay legal, and so does a part of the day with no hour
+outside such a sentence.
+Production count (read-only, 2026-11-20): the rule matches 46 of 474 pest
+customer recaps and 48 of 401 technician notes, none of the form lists or
+finding fields; the access-code check matches none. Otherwise it is what the report builds with no free text (the lawn visit
 summary, or on a live view a narrative of the typed card under that narrative's
 own gate, which reads an empty recap) or empty, never `customerRecap`. A
 refused or malformed note is no text, and the raw column is never its fallback.

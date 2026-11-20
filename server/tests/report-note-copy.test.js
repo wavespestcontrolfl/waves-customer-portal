@@ -19,6 +19,7 @@ const {
   carriesReportNote,
   printedReportSummary,
   reportTechnicianFirstName,
+  noteRecordCopyViolations,
   MAX_REPORT_NOTE_CHARS,
 } = require('../services/service-report/technician-report-copy');
 
@@ -78,6 +79,11 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
     expect(unsafe.body).toBeNull();
     expect(unsafe.violations.length).toBeGreaterThan(0);
     expect(reportNoteCustomerCopy(stored({ text: 'I treated the garage. The gate code is 4471.' })).body).toBeNull();
+    // A shape only the completion access-code check names (the report check
+    // in customerCopyViolations does not).
+    const access = reportNoteCustomerCopy(stored({ text: 'I treated the yard. Side access 4417 for the yard.' }));
+    expect(access.body).toBeNull();
+    expect(access.violations).toEqual(['note_record_access_code']);
   });
 
   test('a time figure in any form withholds the note; the sanctioned wording and days stand', () => {
@@ -144,6 +150,43 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I am glad the lanai looks better. I treated the IPM zones.',
       'I treated the lanai and swept the webs. Have a great afternoon!',
     ]) expect(reportNoteCustomerCopy(stored({ text })).body).toBe(text);
+  });
+
+  test('a day word in a sentence about drying or re-entry withholds the note; follow-up days stand', () => {
+    // Days stay legal, except in a sentence that names drying or re-entry or
+    // the people and pets a re-entry line is about: there "until dry" is the
+    // only time a note may give. Each line below is caught by this part of
+    // the rule alone, one marker or day word at a time.
+    for (const text of [
+      'I treated the lawn edge. The spray dries in half a day.',
+      'I treated the lawn edge. Keep pets off the treated grass for two days.',
+      'I treated the yard. Keep off the treated grass for 1.5 days.',
+      'I treated the yard. Keep off the grass approx. 2 days.',
+      'I treated the yard. Stay off the treated grass for a couple of days.',
+      'I treated the yard. Re-entry is fine in two days.',
+      'I treated the yard. The yard is off-limits for a day.',
+      'I treated the yard. Avoid the treated lawn for a week.',
+      'I treated the yard. The dog can go out in two days.',
+      'I treated the yard. In two days the treated lawn will be dry.',
+      'I treated the yard. Keep off the lawn until Monday.',
+      'I treated the yard. Keep off the treated grass for the rest of today.',
+      'I treated the yard. The spray will be dry by this evening.',
+      'I treated the yard. Stay inside until after lunch.',
+    ]) {
+      const parsed = reportNoteCustomerCopy(stored({ text }));
+      expect(parsed.body).toBeNull();
+      expect(parsed.violations).toEqual(['note_record_time']);
+    }
+    for (const text of [
+      'I treated the lanai. Keep people and pets off treated areas until dry.',
+      'I placed bait in the garage. I will check the stations again in 14 days.',
+      'I treated the lanai. Keep an eye out for activity over the next two weeks.',
+      // A full stop before a capital ends the sentence.
+      'I treated the lanai. Keep pets off until dry. In two weeks you should see fewer ants.',
+    ]) expect(reportNoteCustomerCopy(stored({ text })).body).toBe(text);
+    // A note holds one line, but a finding field or list value can hold two:
+    // a line break does not end the sentence.
+    expect(noteRecordCopyViolations('Keep off the treated grass\nfor two days.')).toEqual(['note_record_time']);
   });
 });
 

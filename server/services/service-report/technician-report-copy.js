@@ -41,6 +41,7 @@
 
 const crypto = require('crypto');
 const { findBannedCustomerCopy } = require('./activity-indicators');
+const { COMPLETION_ACCESS_CODE_RE } = require('../completion-access-code');
 const { formatTechnicianForCustomer, isGenericTechnicianLabel } = require('../../utils/technician-name');
 
 // Code-noun anchored credential detector (shared with the generate-report
@@ -653,7 +654,9 @@ function customerCopyViolations(text) {
 // The copy screen for a record that carries the technician's own note: the
 // note, and every list value and finding field such a record prints
 // (report-data.js buildProtocolPayload, finding-provenance.js). The complete
-// screen above, plus any time a technician can give for re-entry or drying:
+// screen above; the completion access-code check (COMPLETION_ACCESS_CODE_RE,
+// which also names "Side access 4417 for the yard", a shape the report check
+// above does not); and any time a technician can give for re-entry or drying:
 // any word that names hours, minutes or seconds, with or without a figure
 // ("30+ minutes", "eighteen minutes", "½ hour", "a few minutes", "30min"); a
 // figure with h or m ("2h"); a clock time, written in any of its marked forms
@@ -669,19 +672,47 @@ function customerCopyViolations(text) {
 // time word before an hour. On such a record each match withholds the copy: a
 // refused note shows nothing, and a refused list value or finding field is
 // left out. Days stay legal: they name the next visit and when results show.
-// Singular "second" stays legal: it is the ordinal ("second visit"), and no
+// The one exception is a sentence that names drying or re-entry ("dry",
+// "re-enter", "keep … off", "stay … inside", "off-limits", "avoid") or the
+// people and pets a re-entry line is about: there any day word decides, a
+// unit ("dries in half a day", "keep pets off for two days"), a weekday,
+// "today", or a part of the day ("dry by this evening"). Inside such a
+// sentence the only time a note may give is the idiom "until dry". A full
+// stop ends a sentence only before a capital letter or the end of the text,
+// so "1.5 days" and "approx. 2 days" stay in their sentence; a line break
+// does not end one. Singular "second" stays legal: it is the ordinal ("second visit"), and no
 // re-entry time is one second. So do "am" after anything but a number ("I am")
-// and a part of the day with no hour ("Have a great afternoon!"). A count
+// and, outside a drying or re-entry sentence, a part of the day with no hour
+// ("Have a great afternoon!"). A count
 // after one of those time words ("at 3 stations") is withheld too: nothing
 // tells it from a clock time. A read-only production count of this rule
-// (2026-11-20): a match in 2 of 474 pest customer recaps, both clock times,
-// none from a unit word, and none in the form lists or the finding fields.
+// (2026-11-20): a match in 46 of 474 pest customer recaps (2 clock times; in
+// 41 a drying word and a day unit share a sentence) and in 48 of 401
+// technician notes, none in the form lists or the finding fields. The
+// access-code check matched none of them.
 const NOTE_HOUR_SRC = '(?:\\p{N}{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
 // A 24-hour clock with no colon: 3 or 4 digits, hour 0 to 23 and minutes 00
 // to 59, or 2400 (midnight).
 const NOTE_24H_CLOCK_SRC = '(?:(?:[01]?\\p{Nd}|2[0-3])[0-5]\\p{Nd}|2400)';
 // The number words of a clock's hour and minutes (0 to 59: "four thirty am").
 const NOTE_CLOCK_WORD_SRC = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|oh)';
+// One sentence: a question or exclamation mark or a semicolon ends it; a
+// full stop ends it only before a capital letter or the end of the text.
+const NOTE_SENTENCE_CHAR_SRC = '(?:[^.!?;]|\\.(?!\\s*(?:\\p{Lu}|$)))';
+// What marks a drying or re-entry sentence: a drying word, re-entry, keep or
+// stay with off, out, away, inside, indoors or clear ("keep an eye out" is
+// not one), off-limits, avoid, or the people and pets a re-entry line names.
+const NOTE_DRY_REENTRY_SRC = `(?<!\\p{L})(?:${[
+  '(?:dry|dries|drying|dried|wet|damp)',
+  're-?\\s?ent(?:er|ers|ered|ering|ry|ries|rance)',
+  `(?:keep|keeps|keeping|kept)(?!\\s+an\\s+eye)${NOTE_SENTENCE_CHAR_SRC}{0,40}?(?<!\\p{L})(?:off|out|outside|away|inside|indoors|clear)`,
+  `(?:stay|stays|staying|stayed)${NOTE_SENTENCE_CHAR_SRC}{0,40}?(?<!\\p{L})(?:off|out|outside|away|inside|indoors|clear)`,
+  'off[\\s-]?limits',
+  '(?:avoid|avoids|avoiding|avoided)',
+  '(?:pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|kids?|child(?:ren)?|toddlers?|bab(?:y|ies)|people|family|anyone|everyone|guests?)',
+].join('|')})(?!\\p{L})`;
+// A day word: a unit from a day up, a weekday, today, or a part of the day.
+const NOTE_DAY_WORD_SRC = '(?<!\\p{L})(?:days?|nights?|weeks?|weekends?|fortnights?|months?|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mornings?|afternoons?|evenings?|sunset|sundown|sunrise|dawn|dusk|lunch(?:time)?|dinner(?:time)?|bedtime|breakfast)(?!\\p{L})';
 const NOTE_RECORD_TIME_RE = new RegExp([
   '(?<!\\p{L})(?:half-?|quarter-?)?(?:hours?|minutes?|mins?|hrs?|secs?|seconds)(?!\\p{L})',
   '\\p{N}\\s*[hm](?!\\p{L})',
@@ -694,11 +725,16 @@ const NOTE_RECORD_TIME_RE = new RegExp([
   `(?<!\\p{L})${NOTE_HOUR_SRC}\\s+(?:in\\s+the\\s+(?:morning|afternoon|evening|night)|at\\s+night|this\\s+(?:morning|afternoon|evening))`,
   `(?<!\\p{L})(?:at|after|until|till|til|by|before|around|past|between|from)\\s+(?:about\\s+|around\\s+)?(?:${NOTE_HOUR_SRC}|${NOTE_24H_CLOCK_SRC})(?![\\p{L}\\p{N}])`,
   '\\b(?:overnight|tonight|tomorrow|noon|midnight)\\b',
+  `${NOTE_DRY_REENTRY_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DAY_WORD_SRC}`,
+  `${NOTE_DAY_WORD_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DRY_REENTRY_SRC}`,
 ].join('|'), 'iu');
 
 function noteRecordCopyViolations(text) {
-  const violations = customerCopyViolations(text);
-  return NOTE_RECORD_TIME_RE.test(String(text || '')) ? [...violations, 'note_record_time'] : violations;
+  const value = String(text || '');
+  const violations = customerCopyViolations(value);
+  if (COMPLETION_ACCESS_CODE_RE.test(value)) violations.push('note_record_access_code');
+  if (NOTE_RECORD_TIME_RE.test(value)) violations.push('note_record_time');
+  return violations;
 }
 
 module.exports = {

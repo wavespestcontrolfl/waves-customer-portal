@@ -132,6 +132,11 @@ describe('the report payload', () => {
       ['I treated the perimeter. Allow a 30-minute drying period.', '30-minute drying'],
       ['I treated the lanai. Return to the treated area after 30+ minutes.', '30+ minutes'],
       ['I treated the lanai. Keep the dog in overnight.', 'overnight'],
+      // A day word in a sentence about drying or re-entry.
+      ['I treated the lawn edge. Keep pets off the treated grass for two days.', 'for two days'],
+      ['I treated the perimeter. The spray dries in half a day.', 'half a day'],
+      // An access code only the completion check names.
+      ['I treated the yard. Side access 4417 for the yard.', '4417'],
     ]) {
       expect(visitReportCustomerCopy({ ...SERVICE, structured_notes: JSON.stringify(stored({ text })) }).body).toBeNull();
       const data = await build({ structured_notes: JSON.stringify(stored({ text })) });
@@ -281,18 +286,23 @@ describe('the report payload', () => {
       row('f-toxic', 'Seal the slider', { detail: 'Toxic residue on the sill', recommendation: 'Replace the weatherstrip.' }),
       // A time figure counts too (noteRecordCopyViolations).
       row('f-time', 'Ant trail by the patio', { detail: 'A trail along the patio door.', recommendation: 'Stay off the patio for an hour.' }),
+      // An access code only the completion check names; a day word in a re-entry line.
+      row('f-side', 'Ant trail by the side gate', { detail: 'Side access 4418 for the yard.', recommendation: 'Seal the gap under the side gate.' }),
+      row('f-days', 'Ant trail by the fence', { detail: 'A trail along the fence.', recommendation: 'Keep off the treated grass for two days.' }),
       { id: 'f-none', service_record_id: SERVICE.id, ...buildNoActivityFinding('pest') },
     ];
     const data = await build({ structured_notes: JSON.stringify(stored()) }, { service_findings: findings });
-    expect(data.findings.map((f) => f.title)).toEqual(['Ant trail by the lanai', 'Seal the slider', 'Ant trail by the patio']);
+    expect(data.findings.map((f) => f.title)).toEqual(['Ant trail by the lanai', 'Seal the slider', 'Ant trail by the patio', 'Ant trail by the side gate', 'Ant trail by the fence']);
     expect(JSON.stringify(data.findings)).toContain('A trail along the lanai door.');
     expect(JSON.stringify(data.findings)).toContain('Replace the weatherstrip.');
     expect(JSON.stringify(data.findings)).toContain('A trail along the patio door.');
+    expect(JSON.stringify(data.findings)).toContain('Seal the gap under the side gate.');
+    expect(JSON.stringify(data.findings)).toContain('A trail along the fence.');
     expect(JSON.stringify(data.findings)).not.toMatch(/were clear/);
-    expect(JSON.stringify(data)).not.toMatch(/4417|Toxic|for an hour/);
+    expect(JSON.stringify(data)).not.toMatch(/4417|4418|Toxic|for an hour|for two days/);
     // A record with no note keeps every row, as today.
     const legacy = await build({ structured_notes: '{}' }, { service_findings: findings });
-    expect(legacy.findings.map((f) => f.title).sort()).toEqual(['Ant trail by the lanai', 'Ant trail by the patio', 'No activity observed this visit', 'Seal the slider']);
+    expect(legacy.findings.map((f) => f.title).sort()).toEqual(['Ant trail by the fence', 'Ant trail by the lanai', 'Ant trail by the patio', 'Ant trail by the side gate', 'No activity observed this visit', 'Seal the slider']);
   });
 
   test('beside a note, a customer concern never turns the stored "no activity" row into copy that prints', async () => {
