@@ -410,6 +410,10 @@ const TERMITICIDE_METADATA_FIELDS = [
   'concentrationLabel',
   'trenchDepthFt',
   'concreteVolumePadPct',
+  // The trench line's finished gallons and the concrete volume pad's share of them, an allowance beyond the applied volume
+  // (pre-push audit at the sixteenth push).
+  'finishedGallons',
+  'concreteVolumePadGallons',
   'productSurcharge',
   'baseInstallPrice',
   'warrantyTier',
@@ -427,6 +431,9 @@ const TERMITICIDE_METADATA_FIELDS = [
   'productOz',
   'units',
   'containersRequired',
+  // The exact container cost the pre-slab line priced with, so a replay of the sent quote prices with it (pre-push audit at the
+  // eighth push: a cost with fractional cents does not survive fullContainerProductCost / containersRequired).
+  'containerCost',
   'containerOz',
   'chemicalCostPerOz',
   'allocatedProductCost',

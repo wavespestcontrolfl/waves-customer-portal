@@ -1110,6 +1110,35 @@ describe('ownership lifecycle evidence', () => {
     }), 'cust-past');
     expect(owned).toEqual([]);
   });
+
+  // An included follow-up is the $0 second visit of a one-time job. No writer saves one with the recurring flag;
+  // if a row ever carries both, it is still not a recurring service the customer owns, so its family is quoted.
+  test('an included follow-up that carries the recurring flag is not ownership evidence, and its family is still quoted', async () => {
+    const loadOwned = loadOwnedGated();
+    const followUp = {
+      id: 'svc-fu', service_type: 'Quarterly Pest Control', scheduled_date: futureDate,
+      status: 'confirmed', is_recurring: true, followup_included: true,
+    };
+    const mk = (rows) => dbForTables({
+      customers: [{ id: 'cust-fu', active: true, waveguard_tier: null, monthly_rate: null }],
+      scheduled_services: rows,
+    });
+    expect(await loadOwned(mk([followUp]), 'cust-fu')).toEqual([]);
+    expect(await loadOwned(mk([{ ...followUp, followup_included: false }]), 'cust-fu')).toEqual(['pest_control']);
+
+    const quote = (rows) => buildCustomerPricingResponse({
+      db: mk(rows),
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-fu', waveguard_tier: null, monthly_rate: null }),
+    });
+    const quoted = await quote([followUp]);
+    expect(quoted.alreadyIncluded).toEqual([]);
+    expect(quoted.options.some((option) => option.serviceKey === 'pest_control')).toBe(true);
+    const owned = await quote([{ ...followUp, followup_included: false }]);
+    expect(owned.alreadyIncluded).toContain('Pest Control');
+    expect(owned.options).toEqual([]);
+  });
 });
 
 // Codex #3253 r4: rodent ownership = bait-monitoring products only; owned-only

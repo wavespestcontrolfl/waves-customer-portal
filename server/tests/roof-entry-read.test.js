@@ -87,11 +87,17 @@ jest.mock('../models/db', () => {
       },
       update(rawPatch) {
         const renewing = !!(rawPatch.claimed_at && rawPatch.claimed_at.raw);
-        const patch = renewing ? { ...rawPatch, claimed_at: new Date().toISOString() } : rawPatch;
+        const patch = renewing ? { ...rawPatch, claimed_at: new Date().toISOString() } : { ...rawPatch };
+        // The flags merge is SQL (COALESCE(col, '{}') || ?::jsonb); the mock applies the same merge to the stored JSON.
+        const mergeFlags = patch.tech_final_flags && patch.tech_final_flags.raw ? JSON.parse(patch.tech_final_flags.bindings[0]) : null;
+        if (mergeFlags) delete patch.tech_final_flags;
         return settled(() => {
           mockEvents.push(renewing ? 'renew' : `update:${patch.status || ''}`);
           const rows = match();
-          rows.forEach((r) => Object.assign(r, patch));
+          rows.forEach((r) => {
+            Object.assign(r, patch);
+            if (mergeFlags) r.tech_final_flags = JSON.stringify({ ...(r.tech_final_flags ? JSON.parse(r.tech_final_flags) : {}), ...mergeFlags });
+          });
           return rows;
         });
       },
@@ -108,7 +114,7 @@ jest.mock('../models/db', () => {
   };
   const db = jest.fn((name) => { mockDbCalls.push(name); return table(name); });
   db.fn = { now: () => 'NOW' };
-  db.raw = (sql) => ({ raw: sql });
+  db.raw = (sql, bindings) => ({ raw: sql, bindings });
   // A short transaction runs on the same rows: 'tx' / 'tx-end' bracket it in mockEvents, so a test can prove the fetch and the
   // model call happen outside it. mockOnTransaction simulates something changing right after the first check.
   db.transaction = jest.fn(async (fn) => {
@@ -278,6 +284,8 @@ describe('POST /', () => {
     expect(Object.keys(res.json.read.flags).sort()).toEqual([...svc.ENTRY_TYPES].sort());
     expect(res.json.read.flags.plumbing_vent_stacks).toEqual({ likely: 'yes', pins: [{ x: 0.4, y: 0.5 }, { x: 0.45, y: 0.52 }] });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // The staff screen draws the pins on the exact crop the service fetched.
+    expect(res.json.image_url).toBe(String(fetchSpy.mock.calls[0][0]));
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const payload = mockDispatch.mock.calls[0][1];
     expect(payload.images).toEqual([{ data: expect.any(String), mimeType: 'image/jpeg' }]);
@@ -300,6 +308,8 @@ describe('POST /', () => {
     expect(again.json.status).toBe('ok');
     expect(again.json.cached).toBe(true);
     expect(again.json.read.id).toBe(mockRows[0].id);
+    // A reused read names the same crop: the rounded centre gives the same export URL as the paid read's fetch.
+    expect(again.json.image_url).toBe(String(fetchSpy.mock.calls[0][0]));
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     expect(mockRows).toHaveLength(1);
@@ -335,6 +345,7 @@ describe('POST /', () => {
   it('answers no_image and makes no model call for a county without a service', async () => {
     const res = await post(home({ county: 'Hillsborough' }));
     expect(res.json).toEqual({ status: 'no_image', cached: false, read: null });
+    expect(res.json).not.toHaveProperty('image_url');
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockRows).toHaveLength(0);
@@ -1282,6 +1293,20 @@ describe('PATCH /:id/tech-count', () => {
     expect(res.json.read).toEqual(expect.objectContaining({ id: READ_A, tech_final_count: 4, tech_final_flags: { plumbing_vent_stacks: 'yes', gable_vents: 'no' }, tier: 'med' }));
     expect(mockRows[0].tech_final_count).toBe(4);
     expect(JSON.parse(mockRows[0].tech_final_flags)).toEqual({ plumbing_vent_stacks: 'yes', gable_vents: 'no' });
+  });
+
+  it('merges flags into the saved ones: two saves of different types keep both, a repeated type is replaced', async () => {
+    await call('PATCH', `/${READ_A}/tech-count`, { body: { flags: { gable_vents: 'unsure' } } });
+    await call('PATCH', `/${READ_A}/tech-count`, { body: { flags: { chimney_or_flue: 'yes' } } });
+    const res = await call('PATCH', `/${READ_A}/tech-count`, { body: { flags: { gable_vents: 'no' } } });
+    expect(res.json.read.tech_final_flags).toEqual({ gable_vents: 'no', chimney_or_flue: 'yes' });
+    expect(mockRows[0].tech_final_count).toBeNull();
+  });
+
+  it('writes the count only when it is sent: a flags-only save keeps the saved count', async () => {
+    await call('PATCH', `/${READ_A}/tech-count`, { body: { count: 3 } });
+    const res = await call('PATCH', `/${READ_A}/tech-count`, { body: { flags: { gable_vents: 'yes' } } });
+    expect(res.json.read).toEqual(expect.objectContaining({ tech_final_count: 3, tech_final_flags: { gable_vents: 'yes' } }));
   });
 
   it('accepts a count of 0 and leaves flags alone when only the count is sent', async () => {

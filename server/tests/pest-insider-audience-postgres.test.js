@@ -4,7 +4,8 @@
  * address, inside the window on the open's own time, under every send-path rule. Covers what
  * the toSQL shape test cannot: a repeat open inside the window counts when the first open was
  * before it, an open by a former address does not qualify a corrected one, a batch logged late
- * counts by when the open happened, and both window bounds hold. Also the customers behind a
+ * counts by when the open happened, both window bounds hold, and a machine open (Apple Mail
+ * Privacy Protection) never qualifies while an unflagged one still does. Also the customers behind a
  * mailbox (newsletter-sender withMailboxCustomers), which the holdout asks.
  * Self-skips unless DATABASE_URL is set (CI's DB-gated suites step).
  * Safe on a shared database: synthetic rows, asserted by id, removed after.
@@ -53,11 +54,12 @@ postgres('warmAudienceQuery (real Postgres)', () => {
   }
 
   // An event SendGrid reported at `when` and the webhook logged at `loggedAt` (the same moment
-  // unless a late batch); occurredAt null = a row logged before the column existed.
-  async function logged(email, eventType, when, { loggedAt = when, occurredAt = when } = {}) {
+  // unless a late batch); occurredAt null = a row logged before the column existed. machineOpen =
+  // SendGrid's sg_machine_open as logged (null = no flag, as on every row logged before it).
+  async function logged(email, eventType, when, { loggedAt = when, occurredAt = when, machineOpen = null } = {}) {
     const eventId = `pi-warm-${tag}-${created.events.length}`;
     await db('sendgrid_webhook_events').insert({
-      event_id: eventId, event_type: eventType, email, status: 'processed',
+      event_id: eventId, event_type: eventType, email, status: 'processed', machine_open: machineOpen,
       occurred_at: occurredAt, processed_at: loggedAt, created_at: loggedAt, updated_at: loggedAt,
     });
     created.events.push(eventId);
@@ -92,6 +94,15 @@ postgres('warmAudienceQuery (real Postgres)', () => {
     // Logged before occurred_at existed: the log time stands in.
     await subscriber('legacyRow');
     await logged(address('legacyRow'), 'open', at(until, -3), { occurredAt: null });
+    // Apple Mail Privacy Protection fetched the email: not a reader. A conventional open counts.
+    await subscriber('machineOpen');
+    await logged(address('machineOpen'), 'open', at(until, -4), { machineOpen: true });
+    await subscriber('personOpen');
+    await logged(address('personOpen'), 'open', at(until, -4), { machineOpen: false });
+    // A machine open first, then a person's open: the person's open qualifies.
+    await subscriber('bothOpens');
+    await logged(address('bothOpens'), 'open', at(until, -6), { machineOpen: true });
+    await logged(address('bothOpens'), 'open', at(until, -1), { machineOpen: false });
     // The send path's own rules still apply: an unsubscribed reader who opened is left out.
     await subscriber('unsubscribed', { status: 'unsubscribed' });
     await logged(address('unsubscribed'), 'open', at(until, -2));
@@ -118,7 +129,7 @@ postgres('warmAudienceQuery (real Postgres)', () => {
     const mine = new Set(created.subscribers);
     const warm = (await warmAudienceQuery({ since, until })).map((row) => row.id).filter((id) => mine.has(id));
     const byId = (a, b) => a - b;
-    expect(warm).toEqual([ids.recent, ids.repeat, ids.mixedCase, ids.atStart, ids.atEnd, ids.legacyRow].sort(byId));
+    expect(warm).toEqual([ids.recent, ids.repeat, ids.mixedCase, ids.atStart, ids.atEnd, ids.legacyRow, ids.personOpen, ids.bothOpens].sort(byId));
   });
 
   test('withMailboxCustomers reads the customer behind a mailbox through an alias row or a customer email, one row per reader', async () => {

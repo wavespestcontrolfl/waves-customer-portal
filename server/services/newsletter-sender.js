@@ -40,8 +40,11 @@ const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = re
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
-const { pestInsiderProofLive, newsletterAutoSendLive } = require('../config/feature-gates');
+const { pestInsiderProofLive, newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
+const { issueContextForSend, inSendWindow, issueSendAt, moveIssueForSend, SEND_WINDOW_MS } = require('./pest-insider/schedule');
+const { dateOnlyString } = require('../utils/date-only');
 const NewsletterSubscribers = require('./newsletter-subscribers');
+const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -579,7 +582,6 @@ function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerIds, ad
 //   well-formed address key for every reader on it: the batches would skip
 //   everyone, and the issue would end 'sent' to nobody.
 function audienceRefusal(send) {
-  const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
   const filter = send.segment_filter;
   const refused = (code, message) => Object.assign(new Error(message), { code, audienceRefusal: true });
   if (filter?.holdout != null && !sendHoldout(filter)) {
@@ -1002,6 +1004,10 @@ async function sendCampaign(sendId, opts = {}) {
       if (opts.expect.proofApprovedAt) {
         claim = claim.whereNotNull('proof_approved_at').where('proof_approved_at', '<', noLaterThan(opts.expect.proofApprovedAt));
       }
+      // A deadline (a Waves Pest Insider issue's 10:00 AM ET window end) binds the claim itself,
+      // on the database clock: the checks before this line take time, and a tick that passed
+      // the window check at 9:59 must not start the send after 10:00.
+      if (opts.expect.notAfter) claim = claim.whereRaw('clock_timestamp() < ?::timestamptz', [opts.expect.notAfter]);
     } else {
       claim = claim.whereIn('status', ['draft', 'scheduled']);
     }
@@ -1025,8 +1031,12 @@ async function sendCampaign(sendId, opts = {}) {
           logger.warn(`[newsletter] claim re-read for ${send.id} failed: ${readErr.message}`);
         }
       }
-      const err = new Error(claimedElsewhere ? 'already sent or in progress' : 'row changed since it was validated');
-      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : 'VERSION_CHANGED';
+      // A deadline that passed explains an empty claim on a row nobody else took.
+      const windowClosed = !claimedElsewhere && Boolean(opts.expect?.notAfter)
+        && Date.now() >= new Date(opts.expect.notAfter).getTime();
+      const err = new Error(claimedElsewhere ? 'already sent or in progress'
+        : windowClosed ? 'its send window closed before the send could start' : 'row changed since it was validated');
+      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : windowClosed ? 'SEND_WINDOW_CLOSED' : 'VERSION_CHANGED';
       throw err;
     }
   }
@@ -1167,6 +1177,10 @@ async function sendCampaign(sendId, opts = {}) {
 
   let accepted = 0, failed = 0;
   let claimLost = false;
+  // A deadline (expect.notAfter: a Waves Pest Insider issue's 10:00 AM ET window end) binds every
+  // chunk as it binds the claim: no chunk goes to SendGrid after it (the heartbeat below).
+  const deadline = opts.expect?.notAfter ? new Date(opts.expect.notAfter) : null;
+  let deadlineReached = false;
 
   // O(1) variant lookup per subscriber. The previous .filter().find() was
   // O(n²) — at 5k subscribers that's 25M comparisons before the first
@@ -1352,9 +1366,20 @@ async function sendCampaign(sendId, opts = {}) {
       // the stale lease, so recovery cannot legally reclaim while the
       // following SendGrid request is in flight (a reclaim requires a full
       // lease window of silence).
-      const heartbeat = await db('newsletter_sends')
+      // A deadline is checked here too, on the database clock: 0 rows on a
+      // claim this worker still owns means the deadline passed, and this
+      // chunk and the rest stay unsent (the send finalizes as failed below).
+      const heartbeatQuery = db('newsletter_sends')
+        .where({ id: send.id, status: 'sending', sending_claim_token: claimToken });
+      if (deadline) heartbeatQuery.whereRaw('clock_timestamp() < ?::timestamptz', [deadline]);
+      const heartbeat = await heartbeatQuery.update({ updated_at: new Date() });
+      if (!heartbeat && deadline && await db('newsletter_sends')
         .where({ id: send.id, status: 'sending', sending_claim_token: claimToken })
-        .update({ updated_at: new Date() });
+        .first('id').catch(() => null)) {
+        deadlineReached = true;
+        logger.error(`[newsletter] send ${send.id} reached its send deadline — stopping before mailing this chunk; ${accepted} accepted so far`);
+        break;
+      }
       if (!heartbeat) {
         claimLost = true;
         logger.error(`[newsletter] send ${send.id} claim lost (stale reclaim by another worker) — stopping before mailing this chunk; ${accepted} accepted so far; new owner resumes the rest`);
@@ -1443,7 +1468,7 @@ async function sendCampaign(sendId, opts = {}) {
       }
 
     }
-    if (claimLost) break;
+    if (claimLost || deadlineReached) break;
   }
 
   // A worker that lost its claim must not finalize, advance the calendar,
@@ -1469,8 +1494,10 @@ async function sendCampaign(sendId, opts = {}) {
     && failed === attemptedCount
     && attemptedCount > 0
     && successfulDeliveryCount === 0;
+  // A send its deadline stopped part way did not go out as planned: 'failed', its
+  // unsent rows still queued for a resume (settlePlannedIssues tells the owner).
   const finalSendUpdate = {
-    status: allFailed ? 'failed' : 'sent',
+    status: allFailed || deadlineReached ? 'failed' : 'sent',
     recipient_count: recipientCount,
     updated_at: new Date(),
   };
@@ -1491,6 +1518,8 @@ async function sendCampaign(sendId, opts = {}) {
     return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, skipped_ineligible: skippedIneligible, lostClaim: true };
   }
 
+  // A planned Waves Pest Insider issue that reached no reader (failed, or sent to
+  // nobody) is settled by settlePlannedIssues: its row fails, with one alert.
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
     // Advance the calendar lifecycle (idempotent) so a sent newsletter's
     // calendar row reflects reality instead of being stuck at 'drafted'.
@@ -1498,6 +1527,19 @@ async function sendCampaign(sendId, opts = {}) {
       await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'sent', updated_at: new Date() });
     } catch (err) {
       logger.warn(`[newsletter] calendar status update failed for send ${send.id}: ${err.message}`);
+    }
+    // The same for a planned Waves Pest Insider issue, also when a person
+    // sent it by hand after a hold, once no reader is left to resume: a send
+    // some readers did not get leaves its row (settlePlannedIssues tells the
+    // owner about an auto-sent one). A 'failed' row is settlePlannedIssues'
+    // too: the Resume that finishes its send moves it to 'sent' there, with
+    // one correction if the owner was told it failed.
+    if (send.newsletter_type === PEST_INSIDER_TYPE && Number(retryableRemaining?.c || 0) === 0) {
+      try {
+        await moveIssueForSend(send.id, ['drafted', 'scheduled', 'held'], 'sent');
+      } catch (err) {
+        logger.warn(`[newsletter] Pest Insider issue status update failed for send ${send.id}: ${err.message}`);
+      }
     }
 
     // First-'sent' only: advance events_raw.times_featured + recompute
@@ -1616,6 +1658,9 @@ async function prepareResumeCampaign(sendId) {
       // with its approval cleared (codex round 13 P2) — compare-and-set on
       // the inspected state and lease, like every other transition here.
       const reset = db('newsletter_sends').where({ id: send.id, status: send.status });
+      // Bound to the version read, as the resume claim is: a row repaired or
+      // edited since then is left as it is now.
+      if (send.updated_at) reset.where('updated_at', '<', noLaterThan(send.updated_at));
       if (reclaimingStaleSend) reset.where('updated_at', '<=', leaseCutoff);
       const returned = (await reset.update({
         status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_refused_at: null,
@@ -1623,9 +1668,11 @@ async function prepareResumeCampaign(sendId) {
       })) > 0;
       outcome = returned ? 'returned to draft for editing (nobody received it)' : 'it changed state meanwhile and was left as is';
     } else if (reclaimingStaleSend) {
-      const released = (await db('newsletter_sends')
+      const release = db('newsletter_sends')
         .where({ id: send.id, status: 'sending' })
-        .where('updated_at', '<=', leaseCutoff)
+        .where('updated_at', '<=', leaseCutoff);
+      if (send.updated_at) release.where('updated_at', '<', noLaterThan(send.updated_at));
+      const released = (await release
         .update({ status: 'failed', sending_claim_token: null, updated_at: new Date() })) > 0;
       if (released) outcome = `its stale send claim was released; ${repair} and resume again`;
     }
@@ -1745,39 +1792,114 @@ async function resumeCampaign(sendId) {
  * A scheduled send that fails a check at dispatch goes back to draft with its
  * approval cleared (the state the owner signed off no longer holds), its
  * calendar week back to 'drafted', and one alert that says why: the week is
- * skipped, nothing went out (owner 2026-10-30, option A). Returns whether
+ * skipped, nothing went out (owner 2026-10-30, option A). A planned Waves Pest
+ * Insider issue's row moves to failed in the same transaction (to held, with no
+ * alert, when `held`: a verified HOLD reply stopped it): all of it lands, or
+ * nothing does and the row stays scheduled for the next tick, which stops it
+ * again. A failed row's alert then comes from settlePlannedIssues, which retries
+ * it until it reaches the owner; every other send's alert follows the commit.
+ * Never throws (the callers move on to the next row either way): returns whether
  * this tick reverted it.
  */
-async function revertBlockedScheduledSend(row, reason) {
-  // Bound to the version this tick read, as the dispatch claim is: a row
-  // edited, re-approved or rescheduled since then is left as it is now.
-  const revert = db('newsletter_sends').where({ id: row.id, status: 'scheduled' });
-  if (row.updated_at) revert.where('updated_at', '<', noLaterThan(row.updated_at));
-  if (row.proof_approved_at) revert.where('proof_approved_at', '<', noLaterThan(row.proof_approved_at));
-  const reverted = await revert.update({
-    status: 'draft',
-    scheduled_for: null,
-    proof_token: null,
-    proof_sent_at: null,
-    proof_approved_at: null,
-    proof_refused_at: null,
-    updated_at: new Date(),
-  });
-  if (!reverted) return false;
-  // Keep the calendar in lockstep: without this the row would stay
-  // 'scheduled' forever (autopilot then skips the week).
-  await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+async function revertBlockedScheduledSend(row, reason, { held = false } = {}) {
+  let reverted;
   try {
-    const { triggerNotification } = require('./notification-triggers');
-    await triggerNotification('newsletter_proof_blocked', {
-      sendId: row.id,
-      subject: row.subject,
-      errors: [`Stopped at send time: ${reason}`],
+    reverted = await db.transaction(async (trx) => {
+      // Bound to the version this tick read, as the dispatch claim is: a row
+      // edited, re-approved or rescheduled since then is left as it is now.
+      const revert = trx('newsletter_sends').where({ id: row.id, status: 'scheduled' });
+      if (row.updated_at) revert.where('updated_at', '<', noLaterThan(row.updated_at));
+      if (row.proof_approved_at) revert.where('proof_approved_at', '<', noLaterThan(row.proof_approved_at));
+      const count = await revert.update({
+        status: 'draft',
+        scheduled_for: null,
+        proof_token: null,
+        proof_sent_at: null,
+        proof_approved_at: null,
+        proof_refused_at: null,
+        updated_at: new Date(),
+      });
+      if (!count) return false;
+      // Keep the calendar in lockstep: without this the row would stay
+      // 'scheduled' forever (autopilot then skips the week).
+      await trx('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+      // A planned Waves Pest Insider issue stopped at send time does not go out:
+      // its date has a fixed send time, and the planner never queues it again.
+      // A verified HOLD reply holds it, as the reply handler does (holdAutoQueuedIssue);
+      // any other stop fails it.
+      const [status, issueReason] = held
+        ? ['held', 'HOLD reply from the owner']
+        : ['failed', `stopped at send time: ${reason}`.slice(0, 500)];
+      const planned = row.newsletter_type === PEST_INSIDER_TYPE
+        && await moveIssueForSend(row.id, ['drafted', 'scheduled'], status, { reason: issueReason, database: trx });
+      return planned ? 'planned' : 'reverted';
     });
-  } catch (e) {
-    logger.warn(`[newsletter-scheduler] stop notice for ${row.id} failed: ${e.message}`);
+  } catch (err) {
+    logger.error(`[newsletter-scheduler] stop for send ${row.id} did not commit, left for the next tick: ${err.message}`);
+    return false;
   }
+  if (!reverted) return false;
+  if (reverted !== 'planned') await notifyStoppedAtSendTime(row, reason);
   return true;
+}
+
+// One newsletter_proof_blocked alert about a send. Never throws. Returns whether it reached
+// anyone (a bell row or a push), as the proof step's notifyProof reads it. outcome: the text
+// says what became of a planned issue's send (its settle step), not a blocked gate. dedupeKey:
+// the alert's identity, so a retry of one already written neither writes a second row nor
+// sends a second push.
+function raiseSendAlert(sendId, subject, text, { outcome = false, dedupeKey = null } = {}) {
+  return require('./newsletter-proof').notifyProof('newsletter_proof_blocked', {
+    sendId,
+    subject,
+    errors: [text],
+    ...(outcome ? { outcome: true } : {}),
+  }, dedupeKey ? { dedupeKey } : null);
+}
+
+// One "Stopped at send time" alert: the owner's last word on this send said it would go out.
+// An alert that reached no one is logged as an error.
+async function notifyStoppedAtSendTime(row, reason) {
+  if (!(await raiseSendAlert(row.id, row.subject, `Stopped at send time: ${reason}`))) {
+    logger.error(`[newsletter-scheduler] stop notice for ${row.id} reached no one`);
+  }
+}
+
+// The stop a verified HOLD reply makes: it holds the planned issue rather than failing it.
+const HOLD_ON_RECORD = 'a HOLD reply to its FYI copy is in the mailbox';
+
+/**
+ * Why an auto-queued Waves Pest Insider send must not go out now, or null
+ * when it may: it needs its planned issue (pest_insider_issues), still
+ * 'scheduled', with scheduled_for at that issue's 7:00 AM ET send time, now
+ * inside the 7:00-10:00 AM ET window of that day, its FYI copy's token, and no
+ * HOLD reply to that copy from a verified sender (holdReplyOnRecord; then
+ * HOLD_ON_RECORD). Throws while the mailbox cannot be read: the caller leaves
+ * the row scheduled for the next tick.
+ */
+async function pestInsiderDispatchStop(row, now = new Date()) {
+  const context = await issueContextForSend(row, { now });
+  if (!context) return 'no planned Waves Pest Insider issue is linked to this send';
+  if (context.issue.status !== 'scheduled') return `its planned issue is ${context.issue.status}, not scheduled`;
+  const target = context.scheduledFor.getTime();
+  if (!row.scheduled_for || new Date(row.scheduled_for).getTime() !== target) {
+    return `scheduled_for is not its issue Thursday (${context.issueDate}) at 7:00 AM ET`;
+  }
+  if (!inSendWindow(context.issueDate, now)) return `missed the ${context.issueDate} 7:00-10:00 AM ET send window`;
+  // The send-time HOLD check (holdReplyOnRecord) finds a HOLD reply the reply handler could not
+  // apply when it read it, in the stored inbox and in the mailbox itself. A check that cannot
+  // answer in full waits for the next tick, and the window still bounds the wait
+  // (settlePlannedIssues tells the owner if it closes).
+  const { holdReplyOnRecord, isProofToken } = require('./newsletter-proof');
+  // A HOLD reply names its issue by this token, so without it no HOLD can be checked, now or later.
+  if (!isProofToken(row.proof_token)) return 'its FYI copy has no valid token, so a HOLD reply to it cannot be checked';
+  let held;
+  try {
+    held = await holdReplyOnRecord(row, context.issue);
+  } catch (err) {
+    throw new Error(`the HOLD check could not read the mailbox (${err.message}), so a HOLD reply could be unread`);
+  }
+  return held ? HOLD_ON_RECORD : null;
 }
 
 /**
@@ -1800,6 +1922,9 @@ async function processScheduledSends() {
   logger.info(`[newsletter-scheduler] ${due.length} scheduled send(s) due`);
   let processed = 0;
   for (const row of due) {
+    // This tick's own claim token (sendCampaign stamps it on its claim): the failure flip below
+    // touches only a claim this tick made, never another worker's send in progress.
+    const claimToken = crypto.randomUUID();
     try {
       // Proof-approved rows remain governed by the proof kill switch even
       // after approval. A manual future schedule has no proof_approved_at and
@@ -1809,20 +1934,47 @@ async function processScheduledSends() {
         logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
         continue;
       }
-      // Same rule for the type-specific switch: a proof-approved Pest
+      // An issue an auto-send switch queued: approved with no approving email.
+      const autoQueued = Boolean(row.proof_approved_at) && !row.proof_approval_email_id;
+      const pestInsider = row.newsletter_type === PEST_INSIDER_TYPE;
+      // Same rule for the type-specific switch: a reply-approved Pest
       // Insider issue stays queued while GATE_PEST_INSIDER_PROOF is off. A
       // Pest Insider issue scheduled by hand has no proof_approved_at and is
-      // unaffected.
-      if (row.proof_approved_at && row.newsletter_type === 'pest-insider-monthly' && !pestInsiderProofLive()) {
+      // unaffected; one the auto-send switch queued follows that switch.
+      if (row.proof_approved_at && pestInsider && !autoQueued && !pestInsiderProofLive()) {
         logger.warn(`[newsletter-scheduler] send ${row.id} is a proof-approved Pest Insider issue but GATE_PEST_INSIDER_PROOF is off — leaving it scheduled`);
         continue;
       }
-      // An issue the auto-send switch queued (approved with no approving
-      // email) stays queued while GATE_NEWSLETTER_AUTO_SEND is off: unsetting
-      // the switch stops it, and the next week waits for an APPROVED reply.
-      if (row.proof_approved_at && !row.proof_approval_email_id && !newsletterAutoSendLive()) {
+      // An issue an auto-send switch queued stays queued while that switch is
+      // off: GATE_PEST_INSIDER_AUTO_SEND for a Waves Pest Insider issue,
+      // GATE_NEWSLETTER_AUTO_SEND for every other. Unsetting the switch stops
+      // it, and the next issue waits for an APPROVED reply.
+      if (autoQueued && !(pestInsider ? pestInsiderAutoSendLive() : newsletterAutoSendLive())) {
         logger.warn(`[newsletter-scheduler] send ${row.id} was queued by the auto-send switch, which is off — leaving it scheduled`);
         continue;
+      }
+      // A Waves Pest Insider issue the switch queued goes out only from its
+      // planned issue, still scheduled, at its own Thursday 7:00 AM ET target,
+      // inside the 7:00-10:00 AM ET window. Anything else stops it for good.
+      let notAfter = null;
+      if (autoQueued && pestInsider) {
+        let stop;
+        try {
+          stop = await pestInsiderDispatchStop(row);
+        } catch (readErr) {
+          // A read that failed, or an inbox not being read. Nothing was claimed, so this is no
+          // send failure: the row stays scheduled for the next tick, and the window still bounds
+          // how long it can wait.
+          logger.warn(`[newsletter-scheduler] Pest Insider send ${row.id} waits for the next tick: ${readErr.message}`);
+          continue;
+        }
+        if (stop) {
+          logger.error(`[newsletter-scheduler] Pest Insider send ${row.id} blocked: ${stop}`);
+          await revertBlockedScheduledSend(row, stop, { held: stop === HOLD_ON_RECORD });
+          continue;
+        }
+        // The window's end also binds the claim (sendCampaign's expect.notAfter).
+        notAfter = new Date(new Date(row.scheduled_for).getTime() + SEND_WINDOW_MS);
       }
       const eventSelection = await validateFlagshipEventSelection(row);
       if (eventSelection.flagship) {
@@ -1877,7 +2029,8 @@ async function processScheduledSends() {
       // edit (or re-approval) landing in between leaves the claim empty and
       // the row is picked up again, re-validated, on a later tick.
       await sendCampaign(row.id, {
-        expect: { status: 'scheduled', updatedAt: row.updated_at, proofApprovedAt: row.proof_approved_at },
+        expect: { status: 'scheduled', updatedAt: row.updated_at, proofApprovedAt: row.proof_approved_at, notAfter },
+        claimToken,
       });
       processed++;
     } catch (err) {
@@ -1892,14 +2045,15 @@ async function processScheduledSends() {
         logger.info(`[newsletter-scheduler] send ${row.id} changed after this tick validated it — not dispatching this version`);
         continue;
       }
-      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID' || err.audienceRefusal) {
+      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID' || err.code === 'SEND_WINDOW_CLOSED' || err.audienceRefusal) {
         // sendCampaign's own pre-claim gates re-run the lineup checks and
         // can newly fail even though the tick's gate just passed (the
         // recheck fetches live pages). A generic 'failed' flip would
         // strand the week uneditable — take the same
         // revert-to-editable-draft exit as the tick's gate. An audience
         // refusal (audienceRefusal) takes the same exit: nothing went out,
-        // and the alert says why.
+        // and the alert says why. So does a Pest Insider window that closed
+        // before the claim (SEND_WINDOW_CLOSED), as a missed window does.
         logger.error(`[newsletter-scheduler] send ${row.id} blocked at dispatch: ${err.message}`);
         try {
           await revertBlockedScheduledSend(row, err.message);
@@ -1908,20 +2062,388 @@ async function processScheduledSends() {
       }
       logger.error(`[newsletter-scheduler] send ${row.id} failed: ${err.message}`);
       try {
-        const flipped = await db('newsletter_sends').where({ id: row.id, status: 'sending' }).update({ status: 'failed' });
-        if (!flipped) {
-          // Pre-claim throw (e.g. SendGrid unconfigured): the row never
-          // reached 'sending' and would otherwise stay 'scheduled' — due
-          // forever, retried every tick, invisible as a failure. Same
-          // status-guarded flip as the route's fire-and-forget catch.
-          await db('newsletter_sends')
-            .where({ id: row.id, status: 'scheduled' })
-            .update({ status: 'failed', updated_at: new Date() });
-        }
+        const flipped = await db('newsletter_sends').where({ id: row.id, status: 'sending', sending_claim_token: claimToken }).update({ status: 'failed' });
+        // Pre-claim throw (e.g. SendGrid unconfigured): the row never
+        // reached 'sending' and would otherwise stay 'scheduled' — due
+        // forever, retried every tick, invisible as a failure. Same
+        // status-guarded flip as the route's fire-and-forget catch.
+        // Bound to the version this tick read, as the claim is: a row
+        // cancelled, edited or rescheduled since then is left as it is now.
+        // A planned Waves Pest Insider issue whose send is now failed (before
+        // or after the claim) is settled by settlePlannedIssues: its row fails
+        // and the owner gets one alert that says how many readers got it.
+        const preClaim = flipped ? null : db('newsletter_sends').where({ id: row.id, status: 'scheduled' });
+        if (preClaim && row.updated_at) preClaim.where('updated_at', '<', noLaterThan(row.updated_at));
+        if (preClaim && row.proof_approved_at) preClaim.where('proof_approved_at', '<', noLaterThan(row.proof_approved_at));
+        if (preClaim) await preClaim.update({ status: 'failed', updated_at: new Date() });
       } catch { /* swallow */ }
     }
   }
   return { processed };
+}
+
+/** A planned issue untold for longer than this is past telling (its alert never reached anyone). */
+const SETTLE_LOOKBACK_DAYS = 14;
+
+function issueDiagnostics(issue) {
+  let diagnostics = issue.diagnostics;
+  if (typeof diagnostics === 'string') { try { diagnostics = JSON.parse(diagnostics); } catch { diagnostics = {}; } }
+  return diagnostics || {};
+}
+
+// The reason routes/webhooks-sendgrid.js records for a message SendGrid dropped for an address on its
+// spam-report list. A reader's own spam report after delivery records none.
+const SPAM_REPORT_DROP_REASON = 'spam reporting address';
+
+/**
+ * Refused for good, and never mailed again by a Resume: a hard bounce (bounced_at; it keeps the sent_at
+ * SendGrid's acceptance wrote), or a message SendGrid dropped, never delivering it, for an address on
+ * its unsubscribe list (routes/webhooks-sendgrid.js writes status 'unsubscribed' only then; a reader's
+ * own unsubscribe after delivery writes only unsubscribed_at) or on its spam-report list (the webhook
+ * records SPAM_REPORT_DROP_REASON; a reader's own spam report writes the same 'complained' with no
+ * reason). Each, with or without an acceptance timestamp: a drop can land before the sender records
+ * one, or after it lost SendGrid's answer.
+ */
+function refusedDelivery(q) {
+  // IS NOT DISTINCT FROM reads a NULL status or reason as false, never unknown: ledgerProgress counts
+  // reached rows with whereNot(refusedDelivery), and NOT unknown would drop an accepted row that has
+  // no reason (most rows) from that count.
+  return q.whereNotNull('bounced_at').orWhere((dropped) => dropped
+    .where((drop) => drop.whereRaw('?? is not distinct from ?', ['status', 'unsubscribed'])
+      .orWhereRaw('?? is not distinct from ?', ['bounce_reason', SPAM_REPORT_DROP_REASON]))
+    .whereNull('delivered_at').whereNull('opened_at').whereNull('clicked_at'));
+}
+
+/**
+ * A send's delivery ledger: how many readers got it (any success signal, as
+ * hasDeliverySuccessSignal reads one, or a reader's own spam report or
+ * unsubscribe, which only a delivered message gets, also when the sender lost
+ * SendGrid's acceptance; and not refused), how many it reached no inbox of for
+ * good (refusedDelivery), and how many a Resume would still mail:
+ * outstandingEligibleDeliveries (the resume precheck's own predicate), and for
+ * a planned issue only the readers its plan still holds, as each batch
+ * re-checks them (narrowToPlannedAudience, then plannedEligibleRows on the
+ * address on file now and every customer behind its mailbox).
+ */
+async function ledgerProgress(trx, send) {
+  const ledger = () => trx('newsletter_send_deliveries').where({ send_id: send.id });
+  const reached = await ledger()
+    .where((q) => q.whereIn('status', TERMINAL_SUCCESS_STATUSES).orWhereNotNull('sent_at').orWhereNotNull('delivered_at')
+      .orWhereNotNull('opened_at').orWhereNotNull('clicked_at').orWhereNotNull('complained_at').orWhereNotNull('unsubscribed_at'))
+    .whereNot(refusedDelivery)
+    .count('* as c').first();
+  const refused = await ledger().where(refusedDelivery).count('* as c').first();
+  const got = Number(reached?.c) || 0;
+  const refusedCount = Number(refused?.c) || 0;
+  // Only a retryable row can be one a Resume would mail (outstandingEligibleDeliveries): with none,
+  // nothing is left, and the archived-link repair below could change nothing, so it does not run.
+  const retryable = await applyRetryableDeliveryFilter(ledger()).count('* as c').first();
+  if (!(Number(retryable?.c) > 0)) return { got, left: 0, refused: refusedCount };
+  // Relinked first, like the resume precheck and hasOutstandingDeliveries: a reader whose archived
+  // link has a live same-email twin is one a Resume would mail. Inside this transaction the sweep
+  // nests as a savepoint under its own lock; a failure leaves this issue to the next minute.
+  await NewsletterSubscribers.relinkArchivedLinkedSubscribers(trx);
+  const outstanding = outstandingEligibleDeliveries(send.id, { database: trx });
+  const plan = sendHoldout(send.segment_filter);
+  const left = plan
+    ? plannedEligibleRows(plan, send.segment_filter, await withMailboxCustomers(narrowToPlannedAudience(outstanding, send.segment_filter))).length
+    : Number((await outstanding.count('newsletter_send_deliveries.id as c').first())?.c) || 0;
+  return { got, left, refused: refusedCount };
+}
+
+// Why a planned issue did not go out: its 'failed' outcome, with the 'outcome' alert.
+const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, alert: 'outcome', ...more });
+const SEND_ENDED = Object.freeze({ sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' });
+
+/**
+ * What a send's delivery ledger says of its planned issue once the send is 'sent' or 'failed', or its
+ * claim went stale: 'sent' ({ status, revokeClaim, got }) when every planned reader it can still
+ * reach got it, else why it did not go out. plannedSendOutcome reads it the minute the send ends, and
+ * settledOutcome every later minute of a 'failed' issue whose send is 'sent', so the two never give a
+ * different outcome or different words for the same ledger. The ledger decides, never the send's
+ * recipient_count: a worker that stopped after SendGrid took a batch leaves that count at 0, and the
+ * delivery webhooks can still move the send to 'sent' (reconcileNewsletterSendStatus).
+ */
+async function ledgerOutcome(trx, send, stale = false) {
+  const { got, left, refused } = await ledgerProgress(trx, send);
+  // Every planned reader it can still reach got it: 'sent', with nothing to resume, whatever the
+  // send's own status says. A failure after its last batch leaves the send 'failed' until the
+  // webhooks' reconcileNewsletterSendStatus moves it to 'sent'; a stale claim after its last batch
+  // is released as 'sent' (settlePlannedIssue), the same write.
+  if (left === 0 && got > 0) return { status: 'sent', revokeClaim: stale, got };
+  // No reader got it and none is left: every planned reader failed the send-time re-check ('skipped'), or the plan held none.
+  if (send.status === 'sent' && left === 0 && refused === 0) return notOut('no planned reader was still eligible when it sent');
+  const how = SEND_ENDED[send.status];
+  return got > 0
+    ? notOut(`${how} after ${got} of ${got + left} readers got it; Resume in Newsletter → History sends it to the rest`, { revokeClaim: stale })
+    : notOut(`${how}, and no reader got it`, { revokeClaim: stale });
+}
+
+/**
+ * What became of a 'scheduled' planned issue's send: sent ({ status: 'sent' }, quietly), why it did
+ * not go out ({ status: 'failed', reason, alert, revert, revokeClaim }), or null while it still may.
+ */
+async function plannedSendOutcome(issue, send, now, trx) {
+  if (!send) return notOut('its draft no longer exists');
+  // sendingClaimIsStale is false for any status but 'sending'. A stale claim is revoked with the
+  // outcome, so its paused worker can send no further batch.
+  const stale = sendingClaimIsStale(send, now);
+  if (['sent', 'failed'].includes(send.status) || stale) return ledgerOutcome(trx, send, stale);
+  const windowEnd = issueSendAt(dateOnlyString(issue.issue_date)).getTime() + SEND_WINDOW_MS;
+  // Still able to go out: before the window's end, or a send in progress (its deadline stops it).
+  if (now.getTime() < windowEnd || send.status === 'sending') return null;
+  if (send.status === 'scheduled') {
+    // A send a person scheduled by hand goes at that time, and its row follows it.
+    if (!send.proof_approved_at || send.proof_approval_email_id) return null;
+    return notOut('it was still queued when its 7:00-10:00 AM ET window closed, so it went back to a draft', { revert: true });
+  }
+  return notOut(`it was ${send.status === 'draft' ? 'back in drafts' : send.status} when its 7:00-10:00 AM ET window closed`);
+}
+
+/**
+ * A planned issue that is no longer 'scheduled', read again. A 'failed' one whose send has since
+ * become 'sent' with every planned reader done (a Resume that finished, or delivery confirmations
+ * that came after the send was marked failed, as after a lost SendGrid response; the webhook's
+ * reconcileNewsletterSendStatus then sets it 'sent') becomes 'sent': quietly if nobody was told it
+ * failed (alertToldAt), else with one correction (alert 'recovered', told once by its own mark,
+ * recoveredToldAt). It is then read as any 'sent' one is; a correction that reached no one is owed
+ * only while it holds (nobody left to resume, and no block told since). Else a 'failed' one whose
+ * send is 'sent' stays 'failed', in the words its ledger gives now (ledgerOutcome, as the minute its
+ * send ended read it): its alert, while nobody was told, says them; told, only its reason changes. Otherwise what nobody was told yet: a
+ * 'failed' one (its reason), a 'sent' one whose finished send has readers a Resume would still
+ * mail (a provider block after SendGrid accepted the batch resets a reader's delivery), which
+ * stays 'sent' (alert 'blocked', told once by its own mark, blockedToldAt, so the issue is still
+ * read: its counts stay current, and its reason clears, quietly, once nobody is left, told or not),
+ * or a 'sent' one no reader got after all (every one bounced, was dropped or was blocked), which
+ * becomes 'failed', also after a 'blocked' alert. Null when there is nothing to change or tell.
+ */
+const recoveredReason = (got) => `went out after all: ${got} readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume`;
+
+async function settledOutcome(issue, send, trx) {
+  const diagnostics = issueDiagnostics(issue);
+  const sendSent = send?.status === 'sent';
+  if (issue.status === 'failed' && sendSent) {
+    const read = await ledgerOutcome(trx, send);
+    if (read.status === 'sent') {
+      const failureToldAt = await alertToldAt(trx, issue.id, diagnostics, 'outcome');
+      if (!failureToldAt) return { status: 'sent', reason: null };
+      // The failure was told; this correction is not yet.
+      return { status: 'sent', reason: recoveredReason(read.got), alert: 'recovered', failureToldAt };
+    }
+    // Still 'failed' as its ledger reads now (a Resume that reached some, confirmations that came
+    // late, or readers it reached that bounced later), in the words the minute its send ended would
+    // give now. Told already: only its reason changes (no write when it is already current).
+    return diagnostics.outcomeToldAt ? { ...read, alert: null } : read;
+  }
+  if (diagnostics.outcomeToldAt) return null;
+  if (issue.status === 'failed') return { status: 'failed', reason: issue.reason || 'did not go out', alert: 'outcome' };
+  if (issue.status !== 'sent' || !sendSent) return null;
+  const { got, left } = await ledgerProgress(trx, send);
+  // No reader got it after all: after its send ended and the issue was marked sent, every reader's
+  // mail server bounced it or SendGrid dropped it (final), or it was blocked (a Resume retries
+  // those, while its reader can still be mailed). The outcome a scheduled issue whose send ended
+  // this way gets (plannedSendOutcome), also when nobody is left to resume.
+  if (got === 0) return { status: 'failed', reason: 'did not go out: its send ended, and no reader got it', alert: 'outcome' };
+  if (left === 0) {
+    // A correction an earlier minute could not deliver, in words from the counts now: owed only
+    // while nobody is left to resume and no block was told since it (that alert said it went out;
+    // its keyed bell row counts, for a worker that stopped before it wrote the mark).
+    const correctionOwed = diagnostics.failureToldAt && !diagnostics.recoveredToldAt
+      && !(await alertToldAt(trx, issue.id, diagnostics, 'blocked'));
+    // Else nobody left to resume: a 'sent' issue carries no reason, so a blocked one, told or not,
+    // clears, quietly (no write when it is already clear).
+    return correctionOwed ? { status: 'sent', reason: recoveredReason(got), alert: 'recovered' } : { status: 'sent', reason: null };
+  }
+  const reason = `went out to ${got} readers, but ${left} readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them`;
+  // Told once: later minutes only keep the counts current.
+  return diagnostics.blockedToldAt ? { status: 'sent', reason } : { status: 'sent', reason, alert: 'blocked' };
+}
+
+// Each alert's told mark on the issue row.
+const TOLD_MARKS = Object.freeze({ outcome: 'outcomeToldAt', blocked: 'blockedToldAt', recovered: 'recoveredToldAt' });
+
+/**
+ * When the owner was told a planned issue's alert ('outcome': it did not go out; 'blocked'), or
+ * null: its told mark, or, for a worker that delivered the alert and stopped before it wrote that
+ * mark, the alert's own keyed bell row.
+ */
+async function alertToldAt(trx, issueId, diagnostics, alert) {
+  if (diagnostics[TOLD_MARKS[alert]]) return diagnostics[TOLD_MARKS[alert]];
+  const bell = await trx('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [issueAlertKey(alert, issueId, diagnostics.episode)])
+    .first('created_at');
+  return bell ? new Date(bell.created_at).toISOString() : null;
+}
+
+/**
+ * A planned issue's alert key (one alert per key: a second one with the same key counts as told).
+ * Each flip between 'sent' and 'failed' starts a new episode (diagnostics.episode, settlePlannedIssue),
+ * and an alert in a later episode carries its number, so a block or a failure after a Resume, or a
+ * recovery after a later failure, is a new alert, never taken for one told before it.
+ */
+function issueAlertKey(alert, issueId, episode) {
+  return `pest-insider-${alert}:${issueId}${episode ? `:${episode}` : ''}`;
+}
+
+// A new episode's diagnostics: the told marks of the one before it go (failureToldAt too: a correction
+// is owed only in the episode that recovered from a told failure).
+const NEW_EPISODE_SQL = "(coalesce(diagnostics, '{}'::jsonb) - array['outcomeToldAt', 'blockedToldAt', 'recoveredToldAt', 'failureToldAt']) || ?::jsonb";
+
+/**
+ * A stale claim's release, as the resume path releases one: its worker's next heartbeat finds no
+ * claim. `status` is the outcome's: 'sent' when every planned reader got it, else 'failed'. A 'sent'
+ * one gets what its worker's finalize would have written: its recipients (every ledger row but a
+ * skipped one, as finalize counts them), when it went out (an earlier attempt's sent_at, else its
+ * last accepted batch; the public archive lists a send by it), and its calendar week. A Waves Pest
+ * Insider send features no event and is never shared to social (planned with auto_share_social
+ * off), so nothing else of finalize applies. Runs in the settle transaction, which holds the send row.
+ */
+async function releaseStaleClaim(trx, send, status) {
+  const release = { status, sending_claim_token: null, updated_at: new Date() };
+  const finished = status === 'sent';
+  if (finished) {
+    const ledger = () => trx('newsletter_send_deliveries').where({ send_id: send.id });
+    const recipients = await ledger().whereNot('status', SKIPPED_DELIVERY_STATUS).count('* as c').first();
+    release.recipient_count = Number(recipients?.c) || 0;
+    release.sent_at = send.sent_at || (await ledger().max('sent_at as at').first())?.at || new Date();
+  }
+  await trx('newsletter_sends').where({ id: send.id, status: 'sending' }).update(release);
+  if (finished) await trx('newsletter_calendar').where({ send_id: send.id }).update({ status: 'sent', updated_at: new Date() });
+}
+
+/**
+ * One planned issue. Its outcome is recorded in one transaction that locks its send row, then its
+ * row (the order every writer of both uses). Its alert follows the commit, so no lock or pooled
+ * connection is held while the alert is delivered; the alert is keyed per issue, so a retry after
+ * a crash between the two writes no second row. The row is marked told only after its alert
+ * reached someone, and only while it still holds the outcome that alert told; an untold row is
+ * tried again each minute, within the lookback. A 'blocked' alert and a 'recovered' correction have
+ * their own marks (blockedToldAt, recoveredToldAt), so their row stays untold: a later outcome (a
+ * block after a Resume, or no reader got it after all) still gets its own alert. Each flip between
+ * 'sent' and 'failed' (a recovery, told or quiet, or a sent issue no reader got after all) starts a
+ * new episode: it clears the told marks before it, and its alerts get keys of their own; a told
+ * recovery records the failure it recovered from (failureToldAt). Returns whether it changed the row.
+ */
+async function settlePlannedIssue({ id, send_id: sendId }, now) {
+  const settled = await db.transaction(async (trx) => {
+    const send = sendId ? await trx('newsletter_sends').where({ id: sendId }).forUpdate().first() : null;
+    const issue = await trx('pest_insider_issues').where({ id }).forUpdate().first();
+    // Changed since the list was read: the next minute reads it again.
+    if (!issue || issue.send_id !== sendId) return null;
+    const outcome = issue.status === 'scheduled' ? await plannedSendOutcome(issue, send, now, trx) : await settledOutcome(issue, send, trx);
+    if (!outcome) return null;
+    if (outcome.revert) {
+      await trx('newsletter_sends').where({ id: send.id, status: 'scheduled' }).update({
+        status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_refused_at: null, updated_at: new Date(),
+      });
+      await trx('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
+    }
+    if (outcome.revokeClaim) await releaseStaleClaim(trx, send, outcome.status);
+    // The row always records the outcome.
+    const reason = 'reason' in outcome ? (outcome.reason && outcome.reason.slice(0, 500)) : issue.reason;
+    const changed = outcome.status !== issue.status || reason !== issue.reason;
+    // Both outcomes are 'sent' or 'failed': a settled issue that changes status flips.
+    const flipped = issue.status !== 'scheduled' && outcome.status !== issue.status;
+    const episode = Number(issueDiagnostics(issue).episode || 0) + Number(flipped);
+    if (changed) {
+      await trx('pest_insider_issues').where({ id }).update({
+        status: outcome.status,
+        reason,
+        ...(flipped ? { diagnostics: trx.raw(NEW_EPISODE_SQL, [JSON.stringify({ episode, failureToldAt: outcome.failureToldAt })]) } : {}),
+        updated_at: new Date(),
+      });
+    }
+    return { changed, outcome, reason, episode, subject: send?.subject || issue.subject };
+  });
+  if (!settled) return false;
+  const { outcome, reason } = settled;
+  if (!outcome.alert) return settled.changed;
+  const told = await raiseSendAlert(sendId, settled.subject, reason.charAt(0).toUpperCase() + reason.slice(1), {
+    outcome: true, dedupeKey: issueAlertKey(outcome.alert, id, settled.episode),
+  });
+  if (!told) {
+    logger.error(`[newsletter-scheduler] Pest Insider issue ${id}: its alert reached no one; the next minute tries again`);
+    return settled.changed;
+  }
+  // #8139 wrote a blocked or recovered alert's mark as outcomeToldAt, and keyed each alert by its issue
+  // alone. No issue carries those: production had no planned issues when this shipped, and only
+  // GATE_PEST_INSIDER_AUTO_SEND makes one sent, so there is no compat read for them (CLAUDE.md rule 16).
+  const mark = TOLD_MARKS[outcome.alert];
+  const marked = await db('pest_insider_issues').where({ id, status: outcome.status })
+    .whereRaw('diagnostics->>?::text is null', [mark])
+    .update({
+      diagnostics: db.raw("coalesce(diagnostics, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [mark]: now.toISOString() })]),
+      updated_at: new Date(),
+    });
+  return settled.changed || marked > 0;
+}
+
+const SETTLE_LOOKBACK_SQL = "issue_date >= (now() at time zone 'America/New_York')::date - ?::int";
+const RECOVERED_SEND_LOOKBACK_SQL = "newsletter_sends.updated_at >= now() - ?::int * interval '1 day'";
+const ISSUE_CHANGE_LOOKBACK_SQL = "updated_at >= now() - ?::int * interval '1 day'";
+
+/**
+ * The one place that tells the owner a planned Waves Pest Insider issue did not go out as its
+ * FYI copy said (the plan's skip rule: one admin alert). Runs every minute, after the dispatcher,
+ * under one lease (the scheduler's runExclusive 'pest-insider-settle'): two ticks (a slow one, or
+ * an overlapping deploy) never settle at once, so a recovery never reads an issue while another
+ * tick is still delivering its failure alert. Each tick:
+ * - a 'scheduled' issue whose send reached every reader becomes 'sent', quietly;
+ * - one whose send ended without that (failed, sent to nobody, or with readers a Resume would
+ *   still mail), stopped part way (its claim went stale; the claim is revoked), or is still not
+ *   out when its 7:00-10:00 AM ET window closed becomes 'failed'. A send in progress is left to
+ *   finish, and a send a person scheduled by hand to go at its time. A send the switch still has
+ *   queued goes back to a draft, so it never goes out late;
+ * - every 'failed' issue, also one a send-time stop failed, gets one alert that says why, and so
+ *   does a 'sent' one whose readers' mail servers blocked it after SendGrid accepted it (a provider
+ *   block, which leaves the reader to a Resume). That 'sent' one is still read each minute, within
+ *   the lookback: its reason keeps the counts current and clears, quietly, once a Resume leaves
+ *   nobody, and it still fails if no reader got it after all;
+ * - a 'failed' issue whose send has since become 'sent' with every planned reader done (a Resume
+ *   that finished, or late delivery confirmations) becomes 'sent', with one correction if the
+ *   owner was told it failed. This step owns that change: the send's finalize leaves a 'failed'
+ *   row alone. It is then read as any 'sent' issue is, for the lookback from its last change: a
+ *   correction that reached no one is retried while it holds, and a block or a failure after it
+ *   gets its own alert. So is one that became 'sent' quietly (nobody was told it failed);
+ * - a 'sent' issue no reader got after all (every reader's mail server bounced or blocked it, or
+ *   SendGrid dropped it) becomes 'failed', with one alert.
+ * A hard bounce, and a message SendGrid dropped for an address on its unsubscribe list, is final
+ * (refusedDelivery): no Resume can reach that reader, it never counts as reached, and it raises no
+ * alert of its own. The readers a Resume would still mail are counted after the same archived-link
+ * repair a Resume runs first, which runs only while a reader is still retryable.
+ */
+async function settlePlannedIssues(now = new Date()) {
+  const scheduled = await db('pest_insider_issues').where({ status: 'scheduled' }).select('id', 'send_id');
+  // What nobody was told yet: a 'failed' issue with no told outcome, and every 'sent' one (never
+  // marked so). By its issue date or by its own last change (updated_at), so one a Resume long after
+  // the issue made 'sent', told or quietly, or that failed again after that, is read too.
+  const untold = await db('pest_insider_issues').whereIn('status', ['failed', 'sent'])
+    .whereRaw("diagnostics->>'outcomeToldAt' is null")
+    .where((recent) => recent.whereRaw(SETTLE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
+      .orWhereRaw(ISSUE_CHANGE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS]))
+    .select('id', 'send_id');
+  // An issue whose send has since become or stayed 'sent' and changed (a Resume that finished, or late
+  // delivery confirmations): by the send's own last change, so a Resume long after the issue counts. A
+  // failed one, told or not, may have recovered; a sent one's counts and reason follow its send.
+  const recovered = await db('pest_insider_issues').whereIn('status', ['failed', 'sent'])
+    .whereExists(function recoveredSend() {
+      this.select(db.raw('1')).from('newsletter_sends')
+        .whereRaw('newsletter_sends.id = pest_insider_issues.send_id')
+        .where('newsletter_sends.status', 'sent')
+        .whereRaw(RECOVERED_SEND_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS]);
+    })
+    .select('id', 'send_id');
+  // One settle per issue a minute, also when it is on two lists.
+  const rows = new Map([...scheduled, ...untold, ...recovered].map((row) => [row.id, row]));
+  let settled = 0;
+  for (const row of rows.values()) {
+    try {
+      if (await settlePlannedIssue(row, now)) settled += 1;
+    } catch (err) {
+      logger.error(`[newsletter-scheduler] Pest Insider issue ${row.id} not settled, the next minute tries again: ${err.message}`);
+    }
+  }
+  return { settled };
 }
 
 /**
@@ -1976,4 +2498,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };

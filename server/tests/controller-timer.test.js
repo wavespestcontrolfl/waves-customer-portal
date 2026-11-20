@@ -1,11 +1,12 @@
 // The sprinkler timer on file as one record (services/controller-timer.js): the helpers the two preference writers and
 // the row movers use. The writers' routes are tested in property-prefs-partial-validation.test.js (the customer's) and
 // admin-customers-property-preferences-route.test.js (staff), the move in lawn-sod-move.test.js, the merge in
-// customer-dedupe.test.js, the undo in customer-dedupe-undo.test.js.
+// customer-dedupe.test.js, the undo in customer-dedupe-undo.test.js. The staff count's tool wiring is in
+// intelligence-bar-action-registry.test.js; its rule is tested here.
 const { CONTROLLER_BRANDS, CONTROLLER_MODELS, controllerAsksAboutApp } = require('@waves/irrigation-runtime');
 const {
-  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerOf, hasControllerTimer, settleControllerTimer,
-  settleKeptControllerTimer,
+  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerCounts, controllerTimerKey, controllerTimerOf,
+  controllerTimerSeen, hasControllerTimer, settleControllerTimer, settleKeptControllerTimer,
 } = require('../services/controller-timer');
 
 const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
@@ -47,7 +48,8 @@ test('only an exact false clears it; an unknown premise, or a row with no timer 
 
 // A preference write (settleControllerTimer): the timer saves whole or not at all, and only from a form rendered
 // against the home on the row now. `left` is what the write still holds after the settle.
-const settle = (updates, options) => ({ rejected: settleControllerTimer(updates, options), left: updates });
+// By default the form showed no timer and the row holds none (`seen` '||', no `stored` row).
+const settle = (updates, options) => ({ rejected: settleControllerTimer(updates, { seen: '||', ...options }), left: updates });
 const timerColumns = ([brand, model, app]) => ({
   irrigation_controller_brand: brand, irrigation_controller_model: model, irrigation_controller_app: app,
 });
@@ -94,6 +96,58 @@ test('a timer that cannot exist is rejected whole, with one reason on each field
   }
 });
 
+test('a timer change lands only over the timer the form showed: a page left open never puts back a replaced timer', () => {
+  const RAIN_BIRD = timerColumns(['rain_bird', null, null]);
+  // The form showed the X2 and the row still holds it: the new answer saves.
+  expect(settle({ ...X2, irrigation_controller_app: 'no' }, { stored: X2, seen: 'hunter|x2|yes' }).rejected).toEqual([]);
+  // Someone set a Rain Bird meanwhile: a change from the X2 page is refused whole (an answer, a pick, a clear).
+  for (const change of [{ ...X2, irrigation_controller_app: 'no' }, timerColumns(['hunter', 'pro_c', null]), clearedControllerTimer()]) {
+    const { rejected, left } = settle({ ...change, irrigation_zones: 6 }, { stored: RAIN_BIRD, seen: 'hunter|x2|yes' });
+    expect(left).toEqual({ irrigation_zones: 6 });
+    expect(rejected).toHaveLength(3);
+    for (const r of rejected) expect(r.message).toBe('The sprinkler timer on this account changed while this page was open. Reload, then set it again.');
+  }
+  // A timer write that names no timer it saw is refused; a write with no timer field needs none.
+  expect(settle({ ...X2 }, { seen: null }).rejected).toHaveLength(3);
+  expect(settle({ irrigation_zones: 6 }, { seen: null })).toEqual({ rejected: [], left: { irrigation_zones: 6 } });
+  // A move outranks it: the reason names the home.
+  expect(settle({ ...X2 }, { stored: RAIN_BIRD, seen: 'hunter|x2|yes', fresh: false }).rejected[0].message).toMatch(/home on this account changed/);
+  // A page names every timer the row may hold: after a save that may have landed, the old one and the one it sent.
+  const PRO_C = timerColumns(['hunter', 'pro_c', null]);
+  const answer = { ...PRO_C, irrigation_controller_app: 'yes' };
+  for (const stored of [X2, PRO_C]) expect(settle({ ...answer }, { stored, seen: ['hunter|x2|yes', 'hunter|pro_c|'] }).rejected).toEqual([]);
+  expect(settle({ ...answer }, { stored: RAIN_BIRD, seen: ['hunter|x2|yes', 'hunter|pro_c|'] }).rejected).toHaveLength(3);
+  // A timer equal to the one stored changes nothing: the retry of a save that landed but whose answer was lost.
+  expect(settle({ ...X2, irrigation_zones: 6 }, { stored: X2, seen: '||' })).toEqual({ rejected: [], left: { ...X2, irrigation_zones: 6 } });
+  expect(settle({ ...X2 }, { stored: X2, seen: null }).rejected).toEqual([]);
+});
+
+test('the timer a form saw comes from either writer\'s field, as brand|model|app', () => {
+  expect(controllerTimerKey(X2)).toBe('hunter|x2|yes');
+  expect(controllerTimerKey(null)).toBe('||');
+  expect(controllerTimerSeen({ controller_timer_seen: ['hunter|x2|yes', 'hunter|pro_c|'] })).toEqual(['hunter|x2|yes', 'hunter|pro_c|']);
+  expect(controllerTimerSeen({ controllerTimerSeen: '||' })).toEqual(['||']);
+  for (const body of [
+    {}, null, { controller_timer_seen: 7 }, { controllerTimerSeen: null }, { controller_timer_seen: [] },
+    { controller_timer_seen: ['||', 7] }, { controller_timer_seen: Array.from({ length: 33 }, (_, i) => `hunter|${i}|`) },
+    { controller_timer_seen: 'x'.repeat(65) },
+  ]) expect(controllerTimerSeen(body)).toBeNull();
+  // Each key counts once, so a repeated key never makes a list too long.
+  expect(controllerTimerSeen({ controller_timer_seen: [...Array(40).fill('||'), 'hunter|x2|'] })).toEqual(['||', 'hunter|x2|']);
+  // Every timer that can exist fits in one list, so no history a form builds is cut off.
+  const everyTimer = [];
+  for (const brand of [null, ...Object.keys(CONTROLLER_BRANDS)]) {
+    for (const model of [null, ...Object.keys(CONTROLLER_MODELS)]) {
+      for (const app of [null, 'yes', 'no', 'unknown']) {
+        const timer = timerColumns([brand, model, app]);
+        if (!settle({ ...timer }).rejected.length) everyTimer.push(controllerTimerKey(timer));
+      }
+    }
+  }
+  expect(everyTimer).toHaveLength(20);
+  expect(controllerTimerSeen({ controller_timer_seen: everyTimer })).toEqual(everyTimer);
+});
+
 test('a write rendered against a home the customer has left is rejected, a clear included', () => {
   for (const timer of [X2, clearedControllerTimer()]) {
     const { rejected, left } = settle({ ...timer }, { fresh: false });
@@ -101,4 +155,28 @@ test('a write rendered against a home the customer has left is rejected, a clear
     expect(rejected).toHaveLength(3);
     for (const r of rejected) expect(r.message).toBe('The home on this account changed. Reload, then set the sprinkler timer again.');
   }
+});
+
+// The staff count (get_sprinkler_timer_counts) checks the owner's field read that most timers run from the maker's
+// phone app, so an answer must count only where the card asks the question, and a timer never asked must not read as
+// "not on the app".
+test('the staff count totals the customers by timer and by phone-app answer, where the question is asked', () => {
+  const row = (brand, model, app, customers) => ({ brand, model, app, customers });
+  const counts = controllerTimerCounts([
+    row('hunter', 'x2', 'yes', '4'), row('hunter', 'x2', 'no', '2'), row('hunter', 'pro_c', 'unknown', '1'),
+    row('hunter', 'hydrawise', null, '3'), row('hunter', 'x_core', null, '5'), row('hunter', null, null, '1'),
+    row('rain_bird', null, 'yes', '2'), row('rain_bird', null, null, '1'), row('other', null, null, '6'),
+  ]);
+  expect(counts.customers_with_a_timer).toBe(25);
+  expect(counts.summary).toEqual({ on_phone_app: 6, not_on_phone_app: 2, not_sure: 1, not_answered: 5, no_app_question: 11 });
+  expect(counts.by_timer[0]).toEqual({ timer: 'Another brand', phone_app: 'no_app_question', customers: 6 });
+  expect(counts.by_timer).toEqual(expect.arrayContaining([
+    { timer: 'Hunter X2', phone_app: 'on_phone_app', customers: 4 },
+    { timer: 'Hunter Hydrawise touchscreen', phone_app: 'not_answered', customers: 3 },
+    { timer: 'Hunter (model not recorded)', phone_app: 'not_answered', customers: 1 },
+    { timer: 'Rain Bird', phone_app: 'on_phone_app', customers: 2 },
+  ]));
+  expect(controllerTimerCounts([])).toEqual({
+    customers_with_a_timer: 0, summary: { on_phone_app: 0, not_on_phone_app: 0, not_sure: 0, not_answered: 0, no_app_question: 0 }, by_timer: [],
+  });
 });

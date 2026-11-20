@@ -288,6 +288,77 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     ).toBe(false);
   });
 
+  it("backfill within 3 days of the worked day (GATE_REVIEW_LATE_CLOSE_ASK) follows the operator's toggle", () => {
+    const reason = completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true });
+    expect(reason).toBe(null);
+    expect(completionWillReview({ requestReview: true, reviewSuppressionReason: reason })).toBe(true);
+  });
+
+  it("the late-close read lands only for the active request and a failed read clears it (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    // One-shot read: skipped once the effect is cleaned up; a failed read (null) sets false.
+    expect(src).toMatch(/return runPreviewReadWithRetry\(\{\s*\n\s*read: fetchReviewSendPreview,\s*\n\s*retry: backfillQuietCloseout && lateCloseKeyRef\.current !== false,/);
+    expect(src).toMatch(/\/\/ A failed read never keeps the late-close ask: fewer texts\.\s*\n\s*setReviewLateCloseAskKept\(lateCloseAskKeptFrom\(data\)\);/);
+    // The effect re-runs when the backdate box changes, so a retry stops when it is unchecked.
+    expect(src).toMatch(/\[service\?\.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly, backfillQuietCloseout\]/);
+    // Poll: set only after the cancellation check, so an obsolete response cannot overwrite the verdict.
+    const cancelAt = src.indexOf("if (cancelled) return;\n      // Only the active request sets it");
+    const setAt = src.indexOf("setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));", cancelAt);
+    expect(cancelAt).toBeGreaterThan(0);
+    expect(setAt).toBeGreaterThan(cancelAt);
+    expect(src).not.toMatch(/if \(data\) \{[^}]*setReviewLateCloseAskKept/);
+  });
+
+  it("the page passes the recap mode into the suppression reason, so a draft restored into recap mode agrees with the hint (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect(src).toMatch(/lateCloseAskKept: reviewLateCloseAskKept,\s*\n\s*oneTimeRecapOnly,/);
+    expect(src).toMatch(/reviewAskGoes: reviewLateCloseAskKept && willReview && !oneTimeRecapOnly,/);
+  });
+
+  it("the submit-time preview refresh applies the late-close verdict and pauses through the same guard (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect(src).toMatch(/const lateCloseShown = backfillQuietCloseout && reviewLateCloseAskKept === true;/);
+    expect(src).toMatch(/\(reviewTiming === "auto" \|\| !schedulerStateKnown \|\| lateCloseShown\)/);
+    expect(src).toMatch(/if \(fresh\) setReviewLateCloseAskKept\(lateCloseAskKeptFrom\(fresh\)\);/);
+    expect(src).toMatch(/else if \(lateCloseShown\) setReviewLateCloseAskKept\(false\);/);
+    expect(src).toMatch(/if \(lateCloseShown && lateCloseAskKeptFrom\(fresh\) !== true\) \{\s*\n\s*setRequestReview\(false\);/);
+    expect(src).toMatch(/reviewPreviewSubmitVerdict\(\{ reviewTiming, fresh, shown, lateCloseShown: lateCloseShown \? true : null,/);
+  });
+
+  it("a backdated closeout kept off only by the backdate box reads the preview once more at submit and stops when it now keeps the ask (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect(src).toMatch(/!willReview && backfillQuietCloseout && lateCloseKeyRef\.current === true\s*\n\s*&& visitOutcome === "completed" && reviewSuppressionReason === "backfill"\) \{\s*\n\s*\/\/ A second tap[^\n]*\n\s*if \(!claimPreviewRecheck\(previewRecheckRef\)\) return;/);
+    expect(src).toMatch(/if \(lateCloseAskKeptFrom\(probe\)\) \{\s*\n\s*setReviewSendPreview\(probe\);\s*\n\s*setReviewLateCloseAskKept\(true\);\s*\n\s*alert\(LATE_CLOSE_NOW_KEPT_MESSAGE\);\s*\n\s*return;/);
+  });
+
+  it("gate off = today's flow: the late-close waits and re-checks run only once a preview answer carried the lateCloseAskKept key (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect(src).toMatch(/lateCloseKeyRef\.current = Object\.prototype\.hasOwnProperty\.call\(data, "lateCloseAskKept"\);/);
+    // The backdate-only submit re-check needs the key seen; the failed-read retry stops once an answer said there is none.
+    expect(src).toMatch(/lateCloseKeyRef\.current === true\s*\n\s*&& visitOutcome === "completed"/);
+    expect(src).toMatch(/retry: backfillQuietCloseout && lateCloseKeyRef\.current !== false,/);
+  });
+
+  it("a failed submit-time check holds the review box off against the first-ask effect until the operator re-checks it (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect(src).toMatch(/setRequestReview\(false\);\s*\n\s*setLateCloseSuppressedByFailure\(true\);/);
+    expect(src).toMatch(/reviewFirstAsk && !requestReview && !reviewOptOutReason && !lateCloseSuppressedByFailure\) setRequestReview\(true\);/);
+    expect(src).toMatch(/const handleReviewToggle = \(checked\) => \{\s*\n\s*\/\/[^\n]*\n\s*setLateCloseSuppressedByFailure\(false\);/);
+  });
+
+  it("both submit-time preview reads are bounded by a timeout (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect(src).toContain("const SUBMIT_PREVIEW_TIMEOUT_MS = 8000;");
+    expect((src.match(/await fetchReviewSendPreview\(SUBMIT_PREVIEW_TIMEOUT_MS\)/g) || []).length).toBe(2);
+    expect(src).not.toMatch(/await fetchReviewSendPreview\(\);/);
+  });
+
+  it("both backdate checkbox layouts word the line from the review answer, not a fixed promise of silence", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect((src.match(/backfillCheckboxHint\(\{/g) || []).length).toBe(2);
+    expect(src).not.toContain('"Records to the visit day, sends no customer messages, and skips auto-charge."');
+  });
+
   it("without backfill the existing suppression chain is unchanged", () => {
     expect(completionReviewSuppressionReason({})).toBe(null);
     expect(completionReviewSuppressionReason({ isIncompleteVisit: true })).toBe("incomplete");

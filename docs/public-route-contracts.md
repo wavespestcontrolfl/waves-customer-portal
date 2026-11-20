@@ -2855,6 +2855,22 @@ Won / phone accept) and to booking from a linked not-yet-accepted estimate
 (409 before any appointment is written). Estimates accepted before the
 retirement are unaffected.
 
+Termite bottle pins (2026-11-19, the house bifenthrin moved to LESCO Crosscheck
+Plus): a replay of a sent estimate (`GET /:token/data`, the view, `PUT /accept`
+and every money gate that re-prices it) keeps the cost a pre-slab or trench line
+was quoted with when a stored row carries it: the pre-slab container cost and
+size, and the trench product surcharge (server-owned
+`preSlabTermiticidePricingKnobs` / `trenchingTermiticidePricingKnobs`, like the
+termite station and misting pins). The engine uses a pin only for the product
+it was quoted with (for trenching, also the rate and product oz); a cost set on
+the service still wins. A never-issued draft replays its pins like every other
+pin, so its first send and every later replay agree; a re-save in the estimate
+tool prices today's bottle. An estimate that kept only its engine inputs has no
+stored row, so no pin: it prices today's bottle, as the other pins do without
+their stored rows. On 2026-11-19 no open sent or viewed estimate held a slab
+or trench service. A send snapshot that serves as sent is unchanged. No new
+quote-required reason.
+
 Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
 or an annual-plan offer already delivered before the gate turned off): a
 `prepay_annual` accept of the Subterranean Termite Protection annual plan
@@ -4486,9 +4502,53 @@ Quiz and "Not a quiz lead" (`server/services/lead-funnel.js`).
 no residential draft is priced (under `GATE_UNIT_SCOPE_GUARDRAILS`, as for
 every other commercial signal). The quiz answers are NOT a pricing input:
 `property` never becomes the draft's property type. They are not
-staff-only: the Lead Response Agent may read them. The response is
-unchanged. Safe in either deploy order: a portal without this change
-ignores the unknown key and files an ordinary form lead;
+staff-only: the Lead Response Agent may read them. Safe in either deploy
+order: a portal without this change ignores the unknown key and files an
+ordinary form lead. The AI triage,
+which the webhook starts without waiting, writes a lead this request
+inserted only while the row still holds the intake stage
+(`lead_webhook_received`, checked in the UPDATE's WHERE): once a price page
+has continued the lead (the attach token, see
+`/api/public/estimator/property-lookup` below), a late triage answer is
+dropped whole: it never replaces the price page's stage, address verdict or
+profile, re-prices no draft and records no `ai_triage` activity;
+and both accept an OPTIONAL `price_handoff` — the JSON boolean `true`, sent
+by a quiz page whose answers end on a price page and whose browser can
+carry the hand-off there (owner *build* 2026-11-19, "one visitor makes one
+lead"). Any other value (absent, `false`, the string `"true"`, `1`) is a
+no-op; no other form sends it, and a page must leave it out of a request it
+saves to replay later (nobody is there to use the hand-off, and the lead
+would get no draft). The server's own rule must agree (`quizContinuesToPrice`,
+`server/services/lead-quiz.js`: a named problem, `property` `house` |
+`townhome` | `condo`, `timeline` `this_week` | `this_month` | `browsing`),
+and the submission must name no service key (any nonblank `serviceKey` or
+`service_key` value). Such a submission takes the path every form takes,
+unchanged: a keyed lead keeps its catalog label, a well-formed key the
+catalog cannot confirm reaches the draft step, which parks it for review,
+and a value the webhook does not read as a key is drafted from its label. When all hold AND this request INSERTS the `leads` row (never an
+attach to a call lead, never the existing-customer or unverified-hold
+reply, never a row the readiness gate marked commercial), the response
+gains `handoff: { lead_id, token, expires_in }`: an ATTACH token for that
+one lead (see `/api/public/estimator/property-lookup` below), 2 hours. A
+response that carries a `handoff` is sent `Cache-Control: no-store` (the
+shared token-response headers, `server/middleware/no-store.js`). That
+request creates NO `lead_webhook` draft estimate: the price page makes the
+visitor's one estimate, and `/api/public/quote/calculate` refuses its own
+draft while another open estimate sits on the phone. A lead that is handed
+off says so in its activity list (`lead_activities` `price_handoff`, best
+effort). It keeps no draft when the visitor leaves the price page early, or
+never receives this response: the office has the lead, its alert and that
+line, and makes the estimate by hand (a later repeat of the form lands on
+the repeat-form reply, which makes no draft for any form). A submission
+that asked and gets no hand-off gets the usual draft, created after the
+lead step instead of before it (the lead's own
+`automation.draftEstimateAutomation` copy then stays null; the estimate row
+carries the record). Every other submission is unchanged: the draft as
+before, and `{ success, customerId }` with no `handoff`. The texts, the
+bell, the automation enrollment and the ad attribution are the same with or
+without a hand-off. Safe in either deploy order: a portal without this
+change ignores the key and answers with no `handoff`, and the site then
+shows its office-review ending;
 and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
@@ -5256,7 +5316,29 @@ Also accepts an OPTIONAL `prefill_lead_id` + `prefill_token` pair — the
 lead-prefill HMAC below — which, when valid, makes the lead capture UPDATE
 that existing open call-pipeline lead instead of inserting a new row; the
 same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
-with identical semantics. Also accepts the OPTIONAL `timeline` described
+with identical semantics. On THIS route only, the pair may instead carry
+the quiz hand-off's ATTACH token (`mintLeadAttachToken`,
+`utils/lead-prefill-token.js`: the prefill token's format and secret, HMAC
+purpose `lead-attach`, 2-hour TTL; minted ONLY by `/api/webhooks/lead`, for
+the lead that same request inserted, see `price_handoff` there). When valid, the
+lead capture UPDATES the lead the token names with the prefill attach's
+field rules, but only while that lead passes the hand-off's rule
+(`applyQuizHandoffLeadPredicate`, `server/services/lead-statuses.js`: open
+by `applyOpenLeadPredicate`, not deleted, not commercial). The lead keeps
+its `form_submission` type, its source and its `quiz` answers
+(`extracted_data` is merged: a key the price page does not send, `timeline`
+included, is kept), and the later `/api/public/quote/calculate` run prices
+that same lead. Either attach (prefill or hand-off) writes its service label
+only while the lead has no `service_key`: the price calculation writes a
+key and its catalog name together, so a lookup that runs again on the same
+token leaves that name beside its key. A wrong, expired or refused attach
+token is ignored: the
+lookup inserts its own `quote_wizard` lead as before. The rule is decided
+once, in the attach UPDATE; the same request's later writes (the completion
+stage, the address verdict) follow that lead and merge `extracted_data`
+keys only. The webhook does not
+accept an attach token in the pair. Also accepts the OPTIONAL `timeline`
+described
 under `/api/webhooks/lead` above, with the same storage and urgency
 semantics; it survives the later `/api/public/quote/calculate` snapshot).
 Attribution (referrer/UTM/click-ids) resolves through
@@ -5363,7 +5445,9 @@ format gate on lead_id, 30 req/hour rate limit, privacy headers
 mismatched, or unknown ids — indistinguishable on purpose (no oracle).
 PREFILL/attach authority ONLY: it returns the contact data we already
 texted the link-holder about, and is never accepted as identity or pricing
-authority on any money path).
+authority on any money path. The quiz hand-off's attach token (purpose
+`lead-attach`, see the property lookup above) is not a prefill token: this
+route answers it with the same 404, so it can never read a lead back).
 `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
 instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
 limit. Persists a quote/lead and may text the quote via a Twilio short-link;
@@ -5381,6 +5465,17 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+A `leadId` that names a web-form lead (`lead_type` `form_submission`; its
+id reaches a visitor only through the quiz hand-off) is written only while
+that lead passes the hand-off's rule: open, not deleted, not commercial
+(`exceptClosedWebFormLead`, `server/services/lead-statuses.js`, inside the
+ownership UPDATE). A refused lead matches zero rows, like a wrong id, and
+the run files its own `quote_wizard` lead. The run's later customer link
+(`customer_id`) repeats the rule, so a web-form lead the office converted
+or closed mid-request keeps its customer. `/upsell` never writes a
+web-form lead (its read excludes the type and answers 404): no page of the
+hand-off calls it. A `leadId` of any other lead type is held to its own
+route's conditions only.
 Optional `heard_about` / `heard_about_prompt` (owner-approved 2026-10-30,
 "count customers from AI"): the wizard's self-reported "How did you hear
 about us?" answer and its AI-only "What did you ask it?" follow-up, validated
@@ -8739,8 +8834,9 @@ that gate is dark the confirmation is skipped entirely (byte-identical to
 before the lane); it is never a blocking part of the request either way.
 Treat the gate, the limiters, the no-customer/no-lead rule, and the
 fire-and-forget-only comms contract as security-critical.)
-`/api/public/careers/offer/:token` (GET; `/offer/:token/text-consent`, `/offer/:token/accept`,
-`/offer/:token/date-request` and `/offer/:token/decline`, all POST — the applicant's private job offer
+`/api/public/careers/offer/:token` (GET; `/offer/:token/v2/text-consent`, `/offer/:token/v2/accept`,
+`/offer/:token/v2/date-request` and `/offer/:token/v2/decline`, all POST, each also without `/v2` — the applicant's
+private job offer
 (`services/job-offers.js`), gated `GATE_JOB_OFFERS` ALONE: 404 `{error:'Not found'}` for the WHOLE `/offer/*`
 family before even the limiter runs, and `index.js` carves `/offer` out of the `jobApplications` intake gate so a
 sent offer keeps working if intake closes). The token is `job_offers.token`, 64 lowercase hex (32 random bytes set
@@ -8813,19 +8909,40 @@ GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` ->
 `version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with
 no write, and a change made from any other version answers 409 `{state:'open'}`, so a save that lands late (its reply
 was lost and the page saved the same choice again) cannot undo a later choice (on that 409 the page reads the offer,
-shows the stored choice and says "That did not go through. Please try again."; when that read fails, the page stays
-locked, and the read Try again makes says the same when the stored choice is not the refused one); `accept {signedName,
+shows the stored choice and says "That did not go through. Please try again." only when that read stores another
+choice: the 409 refuses this request, and an earlier save of the same choice whose reply was lost may have landed;
+when that read fails, the page locks every answer until Check again reads the offer, and that read decides the line); `accept {signedName,
 version}` (trimmed,
 3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
 'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500), version}` -> `{state:'date_requested'}`; `decline {reason?
 (<= 500), version}` -> `{state:'declined'}`. Each answer carries the `version` the page shows, the text choice included,
 and a change since then (another tab's text choice) answers the same 409 `{state:'open'}` with no write, so a signature,
-a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is the
-contract before it and is answered as before, with no version check; the page always sends one. The page never
-applies an open read or a text-choice save without a `version` (a server from before it): such a read counts as failed,
-and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
-controls only for a read whose state is explicitly `open` and that carries the text choice and non-empty Terms; a read
-with no known state, or an open read without those, also counts as failed, and an
+a date request or a decline never fixes a text choice the applicant did not see. A body without `version` writes
+nothing: an answer that would write is refused the same way (409 `{state:'open'}`), and the two answers that write
+nothing either way (a text choice equal to the stored one, an identical replay of a signature) answer as they do for
+any resend, so no write skips the check; the page always sends one. The page posts its answers under `/v2`: a server
+from before the version (#8012) has only the paths without `/v2`, whose handlers ignore it, so in a mixed deploy or a
+rollback a page that read a version never posts an answer to a handler that ignores it. That post answers 404 and
+writes nothing, and the page reads the offer before it calls the link dead: a 404 read shows the dead link, and an
+open read keeps the offer and marks the page out of date. So does a read from a server that does not match the page
+(an open offer without its version, or a state the page does not know), the first read included, and every later read
+whatever asked for it (the text choice's check after a lost reply too): reading again gets the same answer. Out of date, the page locks every answer and says "This page is out of date. Please reload it and try
+again." with a "Reload page" button, shown only while no send is in flight or lost (a reload would drop a send whose
+outcome is not known). When the read after a refusal fails, the page locks every answer, and its Check again reads with
+that refusal's status, so a 404 still counts. After a lost reply, a resend's 404 does not mark the page: that send may
+still land on a server that has the route, so its resend stays the only action, and its banner adds "If this keeps
+happening, call us at (941) 297-5749 and we will check it for you." The line stays until that send has a definite
+answer, through resends that fail again. An open read missing a term the page
+shows stays a failed read (the load error, or Check again). Here the paths without `/v2` run the same handlers with the same check,
+for a tab that opened the page from before `/v2` (#8091 posts there with its version). A signature is also refused
+the same way (409 `{state:'open'}`, no write, a warning logged) when the frozen offer lacks a term the page shows (the
+job, a real start date, an hourly rate of whole cents, the week, who they report to, pay day, the Terms, and a pay step
+only with both its rate and its date; no raise is both sent as null), so no client signs a gap. The page never
+applies an open read or a text-choice save without a `version` (a server from before it): such a read marks the page out
+of date (above), and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
+controls only for a read whose state is explicitly `open` and that carries the text choice, non-empty Terms and every
+term it shows, each as it shows it (rates in whole cents, no raise only as both step fields null); an open read without those,
+or a read that names no state, counts as failed (a state the page does not know marks the page out of date, above), and an
 action's 200 that does not name its answer (`signed`, `date_requested`, `declined`) is treated as a lost reply: the
 page reads the offer. Each acts only from state `open`; any
 other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter
@@ -9321,4 +9438,4 @@ Referral code in the same field (`GATE_ESTIMATE_REFERRAL_CODE`, dark in prod, ow
 
 `/api/pay/:token/plan-choice` (POST, body `{ plan: 'prepay_annual' }`; the "prepay the year" pick on the invoice pay page, `GATE_PAY_PLAN_CHOICE`, dark everywhere unless exactly `true`, owner 2026-11-19). It inherits the `/api/pay` router's baseline (token format gate with the generic 404, `payLimiter`, `noStore` privacy headers) and answers that same 404 while the gate is off or the token is unknown. While the gate is off the request skips `payLimiter` (a `skip` on the router limiter for this path only), so a dark probe never sees a 429 and spends none of the caller's quota for the live pay routes. `400 { error: 'invalid_plan' }` for any other plan (paying per application is paying the invoice as it stands; it has no action here). `409 { error: 'plan_choice_unavailable' }` when the choice is not, or no longer, offered on this invoice. `200 { success: true, payUrl }`: `payUrl` is the pay link of the annual prepay invoice this pick minted (an unsent draft plus a `payment_pending` term), and a repeat answers with the same link, never a second invoice. `503` on a failure the customer can retry. Every amount is derived server-side from the booked series; the body's `plan` is the only field read. Nothing is charged, sent or voided: the first invoice stays payable, and paying the prepay closes it. The read side is a `planChoice` key on `GET /api/pay/:token`, absent with the gate off or when the choice is not offered (that payload stays byte-identical): `{ selected: false, serviceType, visitsPerYear, perApplication: { perVisit, setupFee, yearTotal }, prepay: { total, setupFeeWaived, discount, discountLabel, savings } }` before a pick, `{ selected: true, prepay: { total } }` after one. It never carries the prepay invoice's token; only the POST answers the link.
 
-`/pest-insider/cards/<fact>-<hash>.png` and `/pest-insider/heroes/<fact>-<hash>.jpg` (GET; static pictures inside Waves Pest Insider emails: each lead fact's card and top picture, `server/services/pest-insider/cards.js` and `heroes.js`). Served from `client/public/pest-insider/` (in production, its copy in `client/dist/`) by the two existing static mounts in `server/index.js`: no token, no database read, no gate, nothing taken from the caller, and the static mounts' own cache headers. The files are drawn on a Mac (`ops/agents/pest-insider-cards.js`, `pest-insider-heroes.js`) from reviewed copy only (a fact's title or one whole reviewed sentence, a tag from a fixed list, "Waves Pest Insider") and wordless ChatGPT art, and each name carries a hash of everything drawn on it, so a URL never changes what it shows. They carry the static mounts' headers unchanged, including helmet's `Cross-Origin-Resource-Policy: same-origin`, as the app-store badges in emails (`/app-email/`) do today: a mail app that loads pictures directly, with no image proxy, may block them and show the alt text instead. A `cross-origin` header on these folders changes both static mounts' allowlist keys, so it waits for owner review. No route or middleware of its own serves them. The drawing scripts never remove a file, because a sent email and the issue archive keep the exact picture URLs; an old file is removed by hand only once no sent issue uses it.
+`/pest-insider/cards/<fact>-<hash>.png` and `/pest-insider/heroes/<fact>-<hash>.jpg`, and their moving copies `<fact>-<hash>.gif` in the same two folders, and `/pest-insider/parts/<id>-<hash>.jpg` (GET; static pictures inside Waves Pest Insider emails: each lead fact's card and top picture, `server/services/pest-insider/cards.js` and `heroes.js`, and the part picture of a lead fact or species that names a part, `parts.js`: a real CC0 or CC BY 4.0 photo with the part circled and labeled, credited under the picture in the email, or a Waves diagram; an email shows a GIF to every mail app but classic Outlook, which gets the still, as does a reader whose mail app reports a reduced-motion setting). Served from `client/public/pest-insider/` (in production, its copy in `client/dist/`) by the two existing static mounts in `server/index.js`: no token, no database read, no gate, nothing taken from the caller, and the static mounts' own cache headers. The files are drawn on a Mac (`ops/agents/pest-insider-cards.js`, `pest-insider-heroes.js`, with `pest-insider-motion.js` for the moving top pictures, and `pest-insider-parts.js` from the photos in `ops/agents/pest-insider-photos/`) from reviewed copy only (a fact's title or one whole reviewed sentence, a tag from a fixed list, "Waves Pest Insider") and wordless ChatGPT art, and each name carries a hash of everything drawn on it, so a URL never changes what it shows. They carry the static mounts' headers unchanged, including helmet's `Cross-Origin-Resource-Policy: same-origin`, as the app-store badges in emails (`/app-email/`) do today: a mail app that loads pictures directly, with no image proxy, may block them and show the alt text instead. A `cross-origin` header on these folders changes both static mounts' allowlist keys, so it waits for owner review. No route or middleware of its own serves them. The drawing scripts never remove a file, because a sent email and the issue archive keep the exact picture URLs; an old file is removed by hand only once no sent issue uses it.

@@ -26,6 +26,9 @@ import {
   rodentBaitWaveguardFlags,
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
+  normalizePreSlabProductKey,
+  normalizeTrenchingProductKey,
+  normalizeTrenchingRate,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
@@ -66,6 +69,16 @@ import {
 import { formatCalendarDate, moveEstimateForm } from "../../lib/moveEstimateForm";
 import { MISTING_FORM_DEFAULTS, NO_MISTING, defaultMistingLabel, mistingOption, readMistingAvailability } from "../../lib/mosquitoMisting";
 import MistingLayoutDesigner from "../../components/admin/MistingLayoutDesigner";
+import RoofReadPanel, { roofSpotFrom, roofAddressDoubtful } from "../../components/admin/RoofReadPanel";
+
+// The estimate a roof read belongs to: a draft saved this session, or a reopened estimate only while the form
+// still shows that estimate's saved address (an edited address is a different roof). The panel is keyed on the
+// same value, so it restarts exactly when the estimate it writes to changes.
+export function roofReadEstimateIdFor(savedId, editMode, address) {
+  if (savedId) return savedId;
+  if (editMode?.id && String(editMode.address || "").trim() === String(address || "").trim()) return editMode.id;
+  return null;
+}
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
@@ -87,8 +100,8 @@ const GRASS_CHOICES = [
 const TRENCHING_PRODUCT_OPTIONS = [
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
-  // bifen_it is the same Talak bottle (owner 2026-10-25), so Talak is listed once.
-  { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
+  // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18), so it is listed once.
+  { value: "talstar_p", label: "Crosscheck Plus - Bifenthrin, repellent barrier" },
 ];
 
 const TRENCHING_PRODUCT_META = {
@@ -101,29 +114,87 @@ const TRENCHING_PRODUCT_META = {
     config: "78 oz @ $95 | 0.8 oz / finished gal standard",
   },
   bifen_it: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
-    config: "96 oz @ $41.57 | 1.0 oz / finished gal standard",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
   talstar_p: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
-    config: "96 oz @ $41.57 | 1.0 oz / finished gal standard",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
 };
 
 const PRE_SLAB_PRODUCT_OPTIONS = [
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
-  // bifen_it is the same Talak bottle (owner 2026-10-25), so Talak is listed once.
-  { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
+  // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18), so it is listed once.
+  { value: "talstar_p", label: "Crosscheck Plus - Bifenthrin, repellent barrier" },
 ];
 
 // A saved estimate that still carries bifen_it keeps one matching entry, so the select shows the
-// product the estimate prices (Talak) instead of falling back to the first option.
-const LEGACY_BIFEN_OPTION = { value: "bifen_it", label: "Talak 7.9 F - Bifenthrin, repellent barrier (saved as Bifen I/T)" };
+// product the estimate prices (Crosscheck Plus) instead of falling back to the first option.
+const LEGACY_BIFEN_OPTION = { value: "bifen_it", label: "Crosscheck Plus - Bifenthrin, repellent barrier (saved as Bifen I/T)" };
 
 export function termiticideProductOptions(kind, selectedKey) {
   const options = kind === "trenching" ? TRENCHING_PRODUCT_OPTIONS : PRE_SLAB_PRODUCT_OPTIONS;
   return selectedKey === "bifen_it" ? [...options, LEGACY_BIFEN_OPTION] : options;
+}
+
+// The bottle the bifenthrin keys name. Since 2026-11-18 talstar_p and bifen_it are LESCO Crosscheck Plus (was Atticus Talak
+// 7.9 F under the same keys), so every form carries this mark and a saved estimate shows which bottle its label checks were
+// made for. An estimate saved without the mark predates the swap: its bifenthrin label check was made for the earlier bottle,
+// so a reopen clears it and the quote asks for the Crosscheck Plus label again (a saved alias such as "talak" resolves to its key
+// first, as the engine resolves it). Choosing another product also clears its label
+// check (the form's set()), so on a marked form a check is always for the product selected.
+export const BIFENTHRIN_LABEL_BOTTLE = "lesco_crosscheck_plus";
+const BIFENTHRIN_OPTION_KEYS = new Set(["talstar_p", "bifen_it"]);
+// A pre-slab ingredient name names no product: the server takes it only from a legacy payload and otherwise holds the quote for
+// review, so a reopen keeps it as saved (trenching takes ingredient names, and they resolve).
+const PRE_SLAB_INGREDIENT_NAMES = new Set(["bifenthrin", "fipronil"]);
+const productToken = (value) => String(value).trim().toLowerCase().replace(/[\s/-]+/g, "_").replace(/_+/g, "_");
+// Each termiticide product field and the label check made for the product it selects.
+const LABEL_CHECKS = [
+  { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", serviceField: "svcPreslab", name: "pre-slab", resolve: normalizePreSlabProductKey, keepAsSaved: PRE_SLAB_INGREDIENT_NAMES },
+  // The trenching box confirms the label rate and trench depth too ("Label rate and trench depth confirmed").
+  { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", serviceField: "svcTrenching", name: "trenching", resolve: normalizeTrenchingProductKey, alsoConfirms: ["trenchingApplicationRate", "trenchingDepthFt"] },
+];
+const LABEL_CHECK_FOR_FIELD = Object.fromEntries(LABEL_CHECKS.flatMap(({ productField, checkField, alsoConfirms = [] }) =>
+  [productField, ...alsoConfirms].map((field) => [field, checkField])));
+
+// The saved fields a reopen canonicalizes: each product field, and the trenching rate (pre-push audit 31).
+const CANONICAL_FIELDS = [
+  ...LABEL_CHECKS.map(({ productField, resolve, keepAsSaved }) => ({ field: productField, resolve, keepAsSaved })),
+  { field: "trenchingApplicationRate", resolve: normalizeTrenchingRate },
+];
+
+// A saved alias becomes its option value, as the server reads it. A product alias ("talak", "Crosscheck Plus") becomes its option
+// key, so the picker shows the product the engine prices and the label panel shows that product's warning. A rate alias
+// ("high_rate", "0.125%") becomes "standard" or "high", so the picker and the label box show the rate the server prices. A blank or
+// unrecognized value, or a pre-slab ingredient name, is left as saved.
+export function canonicalTermiticideFields(form) {
+  let next = form;
+  for (const { field, resolve, keepAsSaved } of CANONICAL_FIELDS) {
+    const value = form[field];
+    if (typeof value !== "string" || !value.trim() || keepAsSaved?.has(productToken(value))) continue;
+    const key = resolve(value, { fallback: null });
+    if (key && key !== value) next = { ...next, [field]: key };
+  }
+  return next;
+}
+
+// savedInputs = the stored form snapshot as saved; form = the form a reopen restores from it. The form it returns always carries
+// today's bottle mark, so a check ticked from here on counts for the bottle it is ticked for: a saved null or an earlier bottle's
+// mark would otherwise ride along, and the server would not count the operator's new check (pre-push audit 22). A deselected
+// service keeps its fields, so its earlier-bottle check is cleared too, but only a selected service's check is named in
+// `cleared`, which sends the estimate back to Generate: the saved price does not include a deselected service (pre-push audit 29).
+export function clearPriorBottleLabelChecks(savedInputs, form) {
+  const marked = form._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE ? form : { ...form, _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE };
+  if (!savedInputs || savedInputs._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE) return { form: marked, cleared: [] };
+  const stale = LABEL_CHECKS.filter(({ productField, checkField, resolve }) =>
+    BIFENTHRIN_OPTION_KEYS.has(resolve(form[productField])) && !!form[checkField]);
+  if (stale.length === 0) return { form: marked, cleared: [] };
+  const next = { ...marked };
+  for (const { checkField } of stale) next[checkField] = false;
+  return { form: next, cleared: stale.filter(({ serviceField }) => !!form[serviceField]).map(({ name }) => name) };
 }
 
 const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
@@ -142,12 +213,12 @@ const PRE_SLAB_PRODUCT_META = {
     config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   bifen_it: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.",
-    config: "96 oz @ $41.57 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Confirm the Crosscheck Plus label supports pre-construction subterranean termite treatment.",
+    config: "128 oz @ $30.90 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   talstar_p: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.",
-    config: "96 oz @ $41.57 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Confirm the Crosscheck Plus label supports pre-construction subterranean termite treatment.",
+    config: "128 oz @ $30.90 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
 };
 
@@ -1950,6 +2021,8 @@ export default function EstimateToolViewV2({
     trenchingDepthFt: "0.5",
     trenchingWarrantyTier: "one_year_retreat",
     trenchingLabelConfirmed: false,
+    // The bottle the two label checks above are made for when the key is bifenthrin (clearPriorBottleLabelChecks).
+    _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE,
     foamPoints: "5",
     foamRecurringPoints: "5",
     foamRecurringFreq: "quarterly",
@@ -2410,11 +2483,15 @@ export default function EstimateToolViewV2({
   // out unchanged).
   function reopenEditSource(d) {
     const restored = formFromEditSource(d);
-    const { form: seeded, cleared } = scrubReopenedEstimateForm(restored, d.engineProfile);
+    const { form: scrubbed, cleared } = scrubReopenedEstimateForm(restored, d.engineProfile);
+    const { form: seeded, cleared: labelChecks } = clearPriorBottleLabelChecks(d.inputs, canonicalTermiticideFields(scrubbed));
     const guessedHomeSize = linesPricedOnGuessedHomeSize(d.result).length > 0;
     const notice = [
       cleared.length > 0
         ? `This estimate was saved before a pricing fix. Removed values the lookup filled in: ${cleared.join(", ")}.`
+        : null,
+      labelChecks.length > 0
+        ? `Its ${labelChecks.join(" and ")} label check was for the earlier bifenthrin bottle. The bottle is now LESCO Crosscheck Plus: confirm its label again.`
         : null,
       // An association aggregate's missing input is the story count, as in
       // the Generate guard (codex r1 P2).
@@ -2655,6 +2732,8 @@ export default function EstimateToolViewV2({
           status: d.status,
           editVersion: d.editVersion,
           customerName: d.customerName || "",
+          // The address the estimate was saved with, for the roof read's estimate link.
+          address: seeded.address || "",
           hasInputs: !!d.inputs,
         });
         setMoveEstimate(d.moveEstimate ? { ...d.moveEstimate, estimateId: d.id } : null);
@@ -2811,6 +2890,9 @@ export default function EstimateToolViewV2({
         ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
         ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
         ...(key === "preslabSqft" ? { _preslabSqftAuto: false } : {}),
+        // A label check is for what its box confirmed when it was ticked (the product; for trenching also the rate and depth):
+        // changing one clears it.
+        ...(LABEL_CHECK_FOR_FIELD[key] ? { [LABEL_CHECK_FOR_FIELD[key]]: false } : {}),
         // palmCount ONLY: the auto flag tracks the PROPERTY count's
           // provenance — a treatment-count edit says nothing about it, and
           // flipping the flag there would leave a stale property prefill
@@ -3725,6 +3807,10 @@ export default function EstimateToolViewV2({
   // Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): explicit true from the rodent_waveguard row read below,
   // so a 404, a failed read or an older server hides the Seal scope choice and sends nothing new.
   const [exclusionWholeHomeAvailable, setExclusionWholeHomeAvailable] = useState(false);
+  // Staff roof read (GATE_ROOF_ENTRY_READ): explicit true from the same rodent_waveguard row, so a 404, a failed
+  // read or an older server hides the panel. The epoch restarts the panel on Next estimate.
+  const [roofReadAvailable, setRoofReadAvailable] = useState(false);
+  const [roofReadEpoch, setRoofReadEpoch] = useState(0);
   const [exclusionRoofStyleAvailable, setExclusionRoofStyleAvailable] = useState(false);
   // Bahia as a NEW lawn plan (GATE_LAWN_V13 has no bahia program, so the server parks it for review).
   // Only an explicit false hides the option; an older server or a failed read keeps it, and a
@@ -3834,7 +3920,7 @@ export default function EstimateToolViewV2({
         if (r.status === 404) return { ok: true, data: null };
         if (!r.ok) return { ok: false, data: null };
         const body = await r.json();
-        return { ok: true, data: body?.data ?? null, wholeHome: body?.exclusionWholeHome === true, roofStyle: body?.exclusionRoofStyle === true };
+        return { ok: true, data: body?.data ?? null, wholeHome: body?.exclusionWholeHome === true, roofRead: body?.roofEntryRead === true, roofStyle: body?.exclusionRoofStyle === true };
       } catch {
         return { ok: false, data: null };
       }
@@ -3847,6 +3933,7 @@ export default function EstimateToolViewV2({
       ]);
       if (!active) return;
       setExclusionWholeHomeAvailable(waveguardRow.wholeHome === true);
+      setRoofReadAvailable(waveguardRow.roofRead === true);
       setExclusionRoofStyleAvailable(waveguardRow.roofStyle === true);
       // ALL THREE rows or nothing (codex #3591 r55 local P1): applying a
       // partial set leaves module defaults beside live values — the sidebar
@@ -4162,6 +4249,9 @@ export default function EstimateToolViewV2({
         campusParcel: data.meta?.campusParcel || null,
         // This lookup's own cage era: a two-size lookup's size is never reclassified.
         poolCageTwoSizes: data.meta?.poolCageTwoSizes === true,
+        // The home's map point and county, for the staff roof read.
+        roofSpot: roofSpotFrom(data),
+        roofAddressDoubt: roofAddressDoubtful(data),
       });
       setCageTwoSizes(data.meta?.poolCageTwoSizes === true);
       setVerifySaveState({});
@@ -4775,6 +4865,9 @@ export default function EstimateToolViewV2({
         preslabSqft,
         preslabProductKey: form.preslabProductKey || "termidor_sc",
         preslabLabelConfirmed: !!form.preslabLabelConfirmed,
+        // The bottle the form's label checks were made for: the server counts a bifenthrin check only with it, so a request saved
+        // before the Crosscheck Plus swap reprices with its label review back on.
+        bifenthrinLabelBottle: form._bifenthrinLabelBottle,
         preslabWarranty: form.preslabWarranty || "BASIC",
         preslabVolume: form.preslabVolume || "NONE",
         preslabJobContext: resolvePreSlabJobContextForForm(form),
@@ -5316,7 +5409,8 @@ export default function EstimateToolViewV2({
         setAddressUnverified({ source: 'county_roll', reason: 'County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.' });
         setConfirmAddress(false);
       }
-      setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", hasInputs: true });
+      // The address this save persisted, so the roof read stays linked to this estimate through non-address edits.
+      setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", address: String(form.address || "").trim(), hasInputs: true });
       if (!isEditRevision && moveRequestId) {
         const savedMove = moveSeed.data?.move || {};
         setMoveEstimate({ estimateId: id, moveId: moveRequestId, moveOutDate: savedMove.moveOutDate || null, moveInDate: savedMove.moveInDate || null });
@@ -5372,6 +5466,8 @@ export default function EstimateToolViewV2({
     setGroupAnchorId(null);
     // The previous estimate's saved cage size no longer applies to the next estimate.
     setLoadedCageSize("");
+    // The last roof read belongs to the last estimate.
+    setRoofReadEpoch((n) => n + 1);
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),
@@ -7913,13 +8009,16 @@ export default function EstimateToolViewV2({
                           label="Estimate trenching perimeter from footprint"
                         />
                       )}
+                      {/* The box confirms the label rate and trench depth, never a volume: the server alone knows whether its
+                          configured dilution reduces the volume, so its line names the label's conditions and stays in review
+                          (pre-push audit at the second push). */}
                       <CheckboxV2
                         k="trenchingLabelConfirmed"
                         label="Label rate and trench depth confirmed"
                       />
                       <div className="text-14 text-zinc-600 leading-snug mb-1">
                         {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).warning}
-                        {form.trenchingApplicationRate === "high" ? " High rate requires label confirmation." : ""}
+                        {normalizeTrenchingRate(form.trenchingApplicationRate) === "high" ? " High rate requires label confirmation." : ""}
                       </div>
                       <div className="text-14 text-zinc-500 leading-snug">
                         Admin config: {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).config}
@@ -8553,6 +8652,17 @@ export default function EstimateToolViewV2({
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
                   {(exclusionWholeHomeAvailable || form.exclSealScope === "whole_home") && (
                     <ExclusionSealScope estimate={estimate} commercial={commercialDetected} blockedReason={wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable)} />
+                  )}
+                  {roofReadAvailable && (
+                    <RoofReadPanel
+                      // A new estimate id (the draft was saved) also restarts the panel: a read taken before it
+                      // belongs to the pre-draft context, so staff tap again and get this estimate's own copy.
+                      key={`${roofReadEpoch}|${form.address}|${form.customerId || ""}|${form.leadId || ""}|${form.propertyId || ""}|${roofReadEstimateIdFor(savedId, editMode, form.address) || ""}|${lookupMeta?.roofSpot?.lat ?? ""},${lookupMeta?.roofSpot?.lng ?? ""}`}
+                      spot={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.roofSpot || null : null}
+                      addressDoubt={lookupMeta?.address === String(form.address || "").trim() && lookupMeta?.roofAddressDoubt === true}
+                      estimateId={roofReadEstimateIdFor(savedId, editMode, form.address)}
+                      customerId={form.customerId || null}
+                    />
                   )}
                   {(exclusionRoofStyleAvailable || form.exclRoofStyle) && (
                     <ExclusionRoofStyle

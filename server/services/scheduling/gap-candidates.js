@@ -10,6 +10,7 @@ const { getCustomerSchedulingPreferences } = require('../auto-dispatch/preferenc
 const { inBlackout, violatesPreferredDay, violatesPreferredTime, _internals: { weekdayOf } } = require('../auto-dispatch/candidate-slots');
 const { toDateStr, shiftDateStr } = require('../auto-dispatch/dates');
 const mowingDays = require('../auto-dispatch/mowing-days');
+const { categoriesForServices } = require('../technician-capabilities');
 
 async function loadGapCandidate(serviceId, conn) {
   const service = await conn('scheduled_services').leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -47,17 +48,74 @@ async function loadGapCandidate(serviceId, conn) {
   return { service, preferences, holds, siblingDates, deactivated };
 }
 
+/**
+ * An open estimate's first visit as a gap candidate (the 07:05 notice's fill list, day-replan/fill-list.js). It is a
+ * new stop, under the office's new-stop id ('__candidate__', arrival-route.js), at the customer's stored location:
+ * never geocoded (resolveEstimateCoords paidCalls false). Its service and length are the ones the estimate's booking
+ * page offers: resolveCatalogSlotProfile with the page picker's service mode and default selection (`picker`,
+ * estimate-slots-public.js pageSlotPicker), as the page's first fetch sizes the visit. The customer's day and time
+ * rules apply as for loadGapCandidate, and a
+ * technician needs the capability for every service the visit performs (a combined visit's too). It is checked as a new
+ * visit (`prospective`, analyzeGapCandidate): at every place in the route, as the staff finder checks a new customer.
+ * `dayOpen(date)` holds the visit's own day rules beyond analyzeGapCandidate's: the booking page's first-visit dates
+ * (a seasonal mosquito program starts in season; a new-home estimate not before the move-in date) and the mowing-day
+ * rule over every service the visit performs (a pest-first visit with lawn care too). `{ unavailable:
+ * 'no_stored_location' }` when no stored location can stand in. A failed read throws.
+ */
+async function estimateGapCandidate(estimate, conn, picker = {}) {
+  const slots = require('../estimate-slot-availability');
+  let coords;
+  try {
+    coords = await slots.resolveEstimateCoords(estimate, { paidCalls: false, strictReads: true });
+  } catch (err) {
+    if (err.code === 'COORDS_NEED_GEOCODE') return { unavailable: 'no_stored_location' };
+    throw err;
+  }
+  const profile = await slots.resolveCatalogSlotProfile(estimate,
+    { ...(picker.serviceMode ? { serviceMode: picker.serviceMode } : {}), ...(picker.selection || {}) }, conn);
+  const performed = slots.appointmentServicesFor(profile);
+  const performs = performed.map((row) => ({
+    service_type: row.label || profile.serviceLabel, service_key_snapshot: row.resolvedServiceKey || row.service || null,
+  }));
+  const [primary = { service_type: profile.serviceLabel, service_key_snapshot: null }] = performs;
+  const service = {
+    id: '__candidate__', customer_id: estimate.customer_id, status: 'pending', lat: coords.lat, lng: coords.lng,
+    estimated_duration_minutes: profile.durationMinutes, ...primary,
+    // Several services on this one visit name no single planning-minutes row, so the route plans its full length, as
+    // the reservation plans it (slot-reservation.js; planning-minutes.js). Only the services the visit performs count: a
+    // companion program that books its own visits is not on this one, though plan-only mode keeps it in the profile.
+    ...(performs.length > 1 ? { combined_services: true } : {}),
+  };
+  const preferences = await getCustomerSchedulingPreferences(estimate.customer_id, service.service_type, conn,
+    { serviceKey: service.service_key_snapshot });
+  // The office list's capability rule, by each service's catalog category or name (technician-capabilities.js).
+  const categories = [...new Set(await categoriesForServices(conn, performs.length ? performs : [primary]))];
+  const deactivated = await conn('technician_capabilities').whereIn('service_category', categories).where('active', false).pluck('technician_id');
+  const seasonal = slots.seasonalSelectionProfile(profile);
+  const moveInDate = await slots.estimateMoveInDate(estimate);
+  const mowing = mowingDays.unitRule(preferences, performs);
+  const dayOpen = (date) => (!seasonal || slots.inMosquitoSeason(date)) && (!moveInDate || date >= moveInDate)
+    && !mowingDays.blocksLive(date, mowing);
+  // The line names the services this visit performs, in the page's words: plan-only mode keeps a companion program that
+  // books its own visits in the profile's label.
+  return { service, preferences, holds: [], siblingDates: [], deactivated,
+    label: slots.formatServiceProfileLabel(performed) || profile.serviceLabel, prospective: true, dayOpen };
+}
+
 function analyzeGapCandidate(candidate, rows, {
   date, technicianId, now, today, departureMinutes, targetReturnMinutes, breakMinutes, closed,
   // The tech's start point (GATE_TECH_START_POINTS); absent = the office.
   home,
   // The van's departure when the caller gave none (day-quality.js); 08:00 by default.
   modeledDepartureMinutes = 480,
+  // The day's schedule blocks for this technician (tech_schedule_blocks rows: start_time, end_time), when the caller
+  // read them (the 07:05 fill list); absent = none, as before.
+  blocks,
 }) {
   const response = { candidateId: candidate.service?.id || null, routeFits: [], feasibleInsertionWindows: null,
     automaticMoveAuthorized: false, reviewRequirements: ['customer_commitments_and_access', 'locked_save_recheck'] };
   if (candidate.unavailable) return { ...response, reason: candidate.unavailable };
-  const { service, preferences, holds, siblingDates, deactivated } = candidate;
+  const { service, preferences, holds, siblingDates, deactivated, prospective } = candidate;
   if (date <= today) return { ...response, reason: 'actual_progress_required' };
   if (closed) return { ...response, reason: 'scheduled_day_off' };
   if (deactivated.includes(technicianId)) return { ...response, reason: 'technician_category_deactivated' };
@@ -118,12 +176,19 @@ function analyzeGapCandidate(candidate, rows, {
   // vanDepartureMin: with GATE_SCHEDULING_CAPACITY on the route opens at the
   // van's departure (the Settings time; 08:00 with the day rules off), not at
   // the 08:00 shift open, the way the night tool's arrival search plans it.
-  const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home, vanDepartureMin: modeledDepartureMinutes };
+  // A new visit (`prospective`: an estimate's first visit, estimateGapCandidate) is tried at every place in the route:
+  // the staff finder's check of a new customer (arrival-route.js staffPlacement, with its margin for later stops). A
+  // saved visit keeps the order its save would produce.
+  const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home, vanDepartureMin: modeledDepartureMinutes,
+    prospective, blocks };
   const result = enumerateArrivalPlacements(context, { durationMinutes: duration, earliestStartMin: earliestStart,
     latestServiceEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES),
     dayEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES), departureMin: departure, returnByMin: returnBy });
   const routeFits = result.placements.filter(item => !violatesPreferredTime(item.windowStart, preferences)).map(({ windowStart, windowEnd, fit }) => ({
     windowStart, windowEnd, estimatedArrival: fit.estimatedArrival,
+    // When the visit ends on the modeled route: its arrival plus its planned minutes on site, which can be shorter
+    // than the window (owner planning minutes, arrival-route.js buildPlacementTarget).
+    estimatedDeparture: (fit.arrivals || []).find(row => String(row.id) === String(target.id))?.departure || null,
     addedDriveMinutes: fit.detourMinutes, modeledDriveMinutes: fit.driveMinutes, modeledWaitingMinutes: fit.waitingMinutes,
     modeledReturnMinuteBeforeBreaks: fit.returnMinuteBeforeBreaks,
     modeledReturnMinuteWithAllowance: configured ? fit.returnMinuteBeforeBreaks + breakMinutes : null,
@@ -133,7 +198,8 @@ function analyzeGapCandidate(candidate, rows, {
     reason: !configured ? 'workday_or_break_allowance_unset' : (routeFits.length ? 'route_fit_requires_staff_review' : 'no_fit_in_saved_order'),
     evaluatedWindows: result.evaluated, rejections: { ...result.rejections, customer_time_preference: result.placements.length - routeFits.length },
     workdayVerified: configured, departureMinutes: departure, breakPlacement: 'daily_allowance_not_a_timed_break',
-    note: 'Fits preserve the dispatch order produced by the existing save. They do not authorize a date/time change or create a booking hold.' };
+    note: prospective ? 'Fits place the new visit where the staff finder would. They do not book it or create a booking hold.'
+      : 'Fits preserve the dispatch order produced by the existing save. They do not authorize a date/time change or create a booking hold.' };
 }
 
-module.exports = { loadGapCandidate, analyzeGapCandidate };
+module.exports = { loadGapCandidate, estimateGapCandidate, analyzeGapCandidate };

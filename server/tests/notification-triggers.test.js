@@ -271,6 +271,10 @@ describe('notification trigger push tags', () => {
     expect(blocked.link).toBe('/admin/newsletter?tab=history');
     expect(blocked.body).toMatch(/Nothing was sent\.$/);
     expect(blocked.body).not.toMatch(/composer/i);
+    // A planned issue's outcome (its settle step) is told in its own words: some readers may have got
+    // it, so never "did not pass the send gate" or "Nothing was sent".
+    const outcome = TRIGGER_REGISTRY.newsletter_proof_blocked.build({ sendId: 'send-7', subject: 'x', errors: ['Did not go out: its send failed after 40 of 85 readers got it'], outcome: true });
+    expect(outcome.body).toBe('"x": Did not go out: its send failed after 40 of 85 readers got it.');
     expect(TRIGGER_REGISTRY.newsletter_send_not_dispatched).toBeUndefined();
     expect(TRIGGER_REGISTRY.pest_insider_draft).toBeUndefined();
     for (const type of Object.keys(TRIGGER_REGISTRY).filter((t) => t.startsWith('newsletter_'))) {
@@ -572,6 +576,47 @@ describe('triggerNotification bell outcome', () => {
     expect(quiet).not.toHaveProperty('sound');
   });
 
+  test('beforeHandoff reaches the push service\'s per-device check, and a fan-out it stopped part way keeps its count', async () => {
+    const PushService = require('../services/push-notifications');
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }])
+        : table === 'notification_preferences'
+          ? tableMock([{ admin_user_id: 'admin-1', trigger_key: 'lead_call_reminder', bell_enabled: true, push_enabled: true, sound_enabled: true }])
+          : tableMock([])));
+    // Two devices, as the push service runs them (push-notifications-before-handoff.test.js): the check before each
+    // handoff; a false answer stops that device and every later one.
+    PushService.sendToAdminUsers.mockClear();
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payload, opts) => {
+      const results = [];
+      for (let device = 0; device < 2; device += 1) {
+        if ((await opts.beforeHandoff()) === false) {
+          return { subscriptions: 2, sent: results.length, expired: 0, failed: 0, skipped: 2 - results.length, results, superseded: true };
+        }
+        results.push({ sent: true });
+      }
+      return { subscriptions: 2, sent: 2, expired: 0, failed: 0, skipped: 0, results };
+    });
+    const answers = [true, false];
+    const beforeHandoff = jest.fn(async () => answers.shift());
+    const expiresAt = '2026-11-09T23:00:00.000Z';
+    const stats = await triggerNotification('lead_call_reminder', { alertRowId: 'n-1', alertTitle: 'Leads — call Pat Sample back', alertBody: 'b', expiresAt },
+      { pushOnly: true, adminOnly: true, bellAuthorized: true, beforePush: async () => true, beforeHandoff });
+    // The reminder's expiry reaches every device's payload (web push TTL, apns-expiration, FCM ttl).
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1')).toMatchObject({ expiresAt });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][2].beforeHandoff).toBe(beforeHandoff);
+    expect(beforeHandoff).toHaveBeenCalledTimes(2);
+    // One device has the push: the count stays, it is not read as "stopped before the push".
+    expect(stats.push).toMatchObject({ sent: 1, superseded: true });
+  });
+
+  test('pushExpiryFor: the lead reminders\' push carries its own expiry; no other trigger reads one from its payload', () => {
+    expect(__private.pushExpiryFor('lead_call_reminder', { expiresAt: '2026-11-09T23:00:00.000Z' })).toEqual({ expiresAt: '2026-11-09T23:00:00.000Z' });
+    expect(__private.pushExpiryFor('lead_call_reminder', {})).toEqual({});
+    expect(__private.pushExpiryFor('lead_call_reminder', { expiresAt: 'not a time' })).toEqual({});
+    expect(__private.pushExpiryFor('new_lead', { expiresAt: '2026-11-09T23:00:00.000Z' })).toEqual({});
+  });
+
   test('portal_ask is a pushOnly page: it writes no bell row and pushes one banner tagged by the ask', async () => {
     const PushService = require('../services/push-notifications');
     PushService.sendToAdminUsers.mockClear();
@@ -614,6 +659,15 @@ describe('triggerNotification bell outcome', () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
     expect(await triggerNotification('sms_reply', { twilioSid: 'SM-synthetic-replay' },
       { dedupeKey: 'sms-reply:SM-synthetic-replay' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  // A planned Waves Pest Insider issue's outcome alert is keyed per issue: a hit is the settle
+  // step's retry of an alert that landed before its row was marked told.
+  test('a keyed send-stop alert retry reuses its bell and does not push again', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'outcome-bell', deduped: true });
+    expect(await triggerNotification('newsletter_proof_blocked', { sendId: 'send-7', subject: 'x', errors: ['e'] },
+      { dedupeKey: 'pest-insider-outcome:issue-1' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
     expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 

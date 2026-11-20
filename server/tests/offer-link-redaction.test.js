@@ -409,6 +409,23 @@ describe('the joined text is decoded as a whole', () => {
     const text = '<p>Fees: 5%&nbsp;off &amp; more, %41 &Tab; x, a%2<wbr>Fb and /care&Zero<wbr>WidthSpace;ers/jobs</p>';
     expect(redactOfferLinks(text)).toBe(text);
   });
+
+  // Codex P1 (round 34): a match of "&" and the letters and digits after it decodes only as far as the name decodeHTML
+  // knows ("&amp" of "&ampnotes"). The round 34 code mapped the whole match back as one piece, so a token found in it
+  // hid every unit of the run with it: the words around the token, and on the past-budget path part of a tag too.
+  test('a named reference decodes only as far as its name: only the token is hidden, the words around it stay', () => {
+    const token = createHash('sha256').update('amp run').digest('hex');
+    const text = `<p>Read ${portalUrl(`/careers/offer/${token}`)}</p>`
+      + `<p>&amp<b></b>notes<b></b>${token.slice(0, 32)}<b></b>${token.slice(32)}<b></b>more<b></b>words</p>`;
+    const stored = redactOfferLinks(text);
+    expect(stored).toContain('<p>&amp<b></b>notes<b></b>[link hidden]<b></b><b></b>more<b></b>words</p>');
+    for (const view of readerViews(stored)) expect(view).not.toContain(token);
+  });
+
+  test('past the budget, only the units of the reference still encoded are hidden, never the words or tags after it', () => {
+    const text = `<p>Notes: &${'amp;'.repeat(4)}amp<b></b>notes<b></b>more words</p>`;
+    expect(redactOfferLinks(text)).toBe('<p>Notes: [link hidden]<b></b>notes<b></b>more words</p>');
+  });
 });
 
 describe('malformed markup', () => {

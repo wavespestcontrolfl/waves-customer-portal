@@ -372,7 +372,7 @@ describe('sendDualChannel with the PDF copy', () => {
     expect(build).not.toHaveBeenCalled();
   });
 
-  test('a PDF-bearing send passes the final fence as its provider handoff; a body-only send has none', async () => {
+  test('a PDF-bearing send passes the final fence as its provider handoff; a body-only send carries only the checkout handoff', async () => {
     await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });
     expect(sent().withProviderHandoff).toEqual(expect.any(Function));
     // A render that returns nothing: no file, no note, but the fence still rides the send.
@@ -381,10 +381,12 @@ describe('sendDualChannel with the PDF copy', () => {
     expect(sent()).not.toHaveProperty('attachments');
     expect(sent().payload).toEqual({ first_name: 'Sam' });
     expect(sent().withProviderHandoff).toEqual(expect.any(Function));
-    // Ineligible before any render (gate off): exactly as before, no fence.
+    // Ineligible before any render (gate off): no PDF fence, but the mid-checkout
+    // handoff still rides every follow-up email.
     setGates(false);
     await _private.sendDualChannel(est, { email: leg('estimate.viewed_followup') });
-    expect(sent()).not.toHaveProperty('withProviderHandoff');
+    expect(sent()).not.toHaveProperty('attachments');
+    expect(sent().withProviderHandoff).toEqual(expect.any(Function));
   });
 
   test('an address that is not the estimate\'s current one gets the email without the file', async () => {

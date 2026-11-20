@@ -3,7 +3,7 @@
  * count/sample adapter. The SQL itself is exercised against the local
  * schema by the syntax check in the PR (psql), not here (no DB in jest).
  */
-const { PREDICATES, PREDICATE_KEYS, runPredicate, CANONICAL_SIBLING, _private } = require('../services/completion-record-invariants');
+const { PREDICATES, PREDICATE_KEYS, runPredicate, CANONICAL_SIBLING, deliveryEvidenceForRecords, _private } = require('../services/completion-record-invariants');
 
 const KEYS = [
   'completed_visit_without_record',
@@ -251,5 +251,42 @@ describe('runPredicate', () => {
     const knex = { raw: jest.fn(async () => ({ rows: [{ n: 0, sample: null }] })) };
     expect(await runPredicate('duplicate_completed_records_per_visit', knex)).toMatchObject({ count: 0, ids: [] });
     await expect(runPredicate('nope', knex)).rejects.toThrow(/unknown completion-record predicate/);
+  });
+});
+
+describe('deliveryEvidenceForRecords', () => {
+  const ID = '11111111-1111-4111-8111-111111111111';
+  // A fake knex: the exemption read answers first, the send read second (the SQL text tells them apart).
+  const fakeKnex = (exemptRow, sendRows) => ({
+    raw: jest.fn(async (sql) => (sql.includes('AS exempt') ? { rows: [exemptRow] } : { rows: sendRows })),
+  });
+  const exemptRow = (extra = {}) => ({ record_id: ID, exempt: false, report_waived: true, completed_at: '2026-04-10T15:00:00Z', ...extra });
+
+  test('exact-time and delivered-only email evidence come from ONE scan of email_messages', async () => {
+    const knex = fakeKnex(exemptRow(), [
+      { record_id: ID, kind: 'email', at: '2026-04-10T16:00:00Z', text_at: null, queued_at: null },
+      { record_id: ID, kind: 'email_delivered_only', at: '2026-04-10T17:05:00Z', text_at: null, queued_at: '2026-04-10T17:00:00Z' },
+    ]);
+    const evidence = (await deliveryEvidenceForRecords([ID], knex)).get(ID);
+    expect(knex.raw).toHaveBeenCalledTimes(2); // exemption read + ONE send read
+    const emailScans = knex.raw.mock.calls.filter(([sql]) => sql.includes('email_messages'));
+    expect(emailScans).toHaveLength(1);
+    expect(evidence.sendTimes).toEqual([new Date('2026-04-10T16:00:00Z')]);
+    expect(evidence.deliveredIntervals).toEqual([{ from: new Date('2026-04-10T17:00:00Z'), to: new Date('2026-04-10T17:05:00Z') }]);
+    expect(evidence.confirmedWithoutTime).toBe(false);
+  });
+
+  test('a delivered-only email is a confirmed send before the exemptions: it blocks a consent-blocked or suppressed-pair exemption', async () => {
+    const delivered = { record_id: ID, kind: 'email_delivered_only', at: '2026-04-10T17:05:00Z', text_at: null, queued_at: '2026-04-10T17:00:00Z' };
+    // report waived + consent-blocked text: exempt on its own ...
+    expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow(), [{ record_id: ID, kind: 'consent_blocked' }]))).get(ID).exempt).toBe(true);
+    // ... but not once a delivered-only report email exists
+    expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow(), [{ record_id: ID, kind: 'consent_blocked' }, delivered]))).get(ID).exempt).toBe(false);
+    // a delivered-only email wholly before the closeout window (completed 15:00, window from 14:00) is an earlier closeout's: no block
+    const earlier = { record_id: ID, kind: 'email_delivered_only', at: '2026-04-06T10:00:00Z', text_at: null, queued_at: '2026-04-05T10:00:00Z' };
+    expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow(), [{ record_id: ID, kind: 'consent_blocked' }, earlier]))).get(ID).exempt).toBe(true);
+    // same for a suppressed summary pair
+    expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow({ report_waived: false }), [{ record_id: ID, kind: 'summary_suppressed' }]))).get(ID).exempt).toBe(true);
+    expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow({ report_waived: false }), [{ record_id: ID, kind: 'summary_suppressed' }, delivered]))).get(ID).exempt).toBe(false);
   });
 });

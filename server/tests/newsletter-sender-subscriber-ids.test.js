@@ -96,7 +96,9 @@ describe('warmAudienceQuery', () => {
     // One group, ANDed with every send-path rule before it, on the open's own time.
     expect(sql).toContain(' and (exists (select 1 from "sendgrid_webhook_events" as "opened" where "opened"."event_type" = ?'
       + ' and lower(opened.email) = lower(newsletter_subscribers.email)'
-      + ' and coalesce(opened.occurred_at, opened.created_at) >= ? and coalesce(opened.occurred_at, opened.created_at) <= ?)) order by');
+      + ' and coalesce(opened.occurred_at, opened.created_at) >= ? and coalesce(opened.occurred_at, opened.created_at) <= ?'
+      // A known machine open (Apple Mail Privacy Protection) never qualifies; an unflagged row still counts.
+      + ' and opened.machine_open IS NOT TRUE)) order by');
     // The address alone decides: a subscriber-id match would let a former address's open qualify a corrected one.
     expect(sql.slice(sql.indexOf(' and (exists (select 1 from "sendgrid_webhook_events"'))).not.toMatch(/subscriber_id/);
     // The send path query opens with its WITH clauses; the main select after them reads the reader's id,

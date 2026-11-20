@@ -20,10 +20,12 @@
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
+// The signed-in customer (a test may give them a tier or a turf type, then puts them back).
+const mockCustomer = { id: 'cust-1', waveguard_tier: null, lawn_type: null };
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => {
     req.customerId = 'cust-1';
-    req.customer = { id: 'cust-1', waveguard_tier: null, lawn_type: null };
+    req.customer = { ...mockCustomer };
     next();
   },
 }));
@@ -32,6 +34,10 @@ jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: j
 jest.mock('../services/termite-stations', () => ({}));
 jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
 jest.mock('../services/irrigation-app-plan', () => ({ appPlanEnabled: jest.fn(() => false), loadCustomerWateringPlan: jest.fn() }));
+jest.mock('../services/lawn-health-shared', () => ({
+  ...jest.requireActual('../services/lawn-health-shared'),
+  hasCustomerLawnCare: jest.fn(async () => false),
+}));
 
 // Minimal fake `property_preferences` table backed by one in-memory row.
 // None of the fields exercised here (parkingNotes/hoaEmail/accessNotes) are
@@ -67,6 +73,7 @@ jest.mock('../models/db', () => {
 
 const express = require('express');
 const db = require('../models/db');
+const { hasCustomerLawnCare } = require('../services/lawn-health-shared');
 
 const app = express();
 app.use('/api/property', require('../routes/property'));
@@ -217,7 +224,7 @@ describe('PUT /api/property/preferences — the sprinkler timer on file', () => 
   });
 
   test('a whole timer saves, comes back in the response, stamps no irrigation system and sends no email', async () => {
-    const { status, body } = await putPrefs(X2_ON_APP);
+    const { status, body } = await putPrefs({ ...X2_ON_APP, controller_timer_seen: '||' });
     expect(status).toBe(200);
     expect(body.preferences).toMatchObject(X2_ON_APP);
     expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
@@ -252,7 +259,36 @@ describe('PUT /api/property/preferences — the sprinkler timer on file', () => 
       expect(body.error).toBe('The home on this account changed. Reload, then set the sprinkler timer again.');
       expect(timerOf(db._state.row)).toEqual([null, null, null]);
     }
-    expect((await putPrefs({ ...X2_ON_APP, confirmed_as_of: movedAt })).status).toBe(200);
+    expect((await putPrefs({ ...X2_ON_APP, confirmed_as_of: movedAt, controller_timer_seen: '||' })).status).toBe(200);
+    expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
+  });
+
+  // Pro-C picked over an X2, its save landed but the answer was lost, and Yes was tapped meanwhile: the retry names
+  // both timers the row may hold, and the row holding either one takes it.
+  test('after a save that may have landed, a change naming both timers saves over either one', async () => {
+    const answered = { irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: 'yes', controller_timer_seen: ['hunter|x2|', 'hunter|pro_c|'] };
+    for (const model of ['x2', 'pro_c']) {
+      db._state.row = { id: 'pref-1', customer_id: 'cust-1', irrigation_controller_brand: 'hunter', irrigation_controller_model: model, irrigation_controller_app: null };
+      expect((await putPrefs(answered)).status).toBe(200);
+      expect(timerOf(db._state.row)).toEqual(['hunter', 'pro_c', 'yes']);
+    }
+  });
+
+  test('a page that showed another timer cannot set one: the timer changed while it was open', async () => {
+    db._state.row = { id: 'pref-1', customer_id: 'cust-1', irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
+    for (const seen of [{ controller_timer_seen: 'hunter|x2|' }, {}]) {
+      const { status, body } = await putPrefs({ ...X2_ON_APP, ...seen });
+      expect(status).toBe(400);
+      expect(body.error).toBe('The sprinkler timer on this account changed while this page was open. Reload, then set it again.');
+      expect(timerOf(db._state.row)).toEqual(['rain_bird', null, null]);
+    }
+    expect((await putPrefs({ ...X2_ON_APP, controller_timer_seen: 'rain_bird||' })).status).toBe(200);
+    expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
+    // That save landed but its answer was lost: the page sends it again, with the timer it showed before it. The row
+    // already holds this timer, so the retry is no conflict.
+    const retry = await putPrefs({ ...X2_ON_APP, controller_timer_seen: 'rain_bird||' });
+    expect(retry.status).toBe(200);
+    expect(retry.body.rejected).toBeUndefined();
     expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
   });
 
@@ -263,5 +299,29 @@ describe('PUT /api/property/preferences — the sprinkler timer on file', () => 
     }
     const x2Columns = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
     expect(propertyChangeItems(x2Columns, clearedControllerTimer())).toEqual([]);
+  });
+});
+
+// The sprinkler timer card is a lawn surface: it follows the Lawn Health card's rule (owner ruling 2026-08-28, in
+// lawn-health-shared), never the tier / turf-type shortcut that Weekly Inches keeps. A tier counts any two services,
+// and a pest-only home can have a turf type on file.
+describe('GET /api/property/preferences — who sees the sprinkler timer card', () => {
+  const getPrefs = async () => (await fetch(`${base}/api/property/preferences`)).json();
+
+  test('a tier and a turf type show Weekly Inches but not the card; lawn care shows the card', async () => {
+    Object.assign(mockCustomer, { waveguard_tier: 'Gold', lawn_type: 'St. Augustine' });
+    try {
+      hasCustomerLawnCare.mockResolvedValueOnce(false);
+      expect(await getPrefs()).toMatchObject({ hasLawnCare: true, hasLawnService: false });
+      expect(hasCustomerLawnCare).toHaveBeenCalledWith('cust-1');
+      db._state.row = { id: 'pref-1', customer_id: 'cust-1', irrigation_system: true };
+      hasCustomerLawnCare.mockResolvedValueOnce(true);
+      expect(await getPrefs()).toMatchObject({ hasLawnCare: true, hasLawnService: true });
+      // A failed lookup hides the card and keeps the page.
+      hasCustomerLawnCare.mockRejectedValueOnce(new Error('db down'));
+      expect(await getPrefs()).toMatchObject({ hasLawnCare: true, hasLawnService: false });
+    } finally {
+      Object.assign(mockCustomer, { waveguard_tier: null, lawn_type: null });
+    }
   });
 });

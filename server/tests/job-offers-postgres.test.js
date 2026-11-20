@@ -71,10 +71,16 @@ jest.setTimeout(120000);
   // The version a read of the link shows: what the page sends back with each answer.
   const shownVersion = async (token) => (await JobOffers.publicView(token)).version;
 
+  // Presses Send as the page does: with the draft's hash and the offers out the owner's read showed (outStamp).
+  async function sendAsPage(applicationId, offerId, draftHash) {
+    const { outStamp } = await JobOffers.adminPanel(applicationId, actor());
+    return JobOffers.sendOffer(applicationId, offerId, actor(), draftHash, new Date(), { expectedOut: outStamp });
+  }
+
   // Saves the default draft and presses Send on exactly the preview the draft's hash names.
   async function sendNew(app) {
     const draft = await JobOffers.saveDraft(app.id, {}, actor());
-    return JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash);
+    return sendAsPage(app.id, draft.id, draft.draftHash);
   }
 
   async function newApplication(over = {}) {
@@ -140,7 +146,7 @@ jest.setTimeout(120000);
     test('409 TERMS_NOT_ISSUED names the blockers and leaves the draft a draft', async () => {
       const app = await newApplication();
       const offer = await JobOffers.saveDraft(app.id, {}, actor());
-      await expect(JobOffers.sendOffer(app.id, offer.id, actor(), offer.draftHash)).rejects.toMatchObject({ status: 409, code: 'TERMS_NOT_ISSUED' });
+      await expect(sendAsPage(app.id, offer.id, offer.draftHash)).rejects.toMatchObject({ status: 409, code: 'TERMS_NOT_ISSUED' });
       expect((await root('job_offers').where({ id: offer.id }).first()).status).toBe('draft');
       expect(mockSendStageComms).not.toHaveBeenCalled();
     });
@@ -173,7 +179,7 @@ jest.setTimeout(120000);
     test('send freezes the offer, moves the application to offer, texts and emails once, and refuses a replay', async () => {
       const app = await newApplication();
       const draft = await JobOffers.saveDraft(app.id, {}, actor());
-      const sent = await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash);
+      const sent = await sendAsPage(app.id, draft.id, draft.draftHash);
       expect(sent.comms).toEqual({ sms: { outcome: 'sent', code: null }, email: { outcome: 'sent', code: null } });
       expect(sent.offer).toMatchObject({ status: 'sent', sentByName: 'Test Owner', payDayLine: 'Paid weekly. Pay day is Friday for the week ending the prior Sunday.' });
       expect(sent.offer.offerUrl).toMatch(/\/careers\/offer\/[0-9a-f]{64}$/);
@@ -196,29 +202,49 @@ jest.setTimeout(120000);
       expect(opts.vars.offer_link).toContain(row.token);
       expect(await opts.stillEligible()).toBe(true);
 
-      await expect(JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash)).rejects.toMatchObject({ status: 409, code: 'OFFER_NOT_DRAFT' });
+      await expect(sendAsPage(app.id, draft.id, draft.draftHash)).rejects.toMatchObject({ status: 409, code: 'OFFER_NOT_DRAFT' });
       expect(mockSendStageComms).toHaveBeenCalledTimes(1);
     });
 
     test('an applicant with no phone and no email cannot be sent an offer', async () => {
       const app = await newApplication({ contact_snapshot: JSON.stringify({ name: 'Casey Morgan' }) });
       const draft = await JobOffers.saveDraft(app.id, {}, actor());
-      await expect(JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash)).rejects.toMatchObject({ status: 409, code: 'NO_CONTACT' });
+      await expect(sendAsPage(app.id, draft.id, draft.draftHash)).rejects.toMatchObject({ status: 409, code: 'NO_CONTACT' });
     });
 
-    test('a comms failure after the commit leaves the offer sent and reports the channels as failed', async () => {
+    test('the offer read names every channel Send tries, by the rule the send uses, masked', async () => {
+      // A number too short to mask is still on file, so the send tries it: the read names it as '***'.
+      const app = await newApplication({ contact_snapshot: JSON.stringify({ name: 'Casey Morgan', phone: '555-01', email: 'Casey.Morgan@Example.test' }) });
+      expect((await JobOffers.adminPanel(app.id, actor())).sendTo).toEqual({ sms: '***', email: 'C***@example.test' });
+      const draft = await JobOffers.saveDraft(app.id, {}, actor());
+      mockSendStageComms.mockClear();
+      await sendAsPage(app.id, draft.id, draft.draftHash);
+      expect(mockSendStageComms.mock.calls[0][2]).toMatchObject({ sms: true, email: true });
+      const emailOnly = await newApplication({ contact_snapshot: JSON.stringify({ name: 'Sam Lee', email: 'sam@example.test' }) });
+      expect((await JobOffers.adminPanel(emailOnly.id, actor())).sendTo).toEqual({ sms: null, email: 's***@example.test' });
+    });
+
+    test('a comms failure after the commit leaves the offer sent and reports each channel it tried as uncertain', async () => {
+      // The send threw partway, so the text may already have gone out: no channel reads as failed.
       const app = await newApplication();
       const draft = await JobOffers.saveDraft(app.id, {}, actor());
       mockSendStageComms.mockRejectedValueOnce(new Error('boom'));
-      const sent = await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash);
+      const sent = await sendAsPage(app.id, draft.id, draft.draftHash);
       expect(sent.offer.status).toBe('sent');
-      expect(sent.comms.sms.outcome).toBe('failed');
+      expect(sent.comms).toEqual({ sms: { outcome: 'uncertain', code: 'comms_threw' }, email: { outcome: 'uncertain', code: 'comms_threw' } });
+      // A channel with nothing on file was not tried.
+      const textOnly = await newApplication({ contact_snapshot: JSON.stringify({ name: 'Sam Lee', phone: '(941) 555-0101' }) });
+      const second = await JobOffers.saveDraft(textOnly.id, {}, actor());
+      mockSendStageComms.mockRejectedValueOnce(new Error('boom'));
+      expect((await sendAsPage(textOnly.id, second.id, second.draftHash)).comms).toEqual({
+        sms: { outcome: 'uncertain', code: 'comms_threw' }, email: { outcome: 'not_requested', code: null },
+      });
     });
 
     test('revise leaves the old offer out until the new draft is sent; sending supersedes it', async () => {
       const app = await newApplication();
       const draft = await JobOffers.saveDraft(app.id, {}, actor());
-      const sent = await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash);
+      const sent = await sendAsPage(app.id, draft.id, draft.draftHash);
       const oldToken = (await root('job_offers').where({ id: draft.id }).first()).token;
 
       await expect(JobOffers.saveDraft(app.id, {}, actor())).rejects.toMatchObject({ status: 409, code: 'OFFER_ALREADY_OPEN' });
@@ -227,7 +253,7 @@ jest.setTimeout(120000);
       expect((await root('job_offers').where({ id: draft.id }).first()).status).toBe('sent');
       expect((await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor())).id).toBe(revised.id);
 
-      const resent = await JobOffers.sendOffer(app.id, revised.id, actor(), revised.draftHash);
+      const resent = await sendAsPage(app.id, revised.id, revised.draftHash);
       expect(resent.offer.status).toBe('sent');
       const old = await root('job_offers').where({ id: draft.id }).first();
       expect(old).toMatchObject({ status: 'superseded', superseded_by_id: revised.id });
@@ -236,6 +262,131 @@ jest.setTimeout(120000);
       expect(view.terms).toBeUndefined();
       expect(view.message).toMatch(/^This offer was updated\. Please use the newest link /);
       expect((await root('job_applications').where({ id: app.id }).first()).status_history.at(-1).note).toBe('Updated job offer sent');
+    });
+
+    test('the offer read names the offer a Send of the revision replaces, while its link still works', async () => {
+      const app = await newApplication();
+      const draft = await JobOffers.saveDraft(app.id, {}, actor());
+      expect((await JobOffers.adminPanel(app.id, actor())).sendReplacesId).toBeNull();
+      const sent = await sendAsPage(app.id, draft.id, draft.draftHash);
+      expect((await JobOffers.adminPanel(app.id, actor())).sendReplacesId).toBeNull();
+      await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor());
+      expect((await JobOffers.adminPanel(app.id, actor())).sendReplacesId).toBe(sent.offer.id);
+      // Past its expiry the old link already says so: a Send stops no working link.
+      const later = new Date(Date.parse(sent.offer.expiresAt) + 60 * 1000);
+      expect((await JobOffers.adminPanel(app.id, actor(), later)).sendReplacesId).toBeNull();
+    });
+
+    // The page reads the application and the offers separately; the panel's own stage lets it see when its application
+    // read is behind the offer card. Both come from one read-only snapshot (here a savepoint inside the suite's
+    // transaction, which takes no isolation level: the options are checked as passed, on the db module the service reads).
+    test('the offer read returns the stage it read with the offers, from one read-only snapshot', async () => {
+      const app = await newApplication();
+      const spy = jest.spyOn(require('../models/db'), 'transaction');
+      try {
+        expect((await JobOffers.adminPanel(app.id, actor())).applicationStatus).toBe('reviewed');
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'repeatable read', readOnly: true });
+      } finally {
+        spy.mockRestore();
+      }
+      const sent = await sendNew(app);
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      expect((await JobOffers.adminPanel(app.id, actor())).applicationStatus).toBe('offer');
+      await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version: await shownVersion(token) });
+      expect(await JobOffers.adminPanel(app.id, actor())).toMatchObject({ applicationStatus: 'hired', current: { id: sent.offer.id, status: 'accepted' } });
+    });
+
+    test('a revision Send is refused when the offer out changed after the read, and nothing is replaced or sent', async () => {
+      const app = await newApplication();
+      const sent = await sendNew(app);
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor());
+      const read = await JobOffers.adminPanel(app.id, actor());
+      // The applicant asks for another start date after the owner's read; the revision's own hash is unchanged.
+      const wanted = addStaffWorkDays(JobOffers.suggestStartDate(), 14);
+      await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks', version: await shownVersion(token) });
+      mockSendStageComms.mockClear();
+      await expect(JobOffers.sendOffer(app.id, revised.id, actor(), revised.draftHash, new Date(), { expectedOut: read.outStamp }))
+        .rejects.toMatchObject({ status: 409, code: 'OFFERS_CHANGED' });
+      expect((await root('job_offers').where({ id: sent.offer.id }).first()).status).toBe('date_requested');
+      expect((await root('job_offers').where({ id: revised.id }).first()).status).toBe('draft');
+      expect(mockSendStageComms).not.toHaveBeenCalled();
+      // A read after the request carries it, and that send goes through.
+      const fresh = await JobOffers.adminPanel(app.id, actor());
+      expect(fresh.outStamp).not.toBe(read.outStamp);
+      const resent = await JobOffers.sendOffer(app.id, revised.id, actor(), revised.draftHash, new Date(), { expectedOut: fresh.outStamp });
+      expect(resent.offer.status).toBe('sent');
+    });
+
+    test('a revision Send without the stamp of the offers out is refused, and nothing is replaced or sent', async () => {
+      const app = await newApplication();
+      const sent = await sendNew(app);
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor());
+      // The applicant asks for another start date; the revision's own hash is unchanged, so only the stamp can catch it.
+      const wanted = addStaffWorkDays(JobOffers.suggestStartDate(), 14);
+      await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks', version: await shownVersion(token) });
+      mockSendStageComms.mockClear();
+      await expect(JobOffers.sendOffer(app.id, revised.id, actor(), revised.draftHash))
+        .rejects.toMatchObject({ status: 400, code: 'OUT_STAMP_REQUIRED' });
+      expect((await root('job_offers').where({ id: sent.offer.id }).first()).status).toBe('date_requested');
+      expect((await root('job_offers').where({ id: revised.id }).first()).status).toBe('draft');
+      expect(mockSendStageComms).not.toHaveBeenCalled();
+    });
+
+    // The card's dated update names the asked day. On that day (Eastern) the server no longer takes it as a start date:
+    // the dated update is refused and writes nothing, so no draft starts on another day than its button named. A Revise
+    // without a date still falls back to the suggested start.
+    test('on the asked day, the dated update is refused and writes nothing; a Revise without a date falls back to the suggested start', async () => {
+      const app = await newApplication();
+      const sent = await sendNew(app);
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      const wanted = addStaffWorkDays(JobOffers.suggestStartDate(), 14);
+      await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks', version: await shownVersion(token) });
+      const onTheDay = new Date(`${wanted}T17:00:00Z`); // noon in Eastern time on the asked day
+      await expect(JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested', startDate: wanted }, actor(), onTheDay)).rejects.toMatchObject({
+        status: 409,
+        code: 'START_DATE_UNAVAILABLE',
+        message: 'The start date must be in the future. Nothing was changed. Use Revise to choose another start date.',
+      });
+      // A start date the request carries is checked even when empty: only a request without the field falls back.
+      for (const startDate of ['', null, false]) {
+        await expect(JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested', startDate }, actor()))
+          .rejects.toMatchObject({ status: 409, code: 'START_DATE_UNAVAILABLE' });
+      }
+      expect(await root('job_offers').where({ application_id: app.id, status: 'draft' })).toEqual([]);
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested' }, actor(), onTheDay);
+      expect(revised.startDate).toBe(JobOffers.suggestStartDate(onTheDay));
+    });
+
+    // The clock is read once the row locks are held. A dated update that waits for a lock across Eastern midnight is
+    // judged by the day it writes in. Here only Date is fake: it starts on the eve of the asked day, and every FOR UPDATE
+    // the revision sends moves it to the asked day, as a long lock wait would.
+    test('a dated update is judged by the clock after its row locks', async () => {
+      const app = await newApplication();
+      const sent = await sendNew(app);
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      const wanted = addStaffWorkDays(JobOffers.suggestStartDate(), 14);
+      await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks', version: await shownVersion(token) });
+      const onTheDay = new Date(`${wanted}T17:00:00Z`); // noon in Eastern time on the asked day
+      const eve = new Date(onTheDay.getTime() - 24 * 3600e3); // about noon the day before
+      const lockWait = (query) => {
+        if (/for update/i.test(query.sql)) jest.setSystemTime(onTheDay);
+      };
+      jest.useFakeTimers({
+        now: eve,
+        doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'],
+      });
+      database.on('query', lockWait);
+      try {
+        await expect(JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested', startDate: wanted }, actor()))
+          .rejects.toMatchObject({ status: 409, code: 'START_DATE_UNAVAILABLE' });
+      } finally {
+        database.removeListener('query', lockWait);
+        jest.useRealTimers();
+      }
+      expect(await root('job_offers').where({ application_id: app.id, status: 'draft' })).toEqual([]);
     });
 
     test('a date request becomes a revised offer at the requested date', async () => {
@@ -248,9 +399,32 @@ jest.setTimeout(120000);
       const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested' }, actor());
       expect(revised.startDate).toBe(wanted);
       expect(revised.stepEffectiveOn).toBe(JobOffers.stepDateFor(wanted));
-      const resent = await JobOffers.sendOffer(app.id, revised.id, actor(), revised.draftHash);
+      const resent = await sendAsPage(app.id, revised.id, revised.draftHash);
       expect(resent.offer.status).toBe('sent');
       expect((await root('job_offers').where({ id: sent.offer.id }).first()).status).toBe('superseded');
+    });
+
+    // Signing or declining the offer out closes a revision the owner was drafting meanwhile. That revision is newer but
+    // was never sent: the card shows the offer the applicant answered, and the closed revision is an earlier offer.
+    test.each(['signs', 'declines'])('when the applicant %s while a revision is in draft, the panel shows the answered offer, not the closed revision', async (answer) => {
+      const app = await newApplication();
+      const sent = await sendNew(app);
+      // Every row here is written in one transaction, so all share one created_at. Live, the revision comes in a later
+      // request: the offer was drafted an hour before it.
+      await root('job_offers').where({ id: sent.offer.id }).update({ created_at: new Date(Date.now() - 3600e3) });
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor());
+      // The answer carries the version the applicant's page showed (#8115: an answer without it is refused).
+      const version = await shownVersion(token);
+      const out = answer === 'signs'
+        ? await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version })
+        : await JobOffers.declineOffer(token, { version });
+      expect(out.refused).toBeUndefined();
+      const panel = await JobOffers.adminPanel(app.id, actor());
+      expect(panel.current).toMatchObject({ id: sent.offer.id, status: answer === 'signs' ? 'accepted' : 'declined' });
+      expect(panel.applicationStatus).toBe(answer === 'signs' ? 'hired' : 'withdrawn');
+      expect(panel.draft).toBeNull();
+      expect(panel.history.map((o) => [o.id, o.status])).toEqual([[revised.id, 'withdrawn']]);
     });
 
     test('withdraw sends nothing, leaves the application status, and the link says so', async () => {
@@ -408,16 +582,51 @@ jest.setTimeout(120000);
         expect((await root('job_offers').where({ id: offer.id }).first()).text_consent_at).toBeTruthy();
       });
 
-      // A body with no version is the contract these routes served before the version, so it is answered as before,
-      // even after a change its sender did not see. The page always sends one (CareersOfferPage.test.jsx).
+      // A write with no version is refused like one made on an older version (409, state open) and writes nothing, so
+      // no answer skips the check. The page always sends one (CareersOfferPage.test.jsx).
       test.each([
-        ['text choice', (t) => JobOffers.setTextConsent(t, false), { textConsent: false, version: expect.any(String) }],
-        ['sign', (t) => JobOffers.acceptOffer(t, { signedName: 'Jordan Rivera' }), expect.objectContaining({ state: 'signed' })],
-        ['date request', (t) => JobOffers.requestDate(t, { requestedStartDate: addStaffWorkDays(JobOffers.suggestStartDate(), 7) }), { state: 'date_requested' }],
-        ['decline', (t) => JobOffers.declineOffer(t, { reason: 'Took another job' }), { state: 'declined' }],
-      ])('a %s sent with no version is answered as before', async (_, answer, body) => {
+        ['text choice', (t) => JobOffers.setTextConsent(t, false)],
+        ['sign', (t) => JobOffers.acceptOffer(t, { signedName: 'Jordan Rivera' })],
+        ['date request', (t) => JobOffers.requestDate(t, { requestedStartDate: addStaffWorkDays(JobOffers.suggestStartDate(), 7) })],
+        ['decline', (t) => JobOffers.declineOffer(t, { reason: 'Took another job' })],
+      ])('a %s sent with no version is refused, and nothing is written', async (_, answer) => {
         await JobOffers.setTextConsent(token, true, await shownVersion(token));
-        expect((await answer(token)).body).toEqual(body);
+        const before = await root('job_offers').where({ id: offer.id }).first();
+        expect(await answer(token)).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await root('job_offers').where({ id: offer.id }).first()).toEqual(before);
+        expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
+      });
+
+      // The server signs only a frozen offer that carries every term the page shows, so no client (a tab from before
+      // the page's own check included) signs a gap. The answer is the same 409, and nothing is written.
+      test.each([
+        ['no hourly rate', { hourlyRate: null }],
+        ['an hourly rate that shows as $0.00', { hourlyRate: 0.001 }],
+        ['an hourly rate sent as text', { hourlyRate: '23.00' }],
+        ['a step rate with no step date', { stepEffectiveOn: null }],
+        ['no pay step fields', { stepRate: undefined, stepEffectiveOn: undefined }],
+        ['no job', { jobTitle: ' ' }],
+        ['no start date', { startDate: null }],
+        ['empty Terms', { terms: { title: 'Technician Terms', markdown: '' } }],
+      ])('a signature on a frozen offer with %s is refused, and nothing is written', async (_, gap) => {
+        const sent = await root('job_offers').where({ id: offer.id }).first();
+        const snapshot = typeof sent.snapshot === 'string' ? JSON.parse(sent.snapshot) : sent.snapshot;
+        await root('job_offers').where({ id: offer.id }).update({ snapshot: JSON.stringify({ ...snapshot, ...gap }) });
+        const version = await shownVersion(token); // read before the row: a view stamps last_viewed_at
+        const before = await root('job_offers').where({ id: offer.id }).first();
+        expect(await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version })).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await root('job_offers').where({ id: offer.id }).first()).toEqual(before);
+        expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
+      });
+
+      // A text choice equal to the stored one writes nothing either way, so with no version it answers as any resend
+      // does: the stored choice and the version on file.
+      test('a text choice equal to the stored one, sent with no version, writes nothing and answers the stored choice', async () => {
+        await JobOffers.setTextConsent(token, true, await shownVersion(token));
+        const version = await shownVersion(token); // read before the row: a view stamps last_viewed_at
+        const before = await root('job_offers').where({ id: offer.id }).first();
+        expect(await JobOffers.setTextConsent(token, true)).toEqual({ body: { textConsent: true, version } });
+        expect(await root('job_offers').where({ id: offer.id }).first()).toEqual(before);
       });
 
       test('past its expiry the offer reads expired before any sweep, and nothing can be signed', async () => {
@@ -448,11 +657,30 @@ jest.setTimeout(120000);
       // Another admin edits the rate after the owner opened the preview.
       const edited = await JobOffers.saveDraft(app.id, { hourlyRate: 24, draftId: draft.id, draftHash: draft.draftHash }, actor());
       expect(edited.draftHash).not.toBe(draft.draftHash);
-      await expect(JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash))
+      await expect(sendAsPage(app.id, draft.id, draft.draftHash))
         .rejects.toMatchObject({ status: 409, code: 'DRAFT_CHANGED', message: 'This draft changed after you opened it. Review the new preview, then send.' });
       expect((await root('job_offers').where({ id: draft.id }).first()).status).toBe('draft');
       expect(mockSendStageComms).not.toHaveBeenCalled();
-      expect((await JobOffers.sendOffer(app.id, draft.id, actor(), edited.draftHash)).offer.status).toBe('sent');
+      expect((await sendAsPage(app.id, draft.id, edited.draftHash)).offer.status).toBe('sent');
+    });
+
+    // The stage move's stamp versions each offer by updated_at. Two saves of one draft in the same millisecond (the
+    // clock frozen) still give two stamps, so a move confirmed on the first preview never discards the second save.
+    test('two saves of one draft in the same millisecond give the stage move two stamps', async () => {
+      const app = await newApplication();
+      const draft = await JobOffers.saveDraft(app.id, {}, actor());
+      const ALL_BUT_DATE = ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate',
+        'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'];
+      jest.useFakeTimers({ now: new Date(), doNotFake: ALL_BUT_DATE });
+      try {
+        const first = await JobOffers.saveDraft(app.id, { hourlyRate: 24, draftId: draft.id, draftHash: draft.draftHash }, actor());
+        const seen = (await JobOffers.liveOfferStake(root, app.id)).stamp;
+        const second = await JobOffers.saveDraft(app.id, { hourlyRate: 23.5, draftId: first.id, draftHash: first.draftHash }, actor());
+        expect(second.hourlyRate).toBe(23.5);
+        expect((await JobOffers.liveOfferStake(root, app.id)).stamp).not.toBe(seen);
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     test('a save over an open draft must name that draft and its hash, or it is refused and writes nothing', async () => {
@@ -492,6 +720,23 @@ jest.setTimeout(120000);
       expect(panel.letterPreview.markdown).not.toContain('Someone Else');
     });
 
+    test("another admin's draft preview names no one as the signer, and that admin's save still goes through", async () => {
+      const app = await newApplication();
+      const draft = await JobOffers.saveDraft(app.id, {}, actor());
+      const other = { id: owner.id, name: 'Office Admin', ownerAccount: false };
+      const read = await JobOffers.adminPanel(app.id, other);
+      expect(read.letterPreview.markdown).toContain("Signed by [owner's name], owner ·");
+      expect(read.letterPreview.markdown).toContain("- **Reports to:** [owner's name], owner");
+      expect(read.letterPreview.markdown).not.toContain('Office Admin');
+      expect(read.defaults.reportTo).toBe("[owner's name], owner");
+      // An owner account's read names that owner, as its Send will.
+      const own = await JobOffers.adminPanel(app.id, { ...actor(), ownerAccount: true });
+      expect(own.letterPreview.markdown).toContain('Signed by Test Owner, owner ·');
+      // The other admin's save is checked against the hash of their own read.
+      const saved = await JobOffers.saveDraft(app.id, { hourlyRate: 24, draftId: draft.id, draftHash: read.letterPreview.draftHash }, other);
+      expect(saved.hourlyRate).toBe(24);
+    });
+
     test('the panel names current (the offer out), draft (a revision in progress) and history', async () => {
       const app = await newApplication();
       const empty = await JobOffers.adminPanel(app.id, actor());
@@ -519,11 +764,11 @@ jest.setTimeout(120000);
       await JobOffers.withdrawOffer(app.id, first.id, actor(), { expectedStatus: 'sent' });
       const second = await JobOffers.saveDraft(app.id, {}, actor());
       expect(second).toMatchObject({ status: 'draft', supersedesId: null });
-      expect((await JobOffers.sendOffer(app.id, second.id, actor(), second.draftHash)).offer.status).toBe('sent');
+      expect((await sendAsPage(app.id, second.id, second.draftHash)).offer.status).toBe('sent');
 
       await root('job_offers').where({ id: second.id }).update({ expires_at: new Date(Date.now() - 60000) });
       const third = await JobOffers.saveDraft(app.id, {}, actor());
-      await JobOffers.sendOffer(app.id, third.id, actor(), third.draftHash);
+      await sendAsPage(app.id, third.id, third.draftHash);
       expect((await root('job_offers').where({ id: second.id }).first()).status).toBe('expired');
       expect((await root('job_offers').where({ id: third.id }).first()).status).toBe('sent');
     });
@@ -595,7 +840,7 @@ jest.setTimeout(120000);
     test('Revise keeps a negotiated raise date unless the start date changes, and a second Revise returns the draft untouched', async () => {
       const app = await newApplication();
       const first = await JobOffers.saveDraft(app.id, { stepEffectiveOn: addStaffWorkDays(JobOffers.stepDateFor(JobOffers.suggestStartDate()), 7) }, actor());
-      const sent = (await JobOffers.sendOffer(app.id, first.id, actor(), first.draftHash)).offer;
+      const sent = (await sendAsPage(app.id, first.id, first.draftHash)).offer;
       const token = (await root('job_offers').where({ id: sent.id }).first()).token;
       expect((await JobOffers.requestDate(token, { requestedStartDate: sent.startDate, version: await shownVersion(token) })).body)
         .toEqual({ state: 'date_requested' }); // asks for the very same day
@@ -635,7 +880,7 @@ jest.setTimeout(120000);
       await refuse(draft.id, { expectedStatus: 'draft', draftHash: 'f'.repeat(64) }, 'DRAFT_CHANGED', 409);
       expect((await root('job_offers').where({ id: draft.id }).first()).status).toBe('draft');
       // The stale "Discard draft": the draft was sent meanwhile, so the live offer must NOT be withdrawn.
-      await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash);
+      await sendAsPage(app.id, draft.id, draft.draftHash);
       await refuse(draft.id, { expectedStatus: 'draft', draftHash: draft.draftHash }, 'OFFER_CHANGED', 409);
       expect((await root('job_offers').where({ id: draft.id }).first()).status).toBe('sent');
       expect((await JobOffers.withdrawOffer(app.id, draft.id, actor(), { expectedStatus: 'sent' })).status).toBe('withdrawn');
@@ -663,7 +908,7 @@ jest.setTimeout(120000);
       const draft = await JobOffers.saveDraft(app.id, {}, actor());
       const withDraft = await JobOffers.adminPanel(app.id, actor());
       expect(withDraft.letterPreview).toMatchObject({ offerId: draft.id, draftHash: draft.draftHash });
-      const sent = (await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash)).offer;
+      const sent = (await sendAsPage(app.id, draft.id, draft.draftHash)).offer;
       const out = await JobOffers.adminPanel(app.id, actor());
       expect(out.letterPreview).toMatchObject({ offerId: sent.id, draftHash: null });
     });

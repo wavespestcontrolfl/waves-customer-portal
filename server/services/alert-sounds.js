@@ -25,6 +25,7 @@ const ALERT_SOUNDS = Object.freeze({
   new_lead_email: 'waves-lead.caf',
   bundle_quote_requested: 'waves-lead.caf',
   estimate_stuck: 'waves-lead.caf',
+  call_phone_yes: 'waves-lead.caf',
   customer_email_received: 'waves-email.caf',
   sms_operational_followup: 'waves-reminder.caf',
   call_commitment_overdue: 'waves-reminder.caf',

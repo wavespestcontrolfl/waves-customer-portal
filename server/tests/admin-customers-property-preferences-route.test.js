@@ -554,7 +554,7 @@ describe('the sprinkler timer on file: one record, saved whole (services/control
   const timerOf = (row) => [row?.irrigation_controller_brand ?? null, row?.irrigation_controller_model ?? null, row?.irrigation_controller_app ?? null];
 
   it('saves a whole timer, stamps no irrigation system, and audits the three field names', async () => {
-    const res = await putPrefs(X2_ON_APP);
+    const res = await putPrefs({ ...X2_ON_APP, controllerTimerSeen: '||' });
     expect(res.status).toBe(200);
     expect(timerOf(mockState.prefsRow)).toEqual(['hunter', 'x2', 'yes']);
     expect(mockState.prefsRow.irrigation_system).toBeUndefined();
@@ -589,8 +589,19 @@ describe('the sprinkler timer on file: one record, saved whole (services/control
       expect(res.body.error).toMatch(/home on this account changed/);
       expect(timerOf(mockState.prefsRow)).toEqual(['rain_bird', null, null]);
     }
-    expect((await putPrefs({ ...X2_ON_APP, confirmedAsOf: movedAt })).status).toBe(200);
+    expect((await putPrefs({ ...X2_ON_APP, confirmedAsOf: movedAt, controllerTimerSeen: 'rain_bird||' })).status).toBe(200);
     expect(timerOf(mockState.prefsRow)).toEqual(['hunter', 'x2', 'yes']);
+  });
+
+  it('a form that showed another timer cannot set one: the customer changed it while the form was open', async () => {
+    mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', irrigation_controller_brand: 'hunter', irrigation_controller_model: 'pro_c', irrigation_controller_app: null };
+    const res = await putPrefs({ ...X2_ON_APP, controllerTimerSeen: 'hunter|x2|yes', accessNotes: 'Side gate' });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected.map((r) => r.field)).toEqual(['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp']);
+    expect(res.body.rejected[0].message).toMatch(/changed while this page was open/);
+    expect(timerOf(mockState.prefsRow)).toEqual(['hunter', 'pro_c', null]);
+    expect(mockState.prefsRow.access_notes).toBe('Side gate');
+    expect(recordAuditEvent.mock.calls[0][0].metadata.fields).toEqual(['access_notes']);
   });
 });
 

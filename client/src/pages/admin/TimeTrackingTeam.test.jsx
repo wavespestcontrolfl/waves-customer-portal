@@ -149,6 +149,14 @@ describe('TimeTrackingPage pay-growth deep-link resolution', () => {
   });
 });
 
+describe('TimeTrackingPage protocol-audit deep-link resolution', () => {
+  it('opens for an admin and sends a technician (or no role) to Dashboard: it is an office-only tab', () => {
+    expect(resolveStaffTab('protocol-audit', null, 'admin')).toBe('protocol-audit');
+    expect(resolveStaffTab('protocol-audit', true, 'technician')).toBe('dashboard');
+    expect(resolveStaffTab('protocol-audit', true, null)).toBe('dashboard');
+  });
+});
+
 describe('TimeTrackingPage payroll deep-link resolution', () => {
   it('withholds the payroll tab while the admin status probe is pending, then resolves it', () => {
     expect(resolveStaffTab('payroll', false, 'admin', null)).toBeNull();

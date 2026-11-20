@@ -123,6 +123,7 @@ import { useCanAccessCalls } from "../../hooks/useStaffCallAccess";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import useSmsDraft from "../../hooks/useSmsDraft";
+import { holdReloadWhileSending } from "../../lib/reloadHolds";
 import { ActionFeedback } from "../../components/ui/ActionFeedback";
 import { OfficeLikeButton, SmsLikeBadges } from "../../components/admin/SmsLikeControls";
 import { smsLikeThread } from "../../lib/smsLikes";
@@ -2350,7 +2351,7 @@ export function SmsTab({
 
   // Upload one-or-more image files → S3 → mediaUrls. Called from the hidden
   // <input type="file">triggered by the + button.
-  const handleUpload = async (fileList) => {
+  const uploadAttachments = async (fileList) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
     const remaining = 10 - attachments.length;
@@ -2414,6 +2415,12 @@ export function SmsTab({
       setUploading(false);
     }
   };
+
+  // Photos are compressed before their upload starts, so no save is open yet,
+  // and the upload lands in the stored text draft even after a page move. Each
+  // upload holds an out-of-date tab's reload until it settles
+  // (lib/reloadHolds.js).
+  const handleUpload = (fileList) => holdReloadWhileSending("text-attachment", () => uploadAttachments(fileList));
 
   const removeAttachment = (idx) => {
     setAttachments((prev) => {

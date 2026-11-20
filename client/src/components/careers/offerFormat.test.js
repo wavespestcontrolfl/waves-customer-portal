@@ -5,6 +5,7 @@ import {
   formatLongDate,
   formatLongInstant,
   formatSentOn,
+  hasOfferFacts,
   payLine,
   signedNameValid,
   tomorrowET,
@@ -13,6 +14,41 @@ import {
 afterEach(() => vi.useRealTimers());
 
 describe('offerFormat', () => {
+  const facts = {
+    jobTitle: 'Pest Control Technician',
+    startDate: '2027-01-04',
+    hourlyRate: 23,
+    stepRate: 25,
+    stepEffectiveOn: '2027-04-05',
+    hoursLine: '40 paid hours each full week',
+    reportTo: 'Sam Carter, owner',
+    payDayLine: 'Every Friday',
+  };
+
+  it('signs only an offer that carries every term it shows', () => {
+    expect(hasOfferFacts(facts)).toBe(true);
+    expect(hasOfferFacts({ ...facts, stepRate: null, stepEffectiveOn: null })).toBe(true);
+    expect(hasOfferFacts({ ...facts, hourlyRate: 23.5, stepRate: 25.75 })).toBe(true);
+    expect(hasOfferFacts({ ...facts, hourlyRate: 0.01 })).toBe(true);
+    const { stepRate, stepEffectiveOn, ...withoutStep } = facts;
+    expect([stepRate, stepEffectiveOn]).toEqual([25, '2027-04-05']);
+    expect(hasOfferFacts(withoutStep)).toBe(false); // a read that leaves the step out may hide a raise
+    for (const missing of [
+      { stepRate: '', stepEffectiveOn: '' }, { stepRate: undefined, stepEffectiveOn: undefined },
+      { hourlyRate: '0.001' }, { hourlyRate: 0.004 }, { hourlyRate: '23.005' }, { stepRate: '0.001' },
+      { stepRate: 25.999 }, { hourlyRate: 1e21 }, { hourlyRate: Infinity }, { hourlyRate: '1e400' },
+      // The server sends rates as numbers and signs by the same rule (job-offers.js centsFact): text is not a rate.
+      { hourlyRate: '23.00' }, { hourlyRate: '23' }, { stepRate: '25.00' }, { hourlyRate: '23.000000000000001' },
+      { jobTitle: '' }, { hoursLine: null }, { reportTo: '  ' }, { payDayLine: undefined },
+      { startDate: null }, { startDate: '2027-02-30' }, { startDate: 'soon' },
+      { hourlyRate: null }, { hourlyRate: '' }, { hourlyRate: 0 }, { hourlyRate: -1 }, { hourlyRate: true },
+      { hourlyRate: 'twenty' }, { stepRate: 'x' }, { stepEffectiveOn: null }, { stepEffectiveOn: '2027-13-01' },
+      { stepRate: null }, { stepRate: '' }, { stepRate: undefined },
+    ]) {
+      expect(hasOfferFacts({ ...facts, ...missing })).toBe(false);
+    }
+  });
+
   it('formats pay with and without a step', () => {
     expect(payLine({ hourlyRate: '23.00', stepRate: '25.00', stepEffectiveOn: '2027-04-05' })).toBe('$23.00 an hour, $25.00 from Apr 5');
     expect(payLine({ hourlyRate: 23, stepRate: null, stepEffectiveOn: null })).toBe('$23.00 an hour');

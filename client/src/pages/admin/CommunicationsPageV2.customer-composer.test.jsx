@@ -5,15 +5,20 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SmsTab } from "./CommunicationsPageV2";
+import { reloadHoldNames } from "../../lib/reloadHolds";
 
 const speech = vi.hoisted(() => ({ callback: null, toggle: vi.fn() }));
 vi.mock("../../hooks/useSpeechDictation", () => ({ default: (callback) => {
   speech.callback = callback;
   return { listening: false, supported: true, toggle: speech.toggle };
 } }));
+const compression = vi.hoisted(() => ({ wait: null }));
 vi.mock("../../utils/imageCompression", async (original) => ({
   ...await original(),
-  fitImagesToBudget: async (files) => ({ ok: true, files }),
+  fitImagesToBudget: async (files) => {
+    await compression.wait;
+    return { ok: true, files };
+  },
 }));
 
 const customer = { id: "customer-a", phone: "+19415550100" };
@@ -44,7 +49,7 @@ beforeEach(() => {
     static revokeObjectURL = vi.fn();
   });
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); compression.wait = null; window.history.replaceState({}, "", "/"); });
 
 it("keeps inbox filters and log loading out of the Customer360 composer", () => {
   setup();
@@ -204,6 +209,21 @@ it("uploads signed attachment metadata, blocks scheduling MMS, and supports an i
   expect(bodyOf("/admin/communications/sms")).toMatchObject({ mediaUrls: [attachment.url], mediaAttachments: [attachment] });
   await waitFor(() => expect(onSent).toHaveBeenCalledOnce());
   expect(screen.queryByRole("button", { name: "Remove qa.png" })).not.toBeInTheDocument();
+});
+
+it("holds an out-of-date tab reload from the photo pick while it is compressed, until its upload lands in the stored draft", async () => {
+  let finishCompression;
+  compression.wait = new Promise((resolve) => { finishCompression = resolve; });
+  const attachment = { url: "https://example.invalid/qa.png", key: "qa/image", fileName: "qa.png", size: 4, mimeType: "image/png", attachmentToken: "synthetic-signed-token" };
+  responses["/admin/communications/attach"] = { attachments: [attachment] };
+  const { container } = setup();
+  fireEvent.change(container.querySelector('input[type="file"]'), { target: { files: [new File(["test"], "qa.png", { type: "image/png" })] } });
+  expect(reloadHoldNames()).toContain("text-attachment");
+  expect(requests("/admin/communications/attach")).toHaveLength(0);
+  await act(async () => finishCompression());
+  await screen.findByRole("button", { name: "Remove qa.png" });
+  await waitFor(() => expect(reloadHoldNames()).not.toContain("text-attachment"));
+  expect(requests("/admin/communications/attach")).toHaveLength(1);
 });
 
 it("schedules text for 8 AM Eastern tomorrow through the existing scheduler", async () => {

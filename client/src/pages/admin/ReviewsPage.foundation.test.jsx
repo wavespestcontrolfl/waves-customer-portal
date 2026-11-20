@@ -364,4 +364,183 @@ describe("Reviews workspace foundation", () => {
       body: { customerId: "customer-dana", result: "pause" },
     }));
   });
+
+  it("shows the monthly review cap and labels a payout over it (owner 2026-11-20 D4)", async () => {
+    const incentives = (policy, payouts) => vi.fn(async (url) => {
+      const path = String(url);
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) {
+        return response({ summary: { confirmedGoogleReviews: 1 }, payouts, leaderboard: [], policy });
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const payout = (id, patch) => ({
+      id, technicianName: "Sample Alpha", source: "google_review", amountCents: 1500, status: "earned",
+      earnedAt: "2027-01-10T15:00:00Z", ...patch,
+    });
+    vi.stubGlobal("fetch", incentives(
+      { enabled: true, amountCents: 1500, monthlyCapCount: 15 },
+      [payout("p-ok"), payout("p-over", { overMonthlyCap: true })],
+    ));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    expect(screen.getByText("Over monthly cap \u2014 not paid")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+
+    cleanup();
+    vi.stubGlobal("fetch", incentives({ enabled: true, amountCents: 500, monthlyCapCount: null }, []));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("No monthly cap")).toBeInTheDocument();
+
+    // A failed policy load shows Unavailable, never "No monthly cap".
+    cleanup();
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const path = String(url);
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) return response({ error: "Synthetic policy failure" }, 503);
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No monthly cap")).toBeNull();
+  }, 30000);
+
+  it("the cap card says Unavailable when a refresh fails after a successful load", async () => {
+    let failing = false;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const path = String(url);
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) {
+        return failing
+          ? response({ error: "Synthetic refresh failure" }, 503)
+          : response({ summary: { confirmedGoogleReviews: 1 }, payouts: [], leaderboard: [], policy: { enabled: true, amountCents: 1500, monthlyCapCount: 15 } });
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    failing = true;
+    await act(async () => refresh.callback());
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("15 reviews a month")).toBeNull();
+  }, 30000);
+
+  it("a queue-only failure still shows the real cap; an incentives failure shows Unavailable", async () => {
+    const mount = async (queueStatus, incentivesStatus) => {
+      vi.stubGlobal("fetch", vi.fn(async (url) => {
+        const path = String(url);
+        if (path.includes("/admin/reviews/incentives/attribution-queue?")) {
+          return queueStatus === 200 ? response({ items: [] }) : response({ error: "Synthetic queue failure" }, queueStatus);
+        }
+        if (path.includes("/admin/reviews/incentives?")) {
+          return incentivesStatus === 200
+            ? response({ summary: { confirmedGoogleReviews: 1 }, payouts: [], leaderboard: [], policy: { enabled: true, amountCents: 1500, monthlyCapCount: 15 } })
+            : response({ error: "Synthetic incentives failure" }, incentivesStatus);
+        }
+        if (path.includes("/admin/reviews")) {
+          return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      }));
+      render(<ReviewsPage />);
+      await screen.findByText("No reviews match your filters");
+      fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+      fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    };
+    await mount(503, 200);
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    cleanup();
+    await mount(200, 503);
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("15 reviews a month")).toBeNull();
+  }, 30000);
+
+  it("a successful Run Attribution replaces a failed or old cap on the card", async () => {
+    let incentivesOk = false;
+    let syncCap = 15;
+    const dashboard = (cap) => ({ summary: { confirmedGoogleReviews: 1 }, payouts: [], leaderboard: [], policy: { enabled: true, amountCents: 1500, monthlyCapCount: cap } });
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const path = String(url);
+      if (options.method === "POST" && path.includes("/admin/reviews/incentives/sync")) return response(dashboard(syncCap));
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) {
+        return incentivesOk ? response(dashboard(15)) : response({ error: "Synthetic policy failure" }, 503);
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    // A successful sync response carries the policy: the card shows the cap.
+    fireEvent.click(await screen.findByRole("button", { name: /Run Attribution/ }));
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    // A changed cap in the next sync response replaces the old one.
+    syncCap = 10;
+    fireEvent.click(screen.getByRole("button", { name: /Run Attribution/ }));
+    expect(await screen.findByText("10 reviews a month")).toBeInTheDocument();
+    expect(screen.queryByText("15 reviews a month")).toBeNull();
+    incentivesOk = true;
+  }, 30000);
+
+  it("Mark Pending Paid sends only the pending ids the button was enabled from, never over-cap rows", async () => {
+    const posts = [];
+    const payout = (id, patch) => ({
+      id, technicianName: "Sample Alpha", source: "google_review", amountCents: 1500, status: "earned",
+      earnedAt: "2027-01-10T15:00:00Z", ...patch,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const path = String(url);
+      if (options.method === "POST") {
+        posts.push({ path, body: JSON.parse(options.body || "{}") });
+        return response({ success: true, updated: 1, skippedOverCap: 2 });
+      }
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) {
+        return response({
+          summary: { confirmedGoogleReviews: 1 },
+          payouts: [payout("p-ok"), payout("p-over", { overMonthlyCap: true }), payout("p-paid", { status: "paid" })],
+          leaderboard: [],
+          policy: { enabled: true, amountCents: 1500, monthlyCapCount: 1 },
+        });
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mark Pending Paid/ }));
+    await waitFor(() => expect(posts.map((p) => p.path)).toEqual(["/api/admin/reviews/incentives/mark-paid"]));
+    expect(posts[0].body).toEqual({ ids: ["p-ok"] });
+    expect(await screen.findByText("Marked 1 paid; 2 skipped (over the monthly cap)")).toBeInTheDocument();
+  });
 });

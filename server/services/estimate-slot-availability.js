@@ -967,6 +967,16 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
 // remain work on this same appointment. Shared by the catalog resolution
 // below and the rain ranking, which must judge only the work done in the
 // slot (Codex #6127 r3). Idempotent on an already-narrowed profile.
+// Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
+// visit before the move-in date, which the customer can still change. Only
+// a stamped estimate reads its move; every other estimate skips the lookup.
+// The page's read and the 07:05 fill list's (scheduling/gap-candidates.js).
+async function estimateMoveInDate(estimate) {
+  return parseEstimateData(estimate.estimate_data)?.move?.moveId
+    ? (await require('./customer-moves').moveForEstimate(estimate.id))?.move_in_date || null
+    : null;
+}
+
 function appointmentServicesFor(profile = {}) {
   const services = Array.isArray(profile.services) ? profile.services : [];
   if (profile.reservationServiceMix || profile.serviceMode === 'one_time') return services;
@@ -1134,6 +1144,8 @@ async function resolveEstimateCoords(estimate, opts = {}) {
       customerAddress = [cust?.address_line1, cust?.city, cust?.state, cust?.zip].filter(Boolean).join(', ');
       customerCity = cust?.city || '';
     } catch (err) {
+      // strictReads: a failed read is the caller's to report, never "no stored location" (the 07:05 fill list).
+      if (opts.strictReads) throw err;
       logger.warn(`[estimate-slots] customer coord lookup failed: ${err.message}`);
     }
   }
@@ -2396,12 +2408,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // GATE_BOOKING_MAKE_ROOM on (hour mode): this list may carry one make-room hour; read at call time.
   const makeRoomMode = makeRoomModeFor(userOpts);
   const makeRoomOffer = makeRoomOffersOn(makeRoomMode);
-  // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
-  // visit before the move-in date, which the customer can still change. Only
-  // a stamped estimate reads its move; every other estimate skips the lookup.
-  const moveInDate = parseEstimateData(estimate.estimate_data)?.move?.moveId
-    ? (await require('./customer-moves').moveForEstimate(estimateId))?.move_in_date || null
-    : null;
+  const moveInDate = await estimateMoveInDate(estimate);
   const cacheKey = [
     estimateId,
     `move-in:${moveInDate || 'none'}`,
@@ -3067,6 +3074,12 @@ module.exports = {
   invalidateAllEstimates,
   resolveEstimateSlotProfile,
   resolveCatalogSlotProfile,
+  // The services one appointment performs: the rain ranking's and the fill list's (day-replan/fill-list.js) read.
+  appointmentServicesFor,
+  // The page's name for a set of services ("4x Pest Control + Lawn Care"): the fill list names the visit with it.
+  formatServiceProfileLabel,
+  // A new-home estimate's move-in date (no first visit before it): the page's and the fill list's read.
+  estimateMoveInDate,
   // The offer/commit collision guard, shared with the day-agreement shadow sweep.
   filterCollidingSlots,
   // Shared with slot-reservation so holds can be geo-stamped as route anchors.

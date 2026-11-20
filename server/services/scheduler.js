@@ -142,6 +142,23 @@ const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
 // watchdog's page.
 const SCHEDULED_SMS_CLAIM_JOB = 'scheduled-sms-claim';
 const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
+// Timed waits a replay's own check names when no provider send was tried. The
+// executor refunds the claimed attempt and waits until nextAllowedAt; the check
+// that names the wait also bounds it.
+//  - BILLING_TEXT_LEG_IN_FLIGHT: another attempt holds this notice's billing Text
+//    claim (messaging/billing-text-leg-dedupe.js). Spent on the bounded ladder, a
+//    claim live across three ticks would terminally block this replay, and the
+//    notice would be lost if that other attempt then ended not_sent. Past
+//    CLAIM_STALE_MS the claim answers with the non-retryable
+//    BILLING_TEXT_LEG_CLAIM_STALE instead of this hold.
+//  - CUSTOMER_MID_CHECKOUT: a queued estimate follow-up whose customer started
+//    checkout after the replay's recheck (estimate-follow-up.js
+//    followupTextProviderCheck). The wait lasts while the card step or a
+//    visit-time hold is live; then the check ends the text or lets it go.
+const TIMED_WAIT_HOLDS = {
+  BILLING_TEXT_LEG_IN_FLIGHT: { at: 'billing_text_in_flight_hold_at', why: 'waiting on an in-flight billing text for the same notice' },
+  CUSTOMER_MID_CHECKOUT: { at: 'customer_checkout_hold_at', why: 'waiting while the customer is mid-checkout' },
+};
 const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
@@ -1766,6 +1783,34 @@ function initScheduledJobs() {
   for (const slot of ['41 7 * * 0,2-6', '11 9 * * *', '41 13,17 * * *']) {
     cron.schedule(slot, () => runPermitReportCatchUpTick(), { timezone: 'America/New_York' });
   }
+
+  // =========================================================================
+  // MONDAY 10:36 AM ET — Weekly restaurant prospect list (owner 2026-11-19):
+  // new food licenses, ownership changes and violation-35 inspections in
+  // Manatee / Sarasota / Charlotte, less Punta Gorda (not served), from
+  // Florida's public restaurant files. Fills restaurant_prospects only:
+  // sends nothing, calls no AI, no gate. Kill = env
+  // DBPR_PROSPECT_SYNC_DISABLED. Minute 36, not :25: the hourly :25 check
+  // runs then. It is clear of the Monday 6:40-7:15 and the 8:40-9:40 deploy
+  // windows. Every write upserts by (kind, source_key), so a re-run after a
+  // deploy kill is harmless.
+  // =========================================================================
+  const runRestaurantProspectSyncTick = async () => {
+    const prospects = require('./prospects/dbpr-restaurants');
+    // The kill switch returns before the lease: a run that did nothing must not read as a success in job_health.
+    if (prospects.syncDisabled()) return;
+    await runExclusive('restaurant-prospect-sync', async () => {
+      const result = await prospects.syncRestaurantProspects();
+      // A failed file or a database failure must read as a FAILED run in job_health: rethrow (a count only) so
+      // runExclusive records it.
+      if (result.failures > 0) throw new Error(`restaurant prospect sync: ${result.failures} failure(s)`);
+    }).catch((err) => logger.error(`Restaurant prospect sync failed: ${err.message}`));
+  };
+  cron.schedule('36 10 * * 1', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
+  // The files hold one fiscal year and start over on July 1 (no CSV of the year before), so the last week of June
+  // runs daily: at most the last day of June goes unread. A Monday in that week runs once (one lease).
+  cron.schedule('36 10 24-30 6 *', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('restaurant-prospect-sync', () => runRestaurantProspectSyncTick());
 
   // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
@@ -4617,6 +4662,14 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Newsletter scheduler tick failed: ${err.message}`);
     }
+    // Then a planned Waves Pest Insider issue that did not go out as its FYI copy said gets its
+    // one admin alert (settlePlannedIssues), retried each minute until it reaches the owner. One
+    // settler at a time: an issue's failure alert and a later tick's recovery of it never overlap.
+    try {
+      await runExclusive('pest-insider-settle', () => require('./newsletter-sender').settlePlannedIssues());
+    } catch (err) {
+      logger.error(`Pest Insider settle tick failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -5794,19 +5847,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEDNESDAYS 7:00AM + 1:00PM — Pest Insider shadow planner. Issues go out on the 1st and 3rd
+  // WEDNESDAYS 7:00AM + 1:00PM — Waves Pest Insider planner. Issues go out on the 1st and 3rd
   // Thursday of the month; the day before, this plans and builds the issue with the real builder
-  // and records the result in pest_insider_issues (status shadow, or skipped with the reason).
-  // Any other Wednesday it does nothing. The 1:00 PM run is the catch-up for a missed, failed or
-  // refused 7:00 AM tick: a built row is left alone, a skipped one is built again. It SENDS NOTHING:
-  // no email, no newsletter_sends row, no bell. The send path comes in the next PR and reads these rows.
+  // and records it in pest_insider_issues. Any other Wednesday it does nothing.
+  // GATE_PEST_INSIDER_AUTO_SEND off (default): the row only (shadow, or skipped with the reason);
+  // nothing is sent. On: the issue becomes a draft for its readers, and the proof step emails the
+  // owner an FYI copy and queues it for Thursday 7:00 AM ET. The 1:00 PM run is the catch-up for a
+  // missed, failed or refused 7:00 AM tick, and the last one (finalTick): an issue that still
+  // cannot go out then raises one admin notification, unless the proof step already raised one.
   // =========================================================================
-  for (const expression of ['0 7 * * 3', '0 13 * * 3']) {
+  for (const [expression, finalTick] of [['0 7 * * 3', false], ['0 13 * * 3', true]]) {
     cron.schedule(expression, async () => {
       try {
-        await runExclusive('pest-insider-shadow-issue', () => require('./pest-insider/schedule').runShadowIssue());
+        await runExclusive('pest-insider-issue-planner', () => require('./pest-insider/schedule').runIssuePlanner({ finalTick }));
       } catch (err) {
-        logger.error(`Pest Insider shadow planner failed: ${err.message}`);
+        logger.error(`Pest Insider planner failed: ${err.message}`);
       }
     }, { timezone: 'America/New_York' });
   }
@@ -7095,23 +7150,19 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} waiting on a street-level address hold — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
-          } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
-            // Another attempt holds this notice's billing Text claim
-            // (messaging/billing-text-leg-dedupe.js), so no provider send
-            // was tried. Refund the attempt like QUIET_HOURS_HOLD above:
-            // spent on the bounded ladder, a claim live across three ticks
-            // would terminally block this replay, and the notice would be
-            // lost if that other attempt then ends not_sent. Still bounded:
-            // past CLAIM_STALE_MS the claim answers with the non-retryable
-            // BILLING_TEXT_LEG_CLAIM_STALE instead of this hold.
-            const inFlightRetryAt = new Date(smsResult.nextAllowedAt);
+          } else if (TIMED_WAIT_HOLDS[smsResult.code] && smsResult.nextAllowedAt) {
+            // A timed wait the replay's own check named (TIMED_WAIT_HOLDS):
+            // no provider send was tried, so refund the attempt like
+            // QUIET_HOURS_HOLD above and wait until nextAllowedAt.
+            const { at: holdKey, why } = TIMED_WAIT_HOLDS[smsResult.code];
+            const waitRetryAt = new Date(smsResult.nextAllowedAt);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',
-              scheduled_for: inFlightRetryAt,
+              scheduled_for: waitRetryAt,
               updated_at: completedAt,
               metadata: db.raw(`
                 COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-                  'billing_text_in_flight_hold_at', ?::timestamptz,
+                  ?::text, ?::timestamptz,
                   'scheduled_sms_attempts',
                   GREATEST(
                     CASE
@@ -7122,9 +7173,9 @@ function initScheduledJobs() {
                     0
                   )
                 )
-              `, [completedAt]),
+              `, [holdKey, completedAt]),
             });
-            logger.info(`[scheduled-sms] ${msg.id} waiting on an in-flight billing text for the same notice — rescheduled for ${inFlightRetryAt.toISOString()} (attempt refunded)`);
+            logger.info(`[scheduled-sms] ${msg.id} ${why} — rescheduled for ${waitRetryAt.toISOString()} (attempt refunded)`);
           } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
             // MOVE_HOLD: the replay now names its visit (appointmentId, app
@@ -9329,6 +9380,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 10:36 AM ET — yearly review ask (GATE_REVIEW_YEARLY_ASK, owner 2026-11-20, Tech Rewards
+  // plan D6-R1). Runs every day, gate on or off: off only counts and logs the volume and writes
+  // nothing; on enrolls one ask per customer near their service anniversary through the normal
+  // review cadence (every guard applies there). A re-run the same day finds the yearly
+  // sequence and picks nobody.
+  cron.schedule('36 10 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('review-yearly-ask', () => require('./review-yearly-ask').runYearlyReviewAsk());
+    } catch (err) {
+      logger.error(`[review-yearly-ask] daily run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // EVERY 5 MIN — Automatic Google review replies. Rows the GBP sync queued
   // (jittered due time) are claimed atomically and drafted; 4-5★ post to
@@ -10472,8 +10537,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // EVERY 10 MIN — a call that BOOKED a pest visit while the customer had an open estimate (GATE_CALL_PHONE_YES_ACCEPT,
-  // checked each tick): files ONE admin card so the office accepts the estimate, and closes the cards that stopped being
-  // true. It accepts nothing and sends nothing. See server/services/call-phone-yes-accept.js.
+  // checked each tick): files ONE admin card so the office accepts the estimate, closes the cards that stopped being
+  // true, and rings the office's bell and phones for the open ones (call-phone-yes-bell.js). It accepts nothing and sends
+  // a customer nothing. See server/services/call-phone-yes-accept.js.
   cron.schedule('9,19,29,39,49,59 * * * *', async () => {
     if (!require('../config/feature-gates').callPhoneYesAcceptLive()) return;
     try {

@@ -19,6 +19,11 @@
  * a proof, and queues itself for its Tuesday 6:00 AM ET target once that
  * copy went out. A HOLD reply to the copy skips the week. Unset the switch
  * and the issue waits for an APPROVED reply again.
+ *
+ * GATE_PEST_INSIDER_AUTO_SEND (default OFF): the same FYI-and-queue path for a
+ * Waves Pest Insider issue the planner built (services/pest-insider/
+ * schedule.js links it from its pest_insider_issues row). It queues for the
+ * issue's own Thursday 7:00 AM ET, and a HOLD reply holds that issue.
  */
 
 const crypto = require('crypto');
@@ -32,7 +37,8 @@ const { requiresClaimValidation, isFlagshipType, PEST_INSIDER_TYPE } = require('
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
-const { pestInsiderProofLive, newsletterAutoSendLive } = require('../config/feature-gates');
+const { pestInsiderProofLive, newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
+const { issueContextForSend, moveIssueForSend } = require('./pest-insider/schedule');
 
 /**
  * Internal diagnostics panel rendered ABOVE the recipient preview in the
@@ -185,6 +191,21 @@ async function resolveFlagshipCalendarContext(send) {
   return { flagship: true, linkedCalendar, scheduledFor, valid };
 }
 
+// A Waves Pest Insider issue the planner built is linked from its
+// pest_insider_issues row; null for every other send, including a Pest Insider
+// draft made by hand in the composer (it keeps the old approval path).
+async function resolvePestInsiderIssueContext(send) {
+  if (send?.newsletter_type !== PEST_INSIDER_TYPE) return null;
+  return issueContextForSend(send);
+}
+
+// "Thursday, December 3 at 7:00 AM ET": when a planned issue sends.
+function issueSendTimeCopy(issueContext) {
+  const day = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric' })
+    .format(issueContext.scheduledFor);
+  return `${day} at 7:00 AM ET`;
+}
+
 /**
  * The mailbox the Gmail sync actually watches — approval replies MUST land
  * there or maybeHandleProofApproval never sees them. Reply-To on the proof
@@ -221,6 +242,11 @@ function maskEmail(email) {
 function parseProofToken(subject) {
   const m = PROOF_SUBJECT_RE.exec(String(subject || ''));
   return m ? m[1].toLowerCase() : null;
+}
+
+/** A token as sendNewsletterProof makes it (8 hex characters), the only form a reply's subject can carry. */
+function isProofToken(token) {
+  return /^[0-9a-f]{8}$/i.test(String(token || ''));
 }
 
 /**
@@ -310,6 +336,161 @@ function isHoldReply(text) {
 // (email-sync passes the stored emails row).
 function isAutoQueued(send) {
   return Boolean(send?.proof_approved_at) && !send.proof_approval_email_id;
+}
+
+/** A Gmail label list, from a parsed message (an array) or a stored emails row (jsonb). */
+function labelList(labelIds) {
+  if (Array.isArray(labelIds)) return labelIds;
+  try {
+    const parsed = JSON.parse(labelIds || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every address a copy of a planned issue's FYI went to, recorded with its row before each copy
+ * went out (recordFyiRecipient), as `diagnostics.fyiTo` { address: true }. A retry after a failed
+ * attempt keeps the token and may go to another address, so each one may HOLD the issue.
+ */
+function issueFyiAddresses(issue) {
+  let diagnostics = issue?.diagnostics;
+  if (typeof diagnostics === 'string') {
+    try { diagnostics = JSON.parse(diagnostics); } catch { diagnostics = null; }
+  }
+  const recorded = diagnostics?.fyiTo;
+  if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)) return [];
+  return Object.keys(recorded).map(normalizeEmail).filter(Boolean);
+}
+
+// Records the address a planned issue's FYI copy is about to go to, and the copy's text by digest
+// (fyiCopyDigest), before it goes out. Only while the issue is still linked and 'drafted': a draft
+// deleted in History while the copy rendered holds the issue and clears its link. Returns whether
+// the row was written.
+async function recordFyiRecipient(sendId, to, copyText) {
+  const written = await db('pest_insider_issues').where({ send_id: sendId, status: 'drafted' }).update({
+    diagnostics: db.raw(
+      "coalesce(diagnostics, '{}'::jsonb) || jsonb_build_object("
+        + "'fyiTo', coalesce(diagnostics->'fyiTo', '{}'::jsonb) || jsonb_build_object(?::text, true), "
+        + "'fyiCopies', coalesce(diagnostics->'fyiCopies', '{}'::jsonb) || jsonb_build_object(?::text, true))",
+      [normalizeEmail(to), fyiCopyDigest(copyText)],
+    ),
+  });
+  return Number(written) > 0;
+}
+
+/** Who may HOLD a planned issue, before the sender is verified: an approver, or an address its FYI copy went to (the current proof address when none was recorded). */
+function holdAddresses(fyiTos) {
+  return new Set([...approvalSenders(), ...(fyiTos.length ? fyiTos : [proofRecipient()])]);
+}
+
+/**
+ * Whether a reply's sender may HOLD a planned issue, verified rather than read from the From line
+ * a sender types: this mailbox's own account (Gmail's SENT label, which no outside sender can set),
+ * on mail addressed to this mailbox (a reply to the FYI copy goes to its Reply-To, this mailbox; a
+ * forward to someone else does not count; INBOX is not needed, since Send & Archive removes it), or
+ * one of holdAddresses (an approver, or an address the issue's FYI copy went to) whose message
+ * Gmail itself authenticated for its From domain (aligned DKIM or SPF pass in Google's own
+ * Authentication-Results, read strictly: inbox-hygiene.hasAlignedAuth). A draft never counts.
+ */
+function verifiedHoldSender(email, fyiTos) {
+  const labels = labelList(email?.label_ids);
+  if (labels.includes('DRAFT')) return false;
+  if (labels.includes('SENT')) {
+    const { extractEmailAddresses } = require('./email/email-customer-link');
+    return extractEmailAddresses([email.to_address, email.cc_address, email.bcc_address].filter(Boolean).join(','))
+      .includes(syncedApprovalMailbox());
+  }
+  const from = normalizeEmail(email?.from_address);
+  if (!from || !holdAddresses(fyiTos).has(from)) return false;
+  const { hasAlignedAuth } = require('./email/inbox-hygiene');
+  const { domainFromAddress } = require('./email/spam-blocker');
+  return hasAlignedAuth(email.authentication_results, domainFromAddress(from), { strict: true });
+}
+
+/**
+ * A planned issue's FYI copy as its text part reads, with no whitespace and case aside, so a line
+ * wrapped again on its way still matches: the issue's row records it with the address the copy goes
+ * to, before it goes out (recordFyiRecipient). SendGrid leaves that part as sent (no text click
+ * tracking, no subscription footer); it rewrites the HTML part's links and adds an open-tracking
+ * image, so the HTML part is not read.
+ */
+function fyiCopyDigest(text) {
+  return crypto.createHash('sha256').update(String(text || '').replace(/\s+/g, '').toLowerCase()).digest('hex');
+}
+
+/** The FYI copies a planned issue's row recorded, by digest (recordFyiRecipient). */
+function issueFyiCopies(issue) {
+  const recorded = issue?.diagnostics?.fyiCopies;
+  return recorded && typeof recorded === 'object' && !Array.isArray(recorded) ? recorded : {};
+}
+
+/**
+ * The FYI copy itself, wherever it lands (in this mailbox when the proof address is this mailbox, a
+ * group that relays it, or a rule that forwards it on): its text part is, word for word, a copy the
+ * issue's row recorded as it went out. It carries the token and the HOLD line, so whoever it comes
+ * from, it is never an answer to itself. Anything else reads differently and is read for a HOLD: a
+ * reply, whatever its subject, headers or layout, also one typed inside the copy. A copy changed on
+ * its way (a relay's footer) or never recorded is read for a HOLD too: that can only hold an issue,
+ * never send one.
+ */
+function isProofCopyItself(email, copies) {
+  return Boolean(email?.body_text) && copies[fyiCopyDigest(email.body_text)] === true;
+}
+
+/**
+ * A planned issue's HOLD, read one way by the reply handler and the send-time check: a reply to its
+ * FYI copy, not the copy itself (isProofCopyItself) and not a forward of it
+ * (email-strip.isForwardSubject: a forward passes the copy on, and its note, such as "please hold
+ * this for review", is not an answer to it), whose own text asks to stop.
+ */
+function isPlannedHoldReply(email, copies) {
+  const { isForwardSubject } = require('./email/email-strip');
+  return !isProofCopyItself(email, copies) && !isForwardSubject(email?.subject)
+    && isHoldReply(extractTopReplyText(email?.body_text || htmlReplyToText(email?.body_html)));
+}
+
+/** A HOLD reply to the FYI copy with this token (isPlannedHoldReply), from a verified sender. */
+function isVerifiedHold(email, token, fyiTos, copies) {
+  return parseProofToken(email?.subject) === token && isPlannedHoldReply(email, copies) && verifiedHoldSender(email, fyiTos);
+}
+
+/** More messages than this carrying one FYI copy's token: the search did not read them all. */
+const HOLD_SEARCH_CAP = 50;
+
+/**
+ * The send-time HOLD check for a planned issue whose FYI copy offered HOLD: is there a HOLD reply
+ * to any copy of it (every copy carries one token) from a verified sender (verifiedHoldSender)?
+ * The reply handler applies a HOLD as it reads one; this finds one it could not apply then (the
+ * proof gate off, the FYI address outside NEWSLETTER_PROOF_APPROVERS, a write that failed, a
+ * self-reply archived before the sync, which stores it as outbound, or mail the sync never
+ * stored). It reads two witnesses, the stored inbox (emails) and the mailbox itself (a Gmail
+ * search for the copy's token, Spam and Trash included), so a reply counts whether or not the
+ * sync stored it, through one rule. Throws when it cannot answer in full (a send with no valid
+ * token, Gmail not connected, an API error, more than HOLD_SEARCH_CAP results), so it never
+ * answers "no HOLD" without reading. `issue`: the planned issue row (the addresses its FYI copies went to).
+ */
+async function holdReplyOnRecord(send, issue = null) {
+  // Only this form can reach the Gmail query, and a reply names the issue by it.
+  if (!isProofToken(send?.proof_token)) throw new Error('its FYI copy has no valid token');
+  const token = send.proof_token.toLowerCase();
+  const fyiTos = issueFyiAddresses(issue);
+  const copies = issueFyiCopies(issue);
+  // Every FYI copy of this draft carries its token (a retry keeps it), so the search starts at the
+  // draft, not at the latest copy; an hour of margin covers clock differences.
+  const since = send.created_at ? new Date(new Date(send.created_at).getTime() - 60 * 60 * 1000) : null;
+  const stored = db('emails').where('subject', 'ilike', `%[PROOF-${token}]%`);
+  if (since) stored.where('received_at', '>=', since);
+  const rows = await stored.select('from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'label_ids', 'authentication_results');
+  if (rows.some((email) => isVerifiedHold(email, token, fyiTos, copies))) return true;
+  const gmail = require('./email/gmail-client');
+  const query = `subject:"PROOF-${token}"${since ? ` after:${Math.floor(since.getTime() / 1000)}` : ''}`;
+  // Spam and Trash too: a HOLD the spam filter moved, or one deleted after it was sent, still holds.
+  const { messages, truncated } = await gmail.listAllMessages(query, HOLD_SEARCH_CAP, { includeSpamTrash: true });
+  if (truncated) throw new Error(`more than ${HOLD_SEARCH_CAP} messages carry its FYI copy's token`);
+  const found = await Promise.all((messages || []).map(({ id }) => gmail.getMessage(id)));
+  return found.some((email) => isVerifiedHold(email, token, fyiTos, copies));
 }
 
 /**
@@ -425,6 +606,39 @@ function autoSendBannerText(recipientCount) {
   return `SENDS BY ITSELF — NO REPLY NEEDED\nThis issue goes to ${recipientCount} active subscribers Tuesday at 6:00 AM ET. To skip this week, reply HOLD, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
 }
 
+// The owner's copy of a Waves Pest Insider issue the auto-send switch queued. The HOLD deadline is
+// half an hour before the 7:00 AM send, so the reply has reached the mailbox when the send-time
+// check reads it (holdReplyOnRecord).
+function pestInsiderBannerHtml(recipientCount, issueContext) {
+  return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
+<p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Sends by itself — no reply needed</p>
+<p style="margin:0;font-size:14px;color:#1f2937;">This Waves Pest Insider issue goes to <strong>${recipientCount}</strong> readers <strong>${issueSendTimeCopy(issueContext)}</strong>. To skip this issue, reply <strong>HOLD</strong> by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.</p>
+</div>\n`;
+}
+
+function pestInsiderBannerText(recipientCount, issueContext) {
+  return `SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to ${recipientCount} readers ${issueSendTimeCopy(issueContext)}. To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
+}
+
+// Internal panel for a planned Waves Pest Insider issue (proof email only):
+// what the planner picked and who it goes to.
+function pestInsiderDiagnosticsHtml(issueContext) {
+  const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const { issue } = issueContext;
+  let diagnostics = issue.diagnostics || {};
+  if (typeof diagnostics === 'string') { try { diagnostics = JSON.parse(diagnostics); } catch { diagnostics = {}; } }
+  const audience = diagnostics.audience;
+  const audienceLine = audience
+    ? `Readers: ${esc(audience.recipients)} (${esc(audience.warm)} opened a Waves email in the last 90 days; ${esc(audience.heldOut)} customers held out to measure the issue)`
+    : 'Readers: count not recorded';
+  return `<div class="dm-box" style="margin:0 0 20px 0;padding:14px 16px;background:#EEF3F8;border:1px solid #C9D6E2;border-radius:8px;font-family:monospace;font-size:12px;line-height:1.6;color:#26364A;">
+<div style="font-weight:700;margin-bottom:6px;">INTERNAL DIAGNOSTICS — not sent to subscribers</div>
+Issue ${esc(issueContext.issueDate)} · sends ${esc(issueSendTimeCopy(issueContext))} (not after 10:00 AM ET)<br/>
+Fact ${esc(issue.fact_id || '—')} · What's this? ${esc(issue.species_slug || '—')} · Tool ${esc(issue.tool_id || 'none')}<br/>
+${audienceLine}
+</div>`;
+}
+
 async function countRecipients(send) {
   // Shared preflight (codex #3472 r3): runs the archived-link relink sweep
   // before counting, so a proof approval can't block on stale links the
@@ -434,11 +648,12 @@ async function countRecipients(send) {
 
 // Returns whether the notification was actually delivered — a caller that
 // records "the owner was told" must not take a swallowed failure for a
-// delivery (Pest Insider catch-up, codex round 6 P1).
-async function notifyProof(type, payload) {
+// delivery (Pest Insider catch-up, codex round 6 P1). `options`, when given,
+// go to triggerNotification (a dedupeKey: a retry finds the row already written).
+async function notifyProof(type, payload, options = null) {
   try {
     const { triggerNotification } = require('./notification-triggers');
-    const result = await triggerNotification(type, payload);
+    const result = await (options ? triggerNotification(type, payload, options) : triggerNotification(type, payload));
     // triggerNotification resolves with the delivery outcome rather than
     // throwing — { bellWritten: false, push: null, prefsUnavailable: true }
     // is a failure. Delivered = a bell row was written or a push went out.
@@ -472,7 +687,16 @@ async function releaseRefusedProofClaim(sendId, token, reason) {
  * weekly issue that passed every check gets an FYI copy and is queued once
  * the copy went out (queueAutoSendIssue).
  */
-function proofDelivery(calendarContext, recipientCount) {
+function proofDelivery(calendarContext, recipientCount, issueContext = null) {
+  // A planned Waves Pest Insider issue: sendNewsletterProof proofs it only with its switch on.
+  if (issueContext) {
+    return {
+      autoSend: true,
+      prefix: 'FYI',
+      bannerHtml: pestInsiderBannerHtml(recipientCount, issueContext),
+      bannerText: pestInsiderBannerText(recipientCount, issueContext),
+    };
+  }
   if (calendarContext.flagship && newsletterAutoSendLive()) {
     return { autoSend: true, prefix: 'FYI', bannerHtml: autoSendBannerHtml(recipientCount), bannerText: autoSendBannerText(recipientCount) };
   }
@@ -493,34 +717,48 @@ function proofDelivery(calendarContext, recipientCount) {
  * No approving email id: that is how the dispatcher and the reply handler
  * tell an auto-queued issue from a reply-approved one.
  */
-async function queueAutoSendIssue(send, token, claimedAt, calendarContext) {
+async function queueAutoSendIssue(send, token, claimedAt, calendarContext, issueContext = null) {
+  const queueSend = (conn) => conn('newsletter_sends')
+    .where({ id: send.id, proof_token: token, status: 'draft' })
+    .whereNull('proof_approved_at')
+    .whereRaw("date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)", [claimedAt])
+    .update({
+      status: 'scheduled',
+      scheduled_for: issueContext ? issueContext.scheduledFor : calendarContext.scheduledFor,
+      proof_approved_at: new Date(),
+      proof_approval_email_id: null,
+      proof_refused_at: null,
+      updated_at: new Date(),
+    });
   let queued = 0;
   try {
-    queued = await db('newsletter_sends')
-      .where({ id: send.id, proof_token: token, status: 'draft' })
-      .whereNull('proof_approved_at')
-      .whereRaw("date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)", [claimedAt])
-      .update({
-        status: 'scheduled',
-        scheduled_for: calendarContext.scheduledFor,
-        proof_approved_at: new Date(),
-        proof_approval_email_id: null,
-        proof_refused_at: null,
-        updated_at: new Date(),
+    if (issueContext) {
+      // A planned Waves Pest Insider issue is queued together with its planned row, in one
+      // transaction: the dispatcher sends only an issue whose row is scheduled, so a send queued
+      // alone would be stopped on Thursday after its FYI copy said it goes out. A row that is no
+      // longer drafted rolls the queueing back, and the owner is told below.
+      queued = await db.transaction(async (trx) => {
+        const moved = await queueSend(trx);
+        if (moved && !(await moveIssueForSend(send.id, ['drafted'], 'scheduled', { database: trx }))) {
+          throw new Error('its planned issue is no longer drafted');
+        }
+        return moved;
       });
-    if (queued) {
-      await db('newsletter_calendar').where({ id: calendarContext.linkedCalendar.id }).update({ status: 'scheduled', updated_at: new Date() });
+    } else {
+      queued = await queueSend(db);
+      if (queued) await db('newsletter_calendar').where({ id: calendarContext.linkedCalendar.id }).update({ status: 'scheduled', updated_at: new Date() });
     }
   } catch (err) {
     logger.error(`[newsletter-proof] queueing auto-send issue ${send.id} failed: ${err.message}`);
   }
+  let notified = false;
   if (!queued) {
-    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+    notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
-      errors: ['The FYI copy went out, but the issue changed before it could be queued, so it will not send this week.'],
+      errors: [`The FYI copy went out, but the issue changed before it could be queued, so it will not send ${issueContext ? 'by itself' : 'this week'}.`],
     });
   }
-  return Boolean(queued);
+  return { queued: Boolean(queued), notified };
 }
 
 /**
@@ -568,13 +806,24 @@ async function sendNewsletterProof(sendId) {
     }
   }
   const calendarContext = await resolveFlagshipCalendarContext(send);
+  const issueContext = await resolvePestInsiderIssueContext(send);
   // A held or skipped week stays skipped: a fresh proof would queue it again
   // under GATE_NEWSLETTER_AUTO_SEND, or let a reply approve a retired issue.
   if (calendarContext.linkedCalendar?.status === 'skipped') return { skipped: true, reason: 'week_skipped' };
+  // The same for a held Waves Pest Insider issue.
+  if (issueContext?.issue.status === 'held') return { skipped: true, reason: 'issue_held' };
+  // A planned issue is only ever proofed as an FYI copy, so its replies always follow the FYI
+  // rules (handlePlannedIssueReply). With its switch off nothing proofs or queues it.
+  if (issueContext && !pestInsiderAutoSendLive()) return { skipped: true, reason: 'auto_send_off' };
   if (!calendarContext.valid) {
     const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
     const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
     return { skipped: true, reason: 'calendar_target_invalid', errors, notified };
+  }
+  if (issueContext && !issueContext.valid) {
+    const errors = ['This Waves Pest Insider issue must go out on its own issue Thursday at 7:00 AM ET, and that time has passed.'];
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
+    return { skipped: true, reason: 'issue_target_invalid', errors, notified };
   }
   const selectionReference = calendarContext.flagship ? calendarContext.scheduledFor : new Date();
   const eventSelection = await validateFlagshipEventSelection(send, { reference: selectionReference });
@@ -603,9 +852,14 @@ async function sendNewsletterProof(sendId) {
   // our read and this write would otherwise be silently overwritten with
   // updated_at === proof_sent_at — masking the edit from the staleness
   // gate while we email a proof rendered from the pre-edit body.
-  const token = crypto.randomBytes(4).toString('hex');
+  // A planned issue keeps the token an earlier FYI attempt left (the failure release below keeps
+  // it), so every copy of its FYI carries one token: a copy SendGrid accepted before an error
+  // still names this issue, for the reply handler and for the send-time HOLD check.
+  const token = issueContext && isProofToken(send.proof_token)
+    ? send.proof_token.toLowerCase()
+    : crypto.randomBytes(4).toString('hex');
   const now = new Date();
-  const delivery = proofDelivery(calendarContext, recipientCount);
+  const delivery = proofDelivery(calendarContext, recipientCount, issueContext);
   const claimQuery = db('newsletter_sends')
     .where({ id: send.id, status: 'draft' })
     .whereNull('proof_sent_at');
@@ -625,16 +879,22 @@ async function sendNewsletterProof(sendId) {
   try {
     // Internal diagnostics render between the proof banner and the
     // recipient preview — proof email ONLY, never the list send.
-    const diagnosticsHtml = await buildProofDiagnosticsHtml(
-      send,
-      eventSelection.events,
-      calendarContext.scheduledFor,
-    );
+    const diagnosticsHtml = issueContext
+      ? pestInsiderDiagnosticsHtml(issueContext)
+      : await buildProofDiagnosticsHtml(send, eventSelection.events, calendarContext.scheduledFor);
     const { html, text } = await renderSendPreview({
       ...send,
       html_body: delivery.bannerHtml + diagnosticsHtml + (send.html_body || ''),
-      text_body: send.text_body ? delivery.bannerText + send.text_body : send.text_body,
+      // A planned issue's copy always has a text part, its banner first, also when the draft has no
+      // text body: its row records that part by digest (isProofCopyItself).
+      text_body: (send.text_body || issueContext) ? delivery.bannerText + (send.text_body || '') : send.text_body,
     }, to);
+    // Every address a copy of a planned issue's FYI goes to may HOLD it (verifiedHoldSender), and the
+    // copy itself never does (isProofCopyItself): both are recorded with its row before the copy goes
+    // out. A write that fails, or finds the issue no longer drafted, sends nothing.
+    if (issueContext && !(await recordFyiRecipient(send.id, to, text))) {
+      throw new Error('its planned issue is no longer drafted (its draft was deleted in History, or it was held)');
+    }
 
     const result = await sendgrid.sendOne({
       to,
@@ -658,7 +918,8 @@ async function sendNewsletterProof(sendId) {
 
     // The "reply APPROVED" bell is for a proof that waits on the owner; an
     // auto-send issue needs no one (its FYI copy is the record).
-    const queued = delivery.autoSend && await queueAutoSendIssue(send, token, now, calendarContext);
+    const queue = delivery.autoSend ? await queueAutoSendIssue(send, token, now, calendarContext, issueContext) : null;
+    const queued = Boolean(queue && queue.queued);
     if (!delivery.autoSend) {
       await notifyProof('newsletter_proof_sent', { sendId: send.id,
         subject: send.subject,
@@ -668,21 +929,59 @@ async function sendNewsletterProof(sendId) {
     }
 
     logger.info(`[newsletter-proof] proof sent for ${send.id} (token ${token}, queued ${queued}, messageId ${result?.messageId || 'n/a'})`);
-    return { sent: true, token, queued };
+    // An FYI copy that could not queue its issue also says whether the alert about that reached
+    // the owner (the Pest Insider planner's last tick reads it).
+    return { sent: true, token, queued, ...(queue && !queued ? { notified: queue.notified } : {}) };
   } catch (sendErr) {
     // Release OUR claim (token-scoped) so the catch-up tick can retry a
     // transient SendGrid failure instead of the week silently losing its
     // proof (an auto-send issue is not queued yet, so nothing else to undo).
+    // A planned issue keeps its token: SendGrid may have accepted the copy
+    // before the error (a timeout), and a HOLD reply to that copy must still
+    // name this issue. Its retry sends the same token.
     try {
       await db('newsletter_sends')
         .where({ id: send.id, proof_token: token })
-        .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+        .update({ ...(issueContext ? {} : { proof_token: null }), proof_sent_at: null, updated_at: new Date() });
     } catch (clearErr) {
       logger.error(`[newsletter-proof] failed to release proof claim for ${send.id}: ${clearErr.message}`);
     }
     logger.error(`[newsletter-proof] proof send failed for ${send.id}: ${sendErr.message}`);
     return { skipped: true, reason: 'proof_send_failed' };
   }
+}
+
+// A HOLD reply is read once (the inbox sync never retries it). When its writes fail, nothing
+// changed, so the owner is told that the issue may still send and how to stop it by hand.
+async function notifyHoldFailed(send, err) {
+  logger.error(`[newsletter-proof] HOLD for send ${send.id} failed: ${err.message}`);
+  await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+    subject: send.subject,
+    errors: [`The HOLD reply could not be applied (${String(err.message).slice(0, 200)}), so this issue may still send. To stop it, press Cancel schedule in Newsletter → History, or Delete if it shows as a draft.`],
+  });
+}
+
+// A hold word to a planned issue that stops nothing: in a forward of its FYI copy ('forwarded'), or
+// from a sender Gmail could not verify ('unverified'). The owner is told once per send and kind, so a
+// real HOLD sent that way (a forward, a relay that breaks DKIM) is not lost silently.
+const IGNORED_HOLD = {
+  forwarded: {
+    log: 'came in a forward of its FYI copy',
+    text: (who) => `A forward of the FYI copy from ${who} asks to hold this issue, but only a reply to the FYI copy holds it, so this issue still sends. To skip it, reply HOLD to the FYI copy, or press Cancel schedule in Newsletter → History`,
+  },
+  unverified: {
+    log: 'failed sender verification',
+    text: (who) => `A HOLD reply from ${who} was ignored: Gmail could not verify that this address sent it, so this issue still sends. If you sent it, reply HOLD from the inbox the FYI copy reached, or press Cancel schedule in Newsletter → History`,
+  },
+};
+async function ignorePlannedHold(send, from, kind) {
+  logger.warn(`[newsletter-proof] HOLD for planned issue send ${send.id} from ${maskEmail(from)} ${IGNORED_HOLD[kind].log} — ignored`);
+  await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+    subject: send.subject,
+    errors: [IGNORED_HOLD[kind].text(maskEmail(from))],
+    outcome: true,
+  }, { dedupeKey: `pest-insider-${kind}-hold:${send.id}` });
+  return true;
 }
 
 /**
@@ -697,17 +996,70 @@ async function holdAutoQueuedIssue(send, token, from) {
     logger.info(`[newsletter-proof] HOLD for send ${send.id} arrived while it was ${send.status} — nothing to stop`);
     return true;
   }
-  const held = await db('newsletter_sends')
-    .where({ id: send.id, proof_token: token, status: 'scheduled' })
-    .whereNotNull('proof_approved_at')
-    .whereNull('proof_approval_email_id')
-    .update({ status: 'draft', scheduled_for: null, proof_token: null, proof_approved_at: null, updated_at: new Date() });
+  // One transaction: the send goes back to draft only together with its skipped week and its held
+  // planned issue, so a failed write never leaves an issue queued under a draft.
+  const held = await db.transaction(async (trx) => {
+    const reverted = await trx('newsletter_sends')
+      .where({ id: send.id, proof_token: token, status: 'scheduled' })
+      .whereNotNull('proof_approved_at')
+      .whereNull('proof_approval_email_id')
+      .update({ status: 'draft', scheduled_for: null, proof_token: null, proof_approved_at: null, updated_at: new Date() });
+    if (!reverted) return false;
+    await trx('newsletter_calendar').where({ send_id: send.id }).update({ status: 'skipped', updated_at: new Date() });
+    // A held Waves Pest Insider issue stays held: the planner never proofs or queues it again.
+    if (send.newsletter_type === PEST_INSIDER_TYPE) {
+      await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'HOLD reply from the owner', database: trx });
+    }
+    return true;
+  }).catch(async (err) => { await notifyHoldFailed(send, err); return null; });
+  if (held === null) return true;
   if (!held) {
     logger.info(`[newsletter-proof] HOLD for send ${send.id} lost a race with the send — nothing to stop`);
     return true;
   }
-  await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'skipped', updated_at: new Date() });
   logger.info(`[newsletter-proof] send ${send.id} held by ${maskEmail(from)} — week skipped`);
+  return true;
+}
+
+/**
+ * A reply to a planned Waves Pest Insider issue's FYI copy (its pest_insider_issues row links the
+ * send). The issue sends itself on its own Thursday, so the copy offers HOLD only, and an issue
+ * the switch already queued was handled by holdAutoQueuedIssue. HOLD on a send that is not queued
+ * yet holds the planned row: the queueing needs that row drafted, so one still in flight rolls
+ * back, and a send queued in between goes back to draft here. APPROVED never sends it at another
+ * time, and the owner is told that the reply changed nothing.
+ */
+async function handlePlannedIssueReply(send, token, from, replyText) {
+  if (send.status !== 'draft') {
+    logger.info(`[newsletter-proof] reply for planned issue send ${send.id} arrived while it was ${send.status} — no change`);
+    return true;
+  }
+  if (isHoldReply(replyText)) {
+    // One transaction, the send row locked first, as the queueing locks it: a queueing in flight
+    // either commits first (and both rows go back here) or rolls back on the held row.
+    const held = await db.transaction(async (trx) => {
+      await trx('newsletter_sends').where({ id: send.id }).forUpdate().first('id');
+      const moved = await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'HOLD reply from the owner', database: trx });
+      if (moved) {
+        await trx('newsletter_sends')
+          .where({ id: send.id, proof_token: token, status: 'scheduled' })
+          .whereNotNull('proof_approved_at')
+          .whereNull('proof_approval_email_id')
+          .update({ status: 'draft', scheduled_for: null, proof_token: null, proof_approved_at: null, updated_at: new Date() });
+      }
+      return moved;
+    }).catch(async (err) => { await notifyHoldFailed(send, err); return null; });
+    if (held === null) return true;
+    logger.info(`[newsletter-proof] HOLD for planned issue send ${send.id} by ${maskEmail(from)}: ${held ? 'held' : 'nothing to hold'}`);
+    return true;
+  }
+  if (isApprovalReply(replyText)) {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+      subject: send.subject,
+      errors: ['Approved, but an APPROVED reply does not send a Waves Pest Insider issue: it sends only by itself, on its Thursday at 7:00 AM ET, once it is queued. Nothing changed.'],
+    });
+  }
+  logger.info(`[newsletter-proof] reply for planned issue send ${send.id} is not HOLD — no change`);
   return true;
 }
 
@@ -729,31 +1081,56 @@ async function maybeHandleProofApproval(email) {
   if (!token) return false;
 
   const from = normalizeEmail(email?.from_address);
-  // Ignore our own outbound proof (SendGrid copies can sync back in):
-  // a proof has no "Re:" and comes FROM the newsletter address — the
-  // send-side guard below (approved-text required) already makes it inert,
-  // but the sender allowlist is the real boundary. Sender is logged
-  // masked — full addresses in logs are PII.
-  if (!approvalSenders().includes(from)) {
-    logger.info(`[newsletter-proof] ignoring [PROOF-${token}] email from non-approver ${maskEmail(from)}`);
-    return false;
-  }
-
   const send = await db('newsletter_sends').where({ proof_token: token }).first();
-  if (!send) {
-    logger.warn(`[newsletter-proof] approval reply with unknown token ${token}`);
-    return false;
-  }
 
   // HTML-only replies go through the quote-aware converter — a naive tag
   // strip would flatten the quoted proof banner ("Reply APPROVED…") into
   // the checked text and let a non-approval reply match.
   const replyText = extractTopReplyText(email.body_text || htmlReplyToText(email.body_html));
 
+  // A planned Waves Pest Insider issue sends itself on its own Thursday: its own rules below. Its
+  // HOLD follows the send-time check's rules (isPlannedHoldReply, verifiedHoldSender): a reply, not
+  // a forward, from a verified sender, also an FYI address outside the approvers. A hold word from
+  // an approver or an FYI address in a forward, or in a message Gmail could not verify (anyone can
+  // type such an address into a From line), stops nothing, and the owner is told once.
+  const planned = send ? await resolvePestInsiderIssueContext(send) : null;
+  if (planned && isHoldReply(replyText)) {
+    // The FYI copy itself, back in this mailbox (it quotes the HOLD line): not an answer, and no
+    // warning. It is proof traffic, so the sync skips classification and auto-actions for it.
+    const copies = issueFyiCopies(planned.issue);
+    if (isProofCopyItself(email, copies)) {
+      logger.info(`[newsletter-proof] ignoring the FYI copy of planned issue send ${send.id} itself`);
+      return true;
+    }
+    const fyiTos = issueFyiAddresses(planned.issue);
+    const verified = verifiedHoldSender(email, fyiTos);
+    if (!verified && !holdAddresses(fyiTos).has(from)) {
+      logger.info(`[newsletter-proof] ignoring a HOLD for planned issue send ${send.id} from ${maskEmail(from)}, who may not hold it`);
+      return false;
+    }
+    if (!isPlannedHoldReply(email, copies)) return ignorePlannedHold(send, from, 'forwarded');
+    if (!verified) return ignorePlannedHold(send, from, 'unverified');
+  } else if (!approvalSenders().includes(from)) {
+    // Ignore our own outbound proof (SendGrid copies can sync back in):
+    // a proof has no "Re:" and comes FROM the newsletter address — the
+    // send-side guard below (approved-text required) already makes it inert,
+    // but the sender allowlist is the real boundary. Sender is logged
+    // masked — full addresses in logs are PII.
+    logger.info(`[newsletter-proof] ignoring [PROOF-${token}] email from non-approver ${maskEmail(from)}`);
+    return false;
+  }
+
+  if (!send) {
+    logger.warn(`[newsletter-proof] approval reply with unknown token ${token}`);
+    return false;
+  }
+
   // HOLD on an issue the auto-send switch queued skips the week (owner
   // 2026-10-30, option A). Checked before the duplicate guard below: an
   // auto-queued issue already carries proof_approved_at.
   if (isAutoQueued(send) && isHoldReply(replyText)) return holdAutoQueuedIssue(send, token, from);
+
+  if (planned) return handlePlannedIssueReply(send, token, from, replyText);
 
   if (send.proof_approved_at) {
     logger.info(`[newsletter-proof] send ${send.id} already approved — ignoring duplicate reply`);
@@ -957,11 +1334,15 @@ module.exports = {
   resolveFlagshipCalendarContext,
   maskEmail,
   parseProofToken,
+  isProofToken,
   extractTopReplyText,
   htmlReplyToText,
   isApprovalReply,
   isHoldReply,
+  holdReplyOnRecord,
+  fyiCopyDigest,
   renderSendPreview,
   sendNewsletterProof,
   maybeHandleProofApproval,
+  notifyProof,
 };

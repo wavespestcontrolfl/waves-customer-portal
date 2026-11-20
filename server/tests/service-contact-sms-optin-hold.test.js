@@ -145,6 +145,15 @@ describe('resolveServiceContactSmsRecipient', () => {
     await expect(resolveServiceContactSmsRecipient(CONTACT, { dbh })).rejects.toThrow('connection reset');
   });
 
+  test('failClosed: a lookup error is rethrown instead of falling back to the account holder', async () => {
+    const dbh = optinReader([], { error: new Error('connection reset') });
+    await expect(resolveServiceContactSmsRecipient(CONTACT, { dbh, failClosed: true })).rejects.toThrow('connection reset');
+    // A missing opt-in table reads as "no holds" for other callers; failClosed rethrows it.
+    const missing = Object.assign(new Error('relation "recipient_optin" does not exist'), { code: '42P01' });
+    await expect(resolveServiceContactSmsRecipient(CONTACT, { dbh: optinReader([], { error: missing }), failClosed: true })).rejects.toThrow('does not exist');
+    await expect(optinHeldPhoneKeys(['cust-1'], { dbh: optinReader([], { error: missing }) })).resolves.toEqual(new Map());
+  });
+
   test('a slot-1 phone that is the account holder\'s own number is never held', async () => {
     const own = { ...CONTACT, service_contact_phone: '941-555-0100' };
     const dbh = optinReader([{ customer_id: 'cust-1', phone_key: '9415550100' }]);
@@ -176,7 +185,8 @@ describe('send paths resolve the single recipient through the opt-in hold', () =
     const source = read('services/review-request.js');
     expect(source.match(/getServiceContactSmsRecipient\(/g).length).toBe(1);
     expect(source).toMatch(/const destinations = \[\.\.\.new Set\(\[getServiceContactSmsRecipient\(owner\)\.phone, owner\?\.phone\]/);
-    expect(source.match(/await resolveServiceContactSmsRecipient\(/g).length).toBe(4);
+    // 5th: smsRecipientReachable (the yearly picker's pre-enrollment check uses the same hold-aware resolver).
+    expect(source.match(/await resolveServiceContactSmsRecipient\(/g).length).toBe(5);
   });
 
   test('the staff review-request card pins and rechecks the same recipient the sender resolves', () => {

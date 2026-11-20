@@ -235,6 +235,12 @@ describe('contactDeclinesChannel (single-recipient resolvers: review outreach)',
     expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms')).toBe(true);
     const trx = Object.assign(() => builder(), { isTransaction: true });
     await expect(ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms', { dbh: trx })).rejects.toThrow('boom');
+    // failClosed (the yearly review picker): a read error throws instead of holding the contact.
+    await expect(ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms', { failClosed: true })).rejects.toThrow('boom');
+    // A missing table reads as "no per-contact choices" for other callers; failClosed rethrows it.
+    failWith = Object.assign(new Error('relation "contact_notification_prefs" does not exist'), { code: '42P01' });
+    expect(await ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms')).toBe(false);
+    await expect(ContactPrefs.contactDeclinesChannel('cust-1', SAM, 'sms', { failClosed: true })).rejects.toThrow('does not exist');
   });
 
   // The dispatch-boundary re-checks (review outreach, codex r27 P2) ask with

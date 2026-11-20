@@ -46,7 +46,7 @@ const ESTIMATE_COST_FALLBACKS = {
   pest_control: {
     serviceTypes: ['Quarterly Pest Control', 'Pest Control'],
     laborMin: 20,
-    materialPerVisit: 6.67,
+    materialPerVisit: 6.34,
     visitsPerYear: 4,
     areaField: 'homeSqFt',
   },
@@ -784,7 +784,10 @@ async function ensureTable() {
       { config_key: 'pest_footprint', name: 'Pest Footprint Modifiers', category: 'pest', sort_order: 2, data: JSON.stringify({ breakpoints: [{sqft:800,adj:-15},{sqft:1200,adj:-10},{sqft:1500,adj:-5},{sqft:1750,adj:-5},{sqft:2000,adj:0},{sqft:2500,adj:3},{sqft:3000,adj:6},{sqft:4000,adj:10},{sqft:5500,adj:16}] }) },
       { config_key: 'pest_features', name: 'Pest Feature Modifiers', category: 'pest', sort_order: 3, data: JSON.stringify({ indoor:15,pool_cage:8,pool_cage_small:5,pool_cage_medium:8,pool_cage_large:12,pool_cage_oversized:18,pool_no_cage:0,shrubs_heavy:6,shrubs_moderate:0,shrubs_light:-5,landscape_simple:-5,landscape_moderate:0,landscape_complex:3,near_water:3 }) },
       { config_key: 'pest_property_type', name: 'Pest Property Type', category: 'pest', sort_order: 4, data: JSON.stringify({ single_family:0,townhome_end:-8,townhome_interior:-12,duplex:-10,condo_ground:-18,condo_upper:-22 }) },
-      { config_key: 'pest_service_costs', name: 'Pest Service Cost Breakdown', category: 'pest', sort_order: 5, data: JSON.stringify({ chemicals:{ taurus_sc:{ bottle_price:95.00, bottle_oz:78, oz_per_service:4, cost_per_service:4.87 }, talak:{ bottle_price:41.57, bottle_oz:128, oz_per_service:4, cost_per_service:1.30 }, surfactant:{ cost:0.50 }}, labor:{ spray_minutes:10, sweep_minutes:10, total_on_site_minutes:20, rate_per_hour:35, on_site_labor_cost:11.67, drive_minutes:20, drive_labor_cost:11.67 }, direct_service_cost:17.84, fully_allocated_cost:30.01 }), description: 'Per-service cost breakdown including drive time' },
+      // Display only (pestVisitCostModel prices the visit). As on main, direct_service_cost is the two concentrates plus on-site labor
+      // (4.87 + 0.97 + 11.67), and fully_allocated_cost adds the surfactant and the drive labor (+ 0.50 + 11.67). The bifenthrin line
+      // moved from Talak (1.30) to Crosscheck Plus (0.97), and both totals moved by the same 0.33 (migration 20261119020000).
+      { config_key: 'pest_service_costs', name: 'Pest Service Cost Breakdown', category: 'pest', sort_order: 5, data: JSON.stringify({ chemicals:{ taurus_sc:{ bottle_price:95.00, bottle_oz:78, oz_per_service:4, cost_per_service:4.87 }, crosscheck_plus:{ bottle_price:30.90, bottle_oz:128, oz_per_service:4, cost_per_service:0.97 }, surfactant:{ cost:0.50 }}, labor:{ spray_minutes:10, sweep_minutes:10, total_on_site_minutes:20, rate_per_hour:35, on_site_labor_cost:11.67, drive_minutes:20, drive_labor_cost:11.67 }, direct_service_cost:17.51, fully_allocated_cost:29.68 }), description: 'Per-service cost breakdown including drive time' },
       { config_key: 'waveguard_tiers', name: 'WaveGuard Bundle Discounts', category: 'waveguard', sort_order: 10, data: JSON.stringify({ bronze:{min_services:1,discount:0},silver:{min_services:2,discount:0.10},gold:{min_services:3,discount:0.15},platinum:{min_services:4,discount:0.20} }) },
       { config_key: 'waveguard_membership', name: 'WaveGuard Membership Fee', category: 'waveguard', sort_order: 11, data: JSON.stringify({ fee:99, waived_with_prepay:true }) },
       { config_key: 'lawn_st_augustine', name: 'St. Augustine', category: 'lawn', sort_order: 20, data: JSON.stringify([[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]]) },
@@ -862,8 +865,8 @@ async function ensureTable() {
         products: {
           termidor_sc: { container_cost: 375.00, container_oz: 78, product_oz_per_finished_gallon_at_standard_rate: 0.8, product_oz_per_finished_gallon_at_high_rate: 1.6 },
           taurus_sc: { container_cost: 85.00, container_oz: 78, product_oz_per_finished_gallon_at_standard_rate: 0.8, product_oz_per_finished_gallon_at_high_rate: 1.6 },
-          bifen_it: { container_cost: 41.57, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1.0, product_oz_per_finished_gallon_at_high_rate: 2.0 },
-          talstar_p: { container_cost: 41.57, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1.0, product_oz_per_finished_gallon_at_high_rate: 2.0 },
+          bifen_it: { container_cost: 30.90, container_oz: 128, product_oz_per_finished_gallon_at_standard_rate: 1.0, product_oz_per_finished_gallon_at_high_rate: 2.0 },
+          talstar_p: { container_cost: 30.90, container_oz: 128, product_oz_per_finished_gallon_at_standard_rate: 1.0, product_oz_per_finished_gallon_at_high_rate: 2.0 },
         },
       }) },
       { config_key: 'onetime_boracare', name: 'Bora-Care Constants', category: 'one_time', sort_order: 7, data: JSON.stringify({ bc_gal: 91.98, bc_cov: 275, bc_equip: 17.50 }) },
@@ -899,8 +902,8 @@ async function ensureTable() {
         products: {
           termidor_sc: { container_cost: 174.72, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.5294 },
           taurus_sc: { container_cost: 95.00, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.5294 },
-          bifen_it: { container_cost: 41.57, container_oz: 96, product_oz_per_10_sqft: 1.0, margin_divisor: 0.5294 },
-          talstar_p: { container_cost: 41.57, container_oz: 96, product_oz_per_10_sqft: 1.0, margin_divisor: 0.5294 },
+          bifen_it: { container_cost: 30.90, container_oz: 128, product_oz_per_10_sqft: 1.0, margin_divisor: 0.5294 },
+          talstar_p: { container_cost: 30.90, container_oz: 128, product_oz_per_10_sqft: 1.0, margin_divisor: 0.5294 },
         },
       }) },
       { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing + Access Multipliers', category: 'one_time', sort_order: 9, data: JSON.stringify({ simple: 50, moderate: 95, advanced: 195, specialty_minimum: 275, inspection: 75, inspection_waived_with_service_optin: true, minimums_by_home_sqft: [{max_sqft:1500,minimum:395},{max_sqft:2500,minimum:595},{max_sqft:4000,minimum:895},{max_sqft:'Infinity',minimum:1295,custom_recommended:true}], story_multipliers: { one: 1.00, two: 1.15, three: 1.30 }, roof_multipliers: { shingle: 1.00, flat: 1.00, metal: 1.15, tile: 1.25, steep_or_fragile: 1.35 }, construction_multipliers: { block: 1.00, stucco: 1.05, frame: 1.10, mixed: 1.10 } }) },
@@ -1537,6 +1540,10 @@ router.get('/:key', async (req, res, next) => {
       // tells it whether to offer the Whole home seal scope. Present only while the gate is on.
       ...(req.params.key === 'rodent_waveguard' && require('../config/feature-gates').exclusionWholeHomeLive?.() === true
         ? { exclusionWholeHome: true } : {}),
+      // GATE_ROOF_ENTRY_READ (strict 'true' like its router): the estimator's startup read of this row tells it
+      // whether to show the staff Roof read panel. Present only while the gate is on.
+      ...(req.params.key === 'rodent_waveguard' && require('../config/feature-gates').roofEntryReadLive?.() === true
+        ? { roofEntryRead: true } : {}),
       // GATE_EXCLUSION_ROOF_STYLE_PRICING (strict 'true' like its reader): the estimator's startup read of this row
       // tells it whether to show the Roof style control. Present only while the gate is on.
       ...(req.params.key === 'rodent_waveguard' && require('../config/feature-gates').exclusionRoofStylePricingLive?.() === true

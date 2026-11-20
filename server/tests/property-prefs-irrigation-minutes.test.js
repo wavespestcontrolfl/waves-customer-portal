@@ -119,7 +119,10 @@ describe('property preferences — irrigation on by default', () => {
     }
     expect(src).toMatch(/const confirmFields = \(confirmedNow\.length && requestFresh\)/);
     const portal = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'pages', 'PortalPage.jsx'), 'utf8');
-    expect(portal).toMatch(/toSave\.confirmed_as_of = lastSavedRef\.current\?\.irrigationHomeChangedAt \?\? null;/);
+    // The stamp is the one the screen loaded with, never a newer one a save response reported (pre-push audit on #8107).
+    expect(portal).toMatch(/screenStampRef\.current = d\.preferences\?\.irrigationHomeChangedAt \?\? null;/);
+    expect(portal).toMatch(/toSave\.confirmed_as_of = screenStampRef\.current;/);
+    expect(portal).not.toMatch(/confirmed_as_of = lastSavedRef/);
     // gh-r26: the union is ONE atomic statement over the row's CURRENT value (no read-modify-write race with the move reset).
     expect(src).toMatch(/jsonb_array_elements_text\(COALESCE\(irrigation_confirmed_fields, '\[\]'::jsonb\) \|\| \?::jsonb\)/);
     expect(src).toMatch(/irrigation_confirmed_fields: trx\.raw\(/);
@@ -170,7 +173,9 @@ describe('property preferences — Weekly Inches eligibility', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/property.js'), 'utf8');
     expect(src).toMatch(/if \('irrigation_inches_per_week' in updates\) \{[\s\S]{0,400}eligible = await customerQualifiesForLawnInches\(req\.customer\);[\s\S]{0,600}res\.status\(503\)[\s\S]{0,300}if \(!eligible\) delete updates\.irrigation_inches_per_week;/);
     expect(src).toMatch(/customerQualifiesForLawnInches\(req\.customer\)\.catch\(/); // GET
-    expect(src).toMatch(/res\.json\(\{ preferences: camelFields, hasLawnCare, irrigationSuppressed, \.\.\.awayWatchPayload\(req\) \}\)/);
+    expect(src).toMatch(/hasCustomerLawnCare\(req\.customerId\)\.catch\(/); // GET, the timer card (a lawn surface)
+    expect(src).toMatch(/res\.json\(\{ preferences: camelFields, hasLawnCare, hasLawnService, irrigationSuppressed, \.\.\.awayWatchPayload\(req\) \}\)/);
+    expect(src).toMatch(/hasLawnCare,\n\s+hasLawnService,\n\s+irrigationSuppressed: false,/); // GET, no row yet
     expect(src).toMatch(/const irrigationSuppressed = fields\.irrigation_system === false;/);
   });
 });

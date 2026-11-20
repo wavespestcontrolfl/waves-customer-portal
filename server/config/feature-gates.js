@@ -29,16 +29,20 @@
  *   GATE_PORTAL_CHAT_CUSTOMER_CAP=true (security audit run 3, 2026-11-05: POST /api/ai/chat, the signed-in customer's paid AI chat, had no limit of its own beyond the broad global /api limiter, so one login could start thousands of flagship-model turns. On: each customer gets at most 10 chat turns a minute (in memory, per process) and 60 a day (Eastern day, counted in Postgres in public_llm_daily_usage, bucket portal-chat:<customerId>, so it survives deploys and holds across processes; PORTAL_CHAT_DAILY_CAP_PER_CUSTOMER overrides the 60). Counted after validation, before the model call; over a limit the customer gets a short canned reply (HTTP 200, no model call). A database error fails open to the minute limit. Read at call time via portalChatCustomerCapLive(), strict 'true', dark by default; off = unchanged, no database call. Owner flips it and approves the reply text.)
  *   GATE_AI_CREDIT_KEYS=true (owner 2026-10-29: the owner's Claude Max / ChatGPT Pro plans each give a monthly API credit that lands in its own API organization. With this on and ANTHROPIC_CREDIT_KEYS / OPENAI_CREDIT_KEYS set (comma-separated, one credit-only key per organization), Anthropic and OpenAI calls that carry the main key are tried on the credit keys first, in order, and fall back to the main key when a credit key runs out of credit, is rejected or is rate limited (paused in memory 6 h, 1 h or the retry-after time). Only stateless calls move (messages, count_tokens, chat completions, embeddings, moderations, images, audio, and /v1/responses with store:false); file, container, batch, session and streamed-body calls stay on the main key. One wrapper around globalThis.fetch installed at boot by server/services/llm/credit-key-pool.js, so a flip needs a redeploy. Strict 'true', dark by default; off = nothing wrapped, every call as before. Sends nothing to a customer.)
  *   GATE_REVIEW_ALREADY_REVIEWED=true (owner 2026-11-04 "1 + 2": in the completion panel a customer marked as already reviewed ("Left Google review", the mark every review ask already skips on) gets the review box off and greyed out, labeled "Already left a Google review" with the Eastern date of the newest linked live Google review, else the day the mark was set; the one-time recap box is unchanged. The first review ask also gets a second off reason, "Already left a review": the completion saves it on the visit record and marks the customer as reviewed in the same transaction, so no later visit asks again. Read at call time via reviewAlreadyReviewedLive(), strict 'true', dark by default; off = the box, the preview and the saved choice are byte for byte as before. Stops review texts to each customer a tech marks, so the owner flips it.)
+ *   GATE_REVIEW_LATE_CLOSE_ASK=true (an admin backdated quiet closeout within 3 days of the worked day still sends the normal review ask; owner 2026-11-20 D6 R3; off = today's quiet closeout)
+ *   GATE_REVIEW_ASK_RESULTS_VISIT=true (a recurring lawn customer is first asked for a review on the 3rd completed lawn visit, a recurring tree & shrub customer on the 2nd; owner 2026-11-20 D6 R2; off = every recurring visit asks as today)
  *   GATE_REVIEW_ASK_AFTER_REPORT=true (owner 2026-10-22: the same-day (Day 0) review-ask text goes out about 10 minutes after the service report text, for every service line, instead of the smart send window. Only a report sent as a text at completion anchors it: 10 minutes after that text, or 10 minutes after payment for a paid invoice. A report held for the morning moves the ask to 10 minutes after its 8 AM replay goes out as a text. A report sent by the Waves app, failed, blocked, skipped or unknown keeps the smart window. Cadence mode only (needs GATE_REVIEW_SEQUENCES): the legacy path ignores this gate. Covers a completion, a paid invoice and combined-visit packets; the ask goes at the first :14/:44 review send after the 10 minutes. The 8 AM-8 PM window, 72 h ask spacing, click guard, holds, opt-outs and explicit operator timing are unchanged. Read at call time; off unless exactly 'true'; off = today's smart window for new enrollments (an ask already planned keeps its time, at most ~10 minutes out).)
  *   GATE_LIVE_CALL_BACKUP_TRANSCRIPT=true (owner 2026-11-16 "ok build all", live-call suite part 10: when an answered inbound call has NO recording (Twilio holds none; the unrecorded-call watchdog rings for these), its live text from call_live_utterances becomes the call's transcript, labelled Agent:/Caller:, stored with provider twilio_realtime, and the normal pipeline runs on it: extraction, summary, follow-ups. Only the 5-minute missing-recording sweep starts it, after Twilio's lookup found no completed recording and 30 minutes after the call ended. A call WITH a recording never uses it, and a failed transcription of an existing recording stays no_transcription for the sweep to retry. Needs GATE_LIVE_CALL_TRANSCRIPTION on to have any text. Risk: the live text can carry the follow-ups that text a customer, so it ships dark. Read via isEnabled('liveCallBackupTranscript'), strict 'true'; off = a call with no recording ends no_transcription as before. Kill: delete the variable.)
  *   GATE_YARD_WRAPPED=true (owner 2026-10-31 perks round 4, build ask 2026-11-01: "Yard Wrapped", a year-in-review card for WaveGuard members on the Home tab of the customer app. From Dec 1 to Jan 31 (Eastern time) an active member with at least 3 performed visits in the year (the December year, so January still shows the year just ended) sees counts only: visits and the split by service line, the first and last tech-confirmed lawn score when there are two or more, up to 5 pests or weeds the year's products were logged for (each screened by customerCopyViolations), the technician who did the most visits, one lawn photo the app already serves, and the registered company name. A Share button hands the stats to the phone's share sheet. One read-only endpoint, GET /api/yard-wrapped. Read at call time via yardWrappedLive(), strict 'true', dark by default; off = the endpoint answers {enabled:false} with no database read and the card renders nothing, byte-identical to before. Sends nothing to anyone.)
  *   GATE_REVIEW_SENDER_EVERY_5_MIN=true (owner 2026-10-22: the review cadence sender runs every 5 minutes on its own offset (:04 ... :59) instead of :14/:44, so a due review text goes within 5 minutes. Same job and lock. Read at boot; off unless exactly 'true'; off = :14/:44 exactly as before.)
+ *   GATE_SHORT_CALL_RECORDING_SWEEP=true (owner 2026-11-19 "FIX": the 5-minute recording sweep, the restart-safe backstop for the in-memory processing timers that a deploy wipes, also takes a recording of 10 seconds or less on its first pass (a call never processed, or a pass that died) while its call is under 24 hours old. Before, the sweep took only recordings over 10 seconds, so a short call (often a cancel) that ended during a deploy never got a transcript (an 8-second cancel call on 2026-11-18). A short call that ended in no_transcription or extraction_failed is still not retried, and a finished one is not run again. The call-processing stall watchdog, the ops queue, the call-processing stats and the agent-control run list read the same length rule (config/call-extraction-retry.js). A short call older than 24 hours is never swept. It has a gate because each swept call is a paid transcription and extraction (estimate under $1 a month) and a processed call can text the caller (for example the voicemail text), so the owner flips it. Read at call time via shortCallRecordingSweepLive(), strict 'true', dark by default; off = every rule is byte-identical to before (over 10 seconds only). Kill: unset.)
  *   GATE_CALL_ENRICH_CODES_REQUIRE_ANI=true (a call writes gate / garage / lockbox codes and access notes to a customer's profile only when the call's caller ID is that customer's primary phone; a spoken callback number alone no longer does. Pets and internal notes are unchanged. Read at call time via callEnrichCodesRequireAniLive(), strict === 'true', dark by default; off = unchanged; sends nothing to a customer)
  *   GATE_BACKLINK_SIGNUP_URL_GUARD=true (security audit run 2, 2026-10-22: the backlink signup worker's Chromium opens only an http(s) URL whose host resolves to public IPv4, the model's signup_url must stay on the queued site, and a route guard aborts requests to blocked hostnames or literal non-public IPs. Read at call time via backlinkSignupUrlGuardLive(), strict 'true', dark by default; off = navigation exactly as before. Sends nothing to a customer.)
  *   GATE_EMAIL_AUTH_STRICT=true (inbound email trust: hasAlignedAuth parses only real Authentication-Results method results, and a vendor invoice books an expense only when the sender authenticated as its From domain; strict `=== 'true'`, read at call time by emailAuthStrictLive(); dark by default; sends nothing to a customer)
  *   GATE_DEDUPE_NO_UNVERIFIED_BACKFILL=true (the nightly duplicate auto-merge does not merge an untouched anonymous web-intake row whose typed email is not the kept customer's email; the pair stays on the Duplicates page for a manual merge; manual merges unchanged; strict opt-in read at call time by customer-dedupe.js; dark by default; sends nothing to a customer)
  *   GATE_NEWSLETTER_CLICK_BOUND=true (security audit run 2, 2026-10-22: the newsletter event link /api/public/newsletter/e/:token/:eventId redirects to the event's URL only when the token is a real delivery and the event is in that send's lineup (locked or alternate ids); any other pair goes to the homepage, so the portal host is not an open redirect; the target is the URL the send carried (newsletter_sends.event_url_snapshot, written at send time). Read at call time via newsletterClickBoundLive(), strict 'true', dark by default; off = redirect exactly as before. Sends nothing.)
  *   GATE_NEWSLETTER_AUTO_SEND=true (owner 2026-10-30, option A: the weekly issue sends itself Tuesday at 6:00 AM ET once the automatic checks pass. The Monday proof step queues it and emails the owner an FYI copy; a HOLD reply or Cancel schedule in History skips that week. The inactive-reader check-in email also queues itself. Needs GATE_NEWSLETTER_PROOF_APPROVAL on. Read at call time via newsletterAutoSendLive(), strict 'true', dark by default; off = the issue waits for an APPROVED reply, as before. Emails the list.)
+ *   GATE_PEST_INSIDER_AUTO_SEND=true (owner 2026-11-19 build go, Waves Pest Insider: an issue the planner built the Wednesday before its 1st- or 3rd-Thursday send date becomes a draft for its warm audience; the proof step emails the owner an FYI copy and queues it, and it sends itself Thursday at 7:00 AM ET (only until 10:00 AM ET). A HOLD reply or Cancel schedule in History skips that issue. Needs GATE_NEWSLETTER_PROOF_APPROVAL on and NEWSLETTER_PROOF_APPROVERS set. Read at call time via pestInsiderAutoSendLive(), strict 'true', dark by default; off = the planner only records a shadow row, and a queued issue stays unsent. Emails the list.)
  *   GATE_ESTIMATE_LAWN_LIMITS=true (owner 2026-10-22: a recurring lawn estimate says in writing what the program can and can't fix, and the office can flag other grasses (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) and suspected virus streaks on the lawn's turf profile; each flag adds one line to the estimate page, the estimate PDF and the pdfkit fallback. The tech sheet warns when Celsius WG is picked on a carpetgrass lawn. Read at call time via estimateLawnLimitsLive(), strict 'true', dark by default; off = every estimate, turf profile and tech sheet output exactly as before. Sends nothing and prints no prices.)
  *   GATE_CAGE_START_MEDIUM=true (owner 2026-11-17 "both", draft price study: the two office tools start a county-measured pool cage of 601 to 2,000 sq ft at Medium instead of the lookup's Large or Oversized. It covers the call-agent draft and the estimate tool's first fill after a property lookup. With it on, the call-agent draft also drops a cage on a home with no decided pool, as the estimate tool already does. Small, Large and Oversized stay in the estimate tool's list for hand use; a cage over 2,000 sq ft stays Oversized. Not changed: the lookup's own cage size, so the website quote, the website-lead draft and the customer price assistant are as before; the price of each size; any saved estimate. It has a gate because it changes a starting price in the estimate tool. Read at call time via cageStartMediumLive(), strict 'true', dark by default; off or unset = both tools start exactly as before.)
  *   GATE_CAGE_TWO_SIZES=true (owner 2026-11-19, reply "cage 1000": the pool cage size has two sizes, Medium for a cage up to 1,000 sq ft and Large above, in place of Small, Medium, Large and Oversized. The property lookup sizes a county-measured cage that way, the satellite answer maps Small, Medium and Large to Medium and Oversized to Large, and the estimate tool offers only Medium and Large. The 2,000 sq ft Medium start of GATE_CAGE_START_MEDIUM no longer applies while this is on. Not changed: any saved estimate keeps its saved size and price; the price of each size; the satellite prompt; every automatic customer price (website quote, service-report offer card, restart offer) keeps today's manual-quote hold for a cage that today's four sizes call Large or Oversized. It has a gate because it changes a starting price. Read at call time via cageTwoSizesLive(), strict 'true', dark by default; off or unset = four sizes exactly as before.)
@@ -470,6 +474,7 @@
  *   GATE_WDO_ATTENTION_RINGS=true (owner 2026-11-05, step S3 of the admin-bell plan, "go": the WDO report attention sweep (GATE_WDO_REPORT_ATTENTION) rings again. Its category wdo_report_attention has no default under GATE_ADMIN_BELL_POLICY, so the policy muted every ring (no row, yet the sweep counted it as rung) and the last real WDO alert row is from August. On, the sweep passes bellDefault (a saved owner "off" still wins), counts a muted result as NOT rung (warn log, no false ring), closes its own open rows with a plain resolution when no WDO report is stalled any more, keeps a standing row's count right when some items are fixed, and replaces a row a larger set supersedes. Admin notification only; no customer contact. Strict opt-in, read at call time via wdoAttentionRingsLive(); off = the sweep is as before. Kill switch: unset.)
  *   GATE_IB_ANSWER_SEND_TO_CLAUDE=true (owner 2026-11-05: under a bar answer that searched its tools and changed nothing, the owner login sees "Claude has this as gap #N." or a free "Send to Claude" button that sends the owner's own typed question (a pasted one gets no button), never the answer. Read at call time via ibAnswerSendToClaudeLive(); off = the /query reply and the claude-ideas status stay as before)
  *   GATE_CALL_RECORDING_CARD_PAUSE=true (owner 2026-11-16 "ok build all", live-call suite part 9: while card details are spoken on a live-transcribed call, the call recording pauses for 90 seconds. When a stored utterance says "card number", "credit card", "debit card", "card ending", "expiration date", "security code", "CVV", "CVC" or "code on the back", or the live scrub masked a card number, the Dial recording on the caller's call is paused by REST (silence, so it stays aligned with the live text) and resumed at the end; a later trigger only moves the end out. State is call_log.metadata.live_transcription.card_pause. Needs GATE_LIVE_CALL_TRANSCRIPTION on. Read via isEnabled('callRecordingCardPause') at boot, strict 'true', dark by default; off = no recording change and nothing new required. RISK: if a resume fails, the rest of that call's recording is silent and the post-call transcript loses it; the gate is the instant off switch. Sends nothing to a customer; no paid call beyond the Twilio REST update. Kill: delete the variable.)
+ *   GATE_REVIEW_YEARLY_ASK=true (owner 2026-11-20, Tech Rewards plan D6-R1: a yearly review ask for long-time recurring customers. A daily job at 10:36 AM ET picks recurring customers with 12 or more months since their first completed recurring visit, no Google review (linked or probable), no review ask in 30 days, no review-link tap in 180 days, texts and review asks on, and no yearly ask in 365 days, and enrolls ONE ask in the 14 days after the service anniversary through the normal review cadence, so every existing review guard still applies. Off: the job still runs but only counts and logs the volume, with no enrollment, no text and no writes. Needs GATE_REVIEW_SEQUENCES on to enroll. Texts a customer, so the flip is the owner's. Strict `=== 'true'`, read at call time via reviewYearlyAskLive(). Kill: unset.)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -2382,6 +2387,8 @@ const gates = {
   // outage) ring an admin bell instead of silently costing leads — the
   // 2026-08-31 wedge and a row stuck since 07-10 both went unnoticed.
   callProcessingStallWatchdog: process.env.GATE_CALL_PROCESSING_STALL_WATCHDOG === 'true',
+  // GATE_SHORT_CALL_RECORDING_SWEEP: read at CALL time via shortCallRecordingSweepLive(); this entry is for logGateStatus.
+  shortCallRecordingSweep: process.env.GATE_SHORT_CALL_RECORDING_SWEEP === 'true',
   // Callback spam closes the parent voicemail: an admin callback
   // (metadata.relatedCallId) that reaches a solicitor resolves the parent
   // voicemail's open Needs Review cards and dismisses its open callback
@@ -4840,6 +4847,10 @@ const gates = {
   // GATE_PEST_INSIDER_PROOF at call time. Kill = unset: a Pest Insider
   // proof cannot be approved or dispatched.
   pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
+  // Waves Pest Insider auto-send. Ships DARK: off unless exactly 'true'.
+  // For logGateStatus only; pestInsiderAutoSendLive() reads
+  // GATE_PEST_INSIDER_AUTO_SEND at call time.
+  pestInsiderAutoSend: process.env.GATE_PEST_INSIDER_AUTO_SEND === 'true',
 
   // Weekly newsletter sends itself after its checks (owner 2026-10-30,
   // option A). Ships DARK: off unless exactly 'true'. This entry is for
@@ -5948,6 +5959,14 @@ function reviewAskAfterReportLive() {
   return process.env.GATE_REVIEW_ASK_AFTER_REPORT === 'true';
 }
 
+// GATE_SHORT_CALL_RECORDING_SWEEP read at CALL time, strict `=== 'true'`, dark by default (owner 2026-11-19, "FIX").
+// config/call-extraction-retry.js: the recording sweep (and every reader of its length rule) also takes a recording of
+// 10 seconds or less while its call is under 24 hours old. Paid transcription + extraction, and a processed call can
+// text the caller, so the owner flips it. Off = over 10 seconds only, byte for byte. Kill = unset.
+function shortCallRecordingSweepLive() {
+  return process.env.GATE_SHORT_CALL_RECORDING_SWEEP === 'true';
+}
+
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI read at CALL time, strict `=== 'true'`, dark in every environment.
 // services/call-profile-enrichment.js: a call writes gate / garage / lockbox codes and access notes to the
 // customer's profile only when the call's caller ID is that customer's primary phone (a callback number the
@@ -6167,6 +6186,16 @@ function publicLlmSharedCapLive() {
 
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
+}
+
+// GATE_PEST_INSIDER_AUTO_SEND read at CALL time, strict `=== 'true'`, dark by
+// default. On: a Waves Pest Insider issue the planner built becomes a draft,
+// the proof step emails the owner an FYI copy and queues it for its Thursday
+// 7:00 AM ET target, and processScheduledSends sends it in the 7:00-10:00 AM
+// ET window. Off (kill = unset): the planner records shadow rows only, and an
+// issue the switch already queued stays queued and unsent.
+function pestInsiderAutoSendLive() {
+  return process.env.GATE_PEST_INSIDER_AUTO_SEND === 'true';
 }
 
 // GATE_DISCOUNT_STACKING read at CALL time — strict `=== 'true'`, NOT
@@ -9108,6 +9137,8 @@ module.exports.wdoAttentionRingsLive = wdoAttentionRingsLive;
 module.exports.RETIRED_GATES = RETIRED;
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI reader, on its own line so gate PRs never conflict.
 module.exports.callEnrichCodesRequireAniLive = callEnrichCodesRequireAniLive;
+// GATE_SHORT_CALL_RECORDING_SWEEP reader, on its own line so gate PRs never conflict.
+module.exports.shortCallRecordingSweepLive = shortCallRecordingSweepLive;
 module.exports.backlinkSignupUrlGuardLive = backlinkSignupUrlGuardLive;
 module.exports.newsletterClickBoundLive = newsletterClickBoundLive;
 // GATE_NEWSLETTER_AUTO_SEND reader, on its own line so gate PRs never conflict.
@@ -9474,3 +9505,28 @@ function voiceGptLiveTestLive() {
 }
 // GATE_VOICE_GPT_LIVE_TEST reader, on its own line so gate PRs never conflict.
 module.exports.voiceGptLiveTestLive = voiceGptLiveTestLive;
+// GATE_PEST_INSIDER_AUTO_SEND reader, on its own line so gate PRs never conflict.
+module.exports.pestInsiderAutoSendLive = pestInsiderAutoSendLive;
+
+// GATE_REVIEW_LATE_CLOSE_ASK read at CALL time, strict `=== 'true'`, dark (owner 2026-11-20, Tech Rewards Plan D6 R3 "late closes still
+// ask"). It gates a customer text, so the owner flips it. On: an admin backdated closeout whose worked day is within 3 ET calendar days
+// of the close keeps the normal review ask (complete-scheduled-service.js); the rest of the quiet closeout is unchanged. Off = no ask.
+function reviewLateCloseAskLive() {
+  return process.env.GATE_REVIEW_LATE_CLOSE_ASK === 'true';
+}
+// GATE_REVIEW_LATE_CLOSE_ASK reader, on its own line so gate PRs never conflict.
+module.exports.reviewLateCloseAskLive = reviewLateCloseAskLive;
+function reviewYearlyAskLive() {
+  return process.env.GATE_REVIEW_YEARLY_ASK === 'true';
+}
+// GATE_REVIEW_YEARLY_ASK reader, on its own line so gate PRs never conflict.
+module.exports.reviewYearlyAskLive = reviewYearlyAskLive;
+
+// GATE_REVIEW_ASK_RESULTS_VISIT read at CALL time, strict `=== 'true'`, dark (owner 2026-11-20, Tech Rewards Plan D6 R2 "ask once the
+// results show"). On: a recurring lawn customer's review ask waits for the 3rd completed lawn visit and a recurring tree & shrub customer's
+// for the 2nd (review-request.js resultsVisitSkip); earlier visits skip with reason results_not_yet. Pest, other lines and one-time are unchanged.
+function reviewAskResultsVisitLive() {
+  return process.env.GATE_REVIEW_ASK_RESULTS_VISIT === 'true';
+}
+// GATE_REVIEW_ASK_RESULTS_VISIT reader, on its own line so gate PRs never conflict.
+module.exports.reviewAskResultsVisitLive = reviewAskResultsVisitLive;

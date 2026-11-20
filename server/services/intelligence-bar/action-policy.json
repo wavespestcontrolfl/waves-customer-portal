@@ -1247,6 +1247,14 @@
     "approval": null,
     "scope": "none"
   },
+  "get_sprinkler_timer_counts": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "get_stale_leads": {
     "module": "leads-tools.js",
     "domain": "leads",

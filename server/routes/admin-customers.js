@@ -58,7 +58,7 @@ const {
   prefsRenderStamp,
   renderedAgainstCurrentHome,
 } = require('../services/property-preferences-schema');
-const { CONTROLLER_TIMER_FIELDS, settleControllerTimer } = require('../services/controller-timer');
+const { CONTROLLER_TIMER_FIELDS, controllerTimerSeen, settleControllerTimer } = require('../services/controller-timer');
 const {
   IRRIGATION_INPUT_FIELDS: PREFS_IRRIGATION_INPUT_FIELDS,
   changedSizingFields: prefsChangedSizingFields,
@@ -5383,9 +5383,10 @@ function blackoutPairError(updates) {
 // (resolveSodRecord): a record the stored row cannot accept is dropped from the
 // write and its message reported through `outcome.sodRejected` ({ field, message }); `outcome.written`
 // lists the columns that were written.
-// The sprinkler timer on file is settled here too (settleControllerTimer): it saves whole, and only from a form
-// rendered against the current home; its rejections come back in `outcome.timerRejected`.
-async function writeAdminPreferences(customerId, updates, outcome = {}, { renderStamp = null } = {}) {
+// The sprinkler timer on file is settled here too (settleControllerTimer): it saves whole, only from a form rendered
+// against the current home, and only over the timer the form showed (`timerSeen`); its rejections come back in
+// `outcome.timerRejected`.
+async function writeAdminPreferences(customerId, updates, outcome = {}, { renderStamp = null, timerSeen = null } = {}) {
   return db.transaction(async (trx) => {
     // Same advisory-lock key/order the portal PUT and the customer-edit
     // route's address sync already take on this customer — one shared lock
@@ -5414,7 +5415,7 @@ async function writeAdminPreferences(customerId, updates, outcome = {}, { render
     const row = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
       ? { ...updates, irrigation_system: true }
       : { ...updates };
-    outcome.timerRejected = settleControllerTimer(row, { fresh: renderedAgainstCurrentHome(current, renderStamp) });
+    outcome.timerRejected = settleControllerTimer(row, { fresh: renderedAgainstCurrentHome(current, renderStamp), stored: current, seen: timerSeen });
     if (SOD_PREFS_INPUT_FIELDS.some((f) => f in updates)) {
       const sodInput = {};
       for (const f of SOD_PREFS_INPUT_FIELDS) {
@@ -5518,7 +5519,7 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     // A missing or archived customer is a 404, not a foreign-key 500 on
     // the insert, and a stale tab must not edit a soft-deleted customer.
     const outcome = {};
-    if (!(await writeAdminPreferences(customerId, updates, outcome, { renderStamp: prefsRenderStamp(req.body) }))) {
+    if (!(await writeAdminPreferences(customerId, updates, outcome, { renderStamp: prefsRenderStamp(req.body), timerSeen: controllerTimerSeen(req.body) }))) {
       return res.status(404).json({ error: 'Customer not found' });
     }
     const nothingSaved = recordsRejectedWithNothingSaved(outcome, rejected);

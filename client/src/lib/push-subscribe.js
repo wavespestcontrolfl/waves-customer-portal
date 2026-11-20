@@ -6,6 +6,8 @@
  *   await ensurePushSubscription(); // call from a user gesture (button click)
  */
 
+import { holdReloadWhileSending } from './reloadHolds';
+
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -126,7 +128,14 @@ export async function isPushEnabled({ apiBase = '/api', token, verifyServer = fa
   } catch { return false; }
 }
 
-export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
+// The browser's permission prompt and its push subscription wait with no
+// request open, so enabling push holds an out-of-date tab's reload until the
+// server has the endpoint (reloadHolds.js).
+export function ensurePushSubscription(options) {
+  return holdReloadWhileSending('push-setup', () => subscribeForPush(options));
+}
+
+async function subscribeForPush({ apiBase = '/api', token } = {}) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     throw new Error('Push notifications are not supported in this browser. Try Chrome, Firefox, Edge, or Safari 16+.');
   }
@@ -244,15 +253,23 @@ export async function syncPushSubscription({ apiBase = '/api', token } = {}) {
     if (pushOptInState(token) !== true) {
       return { ok: false, reason: 'not_opted_in_on_this_browser' };
     }
-    // Permission is granted, so ensurePushSubscription will not prompt —
-    // requestPermission resolves 'granted' immediately.
-    return await ensurePushSubscription({ apiBase, token });
+    // Permission is granted, so the flow will not prompt: requestPermission
+    // resolves 'granted' at once. It runs without the reload hold, as a
+    // reload only runs the self-heal again at the next load.
+    return await subscribeForPush({ apiBase, token });
   } catch (e) {
     return { ok: false, reason: e?.message || 'sync_failed' };
   }
 }
 
-export async function disablePush({ apiBase = '/api', token } = {}) {
+// Disabling waits on the browser's push subscription before and after its
+// request, so it holds the reload the same way until both ends drop the
+// endpoint.
+export function disablePush(options) {
+  return holdReloadWhileSending('push-setup', () => dropPushSubscription(options));
+}
+
+async function dropPushSubscription({ apiBase = '/api', token } = {}) {
   const authToken = token || localStorage.getItem('waves_admin_token');
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` };
 

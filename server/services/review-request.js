@@ -104,6 +104,141 @@ function reviewAskAfterReportOn() {
   return require("../config/feature-gates").reviewAskAfterReportLive();
 }
 
+// GATE_REVIEW_ASK_RESULTS_VISIT (owner 2026-11-20, Tech Rewards Plan D6 R2): lawn and
+// tree & shrub results are not visible after the first visit, so an early ask wastes the
+// customer's one ask. A recurring lawn customer is first asked on the 3rd completed lawn
+// visit, a recurring tree & shrub customer on the 2nd. Keys are toQualifyingKeys lines.
+const RESULTS_VISIT_MIN = { lawn_care: 3, tree_shrub: 2 };
+function reviewAskResultsVisitOn() {
+  const gates = require("../config/feature-gates");
+  return typeof gates.reviewAskResultsVisitLive === "function" && gates.reviewAskResultsVisitLive();
+}
+/**
+ * Pure rule: the skip reason for a recurring visit, or null to ask. A null or unknown
+ * count asks (a skip is the new behavior, so an unread count fails toward today's).
+ */
+function resultsVisitSkip({ serviceLine, completedCount, gateOn = reviewAskResultsVisitOn() } = {}) {
+  if (!gateOn) return null;
+  const min = RESULTS_VISIT_MIN[serviceLine];
+  if (!min || !Number.isFinite(completedCount)) return null;
+  return completedCount < min ? "results_not_yet" : null;
+}
+// Visit outcomes that mean no treatment was performed (the completion service's own list).
+const RESULTS_VISIT_UNPERFORMED = new Set(["inspection_only", "customer_declined", "incomplete"]);
+// ALL qualifying service keys of one visit row, by catalog identity (service_type plus the joined
+// catalog key and name). A combined row names several; a commercial row names none.
+function resultsVisitKeys(row) {
+  const { qualifyingKeysForRow, toQualifyingKeys } = require("./waveguard-existing-services");
+  const { isCommercialServiceRow } = require("./self-booking-plan-sync");
+  if (isCommercialServiceRow(row)) return [];
+  const combo = require("./visit-prep-combo-types");
+  // An explicit combined label ("Lawn Care + Pest Control") keeps every line it names even when
+  // the catalog names one.
+  let keys = combo.isComboServiceType(row.service_type)
+    ? [...new Set([...qualifyingKeysForRow(row), ...toQualifyingKeys(row.service_type)])]
+    : qualifyingKeysForRow(row);
+  // A standalone pest segment in the service_type or the catalog name is a pest service whatever
+  // the catalog link says ("Pest Control + Lawn Care + Rodent Control" on a lawn catalog row).
+  const labels = [row.service_type, row.service_name];
+  const standalonePest = labels.some(combo.hasStandalonePestSegment);
+  if (standalonePest && !keys.includes("pest_control")) keys = [...keys, "pest_control"];
+  // Pest drops only on a positive plant-pest match: a label says pest and every pest word sits in
+  // a plant-line segment ("Tree & Shrub Pest Control" = ONE plant treatment). Fail toward asking.
+  const plantPestOnly = !standalonePest && labels.some((l) => /pest/i.test(String(l || "")));
+  return plantPestOnly && keys.some((k) => RESULTS_VISIT_MIN[k]) ? keys.filter((k) => k !== "pest_control") : keys;
+}
+// Whether the visit's treatment was performed: no linked record, or any record not marked
+// incomplete, declined or inspection only.
+function resultsVisitPerformed(notesList) {
+  return !notesList.length || notesList.some((n) => !RESULTS_VISIT_UNPERFORMED.has(n.visitOutcome));
+}
+// Completed performed visits per threshold line that come BEFORE cur: an earlier day, or the
+// same day and earlier in compareSameDayVisits order (an indeterminate order counts nothing).
+function resultsVisitPriorCounts(rows, cur, keys) {
+  const curDay = etDayWindow(cur.scheduled_date, 0).anchorStr;
+  const counts = Object.fromEntries(keys.map((k) => [k, 0]));
+  for (const r of rows) {
+    const day = etDayWindow(r.scheduled_date, 0).anchorStr;
+    if (day > curDay || (day === curDay && compareSameDayVisits(r, cur) >= 0)) continue;
+    for (const k of resultsVisitKeys(r)) if (k in counts) counts[k] += 1;
+  }
+  return counts;
+}
+// service_records.structured_notes lists by visit id. Throws on a failed read.
+async function resultsVisitNotesByVisit(visitIds) {
+  const byVisit = new Map();
+  if (!visitIds.length) return byVisit;
+  const recs = await db("service_records").whereIn("scheduled_service_id", visitIds).select("scheduled_service_id", "structured_notes");
+  for (const r of recs) {
+    const list = byVisit.get(r.scheduled_service_id) || [];
+    list.push(structuredNotesObject(r.structured_notes));
+    byVisit.set(r.scheduled_service_id, list);
+  }
+  return byVisit;
+}
+// The visits closed together with this one (a combined completion packet), this visit included.
+async function resultsVisitMemberIds(visitId) {
+  const own = await db("visit_completion_packet_items").where({ scheduled_service_id: visitId }).first("packet_id");
+  if (!own?.packet_id) return [visitId];
+  const items = await db("visit_completion_packet_items").where({ packet_id: own.packet_id }).select("scheduled_service_id");
+  return [...new Set([visitId, ...items.map((i) => i.scheduled_service_id).filter(Boolean)])];
+}
+// One member's verdict: true = skip it, false = it asks. A member that is not recurring, names
+// no qualifying key, or has any key without a threshold asks; otherwise every key is a
+// threshold line and the member skips only while each is below its count.
+async function resultsVisitMemberSkips(customerId, cur, ownNotes) {
+  const keys = resultsVisitKeys(cur);
+  if (cur.is_recurring !== true || !cur.scheduled_date || !keys.length || keys.some((k) => !RESULTS_VISIT_MIN[k])) return false;
+  const rows = await db("scheduled_services as s").leftJoin("services as sv", "s.service_id", "sv.id")
+    .where({ "s.customer_id": customerId, "s.status": "completed", "s.is_recurring": true })
+    .where("s.id", "!=", cur.id)
+    .whereRaw("s.is_callback IS DISTINCT FROM true")
+    .where("s.scheduled_date", "<=", etDayWindow(cur.scheduled_date, 0).anchorStr)
+    .select("s.id", "s.service_type", "s.scheduled_date", "s.window_start", "s.created_at", "sv.service_key", "sv.name as service_name");
+  const notes = await resultsVisitNotesByVisit(rows.map((r) => r.id));
+  const performed = rows.filter((r) => resultsVisitPerformed(notes.get(r.id) || []));
+  const prior = resultsVisitPriorCounts(performed, cur, keys);
+  const self = cur.is_callback !== true && resultsVisitPerformed(ownNotes) ? 1 : 0;
+  return keys.every((k) => resultsVisitSkip({ serviceLine: k, completedCount: prior[k] + self, gateOn: true }));
+}
+/**
+ * THE verdict: the skip reason for a sendable plan, or null to ask. Every member of a combined
+ * completion is judged and the ask stays when ANY member asks or any member record carries a
+ * "customer asked for the link". Throws on any read failure; resultsVisitSkipFor catches it,
+ * logs and asks.
+ */
+async function resultsVisitVerdict({ customerId, serviceRecordId = null, scheduledServiceId = null }) {
+  let visitId = scheduledServiceId;
+  if (!visitId && serviceRecordId) {
+    const sr = await db("service_records").where({ id: serviceRecordId }).first("scheduled_service_id");
+    visitId = sr?.scheduled_service_id || null;
+  }
+  if (!visitId) return null;
+  const ids = await resultsVisitMemberIds(visitId);
+  const notes = await resultsVisitNotesByVisit(ids);
+  if ([...notes.values()].flat().some((n) => n.customerRequestedReview && typeof n.customerRequestedReview === "object")) return null;
+  const members = await db("scheduled_services as s").leftJoin("services as sv", "s.service_id", "sv.id").whereIn("s.id", ids)
+    .select("s.id", "s.service_type", "s.scheduled_date", "s.window_start", "s.created_at", "s.is_recurring", "s.is_callback", "sv.service_key", "sv.name as service_name");
+  // A member that vanished between the two reads was never judged: throw to the log-and-ask fallback.
+  if (members.length !== new Set(ids.map(String)).size) throw new Error(`packet members changed (${members.length} of ${ids.length})`);
+  for (const m of members) {
+    if (!(await resultsVisitMemberSkips(customerId, m, notes.get(m.id) || []))) return null;
+  }
+  return "results_not_yet";
+}
+// The one entry every path calls once it holds a sendable plan: the legacy ask, the cadence
+// plan (every plan the resolver returns, and its first-send re-resolve) and the completion-text
+// link. Gate off, or an explicit customerRequested choice, asks. A failed read logs and asks.
+async function resultsVisitSkipFor(ctx) {
+  if (!reviewAskResultsVisitOn() || ctx.customerRequested) return null;
+  try {
+    return await resultsVisitVerdict(ctx);
+  } catch (err) {
+    logger.warn(`[review] results-visit check failed (customerId=${ctx.customerId}): ${err.message}`);
+    return null;
+  }
+}
+
 // First name from the technician row when an ask carries technician_id but no
 // tech_name (override callers, legacy rows). Null when unknown.
 async function technicianFirstName(technicianId) {
@@ -1383,7 +1518,15 @@ const ReviewService = {
    * the full cadence right after treatment. Fail-open to the default plan on
    * lookup errors: a wrong-but-bounded cadence beats no ask.
    */
-  async resolveSequencePlanForEnrollment({ customerId, serviceRecordId = null, scheduledServiceId = null, _attempt = 0 }) {
+  async resolveSequencePlanForEnrollment(args) {
+    const resolved = await this._resolveSequencePlanBase(args);
+    // GATE_REVIEW_ASK_RESULTS_VISIT: every SENDABLE plan passes the one verdict; skips and errors stay.
+    if (!resolved?.plan) return resolved;
+    const skip = await resultsVisitSkipFor(args);
+    return skip ? { skip } : resolved;
+  },
+
+  async _resolveSequencePlanBase({ customerId, serviceRecordId = null, scheduledServiceId = null, _attempt = 0 }) {
     // Owner-named multi-treatment jobs (2026-08-05: "we should treat
     // cockroach different than one time pest, as we should bed bug") — the
     // follow-up visit IS a treatment, so the review ask waits for it. Other
@@ -1794,7 +1937,7 @@ const ReviewService = {
       // blip here would otherwise permanently lose the deferred cadence.
       if (_attempt < 1) {
         await new Promise((r) => setTimeout(r, 250));
-        return this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId, _attempt: _attempt + 1 });
+        return this._resolveSequencePlanBase({ customerId, serviceRecordId, scheduledServiceId, _attempt: _attempt + 1 });
       }
       logger.warn(`[review] plan resolution failed (customerId=${customerId}): ${err.message}`);
       return { error: true };
@@ -1861,6 +2004,14 @@ const ReviewService = {
     }
     const { isEnabled } = require("../config/feature-gates");
     if (!isEnabled("reviewSequences")) {
+      // GATE_REVIEW_ASK_RESULTS_VISIT: the automatic legacy ask follows the same rule.
+      if (triggeredBy === "auto") {
+        const resultsSkip = await resultsVisitSkipFor({ customerId, serviceRecordId, scheduledServiceId, customerRequested });
+        if (resultsSkip) {
+          logger.info(`[review] Post-service ask skipped (customerId=${customerId} reason=${resultsSkip})`);
+          return { started: false, reason: resultsSkip };
+        }
+      }
       // GATE_REVIEW_ASK_AFTER_REPORT is cadence mode only: this legacy path
       // ignores it (no anchor, no +10), exactly as before.
       return this.create({
@@ -1897,7 +2048,7 @@ const ReviewService = {
       // Per-type cadence plan (owner spec 2026-08-05): recurring = one ask,
       // one-time = full cadence, multi-treatment = one after the first visit
       // then the cadence after the final one (middle visits send nothing).
-      const resolved = await this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId });
+      const resolved = await this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId, customerRequested });
       if (resolved.error) {
         // Fail toward FEWER sends: enrolling on a guessed plan risks a
         // 3-touch cadence where one ask (or none) was owed. The payment/
@@ -3018,6 +3169,8 @@ const ReviewService = {
     // CSR flagged this customer as already-reviewed — caller treats null
     // as "skip the review suffix" so the completion SMS goes out clean.
     if (customer.has_left_google_review) return null;
+    // GATE_REVIEW_ASK_RESULTS_VISIT: no link rides the completion text before the results visit.
+    if (serviceRecordId && await resultsVisitSkipFor({ customerId, serviceRecordId })) return null;
 
     const consent = await this.reviewSmsAllowedNow(customerId);
     if (!consent.allowed) {
@@ -4729,6 +4882,9 @@ const ReviewService = {
     // the channel, so an unavailable channel is a refusal, never a swap to
     // the other one. Default false keeps the cadence's cross-channel fallback.
     strictChannel = false,
+    // The yearly review ask (started_by 'yearly') goes by text only: no email leg, no swap to
+    // email when the phone is missing, suppressed or opted out. Those end the cadence instead.
+    smsOnly = false,
   }) {
     if (!customer || !customer.id) return { ok: false, reason: "no_customer", terminal: true };
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
@@ -4828,7 +4984,18 @@ const ReviewService = {
     const { getServiceContact } = require("./customer-contact");
     // The SMS identity also waits for a contact's own YES (recipient-optin.js).
     const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
-    const contact = await resolveServiceContactSmsRecipient(customer);
+    // A yearly (SMS-only) send resolves strictly: a failed recipient read retries the step
+    // instead of texting the account holder on a fallback. Other sends keep the fallback.
+    let contact;
+    try {
+      contact = await resolveServiceContactSmsRecipient(customer, { failClosed: smsOnly });
+    } catch (err) {
+      if (!smsOnly) throw err;
+      logger.warn(`[review] yearly recipient lookup failed (customerId=${customer.id}): ${err.code || "error"}`);
+      return manageRetryVia === "sequence"
+        ? { ok: false, retryable: true, reason: "recipient_unavailable" }
+        : { ok: false, terminal: true, reason: "recipient_unavailable" };
+    }
     const emailContact = getServiceContact(customer);
 
     // Load consent prefs once. Channel resolution is OPT-OUT-AWARE and honors
@@ -4865,25 +5032,16 @@ const ReviewService = {
     // suppression-only, the cadence should fall back to email rather than stall.
     // sendCustomerMessage would also block it, but checking here lets the channel
     // resolver pick email (matching the candidate list's sms_suppressed → email).
-    let phoneSuppressed = false;
-    if (contact.phone) {
-      try {
-        // messaging_suppression.phone is E.164 (written by the Twilio path), so
-        // normalize before matching or a formatted "(941)…" number misses the
-        // DNC row and the cadence stalls instead of falling back to email.
-        const e164 = toE164(contact.phone) || contact.phone;
-        const sup = await db("messaging_suppression").where({ phone: e164, active: true }).first();
-        phoneSuppressed = !!sup;
-      } catch {
-        /* table may not exist → treat as not suppressed */
-      }
-    }
+    const phoneSuppressed = await phoneIsSuppressed(contact.phone);
     // SMS consent is re-checked downstream in sendCustomerMessage (fails closed
     // there), so a prefs-read blip can still attempt SMS. Email has NO downstream
     // consent gate, so it fails CLOSED: it requires an existing prefs row with
     // review + email enabled (parity with SMS's NO_CONSENT_RECORD on a missing
     // row) and a clean prefs read.
-    const canSms = !!contact.phone && !smsBlocked && !phoneSuppressed;
+    // An SMS-only (yearly) ask texts a valid US / Canada number only, the same rule the picker
+    // applied (the dispatch normalizer reads any ten digits as +1).
+    const nanpOk = !smsOnly || require("../utils/phone").isValidNanpNumber(contact.phone);
+    const canSms = !!contact.phone && !smsBlocked && !phoneSuppressed && nanpOk;
     const canEmail = !!emailContact.email && !!prefs && !emailBlocked && !prefsLookupFailed;
 
     // A no-link private check-in (resolution_check / satisfaction_confirm) must
@@ -4900,9 +5058,10 @@ const ReviewService = {
     // step working. 'both' / unset allow either with fallback.
     const prefChannel = prefs && prefs.review_request_channel;
     const allowSms = canSms && (noLinkSend || prefChannel !== "email");
-    const allowEmail = canEmail && !noLinkSend;
+    const allowEmail = canEmail && !noLinkSend && !smsOnly;
     let intended = noLinkSend ? "sms" : channel === "email" ? "email" : "sms";
     if (!noLinkSend && prefChannel === "email") intended = "email";
+    if (smsOnly) intended = "sms";
 
     // The intended channel when allowed; else the other one unless the
     // operator chose the channel (strictChannel — Quick Links Email-only,
@@ -6974,6 +7133,8 @@ const ReviewService = {
           customerId: seq.customer_id,
           serviceRecordId: seq.service_record_id,
           scheduledServiceId: seq.scheduled_service_id,
+          // A recorded "customer asked for the link" never takes the results-visit skip.
+          customerRequested: seq.customer_requested || null,
         });
         if (re.error) {
           // Defer, never send on a possibly-stale plan (codex #3235 r19 P1):
@@ -7078,8 +7239,7 @@ const ReviewService = {
     if (!customer || customer.deleted_at) return stop("deleted");
     if (customer.has_left_google_review) return stop("reviewed");
     try {
-      const gr = await db("google_reviews").where({ customer_id: seq.customer_id }).first();
-      if (gr) return stop("reviewed");
+      if (await customerHasLinkedGoogleReview(seq.customer_id)) return stop("reviewed");
     } catch {
       /* google_reviews may not exist */
     }
@@ -7250,6 +7410,14 @@ const ReviewService = {
 
     if (manualAskRecent) return stop("manual_ask_recent");
 
+    // Yearly review ask: its gate is a live kill (off retires the row) and the 180-day tap pause
+    // applies at dispatch too (services/review-yearly-ask.js dispatchStopReason).
+    if (seq.started_by === "yearly") {
+      const yearlyStop = await require("./review-yearly-ask").dispatchStopReason(seq);
+      if (yearlyStop === "lookup_failed") askLookupFailed = true;
+      else if (yearlyStop) return stop(yearlyStop);
+    }
+
     // Tap pause (owner 2026-11-02, D3): an automatic cadence stands down when the customer
     // tapped a tracked review link in the last 180 days (a tap on this cadence stopped it above). A
     // cadence a person started, or one the customer asked for (its own stamp or its visit record),
@@ -7351,6 +7519,7 @@ const ReviewService = {
         sequenceStep: seq.current_step,
         triggeredBy: "sequence",
         manageRetryVia: "sequence",
+        smsOnly: seq.started_by === "yearly",
       });
     } catch (err) {
       // The drafted touch repeats an earlier one: held, never reworded (owner
@@ -8371,6 +8540,44 @@ const ReviewService = {
 // `database`: a caller inside a transaction (the visit-closeout packet's records phase) passes its
 // trx, so the read never takes a second pool connection; savepointRead keeps a failed read from
 // aborting that transaction.
+// Hard suppression (DNC / wrong-number) on a phone. messaging_suppression.phone is E.164 (written by
+// the Twilio path), so normalize before matching or a formatted "(941)…" number misses the DNC row.
+// failClosed: a failed read throws instead of reading as "not suppressed" (the yearly picker).
+async function phoneIsSuppressed(phone, { failClosed = false } = {}) {
+  if (!phone) return false;
+  try {
+    const e164 = toE164(phone) || phone;
+    return !!(await db("messaging_suppression").where({ phone: e164, active: true }).first());
+  } catch (err) {
+    // Knex puts bound values (the phone) in its error message: rethrow without them.
+    if (failClosed) throw Object.assign(new Error(`suppression lookup failed (${err.code || "error"})`), { code: err.code });
+    return false; // table may not exist → treat as not suppressed
+  }
+}
+
+// The dispatcher's own SMS recipient and suppression checks, for a caller that must know before it
+// enrolls whether a text could reach the customer. { reachable, reason }.
+async function smsRecipientReachable(customer) {
+  const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
+  // failClosed: a failed opt-in read throws (the picker skips this customer) instead of a primary fallback.
+  const contact = await resolveServiceContactSmsRecipient(customer, { failClosed: true });
+  if (!contact || !contact.phone) return { reachable: false, reason: "no_phone" };
+  // US / Canada numbers only: the dispatch normalizer reads any ten digits as +1, so a non-NANP
+  // number could be checked here and texted at a different destination. Not NANP = no yearly ask.
+  if (!require("../utils/phone").isValidNanpNumber(contact.phone)) return { reachable: false, reason: "invalid_phone" };
+  if (await phoneIsSuppressed(contact.phone, { failClosed: true })) return { reachable: false, reason: "phone_suppressed" };
+  // A number the line-type cache already marks non-SMS (landline / fixed VoIP) is rejected at send.
+  const { cachedLineTypeBlocks } = require("./messaging/validators/line-type");
+  if (await cachedLineTypeBlocks(contact.phone)) return { reachable: false, reason: "non_sms_line_type" };
+  return { reachable: true, reason: null };
+}
+
+// The one linked-review predicate: ANY google_reviews row linked to the customer (the cadence runner
+// stops on it, and the yearly picker selects on it). A read failure throws.
+async function customerHasLinkedGoogleReview(customerId, database = db) {
+  return Boolean(await database("google_reviews").where({ customer_id: customerId }).first("id"));
+}
+
 async function customerNeverAskedForReview(customerId, database = db) {
   if (!customerId) return false;
   try {
@@ -8491,6 +8698,8 @@ ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES = REVIEW_AFTER_REPORT_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 ReviewService.customerNeverAskedForReview = customerNeverAskedForReview;
+ReviewService.smsRecipientReachable = smsRecipientReachable;
+ReviewService.customerHasLinkedGoogleReview = customerHasLinkedGoogleReview;
 ReviewService.firstAskLockVisit = firstAskLockVisit;
 ReviewService.firstAskLockChoice = firstAskLockChoice;
 ReviewService.FIRST_ASK_OPT_OUT_REASON = FIRST_ASK_OPT_OUT_REASON;
@@ -8498,6 +8707,7 @@ ReviewService.ALREADY_LEFT_REVIEW_REASON = ALREADY_LEFT_REVIEW_REASON;
 ReviewService.firstAskOptOutReasons = firstAskOptOutReasons;
 ReviewService.alreadyReviewedForVisit = alreadyReviewedForVisit;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
+ReviewService.resultsVisitSkip = resultsVisitSkip;
 
 // The review page reads the same delivered-ask evidence the sender trusts.
 ReviewService.reviewAskDeliveryEvidenceFor = reviewAskDeliveryEvidenceFor;

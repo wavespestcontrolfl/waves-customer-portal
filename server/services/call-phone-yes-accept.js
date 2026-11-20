@@ -52,6 +52,9 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // A visit still on the calendar keeps the card: every status but cancelled and skipped. A visit waiting for its new
 // slot (rescheduled) and a done visit keep it too (the plan was still never accepted), so the gap never closes by itself.
 const CALENDAR_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'];
+// A visit still to come, the only kind that makes a card's time short. A visit parked for a new slot (rescheduled)
+// keeps its old date and time, and one under way or done is no time to ring for; both still keep a card open.
+const UPCOMING_VISIT_STATUSES = ['pending', 'confirmed', 'en_route'];
 const OPEN_ESTIMATE_STATUSES = ['sent', 'viewed'];
 // The statuses that settle an estimate for good (with an archive or a deleted row). Any other status keeps the card
 // naming it: open, lapsed (the office can extend it and accept), being sent again (a resend claims 'sending' and then
@@ -215,11 +218,16 @@ async function withCatalog(conn, visit) {
   return { ...visit, catalog_service_key: catalog.service_key, catalog_service_name: catalog.name };
 }
 
-// True when one of the call's booked visits is a pest visit (assessments never are).
-async function anyPestVisit(conn, visits) {
+// True when a booked visit is a pest visit (assessments never are).
+async function isPestVisit(conn, visit) {
   const { appointmentMatchesEstimateFamily } = require('../routes/estimate-public');
+  return appointmentMatchesEstimateFamily(await withCatalog(conn, visit), PEST_FAMILY);
+}
+
+// True when one of the call's booked visits is a pest visit.
+async function anyPestVisit(conn, visits) {
   for (const visit of visits) {
-    if (appointmentMatchesEstimateFamily(await withCatalog(conn, visit), PEST_FAMILY)) return true;
+    if (await isPestVisit(conn, visit)) return true;
   }
   return false;
 }
@@ -576,6 +584,26 @@ function callVisitsOnCalendar(conn, callLogId, customerId) {
   return visitsCallBooked(conn, callLogId, customerId).whereIn('status', CALENDAR_VISIT_STATUSES).select('*');
 }
 
+// The card's estimates as its check reads them, under the card's customer: the ones that stay on it (still open,
+// lapsed or accepted) and where the caller's word starts (`since`: the earliest send of those, earliestSentAnchor; null
+// when none stays). cardState, the ring's row hold and its unread-call check read the same window.
+async function cardEstimatesOf(card, conn) {
+  const ids = cardEstimateIds(card);
+  const estimates = ids.length
+    ? await conn('estimates').whereIn('id', ids).where({ customer_id: card.related_customer_id })
+      .select('id', 'status', 'sent_at', 'created_at', 'archived_at', conn.raw(`${handoffSql()} AS handoff_at`))
+    : [];
+  // An archived estimate is closed to the customer, whatever its status.
+  const live = estimates.filter((e) => !e.archived_at);
+  const kept = live.filter((e) => !SETTLED_ESTIMATE_STATUSES.includes(e.status));
+  // An accepted estimate keeps the card while a pest visit this call booked is unlinked (cardState checks that first):
+  // the office's Mark accepted links no visit (skipAutoSchedule), so the visit still lacks the plan. The accept answers
+  // only half of the card's ask, so the card stays, says so and keeps that estimate's link.
+  const accepted = live.filter((e) => e.status === 'accepted');
+  const stays = [...kept, ...accepted];
+  return { ids, accepted, stays, since: stays.length ? earliestSentAnchor(stays) : null };
+}
+
 // `conn`: the global handle, or the close's own transaction when it reads the card again under the lock (a cron job
 // holds one pool connection for its lock, so a read inside the transaction must not take a third).
 async function cardState(card, conn = db) {
@@ -586,28 +614,16 @@ async function cardState(card, conn = db) {
   if (!(await anyPestVisit(conn, onCalendar.filter((v) => !v.source_estimate_id)))) {
     return { close: onCalendar.some((v) => v.source_estimate_id) ? MOOT_NOTES.visit_linked : MOOT_NOTES.no_pest_visit };
   }
-  const ids = cardEstimateIds(card);
-  const estimates = ids.length
-    ? await conn('estimates').whereIn('id', ids).where({ customer_id: customerId })
-      .select('id', 'status', 'sent_at', 'created_at', 'archived_at', conn.raw(`${handoffSql()} AS handoff_at`))
-    : [];
-  // An archived estimate is closed to the customer, whatever its status.
-  const live = estimates.filter((e) => !e.archived_at);
-  const kept = live.filter((e) => !SETTLED_ESTIMATE_STATUSES.includes(e.status));
-  // An accepted estimate keeps the card while a pest visit this call booked is unlinked (checked above): the office's
-  // Mark accepted links no visit (skipAutoSchedule), so the visit still lacks the plan. The accept answers only half of
-  // the card's ask, so the card stays, says so and keeps that estimate's link.
-  const accepted = live.filter((e) => e.status === 'accepted');
-  if (!kept.length && !accepted.length) return { close: MOOT_NOTES.estimate_closed };
+  const { ids, accepted, stays, since } = await cardEstimatesOf(card, conn);
+  if (!stays.length) return { close: MOOT_NOTES.estimate_closed };
   // A card with more than one estimate links the ones still open, lapsed or accepted, in the card's own order (a set
   // compare: a row order that differs is no change, so the card's version moves only when an estimate leaves).
-  const stays = [...kept, ...accepted];
   const staySet = new Set(stays.map((e) => String(e.id)));
   const keptIds = ids.filter((id) => staySet.has(id));
   const linksChanged = !card.related_estimate_id && keptIds.length !== ids.length;
   const acceptedChanged = (accepted.length > 0) !== (parseJson(card.payload).estimate_accepted === true);
   // The yes is read again in every state, an accepted one too: the card never shows words that no longer hold.
-  const state = await yesState(card, { customerId, ids, since: earliestSentAnchor(stays) }, conn);
+  const state = await yesState(card, { customerId, ids, since }, conn);
   if (state?.close || (!linksChanged && !acceptedChanged)) return state;
   return {
     ...(state || { keepYes: true }),
@@ -648,23 +664,27 @@ async function applyCardState(card, state) {
     const row = await trx('triage_items').where({ id: card.id, status: 'open' }).first('payload');
     if (!row) return false;
     const stamp = new Date();
+    let next = state;
     if (state.close) {
       // A dismissed card is never filed again, so the close is read again under the lock: evidence that changed since
-      // the first read (a re-read that dropped a cancel, a visit put back) keeps the card, and the next run reads it.
-      const again = await cardState({ ...card, payload: row.payload }, trx);
-      if (!again?.close) return false;
-      await trx('triage_items').where({ id: card.id, status: 'open' }).update({
-        status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE, resolution_note: again.close,
-        resolved_at: stamp, updated_at: stamp,
-      });
-      await syncCallReviewStatus(trx, card.call_log_id, 'dismissed');
-      return true;
+      // the first read (a re-read that dropped a cancel, a visit put back) keeps the card. What the re-read found is
+      // written instead, so the card, and the bell that rings from it, never keeps a yes the re-read no longer backs.
+      next = await cardState({ ...card, payload: row.payload }, trx);
+      if (!next) return false;
+      if (next.close) {
+        await trx('triage_items').where({ id: card.id, status: 'open' }).update({
+          status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE, resolution_note: next.close,
+          resolved_at: stamp, updated_at: stamp,
+        });
+        await syncCallReviewStatus(trx, card.call_log_id, 'dismissed');
+        return true;
+      }
     }
     const payload = {
       ...parseJson(row.payload),
-      ...(state.keepYes ? {} : heardFields(state.refresh, { recheckingCallId: state.rechecking, noYes: state.noYes })),
-      ...(state.estimateIds ? { estimate_ids: state.estimateIds } : {}),
-      ...(state.estimateAccepted === undefined ? {} : { estimate_accepted: state.estimateAccepted }),
+      ...(next.keepYes ? {} : heardFields(next.refresh, { recheckingCallId: next.rechecking, noYes: next.noYes })),
+      ...(next.estimateIds ? { estimate_ids: next.estimateIds } : {}),
+      ...(next.estimateAccepted === undefined ? {} : { estimate_accepted: next.estimateAccepted }),
     };
     await trx('triage_items').where({ id: card.id, status: 'open' })
       .update({ payload: JSON.stringify(payload), summary: summaryOf(payload), updated_at: stamp });
@@ -690,7 +710,8 @@ async function closeMootCards() {
 }
 
 /**
- * Files the cards and closes the ones that stopped being true. Dark behind GATE_CALL_PHONE_YES_ACCEPT.
+ * Files the cards, closes the ones that stopped being true, and rings the office's bell for the open ones
+ * (call-phone-yes-bell.js). Dark behind GATE_CALL_PHONE_YES_ACCEPT.
  * Reads every candidate in the lookback, newest first, in pages of `pageSize`: a call that gets no card (a lawn visit,
  * a taken-back yes) is read again next run, so it must never fill the scan and keep an older booking from its card.
  * @returns {{skipped?:true, scanned:number, filed:number, closed:number}}
@@ -716,7 +737,112 @@ async function runCallPhoneYesSweep({ now = new Date(), pageSize = SCAN_LIMIT } 
   } catch (e) {
     logger.warn(`[call-phone-yes] moot close pass failed: ${e.code || e.name || 'error'}`);
   }
+  try {
+    await ringOpenCards(now);
+  } catch (e) {
+    logger.warn(`[call-phone-yes] bell pass failed: ${e.code || e.name || 'error'}`);
+  }
   return { scanned, filed, closed };
+}
+
+// The bell pass (call-phone-yes-bell.js), after the filing and the moot close: each open card rings what it owes (once
+// when filed, once more when time runs short), then the rows of cards no longer open close. A card rings or is
+// rewritten only when, read again under its call's triage lock just before, with the rows it reads held to the ring's
+// commit (holdCardRows), it is still open and its evidence matches it (cardState finds nothing to write): the sweep keeps
+// only open cards current (applyCardState), so the bell never says more than the card. A card the tap accepts or a
+// person claims while the pass runs, a card whose estimate was accepted or whose yes was taken back since the moot pass,
+// a card with a row busy, and a card whose check fails ring nothing; the next run reads it again. A claimed card
+// (in_progress) keeps its row until it closes, as does a card that rings nothing in a run: the closes run for every card.
+async function ringOpenCards(now) {
+  const Bell = require('./call-phone-yes-bell');
+  return Bell.runBellPass({
+    listCards: () => db('triage_items').where({ reason_code: REASON_CODE }).whereIn('status', Bell.OPEN_CARD_STATES)
+      .select('id', 'status', 'call_log_id'),
+    readCard: (trx, listed) => openCardNow(trx, listed),
+    now,
+  });
+}
+
+// An open card read again under its call's triage lock (the lock every card writer takes first), with the times that
+// make it urgent, read by the clock after the lock (`now`: a visit may start, or an estimate expire, while the pass
+// works through earlier cards). `hold`: a call in the word's window still owes a read, or the card's own yes is being
+// read again (its `yes_rechecking` mark, which the moot pass sets; a resend can move the window past that call), so the
+// card rings nothing new until the read ends (the read may take the yes back, and the tap refuses meanwhile); its open
+// row still follows the card. A read ends within OWED_READ_HOURS. Null once the card is no longer open (the tap
+// accepted it, or a person claimed, resolved or dismissed it), while its call or a row it reads is busy (the triage
+// lock and holdCardRows, both taken without waiting), and while its evidence says something the card does not show yet
+// (cardState: a close or a refresh the next run writes).
+async function openCardNow(trx, listed) {
+  // The call's triage lock, taken without waiting as the tap takes it: a card whose call another change holds rings
+  // nothing this run, so one busy call never holds up the pass for the other cards.
+  try {
+    await lockNoWaitOrStop(trx, [TRIAGE_LOCK_NAMESPACE, listed.call_log_id], 'call_busy');
+  } catch (err) {
+    if (err.phoneYesRefusal) return null;
+    throw err;
+  }
+  const card = await trx('triage_items').where({ id: listed.id, reason_code: REASON_CODE, status: 'open' })
+    .first('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload', 'summary');
+  const held = card && await holdCardRows(trx, card);
+  if (!held || await cardState(card, trx)) return null;
+  const hold = parseJson(card.payload).yes_rechecking === true
+    || Boolean(held.since && await Word.unreadCallSince(trx, { customerId: card.related_customer_id, since: held.since }));
+  const now = new Date();
+  return { card, now, hold, ...(await cardTimes(trx, card, now)) };
+}
+
+// The rows a ring reads, held FOR SHARE to its commit, as the tap holds them: the customer's row (its phone numbers
+// decide which unlinked calls are theirs), the customer's estimates (the tap's own lock, which also refuses while one is
+// being sent), the customer's calls in the word's window (cardEstimatesOf's `since`, the window cardState reads: the
+// yes, any later word, the booking call), by id the booking call and the call the card's yes came from (cardState reads
+// both by id, also when a resend moved the window past them), the service catalog (the tap's catalog lock,
+// scheduling/catalog-lock.js, taken before the visit rows as the tap takes it: a visit's catalog row decides whether it
+// is a pest visit) and every visit the call booked. A change to one (a new number, an accept, a decline, an extension,
+// a re-read, a relink, a catalog edit, a visit moved) either landed before, and the reads after the lock see it, or
+// waits for the ring's commit, so the ring says what was true when it committed. Returns { since }, or null for a
+// change in flight right now: the card rings nothing this run (NOWAIT, in a savepoint, so the bell never waits on a row
+// and its transaction stays usable). A call or a visit inserted meanwhile has no row to hold; the next run reads it.
+async function holdCardRows(trx, card) {
+  const customerId = card.related_customer_id;
+  try {
+    return await trx.transaction(async (sp) => {
+      await sp('customers').where({ id: customerId }).forShare().noWait().select('id');
+      await lockCustomerEstimates(sp, customerId);
+      const { since } = await cardEstimatesOf(card, sp);
+      if (since) await Word.lockCallsSince(sp, { customerId, since });
+      await sp('call_log').whereIn('id', [card.call_log_id, parseJson(card.payload).yes_call_log_id].filter(Boolean))
+        .orderBy('id').forShare().noWait().select('id');
+      await sp.raw(`${require('./scheduling/catalog-lock').CATALOG_SHARE_LOCK_SQL} NOWAIT`);
+      await visitsCallBooked(sp, card.call_log_id, customerId).orderBy('id').forShare().noWait().select('id');
+      return { since };
+    });
+  } catch (err) {
+    if (err.code === '55P03' || err.phoneYesRefusal) return null;
+    throw err;
+  }
+}
+
+// The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and the
+// soonest start among the visits that keep the card open (booked by the call, on the calendar, not linked to an
+// estimate, pest) and are still to come (UPCOMING_VISIT_STATUSES, start after now). Both are read under the card's
+// customer, as its moot check reads them. A call that booked several visits files its card with no visit of its own,
+// so the call's visits are read, not the card's.
+async function cardTimes(conn, card, now) {
+  const { visitStart } = require('./call-phone-yes-bell');
+  const ids = cardEstimateIds(card);
+  const soonest = ids.length
+    ? await conn('estimates').whereIn('id', ids).where({ customer_id: card.related_customer_id })
+      .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').where('expires_at', '>', now)
+      .orderBy('expires_at').first('expires_at')
+    : null;
+  const upcoming = (await callVisitsOnCalendar(conn, card.call_log_id, card.related_customer_id))
+    .filter((v) => !v.source_estimate_id && UPCOMING_VISIT_STATUSES.includes(v.status) && visitStart(v) > now)
+    .sort((a, b) => visitStart(a) - visitStart(b));
+  let visit = null;
+  for (const candidate of upcoming) {
+    if (await isPestVisit(conn, candidate)) { visit = candidate; break; }
+  }
+  return { expiresAt: soonest?.expires_at || null, several: ids.length > 1, visit };
 }
 
 // One call's card, filed when the call earns one. True when a card was filed.
@@ -1237,5 +1363,7 @@ module.exports = {
     // The tap's two steps inside the accept, driven directly.
     linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, notesKeyOfForTest: notesKeyOf, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
     lockCustomerEstimatesForTest: lockCustomerEstimates, PEST_CADENCE_PLANS, planTermsOfForTest: planTermsOf,
+    // The sweep's bell pass alone, and its moot pass for one card (call-phone-yes-bell.db.test.js).
+    ringOpenCardsForTest: ringOpenCards, cardStateForTest: cardState, openCardNowForTest: openCardNow,
   },
 };

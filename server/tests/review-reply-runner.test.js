@@ -123,7 +123,8 @@ jest.mock('../models/db', () => {
     const hits = state.rows.filter((r) => r.reviewer_name !== '_stats' && r.missing_since == null && !r.dismissed
       && (!locs || locs.includes(String(r.location_id).toLowerCase()))
       && (force ? (r.id === rest[0] && !['skipped', 'retracted'].includes(r.auto_reply_status)) : (['queued', 'failed'].includes(r.auto_reply_status) && new Date(r.auto_reply_due_at) <= now && r.review_created_at >= cutoff))
-      && (r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < now)).slice(0, limit);
+      && (r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < now)
+      && (!/publish_claimed_until IS NULL OR publish_claimed_until </.test(sql) || r.publish_claimed_until == null || new Date(r.publish_claimed_until) < now)).slice(0, limit);
     hits.forEach((r) => { r.auto_reply_claimed_until = token; });
     return { rows: hits.map((r) => ({ ...r })) };
   };
@@ -597,6 +598,33 @@ describe('processDueAutoReplies — state machine', () => {
     Runner.whereNotAutoPosted(qb);
     // codex r77: a reply parked by the reviewer's edit is still live on Google — not dismissible either.
     expect(qb.whereRaw).toHaveBeenCalledWith("NOT ((COALESCE(auto_reply_status, '') = 'parked' AND COALESCE(auto_reply_reason, '') = 'review_edited_after_post') OR (COALESCE(auto_reply_status, '') = 'posted' AND COALESCE(auto_reply_version, '') IN ('human','agent_ops') IS NOT TRUE))");
+  });
+
+  test('a review with a publish in flight stays out of every automatic write: the cron claim, Post now, queue expiry, the catch-up enqueue (codex r3 on #8127)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const live = '2099-01-01T00:00:00Z';
+    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
+    // A person's post is in flight on each row: the publisher cleared the runner's claim before its PUT.
+    state.rows = [row({ id: 'due', publish_claimed_until: live }), row({ id: 'old', review_created_at: stale, publish_claimed_until: live })];
+    expect(await Runner.processDueAutoReplies()).toMatchObject({ claimed: 0 });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows.find((r) => r.id === 'due')).toMatchObject({ auto_reply_status: 'queued', auto_reply_claimed_until: null });
+    expect(state.rows.find((r) => r.id === 'old')).toMatchObject({ auto_reply_status: 'queued', auto_reply_claimed_until: null });
+    // Post now gets the publisher's own answer under that claim, before any drafting.
+    await expect(Runner.postNow('due', { type: 'admin' })).rejects.toMatchObject({ code: 'lock_busy', status: 409 });
+    expect(state.rows.find((r) => r.id === 'due').auto_reply_claimed_until).toBeNull();
+    // Once the publish ends (its claim expired), the same rows move again.
+    state.rows.forEach((r) => { r.publish_claimed_until = '2000-01-01T00:00:00Z'; });
+    expect(await Runner.processDueAutoReplies()).toMatchObject({ claimed: 1 });
+    expect(state.rows.find((r) => r.id === 'old')).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired' });
+    // The catch-up enqueue leaves a never-queued review alone while a post on it is in flight.
+    const rollout = new Date(Date.now() - 86400000).toISOString();
+    state.rows = [row({ id: 'never', auto_reply_status: null, auto_reply_due_at: null, created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString(), publish_claimed_until: live })];
+    expect(await Runner.enqueueMissedReviews({ rollout })).toBe(0);
+    expect(state.rows[0].auto_reply_status).toBeNull();
+    state.rows[0].publish_claimed_until = null;
+    expect(await Runner.enqueueMissedReviews({ rollout })).toBe(1);
+    expect(state.rows[0].auto_reply_status).toBe('queued');
   });
 
   test('queued rows older than maxQueueAgeHours leave the lane before a claim instead of auto-posting after a pause (codex r74)', async () => {
@@ -1316,6 +1344,18 @@ describe('processDueAutoReplies — state machine', () => {
     state.rows = [{ ...parked }];
     expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(1);
     expect(state.rows[0].auto_reply_status).toBe('queued');
+    // The one-time requeue never waits for a publish claim: this sync saves the GBP name, so no later sync could requeue the row.
+    state.rows = [{ ...parked, publish_claimed_until: '2099-01-01T00:00:00Z' }];
+    expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(1);
+    expect(state.rows[0].auto_reply_status).toBe('queued');
+    // A row parked gbp_not_configured can take a person's post meanwhile: its requeue waits for the claim, and the next sync requeues it.
+    const unconfigured = row({ id: 'p', auto_reply_status: 'parked', auto_reply_reason: 'gbp_not_configured', dismissed: false });
+    state.rows = [{ ...unconfigured, publish_claimed_until: '2099-01-01T00:00:00Z' }];
+    expect(await Runner.applyRequeueOnIdentity('p', unconfigured, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(0);
+    expect(state.rows[0].auto_reply_status).toBe('parked');
+    state.rows[0].publish_claimed_until = null;
+    expect(await Runner.applyRequeueOnIdentity('p', unconfigured, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'gbp_connected' });
   });
 
   test('publisher REVIEW_CHANGED (live review differs from the synced row) → re-queued AFTER the next sync window, not every tick', async () => {
@@ -1752,8 +1792,15 @@ describe('admin actions', () => {
     state.rows = [row({ id: 'hu', auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] ' + human, auto_reply_draft: null })];
     mockPublish.mockImplementationOnce(async ({ reviewId }) => { const r = state.rows.find((x) => x.id === reviewId); Object.assign(r, { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_claimed_until: null }); throw new ReviewReplyError('google_uncertain', 'timed out', { status: 502 }); });
     await expect(Runner.postNow('hu', { type: 'admin' }, { expectedDraft: human })).rejects.toMatchObject({ code: 'google_uncertain' });
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: human });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: human, auto_reply_version: 'human' });
     expect(state.rows[0].auto_reply_drafted_at).toBeTruthy();
+    // The review the text was attempted for: a reviewer edit during the park
+    // (the sync keeps the park through it) makes Post now refuse the text.
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toEqual({ fingerprint: Runner.reviewFingerprint(state.rows[0]), accountFingerprint: null });
+    const parked = { ...state.rows[0] };
+    state.rows = [{ ...parked, review_text: 'Edited: they missed the garage' }];
+    await expect(Runner.postNow('hu', { type: 'admin' }, { expectedDraft: human })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/review or its customer link changed/) });
+    state.rows = [parked];
     // The next sync sees the human text live on Google → ours, posted (Retract stays available).
     expect(Runner.syncReplyFields(state.rows[0], { owner_reply: human, owner_reply_updated_at: '2026-08-27T15:00:00Z' }, { now: new Date('2026-08-27T15:05:00Z') }))
       .toMatchObject({ review_reply: human, auto_reply_status: 'posted', auto_reply_reason: null, auto_reply_published_at: '2026-08-27T15:00:00Z' });
@@ -1800,6 +1847,8 @@ describe('admin actions', () => {
     expect(r.outcome).toBe('posted');
     const call = mockPublish.mock.calls[0][0];
     expect(call.expectedAccountFingerprint).toBe('fp:Venice|new');
+    // A pipeline draft is agent text: the publisher's strict app-name rule (owner 2026-11-19).
+    expect(call.fromDraft).toBe(true);
     expect(JSON.parse(call.autoFields.auto_reply_grounding)).toMatchObject({ accountFingerprint: 'fp:Venice|new' });
   });
 
@@ -1813,6 +1862,149 @@ describe('admin actions', () => {
     expect(af).toMatchObject({ auto_reply_draft: human, auto_reply_version: 'human', auto_reply_mode: null, auto_reply_grounding: null });
     expect(mockPublish.mock.calls[0][0].auditMeta).toMatchObject({ version: 'human', mode: null, intent: 'post_now' });
     expect(af.auto_reply_drafted_at).not.toBe('2026-08-20T00:00:00Z');
+    // A person's own [DRAFT] meets the never list only.
+    expect(mockPublish.mock.calls[0][0].fromDraft).toBe(false);
+  });
+
+  test('owner 2026-11-19: postNow of an attempt from an AI draft that the sync restored as a [DRAFT] (version agent_ops) is agent text', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Thanks Dana. Glad the Waves app helps.';
+    state.rows = [row({ id: 'ra', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops', auto_reply_mode: null })];
+    const r = await Runner.postNow('ra', { type: 'admin' }, { expectedDraft: text });
+    expect(r.outcome).toBe('posted');
+    // It keeps its agent origin through the post: version agent_ops, never human.
+    expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, fromDraft: true, auditMeta: { version: 'agent_ops' }, autoFields: { auto_reply_version: 'agent_ops' } });
+  });
+
+  test('owner 2026-11-19: a restored agent draft that times out again under Post now keeps version agent_ops and its grounding for its next restore', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    const text = 'Thanks Dana. Glad the Waves app helps.';
+    const base = row({ id: 'rb', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops', auto_reply_mode: null });
+    const grounding = { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: 'fp:Venice|new' };
+    state.rows = [{ ...base, auto_reply_grounding: grounding }];
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('google_uncertain', 'GBP replyToReview timed out', { status: 502 }));
+    await expect(Runner.postNow('rb', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'google_uncertain' });
+    // A second restore still checks the same review and account facts.
+    expect(state.rows[0]).toMatchObject({ auto_reply_draft: text, auto_reply_version: 'agent_ops', auto_reply_mode: null, auto_reply_grounding: JSON.stringify(grounding) });
+  });
+
+  test('postNow publishes a restored Intelligence Bar attempt as written only while the review and account facts its grounding records still hold', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Thanks Dana. Glad the Waves app helps.';
+    const base = row({ id: 'rg', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops', auto_reply_mode: null });
+    const grounding = { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: 'fp:Venice|new' };
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    // The reviewer edited the review while the row was parked google_uncertain
+    // (the sync keeps that park through an edit, so nothing marked it stale).
+    state.rows = [{ ...base, auto_reply_grounding: grounding, review_text: 'Edited: they missed the garage' }];
+    await expect(Runner.postNow('rg', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/review or its customer link changed/) });
+    // The customer's account facts moved since the draft was written.
+    state.rows = [{ ...base, auto_reply_grounding: grounding }];
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    await expect(Runner.postNow('rg', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/customer facts changed/) });
+    expect(mockPublish).not.toHaveBeenCalled();
+    // Both still hold: published as written.
+    state.rows = [{ ...base, auto_reply_grounding: grounding }];
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    expect((await Runner.postNow('rg', { type: 'admin' }, { expectedDraft: text })).outcome).toBe('posted');
+    // The publisher re-checks the same account facts after the PUT, and the
+    // posted row keeps the grounding of the text it published.
+    expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, expectedAccountFingerprint: 'fp:Venice|new', autoFields: { auto_reply_version: 'agent_ops', auto_reply_grounding: JSON.stringify(grounding) } });
+  });
+
+  test('postNow holds a restored editor attempt in a person\'s own words (version human) to the review it was written for', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Thanks Dana, we will be back Tuesday for the garage.';
+    const base = row({ id: 'rh', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'human', auto_reply_mode: null });
+    const grounding = { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: null };
+    state.rows = [{ ...base, auto_reply_grounding: grounding, review_text: 'Edited: they missed the garage' }];
+    await expect(Runner.postNow('rh', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/review or its customer link changed/) });
+    expect(mockPublish).not.toHaveBeenCalled();
+    state.rows = [{ ...base, auto_reply_grounding: grounding }];
+    expect((await Runner.postNow('rh', { type: 'admin' }, { expectedDraft: text })).outcome).toBe('posted');
+    // A person's own words: no account facts to re-check after the PUT; the
+    // posted row keeps the review the text was written for.
+    expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, fromDraft: false, autoFields: { auto_reply_version: 'human', auto_reply_grounding: JSON.stringify(grounding) } });
+    expect(mockPublish.mock.calls[0][0].expectedAccountFingerprint).toBeUndefined();
+  });
+
+  test('postNow re-attempts a parked manual attempt (before the sync restores it) as written, held to the grounding its attempt recorded', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Thanks Dana, we will be back Tuesday for the garage.';
+    const base = row({ id: 'rp', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', review_reply: null, auto_reply_draft: text, auto_reply_version: 'human', auto_reply_mode: null });
+    const grounding = { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: null };
+    state.rows = [{ ...base, auto_reply_grounding: grounding, review_text: 'Edited: they missed the garage' }];
+    await expect(Runner.postNow('rp', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/review or its customer link changed/) });
+    expect(mockPublish).not.toHaveBeenCalled();
+    // A person's own words: posted as written (the publisher's live read
+    // promotes it if it had landed), the person's app-name rule, no account
+    // check, its grounding kept.
+    state.rows = [{ ...base, auto_reply_grounding: grounding }];
+    expect((await Runner.postNow('rp', { type: 'admin' }, { expectedDraft: text })).outcome).toBe('posted');
+    expect(mockVerify).not.toHaveBeenCalled();
+    expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, fromDraft: false, auditMeta: { version: 'human' }, autoFields: { auto_reply_draft: text, auto_reply_grounding: JSON.stringify(grounding) } });
+    expect(mockPublish.mock.calls[0][0].expectedAccountFingerprint).toBeUndefined();
+    // An Intelligence Bar attempt: agent text, and its account facts re-checked.
+    const ib = { ...base, auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_grounding: { ...grounding, accountFingerprint: 'fp:Venice|new' } };
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    state.rows = [{ ...ib }];
+    expect((await Runner.postNow('rp', { type: 'admin' }, { expectedDraft: ib.auto_reply_draft })).outcome).toBe('posted');
+    expect(mockPublish.mock.calls[1][0]).toMatchObject({ text: ib.auto_reply_draft, fromDraft: true, expectedAccountFingerprint: 'fp:Venice|new' });
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    state.rows = [{ ...ib }];
+    await expect(Runner.postNow('rp', { type: 'admin' }, { expectedDraft: ib.auto_reply_draft })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/customer facts changed/) });
+  });
+
+  test('postNow never re-attempts a parked attempt with no recorded review as written: the park stays for the sync or the editor', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Thanks Dana. Glad the Waves app helps.';
+    // Parked before the publisher recorded the review it was written for (an older editor timeout).
+    state.rows = [row({ id: 'rn', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', review_reply: null, auto_reply_draft: text, auto_reply_version: 'agent_ops', auto_reply_mode: null, auto_reply_grounding: null })];
+    await expect(Runner.postNow('rn', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/no record of the review/) });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(mockVerify).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: text, auto_reply_claimed_until: null });
+  });
+
+  test('pipelineDraftGuard (Use Draft): a restored manual attempt posted verbatim meets the grounding its attempt recorded; edited text takes the human path', async () => {
+    const text = 'Thanks Dana. Glad the Waves app helps.';
+    const base = row({ id: 'ug', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops' });
+    const fresh = { ...base, auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: 'fp:Venice|new' } };
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    expect(await Runner.pipelineDraftGuard(text)(fresh)).toBeNull();
+    expect(await Runner.pipelineDraftGuard(text)({ ...fresh, review_text: 'Edited: they missed the garage' })).toMatch(/review or its customer link changed/);
+    // A person's own words, restored (version human): the review half only.
+    const own = { ...fresh, auto_reply_version: 'human', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: null } };
+    expect(await Runner.pipelineDraftGuard(text)(own)).toBeNull();
+    expect(await Runner.pipelineDraftGuard(text)({ ...own, review_text: 'Edited: they missed the garage' })).toMatch(/review or its customer link changed/);
+    expect(await Runner.pipelineDraftGuard(text + ' We fixed the garage too.')({ ...own, review_text: 'Edited: they missed the garage' })).toBeNull();
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    expect(await Runner.pipelineDraftGuard(text)(fresh)).toMatch(/customer facts changed/);
+    expect(await Runner.pipelineDraftGuard(text + ' We fixed the garage too.')(fresh)).toBeNull();
+    mockAccountFacts.mockRejectedValueOnce(new Error('db down'));
+    expect(await Runner.pipelineDraftGuard(text)(fresh)).toMatch(/could not be re-read/);
+  });
+
+  test('pipelineDraftGuard (editor): a still-parked manual attempt submitted verbatim meets its own grounding, never the automatic-draft snapshot check', async () => {
+    const text = 'Thanks Dana, we will be back Tuesday for the garage.';
+    const base = row({ id: 'pg', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', review_reply: null, auto_reply_draft: text, auto_reply_version: 'human', auto_reply_mode: null });
+    const own = { ...base, auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: null } };
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    // A person's own words: no account facts recorded, so an unchanged review passes.
+    expect(await Runner.pipelineDraftGuard(text)(own)).toBeNull();
+    expect(await Runner.pipelineDraftGuard(text)({ ...own, review_text: 'Edited: they missed the garage' })).toMatch(/review or its customer link changed/);
+    expect(await Runner.pipelineDraftGuard(text + ' Thanks again.')({ ...own, review_text: 'Edited: they missed the garage' })).toBeNull();
+    // An Intelligence Bar attempt: its account facts too.
+    const ib = { ...own, auto_reply_version: 'agent_ops', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: 'fp:Venice|new' } };
+    expect(await Runner.pipelineDraftGuard(text)(ib)).toBeNull();
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    expect(await Runner.pipelineDraftGuard(text)(ib)).toMatch(/customer facts changed/);
+    // An attempt parked with no recorded review (or a malformed record) is never sent again unchanged, as for Post now; edited text is the person's own.
+    expect(await Runner.pipelineDraftGuard(text)({ ...base, auto_reply_grounding: null })).toMatch(/no record of the review/);
+    expect(await Runner.pipelineDraftGuard(text)({ ...base, auto_reply_grounding: '{not json' })).toMatch(/no record of the review/);
+    expect(await Runner.pipelineDraftGuard(text + ' Thanks again.')({ ...base, auto_reply_grounding: null })).toBeNull();
   });
 
   test('a malformed grounding token is never an unguarded submission (codex r47)', async () => {

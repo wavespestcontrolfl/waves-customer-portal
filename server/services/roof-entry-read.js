@@ -605,12 +605,19 @@ const lowerId = (v) => (v ? String(v).toLowerCase() : null);
 
 /**
  * Run or reuse a roof read. Returns { status: 'ok' | 'in_progress' | 'no_image' | 'model_failed', cached, read }.
- * input: { lat, lng, county, estimateId?, customerId? }. Throws code 'unknown_reference' for a missing estimate or
+ * input: { lat, lng, county, estimateId?, customerId? }. An 'ok' answer also carries image_url, the county export URL of the crop. Throws code 'unknown_reference' for a missing estimate or
  * customer. An unsupported county answers no_image before any database read. 'in_progress' means another request holds
  * this crop's claim: no image fetch or model call was made, ask again shortly. A reuse for a different estimate or
  * customer gets its own row (a copy of the paid result, cost 0), so each context keeps its own technician feedback.
  */
 async function runRoofEntryRead(input) {
+  const result = await runRead(input);
+  // The staff screen draws the pins on the crop this key stands for: the exact export URL (same rounded centre) the fetch used.
+  if (result.status !== 'ok') return result;
+  return { ...result, image_url: exportRequestUrl(IMAGE_SOURCES[countyKey(input.county)], input.lat, input.lng) };
+}
+
+async function runRead(input) {
   const county = countyKey(input.county);
   if (!county) return { status: 'no_image', cached: false, read: null };
   // Ids are compared and stored lower-case: an upper-case UUID is the same context as its lower-case spelling.
@@ -628,11 +635,15 @@ async function runRoofEntryRead(input) {
   return pending;
 }
 
-/** The technician's own final count and per-type flags, kept beside the AI read to compare them later. */
+/**
+ * The technician's own final count and per-type flags, kept beside the AI read to compare them later. Only what is sent
+ * changes: the count is written only when sent, and the flags are merged over the saved ones, never replaced.
+ */
 async function saveTechCount(id, { count, flags }) {
   const patch = {};
   if (count !== undefined) patch.tech_final_count = count;
-  if (flags !== undefined) patch.tech_final_flags = JSON.stringify(flags);
+  // Merged in SQL in one statement, so two saves of different types (or two tabs) keep both; a type sent again is replaced.
+  if (flags !== undefined) patch.tech_final_flags = db.raw("COALESCE(tech_final_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify(flags)]);
   const [row] = await db(TABLE).where({ id }).update(patch).returning('*');
   return row ? publicRead(row) : null;
 }

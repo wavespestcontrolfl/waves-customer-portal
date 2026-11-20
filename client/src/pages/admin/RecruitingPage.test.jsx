@@ -46,6 +46,7 @@ function previewFixture(overrides = {}) {
     email_subject: "Let's set up your interview with Waves",
     email_body: 'Pick a time: [interview link]',
     interview_url: null,
+    offers: { held: false, draft: false, owner_only: false, stamp: '0'.repeat(32) },
     ...overrides,
   };
 }

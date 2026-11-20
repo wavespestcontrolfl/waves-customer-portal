@@ -101,6 +101,7 @@ const db = require('../models/db');
 const {
   invoiceStillCollectible,
   recheckDeferredReplay,
+  deferredProviderPreSendCheck,
   dispatchDeferredReplay,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
@@ -1645,6 +1646,23 @@ describe('deferred-replay registry', () => {
     expect(inert.ok).toBe(true);
     expect(upd.update).not.toHaveBeenCalled();
     db.mockReset();
+  });
+
+  test('the estimate follow-up recheck hands the queued row\'s stage and quoted deadline to the eligibility check', async () => {
+    const { deferredFollowupStillEligible } = require('../services/estimate-follow-up');
+    deferredFollowupStillEligible.mockClear();
+    await recheckDeferredReplay('estimate_follow_up_deferred', { estimate_id: 'est-1', followup_stage: 'expiring', quoted_expires_at: '2026-11-25T15:00:00.000Z' });
+    expect(deferredFollowupStillEligible).toHaveBeenCalledWith('est-1', { stage: 'expiring', quotedExpiresAt: '2026-11-25T15:00:00.000Z' });
+  });
+
+  test('a queued estimate follow-up with no estimate id never sends: both hooks refuse it', async () => {
+    const { deferredFollowupStillEligible } = require('../services/estimate-follow-up');
+    deferredFollowupStillEligible.mockClear();
+    await expect(recheckDeferredReplay('estimate_follow_up_deferred', { followup_stage: 'viewed' }))
+      .resolves.toMatchObject({ eligible: false, reason: 'estimate-missing' });
+    const check = deferredProviderPreSendCheck('estimate_follow_up_deferred', { followup_stage: 'viewed' });
+    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'estimate-missing' });
+    expect(deferredFollowupStillEligible).not.toHaveBeenCalled();
   });
 
   test('terminal-hook sweep (r16): re-runs stamped rows bounded, clears loudly at exhaustion', async () => {

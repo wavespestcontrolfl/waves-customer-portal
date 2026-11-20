@@ -115,6 +115,28 @@ describe('readableEmail', () => {
     expect(readableEmail({ subject: 'S'.repeat(SUBJECT_CHARS + 1), body_text: 'Ends May 1.' })).toBeNull();
   });
 
+  // Pre-push audit on b461113351 (P1): reply history written inline in one paragraph was kept.
+  test('reply history written inline is dropped too, and the read is partial', () => {
+    const inline = 'Thanks. On Mon, Apr 13, 2026 at 9:00 AM Sam Rep wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: inline })).toEqual({ subject: 'Deal', text: 'Thanks.', cut: false, partial: true });
+    // Pre-push audit on 34ab1e253a (P1): a header wrapped onto a second line kept the old offer.
+    const wrapped = 'Thanks. On Mon, Apr 13, 2026 at 9:00 AM,\nSam Rep wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: wrapped })).toEqual({ subject: 'Deal', text: 'Thanks.', cut: false, partial: true });
+    // Pre-push audit on 76e2aab5e7 (P1): the cut started at the sender's own "on" and dropped the deadline.
+    const ownOn = 'The sale ends on April 30. On Apr 13, 2026 at 9:00 AM Sam Rep wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: ownOn })).toEqual({ subject: 'Deal', text: 'The sale ends on April 30.', cut: false, partial: true });
+    const ownCapitalOn = 'Hi. On April 30 prices go up. On Apr 13, 2026 at 9:00 AM Sam Rep wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: ownCapitalOn }).text).toBe('Hi. On April 30 prices go up.');
+    // Pre-push audit on 1e7d63d07c (P1): a lowercase header, and a header inside a quoted line, cut the sender's words.
+    const lowerOn = 'Sale ends on April 30. on Apr 13, 2026 Sam wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: lowerOn }).text).toBe('Sale ends on April 30.');
+    const quotedHeader = '> Earlier note: On Apr 13, 2026 Sam wrote: old offer\nOur new offer ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: quotedHeader })).toEqual({ subject: 'Deal', text: 'Our new offer ends tomorrow.', cut: false, partial: true });
+    // Prose is no header: with no date, time or address before "wrote:", the text stays whole.
+    const prose = 'Big savings. On sale now: our rep wrote: ends Friday.';
+    expect(readableEmail({ subject: 'Deal', body_text: prose })).toEqual({ subject: 'Deal', text: prose, cut: false, partial: false });
+  });
+
   // Pre-push audit on 75797b78e6 (P1): "Re: Flash sale ends tomorrow" put the old "tomorrow" on the reply's day.
   test("a reply's or forward's subject is the old email's: left out, so the read is partial", () => {
     for (const subject of ['Re: Flash sale ends tomorrow', 'FW: Flash sale ends tomorrow', 'fwd:Flash sale ends tomorrow']) {
@@ -340,6 +362,17 @@ describe('checkAnswer', () => {
     expect(read('2026-04-23', 'Deals April 13 through Thursday').ok).toBe(true);
   });
 
+  // Pre-push audit on b461113351 (P1): "Wednesday" quoted alone from "Sale ends April 15 (Wednesday)" passed April 22.
+  test('a day word right after a date labels it, also when the date sits just before the quote', () => {
+    const wednesday = new Date('2026-04-15T14:00:00Z'); // Wednesday Apr 15
+    const promo = 'Subject\nSale ends April 15 (Wednesday). Flash sale through Wednesday.';
+    const read = (endDate, quote) => checkAnswer({ end_date: endDate, quote, price_increase: false }, promo, wednesday);
+    const refused = { ok: false, reason: 'quote_date_mismatch' };
+    expect(read('2026-04-22', 'Wednesday')).toEqual(refused);
+    expect(read('2026-04-22', '15 (Wednesday)')).toEqual(refused);
+    expect(read('2026-04-22', 'Flash sale through Wednesday').ok).toBe(true);
+  });
+
   // Pre-push audit on 75797b78e6 (P1): "Offer ends April 15 (Wednesday)" passed the Wednesday after.
   test('beside dates, a day word names a day only as a range close; a weekday beside a date labels it', () => {
     const wednesday = new Date('2026-04-15T14:00:00Z'); // Wednesday Apr 15
@@ -543,6 +576,26 @@ describe('readDealEndDates', () => {
     expect(found.size).toBe(0);
     expect(mockCreate.mock.calls[0][0].messages[0].content).toBe('Received: 2026-04-15 (US Eastern)\nSubject: Deal 1\n\nThanks for the update.');
     expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 0 of 1 deals read by AI; date patterns kept for 1 quote_not_found');
+  });
+
+  // Pre-push audit on 34ab1e253a (P1): a date that ends the subject labelled the body's first word.
+  test('the subject and the body are two sentences to the check', async () => {
+    const { conn } = fakeConn([{ id: 1, body_text: 'Tomorrow only! Save on mulch.', body_html: null }]);
+    mockCreate.mockResolvedValue(reply('{"end_date": "2026-04-16", "quote": "Tomorrow only", "price_increase": false}'));
+
+    const found = await readDealEndDates(conn, [deal(1, { subject: 'April 15' })]);
+
+    expect(found.get(1)).toEqual({ endDate: '2026-04-16', quote: 'Tomorrow only', priceIncrease: false });
+  });
+
+  // Pre-push audit on 76e2aab5e7 (P1): a date that starts the body was a later day in the subject's sentence.
+  test('a date that starts the body is no later day for the subject', async () => {
+    const { conn } = fakeConn([{ id: 1, body_text: '4/15 was the launch date.', body_html: null }]);
+    mockCreate.mockResolvedValue(reply('{"end_date": "2026-04-30", "quote": "Sale ends April 30", "price_increase": false}'));
+
+    const found = await readDealEndDates(conn, [deal(1, { subject: 'Sale ends April 30' })]);
+
+    expect(found.get(1)).toEqual({ endDate: '2026-04-30', quote: 'Sale ends April 30', priceIncrease: false });
   });
 
   // Pre-push audit on 75797b78e6 (P1): a reply's old subject "ends tomorrow" counted from the reply's day.

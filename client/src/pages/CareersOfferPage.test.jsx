@@ -26,8 +26,8 @@ function openPayload(overrides = {}) {
     firstName: 'Jordan',
     jobTitle: 'Pest Control Technician',
     startDate: '2027-01-04',
-    hourlyRate: '23.00',
-    stepRate: '25.00',
+    hourlyRate: 23,
+    stepRate: 25,
     stepEffectiveOn: '2027-04-05',
     hoursLine: '40 paid hours each full week, four 10-hour days, Monday to Thursday',
     reportTo: 'Sam Carter, owner',
@@ -85,6 +85,7 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByText('Every Friday, for the week before')).toBeInTheDocument();
     expect(screen.getByText(/Please don.t give notice at your current job until you have signed this offer\./)).toBeInTheDocument();
     expect(screen.getByText('Open until Fri, Dec 18')).toBeInTheDocument();
+    expect(screen.queryByText('0')).toBeNull(); // no stray value (a lock's status) renders beside the offer
   });
 
   it('shows only the hourly rate when there is no step', async () => {
@@ -122,7 +123,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
     expect(bodyOf(fetchMock, 1)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
-    expect(fetchMock.mock.calls[2][0]).not.toMatch(/\/accept$/); // the re-read
+    expect(fetchMock.mock.calls[2][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}$`)); // the re-read
     await waitFor(() => expect(screen.getByLabelText('Text me about this offer')).toBeChecked());
     expect(screen.queryByText(/You signed this offer|This offer was (already )?signed/)).toBeNull(); // still open
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
@@ -145,7 +146,7 @@ describe('CareersOfferPage — open state', () => {
     expect(accept).toBeEnabled();
     fireEvent.click(accept);
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\. Sam will contact you about your first day\./)).toBeInTheDocument();
-    expect(fetchMock.mock.calls[1][0]).toMatch(/\/accept$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));
     expect(bodyOf(fetchMock, 1)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
   });
 
@@ -159,7 +160,7 @@ describe('CareersOfferPage — open state', () => {
     const box = await screen.findByLabelText('Text me about this offer');
     fireEvent.click(box);
     await waitFor(() => expect(box).toBeChecked());
-    expect(fetchMock.mock.calls[1][0]).toMatch(/\/text-consent$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/v2\/text-consent$/);
     expect(bodyOf(fetchMock, 1)).toEqual({ consent: true, version: VERSION });
     fireEvent.click(box);
     expect(await screen.findByText('Try later')).toBeInTheDocument();
@@ -177,7 +178,8 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByText(/This offer is no longer open/)).toBeInTheDocument();
   });
 
-  it('stays locked with a retry when the refresh after a consent 409 fails', async () => {
+  // The refusal says nothing about what is stored, so until a read works the page only locks and offers Check again.
+  it('stays locked with Check again when the refresh after a consent 409 fails, and says nothing about the choice yet', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({ error: 'Not open', code: 'NOT_OPEN' }, 409))
@@ -186,7 +188,9 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
-    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeEnabled();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
   });
 
@@ -215,12 +219,182 @@ describe('CareersOfferPage — open state', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('shows the not-valid page when the consent save answers 404', async () => {
-    globalThis.fetch = vi.fn()
+  it('shows the not-valid page when the consent save and the read after it answer 404', async () => {
+    const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
       .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404));
+    globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.click(await screen.findByLabelText('Text me about this offer'));
+    expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
+    expect(fetchMock.mock.calls[2][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}$`)); // the read
+  });
+
+  // A server without the /v2 routes (a mixed deploy or a rollback) answers 404 for a live offer: the page reads the
+  // offer before it calls the link dead. An open read keeps the offer and marks the page out of date: every answer
+  // locks (no signature can start next to the reload offer), and the page offers a reload, since only the page the
+  // server serves now can answer.
+  it('keeps the offer when a consent save answers 404 and the read says open, locks every answer and offers a reload', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse(openPayload()));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'This link is not valid.' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
+    expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const originalLocation = window.location;
+    const reload = vi.fn();
+    Reflect.deleteProperty(window, 'location');
+    window.location = { ...originalLocation, reload };
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Reload page' }));
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      window.location = originalLocation;
+    }
+  });
+
+  it('keeps the offer when a signature answers 404 and the read says open, signs nothing on screen, locks every answer and offers a reload', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse(openPayload()));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    const accept = await screen.findByRole('button', { name: 'Accept and sign' });
+    fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(accept);
+    expect(await screen.findByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reload page' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Ask for another start date' })).toBeDisabled();
+    expect(screen.queryByText(/You signed this offer/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'This link is not valid.' })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls[2][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}$`)); // the read
+  });
+
+  // A server from before the offer's version answers the read without one. Reading again gets the same answer, so
+  // the page is out of date: it offers a reload, never a Check again or Try again that reads the same answer forever.
+  it('offers a reload, not Check again, when a signature answers 404 and the read has no version', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined })));
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reload page' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
+  });
+
+  it('offers a reload, not Try again, when a consent save answers 404 and the read has no version', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined })));
+    renderPage();
+    fireEvent.click(await screen.findByLabelText('Text me about this offer'));
+    expect(await screen.findByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reload page' })).toBeEnabled();
+    expect(screen.queryByText(/We could not confirm that choice/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
+    expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
+  });
+
+  it('replaces Check again with a reload when the read after a refusal comes back without a version', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Conflict' }, 409)) // a refusal that names no state
+      .mockRejectedValueOnce(new Error('offline')) // the read fails
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined }))); // Check again: no version
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Check again' }));
+    expect(await screen.findByRole('button', { name: 'Reload page' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
+  });
+
+  // The read after a 404 can fail too. The page then locks every answer, and its Check again reads with that 404, so an
+  // open offer still means the server lacks the route: the page offers a reload and never frees the answers.
+  it('keeps a signature 404 through Check again: an open read then offers a reload, not the answers', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404)) // the signature
+      .mockRejectedValueOnce(new Error('offline')) // the read after it fails
+      .mockResolvedValueOnce(jsonResponse(openPayload())); // Check again: still open
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Check again' }));
+    expect(await screen.findByRole('button', { name: 'Reload page' })).toBeEnabled();
+    expect(screen.getByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
+  });
+
+  it('keeps a text-choice 404 through Check again, and offers a reload when that read has no version', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404)) // the text choice
+      .mockRejectedValueOnce(new Error('offline')) // the read after it fails
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined }))); // Check again: a server from before it
+    renderPage();
+    fireEvent.click(await screen.findByLabelText('Text me about this offer'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Check again' }));
+    expect(await screen.findByRole('button', { name: 'Reload page' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
+    expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
+  });
+
+  // A reload drops what the page knows about a send whose reply was lost, so the page offers none until that send has
+  // a definite answer, even when a read already shows the page is out of date.
+  it('offers no reload while a lost signature is unresolved, then offers it once the resend has a definite answer', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // the signature: reply lost
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined }))) // the read: a form the page cannot use
+      .mockResolvedValueOnce(jsonResponse({ error: 'This offer changed.', state: 'open' }, 409)) // Try again: refused
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined }))); // the read after it
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole('button', { name: 'Reload page' })).toBeNull();
+    expect(screen.queryByText('This page is out of date. Please reload it and try again.')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('button', { name: 'Reload page' })).toBeEnabled();
+    expect(screen.queryByText('We could not confirm that. Check your connection and try again.')).toBeNull();
+    expect(bodyOf(fetchMock, 3)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
+  });
+
+  it('shows the not-valid page when a signature and the read after it answer 404', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404));
+    renderPage();
+    const accept = await screen.findByRole('button', { name: 'Accept and sign' });
+    fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(accept);
     expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
   });
 
@@ -239,8 +413,66 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
-    expect(fetchMock.mock.calls[3][0]).toMatch(/\/text-consent$/);
+    expect(fetchMock.mock.calls[3][0]).toMatch(/\/v2\/text-consent$/);
     expect(bodyOf(fetchMock, 3)).toEqual({ consent: true, version: VERSION });
+  });
+
+  // The check after a lost text-choice reply reads through the page's one read path: a read from a server that does
+  // not match the page marks it out of date there too, so the save landing later cannot unlock signing. The reload
+  // offer waits until the save has a definite answer.
+  it('marks the page out of date when the read after a lost consent reply does not match the page, and keeps signing locked once the save lands', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // POST consent true: reply lost
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined }))) // the read: a server from before the version
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' })); // Try again: saved
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Reload page' })).toBeNull(); // the save's outcome is unknown: no reload yet
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('button', { name: 'Reload page' })).toBeInTheDocument();
+    expect(screen.getByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
+    expect(screen.queryByText(/We could not confirm that choice/)).toBeNull();
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled(); // a name is typed: only the lock holds it
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  // The same for a text choice: a resend that reaches a server without /v2 says nothing about the save whose reply
+  // was lost, so the page reads the offer, and signing stays locked while the read holds the old choice.
+  it('keeps the choice and the lock when a resend after a lost consent reply answers 404 and the read holds the old value', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // POST consent true: reply lost
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: the lost save has not landed yet
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404)) // Try again reaches a server without /v2
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: still the old choice
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' })); // Try again: saved
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
+    expect(screen.getByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reload page' })).toBeNull(); // the save's outcome is unknown: no reload
+    expect(screen.getByRole('link', { name: '(941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749'); // CallUsLine
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    expect(screen.queryByRole('link', { name: '(941) 297-5749' })).toBeNull(); // settled: the call line goes
+    expect(fetchMock.mock.calls[5][0]).toMatch(/\/v2\/text-consent$/);
+    expect(bodyOf(fetchMock, 5)).toEqual({ consent: true, version: VERSION });
   });
 
   it('keeps the choice and the lock when the read after a lost reply still holds the old value, until the choice is sent again', async () => {
@@ -326,20 +558,41 @@ describe('CareersOfferPage — open state', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('shows the load error, not the offer, when the open offer read has no version', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined })));
+  // A first read from a server that does not match this page (one from before the offer's version, or one newer than
+  // the page) gets the same answer on every read: the page offers a reload, not a retry, and no signing controls.
+  it.each([
+    ['an open offer without its version', openPayload({ version: undefined })],
+    ['a state the page does not know', { ...openPayload(), state: 'pending' }],
+  ])('offers a reload, not the offer, on a first read of %s', async (_label, body) => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(body));
     renderPage();
-    expect(await screen.findByText(/load that offer link/)).toBeInTheDocument();
+    expect(await screen.findByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Your job offer' })).toBeInTheDocument(); // the page still says what it is
+    expect(screen.getByRole('button', { name: 'Reload page' })).toBeEnabled();
+    expect(screen.queryByText(/load that offer link/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
   });
 
   // Only an explicit open state with its version shows the signing controls.
   it.each([
     ['an empty answer', {}],
-    ['an unknown state', { ...openPayload(), state: 'pending' }],
     ['open without the text choice', openPayload({ textConsent: undefined })],
     ['open without the Terms', openPayload({ terms: null })],
     ['open with empty Terms', openPayload({ terms: { title: 'Technician Terms', markdown: '  ' } })],
+    ['open without the start date', openPayload({ startDate: null })],
+    ['open with a start date that is not a day', openPayload({ startDate: '2027-02-30' })],
+    ['open without the hourly rate', openPayload({ hourlyRate: null })],
+    ['open with a zero hourly rate', openPayload({ hourlyRate: 0 })],
+    ['open with an hourly rate sent as text', openPayload({ hourlyRate: '23.00' })],
+    ['open with a step rate and no step date', openPayload({ stepEffectiveOn: null })],
+    ['open with a step date and no step rate', openPayload({ stepRate: null })],
+    ['open without the pay step fields', openPayload({ stepRate: undefined, stepEffectiveOn: undefined })],
+    ['open with an hourly rate that shows as $0.00', openPayload({ hourlyRate: 0.001 })],
+    ['open with a step rate the page would round', openPayload({ stepRate: 25.005 })],
+    ['open without the job', openPayload({ jobTitle: ' ' })],
+    ['open without the week', openPayload({ hoursLine: null })],
+    ['open without who they report to', openPayload({ reportTo: '' })],
+    ['open without pay day', openPayload({ payDayLine: null })],
   ])('shows the load error, not the offer, when the offer read is %s', async (label, body) => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(body));
     renderPage();
@@ -387,9 +640,10 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
   });
 
-  // The same refusal, but the read after it fails: signing stays locked, and
-  // the read Try again makes still says the change did not go through.
-  it('still says a refused change did not go through when the read after it failed and Try again reads the offer', async () => {
+  // The same refusal, but the read after it fails: the page locks every answer
+  // until Check again reads the offer, and says the change did not go through
+  // only once that read shows another choice stored.
+  it('says a refused change did not go through once Check again reads another choice stored', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
       .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // another tab changed the choice since this read
@@ -399,14 +653,65 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
-    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull(); // nothing read yet
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked(); // the stored choice, not the refused one
     expect(screen.getByText('That did not go through. Please try again.')).toBeInTheDocument();
     expect(screen.queryByText(/We could not confirm that choice/)).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  // The same, but another tab saved the very choice this one asked for before Check again read it: the box shows
+  // that choice, and the page never says the change did not go through, so no one clicks the box back.
+  it('never says the change did not go through when Check again reads the choice the applicant asked for', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // another tab changed the offer since this read
+      .mockRejectedValueOnce(new Error('offline')) // the read after the refusal fails
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: '2026-12-11T15:30:00.000Z' }))); // that tab saved yes
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked(); // the choice asked for, saved by the other tab
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  // Codex pre-push round 13: a save whose reply was lost can land after all. Try again then sends the same choice on
+  // the old version and meets a 409. That refusal says nothing about what is stored, so while the read after it fails
+  // the page only locks and offers Check again; that read shows the first save stored, and the page never says the
+  // choice did not go through.
+  it('waits for a read before saying a refused resend of a lost choice did not go through', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // the save: its reply is lost (it landed)
+      .mockRejectedValueOnce(new Error('offline')) // the check read fails too
+      .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // Try again: the old version is refused
+      .mockRejectedValueOnce(new Error('offline')) // the read after the refusal fails
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: '2026-12-11T15:30:00.000Z' }))); // Check again
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked(); // the first save landed
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(bodyOf(fetchMock, 3)).toEqual({ consent: true, version: VERSION });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   // The 409 says where the offer stands. A closed offer comes back whole, with
@@ -566,7 +871,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(send);
     expect(await screen.findByText(/Thanks\. Sam will look at your new date\. If it works, he will send you an updated offer\./)).toBeInTheDocument();
     expect(screen.getByText('You asked to start on Mon, Jan 11, 2027.')).toBeInTheDocument();
-    expect(fetchMock.mock.calls[1][0]).toMatch(/\/date-request$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/v2\/date-request$/);
     expect(bodyOf(fetchMock, 1)).toEqual({ requestedStartDate: '2027-01-11', note: 'Need a week', version: VERSION });
   });
 
@@ -581,7 +886,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.change(screen.getByLabelText('Reason (optional)'), { target: { value: 'Took another job' } });
     fireEvent.click(screen.getByRole('button', { name: 'Yes, decline' }));
     expect(await screen.findByText('You declined this offer. Thank you for your time.')).toBeInTheDocument();
-    expect(fetchMock.mock.calls[1][0]).toMatch(/\/decline$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/v2\/decline$/);
     expect(bodyOf(fetchMock, 1)).toEqual({ reason: 'Took another job', version: VERSION });
   });
 
@@ -635,8 +940,50 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.queryByText(/Could not save that/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
-    expect(fetchMock.mock.calls[3][0]).toMatch(/\/accept$/);
+    expect(fetchMock.mock.calls[3][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));
     expect(bodyOf(fetchMock, 3)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
+  });
+
+  // A resend can reach a server without the /v2 routes (a mixed deploy or a rollback) while the first send still waits
+  // for the offer. Its 404 says nothing about that send, so the send stays the only action until a read or a resend
+  // settles it.
+  it('after a lost sign reply, a resend that answers 404 keeps the send the only action while the read says open', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // sign: reply lost
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: the sign has not landed yet
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404)) // the resend reaches a server without /v2
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: still open
+      .mockResolvedValueOnce(jsonResponse({ error: 'Bad gateway' }, 502)) // the next resend: no answer again
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: still open
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the next resend signs
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
+    expect(screen.getByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reload page' })).toBeNull(); // the send's outcome is unknown: no reload
+    // Try again may never work against that server: the applicant can call, and the office checks.
+    expect(screen.getByText((_, el) => el?.tagName === 'P' && el.textContent === 'If this keeps happening, call us at (941) 297-5749 and we will check it for you.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '(941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749');
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Ask for another start date' })).toBeDisabled();
+    expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
+    expect(screen.getByLabelText('Type your full name to sign')).toBeDisabled();
+    // A resend that fails again (no answer) keeps the call line: the send still has no definite answer.
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
+    expect(screen.getByRole('link', { name: '(941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749');
+    expect(screen.getByLabelText('Type your full name to sign')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(fetchMock.mock.calls[7][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));
+    expect(bodyOf(fetchMock, 7)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
   });
 
   it('after a lost decline reply and a failed read, the resend is the same decline and its answer is shown', async () => {
@@ -655,7 +1002,7 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByLabelText('Reason (optional)')).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText('You declined this offer. Thank you for your time.')).toBeInTheDocument();
-    expect(fetchMock.mock.calls[3][0]).toMatch(/\/decline$/);
+    expect(fetchMock.mock.calls[3][0]).toMatch(/\/v2\/decline$/);
     expect(bodyOf(fetchMock, 3)).toEqual(bodyOf(fetchMock, 1));
   });
 
