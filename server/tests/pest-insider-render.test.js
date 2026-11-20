@@ -92,7 +92,8 @@ describe('renderIssue', () => {
   test('the dateline names the edition, the send date and the read time; a date that is not a real YYYY-MM-DD is left out', () => {
     expect(renderIssue({ ...BASE, sendDate: '2026-12-03' }).text_body.startsWith('Waves Pest Insider · Dec 3, 2026 · 1-min read\n\nHey there!\n')).toBe(true);
     expect(renderIssue({ ...BASE, sendDate: '2027-01-21' }).html_body).toContain('>Waves Pest Insider · Jan 21, 2027 · 1-min read</p>');
-    for (const sendDate of [undefined, '2026-13-03', '2026-12-00', 'Dec 3', '<b>2026-12-03</b>', 20261203]) {
+    expect(renderIssue({ ...BASE, sendDate: '2028-02-29' }).text_body.startsWith('Waves Pest Insider · Feb 29, 2028 · 1-min read\n')).toBe(true);
+    for (const sendDate of [undefined, '2026-13-03', '2026-12-00', '2027-02-30', '2026-04-31', '2027-02-29', 'Dec 3', '<b>2026-12-03</b>', 20261203]) {
       const r = renderIssue({ ...BASE, sendDate });
       expect(r.text_body.startsWith('Waves Pest Insider · 1-min read\n')).toBe(true);
     }

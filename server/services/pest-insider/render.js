@@ -47,6 +47,7 @@
 'use strict';
 
 const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAware, ctaButton } = require('../email-template');
+const { validDateOnly, formatDateOnly } = require('../../utils/date-only');
 const { SITE, POST_URLS, postUrl } = require('./posts');
 const { factById } = require('./facts');
 const { cardFor, sourceLine, CARD_WIDTH, CARD_HEIGHT } = require('./cards');
@@ -72,7 +73,6 @@ const SECTIONS = Object.freeze({ lead: 'Today I learned', id: "What's this?", to
 const LEAD_EMOJI = '💡';
 const ID_EMOJI = '🔍';
 const TOOL_EMOJI = '🧰';
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 // The species card's tile: the species' own emoji where its category's would
 // show another animal, else its category's, else the magnifier. "Biting"
@@ -168,9 +168,7 @@ const readMinutes = (text) => Math.max(1, Math.round(String(text).split(/\s+/).f
 // "Waves Pest Insider · Dec 3, 2026 · 1-min read": the edition's name, its
 // send date (a real YYYY-MM-DD, else left out) and the read time.
 function datelineText(sendDate, minutes) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(typeof sendDate === 'string' ? sendDate : '');
-  const day = m ? Number(m[3]) : 0;
-  const date = m && MONTHS[Number(m[2]) - 1] && day >= 1 && day <= 31 ? `${MONTHS[Number(m[2]) - 1]} ${day}, ${m[1]}` : '';
+  const date = validDateOnly(sendDate) ? formatDateOnly(sendDate, { month: 'short' }) : '';
   return ['Waves Pest Insider', date, `${minutes}-min read`].filter(Boolean).join(' · ');
 }
 

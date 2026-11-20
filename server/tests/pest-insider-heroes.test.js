@@ -154,9 +154,12 @@ describe('taking new art', () => {
 
     fs.writeFileSync(path.join(input, 't02.png'), 'not a picture');
     expect(run('--execute').status).toBe(1);
-    // "--only" with no fact ids never means "all"
+    // "--only" with no fact ids never means "all", and every fact it names needs its picture
     expect(run('--execute', '--only').status).toBe(2);
     expect(run('--execute', '--only', ',').status).toBe(2);
+    fs.rmSync(path.join(input, 't02.png'));
+    const missing = run('--execute', '--only', 'T03,R01');
+    expect([missing.status, missing.stderr]).toEqual([1, expect.stringContaining('No picture for R01')]);
     expect(state()).toEqual(before);
   }, 60000);
 

@@ -105,6 +105,8 @@ async function stage() {
     const art = sha16(webp);
     batch.push({ id, art, webp, target: path.join(artDir, `${id.toLowerCase()}-${art}.webp`) });
   }
+  const missing = only ? [...only].filter((id) => !batch.some((item) => item.id === id)) : [];
+  if (missing.length) throw new Error(`No picture for ${missing.join(', ')} in ${dir} (expected <fact>.png, such as ${missing[0].toLowerCase()}.png); nothing taken.`);
   merged(readHeroes(), batch);
   return { batch, artDir };
 }
