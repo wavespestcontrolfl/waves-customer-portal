@@ -79,6 +79,31 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
     expect(unsafe.violations.length).toBeGreaterThan(0);
     expect(reportNoteCustomerCopy(stored({ text: 'I treated the garage. The gate code is 4471.' })).body).toBeNull();
   });
+
+  test('a time figure in any form withholds the note; the sanctioned wording and days stand', () => {
+    // AGENTS.md bans a fixed re-entry or drying time; on a note record each
+    // time figure counts, as no word list can tell which one is a re-entry
+    // time (noteRecordCopyViolations).
+    for (const text of [
+      'I treated the perimeter. The spray dries in 30 minutes.',
+      'I treated the perimeter. Allow a 30-minute drying period.',
+      'I treated the lanai. Return to the treated area after 30+ minutes.',
+      'I treated the lanai. Give it thirty or more minutes.',
+      'I treated the lanai. Keep the dog in for half an hour.',
+      'I treated the lanai. The dog can go out at 3:30.',
+      'I treated the lanai. The dog can go out after 4 pm.',
+      'I treated the lanai. Keep the dog in overnight.',
+    ]) {
+      const parsed = reportNoteCustomerCopy(stored({ text }));
+      expect(parsed.body).toBeNull();
+      expect(parsed.violations).toContain('note_record_time');
+    }
+    for (const text of [
+      'I treated the lanai. Keep people and pets off treated areas until dry.',
+      'I placed bait in the garage. I will check the stations again in 14 days.',
+      'I treated the lanai and swept the webs. Have a great day!',
+    ]) expect(reportNoteCustomerCopy(stored({ text })).body).toBe(text);
+  });
 });
 
 describe('visitReportCustomerCopy: one rule for a record', () => {
@@ -87,6 +112,26 @@ describe('visitReportCustomerCopy: one rule for a record', () => {
 
   test('the note wins over a titled report in the notes column', () => {
     expect(visitReportCustomerCopy({ ...PEST, technician_notes: TITLED, structured_notes: stored() }).body).toBe(NOTE);
+  });
+
+  test('a visit whose recorded outcome applied nothing shows no note, callback or not', () => {
+    const outcome = (visitOutcome) => JSON.stringify({ protocol: { visitOutcome } });
+    for (const row of [
+      { is_callback: true, service_data: outcome('inspection_only') },
+      { is_callback: true, service_data: outcome('customer_declined') },
+      { service_data: outcome('inspection_only') },
+      { structured_notes: { ...stored(), visitOutcome: 'customer_declined' } },
+    ]) {
+      const parsed = visitReportCustomerCopy({ ...PEST, technician_notes: TITLED, structured_notes: stored(), ...row });
+      expect(parsed.body).toBeNull();
+      expect(parsed.violations).toEqual(['report_note_no_application']);
+    }
+    // A treated or incomplete visit keeps it; a record with no note keeps
+    // its titled report.
+    for (const visitOutcome of ['treated', 'incomplete']) {
+      expect(visitReportCustomerCopy({ ...PEST, is_callback: true, structured_notes: stored(), service_data: outcome(visitOutcome) }).body).toBe(NOTE);
+    }
+    expect(visitReportCustomerCopy({ ...PEST, technician_notes: TITLED, service_data: outcome('inspection_only') }).body).toContain('We treated');
   });
 
   test('a note stands only on a pest record; a row read without the line column shows none', () => {

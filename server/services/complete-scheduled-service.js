@@ -4700,10 +4700,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // merged list above folds in [Next] technician-note lines, and the
     // customer report's "What we recommend" section may never render raw
     // note text (AGENTS.md egress; codex P1 on #3516). Persisted beside
-    // the merged list as structured_notes.formRecommendations.
+    // the merged list as structured_notes.formRecommendations. A value that
+    // fails the complete customer-copy screen is left out as it stores, as
+    // formProtocolActions above: every customer reader screens the list again
+    // as it renders (report-data.js), so a report shows the same values, and
+    // the stored list never holds one. The merged list keeps it.
     const formRecommendations = normalizeCompletionTextArray(
       Array.isArray(recommendations) ? recommendations : [],
-    );
+    ).filter((value) => !customerCopyViolations(value).length);
     // Tips from your tech: the client sends ids (+ an optional line in the
     // tech's own words); the registry copy is resolved and frozen here so
     // the report shows what the customer was told on the day, and a custom

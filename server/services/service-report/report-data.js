@@ -45,7 +45,7 @@ const {
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { dayOnlyIds, dayOnlyFields } = require('../time-display');
 const { applyRodentReportNarrative, applyTypedReportNarrative, isTypedNarrativeFallback } = require('./rodent-report-narrative');
-const { visitReportCustomerCopy, carriesReportNote, printedReportSummary, customerCopyViolations } = require('./technician-report-copy');
+const { visitReportCustomerCopy, carriesReportNote, printedReportSummary, noteRecordCopyViolations } = require('./technician-report-copy');
 const { findingHasOwnText, provenFindingRows } = require('./finding-provenance');
 const {
   PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
@@ -2088,11 +2088,12 @@ function buildProtocolPayload(record) {
   // technician_notes, and the merged lists fold in its tagged lines and the
   // parked [Next] lines: such a record's lists hold only what the completion
   // form recorded (formProtocolActions, formObservations, formRecommendations;
-  // docs/public-route-contracts.md), and each value passes the complete
-  // customer-copy screen as it renders, as the note does (AGENTS.md).
+  // docs/public-route-contracts.md), and each value passes the note's own
+  // screen as it renders (noteRecordCopyViolations: the complete
+  // customer-copy screen and any time figure; AGENTS.md).
   const formOnly = carriesReportNote(record.structured_notes);
   const formList = (key) => uniqueStrings(parseJsonArray(structured[key]))
-    .filter((value) => !formOnly || !customerCopyViolations(value).length);
+    .filter((value) => !formOnly || !noteRecordCopyViolations(value).length);
   const structuredObservations = formList('formObservations');
   return {
     actions: withoutAccessCodeLines(formOnly ? formList('formProtocolActions') : uniqueStrings([

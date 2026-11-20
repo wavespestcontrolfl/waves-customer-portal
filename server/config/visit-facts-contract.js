@@ -492,6 +492,7 @@ function genericCompletionFacts(opts = {}) {
       writers: [COMPLETE_SERVICE, SCHEDULE_PAGE],
       readers: withExtra('form_recommendations', [{ file: REPORT_DATA, section: 'Recommendations (form-sourced, structuredRecommendations)' }]),
       whenMissing: 'hidden',
+      notes: 'The form recommendation values that pass customerCopyViolations; a refused value stays in recommendations only.',
     },
     {
       key: 'tech_tips',

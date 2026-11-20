@@ -159,6 +159,18 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     expect(customerSafeVisitNotes(record({ service_data: { typedReportSnapshot: card } }))).toBe('Treated the exterior perimeter and swept eaves. Light ant activity near the lanai.');
   });
 
+  test("the technician's own note never stands on a visit that applied nothing, nor with a time figure, as on the web report", () => {
+    const reportNote = { v: 1, text: 'I treated the lanai and swept the webs.', source: 'cleaned' };
+    const own = (overrides) => record({ technician_notes: 'treated lanai', structured_notes: { reportNote }, ...overrides });
+    expect(customerSafeVisitNotes(own({ is_callback: true, service_data: { protocol: { visitOutcome: 'inspection_only' } } }))).toBeNull();
+    expect(customerSafeVisitNotes(own({ structured_notes: { reportNote, visitOutcome: 'customer_declined' } }))).toBeNull();
+    expect(customerSafeVisitNotes(own({ structured_notes: { reportNote: { ...reportNote, text: 'I treated the lanai. Keep the dog in for an hour.' } } }))).toBeNull();
+    expect(customerSafeVisitNotes(own({ is_callback: true, service_data: { protocol: { visitOutcome: 'treated' } } }))).toBe('I treated the lanai and swept the webs.');
+    // A record with no note keeps today's rule.
+    expect(customerSafeVisitNotes(record({ service_data: { protocol: { visitOutcome: 'inspection_only' } } })))
+      .toBe('Treated the exterior perimeter and swept eaves. Light ant activity near the lanai.');
+  });
+
   test("the technician's own note stands only on a pest record, as on the web report", () => {
     const reportNote = { v: 1, text: 'I treated the lanai and swept the webs.', source: 'cleaned' };
     const own = (overrides) => record({ technician_notes: 'treated lanai swept webs, gate code 4545', structured_notes: { reportNote }, ...overrides });

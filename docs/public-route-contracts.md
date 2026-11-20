@@ -506,8 +506,9 @@ completion form's `structured_notes.formObservations` lists. A bare title (the
 form's free-text observations, a `[Found]` line of the raw technician note
 among them) never prints, as in the report document, the texting prompt and
 the voice relay. On a record that carries the technician's own note
-(`carriesReportNote`), a label proves a row only when it passes
-`customerCopyViolations`, as that record's report lists do. There a row whose
+(`carriesReportNote`), a label proves a row only when it passes that record's
+screen (`noteRecordCopyViolations`: `customerCopyViolations` and any time
+figure, below), as that record's report lists do. There a row whose
 only text is the stock detail completion writes for a picked label
 (`STRUCTURED_OBSERVATION_FINDING_DETAIL`) is that label alone, so it stands
 only when the label passes the same screen. There every text field a customer
@@ -3086,10 +3087,21 @@ and adds the one key below: `summary` is the note when the summary rule accepts 
 (only on a pest report, the line the report renders as, `service_line` or else
 `detectServiceLine(service_type)`; a reader whose row has no `service_line`
 column shows no note, so every reader reads the column, the voice agent's two
-visit queries included; and only on a visit with no frozen typed
-card, primary or companion), a `cleaned`
+visit queries included; only on a visit with no frozen typed
+card, primary or companion; and never on a visit whose recorded outcome applied
+nothing, `inspection_only` or `customer_declined`, callback or not, read from
+the stored `service_data` and structured notes as the callback copy reads it,
+since a callback's report leads with the outcome copy and its PDF prints no
+summary there), a `cleaned`
 note signed ` — <first name>` (the identity snapshot's name, never a generic
-label). Otherwise it is what the report builds with no free text (the lawn visit
+label). The note, and every list value and finding field below on such a
+record, passes `noteRecordCopyViolations`: `customerCopyViolations` and any
+time figure (a number with seconds, minutes or hours, joined in any way, such
+as "30+ minutes" or "a 30-minute drying period"; a clock time; overnight,
+tonight, tomorrow, noon or midnight). AGENTS.md bans a fixed re-entry or drying
+time, and no word list can tell a re-entry time from any other time a
+technician writes, so each one withholds the copy. Days stay legal (the next
+visit, when results show). Otherwise it is what the report builds with no free text (the lawn visit
 summary, or on a live view a narrative of the typed card under that narrative's
 own gate, which reads an empty recap) or empty, never `customerRecap`. A
 refused or malformed note is no text, and the raw column is never its fallback.
@@ -3103,12 +3115,16 @@ keeps its headline. The
 protocol lists (`actions`, `observations`, `recommendations`) carry only what the
 completion form recorded (`structured_notes.formProtocolActions`,
 `formObservations`, `formRecommendations`), never tagged lines of the raw note,
-and each value passes `customerCopyViolations` as it renders. Completion writes
-`formProtocolActions` (the picked labels that pass that screen) beside the
-merged `protocolActionsCompleted` on every visit. `findings` drops a row with a
-bare title (no detail, no recommendation; text of only spaces counts as none),
-a stored row whose only text is the stock detail unless its label passes
-`customerCopyViolations`, and any row whose title fails that screen; a detail
+and each value passes `noteRecordCopyViolations` as it renders. Completion
+writes `formProtocolActions` (the picked labels that pass
+`customerCopyViolations`) beside the merged `protocolActionsCompleted` on every
+visit, and stores `formRecommendations` through the same screen: a refused
+value stays in the merged `recommendations` only, and every report reader
+already screens that list as it renders, so no report changes. `findings` drops
+a row with a bare title (no detail, no recommendation; text of only spaces
+counts as none), a stored row whose only text is the stock detail unless its
+label passes `noteRecordCopyViolations`, and any row whose title fails that
+screen; a detail
 or a recommendation that fails it is left out of its row, so a row with no text
 left drops, the stored "no activity" row of the pest, mosquito, termite and
 rodent lines among them (`provenFindingRows`, as in the readers above). The

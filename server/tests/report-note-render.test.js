@@ -124,10 +124,14 @@ describe('the report payload', () => {
     expect(refused).not.toHaveProperty('summaryIsOwnNote');
   });
 
-  test('a cleaned note that names a fixed drying time is refused: no summary from it', async () => {
+  test('a cleaned note that names a time figure is refused: no summary from it', async () => {
+    // Any time figure on a note record (noteRecordCopyViolations): AGENTS.md
+    // bans a fixed re-entry or drying time, in whatever form it is written.
     for (const [text, figure] of [
       ['I treated the perimeter. The spray dries in 30 minutes.', 'dries in 30'],
       ['I treated the perimeter. Allow a 30-minute drying period.', '30-minute drying'],
+      ['I treated the lanai. Return to the treated area after 30+ minutes.', '30+ minutes'],
+      ['I treated the lanai. Keep the dog in overnight.', 'overnight'],
     ]) {
       expect(visitReportCustomerCopy({ ...SERVICE, structured_notes: JSON.stringify(stored({ text })) }).body).toBeNull();
       const data = await build({ structured_notes: JSON.stringify(stored({ text })) });
@@ -200,12 +204,12 @@ describe('the report payload', () => {
     const form = {
       formObservations: ['Light ant activity', 'Toxic mold by the AC unit'],
       formProtocolActions: ['Treated the perimeter', 'Treatment is safe for pets'],
-      formRecommendations: ['Trim shrubs back from the wall', 'Use gate code 4471 next time'],
+      formRecommendations: ['Trim shrubs back from the wall', 'Use gate code 4471 next time', 'Water the potted plants for 20 minutes.'],
     };
     const serviceData = JSON.stringify({ protocol: { actions: ['Skipped the shed per office'], recommendations: ['Ask about the second lot'] } });
     for (const note of [stored(), stored({ v: 2 })]) {
       const data = await build({ technician_notes: tagged, structured_notes: JSON.stringify({ ...note, ...merged, ...form }), service_data: serviceData });
-      expect(JSON.stringify(data.protocol)).not.toMatch(/side yard|the shed|second lot|the gate|toxic|safe for pets|4471/i);
+      expect(JSON.stringify(data.protocol)).not.toMatch(/side yard|the shed|second lot|the gate|toxic|safe for pets|4471|20 minutes/i);
       expect(data.protocol.actions).toEqual(['Treated the perimeter']);
       expect(data.protocol.observations).toEqual(['Light ant activity']);
       expect(data.protocol.recommendations).toEqual(['Trim shrubs back from the wall']);
@@ -275,17 +279,20 @@ describe('the report payload', () => {
     const findings = [
       row('f-gate', 'Ant trail by the lanai', { detail: 'A trail along the lanai door.', recommendation: 'Gate code 4417 for the next visit' }),
       row('f-toxic', 'Seal the slider', { detail: 'Toxic residue on the sill', recommendation: 'Replace the weatherstrip.' }),
+      // A time figure counts too (noteRecordCopyViolations).
+      row('f-time', 'Ant trail by the patio', { detail: 'A trail along the patio door.', recommendation: 'Stay off the patio for an hour.' }),
       { id: 'f-none', service_record_id: SERVICE.id, ...buildNoActivityFinding('pest') },
     ];
     const data = await build({ structured_notes: JSON.stringify(stored()) }, { service_findings: findings });
-    expect(data.findings.map((f) => f.title)).toEqual(['Ant trail by the lanai', 'Seal the slider']);
+    expect(data.findings.map((f) => f.title)).toEqual(['Ant trail by the lanai', 'Seal the slider', 'Ant trail by the patio']);
     expect(JSON.stringify(data.findings)).toContain('A trail along the lanai door.');
     expect(JSON.stringify(data.findings)).toContain('Replace the weatherstrip.');
+    expect(JSON.stringify(data.findings)).toContain('A trail along the patio door.');
     expect(JSON.stringify(data.findings)).not.toMatch(/were clear/);
-    expect(JSON.stringify(data)).not.toMatch(/4417|Toxic/);
+    expect(JSON.stringify(data)).not.toMatch(/4417|Toxic|for an hour/);
     // A record with no note keeps every row, as today.
     const legacy = await build({ structured_notes: '{}' }, { service_findings: findings });
-    expect(legacy.findings.map((f) => f.title).sort()).toEqual(['Ant trail by the lanai', 'No activity observed this visit', 'Seal the slider']);
+    expect(legacy.findings.map((f) => f.title).sort()).toEqual(['Ant trail by the lanai', 'Ant trail by the patio', 'No activity observed this visit', 'Seal the slider']);
   });
 
   test('beside a note, a customer concern never turns the stored "no activity" row into copy that prints', async () => {
@@ -338,6 +345,52 @@ describe('the note stands only on a pest report', () => {
     expect(summaryCopySignature({ ...SERVICE, service_line: 'lawn' })).toBe('-rn');
     expect(summaryCopySignature({ ...SERVICE, service_line: 'tree_shrub' })).toBe('-rn');
     expect(summaryCopySignature(SERVICE)).toBe(`${keyOf(`${NOTE} — Jordan`)}-rn`);
+  });
+});
+
+describe('a visit that applied nothing never takes the note', () => {
+  // inspection_only / customer_declined: a callback's report leads with the
+  // outcome copy and its PDF prints no summary (ServiceReportDocument), so
+  // the note is withheld on the page, in the PDF state and in the PDF key.
+  const outcome = (visitOutcome) => ({ is_callback: true, service_data: JSON.stringify({ protocol: { visitOutcome } }) });
+  let gate;
+  beforeEach(() => {
+    gate = process.env.GATE_RESERVICE_REPORT_COPY;
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+  });
+  afterEach(() => {
+    if (gate === undefined) delete process.env.GATE_RESERVICE_REPORT_COPY;
+    else process.env.GATE_RESERVICE_REPORT_COPY = gate;
+  });
+
+  test('an inspection-only callback with an accepted note: no summary from it, the PDF state withheld, no summary in the key', async () => {
+    const record = { ...SERVICE, ...outcome('inspection_only') };
+    const data = await build(outcome('inspection_only'));
+    expect(data.reserviceReport).toMatchObject({ outcome: 'inspection_only' });
+    expect(data.summarySource).not.toBe('technician_report');
+    expect(data).not.toHaveProperty('summaryIsOwnNote');
+    expect(JSON.stringify(data)).not.toContain('fire ant hill');
+    expect(reportNoteRenderState(record, data)).toBe('withheld');
+    expect(summaryCopySignature(record)).toBe('-rn');
+  });
+
+  test('a declined visit withholds it too, the outcome read from the stored notes, callback or not', async () => {
+    for (const overrides of [
+      { is_callback: true, structured_notes: notes({ visitOutcome: 'customer_declined' }) },
+      { is_callback: false, structured_notes: notes({ visitOutcome: 'customer_declined' }) },
+      { service_data: JSON.stringify({ protocol: { visitOutcome: 'inspection_only' } }) },
+    ]) {
+      const data = await build(overrides);
+      expect(data).not.toHaveProperty('summaryIsOwnNote');
+      expect(JSON.stringify(data)).not.toContain('fire ant hill');
+    }
+  });
+
+  test('a callback that treated keeps the note', async () => {
+    const data = await build(outcome('treated'));
+    expect(data.reserviceReport).toMatchObject({ outcome: 'treated' });
+    expect(data.summary).toBe(`${NOTE} — Jordan`);
+    expect(data.summaryIsOwnNote).toBe(true);
   });
 });
 

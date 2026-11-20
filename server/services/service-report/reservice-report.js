@@ -138,6 +138,9 @@ const COPY = {
 };
 
 const NON_PERFORMED_OUTCOMES = new Set(['inspection_only', 'customer_declined', 'incomplete']);
+// The outcomes that applied nothing: the callback copy says no application
+// was made, and the report prints no summary beside it (ServiceReportDocument).
+const NO_APPLICATION_OUTCOMES = new Set(['inspection_only', 'customer_declined']);
 
 // Explicit param (report-data's resolved protocol.visitOutcome) wins; the
 // pre-render signature paths fall back to the protocol frozen in
@@ -167,6 +170,12 @@ function outcomeOf(service, visitOutcome) {
   }
   const key = String(outcome || '').toLowerCase();
   return NON_PERFORMED_OUTCOMES.has(key) ? key : 'treated';
+}
+
+// Whether a record's recorded outcome applied nothing, read by the chain the
+// callback copy reads (outcomeOf), on any record, callback or not.
+function recordedOutcomeAppliedNothing(service = {}) {
+  return NO_APPLICATION_OUTCOMES.has(outcomeOf(service, null));
 }
 
 /**
@@ -363,4 +372,5 @@ module.exports = {
   reserviceReportPdfSignature,
   reserviceReportRenderedSignature,
   isCallbackRecord,
+  recordedOutcomeAppliedNothing,
 };

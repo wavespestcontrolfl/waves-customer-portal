@@ -4342,20 +4342,13 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
 // forms (codex r48 #3420).
 const TIME_FIGURE_SRC = '(?:\\d+(?:\\.\\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[-\\s]?five|forty|fifty|sixty|ninety|half\\s+an?|a\\s+half|a\\s+couple(?:\\s+of)?|a\\s+few|several|an?)';
 const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
-// Between a figure and its unit: spaces, a hyphen or a dash ("a 30-minute
-// drying period", "a 30–minute wait") state the same fixed time (pre-push
-// audit on 685c3266d4). A plus is not a gap: the bed bug prep texts and guides
-// say to dry bedding "on high 30+ min", laundry copy a reply may quote.
-const FIGURE_UNIT_GAP_SRC = '[\\s\\u2010-\\u2015-]*';
 // One entry-verb alternation shared by the duration and clock-time shapes
 // (codex r52/r53). "keep an eye out" carries no of/off/away-from and stays
 // legal; "avoid" is scoped to treated-surface nouns so agronomic
 // aftercare ("avoid mowing for 48 hours") stays legal too.
 // Passive occupancy forms are anchored on be/been/being so completed-action
 // prose ("we entered through the side gate") never matches (codex r54).
-// The drying forms (dry, drying, dries, dried) state the same fixed drying
-// time: "The spray dries in 30 minutes" (pre-push audit on c020cecb69).
-const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|play(?:ing)?\\s+on|sit(?:ting)?\\s+on|let\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|children|kids?|family)\\b|(?:allow(?:ing)?|permit(?:ting)?|bring(?:ing|s)?|tak(?:e|es|ing))\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|children|kids?|family|people|guests?|anyone)\\b|(?:be|been|being|are|is|was|were)\\s+brought\\s+back\\b|go(?:es|ing)?\\s+outside|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside)|remain(?:s|ed|ing)?\\s+(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside|out(?:side)?)\\b|wait(?:s|ed|ing)?\\s+(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside|outside)\\b|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|us(?:e|ing)\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|walked\\s+on|played\\s+on|sat\\s+on|returned\\s+to)|occupancy[^.!?]{0,25}\\b(?:may|can|will|could|should)\\s+(?:safely\\s+)?resume|resum(?:e|es|ing)\\s+(?:normal\\s+)?(?:occupancy|use)|ready\\s+for\\s+(?:use|occupancy|pets?|children|kids|families|play|foot\\s+traffic)|available\\s+for\\s+(?:use|occupancy|pets?|children|kids|families|play|foot\\s+traffic)|safe\\s+for\\s+(?:pets?|children|kids|families|play|foot\\s+traffic)|(?:be|is|are|being|been)\\s+(?:safely\\s+)?(?:accessible|usable|walkable|open\\s+for\\s+(?:use|occupancy))|re-?open(?:s|ed|ing)?|open(?:s|ed|ing)?\\s+(?:back\\s+)?(?:up|again)\\b|dry(?:ing|s)?|dries|dried)';
+const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|play(?:ing)?\\s+on|sit(?:ting)?\\s+on|let\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|children|kids?|family)\\b|(?:allow(?:ing)?|permit(?:ting)?|bring(?:ing|s)?|tak(?:e|es|ing))\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|children|kids?|family|people|guests?|anyone)\\b|(?:be|been|being|are|is|was|were)\\s+brought\\s+back\\b|go(?:es|ing)?\\s+outside|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside)|remain(?:s|ed|ing)?\\s+(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside|out(?:side)?)\\b|wait(?:s|ed|ing)?\\s+(?:out\\s+of|off|away(?:\\s+from)?|indoors?|inside|outside)\\b|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|us(?:e|ing)\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|walked\\s+on|played\\s+on|sat\\s+on|returned\\s+to)|occupancy[^.!?]{0,25}\\b(?:may|can|will|could|should)\\s+(?:safely\\s+)?resume|resum(?:e|es|ing)\\s+(?:normal\\s+)?(?:occupancy|use)|ready\\s+for\\s+(?:use|occupancy|pets?|children|kids|families|play|foot\\s+traffic)|available\\s+for\\s+(?:use|occupancy|pets?|children|kids|families|play|foot\\s+traffic)|safe\\s+for\\s+(?:pets?|children|kids|families|play|foot\\s+traffic)|(?:be|is|are|being|been)\\s+(?:safely\\s+)?(?:accessible|usable|walkable|open\\s+for\\s+(?:use|occupancy))|re-?open(?:s|ed|ing)?|open(?:s|ed|ing)?\\s+(?:back\\s+)?(?:up|again)\\b|dry(?:ing|s)?|dried)';
 // Clock times state the same fixed re-entry window as durations
 // (codex r53): "Enter the treated area at 4:30 PM", "Stay off until 6 PM".
 const CLOCK_TIME_SRC = '(?:\\d{1,2}:\\d{2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?|\\d{1,2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight)';
@@ -4400,8 +4393,8 @@ const BANNED_CUSTOMER_COPY = [
   // direct enter/occupancy instructions state the same timing without a
   // "re-" prefix ("Enter the treated area after thirty minutes") —
   // codex r51
-  new RegExp(`\\b${REENTRY_VERB_SRC}\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}${FIGURE_UNIT_GAP_SRC}(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
-  new RegExp(`\\b${TIME_FIGURE_SRC}${FIGURE_UNIT_GAP_SRC}${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b${REENTRY_VERB_SRC}\\b`, 'i'),
+  new RegExp(`\\b${REENTRY_VERB_SRC}\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
+  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b${REENTRY_VERB_SRC}\\b`, 'i'),
   // clock-time forms (codex r53): forward takes any temporal preposition;
   // the reverse direction takes DEADLINE prepositions only, so "We arrived
   // at 2 PM and entered through the side gate" stays legal.

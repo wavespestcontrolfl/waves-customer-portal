@@ -396,7 +396,7 @@ function reportNoteCustomerCopy(structuredNotes) {
     && typeof note.text === 'string' && !REPORT_NOTE_LINE_BREAK.test(note.text.trim());
   const text = valid ? note.text.replace(/\s+/g, ' ').trim() : '';
   if (!text || text.length > MAX_REPORT_NOTE_CHARS) return { body: null, violations: ['report_note_shape'], source: null };
-  const violations = customerCopyViolations(text);
+  const violations = noteRecordCopyViolations(text);
   return { body: violations.length ? null : text, violations, source: note.source };
 }
 
@@ -465,11 +465,22 @@ function reportServiceLine(record) {
 // report parsed from technician_notes. One rule for every reader that holds
 // the record. A note on a record of any other line reads as no text, as a
 // refused one does: no lawn or tree & shrub page edits it, and the raw notes
-// column beside it stays internal.
+// column beside it stays internal. A visit whose recorded outcome applied
+// nothing (inspection_only, customer_declined) shows no note either: on a
+// callback its report leads with the outcome copy and its PDF prints no
+// summary (ServiceReportDocument), and a note can name a treatment the visit
+// did not make. The outcome is the one the callback copy reads
+// (reservice-report.js: the stored service_data and structured notes), on
+// any record, so no reader needs the is_callback column.
 function visitReportCustomerCopy(record) {
   const note = reportNoteCustomerCopy(record?.structured_notes);
   if (note && !REPORT_NOTE_SERVICE_LINES.has(reportServiceLine(record))) {
     return { body: null, violations: ['report_note_service_line'], source: null };
+  }
+  // Required here: the callback copy loads the card and asks modules, which
+  // the copy rules do not need.
+  if (note && require('./reservice-report').recordedOutcomeAppliedNothing(record || {})) {
+    return { body: null, violations: ['report_note_no_application'], source: null };
   }
   return note || technicianReportCustomerCopy(record?.technician_notes);
 }
@@ -607,6 +618,38 @@ function customerCopyViolations(text) {
   return violations;
 }
 
+// The copy screen for a record that carries the technician's own note: the
+// note, and every list value and finding field such a record prints
+// (report-data.js buildProtocolPayload, finding-provenance.js). The complete
+// screen above, plus any time figure: a number with seconds, minutes or hours,
+// joined in any way ("30+ minutes", "a 30-minute drying period", "thirty or
+// more minutes", "an hour"), a clock time, or overnight, tonight, tomorrow,
+// noon or midnight. AGENTS.md bans a fixed re-entry or drying time in customer
+// copy, and no word list can tell a technician's re-entry time from any other
+// time they write (each pre-push audit round on this PR found one more form),
+// so on such a record each time figure withholds the copy: a refused note
+// shows nothing, and a refused list value or finding field is left out. Days
+// stay legal: they name the next visit and when results show. A read-only
+// production count (2026-11-20) found a minutes or hours figure in 0 of 474
+// pest customer recaps, a clock time in 1, and days in 61.
+const NOTE_TIME_FIGURE_SRC = '(?:\\d+(?:[.,/]\\d+)?|an?|half|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|couple|few|several)';
+// One step between a figure and its unit: a separator, or a word of a range
+// or a bound ("30 to 45", "30 or more", "thirty-plus", "a half"). Each step
+// takes one character or one whole word, so the match never backtracks far.
+const NOTE_TIME_STEP_SRC = '(?:[\\s+\\u2010-\\u2015/-]|\\b(?:or|more|so|less|plus|to|and|a|an|of|half|full|about|over|under|\\d+)\\b)';
+const NOTE_RECORD_TIME_RE = new RegExp([
+  `\\b${NOTE_TIME_FIGURE_SRC}${NOTE_TIME_STEP_SRC}*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\\b`,
+  '\\b\\d+\\s*[mh]\\b',
+  '\\b\\d{1,2}:\\d{2}\\b',
+  '\\b\\d{1,2}\\s*[ap]\\.?m\\b',
+  '\\b(?:overnight|tonight|tomorrow|noon|midnight)\\b',
+].join('|'), 'i');
+
+function noteRecordCopyViolations(text) {
+  const violations = customerCopyViolations(text);
+  return NOTE_RECORD_TIME_RE.test(String(text || '')) ? [...violations, 'note_record_time'] : violations;
+}
+
 module.exports = {
   technicianReportCustomerCopy,
   reportNoteCustomerCopy,
@@ -620,6 +663,7 @@ module.exports = {
   fourSectionReport,
   containsReportAccessCode,
   customerCopyViolations,
+  noteRecordCopyViolations,
   summaryCopySignature,
   renderWriterRulesState,
   reportNoteRenderState,

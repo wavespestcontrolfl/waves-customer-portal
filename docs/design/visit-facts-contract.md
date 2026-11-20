@@ -103,7 +103,7 @@ stay internal, without a decision either way.
 | `form_observations` | voice, tap | `structured_notes.formObservations` | Findings, form-sourced only | hidden |
 | `finding_rows` | derived | `service_findings.title` | Findings list | hidden |
 | `recommendations` | prefill, tap | `structured_notes.recommendations` | Recommendations | hidden |
-| `form_recommendations` | prefill, tap | `structured_notes.formRecommendations` | Recommendations, form-sourced only | hidden |
+| `form_recommendations` | prefill, tap | `structured_notes.formRecommendations` | Recommendations, form-sourced only (the values that pass `customerCopyViolations`; a refused value stays in `recommendations` only) | hidden |
 | `tech_tips` | prefill, tap | `structured_notes.techTips` | Tips from your tech (`techNote`, `GATE_TECH_TIPS`) | hidden |
 | `blog_post` | tap only | `structured_notes.blogPost` | From the Waves blog (`payload.blogPost`, `GATE_REPORT_BLOG_POST`) | hidden |
 | `protocol_actions_completed` | prefill, voice, tap | `structured_notes.protocolActionsCompleted` | What we did (protocol actions) | hidden |

@@ -13,8 +13,9 @@
  * texting prompt (context-aggregator loadLatestVisitFindings) and the voice
  * relay (voice-agent/relay-visit.js) drop bare titles the same way. On a
  * record that carries the technician's own note (carriesReportNote), a label
- * proves a row only when it passes the complete customer-copy screen
- * (customerCopyViolations), as that record's report lists do (report-data
+ * proves a row only when it passes that record's copy screen
+ * (noteRecordCopyViolations: the complete customer-copy screen and any time
+ * figure), as that record's report lists do (report-data
  * buildProtocolPayload). There every text field a customer reads passes the
  * same screen before it proves anything: a row whose title fails it is left
  * out, and a detail or a recommendation that fails it is left out of its row
@@ -43,9 +44,9 @@ function stockDetailOnly(row) {
 
 // On a record that carries the technician's own note: the row with each
 // text field a customer reads screened, or null when its title fails.
-function screenedFinding(row, customerCopyViolations) {
-  if (customerCopyViolations(String(row?.title || '').trim()).length) return null;
-  const keep = (value) => (String(value || '').trim() && customerCopyViolations(String(value)).length ? null : value);
+function screenedFinding(row, noteRecordCopyViolations) {
+  if (noteRecordCopyViolations(String(row?.title || '').trim()).length) return null;
+  const keep = (value) => (String(value || '').trim() && noteRecordCopyViolations(String(value)).length ? null : value);
   return { ...row, detail: keep(row?.detail), recommendation: keep(row?.recommendation) };
 }
 
@@ -58,16 +59,16 @@ function provenFindingRows(rows, structuredNotes) {
   }
   // Required here, not at load: technician-report-copy reaches this module
   // through premium-experience.
-  const { carriesReportNote, customerCopyViolations } = require('./technician-report-copy');
+  const { carriesReportNote, noteRecordCopyViolations } = require('./technician-report-copy');
   const screened = carriesReportNote(structuredNotes);
   const labels = notes && typeof notes === 'object' && Array.isArray(notes.formObservations) ? notes.formObservations : [];
   const formTitles = new Set(labels.filter((label) => typeof label === 'string')
     .map((label) => label.trim())
-    .filter((label) => !screened || !customerCopyViolations(label).length)
+    .filter((label) => !screened || !noteRecordCopyViolations(label).length)
     .map((label) => label.toLowerCase()));
   const list = Array.isArray(rows) ? rows : [];
   if (!screened) return list.filter((row) => findingHasOwnText(row) || formTitles.has(titleKey(row)));
-  return list.map((row) => screenedFinding(row, customerCopyViolations)).filter((row) => {
+  return list.map((row) => screenedFinding(row, noteRecordCopyViolations)).filter((row) => {
     if (!row) return false;
     if (stockDetailOnly(row)) return formTitles.has(titleKey(row));
     return findingHasOwnText(row) || formTitles.has(titleKey(row));
