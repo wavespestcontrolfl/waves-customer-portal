@@ -101,10 +101,14 @@ export function notePageMove(from, to) {
 // A move in view also ends the use of the page it left, as for the Reload
 // bar (usePageUsed): the move remounted the routes, so nothing unsaved stays
 // from that use, and Back to that page opens it unused. A move React dropped
-// leaves the page and its use.
+// leaves the page and its use. A move in view to another page also ends the
+// count of the one reload on the path it reopened (chunkReloadAttempted):
+// React.lazy keeps a page it loaded, so Back to that path loads nothing that
+// would end it (noteChunkLoaded).
 export function notePageInView(from, to) {
   shownMove = { from, to };
   usedPath = null;
+  if (reloadedPath !== null && routerPath(to) !== routerPath(reloadedPath)) reloadedPath = null;
 }
 
 // The page that the move to `pathname` left. Null for a move the gate has not
@@ -171,8 +175,9 @@ function pathOpenedByChunkReload() {
 // loads clears the flag (noteChunkLoaded), and a route can load in parts: a
 // page, then a part that opens with it, such as a panel its URL names. So the
 // path that reload reopened counts too, or a part still missing under a page
-// that loaded would reload the tab at every load. Throws when storage is
-// blocked.
+// that loaded would reload the tab at every load. That path counts until the
+// tab leaves it: a page loads on another path, or a move to another page
+// comes into view (notePageInView). Throws when storage is blocked.
 function chunkReloadAttempted() {
   return window.location.pathname === reloadedPath || Boolean(sessionStorage.getItem(CHUNK_RELOAD_FLAG));
 }
@@ -192,11 +197,11 @@ export function takeChunkReload() {
 
 // A page loaded (App.jsx lazyWithRetry): the live build serves its code, so a
 // later deploy may reload the tab again. The path the one reload reopened
-// counts until a page loads on another path. Best effort: blocked storage
-// must not fail a page whose code loaded. While a reload for a missing chunk
-// is under way, a load does not count: the flag must reach the page load
-// that reload opens. Vite still imports a page whose stylesheet is missing,
-// and that script can load before the reload lands.
+// counts until the tab leaves it (chunkReloadAttempted). Best effort:
+// blocked storage must not fail a page whose code loaded. While a reload for
+// a missing chunk is under way, a load does not count: the flag must reach
+// the page load that reload opens. Vite still imports a page whose
+// stylesheet is missing, and that script can load before the reload lands.
 export function noteChunkLoaded() {
   if (reloadPending) return;
   if (window.location.pathname !== reloadedPath) reloadedPath = null;
@@ -270,7 +275,8 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
 // by itself, or what else holds the tab: a registered hold's name, or
 // 'offline' while the browser reports itself offline (blockersBesideWork in
 // lib/portalReload.js). The wait for open work ends none of them, so the page
-// does not wait while one stands, as a page move does not. Null when it can.
+// does not wait while one stands, as a page move does not, and its wait ends
+// once one comes up. Null when it can.
 function selfReloadRuledOut() {
   try {
     if (chunkReloadAttempted()) return 'reloaded';
@@ -301,19 +307,21 @@ export function missingCodeIsNewVersion(newer, offline) {
 
 // A staff page whose code is missing (App.jsx): waits for open work, as a
 // page move does, then reloads once, as for a stale chunk, when nothing holds
-// the tab. It waits only when a reload can follow; otherwise its screen comes
-// at once. `pathname`: the path of the route whose code is missing, as the
-// router rendered it (App.jsx). It reloads only while the address names that
-// route, as the routes match a path, before and after the wait. Back moves
-// the address on at once, even before this page's effect starts, but the
-// routes keep this page in view until the next page's code loads: a reload
-// then would open the next page and spend the one reload on it. With no
-// `pathname`, it never reloads. Resolves why it did not reload: 'moved' when
-// the address names another page, or the page closed during the wait; then
-// 'reloaded', whatever holds the tab (after the one reload a missing page is
-// an outage, so its screen offers the connection retry); then what holds the
-// tab; then the other reasons of selfReloadRuledOut. The screen for 'moved'
-// shows until the next page comes into view.
+// the tab. It waits only while a reload can follow: otherwise its screen
+// comes at once, and the wait ends at its next look once none can (the page
+// closed or moved, or a reason of selfReloadRuledOut came up). `pathname`:
+// the path of the route whose code is missing, as the router rendered it
+// (App.jsx). It reloads only while the address names that route, as the
+// routes match a path, before and after the wait. Back moves the address on
+// at once, even before this page's effect starts, but the routes keep this
+// page in view until the next page's code loads: a reload then would open
+// the next page and spend the one reload on it. With no `pathname`, it never
+// reloads. Resolves why it did not reload: 'moved' when the address names
+// another page, or the page closed during the wait; then 'reloaded',
+// whatever holds the tab (after the one reload a missing page is an outage,
+// so its screen offers the connection retry); then what holds the tab; then
+// the other reasons of selfReloadRuledOut. The screen for 'moved' shows
+// until the next page comes into view.
 export async function reloadForMissingCode({
   pathname,
   current = () => true,
@@ -322,7 +330,8 @@ export async function reloadForMissingCode({
 } = {}) {
   const atPage = () => routerPath(window.location.pathname) === routerPath(pathname);
   if (!atPage()) return 'moved';
-  if (!selfReloadRuledOut()) await waitForWork({ now });
+  const noReload = () => !current() || !atPage() || Boolean(selfReloadRuledOut());
+  if (!noReload()) await waitForWork({ now, done: noReload });
   if (!current() || !atPage()) return 'moved';
   // From here to the reload, all in one turn: no work can start and no hold
   // can register between the last look and the reload. The wait can also

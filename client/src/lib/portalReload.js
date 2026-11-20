@@ -147,11 +147,16 @@ async function waitOutStalledWork() {
 // Waits up to 10 s for open requests and device writes to settle (a closing
 // page can start one). Stalled work is not waited for again, so one hung
 // request costs one wait, whether the reload at a page move or a page whose
-// code is missing (staleChunkReload.js) waits first.
-export async function waitForWork({ now = () => Date.now() } = {}) {
+// code is missing (staleChunkReload.js) waits first. `done()` ends the wait
+// at its next look, once no reload can follow it. The work has then not
+// outlasted a full wait, so it does not count as stalled.
+export async function waitForWork({ now = () => Date.now(), done = () => false } = {}) {
   if (stalledWork()) return;
   const until = now() + WRITE_WAIT_MS;
-  while (workInFlight() > 0 && now() < until) await pause(200);
+  while (workInFlight() > 0 && now() < until) {
+    if (done()) return;
+    await pause(200);
+  }
   if (workInFlight() > 0 && !workStalled) void waitOutStalledWork();
 }
 

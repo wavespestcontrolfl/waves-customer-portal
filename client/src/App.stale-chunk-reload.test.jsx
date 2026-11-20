@@ -20,6 +20,8 @@ import {
   isChunkError,
   isStaleChunkReloadPending,
   markPageNavigating,
+  noteChunkLoaded,
+  notePageInView,
   reloadForMissingCode,
   resetStaleChunkReloadForTests,
   watchPageUse,
@@ -859,6 +861,40 @@ describe('on a staff page', () => {
     expect(reported.calls).toHaveLength(1);
   });
 
+  // React.lazy keeps a page it loaded, so Back to it loads nothing that ends
+  // the count of the one reload on the path it reopened (noteChunkLoaded). A
+  // move in view away from that path ends it, or a later deploy's missing
+  // chunk there would never reload.
+  test('a move in view away from the path the one reload reopened ends that reload\'s count: back on that path, a later missing chunk reloads once more', () => {
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    resetStaleChunkReloadForTests(); // the page load the one reload opened
+    notePageInView(null, '/admin/dashboard');
+    noteChunkLoaded(); // its page loads
+    // A part still missing under it: no second reload.
+    const part = preloadErrorEvent();
+    handleVitePreloadError(part, reload);
+    expect(part.defaultPrevented).toBe(false);
+    // To the More page, in the entry bundle, then Back: no page loads.
+    notePageInView('/admin/dashboard', '/admin/more');
+    notePageInView('/admin/more', '/admin/dashboard');
+    const later = preloadErrorEvent();
+    handleVitePreloadError(later, reload);
+    expect(later.defaultPrevented).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('a move in view to the path the one reload reopened, written another way, keeps that reload\'s count', () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog/caf%C3%A9', reload });
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    resetStaleChunkReloadForTests(); // the page load the one reload opened
+    noteChunkLoaded();
+    notePageInView(null, '/admin/blog/café');
+    const part = preloadErrorEvent();
+    handleVitePreloadError(part, reload);
+    expect(part.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   test('a page that closed during the wait does not reload', async () => {
     await expect(reloadForMissingCode({ pathname: '/admin/dashboard', current: () => false, reload })).resolves.toBe('moved');
     expect(reload).not.toHaveBeenCalled();
@@ -1015,6 +1051,71 @@ describe('on a staff page', () => {
       expect(reload).not.toHaveBeenCalled();
       pending[0]({ headers: new Headers() });
       await read;
+    } finally {
+      uninstall();
+    }
+  });
+
+  // The wait ends at its next look once no reload can follow, as it never
+  // starts then (above): the screen comes at once, not after 10 s.
+  test.each([
+    ['held work', () => { holding = true; }],
+    ['the browser going offline', () => { vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false); }],
+    ['a use of the page', () => { fireEvent.input(document.body); }],
+  ])('%s during the wait for open work ends the wait: a page whose code is missing names the open work at once', async (_, start) => {
+    const target = { fetch: () => new Promise(() => {}) };
+    const uninstall = installPortalVersionWatch({ target });
+    const stop = watchPageUse(document);
+    try {
+      target.fetch('/api/admin/dashboard');
+      const result = reloadForMissingCode({ pathname: '/admin/dashboard', reload });
+      await new Promise((resolve) => { setTimeout(resolve, 300); }); // the wait is under way
+      start();
+      const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 1000); });
+      await expect(Promise.race([result, waited])).resolves.toBe('request');
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      stop();
+      uninstall();
+    }
+  });
+
+  test('a move of the address during the wait for open work ends the wait, with no reload', async () => {
+    const target = { fetch: () => new Promise(() => {}) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      target.fetch('/api/admin/dashboard');
+      const result = reloadForMissingCode({ pathname: '/admin/dashboard', reload });
+      await new Promise((resolve) => { setTimeout(resolve, 300); }); // the wait is under way
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
+      const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 1000); });
+      await expect(Promise.race([result, waited])).resolves.toBe('moved');
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      uninstall();
+    }
+  });
+
+  // A wait that ended early is not a full wait: the work has not outlasted
+  // one, so a later wait still waits for it (waitForWork, lib/portalReload.js).
+  test('after held work ends the wait early, the open request does not count as stalled: a later wait still waits for it', async () => {
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const read = target.fetch('/api/admin/dashboard');
+      const result = reloadForMissingCode({ pathname: '/admin/dashboard', reload });
+      await new Promise((resolve) => { setTimeout(resolve, 300); }); // the wait is under way
+      holding = true;
+      await expect(result).resolves.toBe('request');
+      let settled = false;
+      const again = waitForWork().then(() => { settled = true; });
+      await new Promise((resolve) => { setTimeout(resolve, 500); });
+      expect(settled).toBe(false);
+      pending[0]({ headers: new Headers() });
+      await read;
+      await again;
+      expect(settled).toBe(true);
     } finally {
       uninstall();
     }
