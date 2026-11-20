@@ -217,6 +217,37 @@ test('a part whose code fails after Back opened a customer page reloads nothing,
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
 });
 
+// Vite marks a stylesheet as loaded once it starts to load it, so after one
+// failed, a later part that lists it would render without it. Until a
+// reload, every later import fails as that stylesheet did (loadCode,
+// lib/staleChunkReload.js): on a staff page the part shows its prompt, and
+// on a customer page it reloads at once, as the handler reloads one.
+function failStylesheet() {
+  const failed = new Event('vite:preloadError', { cancelable: true });
+  failed.payload = new Error('Unable to preload CSS for /assets/pay-growth-old.css');
+  vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
+  handleVitePreloadError(failed, reload);
+  expect(failed.defaultPrevented).toBe(false);
+}
+
+test('once a stylesheet failed in the tab, a later part whose code loads shows its prompt on a staff page, not the part without the stylesheet', async () => {
+  failStylesheet();
+  renderPage(lazyPanel(() => Promise.resolve({ default: () => <p>Revenue panel</p> })));
+  expect(await screen.findByText(CONNECTION)).toBeInTheDocument();
+  expect(screen.queryByText('Revenue panel')).not.toBeInTheDocument();
+  expect(reload).not.toHaveBeenCalled();
+});
+
+test('once a stylesheet failed in the tab, a later part whose code loads on a customer page reloads at once and shows the loading line', async () => {
+  failStylesheet();
+  notePageInView('/admin/customers', '/');
+  renderPage(lazyPanel(() => Promise.resolve({ default: () => <p>Revenue panel</p> })), '/');
+  expect(await screen.findByText('Loading...')).toBeInTheDocument();
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText('Revenue panel')).not.toBeInTheDocument();
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
+});
+
 test('a part that loads renders as usual', async () => {
   renderPage(lazyPanel(() => Promise.resolve({ default: () => <p>Revenue panel</p> })));
   expect(await screen.findByText('Revenue panel')).toBeInTheDocument();

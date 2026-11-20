@@ -49,7 +49,9 @@
 // move from a field page opened (staffTab), and a page that never reloads by
 // itself bars the reload whether it is in view or at the address. A redirect
 // continues the move it ends, so until the move's last page is in view, the
-// page the move started on counts too (moveUnderWayFrom). A page whose code
+// page the move started on counts too (moveUnderWayFrom). A redirect is a
+// replace before any use of the page in view: after a use, a replace starts
+// a new move from that page (PortalUpdateGate). A page whose code
 // is missing reloads only while the address names that page: after Back, its
 // reload would open the next page. Two paths name one page when they decode
 // alike, case kept (samePage).
@@ -76,6 +78,14 @@
 // The one reload for a missing chunk counts until the tab leaves the path it
 // reopened (chunkReloadAttempted): a route can load in parts, and the part
 // that loads clears the one-shot flag before the part still missing fails.
+//
+// Vite marks a stylesheet as loaded once it starts to load it. So after one
+// failed in a tab that did not reload, a later import that lists the same
+// stylesheet skips it, and its page renders without it, with no error.
+// Several imports list one stylesheet: the report pages, Dispatch and
+// Projects share one. Which stylesheets an import lists is Vite's own, so
+// after a stylesheet failed, every later import fails as it did, through the
+// same handler (loadCode): only a reload loads the tab's code whole again.
 
 import { decodedPath, isAdminPath, isFieldPath } from './adminBookmarkMeta';
 import { isWavesAdminApp } from '../native/platform';
@@ -107,6 +117,8 @@ let renderedMove = NO_MOVE;
 let shownMove = NO_MOVE;
 let reloadedPath = pathOpenedByChunkReload();
 const staffImports = new Set();
+// The error of a stylesheet Vite failed to load in this tab, if any.
+let failedStylesheet = null;
 
 // Whether two paths name one page: alike once each is decoded, case kept
 // (decodedPath, lib/adminBookmarkMeta.js). The router keeps a link's path as
@@ -196,10 +208,25 @@ export async function trackStaffImport(load) {
   const entry = {};
   staffImports.add(entry);
   try {
-    return await load();
+    return await loadCode(load);
   } finally {
     staffImports.delete(entry);
   }
+}
+
+// Runs `load`, the import of a page's or a part's code, for each loader:
+// lazyWithRetry, lazyPanel and trackStaffImport. Once a stylesheet failed in
+// this tab, an import that resolves fails as that stylesheet did, through
+// the handler, as Vite fails it: its page could render without a stylesheet
+// Vite skipped (see the top of this file).
+export async function loadCode(load) {
+  const mod = await load();
+  if (failedStylesheet === null) return mod;
+  const event = new Event('vite:preloadError', { cancelable: true });
+  event.payload = new Error(failedStylesheet);
+  handleVitePreloadError(event);
+  if (!event.defaultPrevented) throw event.payload;
+  return undefined;
 }
 
 // One set of document listeners notes each use of the page in view for the
@@ -245,11 +272,12 @@ export function onPageUse(listener) {
 // tap, a key or a field change anywhere but on a Reload control. A page keeps
 // unsaved work in many ways: a field, a toggle, a picked slot, a signature on
 // a canvas, a shape drawn on a map. No list of controls names them all, so
-// after any use a reload asks once first. Only the staff rules ask this, so
-// it reads the record alone: the Reload bar, on a staff page; the staff retry
+// after any use a reload asks once first. It reads the record alone. The
+// staff rules ask it: the Reload bar, on a staff page; the staff retry
 // screen (App.jsx); and a page whose code is missing, asked for on a staff
 // tab (reloadForMissingCode), which keeps the staff rules once in view, a
-// customer page included. A page move ends the use once it is in view
+// customer page included. PortalUpdateGate asks it at a replace, which after
+// a use starts a new move. A page move ends the use once it is in view
 // (notePageInView). Both paths read the page in view, so they share one
 // spelling.
 export function usedOnPageInView() {
@@ -361,8 +389,10 @@ export function markPageNavigating(reload = () => window.location.reload()) {
 }
 
 // One-shot guard (takeChunkReload) so a genuine outage still surfaces instead
-// of reload-looping.
+// of reload-looping. It notes a stylesheet that failed, for loadCode.
 export function handleVitePreloadError(event, reload = () => window.location.reload()) {
+  const message = String(event.payload?.message || '');
+  if (/Unable to preload CSS/i.test(message)) failedStylesheet = message;
   if (pageNavigating()) {
     chunkHeld = true;
     event.preventDefault();
@@ -475,4 +505,5 @@ export function resetStaleChunkReloadForTests() {
   shownMove = NO_MOVE;
   reloadedPath = pathOpenedByChunkReload();
   staffImports.clear();
+  failedStylesheet = null;
 }

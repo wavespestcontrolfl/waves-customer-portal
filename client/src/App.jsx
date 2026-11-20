@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from '
 import { reportError } from './lib/reportError';
 import {
   CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
-  noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, trackStaffImport, usedOnPageInView,
+  loadCode, noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, trackStaffImport, usedOnPageInView,
 } from './lib/staleChunkReload';
 import { PortalUpdateBar, PortalUpdateGate, useBrowserOffline, useHoldAwareReload, useNewerBuild, usePageUse } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -400,7 +400,7 @@ export function lazyWithRetry(factory) {
     // code fails after Back opened a customer page (lib/staleChunkReload.js).
     const staff = staffTab();
     try {
-      const mod = await (staff ? trackStaffImport(factory) : factory());
+      const mod = await (staff ? trackStaffImport(factory) : loadCode(factory));
       // main.jsx's vite:preloadError handler swallowed a stale chunk: the
       // import resolved undefined and a reload is in flight. Hold the loading
       // placeholder and keep the one-shot flag; clearing it here would let a

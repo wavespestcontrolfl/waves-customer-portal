@@ -1,6 +1,6 @@
 import { lazy } from 'react';
 import {
-  isChunkError, isStaleChunkReloadPending, missingCodeIsNewVersion, staffTab, trackStaffImport,
+  isChunkError, isStaleChunkReloadPending, loadCode, missingCodeIsNewVersion, staffTab, trackStaffImport,
 } from '../lib/staleChunkReload';
 import { PortalReloadPrompt, useBrowserOffline, useNewerBuild } from './PortalUpdate';
 import { Button, Dialog, DialogBody, DialogFooter } from './ui';
@@ -25,7 +25,7 @@ export function lazyPanel(factory, { dialog } = {}) {
     // code fails after Back opened a customer page (lib/staleChunkReload.js).
     const staff = staffTab();
     try {
-      const mod = await (staff ? trackStaffImport(factory) : factory());
+      const mod = await (staff ? trackStaffImport(factory) : loadCode(factory));
       // The stale-chunk handler swallowed the import: its reload is under
       // way, or an app link is opening the next page (markPageNavigating).
       if (!mod && isStaleChunkReloadPending()) return { default: PanelPending };

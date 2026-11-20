@@ -992,6 +992,73 @@ describe('on a staff page', () => {
     }
   });
 
+  // A replace after a use of the page in view is not a redirect: the move
+  // ended on that page (PortalUpdateGate). A payment page that Back from
+  // Today opened is paid there, and its receipt replaces it: the receipt
+  // opens from the payment page, not from Today, so its missing code reloads
+  // once by itself when nothing holds the tab.
+  test('Back from Today to a payment page, paid there, then its receipt by replace: the receipt\'s missing code reloads once, as no move from Today would', async () => {
+    const stop = watchPageUse();
+    try {
+      function PayPage() {
+        const navigate = useNavigate();
+        return <button type="button" onClick={() => navigate('/receipt/abc', { replace: true })}>Pay</button>;
+      }
+      let failReceipt;
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
+      const move = renderGate(['/pay/abc', '/admin/today'], {
+        pages: {
+          '/pay/:token': PayPage,
+          '/receipt/:token': lazyWithRetry(() => new Promise((_, reject) => { failReceipt = reject; })),
+        },
+      });
+      vi.stubGlobal('location', { ...window.location, pathname: '/pay/abc', reload });
+      move(-1);
+      const pay = screen.getByRole('button', { name: 'Pay' });
+      vi.stubGlobal('location', { ...window.location, pathname: '/receipt/abc', reload });
+      tap(pay);
+      await waitFor(() => expect(failReceipt).toBeDefined());
+      await act(async () => { failReceipt(new TypeError('Failed to fetch dynamically imported module: /assets/ReceiptPage-old.js')); });
+      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+      expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    } finally {
+      stop();
+    }
+  });
+
+  // Vite marks a stylesheet as loaded once it starts to load it, so after one
+  // failed, a later import that lists it skips it, and its page would render
+  // without it. Until a reload, every later import fails as that stylesheet
+  // did (loadCode): a staff page with held work gets its retry screen, and a
+  // customer page in view reloads at once, as the handler reloads one.
+  function failStylesheet() {
+    const failed = preloadErrorEvent();
+    failed.payload = new Error('Unable to preload CSS for /assets/CustomerReportHeader-old.css');
+    handleVitePreloadError(failed, reload);
+    expect(failed.defaultPrevented).toBe(false);
+  }
+
+  test('once a stylesheet failed on a held staff tab, a later page whose code loads gets the retry screen, not the page without the stylesheet', async () => {
+    holding = true;
+    failStylesheet();
+    renderInBoundary(lazyWithRetry(() => Promise.resolve({ default: () => <div>Loaded page</div> })));
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByText('Loaded page')).not.toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('once a stylesheet failed on a staff tab, a customer page in view whose code loads later reloads at once', async () => {
+    failStylesheet();
+    notePageInView(null, '/admin/dashboard');
+    notePageMove('/admin/dashboard', '/report/abc');
+    notePageInView('/admin/dashboard', '/report/abc');
+    vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+    renderInBoundary(lazyWithRetry(() => Promise.resolve({ default: () => <div>Loaded page</div> })));
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Loaded page')).not.toBeInTheDocument();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
+  });
+
   // Back from a field page to a customer page whose code was asked for while
   // the field page was in view: that page keeps the staff rules through its
   // recovery, so the move from the field page still bars its reload.

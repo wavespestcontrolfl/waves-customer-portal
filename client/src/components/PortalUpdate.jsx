@@ -26,10 +26,14 @@ export function PortalUpdateGate({ fallback, children }) {
   // replace, as every <Navigate> in the routes is, and it continues that
   // move. So when the move started on a field page, its redirects leave that
   // page too: Today -> /admin -> the dashboard, Today -> /admin/leads ->
-  // Pipeline.
+  // Pipeline. A replace after a use of the page in view (usedOnPageInView)
+  // is not a redirect: the move ended on that page, and the replace starts a
+  // new one from it, as when a payment page that Back from Today opened is
+  // paid, and its receipt replaces it.
   const [gate, setGate] = useState({ pathname, origin: pathname, from: null, reloading: false });
   if (gate.pathname !== pathname) {
-    const origin = navigationType === 'REPLACE' ? gate.origin : gate.pathname;
+    const redirect = navigationType === 'REPLACE' && !usedOnPageInView();
+    const origin = redirect ? gate.origin : gate.pathname;
     const from = isFieldPath(origin) ? origin : gate.pathname;
     // The stale-chunk reload follows the same rule (lib/staleChunkReload.js),
     // from this render on: the new page's code can fail before the move is
