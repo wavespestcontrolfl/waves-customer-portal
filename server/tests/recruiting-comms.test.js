@@ -634,18 +634,22 @@ describe('sendStageComms — send-window hold', () => {
 });
 
 describe('sendStageComms — a held job-offer text', () => {
-  test('is queued with the link token hidden and pins its offer, so the replay can rebuild the real link', async () => {
-    const link = `https://portal.wavespestcontrol.com/careers/offer/${'d'.repeat(64)}`;
+  const link = `https://portal.wavespestcontrol.com/careers/offer/${'d'.repeat(64)}`;
+  function holdOfferText(text) {
     mockIsEnabled.mockImplementation((gate) => gate === 'jobOffers');
-    mockRenderSmsTemplate.mockResolvedValue(`Hi Jane, your job offer: ${link} It stays open until Fri, Dec 18. Reply STOP to opt out.`);
+    mockRenderSmsTemplate.mockResolvedValue(text);
     mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
     const app = baseApp();
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
     mockDb.__tables.sms_log = [];
-    const result = await RecruitingComms.sendStageComms(app, 'offer_sent', {
+    return RecruitingComms.sendStageComms(app, 'offer_sent', {
       sms: true, email: false, by: 'staff-1', offerId: 'offer-1', offerToken: 'd'.repeat(64),
       vars: { offer_link: link, expires_on: 'Fri, Dec 18', job_title: 'Pest Control Technician', sender_name: 'Test Owner' },
     });
+  }
+
+  test('is queued with the link token hidden and pins its offer, so the replay can rebuild the real link', async () => {
+    const result = await holdOfferText(`Hi Jane, your job offer: ${link} It stays open until Fri, Dec 18. Reply STOP to opt out.`);
     expect(result.sms).toBe('deferred');
     // the provider was handed the real link; the stored queue row was not
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('d'.repeat(64));
@@ -654,6 +658,15 @@ describe('sendStageComms — a held job-offer text', () => {
     expect(JSON.stringify(queued)).not.toContain('d'.repeat(64).slice(0, 40)); // no token anywhere on the row, metadata included
     expect(queued.message_type).toBe('job_offer_sent');
     expect(JSON.parse(queued.metadata)).toMatchObject({ stage: 'offer_sent', purpose: 'offer_sent', job_offer_id: 'offer-1', audience: 'applicant', offer_token_hash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+  });
+
+  // The replay puts this offer's own link in every hidden link, so an edited text that also carries another offer's
+  // link would go out with this offer's link twice: it is not queued.
+  test('an edited text that also carries another offer\'s link is not queued', async () => {
+    const other = `https://portal.wavespestcontrol.com/careers/offer/${'e'.repeat(64)}`;
+    const result = await holdOfferText(`Hi Jane, your job offer: ${link} The old one: ${other} Reply STOP to opt out.`);
+    expect(result.sms).toBe('blocked');
+    expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(0);
   });
 });
 
@@ -738,6 +751,7 @@ describe('sendStageComms — a held owner reply that pastes an offer link', () =
     ['a link split by a no-break space', `Here is your offer again: ${LINK.slice(0, 70)}\u00a0${LINK.slice(70)}`],
     ['a link in another spelling', `Here is your offer again: https://portal.wavespestcontrol.com/careers/%6Fffer/./${TOKEN}`],
     ['two links to the offer in one run of text', `Here it is: ${LINK},${LINK.replace('/offer/', '/%6Fffer/')}`],
+    ['a hidden link pasted from the message history', 'Here is your offer again: https://portal.wavespestcontrol.com/careers/offer/[link hidden]'],
   ])('a held reply with %s is not queued, so the replay never sends words the owner did not write', async (_, smsBody) => {
     const result = await holdReply([{ id: 'offer-7', token: TOKEN }], smsBody);
     expect(result.sms).toBe('blocked');

@@ -8645,9 +8645,10 @@ delimiters and backslashes. The same scan pins only those tokens (a 64-hex query
 so a held text replays each one as the standard link. Any other copy of a token found on an offer path, anywhere in
 the text (the link's own query or fragment, or another word), is hidden too: that unit is stored as the standard link
 for each offer-path token it holds, or as the bare marker when it holds none. The replay rebuilds only the standard
-link, one pinned token per hidden link, so a held text is queued only when its replay gives back the text exactly as
-written; any other (a bare marker, a link in another spelling, two links in one run of text) is not queued, and the
-owner sees it did not go out. The
+link, one pinned token per hidden link, so a held text is queued only when its replay, run with the tokens the replay
+will use (the offer text: its own offer's link in each hidden link), gives back the text exactly as written; any other
+(a bare marker, a link in another spelling, two links in one run of text, a hidden link pasted from the message
+history, another offer's link in the offer text) is not queued, and the owner sees it did not go out. The
 units' reader text is also read run together (once with every unit, once with the units outside tags only) with
 every character a reader does not see dropped, so a link or a copy split by markup, white space (also `&nbsp;`), line
 breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
@@ -8674,7 +8675,9 @@ GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` ->
 `version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with
 no write, and a change made from any other version answers 409 `{state:'open'}`, so a save that lands late (its reply
 was lost and the page saved the same choice again) cannot undo a later choice (on that 409 the page reads the offer,
-shows the stored choice and says "That did not go through. Please try again."); `accept {signedName, version}` (trimmed,
+shows the stored choice and says "That did not go through. Please try again."; when that read fails, the page stays
+locked, and the read Try again makes says the same when the stored choice is not the refused one); `accept {signedName,
+version}` (trimmed,
 3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
 'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500), version}` -> `{state:'date_requested'}`; `decline {reason?
 (<= 500), version}` -> `{state:'declined'}`. Each answer carries the `version` the page shows, the text choice included,

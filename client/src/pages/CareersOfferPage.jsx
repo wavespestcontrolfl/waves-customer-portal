@@ -328,6 +328,10 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
   // True once a save of that choice lost its reply: it may still land, so a
   // later refusal (a 429, say) says nothing about what is stored.
   const lostSave = useRef(false);
+  // A change the server refused (409) while the offer could not be read
+  // after it. The read that Try again makes says the change did not go
+  // through when the stored choice is not this one.
+  const refused = useRef(null);
 
   // A fresh read of the offer (another tab changed the choice, or an action
   // re-read the offer) carries the stored choice. Show it, unless a choice
@@ -353,11 +357,13 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
         setUnconfirmed(true);
         return;
       }
+      const notSaved = body.state === 'open' && refused.current !== null && stored !== refused.current;
       wanted.current = null;
+      refused.current = null;
       lostSave.current = false;
       setChecked(stored);
       setUnconfirmed(false);
-      setError('');
+      setError(notSaved ? NOT_SAVED_ERROR : '');
       onPending(false);
       onSnapshot(body);
     } catch (err) {
@@ -370,6 +376,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
 
   const toggle = async (next) => {
     wanted.current = next;
+    refused.current = null;
     setChecked(next);
     setSaving(true);
     onPending(true);
@@ -410,6 +417,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
       const after = onRefused(res.body) ? 'changed' : await onStale();
       if (after === 'failed') {
         // The offer changed but the new state could not be read: stay locked.
+        refused.current = next;
         setUnconfirmed(true);
         setSaving(false);
         return;

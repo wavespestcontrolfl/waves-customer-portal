@@ -311,6 +311,28 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
   });
 
+  // The same refusal, but the read after it fails: signing stays locked, and
+  // the read Try again makes still says the change did not go through.
+  it('still says a refused change did not go through when the read after it failed and Try again reads the offer', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
+      .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // another tab changed the choice since this read
+      .mockRejectedValueOnce(new Error('offline')) // the read after the refusal fails
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: '2026-12-11T15:30:00.000Z' })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked(); // the stored choice, not the refused one
+    expect(screen.getByText('That did not go through. Please try again.')).toBeInTheDocument();
+    expect(screen.queryByText(/We could not confirm that choice/)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
   // The 409 says where the offer stands. A closed offer comes back whole, with
   // no read. An answer given in another tab names only its state: the page
   // shows it at once, and a failed read for its details does not hide it.
