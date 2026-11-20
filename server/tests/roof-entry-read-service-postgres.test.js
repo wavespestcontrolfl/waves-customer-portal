@@ -48,7 +48,7 @@ jest.setTimeout(60000);
     mockDb = database;
     await database.raw('CREATE SCHEMA ??', [schema]);
     await database.raw('CREATE TABLE ??.estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid)', [schema]);
-    await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid())', [schema]);
+    await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deleted_at timestamptz, phone text)', [schema]);
     for (const m of [m1, m2, m3, m4]) await m.up(database);
   });
   beforeEach(() => {
@@ -196,6 +196,36 @@ jest.setTimeout(60000);
     expect(await rows()).toHaveLength(0);
     expect(global.fetch).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('two customers on one estimate with no customer get two rows with their own technician counts', async () => {
+    const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+    const est = await insertId('estimates');
+    const a = await svc.runRoofEntryRead(home({ estimateId: est, customerId: custA }));
+    const b = await svc.runRoofEntryRead(home({ estimateId: est, customerId: custB }));
+    expect(a.read.id).not.toBe(b.read.id);
+    await database('roof_entry_reads').where({ id: a.read.id }).update({ tech_final_count: 3 });
+    await database('roof_entry_reads').where({ id: b.read.id }).update({ tech_final_count: 5 });
+    expect((await svc.runRoofEntryRead(home({ estimateId: est, customerId: custA }))).read).toEqual(expect.objectContaining({ id: a.read.id, tech_final_count: 3 }));
+    expect((await svc.runRoofEntryRead(home({ estimateId: est, customerId: custB }))).read).toEqual(expect.objectContaining({ id: b.read.id, tech_final_count: 5 }));
+    expect((await rows()).map((r) => r.context_key).sort()).toEqual([`e:${est}|c:${custA}`, `e:${est}|c:${custB}`].sort());
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a customer retired by a duplicate merge (deleted_at + merged- phone) is refused; an archived one is not', async () => {
+    const [survivor, loser, archived] = [await insertId('customers'), await insertId('customers'), await insertId('customers')];
+    await svc.runRoofEntryRead(home());
+    const copy = await svc.runRoofEntryRead(home({ customerId: loser }));
+    // What customer-dedupe does to the loser: soft-delete with the merge sentinel phone, repoint the rows.
+    await database('customers').where({ id: loser }).update({ deleted_at: database.fn.now(), phone: 'merged-9415550100' });
+    await database('roof_entry_reads').where({ customer_id: loser }).update({ customer_id: survivor });
+    await database('customers').where({ id: archived }).update({ deleted_at: database.fn.now(), phone: '+19415550101' });
+    const before = (await rows()).length;
+    await expect(svc.runRoofEntryRead(home({ customerId: loser }))).rejects.toMatchObject({ code: 'unknown_reference' });
+    expect(await rows()).toHaveLength(before);
+    expect((await svc.runRoofEntryRead(home({ customerId: survivor }))).read.id).toBe(copy.read.id);
+    await expect(svc.runRoofEntryRead(home({ customerId: archived }))).resolves.toEqual(expect.objectContaining({ status: 'ok' }));
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
   test('deleting an estimate keeps the paid row and its copies (foreign key set null)', async () => {

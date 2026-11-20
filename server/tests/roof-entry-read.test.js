@@ -808,6 +808,98 @@ describe('customer merge and the context key', () => {
   });
 });
 
+describe('an estimate with no customer, and retired customers', () => {
+  const CUST2 = '77777777-7777-4777-8777-777777777777';
+  const CUST3 = '88888888-8888-4888-8888-888888888888';
+  const retired = (id) => ({ id, deleted_at: new Date().toISOString(), phone: 'merged-5551234567' });
+  const merge = (from, to) => {
+    mockRows.forEach((r) => { if (r.customer_id === from) r.customer_id = to; });
+    mockRefs.estimates.forEach((e) => { if (e.customer_id === from) e.customer_id = to; });
+    mockRefs.customers = mockRefs.customers.map((c) => (c.id === from ? retired(from) : c));
+  };
+
+  it('keeps two customers on one unowned estimate in two rows, with their technician counts apart', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    mockRefs.customers = [{ id: CUST }, { id: CUST2 }];
+    const a = await post(home({ estimate_id: EST, customer_id: CUST }));
+    const b = await post(home({ estimate_id: EST, customer_id: CUST2 }));
+    expect(a.json.read.id).not.toBe(b.json.read.id);
+    expect(mockRows.map((r) => r.context_key)).toEqual([`e:${EST}|c:${CUST}`, `e:${EST}|c:${CUST2}`]);
+    await call('PATCH', `/${a.json.read.id}/tech-count`, { body: { count: 3 } });
+    await call('PATCH', `/${b.json.read.id}/tech-count`, { body: { count: 5 } });
+    const [a2, b2] = [await post(home({ estimate_id: EST, customer_id: CUST })), await post(home({ estimate_id: EST, customer_id: CUST2 }))];
+    expect([a2.json.read.id, a2.json.read.tech_final_count]).toEqual([a.json.read.id, 3]);
+    expect([b2.json.read.id, b2.json.read.tech_final_count]).toEqual([b.json.read.id, 5]);
+    expect(mockRows).toHaveLength(2);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('an owned estimate keeps the plain e:<estimate> key, and an estimate later given its customer finds the earlier two-part row', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    const early = await post(home({ estimate_id: EST, customer_id: CUST }));
+    expect(mockRows[0].context_key).toBe(`e:${EST}|c:${CUST}`);
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }]; // the estimate now belongs to the customer
+    expect((await post(home({ estimate_id: EST, customer_id: CUST }))).json.read.id).toBe(early.json.read.id);
+    expect(mockRows).toHaveLength(1);
+    mockRefs.estimates = [{ id: EST2, customer_id: CUST }];
+    await post(home({ estimate_id: EST2, customer_id: CUST }));
+    expect(mockRows[1].context_key).toBe(`e:${EST2}`);
+  });
+
+  it('a lone estimate id (no customer) is keyed e:<estimate> even when the estimate has no customer', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    await post(home({ estimate_id: EST }));
+    expect(mockRows[0].context_key).toBe(`e:${EST}`);
+  });
+
+  it('refuses a customer retired by a merge as an unknown reference: 400, no row, no fetch, no call', async () => {
+    mockRefs.customers = [{ id: CUST }, retired(CUST2)];
+    const res = await post(home({ customer_id: CUST2 }));
+    expect(res.status).toBe(400);
+    expect(res.json.error).toMatch(/Unknown estimate_id or customer_id/);
+    expect(mockRows).toHaveLength(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it('still accepts a customer that was archived but not merged away (its phone is real)', async () => {
+    mockRefs.customers = [{ id: CUST }, { id: CUST2, deleted_at: new Date().toISOString(), phone: '+19415550100' }];
+    expect((await post(home({ customer_id: CUST2 }))).status).toBe(200);
+  });
+
+  it('after a merge the loser id gets 400 and no row, and the survivor finds the repointed read', async () => {
+    mockRefs.customers = [{ id: CUST }, { id: CUST2 }];
+    await post(home());
+    const copy = await post(home({ customer_id: CUST }));
+    merge(CUST, CUST2); // CUST is the loser: retired, its rows repointed to CUST2
+    const rowsBefore = mockRows.length;
+    expect((await post(home({ customer_id: CUST }))).status).toBe(400);
+    expect(mockRows).toHaveLength(rowsBefore);
+    expect((await post(home({ customer_id: CUST2 }))).json.read.id).toBe(copy.json.read.id);
+    expect(mockRows).toHaveLength(rowsBefore);
+  });
+
+  it('the repointed path needs the row\'s CURRENT customer to equal the supplied one: another customer gets its own copy', async () => {
+    mockRefs.customers = [{ id: CUST }, { id: CUST2 }, { id: CUST3 }];
+    await post(home());
+    const copy = await post(home({ customer_id: CUST }));
+    mockRows.find((r) => r.id === copy.json.read.id).customer_id = CUST2; // repointed by a merge
+    const other = await post(home({ customer_id: CUST3 }));
+    expect(other.json.read.id).not.toBe(copy.json.read.id);
+    expect(other.json.read.customer_id).toBe(CUST3);
+    expect(mockRows.find((r) => r.id === copy.json.read.id).customer_id).toBe(CUST2);
+  });
+
+  it('an unowned estimate\'s two-part row is found by the merged customer through its current customer', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: null }];
+    mockRefs.customers = [{ id: CUST }, { id: CUST2 }];
+    const first = await post(home({ estimate_id: EST, customer_id: CUST }));
+    merge(CUST, CUST2);
+    expect((await post(home({ estimate_id: EST, customer_id: CUST2 }))).json.read.id).toBe(first.json.read.id);
+    expect(mockRows).toHaveLength(1);
+  });
+});
+
 describe('ownership check atomic with the insert', () => {
   const OTHER_CUST = '66666666-6666-4666-8666-666666666666';
 

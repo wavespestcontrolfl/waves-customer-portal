@@ -30,6 +30,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const llmCost = require('./llm-cost');
+const { isMergeRetiredRow } = require('./merge-retired');
 
 const TABLE = 'roof_entry_reads';
 const REUSE_DAYS = 90;
@@ -296,23 +297,37 @@ function publicRead(row) {
 }
 
 /**
- * The context of a row, written once at insert on EVERY row (paid, claim and copy): 'e:<estimate id>' when an estimate is
- * given (estimate ids never change, and a customer merge repoints only the customer), else 'c:<customer id>' (empty when
- * neither is given). Matching and copy dedupe use this, never the nullable estimate_id / customer_id foreign keys that
- * ON DELETE SET NULL can change; an estimate-keyed row stays distinct from a customer-only row after its estimate is
- * deleted. At most 38 characters (varchar(80)). Migration 20261119160000 back-filled the legacy '<est>|<cust>' format; no
- * rows exist from before this format (the table is dark behind GATE_ROOF_ENTRY_READ), so it is never read back.
+ * The context of a row, written once at insert on EVERY row (paid, claim and copy). An estimate that belongs to a customer
+ * is keyed 'e:<estimate id>': estimate ids never change, and a customer merge repoints only the customer. An estimate with
+ * NO customer that is read for a customer is keyed 'e:<estimate id>|c:<customer id>', so two customers on one unowned
+ * estimate never share a row. Otherwise 'c:<customer id>' ('c:' when neither is given). Matching and copy dedupe use this,
+ * never the nullable estimate_id / customer_id keys that ON DELETE SET NULL can change. All lower-case, at most 77
+ * characters (varchar(80)). Migration 20261119160000 back-filled the legacy '<est>|<cust>' format; no rows exist from before
+ * this format (the table is dark behind GATE_ROOF_ENTRY_READ), so it is never read back.
+ * ctx.estimateOwned is false when the estimate has no customer yet (true or undefined otherwise).
  */
-const contextKey = ({ estimateId, customerId }) => (estimateId ? `e:${estimateId}` : `c:${customerId || ''}`).toLowerCase();
-const sameContext = (row, ctx) => row.context_key === contextKey(ctx);
+const unownedFor = (ctx) => !!(ctx.estimateId && ctx.customerId && ctx.estimateOwned === false);
+const contextKey = (ctx) => {
+  if (!ctx.estimateId) return `c:${ctx.customerId || ''}`.toLowerCase();
+  return (unownedFor(ctx) ? `e:${ctx.estimateId}|c:${ctx.customerId}` : `e:${ctx.estimateId}`).toLowerCase();
+};
+/** Every key that answers this context: an estimate that has since been given its customer also finds the earlier two-part key. */
+const contextKeys = (ctx) => {
+  if (!ctx.estimateId || unownedFor(ctx) || !ctx.customerId) return [contextKey(ctx)];
+  return [contextKey(ctx), `e:${ctx.estimateId}|c:${ctx.customerId}`.toLowerCase()];
+};
+const lowerOf = (v) => String(v || '').toLowerCase();
 /**
- * Does this row answer this context? By key, and, for a customer-only lookup, also a row whose CURRENT customer is this
- * customer, with no estimate and a customer-only key: the customer-dedupe merge repoints customer_id (and not the key),
- * so a merged customer still finds the read made under the old customer.
+ * Does this row answer this context? By key, and, after a customer-dedupe merge (which repoints customer_id and never the
+ * key), also a row whose CURRENT customer is the supplied customer: for a customer-only lookup, a customer-only row with no
+ * estimate; for an estimate lookup, that estimate's own two-part row. The customer must equal the row's current one.
  */
-const matchesContext = (row, ctx) => sameContext(row, ctx)
-  || (!ctx.estimateId && !!ctx.customerId && !row.estimate_id && String(row.customer_id || '').toLowerCase() === ctx.customerId
-    && String(row.context_key).startsWith('c:'));
+const matchesContext = (row, ctx) => {
+  if (contextKeys(ctx).includes(row.context_key)) return true;
+  if (!ctx.customerId || lowerOf(row.customer_id) !== ctx.customerId) return false;
+  if (!ctx.estimateId) return !row.estimate_id && String(row.context_key).startsWith('c:');
+  return String(row.context_key).startsWith(`e:${ctx.estimateId}|c:`);
+};
 const timeOf = (row) => new Date(row.created_at).getTime();
 /** The oldest candidate that answers the context. */
 const findForContext = (candidates, ctx) => candidates.filter((r) => matchesContext(r, ctx)).sort((a, b) => timeOf(a) - timeOf(b))[0];
@@ -344,11 +359,12 @@ async function reuseCandidates(key) {
  */
 async function answerFor(source, ctx) {
   if (matchesContext(source, ctx)) return publicRead(source);
-  const [inserted] = await writeOwned(ctx, (conn) => conn(TABLE).insert({
+  let writtenKey;
+  const [inserted] = await writeOwned(ctx, (conn, key) => conn(TABLE).insert({
     source_id: source.id,
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
-    context_key: contextKey(ctx),
+    context_key: (writtenKey = key),
     lookup_key: source.lookup_key,
     county: source.county,
     image_source: source.image_source,
@@ -359,7 +375,7 @@ async function answerFor(source, ctx) {
     status: STATUS_DONE,
     cost_estimate_cents: 0,
   }).onConflict().ignore().returning('*'));
-  const row = inserted || await db(TABLE).where({ source_id: source.id, context_key: contextKey(ctx) }).first();
+  const row = inserted || await db(TABLE).where({ source_id: source.id, context_key: writtenKey }).first();
   return publicRead(row);
 }
 
@@ -369,29 +385,36 @@ const ownerMismatch = (estimateCustomerId, ctx) => !!(ctx.customerId && estimate
 
 /**
  * Before any claim, copy, image fetch or model call: a supplied estimate and customer must exist (code
- * 'unknown_reference'), and when both are given and the estimate belongs to a customer, that customer must be the
- * one supplied (code 'reference_mismatch'). One estimate's read can never be filed under another customer.
+ * 'unknown_reference'), a customer retired by a duplicate merge counts as unknown (its id must never open a new read; the
+ * merge repointed its rows to the surviving customer), and when both are given and the estimate belongs to a customer, that
+ * customer must be the one supplied (code 'reference_mismatch'). One estimate's read can never be filed under another
+ * customer. Returns { estimateOwned } (false when the estimate has no customer yet; undefined unless both ids are given).
  */
 async function assertReferencesExist({ estimateId, customerId }) {
   const estimate = estimateId ? await db('estimates').where({ id: estimateId }).first('id', 'customer_id') : null;
   if (estimateId && !estimate) throw referenceError('unknown_reference', 'unknown estimates reference');
-  if (customerId && !(await db('customers').where({ id: customerId }).first('id'))) throw referenceError('unknown_reference', 'unknown customers reference');
+  if (customerId) {
+    const customer = await db('customers').where({ id: customerId }).first('id', 'deleted_at', 'phone');
+    if (!customer || isMergeRetiredRow(customer)) throw referenceError('unknown_reference', 'unknown customers reference');
+  }
   if (estimate && ownerMismatch(estimate.customer_id, { customerId })) throw referenceError('reference_mismatch', 'the estimate belongs to another customer');
+  return { estimateOwned: estimate && customerId ? !!estimate.customer_id : undefined };
 }
 
 /**
- * Runs `write(conn)` that inserts a row for this context. When the context names both an estimate and a customer, the
+ * Runs `write(conn, contextKey)` that inserts a row for this context. When the context names both an estimate and a customer, the
  * write runs in a SHORT transaction that first locks the estimate row (FOR SHARE: a customer merge cannot change it
  * until we commit), rechecks that its customer is still the one supplied, writes, and commits. The check and the insert
  * are therefore atomic. This is the only transaction in the flow, and it holds no lock during any network I/O.
  */
 async function writeOwned(ctx, write) {
-  if (!(ctx.estimateId && ctx.customerId)) return write(db);
+  if (!(ctx.estimateId && ctx.customerId)) return write(db, contextKey(ctx));
   return db.transaction(async (trx) => {
     const estimate = await trx('estimates').where({ id: ctx.estimateId }).forShare().first('customer_id');
     if (!estimate) throw referenceError('unknown_reference', 'unknown estimates reference');
     if (ownerMismatch(estimate.customer_id, ctx)) throw referenceError('reference_mismatch', 'the estimate belongs to another customer');
-    return write(trx);
+    // The key is derived from the estimate as locked here, so it can never disagree with who owns it at write time.
+    return write(trx, contextKey({ ...ctx, estimateOwned: !!estimate.customer_id }));
   });
 }
 
@@ -441,10 +464,10 @@ function settleOutcome(outcome) {
 // to every other request before the image fetch starts, and no connection stays open afterwards.
 async function insertClaim(key, county, ctx) {
   const src = IMAGE_SOURCES[county];
-  const rows = await writeOwned(ctx, (conn) => conn(TABLE).insert({
+  const rows = await writeOwned(ctx, (conn, contextKeyToWrite) => conn(TABLE).insert({
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
-    context_key: contextKey(ctx),
+    context_key: contextKeyToWrite,
     lookup_key: key,
     county,
     image_source: src.source,
@@ -592,7 +615,7 @@ async function runRoofEntryRead(input) {
   if (!county) return { status: 'no_image', cached: false, read: null };
   // Ids are compared and stored lower-case: an upper-case UUID is the same context as its lower-case spelling.
   const ctx = { estimateId: lowerId(input.estimateId), customerId: lowerId(input.customerId) };
-  await assertReferencesExist(ctx);
+  ctx.estimateOwned = (await assertReferencesExist(ctx)).estimateOwned;
   const key = lookupKey({ source: IMAGE_SOURCES[county].source, lat: input.lat, lng: input.lng });
   const hit = await reuseCandidates(key);
   const same = hit && findForContext(hit.candidates, ctx);
