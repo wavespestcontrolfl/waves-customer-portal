@@ -516,6 +516,29 @@ describe('parseInspectionReport', () => {
     expect(parse(reportPage(fewer.replace('< 5', '&lt; 5'))).findings[0].text).toBe('Observed < 5 live roaches under the sink.');
   });
 
+  test('a table that opens inside the inspection table or the violations table gives no answer: a callback row after it would go unread', () => {
+    const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
+    const read = (html) => parse(html, { violation35: 1, visitDate: '2026-10-20' });
+    const nested = '<td>Warning Issued<table><tr><td>Met</td></tr></table></td></tr>';
+    const callbackRow = '<tr><td>Callback - Food</td><td>10/21/2026</td><td>Met Inspection Standards</td></tr></table>';
+    expect(read(reportPage(rows, '10/20/2026'))).toMatchObject({ pestEvidence: true });
+    // A table in the first visit's Result cell, then a callback's row: the page lists two visits, so no answer.
+    const hidden = reportPage(rows, '10/20/2026').replace('<td>Warning Issued</td></tr></table>', `${nested}${callbackRow}`);
+    expect(hidden).toContain('10/21/2026');
+    expect(read(hidden)).toBeNull();
+    // The same in the real layout.
+    const fixtureHidden = fixture('report-35a.html').replace('<td>Warning Issued</td></tr></table>', `${nested}${callbackRow}`);
+    expect(fixtureHidden).toContain('10/21/2026');
+    expect(read(fixtureHidden)).toBeNull();
+    // A table inside either table, with nothing after it, is still a page not laid out as expected.
+    expect(read(reportPage(rows, '10/20/2026').replace('<td>Warning Issued</td></tr></table>', `${nested}</table>`))).toBeNull();
+    const inObservation = rows.replace('Live flies at the bar.', 'Live flies at the bar.<table><tr><td>note</td></tr></table>');
+    expect(read(reportPage(inObservation, '10/20/2026'))).toBeNull();
+    // Tables beside them, opened after they close, still read.
+    expect(read(`<table><tr><td>Header</td></tr></table>${reportPage(rows, '10/20/2026')}<table><tr><td>Footer</td></tr></table>`))
+      .toMatchObject({ pestEvidence: true });
+  });
+
   test('a page answers only for the visit whose date its inspection table gives', () => {
     const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
     const read = (html, visitDate) => parse(html, { violation35: 1, visitDate, visitNumber: 1 });

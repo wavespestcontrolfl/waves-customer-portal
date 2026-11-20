@@ -377,6 +377,8 @@ const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
 // in it must hold a code alone in the Violation column and nothing before it; anywhere else no cell may be a code.
 // The inspection table is a head row naming "Inspection Date" (and "Inspection Type"), then the rows under it: each
 // row up to the table's end is a visit, its date and type in those columns, so a second visit's row is a second visit.
+// A table that opens inside either table makes the page unreadable: its tags would end that table's reading early,
+// and a visit or a violation row after it (a callback's row) would go unread.
 function readReportTables(page) {
   const entries = [];
   const visits = [];
@@ -412,6 +414,7 @@ function readReportTables(page) {
     const column = violationsColumn(row);
     if (column >= 0) codeColumn = column;
     if (/^table$/i.test(match[2])) {
+      if (!match[0].startsWith('</') && (codeColumn >= 0 || dateColumn >= 0)) unreadable = true;
       codeColumn = -1;
       dateColumn = -1;
     }
@@ -435,8 +438,8 @@ function readReportTables(page) {
  * - its violations table reads cleanly: the rows after the "Violation" / "Observation" head, up to the next table
  *   tag, each read whole by cell position (the cell in the Violation column is the code, the cells after it are the
  *   observation), so a code quoted in a note, a comment or a script never starts an entry. A row whose Violation cell
- *   is not a code alone (blank, or 35A-02-8*), or a code cell outside that table (another table, the footer), means
- *   the page is not laid out as expected;
+ *   is not a code alone (blank, or 35A-02-8*), a code cell outside that table (another table, the footer), or a table
+ *   that opens inside the inspection table or the violations table means the page is not laid out as expected;
  * - each 35 row has observation text, and every visit label on them reads and has text after it. On a follow-up
  *   report (any violations row labelled with its visit) each 35 row must be labelled, and its initial note is the
  *   first visit's citation;
