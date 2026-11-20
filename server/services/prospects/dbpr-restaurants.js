@@ -11,8 +11,8 @@
  * The state rebuilds the three files each morning, and each holds one fiscal year (July to June): on July 1 they
  * start over. The year before is not posted as these CSVs. Its archives are statewide XLSX files, checked
  * 2026-11-20: inspections about 55 MB, new licenses posted about July 9, no ownership-change archive since 2022-23.
- * Reading them is not worth one day of rows a year. So the schedule (the next change) also runs the job daily on
- * June 24-30, and at most the last day of June goes unread.
+ * Reading them is not worth one day of rows a year. So the job also runs daily on June 24-30 (scheduler.js), and
+ * at most the last day of June goes unread.
  *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
@@ -20,10 +20,12 @@
  * then every inspection stays NULL.
  *
  * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
- * sync itself never throws. Logs carry counts and elapsed time only, never a business name, address or phone. A read
- * with under 90% of the rows of the fullest complete read of the same file and fiscal year is short (a download that
- * stopped early): its rows are written and the run fails (readProblem). That measure is kept in system_settings. A
- * copy of an older fiscal year than one already read, or a file with no row from the last 14 days, fails the same way.
+ * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
+ * elapsed time only, never a business name, address or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true
+ * or on); the scheduler checks it before the run starts, so job_health keeps the last real outcome. A read with under
+ * 90% of the rows of the fullest complete read of the same file and fiscal year is short (a download that stopped
+ * early): its rows are written and the run fails (readProblem). That measure is kept in system_settings. A copy of
+ * an older fiscal year than one already read, or a file with no row from the last 14 days, fails the same way.
  */
 
 const db = require('../../models/db');
@@ -69,6 +71,10 @@ const FILE_TIMEOUT_MS = 60 * 1000;
 const REPORT_MAX_ATTEMPTS = 3;
 const UPSERT_CHUNK = 500;
 
+function syncDisabled(env = process.env) {
+  return /^(1|true|on)$/i.test(String(env.DBPR_PROSPECT_SYNC_DISABLED || '').trim());
+}
+
 // ── Parsers (pure) ──────────────────────────────────────────────
 
 // PostgreSQL text and jsonb refuse a NUL character, and one in any field would fail its whole insert batch: it
@@ -93,6 +99,12 @@ function parseUsDate(value) {
 // list of those places; it decides by city name or by a Punta Gorda-only ZIP. Each value is cleaned first, as it is
 // stored: a check on the raw value could pass a city whose stored copy is excluded ("PUNTA\0GORDA" stores as
 // "PUNTA GORDA").
+// A row with no county cannot be placed: it is malformed, not outside the area, so a file whose county cells went
+// blank fails instead of passing with no prospects. A blank city or ZIP only means no excluded place.
+function hasNoCounty(county) {
+  return !clean(county);
+}
+
 function inServiceArea(county, city, zip) {
   return isInServiceAreaCounty(clean(county)) && !isExcludedLocality(clean(city)) && !isExcludedZip(clean(zip));
 }
@@ -139,6 +151,10 @@ function parseInspectionRows(rows, counts = {}, today = null) {
   const out = [];
   for (const row of rows) {
     if (!hasEveryColumn(row, 'inspection')) {
+      counts.malformed += 1;
+      continue;
+    }
+    if (hasNoCounty(row['County Name'])) {
       counts.malformed += 1;
       continue;
     }
@@ -192,6 +208,10 @@ function parseLicenseRows(rows, kind, counts = {}, today = null) {
   const out = [];
   for (const row of rows) {
     if (!hasEveryColumn(row, kind)) {
+      counts.malformed += 1;
+      continue;
+    }
+    if (hasNoCounty(row['Location County'])) {
       counts.malformed += 1;
       continue;
     }
@@ -463,11 +483,12 @@ async function syncFiles(deps, result) {
 /**
  * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
  * { fetchText, store, now }.
- * @returns {Promise<{ failures: number, files: object, elapsedMs: number }>}
+ * @returns {Promise<{ skipped?: string, failures: number, files: object, elapsedMs: number }>}
  */
 async function syncRestaurantProspects(deps = {}) {
   const started = Date.now();
   const result = { failures: 0, files: {}, elapsedMs: 0 };
+  if (syncDisabled()) return { ...result, skipped: 'disabled' };
   await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
   result.elapsedMs = Date.now() - started;
   const counts = Object.entries(result.files)
@@ -480,6 +501,7 @@ async function syncRestaurantProspects(deps = {}) {
 
 module.exports = {
   syncRestaurantProspects,
+  syncDisabled,
   parseUsDate,
   parseInspectionRows,
   parseLicenseRows,
