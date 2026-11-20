@@ -484,6 +484,18 @@ describe('syncRestaurantProspects', () => {
     expect((await sync({ fetchText, store })).failures).toBe(0);
   });
 
+  test('freshness reads the newest row of the read\'s own year: a frozen June file with one stray July row is stale', async () => {
+    store = makeStore();
+    reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
+    // July 20, 2027: the state still serves the June file. One row says July 15; the other 19 are 22 days old.
+    const june = [...Array.from({ length: 19 }, (_, i) => inspRow({ visit: String(9001 + i), date: '06/28/2027' })), inspRow({ visit: '9101', date: '07/15/2027' })];
+    fetchText = makeFetch({ ...licFiles('07/19/2027'), '7fdinspi.csv': () => inspCsv(june) });
+    const result = await sync({ fetchText, store, now: new Date('2027-07-20T15:36:00Z') });
+    expect(result.files.inspection).toEqual({ kept: 20, malformed: 0, upserted: 20, stale: true });
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is stale: no row from the last 14 days (newest 2027-06-28)');
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
+  });
+
   test('a license row with a cell added or lost is malformed; the usual 36 cells and a full 38 load', async () => {
     store = makeStore();
     // 37 cells: an extra cell before Secondary Phone Number would move the phone and the license number.

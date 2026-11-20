@@ -34,7 +34,7 @@ const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
 const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, etCalendarDaysUntil } = require('../../utils/datetime-et');
 
 const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
 const FILES = {
@@ -320,9 +320,8 @@ async function loadFile(kind, fetchText, now, last) {
   const records = [];
   const today = etDateString(now);
   let rowsRead = 0;
-  // How many rows fall in each fiscal year, by the row's own date, and the newest date.
+  // Each fiscal year's row count and newest date, by the row's own date.
   const years = new Map();
-  let newest = null;
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
   const header = await eachDbprCsvRow(text, (row, { cells, columns }) => {
     rowsRead += 1;
@@ -339,8 +338,8 @@ async function loadFile(kind, fetchText, now, last) {
     }
     if (day) {
       const year = fiscalYearOf(day);
-      years.set(year, (years.get(year) || 0) + 1);
-      if (!newest || day > newest) newest = day;
+      const seen = years.get(year) || { rows: 0, newest: day };
+      years.set(year, { rows: seen.rows + 1, newest: day > seen.newest ? day : seen.newest });
     }
     records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts) : parseLicenseRows([row], kind, counts)));
   });
@@ -360,9 +359,10 @@ async function loadFile(kind, fetchText, now, last) {
   // Rows without one readable date leave nothing to measure the file by (a cut file of rows outside the area, say):
   // it fails. Only a header alone, above, reads with no fiscal year.
   if (rowsRead && !years.size) throw new Error('no dated row');
-  // The fiscal year most rows fall in (null for a header alone), so one stray date never moves a file.
-  const fiscalYear = [...years].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
-  return { records, malformed: counts.malformed, rowsRead, fiscalYear, newest };
+  // The fiscal year most rows fall in (null for a header alone) and that year's newest date, so a stray date of
+  // another year never moves a file or makes it look fresh.
+  const [fiscalYear, year] = [...years].sort((a, b) => b[1].rows - a[1].rows)[0] || [null, null];
+  return { records, malformed: counts.malformed, rowsRead, fiscalYear, newest: year && year.newest };
 }
 
 // The first day (July 1) of the fiscal year a day (YYYY-MM-DD) falls in.
@@ -387,16 +387,13 @@ const SHORT_MIN_ROWS = 20;
 const FRESH_DAYS = 14;
 const READ_FLAGS = ['stale', 'short'];
 
-// Whole days from one plain date to a later one.
-const dayDiff = (from, to) => Math.round((Date.parse(to) - Date.parse(from)) / (24 * 60 * 60 * 1000));
-
-function readProblem(last, read, today) {
+function readProblem(last, read, now) {
   // A header alone in the first week of July (loadFile) has no year to measure.
   if (!read.fiscalYear) return null;
   if (last && read.fiscalYear < last.fiscalYear) {
     return { flag: 'stale', text: `is stale: its rows are from the fiscal year that began ${read.fiscalYear}, after a read of ${last.fiscalYear}` };
   }
-  if (!read.newest || dayDiff(read.newest, today) > FRESH_DAYS) {
+  if (!read.newest || etCalendarDaysUntil(read.newest, now) < -FRESH_DAYS) {
     return { flag: 'stale', text: `is stale: no row from the last ${FRESH_DAYS} days (newest ${read.newest || 'none'})` };
   }
   if (last && last.fiscalYear === read.fiscalYear && last.rows >= SHORT_MIN_ROWS && read.rows < last.rows * SHORT_SHARE) {
@@ -413,7 +410,7 @@ async function syncFiles(deps, result) {
       const unique = dedupeByKey(records);
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
       // The rows are whole and valid, so they are written even when the read fails.
-      const problem = readProblem(last, { fiscalYear, rows: rowsRead, newest }, etDateString(deps.now));
+      const problem = readProblem(last, { fiscalYear, rows: rowsRead, newest }, deps.now);
       if (problem) {
         result.failures += 1;
         result.files[kind][problem.flag] = true;
