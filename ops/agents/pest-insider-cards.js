@@ -4,8 +4,10 @@
  * Draws every card in server/data/pest-insider-cards-v1.json (checked by
  * server/services/pest-insider/cards.js) as a 582x300 picture at 2x, and
  * writes it to client/public/pest-insider/cards/<fact>-<hash>.png, where the
- * portal serves it to email readers. Run it on a Mac after any change to the
- * card file or the drawing, then commit the pictures with the change.
+ * portal serves it to email readers. A months card also gets
+ * <fact>-<hash>.gif: the whole card, then its months light one by one; it
+ * plays 3 times and stops on the whole card. Run it on a Mac after any change
+ * to the card file or the drawing, then commit the pictures with the change.
  *
  *   node ops/agents/pest-insider-cards.js [--execute] [--out <dir>] [--only A01,T03]
  *
@@ -27,7 +29,8 @@
  * either font did not load, so no card ships in a fallback font. Each
  * card uses its color set from cards.js SCHEMES, and no other color.
  * Change the drawing below -> bump CARD_DESIGN in cards.js, so every card
- * gets a new file name and the test asks for new pictures.
+ * gets a new file name and the test asks for new pictures; change the months
+ * card's motion -> bump CARD_MOTION_DESIGN.
  */
 /* global document, getComputedStyle */
 'use strict';
@@ -80,6 +83,11 @@ const tint = (hex, alpha) => {
   const n = parseInt(hex.slice(1), 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 };
+// The moving months card: the whole card (all Outlook-like readers see it
+// first), a blink with no month lit, the months lighting one by one from the
+// first, and the whole card held. It plays 3 times and stops on the whole card.
+const MONTHS_GIF = Object.freeze({ wholeMs: 1800, darkMs: 350, stepMs: 300, endMs: 2600, loops: 3 });
+
 // A fixed label per layout: no fact in it.
 const KICKER = { number: 'By the numbers', statement: 'Did you know?', months: 'Season', versus: 'Side by side' };
 const MONTH_LETTERS = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
@@ -110,6 +118,9 @@ const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 function lit(month, [first, last]) {
   return first <= last ? month >= first && month <= last : month >= first || month <= last;
 }
+
+// The lit months in order from the first, across the new year: [12, 5] -> 12, 1, 2, 3, 4, 5.
+const litInOrder = ([first, last]) => Array.from({ length: ((last - first + 12) % 12) + 1 }, (_, i) => ((first - 1 + i) % 12) + 1);
 
 // Line breaks only: a number stays with the word after it ("3 million") and a
 // month with its day ("Sept. 30"); a comma that opens the after line moves to
@@ -189,8 +200,9 @@ async function fitText(page, layout) {
   const wanted = Object.entries(CARDS).filter(([id]) => !only || only.has(id));
   const unknown = only ? [...only].filter((id) => !Object.prototype.hasOwnProperty.call(CARDS, id)) : [];
   if (unknown.length) { console.error(`No card for ${unknown.join(', ')}; nothing drawn.`); process.exit(2); }
+  const state = (file) => (fs.existsSync(path.join(outDir, file)) ? 'drawn' : 'would draw');
   if (!execute) {
-    for (const [id, card] of wanted) console.log(`${id}  ${card.file}  ${fs.existsSync(path.join(outDir, card.file)) ? 'drawn' : 'would draw'}`);
+    for (const [id, card] of wanted) console.log(`${id}  ${card.file}  ${state(card.file)}${card.gifFile ? `  ${card.gifFile}  ${state(card.gifFile)}` : ''}`);
     console.log(`Dry run: nothing written. Add --execute to draw into ${outDir}.`);
     return;
   }
@@ -200,17 +212,39 @@ async function fitText(page, layout) {
   const page = await browser.newPage({ viewport: { width: CARD_WIDTH, height: CARD_HEIGHT }, deviceScaleFactor: 2 });
   let failed = 0;
   for (const [id, card] of wanted) {
-    if (fs.existsSync(path.join(outDir, card.file))) { console.log(`${id}  ${card.file}  already drawn; kept`); continue; }
+    const needStill = !fs.existsSync(path.join(outDir, card.file));
+    const needGif = Boolean(card.gifFile) && !fs.existsSync(path.join(outDir, card.gifFile));
+    if (!needStill && !needGif) { console.log(`${id}  ${card.file}  already drawn; kept`); continue; }
     await page.setContent(cardHtml(card, fontCss), { waitUntil: 'networkidle' });
     const fonts = await page.evaluate(fontsLoaded, ['40px Anton', '700 17px Inter']);
     if (!fonts) { console.error(`${id}: Anton or Inter did not load; not drawn`); failed += 1; continue; }
     const size = await fitText(page, card.layout);
     if (!size) { console.error(`${id}: the words do not fit the card; shorten the piece`); failed += 1; continue; }
     // Clear corners: the card keeps its round shape in every mail app, Outlook too.
-    const shot = await page.screenshot({ clip: { x: 0, y: 0, width: CARD_WIDTH, height: CARD_HEIGHT }, omitBackground: true });
-    const png = await sharp(shot).png({ palette: true, quality: 95, effort: 10, compressionLevel: 9 }).toBuffer();
-    publish(outDir, card.file, png);
-    console.log(`${id}  ${card.file}  ${card.layout}  big ${size}px  ${Math.round(png.length / 1024)} KB`);
+    const grab = () => page.screenshot({ clip: { x: 0, y: 0, width: CARD_WIDTH, height: CARD_HEIGHT }, omitBackground: true });
+    if (needStill) {
+      const png = await sharp(await grab()).png({ palette: true, quality: 95, effort: 10, compressionLevel: 9 }).toBuffer();
+      publish(outDir, card.file, png);
+      console.log(`${id}  ${card.file}  ${card.layout}  big ${size}px  ${Math.round(png.length / 1024)} KB`);
+    }
+    if (needGif) {
+      // The words keep the size fitted above: only which month chips are lit changes.
+      const light = (months) => page.evaluate((on) => {
+        document.querySelectorAll('.m').forEach((chip, i) => chip.classList.toggle('on', on.includes(i + 1)));
+      }, months);
+      const order = litInOrder(card.months);
+      const frames = [];
+      const delay = [];
+      const frame = async (months, ms) => { await light(months); frames.push(await grab()); delay.push(ms); };
+      await frame(order, MONTHS_GIF.wholeMs);
+      await frame([], MONTHS_GIF.darkMs);
+      for (let i = 1; i <= order.length; i += 1) await frame(order.slice(0, i), i === order.length ? MONTHS_GIF.endMs : MONTHS_GIF.stepMs);
+      const gif = await sharp(frames, { join: { animated: true } })
+        .gif({ delay, loop: MONTHS_GIF.loops, dither: 0, effort: 10, reuse: true })
+        .toBuffer();
+      publish(outDir, card.gifFile, gif);
+      console.log(`${id}  ${card.gifFile}  ${frames.length} frames  ${Math.round(gif.length / 1024)} KB`);
+    }
   }
   await browser.close();
   if (failed) process.exit(1);

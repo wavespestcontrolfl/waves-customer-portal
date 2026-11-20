@@ -32,6 +32,9 @@
  * - If step 2 fails before the switch, the art it added is removed. A run
  *   that is killed leaves at most an art file no fact names (the heroes test
  *   names it) and its lock file (remove it once no import runs).
+ * - A fact's motion (heroes.js MOTION_KINDS) is placed on its art: new art
+ *   drops it, and the run says so, so a person places it again. The same art
+ *   imported again keeps its motion.
  *
  * The art: ChatGPT on the owner's plan (owner 2026-11-19: "just use
  * chatgpt"), through Codex on the Mac with Codex's built-in image tool, never
@@ -89,7 +92,7 @@ const sha16 = (buf) => crypto.createHash('sha256').update(buf).digest('hex').sli
 function heroesFileText(raw) {
   const top = Object.entries(raw).filter(([key, value]) => key !== 'heroes' && value !== undefined)
     .map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},\n`).join('');
-  const lines = Object.entries(raw.heroes).map(([id, h]) => `    ${JSON.stringify(id)}: { "art": ${JSON.stringify(h.art)} }`);
+  const lines = Object.entries(raw.heroes).map(([id, h]) => `    ${JSON.stringify(id)}: { "art": ${JSON.stringify(h.art)}${h.motion === undefined ? '' : `, "motion": ${JSON.stringify(h.motion)}`} }`);
   const text = `{\n${top}  "heroes": {\n${lines.join(',\n')}\n  }\n}\n`;
   const back = JSON.parse(text);
   validateHeroes(back);
@@ -102,13 +105,24 @@ const readHeroes = () => JSON.parse(fs.readFileSync(HEROES_FILE, 'utf8'));
 
 // The heroes file with this batch's art, checked by heroes.js. The current
 // file is checked first: its old art hashes name the files removed later.
+// New art drops the fact's motion (it was placed on the old art); the same
+// art keeps the entry as it is.
 function merged(raw, batch) {
   validateHeroes(raw);
   const next = { ...raw, heroes: { ...raw.heroes } };
-  for (const item of batch) next.heroes[item.id] = { art: item.art };
+  for (const item of batch) {
+    const current = raw.heroes[item.id];
+    next.heroes[item.id] = current && current.art === item.art ? current : { art: item.art };
+  }
   validateHeroes(next);
   return next;
 }
+
+// The facts whose motion this batch drops: new art, motion placed on the old.
+const motionDropped = (raw, batch) => batch.filter((item) => {
+  const current = raw.heroes[item.id];
+  return current && current.motion !== undefined && current.art !== item.art;
+}).map((item) => item.id);
 
 // Step 1: cut every picture and check the new heroes file. Writes nothing.
 async function stage() {
@@ -204,6 +218,8 @@ function publish({ batch, artDir }) {
   }
   const staged = await stage();
   for (const item of staged.batch) console.log(`${item.id}  art ${item.art}  ${Math.round(item.webp.length / 1024)} KB`);
+  const dropped = motionDropped(readHeroes(), staged.batch);
+  if (dropped.length) console.log(`New art drops the motion of ${dropped.join(', ')}: place it again on the new art in the heroes file.`);
   if (!staged.batch.length) { console.log(`No <fact>.png in ${dir}; nothing to take.`); return; }
   if (!execute) { console.log(`Dry run: ${staged.batch.length} art file(s) checked; nothing written. Add --execute.`); return; }
   publish(staged);

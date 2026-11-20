@@ -20,6 +20,11 @@
  * ship with the portal (client/public/pest-insider/cards/). Each file name
  * carries a hash of everything drawn on it, so a card whose words change
  * gets a new file, and a test fails until it is drawn.
+ *
+ * A months card also moves (owner 2026-11-19, approved plan step 2: "the
+ * months light up one by one"): a GIF whose first frame is the whole card,
+ * then the lit months go dark and light again one by one, and the card
+ * stops whole after 3 plays.
  */
 'use strict';
 
@@ -29,6 +34,8 @@ const { factById, sourceLabel } = require('./facts');
 
 /** Bump when the drawing changes: every card gets a new file name. */
 const CARD_DESIGN = 2;
+/** Bump when the months card's motion changes: every moving card gets a new file name. */
+const CARD_MOTION_DESIGN = 1;
 const CARD_WIDTH = 582;
 const CARD_HEIGHT = 300;
 const CARD_BASE_URL = 'https://portal.wavespestcontrol.com/pest-insider/cards/';
@@ -165,14 +172,18 @@ function validateCards(raw) {
     const problem = cardProblem(id, card);
     if (problem) throw new Error(`pest-insider cards: ${id}: ${problem}`);
     const shown = drawn(id, card);
-    const hash = crypto.createHash('sha256').update(JSON.stringify(shown)).digest('hex').slice(0, 10);
-    const file = `${id.toLowerCase()}-${hash}.png`;
+    const hash10 = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 10);
+    const file = `${id.toLowerCase()}-${hash10(shown)}.png`;
+    // A months card also moves: the same card as a GIF, named by both.
+    const gifFile = shown.layout === 'months' ? `${id.toLowerCase()}-${hash10({ ...shown, motionDesign: CARD_MOTION_DESIGN })}.gif` : null;
     cards[id] = Object.freeze({
       ...shown,
       months: shown.months && Object.freeze(shown.months),
       pieces: Object.freeze(shown.pieces.map((p) => Object.freeze(p))),
       file,
       url: `${CARD_BASE_URL}${file}`,
+      gifFile,
+      gifUrl: gifFile && `${CARD_BASE_URL}${gifFile}`,
       // What the picture says, for its alt text.
       alt: shown.pieces.map(pieceText).join(' / '),
     });
@@ -180,12 +191,12 @@ function validateCards(raw) {
   return Object.freeze(cards);
 }
 
-/** Fact id -> its card: { layout, tag, scheme, months, pieces, source, file, url, alt }. Frozen. */
+/** Fact id -> its card: { layout, tag, scheme, months, pieces, source, file, url, gifFile, gifUrl, alt }. Frozen. */
 const CARDS = validateCards(data);
 
 const cardFor = (factId) => (typeof factId === 'string' && Object.prototype.hasOwnProperty.call(CARDS, factId) ? CARDS[factId] : null);
 
 module.exports = {
-  CARDS, CARD_DESIGN, CARD_WIDTH, CARD_HEIGHT, CARD_BASE_URL, CARD_DIR, LAYOUTS, TAGS, WAVES_COLORS, SCHEMES,
+  CARDS, CARD_DESIGN, CARD_MOTION_DESIGN, CARD_WIDTH, CARD_HEIGHT, CARD_BASE_URL, CARD_DIR, LAYOUTS, TAGS, WAVES_COLORS, SCHEMES,
   cardFor, validateCards, pieceText, sourceLine, monthsNamed,
 };

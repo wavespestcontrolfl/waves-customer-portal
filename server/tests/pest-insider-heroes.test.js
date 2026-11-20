@@ -7,15 +7,31 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
-  HEROES, HERO_DESIGN, HERO_DIR, HERO_BASE_URL, ART_DIR, heroFor, validateHeroes,
+  HEROES, HERO_DESIGN, HERO_DIR, HERO_BASE_URL, ART_DIR, HERO_MOTION_DESIGN, HERO_ART_LEFT, MOTION_KINDS, MOTION_COLORS, heroFor, validateHeroes,
 } = require('../services/pest-insider/heroes');
-const { cardFor } = require('../services/pest-insider/cards');
+const { cardFor, WAVES_COLORS } = require('../services/pest-insider/cards');
+const { motionSvg, MOTION_FRAMES } = require('../../ops/agents/pest-insider-motion');
 const { FACTS, factById } = require('../services/pest-insider/facts');
 const { POSTS } = require('../services/pest-insider/posts');
 
 const ROOT = path.join(__dirname, '../..');
 const sha16 = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16);
 const listed = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => !f.startsWith('.')).sort() : []);
+
+const hash10 = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 10);
+const MOVING = Object.entries(HEROES).filter(([, h]) => h.motion);
+// One valid motion of each kind, for the checks below.
+const SAMPLE = {
+  swarm: { x: 0.7, y: 0.3 },
+  rise: { x: 0.7, y: 0.8, x2: 0.8, y2: 0.4 },
+  drop: { x: 0.7, y: 0.2, to: 0.5, size: 5 },
+  rain: { x: 0.6 },
+  march: { x: 0.6, y: 0.6, cx: 0.7, cy: 0.8, x2: 0.9, y2: 0.9 },
+  pulse: { x: 0.7, y: 0.7, r0: 10, r1: 30 },
+  spray: { x: 0.8, y: 0.6, angle: 120, spread: 40, reach: 120, fall: 30, size: 2 },
+  heat: { x: 0.9, y: 0.6 },
+};
+const withMotion = (motion) => ({ T03: { art: '0123456789abcdef', motion } });
 
 // A JPEG's [width, height], read from its frame header.
 function jpegSize(buf) {
@@ -61,6 +77,27 @@ describe('the top picture list', () => {
     expect(HERO_BASE_URL).toBe('https://portal.wavespestcontrol.com/pest-insider/heroes/');
   });
 
+  test("a moving picture's GIF is named by the picture and its motion: new motion gets a new GIF, and the still keeps its name", () => {
+    expect(MOVING.length).toBeGreaterThan(0);
+    for (const [id, h] of MOVING) {
+      const drawn = { design: HERO_DESIGN, title: h.title, tag: h.tag, kicker: h.kicker, art: h.art };
+      expect(h.gifFile).toBe(`${id.toLowerCase()}-${hash10({ ...drawn, motion: h.motion, motionDesign: HERO_MOTION_DESIGN })}.gif`);
+      expect(h.gifUrl).toBe(`${HERO_BASE_URL}${h.gifFile}`);
+      expect(Object.isFrozen(h.motion)).toBe(true);
+      // the checked motion keeps a fixed key order: kind, color, then its numbers
+      expect(Object.keys(h.motion)).toEqual(['kind', 'color', ...MOTION_KINDS[h.motion.kind]]);
+    }
+    for (const [, h] of Object.entries(HEROES).filter(([, x]) => !x.motion)) expect([h.motion, h.gifFile, h.gifUrl]).toEqual([null, null, null]);
+    const base = validateHeroes({ heroes: withMotion({ kind: 'pulse', color: 'navy', ...SAMPLE.pulse }) }).T03;
+    const moved = validateHeroes({ heroes: withMotion({ kind: 'pulse', color: 'navy', ...SAMPLE.pulse, x: 0.71 }) }).T03;
+    const recolored = validateHeroes({ heroes: withMotion({ kind: 'pulse', color: 'gold', ...SAMPLE.pulse }) }).T03;
+    // the same motion with its keys in another order is the same GIF
+    const reordered = validateHeroes({ heroes: withMotion({ r1: 30, r0: 10, y: 0.7, x: 0.7, color: 'navy', kind: 'pulse' }) }).T03;
+    expect(new Set([base.gifFile, moved.gifFile, recolored.gifFile]).size).toBe(3);
+    expect(reordered.gifFile).toBe(base.gifFile);
+    expect(new Set([base.file, moved.file, recolored.file])).toEqual(new Set([validateHeroes({ heroes: { T03: { art: '0123456789abcdef' } } }).T03.file]));
+  });
+
   test('each picture ships with the portal as a whole 1164x652 JPEG (582x326 at 2x); an older picture may stay for sent emails', async () => {
     const sharp = require('sharp');
     const dir = path.join(ROOT, HERO_DIR);
@@ -71,8 +108,53 @@ describe('the top picture list', () => {
       // the whole picture decodes: a file cut short by a failed write does not
       await expect(sharp(path.join(dir, hero.file)).raw().toBuffer()).resolves.toBeInstanceOf(Buffer);
     }
-    // every file is a top picture by name (<fact>-<hash>.jpg); a retired fact's pictures may stay
-    expect(files.filter((f) => !/^[a-z]\d\d-[0-9a-f]{10}\.jpg$/.test(f))).toEqual([]);
+    // every file is a top picture by name (<fact>-<hash>.jpg or .gif); a retired fact's pictures may stay
+    expect(files.filter((f) => !/^[a-z]\d\d-[0-9a-f]{10}\.(?:jpg|gif)$/.test(f))).toEqual([]);
+  });
+
+  test('each moving picture ships as a whole 1164x652 GIF of 16 frames that plays 3 times, under 400 KB', async () => {
+    const sharp = require('sharp');
+    const dir = path.join(ROOT, HERO_DIR);
+    for (const [id, hero] of MOVING) {
+      const file = path.join(dir, hero.gifFile);
+      expect({ id, there: fs.existsSync(file) }).toEqual({ id, there: true });
+      const gif = fs.readFileSync(file);
+      expect(gif.subarray(0, 6).toString('latin1')).toBe('GIF89a');
+      expect({ id, kb: Math.ceil(gif.length / 1024) <= 400 }).toEqual({ id, kb: true });
+      const meta = await sharp(gif, { animated: true }).metadata();
+      expect({ id, size: [meta.width, meta.pageHeight], frames: meta.pages, loop: meta.loop, delay: meta.delay })
+        .toEqual({ id, size: [1164, 652], frames: MOTION_FRAMES, loop: 3, delay: Array(MOTION_FRAMES).fill(100) });
+      // every frame decodes: a file cut short by a failed write does not
+      await expect(sharp(gif, { animated: true }).raw().toBuffer()).resolves.toBeInstanceOf(Buffer);
+    }
+  }, 60000);
+
+  test('motion is drawn over the art only, right of the title panel, in Waves colors, for every kind', () => {
+    expect(Object.keys(SAMPLE).sort()).toEqual(Object.keys(MOTION_KINDS).sort());
+    expect(HERO_ART_LEFT * 582).toBeGreaterThan(24 + 250); // the title box ends at 274px
+    const waves = new Set(Object.values(WAVES_COLORS));
+    const motions = [
+      ...MOVING.map(([, h]) => h.motion),
+      ...MOTION_COLORS.flatMap((color) => Object.entries(SAMPLE).map(([kind, numbers]) => validateHeroes({ heroes: withMotion({ kind, color, ...numbers }) }).T03.motion)),
+    ];
+    for (const motion of motions) {
+      for (let frame = 0; frame < MOTION_FRAMES; frame += 1) {
+        const svg = motionSvg(motion, frame, 1164, 652);
+        const body = /^<svg [^>]*><defs>(.*)<clipPath id="art"><rect x="([\d.]+)" y="0" width="([\d.]+)" height="652"\/><\/clipPath><\/defs><g clip-path="url\(#art\)">(.*)<\/g><\/svg>$/.exec(svg);
+        expect({ kind: motion.kind, clipped: Boolean(body) }).toEqual({ kind: motion.kind, clipped: true });
+        // the clip starts at the panel's edge (to the drawing's 0.1px)
+        expect([Number(body[2]), Number(body[3])]).toEqual([Number((HERO_ART_LEFT * 1164).toFixed(1)), Number((1164 - HERO_ART_LEFT * 1164).toFixed(1))]);
+        // nothing is drawn outside the clipped group: its inner groups balance and never close it early
+        let depth = 0;
+        for (const [, close] of body[4].matchAll(/<(\/?)g[\s>]/g)) {
+          depth += close ? -1 : 1;
+          expect({ kind: motion.kind, early: depth < 0 }).toEqual({ kind: motion.kind, early: false });
+        }
+        expect({ kind: motion.kind, depth }).toEqual({ kind: motion.kind, depth: 0 });
+        const colors = [...svg.matchAll(/(?:fill|stroke|stop-color)="([^"]+)"/g)].map((m) => m[1]).filter((c) => c !== 'none' && c !== 'url(#glow)');
+        expect({ kind: motion.kind, other: colors.filter((c) => !waves.has(c)) }).toEqual({ kind: motion.kind, other: [] });
+      }
+    }
   });
 
   test('the drawing scripts never change or remove a published picture, and write only with --execute', () => {
@@ -114,6 +196,19 @@ describe('the top picture list', () => {
     ['an entry with no art field', { T03: {} }, /art must be null or/],
     ['art that is a link, not a hash', { T03: { art: 'https://www.example.com/x.png' } }, /art must be null or/],
     ['an entry that is not an object', { T03: 'x' }, /not an object/],
+    ['an entry with a field of its own', { T03: { art: null, note: 'x' } }, /art and motion only, not note/],
+    ['motion on a picture with no art', { T03: { art: null, motion: { kind: 'rain', color: 'white', x: 0.6 } } }, /no art has no motion/],
+    ['motion that is not an object', withMotion('rain'), /motion must be an object/],
+    ['a kind of motion not on the list', withMotion({ kind: 'spin', color: 'navy', x: 0.7 }), /motion kind must be one of swarm, rise/],
+    ['a prototype key as the kind', withMotion({ kind: 'constructor', color: 'navy' }), /motion kind must be one of/],
+    ['a color that is not a Waves color', withMotion({ kind: 'rain', color: 'red', x: 0.6 }), /motion color must be one of navy, gold, wavesBlue, white/],
+    ['a number the kind needs, missing', withMotion({ kind: 'drop', color: 'navy', x: 0.7, y: 0.2, to: 0.5 }), /drop motion needs size from 1 to 8/],
+    ['a number given as text', withMotion({ kind: 'rain', color: 'white', x: '0.6' }), /rain motion needs x from 0.52 to 1/],
+    ['a spot over the title panel', withMotion({ kind: 'pulse', color: 'navy', ...SAMPLE.pulse, x: 0.3 }), /pulse motion needs x from 0.52 to 1/],
+    ['a spot off the picture', withMotion({ kind: 'heat', color: 'gold', x: 0.9, y: 1.2 }), /heat motion needs y from 0 to 1/],
+    ['a number the kind does not take', withMotion({ kind: 'rain', color: 'white', x: 0.6, y: 0.5 }), /rain motion takes no y/],
+    ['rings that shrink', withMotion({ kind: 'pulse', color: 'navy', ...SAMPLE.pulse, r1: 10 }), /r1 larger than r0/],
+    ['a drop that falls up', withMotion({ kind: 'drop', color: 'navy', ...SAMPLE.drop, to: 0.1 }), /must be below its y/],
   ])('refuses %s', (_label, heroes, message) => expect(() => validateHeroes({ heroes })).toThrow(message));
 
   test('refuses a file with no heroes map', () => {
@@ -221,6 +316,23 @@ describe('taking new art', () => {
     expect([stopped.status, stopped.stderr]).toEqual([1, expect.stringContaining(`t03-${art}.webp is there but does not hold the art its name says`)]);
     expect(state()).toEqual(before);
     expect(fs.readFileSync(path.join(root, ART_DIR, `t03-${art}.webp`), 'utf8')).toBe('a hand edit');
+  }, 60000);
+
+  test('new art drops the motion placed on the old art, and says so; the same art again keeps its motion', async () => {
+    expect(HEROES.T03.motion).not.toBeNull();
+    fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
+    const first = run('--execute');
+    expect([first.status, first.stdout]).toEqual([0, expect.stringContaining('New art drops the motion of T03: place it again')]);
+    const raw = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'));
+    expect(Object.keys(raw.heroes.T03)).toEqual(['art']);
+    // a person places the motion again on the new art; importing that same art keeps it
+    raw.heroes.T03.motion = { ...HEROES.T03.motion };
+    fs.writeFileSync(path.join(root, MANIFEST), JSON.stringify(raw, null, 2));
+    const again = run('--execute');
+    expect([again.status, again.stdout]).toEqual([0, expect.not.stringContaining('drops the motion')]);
+    const kept = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8')).heroes.T03;
+    expect(kept).toEqual({ art: raw.heroes.T03.art, motion: { ...HEROES.T03.motion } });
+    expect(validateHeroes({ heroes: { T03: kept } }).T03.gifFile).toMatch(/^t03-[0-9a-f]{10}\.gif$/);
   }, 60000);
 
   test('runs one import at a time: while another holds the lock, it stops and writes nothing', async () => {

@@ -89,3 +89,24 @@ test('unsafe or malformed srcs are skipped, entity-encoded query strings are dec
     sourceName: 'Waves Newsletter',
   });
 });
+
+test('a Waves Pest Insider issue whose top picture moves: the feed shows its still, never the GIF', async () => {
+  const { renderIssue } = require('../services/pest-insider/render');
+  const { heroFor } = require('../services/pest-insider/heroes');
+  const { factById } = require('../services/pest-insider/facts');
+  const { postUrl } = require('../services/pest-insider/posts');
+  // T03's top picture and card both move: each comes as its still (for
+  // classic Outlook, first in the HTML) and its GIF (every other mail app).
+  const hero = heroFor('T03');
+  expect(hero.gifUrl).toMatch(/\.gif$/);
+  const { html_body: body } = renderIssue({
+    subject: 'Native termites can swarm in winter',
+    preview: 'Swarmers in December are not a fluke.',
+    lead: { headline: factById('T03').title, factId: 'T03', postUrl: postUrl('T03'), sentences: [{ text: 'They swarm on warm days after rain.' }] },
+    idItem: { text: 'It raises a generation in about a week.', species: { slug: 'aedes-mosquito', name: 'Aedes Mosquito' } },
+  });
+  mockRows = [{ ...row(1, body), newsletter_type: 'pest-insider-monthly' }];
+  const [post] = await getPublishedPosts({ limit: 1 });
+  expect(post.image).toBe(hero.url);
+  expect(post.image).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/pest-insider\/heroes\/t03-[0-9a-f]{10}\.jpg$/);
+});
