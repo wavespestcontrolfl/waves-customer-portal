@@ -1277,14 +1277,10 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
       const completedReferrals = () => db('ad_service_attribution')
         .where({ lead_source: 'referral', funnel_stage: 'completed' })
         .where('lead_date', '>=', monthStart);
-      if (((require('../config/feature-gates').gates) || {}).referralStep2 === true) {
-        // GATE_REFERRAL_STEP2: the posted amounts for a settled Step 2 referral, the flat settings for any other.
-        const ids = (await completedReferrals().distinct('customer_id')).map((r) => r.customer_id).filter(Boolean);
-        referralRewards = await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion);
-      } else {
-        const [{ n }] = await completedReferrals().countDistinct({ n: 'customer_id' });
-        referralRewards = (Number(n) || 0) * perConversion;
-      }
+      // The recorded amounts for a referral with a Step 2 settlement, whatever the gate says now; the flat settings
+      // for every other referral.
+      const ids = (await completedReferrals().distinct('customer_id')).map((r) => r.customer_id).filter(Boolean);
+      referralRewards = await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion);
     } catch { /* no attribution rows — no referral cost */ }
 
     // Overhead assumptions: latest company_financials row. Admin overhead is

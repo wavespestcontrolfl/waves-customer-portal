@@ -105,6 +105,7 @@ describe('ruleTerms (what staff read before confirming a referral)', () => {
   test('a member at the yearly limit gets $0, stated, and the friend credit still shows', () => {
     expect(ruleTerms({ referee_discount_cents: 2500 }, true)).toEqual({
       atCap: true, text: 'Member is at the yearly limit: $0; friend: $25 credit', short: 'member at the yearly limit: $0; friend $25',
+      conditional: 'Member: $25, or $50 within half a mile, unless at the yearly limit; friend: $25 credit',
     });
   });
 });

@@ -655,7 +655,7 @@ const DAY = 86400000;
   });
 
   describe('referral cost in finance views', () => {
-    test('settled Step 2 referrals count the posted amounts, others the flat settings; gate off is flat', async () => {
+    test('a settled Step 2 referral costs what was recorded, whatever the gate says now; every other referral the flat settings', async () => {
       const near = await performed({ memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
       await firstService(near.friend, near.visit);
       const capped = await performed();
@@ -673,8 +673,37 @@ const DAY = 86400000;
       const ids = [near.friend.id, capped.friend.id, legacy.id];
       // near: $50 member + $25 friend; capped: $0 + $25; legacy: the flat $40.
       expect(await engine.referralAcquisitionCost(db, ids, 40)).toBe(140);
+      // After the gate is turned off the recorded amounts still stand; a customer with no Step 2 settlement is flat.
       gates.referralStep2 = false;
-      expect(await engine.referralAcquisitionCost(db, ids, 40)).toBe(120);
+      expect(await engine.referralAcquisitionCost(db, ids, 40)).toBe(140);
+      expect(await engine.referralAcquisitionCost(db, [legacy.id], 40)).toBe(40);
+      expect(await engine.referralAcquisitionCost(db, [], 40)).toBe(0);
+    });
+
+    test('a formatted friend phone and a household sharing it cannot misattribute the cost (no phone matching)', async () => {
+      const ctx = await performed({ memberFields: HOME, friendFields: { phone: '(941) 555-0199', latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
+      await db('referrals').where({ id: ctx.ref.id }).update({ referee_phone: '+19415550199' });
+      await firstService(ctx.friend, ctx.visit);
+      expect(await amounts(ctx.friend.id)).toEqual([25]);
+      // Another profile on the same phone, never credited: flat.
+      const sibling = await customer({ phone: '941-555-0199', waveguard_tier: 'Silver', monthly_rate: 119.1 });
+      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id], 40)).toBe(75);
+      expect(await engine.referralAcquisitionCost(db, [sibling.id], 40)).toBe(40);
+      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id, sibling.id], 40)).toBe(115);
+    });
+  });
+
+  describe('the rule preview never rejects a list', () => {
+    test('a failed read leaves the terms unknown (null); a good read names the member it was computed for', async () => {
+      const inbound = require('../services/referral-inbound');
+      const member = await customer();
+      const spy = jest.spyOn(engine, 'step2TermsFor').mockRejectedValueOnce(new Error('read failed'));
+      expect(await inbound.previewTerms(db, member.id)).toBeNull();
+      spy.mockRestore();
+      expect(await inbound.previewTerms(db, member.id)).toMatchObject({
+        atCap: false, forCustomerId: String(member.id), conditional: 'Member: $25, or $50 within half a mile, unless at the yearly limit; friend: $25 credit',
+      });
+      expect(await inbound.previewTerms(db, null)).toMatchObject({ forCustomerId: null });
     });
   });
 

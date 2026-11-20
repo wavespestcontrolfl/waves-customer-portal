@@ -1284,16 +1284,10 @@ async function fetchChannelAttribution(since, months = 1, exclude = null) {
         .where('asa.lead_date', '>=', since),
       exclude,
     );
-    let refCost;
-    if (((require('../config/feature-gates').gates) || {}).referralStep2 === true) {
-      // GATE_REFERRAL_STEP2: the posted amounts for a settled Step 2 referral (a near $50 and a capped $0 member
-      // credit, plus the friend's credit), the flat settings for any other.
-      const ids = (await completedReferrals().distinct('asa.customer_id')).map((r) => r.customer_id).filter(Boolean);
-      refCost = round(await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion), 2);
-    } else {
-      const [{ n }] = await completedReferrals().countDistinct({ n: 'asa.customer_id' });
-      refCost = round((Number(n) || 0) * perConversion, 2);
-    }
+    // The recorded amounts for a referral with a Step 2 settlement (a near $50 or a capped $0 member credit, plus the
+    // friend's credit), whatever the gate says now; the flat settings for every other referral.
+    const ids = (await completedReferrals().distinct('asa.customer_id')).map((r) => r.customer_id).filter(Boolean);
+    const refCost = round(await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion), 2);
     if (refCost > 0) fixedCostBySource.referral = (fixedCostBySource.referral || 0) + refCost;
   } catch { /* ad_service_attribution shape / no referrals — no-op */ }
 

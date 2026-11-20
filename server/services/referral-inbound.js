@@ -200,6 +200,18 @@ function performedRecurringVisits(conn) {
     )`, [NOT_PERFORMED_OUTCOMES]);
 }
 
+// The rule staff read on a card, a preview only: a read that fails leaves it unknown (null; the prompts then say
+// credits follow the program settings) so one failed read never rejects the list or stops the bell sweep. The posting
+// transaction stays strict (referral-engine liveSettingsOrThrow).
+async function previewTerms(conn, memberId) {
+  try {
+    return await engine.step2TermsFor(conn, memberId);
+  } catch (err) {
+    logger.warn(`[referral-inbound] rule preview unavailable: ${err.code || err.message}`);
+    return null;
+  }
+}
+
 // The likely referrers for one referee's evidence, as the Queue shows them, and
 // whether the link code belongs to the referee's own household.
 async function suggestionsFor(conn, customer, evidence) {
@@ -287,7 +299,7 @@ async function listInboundReferrals(conn = db, { customerId = null } = {}) {
   for (const { customer, evidence } of open) {
     const { suggestions, selfReferral } = await suggestionsFor(conn, customer, evidence);
     // GATE_REFERRAL_STEP2: the effective rule and the likely referrer's standing, for the Queue and the bell prompts.
-    const terms = step2On ? await engine.step2TermsFor(conn, sureReferrerOf({ suggestions, selfReferral })?.customerId || null) : undefined;
+    const terms = step2On ? await previewTerms(conn, sureReferrerOf({ suggestions, selfReferral })?.customerId || null) : undefined;
     items.push({
       customerId: customer.id,
       name: fullName(customer),
@@ -498,6 +510,7 @@ module.exports = {
   CODE_RE,
   customerForCode,
   sameHousehold,
+  previewTerms,
   listInboundReferrals,
   sureReferrerOf,
   confirmInboundReferral,

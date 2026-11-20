@@ -1297,7 +1297,7 @@ async function step2TermsFor(conn, memberId) {
   const live = await getLiveSettings(conn);
   if (!live) return null;
   const atCap = memberId ? step2.capReached(await memberCreditsThisYear(conn, memberId), live) : false;
-  return step2.ruleTerms(live, atCap);
+  return { ...step2.ruleTerms(live, atCap), forCustomerId: memberId ? String(memberId) : null };
 }
 
 // What a set of referred customers cost in referral credits: the posted amounts for a settled Step 2 referral (the
@@ -1305,20 +1305,33 @@ async function step2TermsFor(conn, memberId) {
 // other (legacy, or still waiting). Gate off: the flat amount for all, as before. Returns dollars.
 async function referralAcquisitionCost(conn, customerIds, perConversionDollars) {
   const flat = customerIds.length * perConversionDollars;
-  if (!isEnabled('referralStep2') || !customerIds.length) return flat;
-  const settled = await conn('customers as c')
-    .joinRaw(`JOIN referrals r ON r.status = 'credited' AND r.referrer_credit_cents IS NOT NULL
-      AND right(regexp_replace(COALESCE(r.referee_phone, ''), '\D', '', 'g'), 10) = right(regexp_replace(COALESCE(c.phone, ''), '\D', '', 'g'), 10)`)
-    .whereIn('c.id', customerIds)
-    .select('c.id as customer_id', 'r.id as referral_id', 'r.referrer_credit_cents',
-      conn.raw(`COALESCE((SELECT SUM(l.delta) FROM customer_credit_ledger l
-        WHERE l.referral_id = r.id AND l.customer_id = c.id AND l.source = 'referral' AND l.delta > 0), 0) AS friend_dollars`));
-  const byCustomer = new Map();
-  for (const row of settled) {
-    if (!byCustomer.has(row.customer_id)) byCustomer.set(row.customer_id, Number(row.referrer_credit_cents) / 100 + Number(row.friend_dollars));
+  if (!customerIds.length) return flat;
+  // The friend is found from the credit the settlement itself posted to them: a referral-sourced ledger row that
+  // names the referral (referral_id) on a customer other than its referrer. No phone matching, so formatting and
+  // shared household phones cannot misattribute a referral. A settled referral whose friend credit was $0 posted no
+  // such row and is not found, so it keeps the flat amount. The member's side is the referral's own
+  // referrer_credit_cents. Recorded amounts count whatever the gate says now (a Step 2 settlement stays what it was).
+  const posted = await conn('customer_credit_ledger as l')
+    .join('referrals as r', 'r.id', 'l.referral_id')
+    .whereIn('l.customer_id', customerIds)
+    .where('l.source', 'referral')
+    .where('l.delta', '>', 0)
+    .whereNotNull('r.referrer_credit_cents')
+    .whereRaw('l.customer_id <> r.referrer_customer_id')
+    .select('l.customer_id', 'r.id as referral_id', 'r.referrer_credit_cents', 'l.delta');
+  if (!posted.length) return flat;
+  const referrals = new Map();
+  for (const row of posted) {
+    const entry = referrals.get(row.referral_id) || { customerId: row.customer_id, member: Number(row.referrer_credit_cents) / 100, friend: 0 };
+    entry.friend += Number(row.delta);
+    referrals.set(row.referral_id, entry);
+  }
+  const actualByCustomer = new Map();
+  for (const { customerId, member, friend } of referrals.values()) {
+    actualByCustomer.set(customerId, (actualByCustomer.get(customerId) || 0) + member + friend);
   }
   let total = flat;
-  for (const actual of byCustomer.values()) total += actual - perConversionDollars;
+  for (const actual of actualByCustomer.values()) total += actual - perConversionDollars;
   return round2(total);
 }
 

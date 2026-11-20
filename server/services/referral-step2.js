@@ -68,13 +68,15 @@ const miles = (n) => (n === 0.5 ? 'half a mile' : `${n} ${n === 1 ? 'mile' : 'mi
 function ruleTerms(settings, atCap = false) {
   const s = step2Settings(settings);
   const friend = dollars(Number(settings?.referee_discount_cents) || 0);
-  if (atCap) {
-    return { atCap: true, text: `Member is at the yearly limit: $0; friend: ${friend} credit`, short: `member at the yearly limit: $0; friend ${friend}` };
-  }
   const std = dollars(s.step2_referrer_reward_cents);
   const near = dollars(s.step2_near_referrer_reward_cents);
   const within = miles(s.step2_near_radius_miles);
-  return { atCap: false, text: `Member: ${std}, or ${near} within ${within}; friend: ${friend} credit`, short: `member ${std} or ${near} within ${within}; friend ${friend}` };
+  // `conditional`: for a member whose standing is not known (staff picked someone other than the suggested member).
+  const conditional = `Member: ${std}, or ${near} within ${within}, unless at the yearly limit; friend: ${friend} credit`;
+  if (atCap) {
+    return { atCap: true, text: `Member is at the yearly limit: $0; friend: ${friend} credit`, short: `member at the yearly limit: $0; friend ${friend}`, conditional };
+  }
+  return { atCap: false, text: `Member: ${std}, or ${near} within ${within}; friend: ${friend} credit`, short: `member ${std} or ${near} within ${within}; friend ${friend}`, conditional };
 }
 
 module.exports = { STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms };

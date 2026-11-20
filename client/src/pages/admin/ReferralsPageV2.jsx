@@ -429,6 +429,13 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
     }
   };
 
+  // The card's rule and cap standing were computed for the suggested member. When staff picked someone else, the
+  // standing is not known, so the line says the limit may apply instead of showing the suggested member's.
+  const termsMatch = Boolean(chosen && item.terms && String(item.terms.forCustomerId) === String(chosen.customerId));
+  const termsLine = termsMatch
+    ? item.terms.text
+    : item.terms?.conditional || "Credits follow the program settings";
+
   const confirm = async () => {
     if (!chosen || busy) return;
     setBusy(true);
@@ -540,7 +547,7 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
             {step2
-              ? `${item.terms?.text || "Credits follow the program settings"} ${item.creditsNow ? "now" : `at ${firstName}'s next completed plan visit`}.${item.terms?.atCap ? "" : " The referrer gets one thank-you email at the next 9:00 AM ET, and no text."}`
+              ? `${termsLine} ${item.creditsNow ? "now" : `at ${firstName}'s next completed plan visit`}.${termsMatch && item.terms.atCap ? "" : " The referrer gets one thank-you email at the next 9:00 AM ET, and no text."}`
               : item.creditsNow
                 ? "Both accounts get the $25 credit now. The referrer gets one thank-you email at the next 9:00 AM ET, and no text."
                 : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text.`}{" "}
