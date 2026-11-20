@@ -50,7 +50,7 @@ function DraftPanel() {
 }
 
 // A field page whose changes live only in the page until Save, like the
-// truck check: toggles, a typed note and a search box.
+// truck check: toggles, a typed note and a signature pad.
 function TruckCheck() {
   const navigate = useNavigate();
   const [missing, setMissing] = useState(false);
@@ -62,7 +62,7 @@ function TruckCheck() {
       <button type="button" aria-pressed={missing} onClick={() => setMissing(true)}>Missing</button>
       <button type="button" role="switch" aria-checked={damaged} onClick={() => setDamaged(true)}>Damaged</button>
       <input aria-label="Note" value={note} onChange={(event) => setNote(event.target.value)} />
-      <input type="search" aria-label="Find a tool" />
+      <canvas aria-label="Signature" />
       <button type="button" onClick={() => navigate('/admin/today')}>Back</button>
     </div>
   );
@@ -203,21 +203,21 @@ describe('PortalUpdateBar', () => {
     ['a toggle button', () => fireEvent.click(screen.getByRole('button', { name: 'Missing' }))],
     ['a switch', () => fireEvent.click(screen.getByRole('switch', { name: 'Damaged' }))],
     ['a typed note', () => fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose' } })],
-  ])('a change on the page in view (%s) is named before Reload drops it', (_kind, change) => {
+    ['a signature drawn on a canvas', () => fireEvent.pointerDown(screen.getByLabelText('Signature'))],
+  ])('a use of the page in view (%s) is named before Reload drops its work', (_kind, change) => {
     renderAt('/admin/today/truck-check');
     goLive('bbb222bbb222');
     change();
     fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
     expect(reload).not.toHaveBeenCalled();
-    expect(screen.getByText('Changes on this page may not be saved.')).toBeTruthy();
+    expect(screen.getByText('Anything not saved on this page will be lost.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  test('a search box is not a change on the page, and a page move ends a change', () => {
+  test('a page not used since it opened reloads at once, and a page move ends a use', () => {
     renderAt('/admin/today/truck-check');
     goLive('bbb222bbb222');
-    fireEvent.input(screen.getByLabelText('Find a tool'), { target: { value: 'hose' } });
     fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
     expect(reload).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'Missing' }));

@@ -42,7 +42,7 @@ const HOLD_TEXT = {
   'schedule-notice': 'A schedule notice is still open.',
   'recap-upload': 'A recap clip is not uploaded yet.',
   'ask-draft': 'An Ask Waves question is not sent yet.',
-  'page-edit': 'Changes on this page may not be saved.',
+  'page-use': 'Anything not saved on this page will be lost.',
 };
 
 // The reload button of the Reload bar and of the staff retry screen
@@ -50,12 +50,12 @@ const HOLD_TEXT = {
 // it, a click names every held work instead of reloading, and the button
 // becomes "Reload anyway". Each click asks again, so "Reload anyway" reloads
 // only when nothing holds that the button has not named. A new resetKey
-// clears the named work. The Reload bar also passes pageEdited (below).
-export function useHoldAwareReload(resetKey, beforeReload, pageEdited) {
+// clears the named work. The Reload bar also passes pageUsed (below).
+export function useHoldAwareReload(resetKey, beforeReload, pageUsed) {
   const [held, setHeld] = useState([]);
   useEffect(() => { setHeld((named) => (named.length ? [] : named)); }, [resetKey]);
   const tryReload = () => {
-    const blockers = [...reloadBlockers(), ...(pageEdited?.() ? ['page-edit'] : [])];
+    const blockers = [...reloadBlockers(), ...(pageUsed?.() ? ['page-use'] : [])];
     if (blockers.some((name) => !held.includes(name))) {
       setHeld(blockers);
       return;
@@ -67,31 +67,25 @@ export function useHoldAwareReload(resetKey, beforeReload, pageEdited) {
   return { named: held.length > 0, heldText, tryReload };
 }
 
-// A change on the page in view: typing, a pick, a checkbox, or a toggle
-// (aria-pressed or aria-checked), as on the truck check and in Quick Move.
-// A choice made with a plain button is seen once the button says that it is
-// pressed (aria-pressed), as screen readers need too. Most staff forms keep such
-// changes only in the page until Save, and the bar's Reload reloads that page
-// in place. So the bar names the change first, as a browser does on a page
-// that asks before a reload. A search box is not a change. A page move ends
-// it: the move closes the page and its fields. The automatic reload waits for
-// a move, so it never needs this.
-function usePageEdited(pathname) {
-  const edited = useRef(false);
-  useEffect(() => { edited.current = false; }, [pathname]);
+// A use of the page in view since it opened: a tap, a click, a key or a
+// field change anywhere but on this bar. The bar's Reload reloads that page
+// in place, and a page keeps unsaved work in many ways: a field, a toggle, a
+// picked slot, a signature on a canvas, a shape drawn on a map. No list of
+// controls names them all, so after any use the bar asks once first. A page
+// move ends the use: the move closes the page and its work. The automatic
+// reload waits for a move, so it never needs this.
+function usePageUsed(pathname) {
+  const used = useRef(false);
+  useEffect(() => { used.current = false; }, [pathname]);
   useEffect(() => {
-    const noteChange = (event) => {
-      const { target } = event;
-      if (!(target instanceof Element)) return;
-      if (event.type === 'click' ? target.closest('[aria-pressed], [aria-checked]') : !target.matches('input[type="search"], [role="searchbox"]')) {
-        edited.current = true;
-      }
+    const noteUse = (event) => {
+      if (event.target instanceof Element && !event.target.closest('[data-portal-update-bar]')) used.current = true;
     };
-    const types = ['input', 'change', 'click'];
-    types.forEach((type) => document.addEventListener(type, noteChange, true));
-    return () => types.forEach((type) => document.removeEventListener(type, noteChange, true));
+    const types = ['pointerdown', 'click', 'keydown', 'input', 'change'];
+    types.forEach((type) => document.addEventListener(type, noteUse, true));
+    return () => types.forEach((type) => document.removeEventListener(type, noteUse, true));
   }, []);
-  return () => edited.current;
+  return () => used.current;
 }
 
 // Every staff page, Waves Admin and the field pages included: says that a
@@ -99,12 +93,12 @@ function usePageEdited(pathname) {
 export function PortalUpdateBar() {
   const { pathname } = useLocation();
   const build = useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
-  const pageEdited = usePageEdited(pathname);
-  const { named, heldText, tryReload } = useHoldAwareReload(`${build} ${pathname}`, undefined, pageEdited);
+  const pageUsed = usePageUsed(pathname);
+  const { named, heldText, tryReload } = useHoldAwareReload(`${build} ${pathname}`, undefined, pageUsed);
   if (!build || !isAdminPath(pathname)) return null;
 
   return (
-    <div role="status" style={{ bottom: 'calc(80px + env(safe-area-inset-bottom, 0px))' }}
+    <div role="status" data-portal-update-bar="" style={{ bottom: 'calc(80px + env(safe-area-inset-bottom, 0px))' }}
       className="fixed left-1/2 z-[10990] box-border flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-sm border-hairline border-zinc-300 bg-white px-4 py-2 font-sans text-sm text-zinc-900 shadow-lg">
       <span>{named ? heldText : 'A new version of the portal is ready.'}</span>
       <Button className="min-h-11 shrink-0 text-sm" onClick={tryReload}>

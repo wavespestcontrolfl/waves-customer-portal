@@ -2246,7 +2246,7 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
             <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>REASON</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
               {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
-                <button key={r.code} type="button" aria-pressed={reason === r.code} onClick={() => pickReason(r.code)} style={chip(reason === r.code)}>
+                <button key={r.code} type="button" onClick={() => pickReason(r.code)} style={chip(reason === r.code)}>
                   {r.label}
                 </button>
               ))}
@@ -2264,7 +2264,6 @@ function RainOutSheet({ service, stopName, onClose, onDone }) {
                   <button
                     key={key}
                     type="button"
-                    aria-pressed={active}
                     onClick={() => setSelectedKey(key)}
                     style={{
                       textAlign: 'left', padding: '11px 13px', borderRadius: 6, fontSize: 14,

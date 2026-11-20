@@ -79,9 +79,10 @@ function CustomerFailureScreen({ title, message, onRetry }) {
 
 export class PageErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null, heldChunk: false }; }
-  // Held work keeps a staff tab on its old code (lib/portalReload.js). A
-  // nested page chunk that plain React.lazy loads and the live build removed
-  // fails here, not in lazyWithRetry: it gets the same hold-aware retry screen.
+  // Held work, or a browser offline, keeps a staff tab on its old code
+  // (lib/portalReload.js). A nested page chunk that plain React.lazy loads
+  // fails here, not in lazyWithRetry, when the live build removed it or the
+  // tab has no signal: it gets the same hold-aware retry screen.
   static getDerivedStateFromError(error) {
     return { error, heldChunk: isChunkError(error) && Boolean(staffReloadBlocker()) };
   }
@@ -383,8 +384,9 @@ export function lazyWithRetry(factory) {
       // failed too: same reload, same placeholder.
       if (isStaleChunkReloadPending()) return { default: RouteFallback };
       if (isChunkError(err)) {
-        // Held work on a staff page keeps the tab (lib/portalReload.js); the
-        // retry screen's button reloads when the person is ready.
+        // Held work on a staff page, or a staff tab offline, keeps the tab
+        // (lib/portalReload.js); the retry screen's button reloads when the
+        // person is ready.
         if (staffReloadBlocker()) return { default: ChunkLoadFallback };
         if (!sessionStorage.getItem(CHUNK_RELOAD_FLAG)) {
           sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');

@@ -25,12 +25,13 @@ function reloadedFor(build) {
   try { return sessionStorage.getItem(RELOADED_FOR) === build; } catch { return true; }
 }
 
+const browserOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
+
 // A reload with no connection swaps a working page for an offline error, so
 // it needs a recent answer from the new server, and the browser must not
 // report itself offline.
 function hasSignal(now) {
-  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
-  return !offline && heardFromServerWithin(RECENT_ANSWER_MS, now);
+  return !browserOffline() && heardFromServerWithin(RECENT_ANSWER_MS, now);
 }
 
 export function reloadDueAtMove(pathname, now = Date.now()) {
@@ -58,10 +59,13 @@ export function reloadBlocker() {
 }
 
 // The stale-chunk reload (staleChunkReload.js, App.jsx's lazyWithRetry) asks
-// too: on a staff page, held work keeps the tab, and a page whose code the
-// deploy removed shows its retry screen instead. Customer pages are unchanged.
+// too: on a staff page, held work keeps the tab, and so does a browser that
+// reports itself offline ('offline'): a reload then opens an error page. The
+// page whose code failed to load shows its retry screen instead. Customer
+// pages are unchanged.
 export function staffReloadBlocker(pathname = window.location.pathname) {
-  return isAdminPath(pathname) ? reloadBlocker() : null;
+  if (!isAdminPath(pathname)) return null;
+  return reloadBlocker() ?? (browserOffline() ? 'offline' : null);
 }
 
 const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });

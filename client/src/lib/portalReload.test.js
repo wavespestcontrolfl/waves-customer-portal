@@ -98,6 +98,14 @@ describe('staffReloadBlocker', () => {
     holding = false;
     expect(staffReloadBlocker('/admin/communications')).toBeNull();
   });
+
+  test('a staff tab the browser reports offline keeps its page, for the stale-chunk reload', () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    expect(staffReloadBlocker('/admin/today')).toBe('offline');
+    expect(staffReloadBlocker('/billing')).toBeNull();
+    holding = true;
+    expect(staffReloadBlocker('/admin/today')).toBe('test-hold');
+  });
 });
 
 describe('reloadForNewBuild', () => {

@@ -85,8 +85,9 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
     event.preventDefault();
     return;
   }
-  // Held work on a staff page keeps the tab: the import fails as it would
-  // with no handler, and lazyWithRetry shows the retry screen.
+  // Held work on a staff page, or a staff tab offline, keeps the tab: the
+  // import fails as it would with no handler, and lazyWithRetry shows the
+  // retry screen.
   if (staffReloadBlocker()) return;
   try {
     if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;

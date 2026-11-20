@@ -226,6 +226,21 @@ test('the held retry screen still reloads when session storage is blocked', asyn
   }
 });
 
+test('an offline staff tab keeps its page: no reload for a missing chunk, and the retry screen shows', async () => {
+  window.history.pushState({}, '', '/admin/today');
+  vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+  const reload = vi.fn();
+  const event = preloadErrorEvent();
+  handleVitePreloadError(event, reload);
+  expect(reload).not.toHaveBeenCalled();
+  expect(event.defaultPrevented).toBe(false);
+  const Panel = lazyWithRetry(() => Promise.reject(new Error('Failed to fetch dynamically imported module: /assets/Panel-abc123.js')));
+  renderInBoundary(Panel);
+  expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  expect(isStaleChunkReloadPending()).toBe(false);
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+});
+
 test('on a customer page, held work leaves the stale-chunk reload as it was', () => {
   holding = true;
   const reload = vi.fn();
