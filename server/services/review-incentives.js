@@ -142,7 +142,15 @@ function operationalError(message, statusCode = 400, code = 'review_incentive_er
  */
 async function overCapPayoutIds(conn, { cap, technicianIds = null } = {}) {
   if (!normalizeMonthlyCap(cap)) return new Set();
-  const ranked = conn('review_incentive_payouts as p')
+  const ranked = monthRankQuery(conn);
+  if (technicianIds) ranked.whereIn('p.technician_id', technicianIds);
+  const rows = await conn.select('ranked.id').from(ranked.as('ranked')).where('ranked.month_rank', '>', cap);
+  return new Set(rows.map((row) => row.id));
+}
+
+// The ranking behind the cap: one row per counted payout with its rank in its technician's ET month.
+function monthRankQuery(conn) {
+  return conn('review_incentive_payouts as p')
     .whereIn('p.source', PAYOUT_ELIGIBLE_SOURCES)
     .where('p.amount_cents', '>', 0)
     .whereNotNull('p.technician_id')
@@ -151,9 +159,19 @@ async function overCapPayoutIds(conn, { cap, technicianIds = null } = {}) {
         order by (p.status = 'paid') desc, p.earned_at, p.id) as month_rank`,
       [STAFF_TIME_ZONE],
     ));
-  if (technicianIds) ranked.whereIn('p.technician_id', technicianIds);
-  const rows = await conn.select('ranked.id').from(ranked.as('ranked')).where('ranked.month_rank', '>', cap);
-  return new Set(rows.map((row) => row.id));
+}
+
+/**
+ * Adds each row's cap rank to a query on `review_incentive_payouts as p`, in the SAME statement, so the
+ * rows and their ranks come from one snapshot (owner 2026-11-20 D4). Read it back with isOverMonthlyCap.
+ */
+function withMonthRank(conn, query) {
+  return query.with('ranked', monthRankQuery(conn)).leftJoin('ranked as rk', 'rk.id', 'p.id').select('rk.month_rank');
+}
+
+/** True for an unpaid payout ranked past the cap. No cap, or a row the ranking does not count, is never over. */
+function isOverMonthlyCap(row, cap) {
+  return Boolean(normalizeMonthlyCap(cap)) && row.status !== 'paid' && Number(row.month_rank) > cap;
 }
 
 async function getPolicy(conn = db) {
@@ -214,33 +232,38 @@ async function lockTechnicianCap(conn, technicianIds) {
 }
 
 async function savePolicy(policyPatch = {}, conn = db) {
-  // A failed read must not overwrite a stored cap with the defaults; a garbled row is replaced.
-  let current;
-  try {
-    current = await getPolicyStrict(conn);
-  } catch (err) {
-    if (err.code !== 'review_policy_malformed') throw err;
-    current = { ...DEFAULT_POLICY };
-  }
-  const policy = parsePolicy({ ...current, ...policyPatch });
-  const now = new Date();
-  await conn('system_settings')
-    .insert({
-      key: POLICY_KEY,
-      value: JSON.stringify(policy),
-      category: 'reviews',
-      description: 'Technician review incentive automation policy',
-      created_at: now,
-      updated_at: now,
-    })
-    .onConflict('key')
-    .merge({
-      value: JSON.stringify(policy),
-      category: 'reviews',
-      description: 'Technician review incentive automation policy',
-      updated_at: now,
-    });
-  return policy;
+  // Read, merge and upsert in one transaction under a lock per settings key, taken BEFORE the read so
+  // it also works when the row is absent: two PATCHes cannot overwrite each other's fields (owner
+  // 2026-11-20 D4). A failed read must not overwrite a stored cap with the defaults; a garbled row is replaced.
+  return conn.transaction(async (trx) => {
+    await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`system_settings:${POLICY_KEY}`]);
+    let current;
+    try {
+      current = await getPolicyStrict(trx);
+    } catch (err) {
+      if (err.code !== 'review_policy_malformed') throw err;
+      current = { ...DEFAULT_POLICY };
+    }
+    const policy = parsePolicy({ ...current, ...policyPatch });
+    const now = new Date();
+    await trx('system_settings')
+      .insert({
+        key: POLICY_KEY,
+        value: JSON.stringify(policy),
+        category: 'reviews',
+        description: 'Technician review incentive automation policy',
+        created_at: now,
+        updated_at: now,
+      })
+      .onConflict('key')
+      .merge({
+        value: JSON.stringify(policy),
+        category: 'reviews',
+        description: 'Technician review incentive automation policy',
+        updated_at: now,
+      });
+    return policy;
+  });
 }
 
 function qualifiesReviewRequest(request, policy) {
@@ -1656,7 +1679,7 @@ async function getDashboard(options = {}) {
   const startsAt = programStart(policy);
   const effectivePeriodStart = startsAt && startsAt > periodStart ? startsAt : periodStart;
 
-  const rows = await conn('review_incentive_payouts as p')
+  const payoutQuery = conn('review_incentive_payouts as p')
     .leftJoin('technicians as t', 'p.technician_id', 't.id')
     .leftJoin('customers as c', 'p.customer_id', 'c.id')
     .leftJoin('review_requests as rr', 'p.review_request_id', 'rr.id')
@@ -1675,15 +1698,12 @@ async function getDashboard(options = {}) {
       'gr.star_rating as review_star_rating',
       'gr.review_text as review_text',
     );
-
   // Owner 2026-11-20 D4: an unpaid payout over the monthly cap is shown but never counted as pending.
-  const overCap = await overCapPayoutIds(conn, {
-    cap: policy.monthlyCapCount,
-    technicianIds: [...new Set(rows.map((row) => row.technician_id).filter(Boolean))],
-  });
+  // The rows and their ranks come from one statement (one snapshot); no cap, no ranking.
+  const rows = await (normalizeMonthlyCap(policy.monthlyCapCount) ? withMonthRank(conn, payoutQuery) : payoutQuery);
   const payouts = rows.map((row) => ({
     ...serializePayout(row),
-    overMonthlyCap: row.status !== 'paid' && overCap.has(row.id),
+    overMonthlyCap: isOverMonthlyCap(row, policy.monthlyCapCount),
   }));
   const leaderboardByTech = new Map();
   for (const payout of payouts) {
@@ -1875,6 +1895,8 @@ module.exports = {
   getDashboard,
   markPaid,
   overCapPayoutIds,
+  withMonthRank,
+  isOverMonthlyCap,
   getPolicyStrict,
   lockPayoutRows,
   lockTechnicianCap,
