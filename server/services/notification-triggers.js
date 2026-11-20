@@ -538,7 +538,7 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=calls',
     }),
   },
-  // The reminder banner for a lead's call request (GATE_LEAD_CALL_REMINDER, owner 2026-11-05, "remind"). A missed
+  // The reminder banner for a lead's call request (owner 2026-11-05, "remind"). A missed
   // press-1 ring ("Missed call request") and a night call-back bell reach only the portal bell; one still open after
   // one business hour, with nobody reaching the lead since, sends this ONE banner (services/lead-call-reminder.js,
   // run by the alert-relevance sweep). pushOnly: the bell row already exists and is not rewritten, so `rule` is the
@@ -680,9 +680,8 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
-      // GATE_MISSED_CALL_ALERT_DETAIL: the producer adds line / duration /
-      // next visit to the payload only with the gate on; without them this is
-      // the original sentence, character for character.
+      // The producer adds line / duration / next visit to the payload; without
+      // them this is the original sentence.
       body: require('./missed-call-alert-detail').formatMissedCallBody(p),
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
