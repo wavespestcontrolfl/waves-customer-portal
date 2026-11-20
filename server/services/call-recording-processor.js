@@ -4628,20 +4628,23 @@ function whereSweepCandidate(qb) {
 // - `scheduledGeneration` (the recording webhook's timers): the
 //   processing_generation the webhook's own write left on the row. A pass
 //   that claimed the row since (a higher generation) overtook the timer, so
-//   the timer runs only on a state still owed a pass: a first-pass state
-//   (NULL or pending, which a deferral restores), a claim (the heartbeat rule
-//   decides), or a retry state (the cap and the backoff decide). A finished
+//   the timer then runs only on a first-pass state (NULL or pending, which a
+//   deferral restores), on a claim (the heartbeat rule decides), or on a row
+//   the sweep would take now (whereSweepCandidate). So a retry state needs
+//   the sweep's cap, backoff and length rule: an overtaken timer never
+//   retries a short call's failure, which the sweep leaves alone. A finished
 //   verdict, a creation failure the office reviews, or any other state
 //   refuses it, so a call the sweep finished before the timer fired is not
-//   run again (pre-push Codex P1, rounds 8 and 9).
-const OVERTAKEN_TIMER_STATES = ['pending', 'processing', 'no_transcription', 'extraction_failed'];
+//   run again (pre-push Codex P1, rounds 8, 9 and 11).
+const OVERTAKEN_TIMER_STATES = ['pending', 'processing'];
 function whereUnattendedClaim(qb, opts = {}) {
   if (opts.sweep) qb.where(function sweepStillSelects() { whereSweepCandidate(this); });
   if (opts.scheduledGeneration != null) {
     qb.where(function noVerdictSinceScheduled() {
       this.where('processing_generation', '<=', Number(opts.scheduledGeneration))
         .orWhereNull('processing_status')
-        .orWhereIn('processing_status', OVERTAKEN_TIMER_STATES);
+        .orWhereIn('processing_status', OVERTAKEN_TIMER_STATES)
+        .orWhere(function sweepWouldTakeNow() { whereSweepCandidate(this); });
     });
   }
   return qb;

@@ -150,14 +150,22 @@ describe('the sweep query text', () => {
   });
 
   // The ordinary claim's fences for a pass nobody pressed a button for (whereUnattendedClaim; pre-push Codex rounds 4,
-  // 5, 8 and 9): a sweep pass re-checks its candidate rule, and a webhook timer that a newer pass overtook runs only on
-  // a row still owed a pass. Any other caller gets neither fence.
-  test('the unattended claim: a sweep pass re-checks its candidate rule; an overtaken timer runs only on a row still owed a pass', () => {
+  // 5, 8, 9 and 11): a sweep pass re-checks its candidate rule, and a webhook timer that a newer pass overtook runs only
+  // on a row still owed a pass. Any other caller gets neither fence.
+  test('the unattended claim: a sweep pass re-checks its candidate rule; an overtaken timer runs only on a row still owed a pass', async () => {
     const sql = (opts) => db('call_log').where(function claim() { processor.whereUnattendedClaim(this, opts); }).toString();
-    expect(sql({ sweep: true })).toContain(`"updated_at" < NOW() - INTERVAL '10 minutes'`);
-    expect(sql({ scheduledGeneration: 4 })).toContain(
-      `("processing_generation" <= 4 or "processing_status" is null or "processing_status" in ('pending', 'processing', 'no_transcription', 'extraction_failed'))`,
-    );
+    for (const value of [undefined, 'true']) {
+      await withGate(value, () => {
+        const sweep = sql({ sweep: true });
+        expect(sweep).toContain(`"updated_at" < NOW() - INTERVAL '10 minutes'`);
+        // Overtaken, a timer takes a first-pass state or a claim, and any other row only where the sweep would take it
+        // now: the very rule a sweep pass re-checks, so a retry state keeps the sweep's cap, backoff and length floor.
+        const candidate = sweep.replace(/^select \* from "call_log" where \(\((.*)\)\)$/s, '$1');
+        expect(candidate).not.toBe(sweep);
+        expect(sql({ scheduledGeneration: 4 })).toBe('select * from "call_log" where (("processing_generation" <= 4'
+          + ` or "processing_status" is null or "processing_status" in ('pending', 'processing') or (${candidate})))`);
+      });
+    }
     expect(sql({ operator: true })).toBe('select * from "call_log"');
   });
 
@@ -209,11 +217,18 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   const SID_SWEPT_LEAD_FAILED = sid('sg'); // 8 s
   // Also overtaken at generation 1, but still owed a pass, so the timer's fence lets them through.
   const SID_OVERTAKEN_FIRST = sid('sh'); // 8 s, NULL: another pass deferred and restored its first-pass state
-  const SID_OVERTAKEN_RETRY = sid('si'); // 60 s, no_transcription after 1 try
+  const SID_OVERTAKEN_RETRY = sid('si'); // 60 s, no_transcription after 1 try, past its backoff: the sweep retries it
   const SID_OVERTAKEN_CLAIM = sid('sj'); // 8 s, a pass holds it now (the claim's heartbeat rule decides)
-  const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP, SID_SHORT_DIED, SID_SHORT_VOICEMAIL,
-    SID_PAN_RETRY, SID_PAN_FINISHED, SID_LONG_VOICEMAIL, SID_SWEPT_VOICEMAIL, SID_SWEPT_SPAM, SID_SWEPT_CUSTOMER_FAILED, SID_SWEPT_LEAD_FAILED,
-    SID_OVERTAKEN_FIRST, SID_OVERTAKEN_RETRY, SID_OVERTAKEN_CLAIM];
+  // Overtaken at generation 1 too, past the backoff and under the cap, but the sweep never retries a short call's
+  // failure, so the timer's fence refuses them (pre-push Codex P1, round 11).
+  const SID_OVERTAKEN_SHORT_NO_TRANSCRIPT = sid('sk'); // 8 s, no_transcription after 1 try
+  const SID_OVERTAKEN_SHORT_FAILED = sid('sl'); // 8 s, extraction_failed after 1 try
+  // The candidate tests read the twelve rows above the timer group; the timer group has its own tests.
+  const SWEEP_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP, SID_SHORT_DIED,
+    SID_SHORT_VOICEMAIL, SID_PAN_RETRY, SID_PAN_FINISHED, SID_LONG_VOICEMAIL];
+  const TIMER_SIDS = [SID_SWEPT_VOICEMAIL, SID_SWEPT_SPAM, SID_SWEPT_CUSTOMER_FAILED, SID_SWEPT_LEAD_FAILED,
+    SID_OVERTAKEN_FIRST, SID_OVERTAKEN_RETRY, SID_OVERTAKEN_CLAIM, SID_OVERTAKEN_SHORT_NO_TRANSCRIPT, SID_OVERTAKEN_SHORT_FAILED];
+  const ALL_SIDS = [...SWEEP_SIDS, ...TIMER_SIDS];
   const REC = 'RE' + '9'.repeat(32);
   const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
 
@@ -235,7 +250,7 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     ...over,
   });
 
-  const candidates = async () => (await processor.pendingCandidatesQuery().whereIn('twilio_call_sid', ALL_SIDS))
+  const candidates = async () => (await processor.pendingCandidatesQuery().whereIn('twilio_call_sid', SWEEP_SIDS))
     .map((r) => r.twilio_call_sid).sort();
 
   beforeAll(async () => {
@@ -264,7 +279,9 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     await insertCall(SID_SWEPT_CUSTOMER_FAILED, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'customer_creation_failed', processing_generation: 1 });
     await insertCall(SID_SWEPT_LEAD_FAILED, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'lead_creation_failed', processing_generation: 1 });
     await insertCall(SID_OVERTAKEN_FIRST, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_generation: 1 });
-    await insertCall(SID_OVERTAKEN_RETRY, { seconds: 60, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_status: 'no_transcription', extraction_attempts: 1, processing_generation: 1 });
+    await insertCall(SID_OVERTAKEN_RETRY, { seconds: 60, createdMinutesAgo: 40, updatedMinutesAgo: 20, processing_status: 'no_transcription', extraction_attempts: 1, processing_generation: 1 });
+    await insertCall(SID_OVERTAKEN_SHORT_NO_TRANSCRIPT, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 20, processing_status: 'no_transcription', extraction_attempts: 1, processing_generation: 1 });
+    await insertCall(SID_OVERTAKEN_SHORT_FAILED, { seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 20, processing_status: 'extraction_failed', extraction_attempts: 1, processing_generation: 1 });
     await insertCall(SID_OVERTAKEN_CLAIM, {
       seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 1, processing_generation: 1,
       processing_status: 'processing', processing_started_at: minutesAgo(1), processing_heartbeat_at: minutesAgo(1),
@@ -323,16 +340,35 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     }
   });
 
-  // The allow-list on real rows (round 9): overtaken, a timer may still take a first-pass state, a claim or a retry
-  // state; never a verdict or a creation failure. Not overtaken, the fence takes no part.
+  // The fence on real rows (rounds 9 and 11): overtaken, a timer may still take a first-pass state, a claim, or a retry
+  // state the sweep would retry now; never a verdict, a creation failure or a short call's failure. Not overtaken, the
+  // fence takes no part.
   test('an overtaken timer\'s fence admits only a row still owed a pass', async () => {
-    const overtaken = [SID_SWEPT_VOICEMAIL, SID_SWEPT_SPAM, SID_SWEPT_CUSTOMER_FAILED, SID_SWEPT_LEAD_FAILED,
-      SID_OVERTAKEN_FIRST, SID_OVERTAKEN_RETRY, SID_OVERTAKEN_CLAIM];
-    const admitted = async (scheduledGeneration) => (await db('call_log').whereIn('twilio_call_sid', overtaken)
+    const admitted = async (scheduledGeneration) => (await db('call_log').whereIn('twilio_call_sid', TIMER_SIDS)
       .where(function claim() { processor.whereUnattendedClaim(this, { scheduledGeneration }); })
       .pluck('twilio_call_sid')).sort();
-    expect(await admitted(0)).toEqual([SID_OVERTAKEN_FIRST, SID_OVERTAKEN_RETRY, SID_OVERTAKEN_CLAIM].sort());
-    expect(await admitted(1)).toEqual([...overtaken].sort());
+    for (const value of [undefined, 'true']) {
+      await withGate(value, async () => {
+        expect(await admitted(0)).toEqual([SID_OVERTAKEN_FIRST, SID_OVERTAKEN_RETRY, SID_OVERTAKEN_CLAIM].sort());
+        expect(await admitted(1)).toEqual([...TIMER_SIDS].sort());
+      });
+    }
+  });
+
+  // The same refusal through the real claim (pre-push Codex P1, round 11): an overtaken timer, a short call's failure
+  // under the cap, its backoff past. The sweep never retries such a row, so the timer must not either.
+  test.each([
+    ['no_transcription', SID_OVERTAKEN_SHORT_NO_TRANSCRIPT],
+    ['extraction_failed', SID_OVERTAKEN_SHORT_FAILED],
+  ])('an overtaken webhook timer refuses a short call\'s %s past its backoff and changes nothing, gate on or off', async (status, target) => {
+    for (const value of [undefined, 'true']) {
+      await withGate(value, async () => {
+        expect(await processor.processRecording(target, { scheduledGeneration: 0 })).toMatchObject({ success: false, skipped: true, reason: 'already_processing' });
+        const row = await db('call_log').where({ twilio_call_sid: target })
+          .first('processing_status', 'processing_token', 'extraction_attempts', 'processing_generation');
+        expect(row).toEqual({ processing_status: status, processing_token: null, extraction_attempts: 1, processing_generation: 1 });
+      });
+    }
   });
 
   test('gate on: the stats that mirror the sweep run on the same rule', async () => {
