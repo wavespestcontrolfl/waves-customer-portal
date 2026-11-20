@@ -27,6 +27,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { takeSendClaim, releaseSendClaim } = require('./sms-send-claims');
 const { etDateString } = require('../utils/datetime-et');
 const { isCallTodayEstimate } = require('../../shared/estimate-call-today.cjs');
 const { ESTIMATE_LIST_LIMIT, estimateListQuery, lastCalledAtByEstimateId, callTodayFields } = require('./estimate-call-list');
@@ -77,20 +78,15 @@ async function countCallToday(nowMs) {
   )).length;
 }
 
+// The day's claim, shared with the morning banner (sms-send-claims.js); the release policy below is this banner's own.
 async function claimDay(day) {
-  const claim = await db.raw(
-    `INSERT INTO sms_send_claims (claim_key) VALUES (?)
-     ON CONFLICT (claim_key) DO NOTHING
-     RETURNING id`,
-    [`${CLAIM_PREFIX}${day}`],
-  );
-  return (claim?.rows || []).length > 0;
+  return takeSendClaim(`${CLAIM_PREFIX}${day}`);
 }
 
 // True when the claim row is gone. A failed delete leaves the row, which blocks a same-day retry, so the caller must say so.
 async function releaseDay(day) {
   try {
-    await db('sms_send_claims').where({ claim_key: `${CLAIM_PREFIX}${day}` }).del();
+    await releaseSendClaim(`${CLAIM_PREFIX}${day}`);
     return true;
   } catch (err) {
     logger.error(`[estimate-call-today] claim release failed for ${day} (${err?.code || 'no code'})`);
