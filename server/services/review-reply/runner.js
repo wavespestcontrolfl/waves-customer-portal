@@ -319,14 +319,17 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
 // you" bell as any other park, instead of vanishing from the lane; a FAILED
 // row whose review is gone from Google or already answered leaves silently
 // like a QUEUED one. This is the backstop for the runner's early park, which
-// already parks a retry that would fall due past the window.
+// already parks a retry that would fall due past the window. A row under a
+// live claim, the runner's or a person's publish (Post now, the Intelligence
+// Bar), is left for the next sweep: its publisher owns the row until then.
 // Returns how many rows left the lane (expired + parked).
 async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
   const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
   const overAge = (statuses) => db('google_reviews')
     .whereIn('auto_reply_status', statuses)
     .where('review_created_at', '<', cutoff)
-    .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()]);
+    .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()])
+    .modify(whereNoLivePublishClaim);
   const counted = (n) => (Array.isArray(n) ? n.length : (n || 0));
   const candidates = await overAge([STATUS.FAILED])
     .whereNull('missing_since')
@@ -1500,7 +1503,8 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
     }
     return { review_reply: null, reply_updated_at: null, auto_reply_status: STATUS.FAILED, auto_reply_reason: 'google_uncertain_cleared', auto_reply_due_at: now.toISOString(), auto_reply_claimed_until: null };
   }
-  // No owner reply on Google: ours is gone (owner deleted it there).
+  // No owner reply on Google: ours is gone (owner deleted it there), or a
+  // reconcile_failed park's reply is gone (removedOwnerReplyFields).
   return removedOwnerReplyFields(existing);
 }
 

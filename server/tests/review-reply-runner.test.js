@@ -663,6 +663,23 @@ describe('processDueAutoReplies — state machine', () => {
     expect(expiredBells.map((c) => c[3].metadata.reviewId)).toEqual(['old-f', 'old-f-racing']);
   });
 
+  test('the expiry sweep leaves a row under a live publish claim (Post now in flight) alone, then handles it once the claim ends', async () => {
+    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
+    state.rows = [
+      row({ id: 'held-f', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, publish_claimed_until: '2099-01-01T00:00:00Z' }),
+      row({ id: 'held-q', review_created_at: stale, auto_reply_status: 'queued', publish_claimed_until: '2099-01-01T00:00:00Z' }),
+    ];
+    // The publisher's compare-and-set expects the empty reply slot it read: the sweep must not fill it under that claim.
+    expect(await Runner.expireOverAgeQueued()).toBe(0);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', review_reply: null });
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: 'queued' });
+    expect(mockNotify).not.toHaveBeenCalled();
+    state.rows.forEach((r) => { r.publish_claimed_until = null; });
+    expect(await Runner.expireOverAgeQueued()).toBe(2);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', review_reply: `[DRAFT] ${GOOD_DRAFT.text}` });
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired' });
+  });
+
   test('an expired retry parks in ONE statement (draft slot + pending bell stamp) that misses when the row changed after it was read', async () => {
     const stale = new Date(Date.now() - 49 * 3600000).toISOString();
     state.rows = [
@@ -1133,6 +1150,13 @@ describe('processDueAutoReplies — state machine', () => {
       .toMatchObject({ review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared' });
     const persistFailed = { ...uncertain, auto_reply_reason: 'persist_failed' };
     expect(Runner.syncReplyFields(persistFailed, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null });
+    // reconcile_failed: the owner reply Google showed is gone, so the park goes back to a person under a reason Monday list 5 shows.
+    const reconcile = { ...uncertain, auto_reply_reason: 'reconcile_failed' };
+    expect(Runner.syncReplyFields(reconcile, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null, auto_reply_reason: 'reconcile_cleared' });
+    expect(Runner.syncReplyFields({ ...reconcile, review_reply: '[DRAFT] Hi Dana, thanks.' }, { owner_reply: null }, { now })).toEqual({ auto_reply_reason: 'reconcile_cleared' });
+    // While Google still shows it, the sync records that reply, as before.
+    expect(Runner.syncReplyFields(reconcile, { owner_reply: 'Thanks, Dana!' }, { now, fnNow: 'NOW()' }))
+      .toEqual({ review_reply: 'Thanks, Dana!', reply_updated_at: 'NOW()', auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google', auto_reply_claimed_until: null });
   });
 
   test('validatePromotionAccountFacts parks a landed uncertain write whose account facts moved (codex r45)', async () => {
