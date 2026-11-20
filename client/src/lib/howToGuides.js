@@ -25,9 +25,11 @@ const SIGN_IN = "Sign in to the Waves app with your phone number.";
 // The app-alert guides' last step and closing line. The quoted status and the
 // button names are the labels in PortalPage.jsx AppNotificationSettings and its
 // Service notifications rows: "This device is connected.", Connect this device,
-// Turn on app notifications, and the App / Text delivery choice. Only alerts
-// with a delivery choice can go by text (the weather row is on/off only).
-const ALERTS_APP_STEP = "Open the Waves app, tap Visits and scroll down to Service notifications. It should say \"This device is connected.\" If you see Connect this device or Turn on app notifications, tap it. Each alert you want on your phone should show App.";
+// Turn on app notifications, each alert's switch and its App / Text delivery
+// choice (per property under Appointment notifications, as in the
+// notifications guide). Only alerts with a delivery choice can go by text
+// (the weather row is on/off only).
+const ALERTS_APP_STEP = "Open the Waves app, tap Visits and scroll down to Service notifications. It should say \"This device is connected.\" If you see Connect this device or Turn on app notifications, tap it. Each alert you want should be switched on and show App. If you have more than one property, those switches are lower down, under Appointment notifications. Pick the property first.";
 const ALERTS_TEXT_CHOICE = "Rather get texts? In Service notifications, pick Text for any alert that offers it.";
 
 const GUIDES = [
