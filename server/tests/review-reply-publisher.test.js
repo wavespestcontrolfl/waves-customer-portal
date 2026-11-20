@@ -105,6 +105,24 @@ describe('publishReviewReply', () => {
     expect(JSON.parse(state.activity[0].metadata).source).toBe('ib');
   });
 
+  test('owner 2026-11-19: any reply that names the app another way than "the Waves app" is refused before anything is written, on every path', async () => {
+    for (const actor of [{ type: 'admin' }, { type: 'ib' }, { type: 'auto' }]) {
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad our app helps.', actor, allowOverwrite: actor.type !== 'auto' }))
+        .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422 });
+    }
+    // A person's own words too: "all references ... need to use waves in them".
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Find us in the Waves App Store.', actor: { type: 'admin' }, allowOverwrite: true }))
+      .rejects.toMatchObject({ code: CODES.APP_NAME, message: expect.stringContaining('says "App" outside the name "the Waves app"') });
+    expect(mockLock).not.toHaveBeenCalled();
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(state.activity).toEqual([]);
+    // The name itself posts.
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'admin' }, allowOverwrite: true });
+    expect(r.googlePosted).toBe(true);
+    expect(state.rows[0].review_reply).toBe('Thanks Dana. Glad the Waves app helps.');
+  });
+
   test('P0: a human reply that lands between the pre-check and the publish claim aborts inside the claim', async () => {
     mockLock.mockImplementationOnce(async (id, fn) => {
       state.rows[0].review_reply = 'A person replied meanwhile';

@@ -10,6 +10,7 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...a) => mockD
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { customerCopy: { name: 'customerCopy' } } }));
 
 const Drafter = require('../services/review-reply/drafter');
+const AppName = require('../services/review-reply/app-name');
 
 const LOCATION = 'Sarasota';
 const SIGN_OFF = Drafter.signOffFor(LOCATION);
@@ -896,7 +897,7 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(Drafter.REPLY_VERSION).toBe('reply-v3');
   });
   test('the rewrite fixes each mention whose article is known and leaves every other word alone', () => {
-    const w = Drafter.wavesApp;
+    const w = AppName.wavesApp;
     expect(w('We love that you like our app.')).toBe('We love that you like the Waves app.');
     expect(w('The app is a big part of it. Our mobile app helps.')).toBe('The Waves app is a big part of it. The Waves app helps.');
     expect(w('Glad the app\u2019s alerts help, and the app\'s notes too.')).toBe('Glad the Waves app\u2019s alerts help, and the Waves app\'s notes too.');
@@ -925,34 +926,34 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     // Exact, case and spacing included: an Agent Ops draft reaches Google as written.
     expect(verdict('the waves app')).toEqual({ code: 'app_name', span: 'app' });
     expect(verdict('the  Waves app')).toEqual({ code: 'app_name', span: 'app' });
-    expect(Drafter.offAppName('Glad it helps. The Waves app is new, and the Waves app is free.')).toBeNull();
-    expect(Drafter.offAppName('Thanks for using The Waves app.')).toBe('app');
-    expect(Drafter.offAppName('Glad it helps. the Waves app is new.')).toBe('app');
+    expect(AppName.offAppName('Glad it helps. The Waves app is new, and the Waves app is free.')).toBeNull();
+    expect(AppName.offAppName('Thanks for using The Waves app.')).toBe('app');
+    expect(AppName.offAppName('Glad it helps. the Waves app is new.')).toBe('app');
     // "apply" and "application" are other words; "the app stores" and the possessive are the app.
-    expect(Drafter.offAppName('Happy to apply our application.')).toBeNull();
-    expect(Drafter.offAppName('Glad the Waves app’s alerts help.')).toBeNull();
-    expect(Drafter.offAppName('Good news: the app stores your service notes.')).toBe('app');
+    expect(AppName.offAppName('Happy to apply our application.')).toBeNull();
+    expect(AppName.offAppName('Glad the Waves app’s alerts help.')).toBeNull();
+    expect(AppName.offAppName('Good news: the app stores your service notes.')).toBe('app');
     // No exceptions: every form of the word is rejected too ("apps", "app-based", every "App Store"), so the model writes the reply without it.
-    expect(Drafter.offAppName('Thanks for trying our apps.')).toBe('apps');
-    expect(Drafter.offAppName('Thanks for trying the Waves apps.')).toBe('apps');
-    expect(Drafter.offAppName('Thanks for letting our app store your service notes.')).toBe('app');
-    expect(Drafter.offAppName('Find the Waves app in the app store.')).toBe('app');
-    expect(Drafter.offAppName('Find the Waves app in the App Store.')).toBe('App');
-    expect(Drafter.offAppName('Find us in the Waves Pest Control App Store.')).toBe('App');
-    expect(Drafter.offAppName('Thanks for trying the app-based reminders.')).toBe('app');
-    expect(Drafter.offAppName('Thanks for trying the Waves app-based reminders.')).toBe('app');
+    expect(AppName.offAppName('Thanks for trying our apps.')).toBe('apps');
+    expect(AppName.offAppName('Thanks for trying the Waves apps.')).toBe('apps');
+    expect(AppName.offAppName('Thanks for letting our app store your service notes.')).toBe('app');
+    expect(AppName.offAppName('Find the Waves app in the app store.')).toBe('app');
+    expect(AppName.offAppName('Find the Waves app in the App Store.')).toBe('App');
+    expect(AppName.offAppName('Find us in the Waves Pest Control App Store.')).toBe('App');
+    expect(AppName.offAppName('Thanks for trying the app-based reminders.')).toBe('app');
+    expect(AppName.offAppName('Thanks for trying the Waves app-based reminders.')).toBe('app');
     // The exact name followed by more of a word or by "store" is not the name: "the Waves app store", "the Waves App Store".
-    expect(Drafter.offAppName('Find us in the Waves app store.')).toBe('app');
-    expect(Drafter.offAppName('Find us in the Waves app Store.')).toBe('app');
-    expect(Drafter.offAppName('Glad it helps. Find us in the Waves App Store.')).toBe('App');
+    expect(AppName.offAppName('Find us in the Waves app store.')).toBe('app');
+    expect(AppName.offAppName('Find us in the Waves app Store.')).toBe('app');
+    expect(AppName.offAppName('Glad it helps. Find us in the Waves App Store.')).toBe('App');
     // The span is the word alone: a hyphenated phone number after it never reaches the stored rejection details.
-    expect(Drafter.offAppName('Text the Waves app-941-555-0100 line.')).toBe('app');
+    expect(AppName.offAppName('Text the Waves app-941-555-0100 line.')).toBe('app');
     // Any hyphen makes a longer word, not only the ASCII one: U+2010, U+2011 (non-breaking), a slash too.
-    expect(Drafter.offAppName('Thanks for trying the Waves app\u2011based reminders.')).toBe('app');
-    expect(Drafter.offAppName('Thanks for trying the Waves app\u2010based reminders.')).toBe('app');
-    expect(Drafter.offAppName('Thanks for trying the Waves app/website.')).toBe('app');
+    expect(AppName.offAppName('Thanks for trying the Waves app\u2011based reminders.')).toBe('app');
+    expect(AppName.offAppName('Thanks for trying the Waves app\u2010based reminders.')).toBe('app');
+    expect(AppName.offAppName('Thanks for trying the Waves app/website.')).toBe('app');
     // The name before closing punctuation or at the end is the name.
-    expect(Drafter.offAppName('Thanks for using the Waves app; glad (and "the Waves app") it helps, the Waves app\u2026 and the Waves app')).toBeNull();
+    expect(AppName.offAppName('Thanks for using the Waves app; glad (and "the Waves app") it helps, the Waves app\u2026 and the Waves app')).toBeNull();
   });
   test('a draft that says "the app" is stored as "the Waves app" on the first attempt', async () => {
     const g = grounding({ text: appReview });

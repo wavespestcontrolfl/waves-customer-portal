@@ -33,7 +33,7 @@ const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix, removedOwnerReplyFields, whereNeedsRealReply } = require('./draft-prefix');
 const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint, groundingCustomerId } = require('./grounding');
-const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, offAppName, REPLY_VERSION } = require('./drafter');
+const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
 
 const STATUS = {
@@ -1551,14 +1551,6 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
     if (tokenInvalid) return 'the grounding token is malformed — draft again';
     // A text-bound token (Intelligence Bar) accepts ONLY the approved draft.
     if (gText && gText !== replyTextFingerprint(submitted)) return 'the reply text differs from the draft that was approved — draft again and submit it unchanged';
-    // Owner 2026-11-19: a reply that came from an AI draft says "the Waves
-    // app". That is any text sent with a draft token (Use Draft, AI Reply,
-    // the Intelligence Bar), edited or not, and the stored draft posted
-    // unchanged. A draft stored, or an AI Reply editor opened, before this
-    // rule can still say "our app". A reply a person writes with no draft is
-    // their own words.
-    const fromDraft = token || parsedToken || submitted === String(fresh.auto_reply_draft || '').trim();
-    if (fromDraft && offAppName(submitted)) return 'this reply came from an AI draft and does not say "the Waves app" — change it to "the Waves app", then post';
     // An Agent Ops draft has no grounding snapshot (its writer is not the
     // canonical drafter). Posting it VERBATIM through Use Draft runs the
     // canonical verifier here (codex r46/r58); text the admin edited is

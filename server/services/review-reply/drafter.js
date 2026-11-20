@@ -27,6 +27,7 @@ const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { SERVED_CITIES } = require('./grounding');
 const { whereHasRealReply } = require('./draft-prefix');
+const { wavesApp, offAppName } = require('./app-name');
 
 // reply-v2 (2026-09-24, #4713): the safe-copy template rung is gone, so a
 // reply-v1 draft stored on a failed publish may be that canned text — the
@@ -556,41 +557,8 @@ function classifyReplyMode(grounding) {
   return 'service_quality';
 }
 
-// Owner 2026-11-19: the app is always "the Waves app". Two parts:
-// - wavesApp rewrites each bare mention whose article is known: "the/our/your
-//   [Waves [Pest Control]] [mobile] app" becomes "the Waves app" ("The" at the
-//   start of a sentence or a line). That is the common slip, and a rewrite
-//   costs no extra attempt. It leaves every other form to the verifier.
-// - offAppName allows one name and rejects the rest, instead of listing wrong
-//   phrasings (audit rounds found a new wrong phrasing each time). It blanks
-//   each exact "the Waves app" ("The Waves app" at the start of a sentence or
-//   a line; "app's" is the name too), then any word "app" or "apps" left is
-//   off the name: "a new Waves app", "our apps", "an app", "the Waves
-//   app-based reminders", "the Waves app store". The verifier rejects it
-//   (app_name) and the model writes the reply again; in a reply to a Waves
-//   review an app is the Waves app. Other words ("apply", "application")
-//   pass. The span is that one word, so no other reply text is stored.
-const OWN_APP_RE = /\b(?:the|our|your)\s+(?:waves\s+(?:pest\s+control\s+)?)?(?:mobile\s+)?app\b/gi;
-const WAVES_APP_RE = /\b[Tt]he Waves app\b/g;
-const APP_WORD_RE = /\bapps?\b/i;
-const SENTENCE_START_RE = /(?:^|[.!?]["')\]\u2019\u201d]*\s+|\n\s*)$/;
-// The name ends only at the end of the text, a space or closing punctuation
-// ("app's" passes). Any other next character (a hyphen of any kind, a
-// letter, a digit, a slash) makes a longer word: "app-based", "app‑based"
-// (U+2011), "apps". " store" after it is the App Store, or the verb in "let
-// our app store your notes".
-const NAME_GOES_ON_RE = /^(?:[^\s.,!?;:)\]"'’”…]|\s+store\b)/i;
-const nameAt = (s, at) => (SENTENCE_START_RE.test(s.slice(0, at)) ? 'The Waves app' : 'the Waves app');
-function wavesApp(text) {
-  return String(text || '').replace(OWN_APP_RE, (m, at, s) => (NAME_GOES_ON_RE.test(s.slice(at + m.length)) ? m : nameAt(s, at)));
-}
-// Exact, case and spacing included: an Agent Ops draft reaches Google as written.
-function offAppName(text) {
-  const s = String(text || '');
-  const rest = s.replace(WAVES_APP_RE, (m, at) => (m === nameAt(s, at) && !NAME_GOES_ON_RE.test(s.slice(at + m.length)) ? ' '.repeat(m.length) : m));
-  const hit = rest.match(APP_WORD_RE);
-  return hit ? hit[0] : null;
-}
+// The app-name rules (owner 2026-11-19, "the Waves app") live in ./app-name:
+// the publisher refuses any reply that breaks them, on every path.
 
 /**
  * Split a candidate into { body, signOff } and normalize whitespace.
@@ -1413,8 +1381,6 @@ module.exports = {
   draftReviewReply,
   // tests
   splitReply,
-  wavesApp,
-  offAppName,
   greetingName,
   reviewEchoBans,
   relationshipAllowedTerms,
