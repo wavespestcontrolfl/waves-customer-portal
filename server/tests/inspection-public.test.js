@@ -495,12 +495,16 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
     expect(callbackVisit.expectedLocation).toEqual({ lat: 27.4, lng: -82.5 });
     // The lead link carries no estimate re-check (only the estimate-token page passes one).
     expect(callbackVisit).not.toHaveProperty('estimateGuard');
-    // Its far-south truck re-check runs on the booking transaction for the booked address, date and technician.
+    // Its far-south truck re-check runs on the booking transaction for the zone createSelfBooking stamps, the date
+    // and the technician it books.
     const trx = jest.fn();
-    await callbackVisit.slotGuard(trx);
-    expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, {
-      address: '123 Palm Ave, Bradenton, FL, 34209', date: FUTURE_DATE, technicianId: 'tech-1',
-    });
+    const zone = { id: 'zone-1', zone_name: 'Bradenton', cities: ['Bradenton'] };
+    await callbackVisit.slotGuard(trx, { zone });
+    expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, { estimateZone: zone, date: FUTURE_DATE, technicianId: 'tech-1' });
+    // The commit's rebuild reads the funnel zone from the address's own city first, as that booking stamps it.
+    expect(mockBuildAvailability).toHaveBeenCalledWith(expect.objectContaining({
+      rangeFrom: FUTURE_DATE, rangeTo: FUTURE_DATE, zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton',
+    }));
   });
 
   test('bookAssessmentVisit hands an estimate page\'s guard to the booking transaction unchanged', async () => {

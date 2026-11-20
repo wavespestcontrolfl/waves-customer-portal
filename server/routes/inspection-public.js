@@ -830,7 +830,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // same gate and grace value.
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
-    ...(zoneFunnelText(address) ? { zoneFunnelAddress: zoneFunnelText(address) } : {}),
+    ...(zoneFunnelText(address) ? { zoneFunnelAddress: zoneFunnelText(address), zoneFunnelCity: address?.city || null } : {}),
   });
 }
 
@@ -2685,9 +2685,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // always uses the global `db` connection and can do real network I/O
     // of its own (a gated weather-outlook call), neither of which may run
     // while that lock is held.
-    const bookingAddress = locationMoved ? customerAddressFields(custRow) : resolved.address;
     const bookingSlot = locationMoved
-      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: bookingAddress })
+      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: customerAddressFields(custRow) })
       : slot;
     if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
 
@@ -2719,8 +2718,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     let fencedUniverse = null;
     // Owner rule B per truck, under the booking's date lock: two commits can rebuild the same new far-south day
     // before either inserts, each with a different truck; the second finds the first's stop and gets SLOT_TAKEN.
-    const slotGuard = (conn) => truckMayTakeDate(conn, {
-      address: zoneFunnelText(bookingAddress), date, technicianId: bookingSlot.technician_id ?? null,
+    // createSelfBooking hands over the zone it stamps on the visit (the customer's city), so the check and the row
+    // agree.
+    const slotGuard = (conn, { zone = null } = {}) => truckMayTakeDate(conn, {
+      estimateZone: zone, date, technicianId: bookingSlot.technician_id ?? null,
     });
     const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 

@@ -17,7 +17,7 @@
  *      visible to step 1.
  *
  * Deliberate boundaries:
- *   - Offer-time only. There is NO redemption re-check in reserveSlot: the
+ *   - The cluster choice is offer-time only. There is NO cluster re-check in reserveSlot: the
  *     signed slot offer (slot-offer-token) already binds surface + estimate +
  *     date, so a customer can only tap a day this funnel genuinely offered —
  *     and unlike an owner blackout, a cluster day shifting between offer and
@@ -32,6 +32,8 @@
  *     exactly the pre-funnel status quo (one extra scattered trip), bounded
  *     by the offer-token TTL, and self-heals: funneled results are never
  *     cached, so the first redeemed seed clusters every subsequent offer.
+ *     Per truck the holds re-check one thing, which needs no window: owner
+ *     rule B on the hold's own date (see Per truck).
  *   - Window-scoped by design. The default rolling 14-day picker hard-funnels;
  *     an explicit single-date request (calendar pin, AI "next Tuesday" search)
  *     evaluates only that day, so a day without zone stops seeds rather than
@@ -60,10 +62,17 @@
  * day has an opening). The assessment link's commit rebuild drops the same
  * openings, because that commit books whichever truck its rebuild finds at
  * the picked date and start (the estimate page books the signed slot's own
- * technician); its booking transaction re-checks the truck under the date
- * lock (truckMayTakeDate), because two commits can rebuild the same new day
- * before either inserts. Off, every zone day is the fleet's, as with one
- * truck.
+ * technician). Two bookings can still pick the same new day for two trucks
+ * before either is written, so each writer re-checks the truck under its date
+ * lock (truckMayTakeDate) with the zone it stamps on its row: the assessment
+ * link's booking transaction (createSelfBooking callbackVisit.slotGuard, the
+ * zone of the customer's city), and the estimate page's holds where a hold
+ * starts to hold its day (a new hold, and a lapsed hold that an extend revives
+ * or an accept graduates: a lapsed hold stops counting, so another truck may
+ * have taken the day). The assessment link's offer reads the zone from the
+ * address's own city first (resolveEstimateZone's city), as that booking
+ * stamps it, so the offer never shows a time the check refuses. Off, every
+ * zone day is the fleet's, as with one truck.
  *
  * Fail-open like blackout-dates: any lookup failure disables the funnel for
  * that request (full pool offered) — a scattered offer beats no offer.
@@ -291,16 +300,14 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
   };
 }
 
-// Owner rule B at commit, under the caller's date lock (the lead assessment link's booking transaction, through
-// createSelfBooking's callbackVisit.slotGuard): may `technicianId` still take `date` for a booking at `address`? Two
-// commits can rebuild the same new day before either inserts; the date lock serializes them, and this read on the
-// locked transaction sees the first one's stop. true when the rule does not apply (gate off, fleet view, no address
-// or technician, no funneled zone). Reads on `conn`; a query failure throws, so the caller's transaction fails
-// closed like its other reads.
-async function truckMayTakeDate(conn, { address, date, technicianId }) {
-  if (!address || technicianId == null || !isEnabled('southZoneDayFunnel') || !perTruckLive()) return true;
-  const estimateZone = await resolveEstimateZone(conn, { address });
-  if (!isFunnelZone(estimateZone)) return true;
+// Owner rule B when a booking is written, under the writer's date lock: may `technicianId` still take `date` for a
+// booking in `estimateZone`, the zone the writer stamps on its row? Two bookings can pick the same new day for two
+// trucks before either is written; the date lock serializes them, and this read on the locked transaction sees the
+// first one's stop. Writers: the lead assessment link (createSelfBooking callbackVisit.slotGuard) and the estimate
+// page's holds (slot-reservation.js). true when the rule does not apply (gate off, fleet view, no technician, no
+// funneled zone), with no read. A query failure throws, so the writer's transaction fails closed like its other reads.
+async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
+  if (technicianId == null || !perTruckLive() || !isFunnelZone(estimateZone)) return true;
   const { dates, techs } = await zoneStopDays(conn, estimateZone, date, date);
   return !dates.has(date) || onZoneDay(date, technicianId, dates, techs);
 }
@@ -309,17 +316,18 @@ async function truckMayTakeDate(conn, { address, date, technicianId }) {
 // routes/booking.js buildBookingAvailability, fed the lead's address text), read in two steps because that
 // builder keeps one technician per date and start: offerFunnelView before its claims (per truck,
 // dropOtherTruckDays runs on find-time's slots), funnelOfferPool after them. Same helpers, same rules: the zone
-// resolves from the address text through resolveEstimateZone and the cluster days come from getZoneFunnelDays over
-// THIS request's window. Returns { days, techDays }, or null when the funnel does not apply (gate off, no address,
+// resolves through resolveEstimateZone, from the address's own `city` first (the zone its booking will stamp,
+// createSelfBooking), else the address text, and the cluster days come from getZoneFunnelDays over THIS request's
+// window. Returns { days, techDays }, or null when the funnel does not apply (gate off, no address,
 // no funneled zone) or cannot be resolved (zone or lookup failure: logged, fail open, as the estimate page does).
 // In the fleet view a one-day window funnels to itself (clustered or seeded, that day stays whole), so it reads
 // nothing: the commit's single-day rebuild with the gate off runs exactly as before.
-async function offerFunnelView({ address, dateFrom, dateTo, conn }) {
+async function offerFunnelView({ address, city = null, dateFrom, dateTo, conn }) {
   if (!address || !isEnabled('southZoneDayFunnel')) return null;
   if (dateFrom === dateTo && !perTruckLive()) return null;
   let estimateZone = null;
   try {
-    estimateZone = await resolveEstimateZone(conn, { address });
+    estimateZone = await resolveEstimateZone(conn, { address, city });
   } catch (err) {
     logger.warn(`[zone-day-funnel] offer zone resolution failed (failing open): ${err.message}`);
     return null;

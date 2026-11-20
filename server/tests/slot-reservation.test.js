@@ -234,11 +234,14 @@ describe('slot reservation helpers', () => {
       del: jest.fn().mockResolvedValue(1),
     };
   }
-  function makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders }) {
+  // `zones`: the service_zones rows the zone lock resolves from (default: none, so the read throws and the hold
+  // degrades to zone:unknown).
+  function makeTrx({ estimateBuilder, technicianBuilder, scheduledBuilders, zones = null }) {
     const trx = jest.fn((table) => {
       if (table === 'estimates') return estimateBuilder;
       if (table === 'technicians') return technicianBuilder;
       if (table === 'scheduled_services') return scheduledBuilders.shift();
+      if (table === 'service_zones' && zones) return { select: jest.fn().mockResolvedValue(zones) };
       // reserveSlot's assignable-technician check now goes through
       // assertAssignableTechnician (technician-eligibility.js), which reads
       // technician_absences whenever a date is present — every reserveSlot
@@ -344,6 +347,126 @@ describe('slot reservation helpers', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  // Owner rule B per truck (GATE_MULTI_TECH_CONFIRM): a new far-south hold re-checks its truck under the date lock,
+  // with the zone it stamps (refuseOtherTruckSouthDay -> zone-day-funnel.js truckMayTakeDate). A day another truck
+  // already drives south is slot-taken and inserts nothing; two signed offers for two trucks on one new day are
+  // serialized by that lock, so the second reads the first's hold.
+  describe('owner rule B per truck on a new hold', () => {
+    const funnel = require('../services/scheduling/zone-day-funnel');
+    const VENICE = { id: 'zone-ven', zone_name: 'Venice / North Port', cities: ['Venice', 'North Port'] };
+    const SLOT = { estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 };
+    let spies = [];
+    afterEach(() => { for (const spy of spies) spy.mockRestore(); spies = []; jest.useRealTimers(); });
+
+    function reserveVeniceHold({ perTruck = true, verdict = true } = {}) {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+      const insertBuilder = makeInsertBuilder({ id: 'scheduled-123', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const zoneConflict = { ...makeConflictBuilder(null), leftJoin: jest.fn().mockReturnThis() };
+      const trx = makeTrx({
+        estimateBuilder: makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', address: '1 Test Way, Venice, FL 34285' }),
+        technicianBuilder: makeTechnicianBuilder(),
+        scheduledBuilders: [makeLiveHoldsBuilder([]), makeConflictBuilder(null), zoneConflict, makeGlobalProbeBuilder([]), insertBuilder],
+        zones: [VENICE],
+      });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+      const seen = { dateLocked: null };
+      const mayTake = jest.fn(async () => {
+        seen.dateLocked = trx.raw.mock.calls.some((c) => String(c[0]).includes('pg_advisory_xact_lock') && c[1]?.[1] === 'occupancy:2027-05-20');
+        return verdict;
+      });
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(perTruck), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const run = slotReservation.reserveSlot({ estimateId: 'estimate-456', slotId: signedSlotId(SLOT), selectedFrequency: 'quarterly' });
+      return { run, insertBuilder, trx, mayTake, seen };
+    }
+
+    test('another truck\'s far-south day: slot-taken, read on the hold transaction after its date lock, nothing inserted', async () => {
+      const { run, insertBuilder, trx, mayTake, seen } = reserveVeniceHold({ verdict: false });
+      await expect(run).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: signedSlotId(SLOT) });
+      expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: VENICE, date: '2027-05-20', technicianId: 'tech-1' });
+      expect(seen.dateLocked).toBe(true);
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
+    });
+
+    test('its own truck\'s day (or no far-south stop): the hold is stamped with the zone the check read', async () => {
+      const { run, insertBuilder, mayTake } = reserveVeniceHold({ verdict: true });
+      await expect(run).resolves.toMatchObject({ scheduledServiceId: 'scheduled-123' });
+      expect(mayTake).toHaveBeenCalledTimes(1);
+      expect(insertBuilder.insert).toHaveBeenCalledWith(expect.objectContaining({ zone: 'venice', technician_id: 'tech-1', scheduled_date: '2027-05-20' }));
+    });
+
+    test('gate off (one truck): no check, the hold inserts as before', async () => {
+      const { run, insertBuilder, mayTake } = reserveVeniceHold({ perTruck: false, verdict: false });
+      await expect(run).resolves.toMatchObject({ scheduledServiceId: 'scheduled-123' });
+      expect(mayTake).not.toHaveBeenCalled();
+      expect(insertBuilder.insert).toHaveBeenCalled();
+    });
+  });
+
+  // The same check where a LAPSED hold starts to hold its day again: an accept graduating it, an extend reviving it.
+  // A lapsed hold stopped counting, so another truck may have taken the day; the zone resolves from the estimate.
+  describe('refuseOtherTruckSouthDay (lapsed holds)', () => {
+    const funnel = require('../services/scheduling/zone-day-funnel');
+    const { refuseOtherTruckSouthDay } = slotReservation._internals;
+    const VENICE = { id: 'zone-ven', zone_name: 'Venice / North Port', cities: ['Venice'] };
+    const ESTIMATE = { id: 'estimate-456', address: '1 Test Way, Venice, FL 34285' };
+    const ARGS = { estimate: ESTIMATE, date: '2027-05-20', techId: 'tech-1', slotId: '2027-05-20_09-00_tech-1' };
+    let spies = [];
+    afterEach(() => { for (const spy of spies) spy.mockRestore(); spies = []; });
+    const conn = () => jest.fn((table) => {
+      if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([VENICE]) };
+      throw new Error(`unexpected table ${table}`);
+    });
+
+    test.each([[false, 'SLOT_UNAVAILABLE'], [true, null]])('per truck, truckMayTakeDate %s: %s', async (verdict, code) => {
+      const mayTake = jest.fn().mockResolvedValue(verdict);
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const trx = conn();
+      const result = refuseOtherTruckSouthDay(trx, ARGS);
+      if (code) await expect(result).rejects.toMatchObject({ code, slotId: ARGS.slotId });
+      else await expect(result).resolves.toBeUndefined();
+      expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: VENICE, date: '2027-05-20', technicianId: 'tech-1' });
+    });
+
+    test('gate off or no technician: nothing is read and nothing is asked', async () => {
+      const mayTake = jest.fn().mockResolvedValue(false);
+      const perTruck = jest.spyOn(funnel, 'perTruckLive').mockReturnValue(false);
+      spies = [perTruck, jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const trx = conn();
+      await expect(refuseOtherTruckSouthDay(trx, ARGS)).resolves.toBeUndefined();
+      perTruck.mockReturnValue(true);
+      await expect(refuseOtherTruckSouthDay(trx, { ...ARGS, techId: null })).resolves.toBeUndefined();
+      expect(trx).not.toHaveBeenCalled();
+      expect(mayTake).not.toHaveBeenCalled();
+    });
+
+    test('a zone that cannot be resolved skips the rule, as the hold\'s own zone checks do', async () => {
+      const mayTake = jest.fn().mockResolvedValue(true);
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const failing = jest.fn(() => ({ select: jest.fn().mockRejectedValue(new Error('zones down')) }));
+      await expect(refuseOtherTruckSouthDay(failing, ARGS)).resolves.toBeUndefined();
+      expect(mayTake).toHaveBeenCalledWith(failing, { estimateZone: null, date: '2027-05-20', technicianId: 'tech-1' });
+    });
+
+    // Placement (the lapsed paths are proven against Postgres in reservation-hold-grace-postgres.test.js): only a
+    // lapsed hold, after the date lock and the rival-hold check, before the technician check.
+    test.each([
+      ['commitReservation', 'if (row._lapsed) {', 'await refuseOtherTruckSouthDay(client, {'],
+      ['extendReservation', 'if (alreadyLapsed) {', 'await refuseOtherTruckSouthDay(trx, {'],
+    ])('%s runs it for a lapsed hold, under its date lock, before the technician check', (fn, lapsedBranch, call) => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../services/slot-reservation.js'), 'utf8');
+      const body = src.slice(src.indexOf(`async function ${fn}(`));
+      const dateLock = body.indexOf('await acquireOccupancyLock(');
+      const branch = body.indexOf(lapsedBranch);
+      const at = body.indexOf(call);
+      const techCheck = body.indexOf('await assertAssignableTechnician(row.technician_id');
+      expect(dateLock).toBeGreaterThan(-1);
+      expect(branch).toBeGreaterThan(dateLock);
+      expect(at).toBeGreaterThan(branch);
+      expect(at).toBeLessThan(techCheck);
+    });
   });
 
   test('reserveSlot refuses a new-home estimate\'s slot before the move-in date, read under a lock in the hold transaction (moving PR B1)', async () => {

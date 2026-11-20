@@ -38,6 +38,13 @@ async function resolveEstimateZone(dbc, estimate) {
       zone = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity)) || null;
     }
   }
+  // A booking address's own city (the lead assessment link's far-south funnel, zone-day-funnel.js offerFunnelView):
+  // the zone that lists it, matched as createSelfBooking stamps its visit's zone. A city no zone lists falls through
+  // to the address text below (a 'North Venice' address still matches Venice there).
+  if (!zone && estimate.city) {
+    const city = String(estimate.city).trim().toLowerCase();
+    zone = zones.find((z) => (z.cities || []).some((c) => String(c || '').toLowerCase() === city)) || null;
+  }
   if (!zone && estimate.address) {
     const addr = String(estimate.address).toLowerCase();
     zone = zones.find((z) => (z.cities || []).some((c) => c && addr.includes(String(c).toLowerCase()))) || null;

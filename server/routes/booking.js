@@ -1700,11 +1700,12 @@ function detachVoiceRouteCheck(plan, candidates) {
 // `technicianId`: opt-in. find-time searches that one technician's days only
 // (its own technicianId filter). Only reschedule-public.js passes it: a visit
 // that already has a technician keeps that technician.
-// `zoneFunnelAddress`: opt-in address text. With GATE_SOUTH_ZONE_DAY_FUNNEL live and an address in a
+// `zoneFunnelAddress`: opt-in address text, and `zoneFunnelCity` its city (the zone resolves from the city first,
+// as createSelfBooking stamps it). With GATE_SOUTH_ZONE_DAY_FUNNEL live and an address in a
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
 // Per truck (GATE_MULTI_TECH_CONFIRM, owner rule B) find-time's slots of a truck on another truck's zone
 // day go before any start is claimed (dropOtherTruckDays), so a start goes to the zone day's own truck.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -2044,7 +2045,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // The far-south funnel's zone days (zoneFunnelAddress), read before the claims: per truck, a truck on another
   // truck's zone day never claims a start, so the zone truck keeps each start it has. Null = no funnel.
   const offerFunnel = result.slots?.length
-    ? await offerFunnelView({ address: zoneFunnelAddress, dateFrom: rangeFrom, dateTo: rangeTo, conn: db })
+    ? await offerFunnelView({ address: zoneFunnelAddress, city: zoneFunnelCity, dateFrom: rangeFrom, dateTo: rangeTo, conn: db })
     : null;
   const findTimeSlots = dropOtherTruckDays(result.slots || [], offerFunnel || {}, (slot) => slot?.technician?.id);
   // A graced build never offers a slot whose simulated arrival delay is past
@@ -2662,9 +2663,10 @@ async function createSelfBooking(payload = {}) {
     // revalidate(trx) }): a booking made from an estimate's page
     // (commercial-first-visit.js, estimate-assessment-public.js) re-checks
     // that estimate inside the booking transaction (see the lock below).
-    // callbackVisit.slotGuard(trx) (the lead assessment link): the caller's
-    // own re-check of this slot on the booking transaction, under the date
-    // lock; false refuses it as a taken slot.
+    // callbackVisit.slotGuard(trx, { zone }) (the lead assessment link): the
+    // caller's own re-check of this slot on the booking transaction, under the
+    // date lock, given the zone this booking stamps on its visit; false
+    // refuses it as a taken slot.
     const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
       && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
       ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
@@ -4396,10 +4398,10 @@ async function createSelfBooking(payload = {}) {
       }
 
       // callbackVisit.slotGuard (the lead assessment link, owner rule B per truck): under the date lock taken first,
-      // after the idempotent replay, the caller re-checks its slot on THIS transaction. Two commits that rebuilt the
-      // same new far-south day before either inserted would otherwise send a second truck south
-      // (zone-day-funnel.js truckMayTakeDate).
-      if (typeof callbackVisit?.slotGuard === 'function' && !(await callbackVisit.slotGuard(trx))) {
+      // after the idempotent replay, the caller re-checks its slot on THIS transaction with the zone this booking
+      // stamps on its visit (`zone`, the customer's city). Two commits that rebuilt the same new far-south day before
+      // either inserted would otherwise send a second truck south (zone-day-funnel.js truckMayTakeDate).
+      if (typeof callbackVisit?.slotGuard === 'function' && !(await callbackVisit.slotGuard(trx, { zone }))) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,
           isOperational: true,

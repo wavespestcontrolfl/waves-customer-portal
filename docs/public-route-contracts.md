@@ -1403,7 +1403,12 @@ The assessment link's commit rebuild drops the same openings, so it books that
 zone-day technician or answers `SLOT_TAKEN`. Its booking transaction checks the
 technician again under the date lock (`truckMayTakeDate`), so two commits that
 rebuilt the same new day before either booked never send two technicians south:
-the second answers `SLOT_TAKEN`. No field or status changes.
+the second answers `SLOT_TAKEN`. The estimate page's holds check the same rule
+under their date lock where a hold starts to hold its day (a new hold, and a
+lapsed hold that an extend revives or an accept graduates), with the existing
+`SLOT_UNAVAILABLE` answer. The assessment link reads the zone from the
+address's own city first, as its booking stamps it, so a list never offers a
+time that check refuses. No field or status changes.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
@@ -7580,8 +7585,10 @@ the commit build included, first drops each opening of a technician on another
 technician's far-south day (`dropOtherTruckDays`), so a zone day's start books
 its own technician, or answers `SLOT_TAKEN` when that technician lost the hour.
 The booking transaction checks it again under the date lock (`createSelfBooking`
-`callbackVisit.slotGuard`, `truckMayTakeDate`): when another commit booked a
-different technician south on that day first, it answers `SLOT_TAKEN`. No
+`callbackVisit.slotGuard`, `truckMayTakeDate`, with the zone the visit is
+stamped with): when another commit booked a different technician south on that
+day first, it answers `SLOT_TAKEN`. Every list reads the zone from the address's
+own city first (the zone the booking stamps), else from the address text. No
 field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than

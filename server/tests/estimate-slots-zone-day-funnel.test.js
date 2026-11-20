@@ -99,7 +99,7 @@ function scheduledServicesChain(rows, { realStopDates = false } = {}) {
   return chain;
 }
 
-function mockDb({ scheduledRows = [], estimateRow = ESTIMATE_ROW, failFirstScheduledCall = false, techs = [{ id: 'tech-1', name: 'Adam Benetti' }], coords = true, realStopDates = false } = {}) {
+function mockDb({ scheduledRows = [], estimateRow = ESTIMATE_ROW, failFirstScheduledCall = false, techs = [{ id: 'tech-1', name: 'Adam Benetti' }], coords = true, realStopDates = false, zones = [VENICE_ZONE, SARASOTA_ZONE] } = {}) {
   let scheduledCalls = 0;
   db.mockImplementation((table) => {
     if (table === 'scheduled_services' && failFirstScheduledCall && scheduledCalls++ === 0) {
@@ -137,7 +137,7 @@ function mockDb({ scheduledRows = [], estimateRow = ESTIMATE_ROW, failFirstSched
       };
     }
     if (table === 'service_zones') {
-      return { select: jest.fn().mockResolvedValue([VENICE_ZONE, SARASOTA_ZONE]) };
+      return { select: jest.fn().mockResolvedValue(zones) };
     }
     if (table === 'scheduled_services') {
       return scheduledServicesChain(scheduledRows, { realStopDates });
@@ -641,6 +641,7 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
   const WINDOW_ARGS = { dateFrom: '2027-05-18', dateTo: '2027-05-24' };
   const VENICE_ADDRESS = '9 Test Palm Way, Venice, FL, 34285';
   const funnelFor = async (p, address, args = WINDOW_ARGS) => funnelOfferPool(p, await offerFunnelView({ address, ...args, conn: db }), { conn: db });
+  const VENICE_VIEW = { days: new Set(['2027-05-20']), techDays: null };
   const scheduledReads = () => db.mock.calls.filter((c) => c[0] === 'scheduled_services').length;
   const withTruckGate = async (value, fn) => {
     const prev = process.env.GATE_MULTI_TECH_CONFIRM;
@@ -709,10 +710,10 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
     expect(await offerFunnelView({ address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db })).toBeNull();
   });
 
-  // The assessment link's re-check on its booking transaction, under the date lock (createSelfBooking
-  // callbackVisit.slotGuard): the first of two racing commits' stop decides the second.
-  describe('truckMayTakeDate (rule B at commit)', () => {
-    const take = (technicianId, address = VENICE_ADDRESS) => truckMayTakeDate(db, { address, date: '2027-05-20', technicianId });
+  // The writers' re-check under their date lock (createSelfBooking callbackVisit.slotGuard, slot-reservation.js holds),
+  // with the zone the writer stamps: the first of two racing bookings' stop decides the second.
+  describe('truckMayTakeDate (rule B when a booking is written)', () => {
+    const take = (technicianId, estimateZone = VENICE_ZONE) => truckMayTakeDate(db, { estimateZone, date: '2027-05-20', technicianId });
 
     test('per truck: a day another truck drives south refuses; its own truck, an unassigned stop or no stop takes it', async () => {
       await withTruckGate('true', async () => {
@@ -726,15 +727,15 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
       });
     });
 
-    test('the fleet view, no technician, no address or another zone: true with no stop read', async () => {
+    test('the fleet view, no technician, no zone or another zone: true with no read', async () => {
       mockDb({ scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })] });
       expect(await withTruckGate(null, () => take('tech-1'))).toBe(true);
       await withTruckGate('true', async () => {
         expect(await take(null)).toBe(true);
         expect(await take('tech-1', null)).toBe(true);
-        expect(await take('tech-1', '55 Main St, Sarasota, FL, 34231')).toBe(true);
+        expect(await take('tech-1', SARASOTA_ZONE)).toBe(true);
       });
-      expect(scheduledReads()).toBe(0);
+      expect(db).not.toHaveBeenCalled();
     });
 
     // Not fail-open like the offer: the booking transaction refuses rather than books past a read it could not do.
@@ -744,6 +745,20 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
         await expect(take('tech-1')).rejects.toThrow('transient outage');
       });
     });
+  });
+
+  // The offer reads the zone as the booking will stamp it (createSelfBooking: the zone that lists the customer's city),
+  // so the commit check never refuses a time the list showed.
+  test.each([
+    ['a Venice address on Sarasota Street, Sarasota listed first', [SARASOTA_ZONE, VENICE_ZONE], '100 Sarasota St, Venice, FL, 34285', 'Venice', null, VENICE_VIEW],
+    ['a Sarasota address on Venice Avenue, Venice listed first', [VENICE_ZONE, SARASOTA_ZONE], '100 Venice Ave, Sarasota, FL, 34231', 'Sarasota', VENICE_VIEW, null],
+    ['a city no zone lists (North Venice): the address text decides', [VENICE_ZONE, SARASOTA_ZONE], '9 Palm Way, North Venice, FL, 34275', 'North Venice', VENICE_VIEW, VENICE_VIEW],
+  ])('%s: the city decides the zone, as the booking stamps it', async (_label, zones, address, city, textOnly, withCity) => {
+    mockDb({ scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })], zones });
+    const view = (c) => offerFunnelView({ address, city: c, ...WINDOW_ARGS, conn: db });
+    expect(await view(null)).toEqual(textOnly);
+    expect(await view(city)).toEqual(withCity);
+    expect(await view(`  ${city.toUpperCase()} `)).toEqual(withCity);
   });
 
   test('gate off: no view and no query at all, also for funnelZoneRows', async () => {

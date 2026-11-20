@@ -769,10 +769,16 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   });
 
   // The lead assessment link's per-truck re-check (owner rule B, GATE_MULTI_TECH_CONFIRM): callbackVisit.slotGuard
-  // runs on the booking transaction itself, after its date lock and the idempotent replay, before the insert. Two
-  // commits that rebuilt the same new far-south day are serialized by that lock; the second reads the first's stop.
+  // runs on the booking transaction itself, after its date lock and the idempotent replay, before the insert, given
+  // the zone the visit is stamped with (the customer's city). Two commits that rebuilt the same new far-south day are
+  // serialized by that lock; the second reads the first's stop.
   describe('slot guard (callbackVisit.slotGuard)', () => {
     const { occupancyLockKey } = require('../services/scheduling/occupancy')._internals;
+    const CITY_ZONE = { id: 'zone-1', zone_name: 'Sarasota / Central', cities: ['Osprey', CUST.city] };
+    beforeEach(() => {
+      const tables = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'service_zones' ? { select: () => Promise.resolve([CITY_ZONE]) } : tables(table)));
+    });
     const assessment = (slotGuard) => callbackPayload({
       source: 'inspection_link',
       callbackVisit: {
@@ -801,16 +807,17 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       });
       await expect(createSelfBooking(assessment(slotGuard))).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN' });
       expect(slotGuard).toHaveBeenCalledTimes(1);
-      expect(slotGuard.mock.calls[0][0]).toBe(seen.trx);
+      expect(slotGuard.mock.calls[0]).toEqual([seen.trx, { zone: CITY_ZONE }]);
       expect(dateLockedFirst).toBe(true);
       expect(capturedScheduledInsert).toBeUndefined();
     });
 
-    test('true books as before', async () => {
+    test('true books as before, the visit stamped with the zone the guard was given', async () => {
       const slotGuard = jest.fn().mockResolvedValue(true);
       await expect(createSelfBooking(assessment(slotGuard))).rejects.toThrow(SENTINEL);
       expect(slotGuard).toHaveBeenCalledTimes(1);
-      expect(capturedScheduledInsert).toBeDefined();
+      expect(slotGuard.mock.calls[0][1]).toEqual({ zone: CITY_ZONE });
+      expect(capturedScheduledInsert).toMatchObject({ zone: 'sarasota' });
     });
 
     test('an idempotent replay returns the first booking without the re-check', async () => {

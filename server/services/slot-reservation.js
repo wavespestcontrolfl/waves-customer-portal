@@ -852,6 +852,20 @@ function slotTaken(slotId) {
   return err;
 }
 
+// Owner rule B per truck (GATE_MULTI_TECH_CONFIRM, 2026-11-19, zone-day-funnel.js truckMayTakeDate): a far-south hold
+// never sends a second truck south on a day another truck already drives there. Read on the caller's transaction,
+// under the date lock it took first, where a hold starts to hold its day: a new hold (reserveSlot, `zone` = the zone
+// it stamps), and a lapsed hold that an extend revives or an accept graduates (`estimate`: the zone resolves as
+// reserveSlot resolved it; a lapsed hold stopped counting, so another truck may have taken the day). Slot-taken when
+// refused. Gate off or no technician: nothing is read.
+async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = null, estimate = null }) {
+  const funnel = require('./scheduling/zone-day-funnel');
+  if (techId == null || !funnel.perTruckLive()) return;
+  // A zone that cannot be resolved skips the check, as reserveSlot's own zone checks do.
+  const estimateZone = zone || (estimate ? await resolveEstimateZone(conn, estimate).catch(() => null) : null);
+  if (!(await funnel.truckMayTakeDate(conn, { estimateZone, date, technicianId: techId }))) throw slotTaken(slotId);
+}
+
 // A fresh gate read right before a write. A make-room hold whose gate went off while the locks were waited on is the
 // ordinary slot-taken answer and writes nothing. Returns the live mode for the destination probe.
 function requireMakeRoomStillOn(makeRoom, slotId) {
@@ -1786,6 +1800,10 @@ async function reserveSlot({
         throw err;
       }
 
+      // Owner rule B per truck: not on a day another truck already drives south (after the same-slot refresh above,
+      // which keeps the customer's own hold).
+      await refuseOtherTruckSouthDay(trx, { zone: reserveZone, date, techId, slotId });
+
       // Zone-capacity check: the tech-scoped conflict above misses
       // unassigned self-bookings (technician_id NULL) that occupy the
       // same zone/time — availability treats the zone as one capacity
@@ -2222,6 +2240,15 @@ async function commitReservation({
         err.code = 'RESERVATION_EXPIRED';
         throw err;
       }
+    }
+    // Owner rule B per truck: a lapsed hold stopped counting, so another truck may have taken its far-south day.
+    // Same slot-unavailable recovery as the technician check below (the customer re-picks a time).
+    if (row._lapsed) {
+      const heldDate = dateOnly(row.scheduled_date);
+      await refuseOtherTruckSouthDay(client, {
+        estimate, date: heldDate, techId: row.technician_id,
+        slotId: `${heldDate}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
+      });
     }
 
     // Technician eligibility re-check at COMMIT (FOR SHARE on this txn): the
@@ -2995,6 +3022,11 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         err.code = 'RESERVATION_NOT_FOUND';
         throw err;
       }
+      // Owner rule B per truck: while lapsed, another truck may have taken this hold's far-south day.
+      await refuseOtherTruckSouthDay(trx, {
+        estimate, date: scheduledDate, techId: row.technician_id,
+        slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
+      });
     }
     // The SAME definitive validity checks commitReservation runs (codex r10
     // P2). Occupancy alone is not enough: if the office de-listed the held
@@ -3151,6 +3183,7 @@ module.exports = {
     catalogLinkForProfile,
     candidateExpectedMinutesFromRow,
     refuseGracedOfferOnRivalHoldConflict,
+    refuseOtherTruckSouthDay,
     makeRoomDestinationClash,
     makeRoomChainClash,
     acceptedWindowOnMakeRoomDestination,
