@@ -868,9 +868,12 @@ const customerAddressFields = (cust) => ({
 // pin): phase 1 books another street on a corrected or another profile, with the typed city, so the city on file
 // there named the old street, and its zone would drop another truck's opening the booking admits (pre-push P1 on
 // 1ef6ba1b16). Phase 1 makes the profile it books this lead's trusted one, so a retry's list reads that profile.
-// The commit's zone re-check compares with the same city (zoneFallbackCity).
+// Nor for a place the area check refuses (Punta Gorda), which phase 1 never keeps, unless a staff-verified pin keeps
+// the whole profile (pre-push P1 on f6c3fdc9e9). zoneFallbackCity is that city, the one phase 1 may keep: the
+// commit's zone re-check compares with it, and phase 1 keeps only it.
 const zoneFallbackCity = (customer, address, coords) => (
-  customer && profileMatchesAddress(customer, address, coords) ? customer.city : null
+  customer && profileMatchesAddress(customer, address, coords)
+    && (customer.verified_by_review || !isExcludedLocality(customer.city)) ? customer.city : null
 );
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer }) {
   const booking = require('./booking');
@@ -2151,20 +2154,22 @@ async function provisionLinkedCustomer(trx, {
     // validated resolution back so a missing/bad address isn't
     // asked for again (this file's own contract — see the header).
     // An address that matches this row (same street and unit, and ZIP or
-    // pin) keeps the row's city on file only when the far-south funnel's zone
-    // comes from it: the typed city is in no zone and the row's city is in a
-    // funneled one (slot-zone.js leadBookingZone, isFunnelZone), so a typed
-    // name no zone lists would take the property out of the zone its list
-    // read, for this commit, its refusal's times and every retry (owner rule
-    // B, pre-push P1s on 850a6a79f0 and 7a682696f6). A place the area check
+    // pin) keeps the row's city on file, the city its list read
+    // (zoneFallbackCity), only when the far-south funnel's zone comes from
+    // it: the typed city is in no zone and the row's city is in a funneled
+    // one (slot-zone.js leadBookingZone, isFunnelZone), so a typed name no
+    // zone lists would take the property out of the zone its list read, for
+    // this commit, its refusal's times and every retry (owner rule B,
+    // pre-push P1s on 850a6a79f0 and 7a682696f6). A place the area check
     // refuses (Punta Gorda) is never kept: the typed address passed that
     // check. Every other address takes the typed city, the validated
     // correction (pre-push P1s on 63e29d5511 and f344681474: a zone with no
     // truck rule, such as Sarasota, needs no kept city); with the funnel off
     // no zone is read from it.
-    const { zone: cityZone, fromCustomer } = [matchesStoredAddress, funnelOn(), !isExcludedLocality(storedCustRow.city)].every(Boolean)
-      ? await leadBookingZone(trx, zoneFunnelInputs(resolved.address), storedCustRow.city) : {};
-    const city = fromCustomer && isFunnelZone(cityZone) ? storedCustRow.city : resolved.address.city;
+    const listCity = zoneFallbackCity(storedCustRow, resolved.address, resolved.location);
+    const { zone: cityZone, fromCustomer } = [listCity, funnelOn()].every(Boolean)
+      ? await leadBookingZone(trx, zoneFunnelInputs(resolved.address), listCity) : {};
+    const city = fromCustomer && isFunnelZone(cityZone) ? listCity : resolved.address.city;
     const after = {
       address_line1: resolved.address.line1,
       address_line2: resolved.address.line2,
@@ -3013,6 +3018,7 @@ router._internals = {
 };
 
 router._test = {
+  zoneFallbackCity,
   tokenMayUseProfile,
   outrightProspect,
   loadTrustedCustomer,

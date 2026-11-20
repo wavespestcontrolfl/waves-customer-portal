@@ -2275,7 +2275,9 @@ describe('POST /:token commit', () => {
     // area check refuses) kept that city after a served town typed in its shared ZIP passed the check, and the profile
     // failed the check on its next read. The city is kept only when the funnel's zone comes from it, never for a
     // refused place. Pre-push P1 on f344681474: a zone with no truck rule (Sarasota) does not keep it either. With the
-    // funnel off, nothing reads a zone, phase 1 included.
+    // funnel off, nothing reads a zone, phase 1 included. Pre-push P1 on f6c3fdc9e9: the list read the refused city's
+    // zone all the same, and with only the other truck free it showed no time; it reads the city phase 1 may keep now
+    // (zoneFallbackCity), so it offers tech-1's hour, and that hour books.
     test.each([
       ['with the funnel off', false, 'Nokomis', 'Laurel', '34209', 'Sarasota'],
       ['and a profile city the area check refuses', true, 'Punta Gorda', 'Charlotte Harbor', '33980', 'Charlotte'],
@@ -2297,13 +2299,22 @@ describe('POST /:token commit', () => {
         address_line1: '123 Palm Ave', address_line2: null, city: storedCity, state: 'FL', zip, latitude: 27.4, longitude: -82.5,
       });
       listResults.scheduled_services = [];
-      mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-2' }] }] });
+      // Only tech-1 is free at 09:00. In the Venice / North Port zone tech-2 drives south that day, so the funnel drops
+      // tech-1's opening and nothing is left; anywhere else, or with the funnel off, tech-1 keeps it.
+      const funneled = (a) => mockFarSouthGates.funnel && ['Nokomis', 'Venice', 'Punta Gorda'].includes(a.zoneFunnelCustomerCity);
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: funneled(a) ? [] : [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = `123 Palm Ave, ${typedCity}, FL ${zip}`;
 
-      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: `123 Palm Ave, ${typedCity}, FL ${zip}` });
+      const list = await callAvailability(token, { address: typed });
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
 
+      expect(list.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['09:00']);
       expect(booked.statusCode).toBe(200);
       expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual([typedCity]);
-      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({ id: 'cust-9', city: typedCity });
+      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ technician_id: 'tech-1', authedCustomer: { id: 'cust-9', city: typedCity } });
       expect(zoneReads.mock.calls.length > 0).toBe(funnel);
     });
 
@@ -3888,6 +3899,23 @@ describe('profileAffirmativelyDiffers unit coverage (Codex P2, PR #5064, :1168 "
   // ('a supplied copy with %s cannot bypass an outside-area review').
   test('an unrecognized community name, no ZIP → NOT proven different (unlike a known distinct city such as Sarasota)', () => {
     expect(profileAffirmativelyDiffers(row, { line1: '5 Palm Ave', city: 'Palma Sola', state: 'FL', zip: null })).toBe(false);
+  });
+});
+
+// The city a list reads as the zone fallback, the one phase 1 may keep (pre-push P1s on 1ef6ba1b16 and f6c3fdc9e9):
+// the trusted profile's city only for its own property, and never a place the area check refuses, unless a
+// staff-verified pin keeps the whole profile (phase 1 then writes nothing).
+describe('zoneFallbackCity (the city a list reads, as phase 1 keeps it)', () => {
+  const property = { address_line1: '123 Palm Ave', address_line2: null, state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+  const typed = { line1: '123 Palm Ave', line2: null, city: 'Charlotte Harbor', state: 'FL', zip: '34209' };
+  test.each([
+    ['the profile\'s own property', 'Nokomis', { ...property, city: 'Nokomis' }],
+    ['another street', null, { ...property, address_line1: '9 Other St', city: 'Nokomis' }],
+    ['no trusted customer', null, null],
+    ['a place the area check refuses', null, { ...property, city: 'Punta Gorda' }],
+    ['a place the area check refuses, under a staff-verified pin', 'Punta Gorda', { ...property, city: 'Punta Gorda', verified_by_review: true }],
+  ])('%s: %s', (_label, expected, customer) => {
+    expect(inspectionPublicRouter._test.zoneFallbackCity(customer, typed, { lat: 27.4, lng: -82.5 })).toBe(expected);
   });
 });
 
