@@ -201,21 +201,19 @@ describe.each([
   test('a form value that holds an access code drops, on every record', async () => {
     // A record with no note. heldAccessCode alone catches each value after
     // the first recommendation (the complete screen catches that one too):
-    // the code's shape (the observation), the completion check (a code noun
-    // beside a location word) and the visit-history redactor (a word after a
-    // code noun, far from it).
+    // the code's shape (the observation) and a word about getting in (a code
+    // that is a word).
     serviceRow = visit(JSON.stringify({
       ...LISTS,
-      formObservations: ['Light ant activity', 'I punched 1234 into the padlock'],
-      formRecommendations: ['Trim the hedge back from the wall', 'Gate code 4545 for next time', 'The side gate has a code', 'The password for the side gate came from the owner today: Bluebird'],
+      formObservations: ['Light ant activity', 'The number is 1234'],
+      formRecommendations: ['Trim the hedge back from the wall', 'Gate code 4545 for next time', 'I used the word ROSE to unlock the side gate'],
     }));
     const text = await printed(path);
     expect(text).toContain('Light ant activity');
     expect(text).toContain('Trim the hedge back from the wall');
     expect(text).not.toContain('4545');
     expect(text).not.toContain('1234');
-    expect(text).not.toContain('has a code');
-    expect(text).not.toContain('Bluebird');
+    expect(text).not.toContain('ROSE');
   });
 
   test('a recommendation the complete screen refuses never prints, on a record with no note too', async () => {

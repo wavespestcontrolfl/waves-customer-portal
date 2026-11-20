@@ -41,7 +41,6 @@
 
 const crypto = require('crypto');
 const { findBannedCustomerCopy, REENTRY_VERB_SRC } = require('./activity-indicators');
-const { COMPLETION_ACCESS_CODE_RE } = require('../completion-access-code');
 const { formatTechnicianForCustomer, isGenericTechnicianLabel } = require('../../utils/technician-name');
 
 // Code-noun anchored credential detector (shared with the generate-report
@@ -654,12 +653,12 @@ function customerCopyViolations(text) {
 // The copy screen for a record that carries the technician's own note: the
 // note, and every list value and finding field such a record prints
 // (report-data.js buildProtocolPayload, finding-provenance.js). The complete
-// screen above; the completion access-code check (COMPLETION_ACCESS_CODE_RE,
-// which also names "Side access 4417 for the yard", a shape the report check
-// above does not); and any time a technician can give for re-entry or drying:
+// screen above; the access check (heldAccessCode, below: a code-shaped
+// number, or any word about getting in); and any time a technician can give
+// for re-entry or drying:
 // any word that names hours, minutes or seconds, with or without a figure
 // ("30+ minutes", "eighteen minutes", "½ hour", "a few minutes", "30min"); a
-// figure with h or m ("2h"); a clock time, written in any of its marked forms
+// figure with h, m or s ("2h", "90s"); a clock time, written in any of its marked forms
 // ("3:30", any pm or a.m., "4am" or "four am", "3 o'clock", "half past three",
 // "four in the afternoon") or as an hour after at, after, until, till, by,
 // before, around, past, between or from ("after four", "until 4"), the
@@ -699,8 +698,8 @@ function customerCopyViolations(text) {
 // tells it from a clock time. A read-only production count of this rule
 // (2026-11-20): a match in 47 of 474 pest customer recaps (2 clock times; in
 // 41 a drying word and a day unit share a sentence) and in 56 of 401
-// technician notes, none in the form lists or the finding fields. The
-// access-code check matched none of them.
+// technician notes, none in the form lists or the finding fields. The access
+// check below catches 7 of the 56 too.
 const NOTE_HOUR_SRC = '(?:\\p{N}{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
 // A 24-hour clock with no colon: 3 or 4 digits, hour 0 to 23 and minutes 00
 // to 59, or 2400 (midnight).
@@ -764,7 +763,7 @@ const NOTE_MARKED_TIME_SRC = `(?:${NOTE_DAY_WORD_SRC}|\\p{N}|(?<!\\p{L})(?:${[
 const NOTE_REENTRY_VERB_SRC = `(?<!\\b(?:i|we|technician|tech|team)(?:\\s*['\u2019]ll|\\s+will|\\s+can|\\s+would|\\s+should|\\s+may|\\s+might|\\s+plan\\s+to)?\\s+)\\b(?:${REENTRY_VERB_SRC})\\b`;
 const NOTE_RECORD_TIME_RE = new RegExp([
   '(?<!\\p{L})(?:half-?|quarter-?)?(?:hours?|minutes?|mins?|hrs?|secs?|seconds)(?!\\p{L})',
-  '\\p{N}\\s*[hm](?!\\p{L})',
+  '\\p{N}\\s*[hms](?!\\p{L})',
   '(?<!\\p{N})\\p{N}{1,2}\\s*:\\s*\\p{N}{2}(?!\\p{N})',
   '(?<!\\p{L})p\\.?\\s?m\\.?(?!\\p{L})',
   '(?<!\\p{L})a\\.\\s?m\\.?(?!\\p{L})',
@@ -784,37 +783,84 @@ const NOTE_MARKED_SENTENCE_RE = new RegExp([
 ].join('|'), 'iu');
 
 // A code-shaped number, whatever words surround it: 3 or more digits, with
-// up to 3 spaces or hyphens between any two ("I punched 1234 into the
-// padlock.", "12-34", "1 2 3 4"), or 3 or more number words in a row ("one
-// two three four", "twelve thirty-four"). Pre-push audit rounds 18, 24 and 26
-// each found one more phrasing around a code ("Side access 4417", "I used
-// 1234 to get through the gate", "The pedestrian entrance unlocks with
-// 1234"), and main's report check went through the same rounds (its comments
-// cite codex r83, r84, r86): no word list ends that, so the note screen
-// judges the code's own shape. A figure with a unit ("150 feet") is refused
-// too. Production (2026-11-20, read-only, counts only): it adds 10 of 401
-// raw pest technician notes (the screen already refused 97), and no recap,
-// finding field or form value.
+// up to 3 spaces, line breaks or hyphens between any two ("I punched 1234
+// into the padlock.", "12-34", "1 2 3 4"), or 3 or more number words in a
+// row ("one two three four", "twelve thirty-four"). Pre-push audit rounds 18,
+// 24 and 26 each found one more phrasing around a code ("Side access 4417",
+// "I used 1234 to get through the gate", "The pedestrian entrance unlocks
+// with 1234"), and main's report check went through the same rounds (its
+// comments cite codex r83, r84, r86): no word list ends that, so the note
+// screen judges the code's own shape. A figure with a unit ("150 feet") is
+// refused too. Production (2026-11-20, read-only, counts only): it adds 10 of
+// 401 raw pest technician notes (the screen already refused 97), and no
+// recap, finding field or form value.
 const NOTE_NUMBER_WORD_SRC = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)';
 const CODE_SHAPED_NUMBER_RE = new RegExp([
-  '(?<!\\p{N})\\p{N}(?:[ \\t\\-\\u2010-\\u2015]{0,3}\\p{N}){2,}',
+  '(?<!\\p{N})\\p{N}(?:[\\s\\-\\u2010-\\u2015]{0,3}\\p{N}){2,}',
   `(?<!\\p{L})${NOTE_NUMBER_WORD_SRC}(?:[\\s,\\-\\u2010-\\u2015]+${NOTE_NUMBER_WORD_SRC}){2,}(?!\\p{L})`,
 ].join('|'), 'iu');
 
-// Three access-code checks beside the report's own (customerCopyViolations):
-// the code's shape (CODE_SHAPED_NUMBER_RE), the completion check
-// (COMPLETION_ACCESS_CODE_RE: "The side gate has a code."), and the
-// visit-history reader's redactor (context-aggregator.js redactAccessCodes:
-// a word after a code noun, "The gate password is bluebird."). Each customer
-// reader that screens with this module withholds a value any one catches:
+// What speaks of getting in, whatever the code is. A code can be a word
+// ("I used the word ROSE to unlock the side gate.", pre-push audit round
+// 27), and a word has no shape; main's report check went through codex r3
+// to r88 on such phrasings. So the screen withholds the subject itself: a
+// gate; a lock, latch, key, keypad, lockbox, fob, buzzer, intercom or
+// opener; a code, PIN, passcode, password, passphrase or combination
+// ("a combination of ants" too: no list tells it from a lock's); a magic,
+// secret or pass word; access, or gaining entry; or a person let or getting
+// in ("lets you in", "we got in"; pests that get in stay legal). Production
+// (2026-11-20, read-only, counts only), with the door rules below and the
+// code shape's line breaks: 9 more of 401 raw pest technician notes withheld
+// (the screen refused 107), 5 more of 474 pest recaps, and no finding field
+// or form value; it catches every value the two checks it replaces caught.
+const NOTE_ACCESS_WORD_RE = new RegExp(`(?<!\\p{L})(?:${[
+  'gates?',
+  '(?:un|re)?lock(?:s|ed|ing)?|padlocks?|deadbolts?|lock\\s?box(?:es)?|keypads?|latch(?:es|ed|ing)?',
+  'keys?|keyed|keyless|fobs?|buzzers?|buzz(?:ed)?\\s+in|intercoms?|openers?|clickers?',
+  'codes?|pins?|passcodes?|passwords?|passphrases?|combos?|combinations?',
+  '(?:magic|secret|pass|code|safe)\\s?words?|the\\s+words?',
+  'access(?:es|ed|ing|ible)?|gain(?:s|ed|ing)?\\s+(?:entry|entrance)',
+  '(?:let|lets|letting|get|gets|got|getting|gotten)\\s+(?:me|us|you|myself|ourselves|yourself|the\\s+(?:tech|techs|technician|technicians|team|crew))\\s+(?:in|into|inside|through|past)',
+  '(?:i|we|you)\\s+(?:(?:can|could|will|would)\\s+)?(?:get|got)\\s+(?:in|into|inside|through|past)',
+].join('|')})(?!\\p{L})`, 'iu');
+// A door, garage, entrance or lanai is named in about half of all pest
+// notes (the treatment goes around them: production, 193 of 401), so it
+// counts only in a sentence that opens it or keys a word in (open, unlatch,
+// say, type, punch, press), with a colon or a dash after it, or with a word
+// in capitals on its line. "Enter", "through" and "with" stay legal: ants enter
+// through a door, and a technician treats around one with a product.
+const NOTE_DOOR_WORDS_SRC = 'doors?|doorways?|garages?|entrances?|entryways?|lanais?|sliders?';
+const NOTE_DOOR_SRC = `(?<!\\p{L})(?:${NOTE_DOOR_WORDS_SRC})(?!\\p{L})`;
+const NOTE_DOOR_KEYING_SRC = '(?<!\\p{L})(?:open(?:s|ed|ing)?|unlatch(?:es|ed|ing)?|say|says|said|saying|type[ds]?|typing|punch(?:es|ed|ing)?|press(?:es|ed|ing)?)(?!\\p{L})';
+const NOTE_DOOR_KEYED_RE = new RegExp([
+  `${NOTE_DOOR_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DOOR_KEYING_SRC}`,
+  `${NOTE_DOOR_KEYING_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DOOR_SRC}`,
+  `${NOTE_DOOR_SRC}(?:\\s*[:=\\u2013\\u2014]|\\s+-|-\\s)`,
+].join('|'), 'iu');
+// The capitals rule tells case apart (no i flag), so the door words carry
+// both cases themselves. It stays on one line: a title line in capitals
+// ("WHAT WE FOUND:") holds no code.
+const NOTE_DOOR_CASELESS_SRC = `(?<!\\p{L})(?:${NOTE_DOOR_WORDS_SRC.replace(/\p{Ll}/gu, (letter) => `[${letter}${letter.toUpperCase()}]`)})(?!\\p{L})`;
+const NOTE_CAPITALS_SRC = '(?<!\\p{L})\\p{Lu}{2,}(?!\\p{L})';
+const NOTE_DOOR_CAPITALS_RE = new RegExp(
+  `${NOTE_DOOR_CASELESS_SRC}[^\\n]*?${NOTE_CAPITALS_SRC}|${NOTE_CAPITALS_SRC}[^\\n]*?${NOTE_DOOR_CASELESS_SRC}`,
+  'u',
+);
+
+// The access check of each customer reader that screens with this module:
 // the note record (noteRecordCopyViolations) and the Documents PDF lists on
-// every record (routes/documents.js). The redactor is required at call time:
-// context-aggregator loads this module.
+// every record (routes/documents.js). A value is withheld when it holds a
+// code-shaped number or speaks of getting in. Both checks this replaces
+// need a run of digits or a code noun to catch a value, and those two
+// catch it here: the completion check (COMPLETION_ACCESS_CODE_RE) and the
+// visit-history reader's redactor (context-aggregator.js
+// redactAccessCodes).
 function heldAccessCode(text) {
   const value = String(text || '');
   return CODE_SHAPED_NUMBER_RE.test(value)
-    || COMPLETION_ACCESS_CODE_RE.test(value)
-    || require('../context-aggregator').redactAccessCodes(value) !== value;
+    || NOTE_ACCESS_WORD_RE.test(value)
+    || value.split(NOTE_SENTENCE_END_RE).some((sentence) => NOTE_DOOR_KEYED_RE.test(sentence)
+      || NOTE_DOOR_CAPITALS_RE.test(sentence));
 }
 
 function noteRecordCopyViolations(text) {

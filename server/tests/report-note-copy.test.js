@@ -20,6 +20,7 @@ const {
   printedReportSummary,
   reportTechnicianFirstName,
   noteRecordCopyViolations,
+  heldAccessCode,
   MAX_REPORT_NOTE_CHARS,
 } = require('../services/service-report/technician-report-copy');
 
@@ -89,25 +90,33 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       expect(held.body).toBeNull();
       expect(held.violations).toEqual(['note_record_access_code']);
     }
-    // A code noun beside a location word: only the completion check.
+    // A code noun beside a location word, and a word after a code noun far
+    // from it: the completion check and the visit-history redactor caught
+    // these; the words about getting in catch them now.
     expect(noteRecordCopyViolations('I treated the yard. The side gate has a code.')).toEqual(['note_record_access_code']);
-    // A word after a code noun, far from it: only the visit-history redactor
-    // (context-aggregator.js redactAccessCodes).
     expect(noteRecordCopyViolations('I treated the yard. The password for the side gate came from the owner today: Bluebird.')).toEqual(['note_record_access_code']);
     expect(noteRecordCopyViolations('I treated the yard and the garage door frame.')).toEqual([]);
   });
 
   test('a code-shaped number withholds the note, whatever words surround it; small counts stand', () => {
-    // Only the code's shape catches each of these: 3 or more digits, with up
-    // to 3 spaces or hyphens between any two, or 3 or more number words.
+    // Rounds 24 and 26: a code with no code noun.
     for (const text of [
       'I treated the yard. The pedestrian entrance unlocks with 1234.',
       'I treated the yard. I punched 1234 into the padlock.',
-      'I treated the yard. I punched 12 34 into the padlock.',
-      'I treated the yard. I punched 1 2 3 4 into the padlock.',
-      'I treated the yard. I punched 12 - 34 into the padlock.',
-      'I treated the yard. I punched one two three four into the padlock.',
-      'I treated the yard. I punched twelve thirty-four into the padlock.',
+    ]) {
+      expect([text, noteRecordCopyViolations(text)]).toEqual([text, ['note_record_access_code']]);
+    }
+    // Only the code's shape catches each of these: 3 or more digits, with up
+    // to 3 spaces, line breaks or hyphens between any two, or 3 or more
+    // number words.
+    for (const text of [
+      'I treated the yard. The number is 1234.',
+      'I treated the yard. The number is 12 34.',
+      'I treated the yard. The number is 1 2 3 4.',
+      'I treated the yard. The number is 12 - 34.',
+      'I treated the yard. The number is 12\n34.',
+      'I treated the yard. The number is one two three four.',
+      'I treated the yard. The number is twelve thirty-four.',
     ]) {
       expect([text, noteRecordCopyViolations(text)]).toEqual([text, ['note_record_access_code']]);
     }
@@ -123,6 +132,43 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
     }
   });
 
+  test('a value that speaks of getting in is withheld, whatever the code is; pest copy about doors stands', () => {
+    // Round 27: a code that is a word has no shape.
+    expect(noteRecordCopyViolations('I treated the yard. I used the word ROSE to unlock the side gate.')).toEqual(['note_record_access_code']);
+    // One line for each part of the rule: no other part catches it.
+    for (const text of [
+      'Rose works at the side gate.',
+      'Rose opens the padlock.',
+      'Rose is the key for the shed.',
+      'I tried a new code.',
+      'Rose is the magic word.',
+      'Rose grants access to the yard.',
+      'Rose lets you in.',
+      'We got in with rose.',
+      // A door, garage, entrance or lanai only when it is keyed, followed by
+      // a colon or a dash, or beside a word in capitals on its line.
+      'Say rose at the front door.',
+      'Front door: rose.',
+      'Front door - rose.',
+      'Use ROSE at the front door.',
+    ]) {
+      const value = `I treated the yard. ${text}`;
+      expect([value, noteRecordCopyViolations(value)]).toEqual([value, ['note_record_access_code']]);
+    }
+    // Pest copy about doors and pests that get in stands.
+    for (const text of [
+      'I treated around the doors with a granular product.',
+      'Ants enter through gaps under the door.',
+      'Ants were getting inside through the slider track.',
+      'Pests get in through gaps by the garage.',
+      'I treated the garage-door frame.',
+    ]) {
+      expect([text, noteRecordCopyViolations(text)]).toEqual([text, []]);
+    }
+    // A title line in capitals holds no code.
+    expect(heldAccessCode('WHAT WE DID:\nI treated around the front door.')).toBe(false);
+  });
+
   test('a time figure in any form withholds the note; the sanctioned wording and days stand', () => {
     // AGENTS.md bans a fixed re-entry or drying time; on a note record each
     // time figure counts, as no word list can tell which one is a re-entry
@@ -134,6 +180,7 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the lanai. Wait 30min before you let the dog out.',
       'I treated the lanai. Wait ½hr.',
       'I treated the lanai. Wait 2h.',
+      'I treated the lanai. Wait 90s before stepping back onto the patio.',
       'I treated the lanai. Give it an hour and a half.',
       'I treated the lanai. Give it a few minutes.',
       'I treated the lanai. Keep the dog in for hours.',

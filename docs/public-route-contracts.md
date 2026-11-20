@@ -3099,20 +3099,29 @@ a `protocol` inside it that cannot be read, since it hides the outcome and the
 frozen typed cards this rule checks; absent `service_data` reads as none), a `cleaned`
 note signed ` — <first name>` (the identity snapshot's name, never a generic
 label). The note, and every list value and finding field below on such a
-record, passes `noteRecordCopyViolations`: `customerCopyViolations`; three
-access-code checks (`heldAccessCode`): a code-shaped number, whatever words
-surround it (3 or more digits, with up to 3 spaces or hyphens between any two:
-"I punched 1234 into the padlock", "1 2 3 4"; or 3 or more number words in a
-row: "one two three four"; a figure with a unit, "150 feet", is withheld too;
-production, 2026-11-20, read-only: it adds 10 of 401 raw pest technician
-notes, and no recap, finding field or form value), the completion access-code
-check (`COMPLETION_ACCESS_CODE_RE`: "The side gate has a code"), and the
-visit-history reader's redactor (a value `redactAccessCodes` would change:
-"The password for the side gate came from the owner today: Bluebird";
-production: it changes 24 of 401 raw pest technician notes, each naming a code
-noun, and no recap, form value or finding field); and any time a technician can give: any word that names hours, minutes or seconds, with
+record, passes `noteRecordCopyViolations`: `customerCopyViolations`; the
+access check (`heldAccessCode`), which withholds a value that holds a
+code-shaped number or speaks of getting in, whatever the code is: a
+code-shaped number, whatever words surround it (3 or more digits, with up to 3
+spaces, line breaks or hyphens between any two: "I punched 1234 into the
+padlock", "1 2 3 4"; or 3 or more number words in a row: "one two three four";
+a figure with a unit, "150 feet", is withheld too); any word about getting in
+("I used the word ROSE to unlock the side gate"): a gate, a lock, latch, key,
+keypad, lockbox, fob, buzzer, intercom or opener, a code, PIN, passcode,
+password, passphrase or combination ("a combination of ants" too), a magic,
+secret or pass word, access or gaining entry, or a person let or getting in
+(pests that get in stay legal); and a door, garage, entrance or lanai in a
+sentence that opens it or keys a word in (open, unlatch, say, type, punch,
+press), with a colon or a dash after it, or with a word in capitals on its
+line ("enter", "through" and "with" stay legal: ants enter through a door).
+It catches every value the completion access-code check
+(`COMPLETION_ACCESS_CODE_RE`) and the visit-history reader's redactor
+(`redactAccessCodes`) caught: each needs a run of digits or a code noun.
+Production, 2026-11-20, read-only, counts only: the code shape added 10 of 401
+raw pest technician notes; the words about getting in and the door rules add
+9 more, and 5 of 474 pest recaps; no finding field or form value. And any time a technician can give: any word that names hours, minutes or seconds, with
 or without a figure ("30+ minutes", "eighteen minutes", "½ hour", "a few
-minutes"); a figure with h or m; a clock time in any marked form ("3:30", any
+minutes"); a figure with h, m or s ("90s"); a clock time in any marked form ("3:30", any
 pm or a.m., "four am", "3 o'clock", "half past three", "four in the
 afternoon") or as an hour after at, after, until, till, by, before, around,
 past, between or from ("after four"), a 24-hour clock there too ("at 1600");
@@ -3189,11 +3198,10 @@ recommendation lists from the completion form's values (`buildProtocolPayload`
 such a record), never the merged `structured_notes` lists (which fold in raw
 `[Found]` / `[Next]` lines) or `ai_report`, on a record with no note too. On
 every record each value passes `customerCopyViolations` before it prints (the
-web payload screens its recommendations with it too), and a value either other
-access-code check catches drops (`heldAccessCode`: the code's shape, the
-completion check and the visit-history redactor `redactAccessCodes`, as on a
-note record; production, 2026-11-20, read-only: no form value of the 11
-records with form lists); a refused value is left out. That
+web payload screens its recommendations with it too), and a value the
+access check catches drops (`heldAccessCode`: a code-shaped number or any word
+about getting in, as on a note record; production, 2026-11-20, read-only: no
+form value of the 11 records with form lists); a refused value is left out. That
 PDF prints the service title frozen at completion, but it judges whether the
 note may stand from the stored row, as the web report does: a row with no
 stored `service_line` takes the line its stored `service_type` names before

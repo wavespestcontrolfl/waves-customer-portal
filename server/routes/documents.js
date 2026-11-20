@@ -403,9 +403,10 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // docs/public-route-contracts.md). On every record each value passes the
   // complete customer-copy screen before it prints (customerCopyViolations,
   // AGENTS.md; the web payload screens its recommendations with it too,
-  // report-data.js buildReportV1Data), and a value either other access-code
-  // check catches drops (heldAccessCode: the completion check and the
-  // visit-history redactor). On a record that carries the technician's own
+  // report-data.js buildReportV1Data), and a value the note's access check
+  // catches drops (heldAccessCode: a code-shaped number, or any word about
+  // getting in, such as a gate, a lock, a key, a code or access). On a
+  // record that carries the technician's own
   // note each value has passed the note's screen as well
   // (noteRecordCopyViolations). A refused value is left out; the rest print.
   const { buildProtocolPayload } = require('../services/service-report/report-data');
