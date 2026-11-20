@@ -6,7 +6,8 @@
  * Segment filter shape (stored in newsletter_sends.segment_filter jsonb):
  *   SQL-expressible (applied directly in buildSubscriberQuery):
  *     { sources?: string[], tags?: string[], customersOnly?: boolean,
- *       leadsOnly?: boolean, region_zone?: string[], subscriber_ids?: number[] }
+ *       leadsOnly?: boolean, region_zone?: string[], subscriber_ids?: number[],
+ *       holdout?: 'pest-insider' }   (holdout: also re-checked per batch at dispatch)
  *   Service-line / membership (NOT a column — resolved to a customer_id set
  *   via newsletter-audience-profiles, then injected as a whereIn):
  *     { has_service?: string[], missing_service?: string[],
@@ -471,20 +472,39 @@ function buildSubscriberQuery(segmentFilter, customerIds = null) {
   if (Array.isArray(f.tags) && f.tags.length) {
     q = q.whereRaw('tags \\?| array[' + f.tags.map(() => '?').join(',') + ']', f.tags);
   }
-  return narrowToSubscriberIds(q, f.subscriber_ids);
+  return narrowToPlannedAudience(q, f);
 }
 
-// subscriber_ids: an exact list of newsletter_subscribers ids (a Waves Pest
-// Insider issue's audience, fixed when the issue is planned: see
-// services/pest-insider/audience.js). Absent or null = no constraint. Present =
-// only those ids, still under every rule in buildSubscriberQuery. A present-but-
-// unusable value (not an array, an empty array, or any element that is not a
-// positive integer inside Postgres's integer range, the id column's type)
-// matches nobody: an exact list must never broaden to every active
-// subscriber, and an id the int[] cast would refuse must not abort the count.
-// One array binding, so a long list cannot hit Postgres's bind-parameter limit.
+// Holdouts a send's segment_filter can name (segment_filter.holdout): customers
+// a planned issue must never reach. The plan already left them out; the
+// per-chunk re-check in sendCampaign asks again on each recipient's CURRENT
+// customer link, so a lead that became a held-out customer after the plan, or
+// a relink to another customer, is skipped on a first send and on a resume.
+const SEND_HOLDOUTS = Object.freeze({
+  'pest-insider': (customerId) => require('./pest-insider/audience').isHeldOut(customerId),
+});
+
+// The holdout check a send names, or null when it names none.
+function sendHoldout(segmentFilter) {
+  const name = segmentFilter?.holdout;
+  return name != null && Object.hasOwn(SEND_HOLDOUTS, name) ? SEND_HOLDOUTS[name] : null;
+}
+
+// The keys a planned issue's segment_filter carries (a Waves Pest Insider
+// issue's audience, fixed when the issue is planned: see
+// services/pest-insider/audience.js).
+// - holdout: a SEND_HOLDOUTS name. One the sender does not know matches nobody.
+// - subscriber_ids: an exact list of newsletter_subscribers ids. Absent or
+//   null = no constraint. Present = only those ids, still under every rule in
+//   buildSubscriberQuery. A present-but-unusable value (not an array, an empty
+//   array, or any element that is not a positive integer inside Postgres's
+//   integer range, the id column's type) matches nobody: an exact list must
+//   never broaden to every active subscriber, and an id the int[] cast would
+//   refuse must not abort the count. One array binding, so a long list cannot
+//   hit Postgres's bind-parameter limit.
 const PG_INTEGER_MAX = 2147483647;
-function narrowToSubscriberIds(q, ids) {
+function narrowToPlannedAudience(q, { subscriber_ids: ids, holdout }) {
+  if (holdout != null && !Object.hasOwn(SEND_HOLDOUTS, holdout)) return q.whereRaw('1 = 0');
   if (ids == null) return q;
   const usable = Array.isArray(ids) && ids.length > 0
     && ids.every((id) => Number.isInteger(id) && id > 0 && id <= PG_INTEGER_MAX);
@@ -1099,7 +1119,12 @@ async function sendCampaign(sendId, opts = {}) {
       const freshCustomerBySub = new Map((await excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
       ))).select('id', 'customer_id')).map((r) => [r.id, r.customer_id ?? null]));
-      const stillEligible = freshCustomerBySub;
+      // A send that names a holdout (a planned Waves Pest Insider issue) also
+      // skips anyone whose customer, as linked right now, is held out.
+      const heldOut = sendHoldout(send.segment_filter);
+      const stillEligible = heldOut
+        ? new Map([...freshCustomerBySub].filter(([, customerId]) => !heldOut(customerId)))
+        : freshCustomerBySub;
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
       if (ineligible.length) {
         const skippedNow = await skipIneligibleDeliveries(send.id, opts.existingDeliveriesOnly
@@ -1112,7 +1137,7 @@ async function sendCampaign(sendId, opts = {}) {
         // terminalized is not counted as skipped here as well.
         skippedIneligible += skippedNow;
         skippedAtDispatch += skippedNow;
-        logger.info(`[newsletter] send ${send.id} skipped ${skippedNow}/${ineligible.length} recipient(s) no longer eligible at dispatch (archived customer / not active)`);
+        logger.info(`[newsletter] send ${send.id} skipped ${skippedNow}/${ineligible.length} recipient(s) no longer eligible at dispatch (archived customer / not active / held out)`);
         chunkToSend = chunkToSend.filter((s) => stillEligible.has(s.id));
         claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean);
         if (!chunkToSend.length) continue;

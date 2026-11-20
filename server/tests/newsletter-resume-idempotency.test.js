@@ -40,6 +40,10 @@ db.raw = jest.fn(async () => ({ rowCount: 0 }));
 db.transaction = jest.fn(async (cb) => cb({ raw: db.raw }));
 const { recordTouchpoint } = require('../services/conversations');
 const RETRYABLE_DELIVERY_STATUSES_FOR_TEST = ['queued', 'failed', 'sending'];
+// Synthetic customer ids (no real customers), pinned in pest-insider-audience.test.js: the first
+// is in the Waves Pest Insider holdout, the second is not.
+const HELD_CUSTOMER = 'a9f7e979-65d6-cf79-9a52-9102a973b8b9';
+const KEPT_CUSTOMER = 'b0fce403-c178-fa57-404c-1cc4176547a8';
 const { sendCampaign, prepareResumeCampaign, resumeCampaign, hasOutstandingDeliveries } = require('../services/newsletter-sender');
 
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
@@ -166,6 +170,55 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(result.skipped_ineligible).toBe(1);
     expect(result.recipients).toBe(1);
     expect(result.accepted).toBe(1);
+  });
+
+  test('a planned issue skips a reader whose customer, as linked at dispatch, is in its holdout (a lead linked after the plan)', async () => {
+    let skipUpdate = null;
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider' }, subject_b: null,
+      },
+      // #1 was a lead when the issue was planned; #2 a kept customer.
+      subscribers: [
+        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
+        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: KEPT_CUSTOMER },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+      ],
+      // Both still pass the eligibility query, but #1 is now linked to a held-out customer.
+      eligibleAtDispatch: [{ id: 1, customer_id: HELD_CUSTOMER }, { id: 2 }],
+      skipUpdated: 1,
+      onSkipUpdate: (payload) => { skipUpdate = payload; },
+    });
+
+    const result = await sendCampaign('send-1');
+
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
+    expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
+    expect(result.skipped_ineligible).toBe(1);
+    expect(result.recipients).toBe(1);
+  });
+
+  test('a send that names no holdout mails the same held-out customer (the check is the send\'s own)', async () => {
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: { subscriber_ids: [1] }, subject_b: null,
+      },
+      subscribers: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: HELD_CUSTOMER }],
+      deliveries: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }],
+    });
+
+    const result = await sendCampaign('send-1');
+
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['a@example.com']);
+    expect(result.skipped_ineligible).toBe(0);
   });
 
   test('a row a webhook already terminalized: recipient still excluded from the payload, but NOT counted as skipped here', async () => {
@@ -1239,6 +1292,72 @@ describe('resumeCampaign — preconditions', () => {
     expect(RETRYABLE_DELIVERY_STATUSES_FOR_TEST).not.toContain('skipped');
     expect(result.skipped_ineligible).toBe(1);
     expect(result.recipients).toBe(1);
+    expect(finalUpdate.recipient_count).toBe(1);
+  });
+
+  test('resume: a planned issue skips a reader whose customer is now in its holdout, terminally', async () => {
+    let finalUpdate = null;
+    let skipUpdate = null;
+    const sentSend = {
+      id: 's',
+      status: 'sent',
+      sent_at: new Date('2026-05-01T10:00:00Z'),
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider' },
+      subject_b: null,
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: sentSend }),                           // resume fetch
+        chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
+        chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat
+        chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 2 }),                                  // rows exist
+        chain({ count: 2 }),                                  // two outstanding
+        chain({ result: [
+          { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+          { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+        ] }),
+        chain({ returning: [
+          { id: 'd-1', subscriber_id: 1, send_attempt_token: 'attempt-1' },
+          { id: 'd-2', subscriber_id: 2, send_attempt_token: 'attempt-2' },
+        ] }),                                                 // claim both before SendGrid
+        chain({ updated: 1, onUpdate: (payload) => { skipUpdate = payload; } }), // terminal skip
+        chain({ updated: 1 }),                                // post-send bulk update
+        chain({ count: 0 }),                                  // final retryable ledger count
+      ],
+      newsletter_subscribers: [
+        chain({ result: [
+          { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: KEPT_CUSTOMER },
+          { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
+        ] }),
+        // Dispatch re-check: both still eligible, but #2 (a lead at the first send) is now
+        // linked to a held-out customer.
+        chain({ result: [{ id: 1, customer_id: KEPT_CUSTOMER }, { id: 2, customer_id: HELD_CUSTOMER }] }),
+      ],
+    };
+    queues.newsletter_calendar = [chain({ updated: 1 })];
+    queues.newsletter_sends.push(chain({ first: null }));
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await resumeCampaign('s');
+
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['a@example.com']);
+    expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
+    expect(result.skipped_ineligible).toBe(1);
     expect(finalUpdate.recipient_count).toBe(1);
   });
 

@@ -16,8 +16,22 @@ const crypto = require('crypto');
 const NewsletterSubscribers = require('../services/newsletter-subscribers');
 const { buildSubscriberQuery } = require('../services/newsletter-sender');
 const {
-  isHeldOut, selectIssueAudience, audienceSegmentFilter, WARM_DAYS, HOLDOUT_PERCENT, HOLDOUT_SALT,
+  isHeldOut, selectIssueAudience, audienceSegmentFilter, WARM_DAYS, HOLDOUT_PERCENT, HOLDOUT_SALT, HOLDOUT_NAME,
 } = require('../services/pest-insider/audience');
+
+// Runs a knex where-builder callback against a recorder: each call as [method, ...args], with a
+// callback argument recorded the same way (nested), so a test can pin the subquery it builds.
+function record(builder) {
+  const calls = [];
+  const recorder = new Proxy({}, {
+    get: (_target, method) => (...args) => {
+      calls.push([method, ...args.map((arg) => (typeof arg === 'function' ? record(arg) : arg))]);
+      return recorder;
+    },
+  });
+  builder.call(recorder);
+  return calls;
+}
 
 // Synthetic customer ids (no real customers): the first two hash into the holdout, the last two do not.
 const HELD = ['a9f7e979-65d6-cf79-9a52-9102a973b8b9', '4d3a21d8-c684-c09c-19b9-3be911827fd5'];
@@ -58,7 +72,7 @@ describe('selectIssueAudience', () => {
   let captured;
   function fakeQuery(rows) {
     const q = {
-      whereExists: jest.fn((fn) => { captured.exists = fn; return q; }),
+      where: jest.fn((fn) => { captured.where = fn; return q; }),
       select: jest.fn((...cols) => { captured.select = cols; return q; }),
       orderBy: jest.fn((...args) => { captured.orderBy = args; order.push('query'); return Promise.resolve(rows); }),
     };
@@ -93,19 +107,27 @@ describe('selectIssueAudience', () => {
     expect(order).toEqual(['relink', 'query']);
   });
 
-  test('asks for an opened Waves email in the 90 days up to asOf, and none after it', async () => {
+  test('asks for an opened Waves email or Waves newsletter in the 90 days up to asOf, and none after it', async () => {
     buildSubscriberQuery.mockReturnValue(fakeQuery([]));
     const asOf = new Date('2026-12-02T12:00:00Z');
+    const since = new Date(asOf.getTime() - 90 * 24 * 60 * 60 * 1000);
     await selectIssueAudience({ asOf });
-    const sub = { calls: [] };
-    const chain = new Proxy(sub, { get: (target, name) => (name === 'calls' ? target.calls : (...args) => { target.calls.push([name, ...args]); return chain; }) });
-    captured.exists.call(chain);
-    expect(sub.calls).toEqual([
-      ['select', { raw: '1' }],
-      ['from', 'email_messages as opened'],
-      ['whereRaw', 'lower(opened.recipient_email_snapshot) = lower(newsletter_subscribers.email)'],
-      ['where', 'opened.opened_at', '>=', new Date(asOf.getTime() - 90 * 24 * 60 * 60 * 1000)],
-      ['where', 'opened.opened_at', '<=', asOf],
+    expect(record(captured.where)).toEqual([
+      ['whereExists', [
+        ['select', { raw: '1' }],
+        ['from', 'email_messages as opened'],
+        ['whereRaw', 'lower(opened.recipient_email_snapshot) = lower(newsletter_subscribers.email)'],
+        ['where', 'opened.opened_at', '>=', since],
+        ['where', 'opened.opened_at', '<=', asOf],
+      ]],
+      // A reader who opened only a Waves newsletter (SendGrid records those opens on the delivery row).
+      ['orWhereExists', [
+        ['select', { raw: '1' }],
+        ['from', 'newsletter_send_deliveries as nl_open'],
+        ['whereRaw', '(nl_open.subscriber_id = newsletter_subscribers.id or lower(nl_open.email) = lower(newsletter_subscribers.email))'],
+        ['where', 'nl_open.opened_at', '>=', since],
+        ['where', 'nl_open.opened_at', '<=', asOf],
+      ]],
     ]);
   });
 
@@ -113,13 +135,14 @@ describe('selectIssueAudience', () => {
     buildSubscriberQuery.mockReturnValue(fakeQuery([]));
     const audience = await selectIssueAudience();
     expect(audience).toEqual({ subscriberIds: [], counts: { warm: 0, heldOut: 0, recipients: 0 } });
-    expect(audienceSegmentFilter(audience)).toEqual({ subscriber_ids: [] });
+    expect(audienceSegmentFilter(audience)).toEqual({ subscriber_ids: [], holdout: 'pest-insider' });
   });
 });
 
-test('audienceSegmentFilter copies the ids, so a later change to the audience cannot change the stored filter', () => {
+test('audienceSegmentFilter copies the ids and names the holdout the sender checks again at dispatch', () => {
   const audience = { subscriberIds: [1, 2] };
   const filter = audienceSegmentFilter(audience);
   audience.subscriberIds.push(3);
-  expect(filter).toEqual({ subscriber_ids: [1, 2] });
+  expect(HOLDOUT_NAME).toBe('pest-insider');
+  expect(filter).toEqual({ subscriber_ids: [1, 2], holdout: 'pest-insider' });
 });

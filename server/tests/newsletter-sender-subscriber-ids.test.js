@@ -41,6 +41,24 @@ describe('subscriber_ids', () => {
     expect(bindings).toContainEqual([2147483647]);
   });
 
+  test('the Pest Insider holdout name keeps the list query; the dispatch re-check applies it', () => {
+    const plain = shapeOf({ subscriber_ids: [3, 1] });
+    const named = shapeOf({ subscriber_ids: [3, 1], holdout: 'pest-insider' });
+    expect(named.sql).toBe(plain.sql);
+    expect(named.bindings).toEqual(plain.bindings);
+  });
+
+  test.each([
+    ['an unknown name', 'pest-insider-v2'],
+    ['an inherited property name', 'toString'],
+    ['a number', 5],
+    ['an object', { name: 'pest-insider' }],
+  ])('a holdout given as %s fails closed', (_label, holdout) => {
+    const { sql } = shapeOf({ subscriber_ids: [3, 1], holdout });
+    expect(sql).toMatch(/1 = 0/);
+    expect(sql).not.toMatch(/ANY\(/);
+  });
+
   test('absent or null keeps the old behavior', () => {
     for (const filter of [{}, { subscriber_ids: null }, { subscriber_ids: undefined }]) {
       const { sql } = shapeOf(filter);
@@ -60,14 +78,18 @@ describe('subscriber_ids', () => {
 });
 
 describe('warmAudienceQuery', () => {
-  test('starts from the send path query and requires an opened Waves email between the cutoff and asOf', () => {
+  test('starts from the send path query and requires an opened Waves email or Waves newsletter between the cutoff and asOf', () => {
     const since = new Date('2026-09-03T12:00:00Z');
     const until = new Date('2026-12-02T12:00:00Z');
     const base = shapeOf(null);
     const { sql, bindings } = warmAudienceQuery({ since, until }).toSQL();
     expect(bindings.slice(0, base.bindings.length)).toEqual(base.bindings);
-    expect(bindings.slice(-2)).toEqual([since, until]);
-    expect(sql).toMatch(new RegExp(`exists \\(select 1 from "email_messages" as "opened" where lower\\(opened\\.recipient_email_snapshot\\) = lower\\(newsletter_subscribers\\.email\\) and "opened"\\."opened_at" >= ${P} and "opened"\\."opened_at" <= ${P}\\)`));
+    expect(bindings.slice(-4)).toEqual([since, until, since, until]);
+    // One group: either open counts, and the group is ANDed with every send-path rule before it.
+    expect(sql).toContain(' and (exists (select 1 from "email_messages" as "opened" where lower(opened.recipient_email_snapshot) = lower(newsletter_subscribers.email)'
+      + ' and "opened"."opened_at" >= ? and "opened"."opened_at" <= ?)'
+      + ' or exists (select 1 from "newsletter_send_deliveries" as "nl_open" where (nl_open.subscriber_id = newsletter_subscribers.id or lower(nl_open.email) = lower(newsletter_subscribers.email))'
+      + ' and "nl_open"."opened_at" >= ? and "nl_open"."opened_at" <= ?)) order by');
     // The send path query opens with its WITH clauses; the main select after them reads two columns.
     expect(sql).toContain(') select "newsletter_subscribers"."id", "newsletter_subscribers"."customer_id" from "newsletter_subscribers" where ');
     expect(sql).toMatch(/order by "newsletter_subscribers"\."id" asc$/);
