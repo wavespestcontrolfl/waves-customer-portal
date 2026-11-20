@@ -750,6 +750,18 @@ visit's own record (`service_records` by the invoice's `service_record_id` and
 `customer_id`). A raw note, a combined-visit invoice (it keeps none) or a
 missing record returns null.
 
+The signed-in customer's `GET /api/billing/balance` uses the same payer
+ownership checks for failed-payment balances, upcoming charges, the next
+charge, the failure banner, unpaid-invoice sum, and Pay now links. The live
+verdict covers stamped payer/statement invoices, visit-level Bill-To, and the
+customer's default payer; statement-accrued invoices never enter the homeowner
+sum. If ownership cannot be verified, the route returns HTTP 503 with
+`BILLING_OWNERSHIP_UNAVAILABLE`, so the existing portal unavailable/retry state
+withholds every amount instead of displaying a wrong zero or third-party debt.
+Malformed legacy failed-payment invoice references are never passed to the
+UUID invoice lookup; valid references still deduplicate, and a real lookup
+failure withholds the unresolved linked attempt amount.
+
 Part payments (billing audit 2026-10-30): `/api/pay/:token` returns
 `invoice.amountPaid`, the money the office already recorded on this
 still-open invoice (`invoices.amount_paid`, GATE_PARTIAL_PAYMENTS), beside

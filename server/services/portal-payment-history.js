@@ -7,7 +7,7 @@ const db = require('../models/db');
 const { excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const StripeService = require('./stripe');
 const logger = require('./logger');
-const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
+const { loadPayerLinkage, excludeDirectPayerPayments, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
 const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer, neverRanVisitStatus } = require('./invoice-helpers');
 const { isNeverAttemptedDeferral } = require('./failed-payments');
 const { isParkedOrSupersededAttempt } = require('./retry-collectibility');
@@ -23,12 +23,17 @@ const { whereAwaitingAuthentication } = require('./invoice-payment-authenticatio
 //      the payment-success SMS/email uses). View-only, no PDF.
 // Customer-scoped lookup: a token is only ever returned for an invoice
 // belonging to the requesting customer.
-const stripeReceiptOf = (p) => {
+const paymentMetadataOf = (payment) => {
   try {
-    const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-    return m?.stripe_receipt_url || p.receipt_url || null;
-  } catch { return p.receipt_url || null; }
+    const metadata = typeof payment?.metadata === 'string'
+      ? JSON.parse(payment.metadata)
+      : payment?.metadata;
+    return metadata && typeof metadata === 'object' ? metadata : null;
+  } catch {
+    return null;
+  }
 };
+const stripeReceiptOf = (p) => paymentMetadataOf(p)?.stripe_receipt_url || p.receipt_url || null;
 // Invoice resolution mirrors the canonical webhook resolver
 // (stripe-webhook.js): metadata.invoice_id, then the dispute/legacy
 // aliases, then the payment's Stripe PaymentIntent matched against
@@ -50,6 +55,16 @@ const RECOVERY_INVOICE_COLUMNS = [
   'stripe_payment_intent_id', 'stripe_charge_id',
 ];
 const RECOVERY_PAYMENT_LIMIT = 10;
+const ABSORBED_ANNUAL_PREPAY_RESOLUTION = 'absorbed_annual_prepay';
+
+function absorbedByAnnualPrepay(payment) {
+  // billing-cron writes both pieces atomically. The marker alone could be
+  // stale/conflicting metadata; self-supersession alone is also how an
+  // uncertain Stripe outcome is parked.
+  return payment?.superseded_by_payment_id != null
+    && String(payment.superseded_by_payment_id) === String(payment.id)
+    && paymentMetadataOf(payment)?.deferred_resolution === ABSORBED_ANNUAL_PREPAY_RESOLUTION;
+}
 
 // The Waves receipt (token) for each visible payment's invoice, indexed by
 // every linkage a payment row can carry.
@@ -401,6 +416,7 @@ function recoveryFieldsFor(payment, { recoveryByPaymentId, recoveryStateByPaymen
   const id = String(payment.id);
   if (payment.status === 'failed') {
     if (isNeverAttemptedDeferral(payment)
+      || absorbedByAnnualPrepay(payment)
       || (payment.superseded_by_payment_id != null && String(payment.superseded_by_payment_id) !== id)) {
       return { recoveryInvoice: null, recoveryState: 'recovery_inactive' };
     }
@@ -578,18 +594,15 @@ async function listPortalPayments(customerId, {
   // stamps (payments.payer_id, metadata.payer_id) are SQL, so the common
   // case (no payer invoice on file) stays one COUNT(*) per page; only an
   // account with payer invoices scans its rows for the invoice-linked ones.
-  const notDirectlyPayerOwned = (q) => q
-    .whereNull('payments.payer_id')
-    .whereRaw("COALESCE(payments.metadata->>'payer_id', '') = ''");
   let total;
   if (payerInvoiceIds.size === 0) {
-    const countRow = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(database('payments')
+    const countRow = await excludeDirectPayerPayments(excludeHoldDeferralPlaceholders(database('payments')
       .where({ customer_id: customerId }), 'payments'))
       .count('* as count')
       .first();
     total = Number(countRow?.count || 0);
   } else {
-    const rows = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(database('payments')
+    const rows = await excludeDirectPayerPayments(excludeHoldDeferralPlaceholders(database('payments')
       .where({ customer_id: customerId }), 'payments'))
       .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id');
     total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
@@ -637,10 +650,7 @@ async function listPortalPayments(customerId, {
   // legacy fallback for rows written before the stamp existed. Description
   // wording alone (e.g. a row that merely says "Monthly") is NOT a signal.
   const isRecurringPayment = (p) => {
-    try {
-      const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-      if (m && m.billed_month) return true;
-    } catch { /* unparseable metadata — fall through to the marker */ }
+    if (paymentMetadataOf(p)?.billed_month) return true;
     return (p.description || '').includes('WaveGuard Monthly');
   };
 
