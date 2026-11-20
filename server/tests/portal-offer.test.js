@@ -642,6 +642,20 @@ describe('buildStartOffer', () => {
       expect(sync).toHaveBeenCalledTimes(1);
     });
 
+    // A refresh that is running may still be rolled back while the settings read fresh: the start offer waits.
+    test('a refresh already running when the engine would price is waited for; if it fails, there is no price', async () => {
+      const running = jest.spyOn(require('../services/pricing-engine/db-bridge'), 'isSyncInFlight').mockReturnValue(true);
+      try {
+        sync.mockResolvedValue(true);
+        expect(await start(noPlanDb())).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+        expect(sync).toHaveBeenCalledTimes(1);
+        sync.mockResolvedValue(false);
+        await expect(start(noPlanDb())).rejects.toMatchObject({ code: 'PRICING_CONFIG_UNAVAILABLE' });
+      } finally {
+        running.mockRestore();
+      }
+    });
+
     test('a customer who is refused before the price costs no refresh', async () => {
       needsSync.mockReturnValue(true);
       sync.mockResolvedValue(false);

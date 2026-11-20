@@ -1188,10 +1188,20 @@ function buildQuoteOption({
 // and does not succeed THROWS PRICING_CONFIG_UNAVAILABLE. This is the place to
 // enforce it: a check made before the pricer's own reads can pass, and the
 // interval can still come due (or an admin edit can invalidate it) by here.
+// strict also waits for a refresh that is RUNNING now (isSyncInFlight). Such a
+// refresh may have changed part of the settings already, and the bridge rolls
+// it back when a later read or its validation fails, while the time of the
+// last good refresh still reads fresh. The bridge runs one refresh at a time,
+// so the refresh asked for here starts after the running one and loads the
+// settings again. After it answers true the engine prices in this same turn
+// (no await between here and the last generateEstimate), and a refresh begins
+// with a database read, so none can change the settings in between.
 async function maybeSyncPricingEngine(db, { strict = false } = {}) {
   const canSync = Boolean(db && db.schema && typeof db.schema.hasTable === 'function');
   if (!canSync && !strict) return;
-  if (!(pricingEngine.needsSync && pricingEngine.needsSync())) return;
+  const due = Boolean(pricingEngine.needsSync && pricingEngine.needsSync());
+  const running = strict && require('./pricing-engine/db-bridge').isSyncInFlight();
+  if (!due && !running) return;
   const synced = canSync ? await pricingEngine.syncConstantsFromDB(db) : false;
   if (strict && synced !== true) {
     throw Object.assign(new Error('live price settings could not be loaded'), { code: 'PRICING_CONFIG_UNAVAILABLE' });

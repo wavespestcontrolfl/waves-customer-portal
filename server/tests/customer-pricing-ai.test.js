@@ -1192,6 +1192,45 @@ describe('strictPriceSettings: the refresh of the price settings before the engi
     expect(result.options.length).toBeGreaterThan(0);
   });
 
+  // A refresh that is running may have changed part of the settings, and the bridge rolls it back if it fails,
+  // while the time of the last good refresh still reads fresh. Strict waits for it: the bridge runs one refresh
+  // at a time, so the refresh strict asks for starts after the running one.
+  describe('a refresh that is already running while the settings read fresh', () => {
+    const bridge = require('../services/pricing-engine/db-bridge');
+    let running;
+    beforeEach(() => {
+      needsSync.mockReturnValue(false);
+      running = jest.spyOn(bridge, 'isSyncInFlight').mockReturnValue(true);
+    });
+    afterEach(() => { running.mockRestore(); });
+
+    test('strict waits for it and prices when it succeeds', async () => {
+      sync.mockResolvedValue(true);
+      const db = refreshable();
+      const result = await price({ strictPriceSettings: true, db });
+      expect(sync).toHaveBeenCalledTimes(1);
+      expect(sync).toHaveBeenCalledWith(db);
+      expect(result.options.length).toBeGreaterThan(0);
+    });
+
+    test('strict throws when it fails: never a price from settings the bridge rolled back', async () => {
+      sync.mockResolvedValue(false);
+      await expect(price({ strictPriceSettings: true })).rejects.toMatchObject(UNAVAILABLE);
+    });
+
+    test('the default does not wait: no refresh is asked for, as before', async () => {
+      const result = await price();
+      expect(sync).not.toHaveBeenCalled();
+      expect(result.options.length).toBeGreaterThan(0);
+    });
+
+    test('with no refresh running, strict asks for none', async () => {
+      running.mockReturnValue(false);
+      await price({ strictPriceSettings: true });
+      expect(sync).not.toHaveBeenCalled();
+    });
+  });
+
   // The default skips the refresh for a handle with no schema access. Strict cannot skip a refresh that is due.
   test('a handle that cannot refresh: the default prices, strict throws while a refresh is due and prices while the settings are fresh', async () => {
     const noSchema = () => dbForTables({ customers: [customer], scheduled_services: [] });
