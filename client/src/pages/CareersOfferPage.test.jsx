@@ -178,7 +178,8 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByText(/This offer is no longer open/)).toBeInTheDocument();
   });
 
-  it('stays locked with Check again when the refresh after a consent 409 fails', async () => {
+  // The refusal says nothing about what is stored, so until a read works the page only locks and offers Check again.
+  it('stays locked with Check again when the refresh after a consent 409 fails, and says nothing about the choice yet', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({ error: 'Not open', code: 'NOT_OPEN' }, 409))
@@ -188,7 +189,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
-    expect(screen.getByText('That did not go through. Please try again.')).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
     expect(screen.getByRole('button', { name: 'Check again' })).toBeEnabled();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
   });
@@ -640,8 +641,9 @@ describe('CareersOfferPage — open state', () => {
   });
 
   // The same refusal, but the read after it fails: the page locks every answer
-  // until Check again reads the offer, and still says the change did not go through.
-  it('still says a refused change did not go through when the read after it failed and Check again reads the offer', async () => {
+  // until Check again reads the offer, and says the change did not go through
+  // only once that read shows another choice stored.
+  it('says a refused change did not go through once Check again reads another choice stored', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
       .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // another tab changed the choice since this read
@@ -653,6 +655,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull(); // nothing read yet
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked(); // the stored choice, not the refused one
@@ -662,8 +665,8 @@ describe('CareersOfferPage — open state', () => {
   });
 
   // The same, but another tab saved the very choice this one asked for before Check again read it: the box shows
-  // that choice, and the line that the change did not go through goes, so no one clicks the box back.
-  it('drops the did-not-go-through line when Check again reads the choice the applicant asked for', async () => {
+  // that choice, and the page never says the change did not go through, so no one clicks the box back.
+  it('never says the change did not go through when Check again reads the choice the applicant asked for', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // another tab changed the offer since this read
@@ -673,13 +676,42 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
-    expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
-    expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
+    expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked(); // the choice asked for, saved by the other tab
     expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  // Codex pre-push round 13: a save whose reply was lost can land after all. Try again then sends the same choice on
+  // the old version and meets a 409. That refusal says nothing about what is stored, so while the read after it fails
+  // the page only locks and offers Check again; that read shows the first save stored, and the page never says the
+  // choice did not go through.
+  it('waits for a read before saying a refused resend of a lost choice did not go through', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // the save: its reply is lost (it landed)
+      .mockRejectedValueOnce(new Error('offline')) // the check read fails too
+      .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // Try again: the old version is refused
+      .mockRejectedValueOnce(new Error('offline')) // the read after the refusal fails
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: '2026-12-11T15:30:00.000Z' }))); // Check again
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked(); // the first save landed
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(bodyOf(fetchMock, 3)).toEqual({ consent: true, version: VERSION });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   // The 409 says where the offer stands. A closed offer comes back whole, with

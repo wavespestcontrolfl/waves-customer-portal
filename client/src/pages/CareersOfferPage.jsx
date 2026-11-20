@@ -326,7 +326,7 @@ function TermsSection({ terms }) {
 // choice and the version.
 const unclearSave = (res) => res.status >= 500 || (res.ok && !(hasVersion(res.body) && typeof res.body.textConsent === 'boolean'));
 
-function TextConsent({ token, initial, version, onPending, onStale, onUnknown, onSnapshot, onRefused, onInvalid, onRead, locked }) {
+function TextConsent({ token, initial, version, snapshot, onPending, onStale, onUnknown, onSnapshot, onRefused, onInvalid, onRead, locked }) {
   const [checked, setChecked] = useState(Boolean(initial));
   // The offer's version the choice is made on: the page's copy, which each
   // read and each save brings up to date. The server refuses a change made
@@ -342,6 +342,11 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
   // through" shows only while the box does not show it, so the line goes when a
   // later read shows that choice stored (another tab saved it).
   const [refused, setRefused] = useState(null);
+  // A 409 refuses this request, not what is stored: an earlier save of the same
+  // choice whose reply was lost may have landed. So the refused choice waits
+  // here until the page applies a read after it (the read after the 409, or
+  // Check again when that read fails), and only then can the line show.
+  const refusal = useRef(null);
   // The choice the applicant just made, while its save has no answer yet. It
   // survives a failed read, and Try again sends it again.
   const wanted = useRef(null);
@@ -351,12 +356,18 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
 
   // A fresh read of the offer (another tab changed the choice, or an action
   // re-read the offer) carries the stored choice. Show it, unless a choice
-  // made here is still waiting for its answer.
+  // made here is still waiting for its answer. `snapshot` is the page's copy
+  // of the offer: a new one comes with every read or answer the page applies,
+  // also one that stores the same values.
   useEffect(() => {
     if (wanted.current !== null) return;
     setChecked(Boolean(initial));
     versionRef.current = version;
-  }, [initial, version]);
+    if (refusal.current !== null) {
+      setRefused(refusal.current);
+      refusal.current = null;
+    }
+  }, [initial, version, snapshot]);
 
   // After a write whose reply was lost, ask the server what it stored. Signing
   // stays locked until the stored choice is the one the applicant made. The read
@@ -397,6 +408,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
     setUnconfirmed(false);
     setError('');
     setRefused(null);
+    refusal.current = null;
     let res;
     try {
       res = await postJson(token, '/text-consent', { consent: next, version: versionRef.current });
@@ -442,12 +454,17 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
       // page out of date (OfferPage `recheck`). If that read fails, the page
       // locks every answer until a read works: its Check again reads with this
       // status, so a 404 still counts there.
+      // After a 409 the next read the page applies decides the line: it says the
+      // change did not go through only if the stored choice is another one, so
+      // no one signs on a choice that was never saved, and no one is told a
+      // saved choice failed.
+      if (res.status === 409) refusal.current = next;
       const after = res.status === 409 && onRefused(res.body) ? 'changed' : await onStale(res.status);
       if (after === 'failed') onUnknown(res.status);
-      // The offer is still open, or may be, after a 409: the change was made on an
-      // older read and refused, and the box shows the stored choice again. Say so,
-      // so no one signs on a choice that was never saved.
-      if (res.status === 409 && (after === 'open' || after === 'failed')) setRefused(next);
+      if (after === 'changed' || after === 'outdated') {
+        refusal.current = null;
+        setRefused(null);
+      }
     } else if (!res.ok) setError(res.body?.error || CONNECTION_ERROR);
     setSaving(false);
     onPending(false);
@@ -767,7 +784,7 @@ function OpenOffer({ token, data, outdated, onApplied, onRefused, onReload, onRe
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} version={data.version} onPending={setConsentPending} onStale={onRecheck} onUnknown={markUnknown} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} onRead={onRead} locked={blocked} />
+        <TextConsent token={token} initial={data.textConsent} version={data.version} snapshot={data} onPending={setConsentPending} onStale={onRecheck} onUnknown={markUnknown} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} onRead={onRead} locked={blocked} />
         <SignBlock
           name={name}
           onName={setName}

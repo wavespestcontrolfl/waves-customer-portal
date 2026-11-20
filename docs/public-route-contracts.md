@@ -8740,8 +8740,9 @@ GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` ->
 `version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with
 no write, and a change made from any other version answers 409 `{state:'open'}`, so a save that lands late (its reply
 was lost and the page saved the same choice again) cannot undo a later choice (on that 409 the page reads the offer,
-shows the stored choice and says "That did not go through. Please try again."; when that read fails, it says the same
-and locks every answer until Check again reads the offer); `accept {signedName,
+shows the stored choice and says "That did not go through. Please try again." only when that read stores another
+choice: the 409 refuses this request, and an earlier save of the same choice whose reply was lost may have landed;
+when that read fails, the page locks every answer until Check again reads the offer, and that read decides the line); `accept {signedName,
 version}` (trimmed,
 3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
 'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500), version}` -> `{state:'date_requested'}`; `decline {reason?
