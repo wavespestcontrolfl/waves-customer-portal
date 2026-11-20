@@ -890,9 +890,11 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
   test('an issue row that is no longer drafted rolls the queueing back, and the owner is told', async () => {
     // The send's queue update matches, but its issue row does not move: the transaction fails.
     wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE, update: 0 } });
+    mockTrigger.mockResolvedValueOnce({ bellWritten: true });
     const r = await sendNewsletterProof('send-1');
 
-    expect(r).toEqual(expect.objectContaining({ sent: true, queued: false }));
+    // `notified`: the alert about it reached the owner (the planner's last tick reads it).
+    expect(r).toEqual(expect.objectContaining({ sent: true, queued: false, notified: true }));
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
       errors: ['The FYI copy went out, but the issue changed before it could be queued, so it will not send by itself.'],
@@ -935,6 +937,39 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(r.queued).toBe(false);
     expect(mockSendOne.mock.calls[0][0].subject).toMatch(/^ACT: /);
     expect(issuesChain.update).not.toHaveBeenCalled();
+  });
+
+  // An FYI copy went out, but its queueing has not landed (or failed): a draft with a live token.
+  const PI_FYI_DRAFT = { ...PI_DRAFT, proof_token: 'ab12cd34', proof_sent_at: PROOF_STAMP, updated_at: PROOF_STAMP };
+  const APPROVED = { ...HOLD, id: 'email-4', body_text: 'approved' };
+
+  test('HOLD before its queueing landed holds the planned row, and a send queued in between goes back to draft', async () => {
+    const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_FYI_DRAFT }, issues: { first: ISSUE } });
+    expect(await maybeHandleProofApproval(HOLD)).toBe(true);
+
+    expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted', 'scheduled']);
+    expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
+    // Only a send the switch queued in between is touched: back to draft.
+    expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', proof_token: 'ab12cd34', status: 'scheduled' });
+    expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_approval_email_id');
+    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft', scheduled_for: null, proof_approved_at: null }));
+  });
+
+  test('APPROVED never sends a planned issue at another time, and the owner is told how to send it', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    try {
+      const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_FYI_DRAFT }, issues: { first: ISSUE } });
+      expect(await maybeHandleProofApproval(APPROVED)).toBe(true);
+
+      expect(sendsChain.update).not.toHaveBeenCalled();
+      expect(issuesChain.update).not.toHaveBeenCalled();
+      expect(mockSendCampaign).not.toHaveBeenCalled();
+      expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+        errors: ['Approved, but this Waves Pest Insider issue sends only by itself, on its Thursday at 7:00 AM ET, so the reply did not send it. To send it now, use the Newsletter page.'],
+      }));
+    } finally {
+      delete process.env.GATE_PEST_INSIDER_PROOF;
+    }
   });
 
   test('HOLD holds the queued issue and its planned row', async () => {

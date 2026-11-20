@@ -254,7 +254,7 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
       q.first = jest.fn(async () => (table === 'pest_insider_issues' ? PLANNED : undefined));
       // Nothing claimed the row: it is still scheduled, not sending.
       q.update = jest.fn(async (patch) => {
-        updates.push({ table, patch });
+        updates.push({ table, patch, conds: q.conds });
         return q.conds.some((cond) => cond && cond.status === 'sending') ? 0 : 1;
       });
       return q;
@@ -263,11 +263,29 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     // sendCampaign throws before its claim here (no SendGrid in tests, and no row to read).
     await processScheduledSends();
 
-    expect(updates).toEqual([
+    expect(updates.map(({ table, patch }) => ({ table, patch }))).toEqual([
       { table: 'newsletter_sends', patch: { status: 'failed' } },
       { table: 'newsletter_sends', patch: expect.objectContaining({ status: 'failed' }) },
       { table: 'pest_insider_issues', patch: expect.objectContaining({ status: 'failed', reason: expect.stringMatching(/^send failed before it started: /) }) },
     ]);
+    // The 'sending' flip is bound to this tick's own claim token: never another worker's send.
+    expect(updates[0].conds).toContainEqual({ id: 'send-pi-2', status: 'sending', sending_claim_token: expect.any(String) });
+  });
+
+  test('a planned issue that cannot be read is left scheduled for the next tick: no failure, no alert', async () => {
+    const updates = wireInsider([AUTO_QUEUED_INSIDER]);
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = base(table);
+      if (table === 'pest_insider_issues') q.first = jest.fn(async () => { throw new Error('connection reset'); });
+      return q;
+    });
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('9:59 AM ET is still inside the window', async () => {

@@ -413,6 +413,34 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(issueUpdate).toMatchObject({ status: 'failed', reason: 'every SendGrid batch failed' });
   });
 
+  test('a planned issue whose every reader dropped out at dispatch reached nobody, so its planned issue row fails', async () => {
+    let issueUpdate = null;
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', newsletter_type: 'pest-insider-monthly', html_body: '<p>Body</p>', text_body: 'Body',
+        subject: 'Hello', from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: PLANNED_PI, subject_b: null,
+      },
+      subscribers: [
+        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
+        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+      ],
+      // Both readers unsubscribed between the count and the batch.
+      eligibleAtDispatch: [],
+      onIssueUpdate: (payload) => { issueUpdate = payload; },
+    });
+
+    const result = await sendCampaign('send-1');
+
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ recipients: 0, skipped_ineligible: 2 });
+    expect(issueUpdate).toMatchObject({ status: 'failed', reason: 'no planned reader was still eligible at send time' });
+  });
+
   test('a holdout name this server does not know stops a first send before anything is sent', async () => {
     buildDb({
       send: {

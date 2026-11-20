@@ -254,12 +254,17 @@ function proofOutcome(proof) {
   return proof.reason || 'skipped';
 }
 
-// The proof step told the owner in this run, or another worker is on its FYI copy right now: no
-// second notice from the planner. A copy an EARLIER run claimed (proof_already_sent) is not
-// enough: that run may have stopped after the claim, before the copy went out or the issue was
-// queued (a restart), and then nobody told the owner.
-const proofInformed = (proof) => Boolean(proof && (proof.sent || proof.notified
+// The proof step told the owner in this run (its FYI copy queued the issue, or an alert reached
+// the owner), or another worker is on its FYI copy right now: no second notice from the planner.
+// An FYI copy that could not queue the issue counts only when the alert about that was delivered
+// (`notified`): otherwise the owner's only message says the issue will send. A copy an EARLIER
+// run claimed (proof_already_sent) is not enough either: that run may have stopped after the
+// claim, before the copy went out or the issue was queued (a restart), and then nobody was told.
+const proofInformed = (proof) => Boolean(proof && ((proof.sent && proof.queued) || proof.notified
   || proof.reason === 'proof_claimed_elsewhere'));
+
+// Why the proof step left an issue drafted, as a reason code for reasonCopy.
+const proofReason = (proof) => (proof && (proof.reason || (proof.sent ? 'not_queued' : null))) || 'draft_missing';
 
 // Why an issue will not send, in plain words for the admin notification.
 const REASON_COPY = [
@@ -274,6 +279,7 @@ const REASON_COPY = [
   [/^sendgrid_not_configured$/, 'SendGrid is not set up, so the FYI copy did not go out'],
   [/^proof_send_failed$/, 'SendGrid did not accept the FYI copy'],
   [/^proof_already_sent$/, 'an earlier run started its FYI copy but never queued it'],
+  [/^not_queued$/, 'its FYI copy went out, but the issue could not be queued'],
   [/^draft_missing$/, 'its draft was deleted'],
 ];
 function reasonCopy(reason) {
@@ -298,7 +304,7 @@ async function noticeIfIssueWillNotSend(db, issueDate, proof, failure = null) {
   if (!failure && row && row.status === 'drafted' && proofInformed(proof)) return false;
   const reason = failure
     ? `the planner's last run stopped with an error: ${String(failure.message || failure).slice(0, 200)}`
-    : !row ? 'no issue was recorded' : reasonCopy(row.status === 'drafted' ? (proof && proof.reason) || 'draft_missing' : row.reason);
+    : !row ? 'no issue was recorded' : reasonCopy(row.status === 'drafted' ? proofReason(proof) : row.reason);
   const { triggerNotification } = require('../notification-triggers');
   await triggerNotification('newsletter_proof_blocked', {
     sendId: null,

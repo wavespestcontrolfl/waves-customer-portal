@@ -487,6 +487,22 @@ describe('runIssuePlanner with GATE_PEST_INSIDER_AUTO_SEND on', () => {
       expect(triggerNotification).not.toHaveBeenCalled();
     });
 
+    test.each([
+      ['did not reach the owner: the notice is raised', false, true],
+      ['reached the owner: no second notice', true, false],
+    ])('an FYI copy that could not queue the issue, whose alert %s', async (_label, notified, raised) => {
+      const database = fakeDb({ existing: { id: 'row-1', status: 'drafted', send_id: 'send-1' }, after: { status: 'drafted', reason: null } });
+      const sendProof = jest.fn(async () => ({ sent: true, token: 'tok', queued: false, notified }));
+      const result = await runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof });
+
+      expect(result).toMatchObject({ proof: 'fyi_sent_not_queued', noticeRaised: raised });
+      if (raised) {
+        expect(triggerNotification.mock.calls[0][1].errors).toEqual(['It will not send this time: its FYI copy went out, but the issue could not be queued (not_queued)']);
+      } else {
+        expect(triggerNotification).not.toHaveBeenCalled();
+      }
+    });
+
     test('no second notice when the proof step already told the owner why', async () => {
       const database = fakeDb({ after: { status: 'drafted', reason: null } });
       const sendProof = jest.fn(async () => ({ skipped: true, reason: 'validation_failed', errors: ['x'], notified: true }));

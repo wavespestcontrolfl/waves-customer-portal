@@ -587,13 +587,14 @@ async function queueAutoSendIssue(send, token, claimedAt, calendarContext, issue
   } catch (err) {
     logger.error(`[newsletter-proof] queueing auto-send issue ${send.id} failed: ${err.message}`);
   }
+  let notified = false;
   if (!queued) {
-    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+    notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: [`The FYI copy went out, but the issue changed before it could be queued, so it will not send ${issueContext ? 'by itself' : 'this week'}.`],
     });
   }
-  return Boolean(queued);
+  return { queued: Boolean(queued), notified };
 }
 
 /**
@@ -737,7 +738,8 @@ async function sendNewsletterProof(sendId) {
 
     // The "reply APPROVED" bell is for a proof that waits on the owner; an
     // auto-send issue needs no one (its FYI copy is the record).
-    const queued = delivery.autoSend && await queueAutoSendIssue(send, token, now, calendarContext, issueContext);
+    const queue = delivery.autoSend ? await queueAutoSendIssue(send, token, now, calendarContext, issueContext) : null;
+    const queued = Boolean(queue && queue.queued);
     if (!delivery.autoSend) {
       await notifyProof('newsletter_proof_sent', { sendId: send.id,
         subject: send.subject,
@@ -747,7 +749,9 @@ async function sendNewsletterProof(sendId) {
     }
 
     logger.info(`[newsletter-proof] proof sent for ${send.id} (token ${token}, queued ${queued}, messageId ${result?.messageId || 'n/a'})`);
-    return { sent: true, token, queued };
+    // An FYI copy that could not queue its issue also says whether the alert about that reached
+    // the owner (the Pest Insider planner's last tick reads it).
+    return { sent: true, token, queued, ...(queue && !queued ? { notified: queue.notified } : {}) };
   } catch (sendErr) {
     // Release OUR claim (token-scoped) so the catch-up tick can retry a
     // transient SendGrid failure instead of the week silently losing its
@@ -795,6 +799,41 @@ async function holdAutoQueuedIssue(send, token, from) {
 }
 
 /**
+ * A reply to a planned Waves Pest Insider issue's FYI copy (its pest_insider_issues row links the
+ * send). The issue sends itself on its own Thursday, so the copy offers HOLD only, and an issue
+ * the switch already queued was handled by holdAutoQueuedIssue. HOLD on a send that is not queued
+ * yet holds the planned row: the queueing needs that row drafted, so one still in flight rolls
+ * back, and a send queued in between goes back to draft here. APPROVED never sends it at another
+ * time; the owner is told how to send it instead.
+ */
+async function handlePlannedIssueReply(send, token, from, replyText) {
+  if (send.status !== 'draft') {
+    logger.info(`[newsletter-proof] reply for planned issue send ${send.id} arrived while it was ${send.status} — no change`);
+    return true;
+  }
+  if (isHoldReply(replyText)) {
+    const held = await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'HOLD reply from the owner' });
+    if (held) {
+      await db('newsletter_sends')
+        .where({ id: send.id, proof_token: token, status: 'scheduled' })
+        .whereNotNull('proof_approved_at')
+        .whereNull('proof_approval_email_id')
+        .update({ status: 'draft', scheduled_for: null, proof_token: null, proof_approved_at: null, updated_at: new Date() });
+    }
+    logger.info(`[newsletter-proof] HOLD for planned issue send ${send.id} by ${maskEmail(from)}: ${held ? 'held' : 'nothing to hold'}`);
+    return true;
+  }
+  if (isApprovalReply(replyText)) {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+      subject: send.subject,
+      errors: ['Approved, but this Waves Pest Insider issue sends only by itself, on its Thursday at 7:00 AM ET, so the reply did not send it. To send it now, use the Newsletter page.'],
+    });
+  }
+  logger.info(`[newsletter-proof] reply for planned issue send ${send.id} is not HOLD — no change`);
+  return true;
+}
+
+/**
  * Inbound-email hook (called from the Gmail sync on every newly stored
  * email). Detects a reply to a proof email and, when it is an allowlisted
  * owner saying "approved", queues the list send for Tuesday at 6:00 AM ET.
@@ -837,6 +876,9 @@ async function maybeHandleProofApproval(email) {
   // 2026-10-30, option A). Checked before the duplicate guard below: an
   // auto-queued issue already carries proof_approved_at.
   if (isAutoQueued(send) && isHoldReply(replyText)) return holdAutoQueuedIssue(send, token, from);
+
+  // A planned Waves Pest Insider issue sends itself on its own Thursday: its own rules below.
+  if (await resolvePestInsiderIssueContext(send)) return handlePlannedIssueReply(send, token, from, replyText);
 
   if (send.proof_approved_at) {
     logger.info(`[newsletter-proof] send ${send.id} already approved — ignoring duplicate reply`);

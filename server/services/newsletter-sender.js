@@ -1502,6 +1502,7 @@ async function sendCampaign(sendId, opts = {}) {
 
   // Nothing went out: a planned Waves Pest Insider issue's row says so.
   if (finalSendUpdate.status === 'failed') await markIssueSendFailed(send, 'every SendGrid batch failed');
+  else if (recipientCount <= 0) await markIssueSendFailed(send, 'no planned reader was still eligible at send time');
 
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
     // Advance the calendar lifecycle (idempotent) so a sent newsletter's
@@ -1861,6 +1862,9 @@ async function processScheduledSends() {
   logger.info(`[newsletter-scheduler] ${due.length} scheduled send(s) due`);
   let processed = 0;
   for (const row of due) {
+    // This tick's own claim token (sendCampaign stamps it on its claim): the failure flip below
+    // touches only a claim this tick made, never another worker's send in progress.
+    const claimToken = crypto.randomUUID();
     try {
       // Proof-approved rows remain governed by the proof kill switch even
       // after approval. A manual future schedule has no proof_approved_at and
@@ -1894,7 +1898,15 @@ async function processScheduledSends() {
       // inside the 7:00-10:00 AM ET window. Anything else stops it for good.
       let notAfter = null;
       if (autoQueued && pestInsider) {
-        const stop = await pestInsiderDispatchStop(row);
+        let stop;
+        try {
+          stop = await pestInsiderDispatchStop(row);
+        } catch (readErr) {
+          // Nothing was claimed, so this is no send failure: the row stays scheduled for the
+          // next tick, and the window still bounds how long it can wait.
+          logger.warn(`[newsletter-scheduler] Pest Insider send ${row.id}: its planned issue could not be read, left for the next tick: ${readErr.message}`);
+          continue;
+        }
         if (stop) {
           logger.error(`[newsletter-scheduler] Pest Insider send ${row.id} blocked: ${stop}`);
           await revertBlockedScheduledSend(row, stop);
@@ -1957,6 +1969,7 @@ async function processScheduledSends() {
       // the row is picked up again, re-validated, on a later tick.
       await sendCampaign(row.id, {
         expect: { status: 'scheduled', updatedAt: row.updated_at, proofApprovedAt: row.proof_approved_at, notAfter },
+        claimToken,
       });
       processed++;
     } catch (err) {
@@ -1988,7 +2001,7 @@ async function processScheduledSends() {
       }
       logger.error(`[newsletter-scheduler] send ${row.id} failed: ${err.message}`);
       try {
-        const flipped = await db('newsletter_sends').where({ id: row.id, status: 'sending' }).update({ status: 'failed' });
+        const flipped = await db('newsletter_sends').where({ id: row.id, status: 'sending', sending_claim_token: claimToken }).update({ status: 'failed' });
         // Pre-claim throw (e.g. SendGrid unconfigured): the row never
         // reached 'sending' and would otherwise stay 'scheduled' — due
         // forever, retried every tick, invisible as a failure. Same
