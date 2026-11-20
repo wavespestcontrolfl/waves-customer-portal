@@ -76,7 +76,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseFirstAskEligible, firstAskCustomerMoved, lateCloseEligibleAfterPreRead, effectiveReviewAskDecision, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
+const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseFirstAskEligible, firstAskCustomerMoved, lateCloseEligibleAfterPreRead, firstAskVisitStillApplies, effectiveReviewAskDecision, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
@@ -1031,6 +1031,30 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
     });
   });
 
+  describe('firstAskVisitStillApplies: the first-ask visit predicates are read again under the lock', () => {
+    test('no first-ask check ran: nothing to revalidate', async () => {
+      const readVisit = jest.fn();
+      expect(await firstAskVisitStillApplies({ checkedCustomerId: null, serviceId: 's', database: {}, readVisit })).toBe(true);
+      expect(readVisit).not.toHaveBeenCalled();
+    });
+    test('a visit turned into a re-service or callback (firstAskLockVisit answers null) voids the forced ask, and so does an unreadable one or another customer', async () => {
+      expect(await firstAskVisitStillApplies({ checkedCustomerId: 'c-1', serviceId: 's', database: {}, readVisit: async () => null })).toBe(false);
+      expect(await firstAskVisitStillApplies({ checkedCustomerId: 'c-1', serviceId: 's', database: {}, readVisit: async () => ({ customer_id: 'c-2' }) })).toBe(false);
+    });
+    test('the same eligible visit still applies', async () => {
+      expect(await firstAskVisitStillApplies({ checkedCustomerId: 'c-1', serviceId: 's', database: {}, readVisit: async () => ({ customer_id: 'c-1' }) })).toBe(true);
+      expect(await firstAskVisitStillApplies({ checkedCustomerId: 42, serviceId: 's', database: {}, readVisit: async () => ({ customer_id: '42' }) })).toBe(true);
+    });
+    test('a voided check keeps the visit quiet through lateCloseEligibleAfterPreRead, and the commit asks it on the locked transaction', async () => {
+      const stillApplies = await firstAskVisitStillApplies({ checkedCustomerId: 'c-1', serviceId: 's', database: {}, readVisit: async () => null });
+      const verdict = jest.fn(async () => true);
+      expect(await lateCloseEligibleAfterPreRead({ preReadEligible: true, customerMoved: !stillApplies, verdict })).toBe(false);
+      expect(verdict).not.toHaveBeenCalled();
+      const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+      expect(src).toMatch(/\|\| \(isBackfillCompletion && !\(await firstAskVisitStillApplies\(\{ checkedCustomerId: firstAskLockCustomerId, serviceId: svc\.id, database: trx \}\)\)\)/);
+    });
+  });
+
   describe('firstAskCustomerMoved: the first-ask choice is for the customer it was checked for', () => {
     test('no check run, or the same customer (number or string): not moved', () => {
       expect(firstAskCustomerMoved(null, { customer_id: 'c-1' })).toBe(false);
@@ -1045,7 +1069,7 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
     });
     test('the commit applies it before the verdict, and a voided choice drops the lock', () => {
       const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-      expect(src).toMatch(/const lateCloseEligible = await lateCloseEligibleAfterPreRead\(\{\s*\n\s*preReadEligible: lateClosePreRead,\s*\n\s*customerMoved: firstAskCustomerMoved\(firstAskLockCustomerId, lockedSvcRow\),/);
+      expect(src).toMatch(/const lateCloseEligible = await lateCloseEligibleAfterPreRead\(\{\s*\n\s*preReadEligible: lateClosePreRead,\s*\n\s*\/\/[^\n]*\n\s*customerMoved: firstAskCustomerMoved\(firstAskLockCustomerId, lockedSvcRow\)/);
       expect(src).toMatch(/firstAskLockCustomerId = lockVisit\.customer_id \?\? null;/);
       expect(src).toMatch(/if \(isBackfillCompletion && !lateCloseEligible\) reviewFirstAskLock = null;/);
     });

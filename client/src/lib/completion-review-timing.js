@@ -353,6 +353,17 @@ export function backfillCheckboxHint({ backfillCloseout = false, reviewAskGoes =
     : "Records to the visit day, sends no customer messages, and skips auto-charge.";
 }
 
+// Runs `start(signal)` and gives its answer, or null when it fails or `timeoutMs` passes first (the request is aborted): a stalled
+// submit-time preview read then takes the unavailable path instead of leaving the closeout unsaved. No timeout = no signal.
+export function withAbortTimeout(start, timeoutMs = 0) {
+  const controller = timeoutMs > 0 && typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  return Promise.resolve()
+    .then(() => start(controller ? controller.signal : undefined))
+    .catch(() => null)
+    .finally(() => { if (timer) clearTimeout(timer); });
+}
+
 // The one-shot send-time-preview read the panel makes while its review box is off. `apply(data)` gets each answer (null =
 // a failed read) unless stopped. With `retry` (a backdated closeout, whose ask stays suppressed until an answer says
 // otherwise) a failed read is read again every `intervalMs`, the normal poll's interval, until one answer lands. The returned

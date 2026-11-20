@@ -79,6 +79,7 @@ import {
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
   runPreviewReadWithRetry,
+  withAbortTimeout,
   claimPreviewRecheck,
   LATE_CLOSE_NOW_KEPT_MESSAGE,
   backfillCheckboxHint,
@@ -12554,6 +12555,9 @@ export function PestRecapCard({ serviceId }) {
 const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "skipCelsiusInBermudaArea", "zoysia2eeOnHand", "testPatchFirst"];
 const BERMUDA_TEST_PATCH_LINE = "Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot";
 
+// A submit-time preview read gives up after this long and counts as a failed read (the unavailable path).
+const SUBMIT_PREVIEW_TIMEOUT_MS = 8000;
+
 export function CompletionPanel({
   service,
   products,
@@ -12833,6 +12837,12 @@ export function CompletionPanel({
   const [reviewAlreadyReviewed, setReviewAlreadyReviewed] = useState(null);
   // GATE_REVIEW_LATE_CLOSE_ASK: the preview says a backdated closeout made now keeps the review ask. False until a read says so.
   const [reviewLateCloseAskKept, setReviewLateCloseAskKept] = useState(false);
+  // Whether the preview carries the `lateCloseAskKept` key: only the gate adds it. null = no answer read yet. false = a read
+  // answered without it (gate off): none of the late-close waits, re-checks or notices run, the flow is today's.
+  const lateCloseKeyRef = useRef(null);
+  // Set when the submit-time check failed and the notice promised the review request is off: it holds the box off against the
+  // first-ask effect and a recovered preview. Only the operator re-checking the box clears it.
+  const [lateCloseSuppressedByFailure, setLateCloseSuppressedByFailure] = useState(false);
   const [reviewFirstAskReasons, setReviewFirstAskReasons] = useState(() => firstAskReasonsFrom(null));
   const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
   const [reviewCustomAt, setReviewCustomAt] = useState("");
@@ -14662,13 +14672,18 @@ export function CompletionPanel({
   reviewSendPreviewRef.current = reviewSendPreview;
   // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
   const previewFailureNoticedRef = useRef(false);
-  const fetchReviewSendPreview = useCallback(() => {
+  // `timeoutMs` (the submit-time reads only) aborts a stalled request; expiry reads as a failed read (null), the unavailable path.
+  const fetchReviewSendPreview = useCallback((timeoutMs = 0) => {
     const qs = new URLSearchParams({ serviceType: service?.serviceType || "", ...(service?.id ? { serviceId: String(service.id) } : {}) });
-    return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
+    return withAbortTimeout((signal) => fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
       headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .catch(() => null);
+      ...(signal ? { signal } : {}),
+    }).then((r) => (r.ok ? r.json() : null)), timeoutMs)
+      .then((data) => {
+        // Remember whether the answer carried the late-close key (gate on); a failed read leaves it as it was.
+        if (data) lateCloseKeyRef.current = Object.prototype.hasOwnProperty.call(data, "lateCloseAskKept");
+        return data;
+      });
   }, [service?.id, service?.serviceType]);
   useEffect(() => {
     if (!willReview || oneTimeRecapOnly) {
@@ -14683,7 +14698,7 @@ export function CompletionPanel({
       // A backdated closeout keeps its ask suppressed until an answer lands, so a failed read is read again on the poll's interval.
       return runPreviewReadWithRetry({
         read: fetchReviewSendPreview,
-        retry: backfillQuietCloseout,
+        retry: backfillQuietCloseout && lateCloseKeyRef.current !== false,
         apply: (data) => {
           const firstAsk = firstReviewAskFrom(data);
           if (firstAsk !== null) setReviewFirstAsk(firstAsk);
@@ -14724,10 +14739,13 @@ export function CompletionPanel({
   // A first ask stays on: a draft restored with the box off, or a verdict that lands late, turns it
   // back on unless the tech already confirmed the one reason.
   useEffect(() => {
-    if (reviewFirstAsk && !requestReview && !reviewOptOutReason) setRequestReview(true);
-  }, [reviewFirstAsk, requestReview, reviewOptOutReason]);
+    // A failed late-close check that promised the request off keeps it off (lateCloseSuppressedByFailure) until the operator re-checks the box.
+    if (reviewFirstAsk && !requestReview && !reviewOptOutReason && !lateCloseSuppressedByFailure) setRequestReview(true);
+  }, [reviewFirstAsk, requestReview, reviewOptOutReason, lateCloseSuppressedByFailure]);
   const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk, reviewedOn: reviewAlreadyReviewed?.reviewedOn, lateCloseAskKept: backfillQuietCloseout && reviewLateCloseAskKept, willReview });
   const handleReviewToggle = (checked) => {
+    // Only the operator re-checking the box clears a failed-check suppression.
+    setLateCloseSuppressedByFailure(false);
     const next = nextReviewChoice({
       checked,
       firstAsk: reviewFirstAsk,
@@ -18727,13 +18745,14 @@ export function CompletionPanel({
     // The backdate box is the ONLY thing keeping the review box off (the preview was pending, failed or said no): read once more,
     // and if it now says the closeout keeps its review request, show that and stop, so the operator confirms the choice.
     // null or false submits as today: suppressed.
-    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && !willReview && backfillQuietCloseout
+    // Runs only once a preview answer carried the late-close key (the gate is on); with the gate off the flow is today's.
+    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && !willReview && backfillQuietCloseout && lateCloseKeyRef.current === true
       && visitOutcome === "completed" && reviewSuppressionReason === "backfill") {
       // A second tap while the read is pending returns, as the review-box branch below does.
       if (!claimPreviewRecheck(previewRecheckRef)) return;
       let probe;
       try {
-        probe = await fetchReviewSendPreview();
+        probe = await fetchReviewSendPreview(SUBMIT_PREVIEW_TIMEOUT_MS);
       } finally {
         previewRecheckRef.current = false;
       }
@@ -18749,7 +18768,7 @@ export function CompletionPanel({
       previewRecheckRef.current = true;
       let fresh;
       try {
-        fresh = await fetchReviewSendPreview();
+        fresh = await fetchReviewSendPreview(SUBMIT_PREVIEW_TIMEOUT_MS);
       } finally {
         previewRecheckRef.current = false;
       }
@@ -18770,7 +18789,10 @@ export function CompletionPanel({
       if (fresh) setReviewLateCloseAskKept(lateCloseAskKeptFrom(fresh));
       else if (lateCloseShown) setReviewLateCloseAskKept(false);
       // The notice says the review request is off: set the box itself off, so a later preview recovery never turns it back on.
-      if (lateCloseShown && lateCloseAskKeptFrom(fresh) !== true) setRequestReview(false);
+      if (lateCloseShown && lateCloseAskKeptFrom(fresh) !== true) {
+        setRequestReview(false);
+        setLateCloseSuppressedByFailure(true);
+      }
       const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, lateCloseShown: lateCloseShown ? true : null, failureNoticed: previewFailureNoticedRef.current, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone: service?.customerPhone }) });
       if (verdict) {
         if (verdict.noticed) previewFailureNoticedRef.current = true;

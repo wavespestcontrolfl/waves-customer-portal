@@ -739,6 +739,16 @@ async function lateCloseEligibleAfterPreRead({ preReadEligible, customerMoved, v
   return (await verdict()) === true;
 }
 
+// The first-ask check ran against the visit as read before its row was locked. Reads the same predicates again (firstAskLockVisit:
+// not a callback, not a re-service, same customer) under the lock; no longer matching, or unreadable, voids a forced first ask.
+// Exported for testability.
+async function firstAskVisitStillApplies({ checkedCustomerId, serviceId, database, readVisit }) {
+  if (checkedCustomerId == null) return true;
+  const read = readVisit || ((id, db2) => require('./review-request').firstAskLockVisit(id, db2));
+  const visit = await read(serviceId, database);
+  return !!visit && String(visit.customer_id) === String(checkedCustomerId);
+}
+
 // The first-ask check ran for one customer before the visit row was locked. A locked visit that belongs to another customer
 // (or whose customer cannot be read) voids that choice: no "already reviewed" mark, no kept late-close ask. Exported for testability.
 function firstAskCustomerMoved(checkedCustomerId, lockedVisit) {
@@ -7368,7 +7378,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // pre-lock row, a strict profile read, every closeout kind. Anything unknown fails closed.
           const lateCloseEligible = await lateCloseEligibleAfterPreRead({
             preReadEligible: lateClosePreRead,
-            customerMoved: firstAskCustomerMoved(firstAskLockCustomerId, lockedSvcRow),
+            // The customer and the first-ask visit predicates (callback, re-service) are checked again on the LOCKED row.
+            customerMoved: firstAskCustomerMoved(firstAskLockCustomerId, lockedSvcRow)
+              || (isBackfillCompletion && !(await firstAskVisitStillApplies({ checkedCustomerId: firstAskLockCustomerId, serviceId: svc.id, database: trx }))),
             verdict: () => require('./review-visit-day').lateCloseAskVerdict({
               isBackfill: isBackfillCompletion, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, recapReviewOnly,
               isInternalOnlyCompletion, deliverySuppressed: deliveryPosture.suppressCustomerComms,
@@ -16622,6 +16634,7 @@ module.exports = {
   lateCloseFirstAskEligible,
   firstAskCustomerMoved,
   lateCloseEligibleAfterPreRead,
+  firstAskVisitStillApplies,
   effectiveReviewAskDecision,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   backfillTimeOnSiteMinutes,

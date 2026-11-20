@@ -14,6 +14,7 @@ import {
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
   runPreviewReadWithRetry,
+  withAbortTimeout,
   claimPreviewRecheck,
   LATE_CLOSE_UNAVAILABLE_MESSAGE,
   previewAnswerSettled,
@@ -433,5 +434,33 @@ describe('submit-time late-close re-check (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
     expect(unknown.message).toBe(LATE_CLOSE_UNAVAILABLE_MESSAGE);
     expect(unknown.message).toMatch(/review request off/);
     expect(reviewPreviewSubmitVerdict({ ...base, fresh: { ...base.shown, lateCloseAskKept: false } }).message).toMatch(/past the 3 days/);
+  });
+});
+
+describe('withAbortTimeout: a stalled submit-time preview read gives up', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  test('a request that never answers is aborted at the deadline and reads as a failed read (null); the claim is released', async () => {
+    vi.useFakeTimers();
+    let aborted = false;
+    const start = (signal) => new Promise((_resolve, reject) => { signal.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')); }); });
+    const done = vi.fn();
+    const ref = { current: true };
+    const run = withAbortTimeout(start, 8000).then((v) => { ref.current = false; done(v); });
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(done).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2);
+    await run;
+    expect(aborted).toBe(true);
+    expect(done).toHaveBeenCalledWith(null);
+    expect(ref.current).toBe(false);
+  });
+
+  test('a fast answer comes back as is and the timer is cleared; no timeout means no signal', async () => {
+    vi.useFakeTimers();
+    expect(await withAbortTimeout(async (signal) => ({ ok: true, hasSignal: !!signal }), 8000)).toEqual({ ok: true, hasSignal: true });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(await withAbortTimeout(async (signal) => ({ hasSignal: !!signal }))).toEqual({ hasSignal: false });
+    expect(await withAbortTimeout(async () => { throw new Error('network'); }, 8000)).toBeNull();
   });
 });
