@@ -5,6 +5,7 @@ import { Field } from '../ui/Field';
 import { Select } from '../ui/Select';
 import { Table, TBody, TD, TH, THead, TR } from '../ui/Table';
 import { adminFetch } from '../../lib/adminFetch';
+import useTechScoreboard from '../../hooks/useTechScoreboard';
 import { centsToDollars, dayLabel } from '../payroll/payrollFormat';
 
 // Tech Rewards Plan D5-4 (owner 2026-11-20). The technician's OWN scoreboard (Staff page, Time > Scoreboard, behind
@@ -27,6 +28,8 @@ const NO_BONUS_REASONS = {
   hired_after_season: 'No estimate: you started after this season.',
 };
 
+// 'Nov 15' (the year is the commission year beside it)
+const shortDay = dateStr => dayLabel(dateStr).replace(/, \d{4}$/, '');
 const percent = value => `${Number(value)}%`;
 const bpsPercent = bps => `${(bps / 100).toFixed(1)}%`;
 const times = e4 => `${(e4 / 10000).toFixed(2)}x`;
@@ -112,22 +115,26 @@ export function ScoreboardView({ scoreboard }) {
       <Stat
         label={`Commission recorded, ${commission.year}`}
         value={centsToDollars(commission.yearToDateCents)}
-        note={`${commission.recordedThrough ? `Recorded through the pay run of ${dayLabel(commission.recordedThrough.payDate)}.` : 'No pay run yet.'} ${centsToDollars(commission.paidCents)} paid, ${centsToDollars(commission.unpaidCents)} not paid yet. A payment after that pay run is not counted yet.`}
+        note={`${commission.recordedThrough ? `Payments through ${shortDay(commission.recordedThrough.weekEnd)}.` : 'Recorded through the last pay run.'} ${centsToDollars(commission.paidCents)} paid, ${centsToDollars(commission.unpaidCents)} not paid yet. A later payment is not counted until a pay run records it.`}
       />
     </Card>
     <BonusCard scoreboard={scoreboard} />
   </div>;
 }
 
-// Staff page, Time > Scoreboard: the signed-in technician's own board, loaded by useTechScoreboard.
-export default function Scoreboard({ board }) {
-  if (board.status !== 'ready') return null;
+// Staff page, Time > Scoreboard: the signed-in technician's own board. It loads when the tab opens (the tab itself shows
+// only when useTechScoreboardAvailability says the gate is on).
+export default function Scoreboard() {
+  const board = useTechScoreboard();
+  if (board.status === 'off') return null;
   return <Card className="grid gap-3 p-4" aria-label="Scoreboard">
     <div>
       <h2 className="m-0 text-ui-title font-medium">Scoreboard</h2>
       <p className="m-0 text-ui-caption text-ink-secondary">Your own numbers only. {ESTIMATE_NOTE}</p>
     </div>
-    <ScoreboardView scoreboard={board.scoreboard} />
+    {board.status === 'loading' && <p role="status" className="m-0">Loading…</p>}
+    {board.status === 'error' && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{board.error}</p>}
+    {board.status === 'ready' && <ScoreboardView scoreboard={board.scoreboard} />}
   </Card>;
 }
 

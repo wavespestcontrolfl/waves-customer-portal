@@ -248,27 +248,29 @@ async function lastUnresolvedAskAt(customerId, { since, excludeReservationId = n
 }
 
 /**
- * Every ask one technician's visits actually delivered, as { requestId, at } (a Date), from the same evidence
- * deliveredAskRows reads: the initial ask (sms_sent_at, else sent_at) and a delivered follow-up (the stamped
- * followup_delivered_at, else the audit log's send time; the two are ONE follow-up, never two asks). Used for
- * counts by send day (the Tech Rewards scoreboard's review rate); no spacing or reservation logic.
+ * How many asks one technician's visits delivered with a send day (in `timeZone`) between `from` and `to` (dates),
+ * counted in PostgreSQL from the same evidence deliveredAskRows reads: the initial ask (sms_sent_at, else sent_at) and
+ * a delivered follow-up (the stamped followup_delivered_at, else the audit log's send time; the two are ONE
+ * follow-up, never two asks) each count on their OWN send time. No spacing or reservation logic. Used by the Tech
+ * Rewards scoreboard's review rate.
  */
-async function deliveredAskEventsForTechnician(conn, technicianId) {
+async function countDeliveredAsksForTechnician(conn, technicianId, { from, to, timeZone }) {
   const scope = 'customer_id IN (SELECT customer_id FROM review_requests WHERE technician_id = ?)';
-  const rows = await conn('review_requests')
-    .joinRaw(`LEFT JOIN ${followupDeliveredSubquery(scope)} ON followups.review_request_id = review_requests.id::text`, [technicianId])
-    .where({ 'review_requests.technician_id': technicianId })
-    .whereRaw(ASK_TOUCH_SQL)
-    .select('review_requests.id', 'review_requests.sms_sent_at', 'review_requests.sent_at',
-      'review_requests.followup_delivered_at as followup_recorded_at', 'followups.followup_delivered_at');
-  const events = [];
-  for (const row of rows) {
-    const initial = row.sms_sent_at || row.sent_at;
-    const followUp = row.followup_recorded_at || row.followup_delivered_at;
-    if (initial) events.push({ requestId: row.id, at: new Date(initial) });
-    if (followUp) events.push({ requestId: row.id, at: new Date(followUp) });
-  }
-  return events;
+  const row = (await conn.raw(
+    `SELECT COUNT(*)::int AS n FROM (
+       SELECT COALESCE(rr.sms_sent_at, rr.sent_at) AS at
+         FROM review_requests rr
+        WHERE rr.technician_id = ? AND ${ASK_TOUCH_SQL}
+       UNION ALL
+       SELECT COALESCE(rr.followup_delivered_at, followups.followup_delivered_at) AS at
+         FROM review_requests rr
+         LEFT JOIN ${followupDeliveredSubquery(scope)} ON followups.review_request_id = rr.id::text
+        WHERE rr.technician_id = ? AND ${ASK_TOUCH_SQL}
+     ) events
+      WHERE at IS NOT NULL AND (at AT TIME ZONE ?)::date >= ?::date AND (at AT TIME ZONE ?)::date <= ?::date`,
+    [technicianId, technicianId, technicianId, timeZone, from, timeZone, to],
+  )).rows[0];
+  return Number(row?.n) || 0;
 }
 
-module.exports = { ASK_SPACING_MS, deliveredAskEventsForTechnician, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt, lastUnresolvedAskAt };
+module.exports = { ASK_SPACING_MS, countDeliveredAsksForTechnician, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt, lastUnresolvedAskAt };

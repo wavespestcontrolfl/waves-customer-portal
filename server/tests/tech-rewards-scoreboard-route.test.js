@@ -100,6 +100,22 @@ describe('tech route (gated, own numbers only)', () => {
   });
 });
 
+describe('tech availability check (the Staff page every-load request)', () => {
+  test('answers only whether the tab shows, never reads a board, and needs the staff login', async () => {
+    let response = await get(techBase, '/availability');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toEqual({ available: true });
+    delete process.env.GATE_TECH_REWARDS_SCOREBOARD;
+    response = await get(techBase, '/availability');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ available: false });
+    expect((await get(techBase, '/availability', null)).status).toBe(401);
+    expect((await get(techBase, '/availability', 'customer')).status).toBe(403);
+    expect(scoreboard.getScoreboard).not.toHaveBeenCalled();
+  });
+});
+
 describe('admin preview (not gated)', () => {
   test('works with the gate off: lists technicians and opens any one board', async () => {
     delete process.env.GATE_TECH_REWARDS_SCOREBOARD;

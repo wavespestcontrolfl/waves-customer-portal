@@ -78,6 +78,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.text('source_id');
       t.uuid('check_id');
       t.date('earned_week_start').notNullable();
+      t.date('covers_from');
       t.date('covers_to');
       t.integer('amount_cents').notNullable();
     });
@@ -194,7 +195,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     // the Mar 2 week in full; the Aug 31 week (Aug 31 - Sep 6) by paid minutes: 480 of 480 + 480 + 480 (Tuesday's 510 less a 30 minute unpaid meal) = 1440 -> 50000 x 480 / 1440; the Feb 23 week (ends Mar 1) had no hours in the season
     expect(board.seasonBonus.grossCents).toBe(100000 + Math.round((50000 * 480) / 1440));
     expect(board.reviews).toMatchObject({ count: 3, asks: 3, rateBps: 10000 });
-    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 33600, paidCents: 23600, unpaidCents: 10000, recordedThrough: { payDate: '2026-11-06', weekEnd: '2026-11-01' } });
+    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 33600, paidCents: 23600, unpaidCents: 10000, recordedThrough: { weekEnd: '2026-12-20' } }); // the newest ledger line is dated Dec 14
     // hired 2025-12-01: the 1-year bonus is due 2026-12-01 from the pay of 2025-12-01 .. today: 100000+50000+70000+10000
     expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1, estimateCents: Math.round(230000 * 0.02) });
   });
@@ -312,22 +313,60 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', earningsStart: '2025-12-01', estimateCents: Math.round(35000 * 0.02) });
   });
 
-  test('commission is recorded only through the newest non-voided pay run; a payment after it is not counted, and the cutoff says so', async () => {
+  test('commission is recorded through the end of the pay week of the newest ledger line, never a run date', async () => {
+    // pay runs exist for later weeks, but the ledger lines prove a sync only through the week of the newest one
     await db('payroll_runs').insert([
       { status: 'finalized', week_start: '2026-11-02', pay_date: '2026-11-13' },
-      { status: 'draft', week_start: '2026-11-09', pay_date: '2026-11-20' },
-      { status: 'voided', week_start: '2026-11-16', pay_date: '2026-11-27' }, // a voided run is not a sync that counts
+      { status: 'draft', week_start: '2026-11-16', pay_date: '2026-11-27' },
     ]);
-    // a payment dated Nov 17 whose ledger line the next sync has not written yet: no row, so no figure
-    await db('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-11-02', covers_to: '2026-11-05', amount_cents: 4000 });
+    await db('payroll_pay_lines').insert([
+      { technician_id: alpha, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-11-02', covers_to: '2026-11-05', amount_cents: 4000 },
+      { technician_id: alpha, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-10-05', covers_to: '2026-10-08', amount_cents: 900 },
+      { technician_id: alpha, kind: 'commission', source_type: 'commission_payment', status: 'voided', earned_week_start: '2026-11-16', covers_to: '2026-11-17', amount_cents: 500 }, // a voided line proves nothing
+      { technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2026-11-16', amount_cents: 700 }, // hand-made: not ledger evidence
+      { technician_id: beta, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-11-09', covers_to: '2026-11-10', amount_cents: 100 },
+    ]);
     const board = await service.getScoreboard(alpha, { now: NOW });
-    expect(board.commission.recordedThrough).toEqual({ payDate: '2026-11-20', weekEnd: '2026-11-15' });
-    expect(board.commission.paidCents).toBe(4000);
+    expect(board.commission.recordedThrough).toEqual({ weekEnd: '2026-11-08' });
+    expect(board.commission.paidCents).toBe(4000 + 900 + 700);
   });
 
-  test('no pay run at all: the cutoff is null', async () => {
+  test('no ledger line for the technician: no cutoff date, even with pay runs on file', async () => {
+    await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-11-02', pay_date: '2026-11-13' });
+    await db('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', status: 'paid', earned_week_start: '2026-11-02', amount_cents: 700 }); // hand-made only
     const board = await service.getScoreboard(alpha, { now: NOW });
-    expect(board.commission).toMatchObject({ recordedThrough: null, yearToDateCents: 0 });
+    expect(board.commission.recordedThrough).toBeNull();
+  });
+
+  test('a hand-made line with only a pay week counts that week in-window days / 7 in the bonus base', async () => {
+    const [zed] = await db('technicians').insert({ name: 'Sample Zed', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-09-07', pay_date: '2026-09-18' }).returning('id');
+    const [check] = await insertChecks([{ run_id: run.id, technician_id: zed.id, status: 'finalized', week_start: '2026-09-07', gross_cents: 7000, regular_pay_cents: 0 }]).returning('id');
+    await db('payroll_pay_lines').insert([
+      { technician_id: zed.id, check_id: check.id, kind: 'commission', status: 'paid', earned_week_start: '2026-08-31', amount_cents: 7000 }, // week-only: Aug 31 is 1 of 7 days
+    ]);
+    const board = await service.getScoreboard(zed.id, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(1000);
+  });
+
+  test('a health allowance covering August assigned to a September pay week counts in the season base', async () => {
+    const [yan] = await db('technicians').insert({ name: 'Sample Yan', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-09-07', pay_date: '2026-09-18' }).returning('id');
+    const [check] = await insertChecks([{ run_id: run.id, technician_id: yan.id, status: 'finalized', week_start: '2026-09-07', gross_cents: 6000, regular_pay_cents: 0 }]).returning('id');
+    await db('payroll_pay_lines').insert({ technician_id: yan.id, check_id: check.id, kind: 'health_allowance', status: 'paid', earned_week_start: '2026-09-07', covers_from: '2026-08-01', covers_to: '2026-08-31', amount_cents: 6000 });
+    const board = await service.getScoreboard(yan.id, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(5000 + 143); // six weeks of 1000; the Aug 31 week is 1 of 7 days in the season
+  });
+
+  test('review asks are counted in SQL on each send time: an initial ask outside the season does not drag its in-season follow-up out', async () => {
+    const [c1, c2] = [randomUUID(), randomUUID()];
+    const rows = await db('review_requests').insert([
+      { technician_id: alpha, customer_id: c1, service_date: '2026-02-20', sms_sent_at: '2026-02-20T16:00:00Z', followup_delivered_at: '2026-03-05T16:00:00Z' }, // initial before Mar 1, follow-up inside
+      { technician_id: alpha, customer_id: c2, service_date: '2026-08-25', sms_sent_at: '2026-08-25T16:00:00Z' }, // initial inside, follow-up after
+    ]).returning(['id', 'customer_id']);
+    await db('messaging_audit_log').insert({ customer_id: c2, entry_point: 'review_request_followup', metadata: { review_request_id: rows.find((r) => r.customer_id === c2).id }, sent_at: '2026-09-02T16:00:00Z' });
+    const board = await service.getScoreboard(alpha, { now: NOW });
+    expect(board.reviews.asks).toBe(2);
   });
 
   test('an edge week with no daily summaries falls back to days / 7', async () => {

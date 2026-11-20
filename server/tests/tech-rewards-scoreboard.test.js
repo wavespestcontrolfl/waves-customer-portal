@@ -26,7 +26,7 @@ function inputs(over = {}) {
     grossSeasonCents: 1000000,
     priorYearGrossCents: 2000000,
     commission: { paidCents: 20000, unpaidCents: 10000 },
-    commissionRecordedThrough: { payDate: '2026-11-13', weekEnd: '2026-11-08' },
+    commissionRecordedThrough: { weekEnd: '2026-11-08' },
     ...over,
   };
 }
@@ -144,6 +144,29 @@ describe('earnedGrossCents (by component earning date)', () => {
     expect(earnedGrossCents([check], FROM, TO)).toBe(9500);
   });
 
+  test('a line with only an earned pay week counts that week in-window days / 7; a day-dated line takes its one day', () => {
+    // Mon Aug 31 week: 1 of 7 days in the season
+    const weekOnly = plain('2026-09-07', 7000, { regularPayCents: 0, lines: [{ cents: 7000, earnedOn: null, weekStart: '2026-08-31' }] });
+    expect(earnedGrossCents([weekOnly], FROM, TO)).toBe(1000);
+    const dayDated = plain('2026-09-07', 7000, { regularPayCents: 0, lines: [{ cents: 7000, earnedOn: '2026-08-31', weekStart: '2026-08-31' }] });
+    expect(earnedGrossCents([dayDated], FROM, TO)).toBe(7000);
+    // a week-only line in a week fully inside is whole
+    expect(earnedGrossCents([plain('2026-09-07', 7000, { regularPayCents: 0, lines: [{ cents: 7000, earnedOn: null, weekStart: '2026-04-06' }] })], FROM, TO)).toBe(7000);
+  });
+
+  test('a manual allowance covering August, paid in a September week, is split over its workweeks like the overtime premium', () => {
+    // Aug 1 - Aug 31 covers the weeks of Jul 27, Aug 3, 10, 17, 24 and 31: 6 x 1000; the Aug 31 week has 1 of 7 days in the season
+    const allowance = plain('2026-09-07', 6000, { regularPayCents: 0, lines: [{ cents: 6000, earnedOn: null, weekStart: '2026-09-07', coversFrom: '2026-08-01', coversTo: '2026-08-31' }] });
+    expect(earnedGrossCents([allowance], FROM, TO)).toBe(5000 + 143);
+    // the same line in the stay window of a later year takes the weeks by the same split; cents that do not divide go to the first weeks
+    const odd = plain('2026-09-07', 1000, { regularPayCents: 0, lines: [{ cents: 1000, earnedOn: null, weekStart: '2026-09-07', coversFrom: '2026-04-06', coversTo: '2026-04-26' }] });
+    expect(checkComponents(odd).filter((c) => c.week).map((c) => c.cents).slice(0, 3)).toEqual([334, 333, 333]);
+    expect(earnedGrossCents([odd], FROM, TO)).toBe(1000);
+    // a ledger commission line (a span, but a payment day) keeps its one day
+    const ledger = plain('2026-09-07', 4000, { regularPayCents: 0, lines: [{ cents: 4000, earnedOn: '2026-05-10', weekStart: '2026-05-04', coversFrom: '2026-03-02', coversTo: '2026-05-10' }] });
+    expect(earnedGrossCents([ledger], FROM, TO)).toBe(4000);
+  });
+
   test('a gross the components do not explain is undated: it takes its week in-window days / 7', () => {
     expect(earnedGrossCents([{ weekStart: '2026-08-31', grossCents: 70000, regularPayCents: 0, overtimePayCents: 0, ptoPayCents: 0, holidayPayCents: 0 }], FROM, TO)).toBe(10000);
   });
@@ -162,7 +185,7 @@ describe('composeScoreboard', () => {
     expect(board.score).toMatchObject({ complete: true, value: 91.5, band: { rateBps: 400, cutLines: CUTS } });
     expect(board.score.parts.audit).toEqual({ value: 90, weight: 25 });
     expect(board.reviews).toEqual({ count: 6, asks: 30, rateBps: 2000, multiplierPartE4: 3333 });
-    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 30000, paidCents: 20000, unpaidCents: 10000, recordedThrough: { payDate: '2026-11-13', weekEnd: '2026-11-08' } });
+    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 30000, paidCents: 20000, unpaidCents: 10000, recordedThrough: { weekEnd: '2026-11-08' } });
     // 1 year of tenure on Mar 1 2026 (hired 2025-04-01 -> 0 full years: Apr 1 is after Mar 1)
     expect(board.multiplier).toMatchObject({ tenureYears: 0, level: 1, levelSource: 'entry_default', multiplierE4: 13333 });
     // 400 bps x $10,000.00 x 1.3333 = $533.32

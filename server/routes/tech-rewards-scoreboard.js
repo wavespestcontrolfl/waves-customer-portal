@@ -8,6 +8,8 @@
  * technician's). The technician is ALWAYS the authenticated one (req.technicianId). A technicianId query
  * parameter is accepted only when it names the caller; any other id answers 403 before any read. An admin
  * login reads its own board here too: the owner's look at another technician is /api/admin/tech-rewards-scoreboard.
+ * GET /availability  { available } the light check the Staff page makes on every load (the board itself loads only when the
+ *         Scoreboard tab opens).
  * Off answers 404 { enabled: false } after the staff login check and before any query. Read only. No-store.
  */
 const express = require('express');
@@ -18,9 +20,16 @@ const scoreboard = require('../services/tech-rewards-scoreboard');
 
 const router = express.Router();
 
+const gateOn = () => typeof techRewardsScoreboardLive === 'function' && techRewardsScoreboardLive();
+
 router.use(adminAuthenticate, requireTechOrAdmin);
+// The light check the Staff page makes on every load: only whether the tab shows. It reads nothing else.
+router.get('/availability', (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.json({ available: gateOn() });
+});
 router.use((req, res, next) => {
-  if (!(typeof techRewardsScoreboardLive === 'function' && techRewardsScoreboardLive())) return res.status(404).json({ enabled: false });
+  if (!gateOn()) return res.status(404).json({ enabled: false });
   return next();
 });
 router.use((req, res, next) => { res.set('Cache-Control', 'private, no-store'); next(); });

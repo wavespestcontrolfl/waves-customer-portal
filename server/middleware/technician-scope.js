@@ -173,7 +173,7 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/payroll\/checks(\/[^/]+\/stub)?$/ },
   // A technician's own rewards scoreboard (GATE_TECH_REWARDS_SCOREBOARD, owner 2026-11-20, Tech Rewards Plan D5-4). The router
   // reads only req.technicianId and refuses any other id with 403.
-  { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/rewards-scoreboard$/ },
+  { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/rewards-scoreboard(\/availability)?$/ },
 
   // Knowledge base: read, and ask. Never write, verify, or run paid jobs.
   { bucket: 'knowledge-read', methods: READ, pattern: /^\/api\/admin\/kb(\/[^/]+)?$/ },

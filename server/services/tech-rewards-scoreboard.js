@@ -27,7 +27,8 @@
 const db = require('../models/db');
 const calc = require('./tech-rewards-calc');
 const scores = require('./tech-rewards-scores');
-const { deliveredAskEventsForTechnician } = require('./review-ask-history');
+const { countDeliveredAsksForTechnician } = require('./review-ask-history');
+const { weeksOfLine } = require('./payroll-regular-rate');
 const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
 const { SOURCE_TYPE: COMMISSION_SOURCE_TYPE } = require('./payroll-commission');
 const { SOURCE_TYPE: REVIEW_BONUS_SOURCE_TYPE } = require('./payroll-review-bonuses');
@@ -132,7 +133,7 @@ function stayBonusBlock(hireDate, today, priorPayCents) {
  * The scoreboard from the already-read inputs. Pure: no database, no clock.
  * inputs: { technician: { id, name, hireDate }, today, season, seasonScore, settings, reviews, asks,
  *           grossSeasonCents, priorYearGrossCents, commission: { paidCents, unpaidCents },
- *           commissionRecordedThrough: { payDate, weekEnd } | null }
+ *           commissionRecordedThrough: { weekEnd } | null }
  */
 function composeScoreboard(inputs) {
   const { technician, today, season, seasonScore, settings } = inputs;
@@ -186,16 +187,12 @@ async function readReviewCount(conn, technicianId, season) {
   return Number(row?.n) || 0;
 }
 
-// Review asks the technician's visits delivered in the window, by the ET day each went out (review-ask-history.js:
-// the initial ask and a delivered follow-up each count on their own send day; the follow-up's stamp and its
-// audit-log record are one ask). An ask sent after the season for a visit inside it belongs to the next one.
-async function readAskCount(conn, technicianId, season) {
-  const events = await deliveredAskEventsForTechnician(conn, technicianId);
-  return events.filter(({ at }) => {
-    const day = etDateString(at);
-    return day >= season.start && day <= season.asOf;
-  }).length;
-}
+// Review asks the technician's visits delivered from the season start to the board's date, by the ET day each went
+// out (review-ask-history.js: the initial ask and a delivered follow-up each count on their own send time; the
+// follow-up's stamp and its audit-log record are one ask), counted in PostgreSQL. An ask sent after the season for a
+// visit inside it belongs to the next one.
+const readAskCount = (conn, technicianId, season) => countDeliveredAsksForTechnician(conn, technicianId,
+  { from: season.start, to: season.asOf, timeZone: STAFF_TIME_ZONE });
 
 const DAY_MS = 86400000;
 const dayNumber = (dateStr) => Math.floor(Date.parse(`${dateStr}T00:00:00Z`) / DAY_MS);
@@ -204,6 +201,19 @@ const mulDivRound = (a, b, c) => Math.floor((2 * a * b + c) / (2 * c));
 // the same for a signed amount (a component can in principle be a negative adjustment)
 const signedMulDivRound = (cents, b, c) => (cents < 0 ? -mulDivRound(-cents, b, c) : mulDivRound(cents, b, c));
 const hundredths = (value) => Math.round(Number(value) * 100) || 0;
+
+// A pay line's components. A line with an earning DAY takes that day. Any other line with a span (covers_from..covers_to:
+// a hand-made commission or a monthly allowance) is split EQUALLY over the workweeks of the span, by the very helper the
+// overtime premium uses (payroll-regular-rate.js weeksOfLine, 29 CFR 778.120); the cents that do not divide go one each to the
+// earliest weeks. Each week then counts its in-window days / 7. A line with no span has only its earned pay week.
+function lineComponents(line) {
+  if (line.earnedOn) return [{ cents: line.cents, spread: [{ date: line.earnedOn, weight: 1 }] }];
+  const spanned = line.coversFrom && line.coversTo;
+  const weeks = spanned ? weeksOfLine({ coversFrom: line.coversFrom, coversTo: line.coversTo, weekStart: line.weekStart }) : [line.weekStart];
+  const base = Math.trunc(line.cents / weeks.length);
+  const extra = line.cents - base * weeks.length;
+  return weeks.map((week, i) => ({ cents: base + (i < extra ? 1 : 0), week }));
+}
 
 /**
  * The gross of one finalized check, split into the components payroll-calc.js computePaycheck adds up
@@ -222,9 +232,12 @@ const hundredths = (value) => Math.round(Number(value) * 100) || 0;
  *   holiday pay (holiday_pay_cents)        the dated holiday records of the week,       payroll_time_off (kind holiday)
  *                                           weighted by minutes
  *   commission lines (commission_cents)    the payment day for a ledger line            payroll_pay_lines of the check:
- *   review bonus lines (review_bonus_      (covers_to), the day the review was          LINE_EARNED_ON_SQL
- *   cents), health allowance lines         credited for a review bonus, the line's
- *   (health_allowance_cents)               own pay week otherwise
+ *   review bonus lines (review_bonus_      (covers_to), the day the review was          LINE_DAY_SQL
+ *   cents), health allowance lines         credited for a review bonus; a line with
+ *   (health_allowance_cents)               no such day (hand-made, allowance) only
+ *                                           has its earned pay week: in-window days / 7;
+ *                                           a spanned line (covers_from..covers_to) is split
+ *                                           equally over its workweeks (weeksOfLine)
  *   catch-up overtime premium              the earned weeks of the line pay it          calc_snapshot.lineOvertimeWeeks
  *   (line_overtime_premium_cents)          comes from (each week's premiumCents)
  *   anything else (gross minus the above)  NO DATE: the check's own week, in-window     (a check with no day records, a
@@ -250,7 +263,7 @@ function checkComponents(check) {
     { cents: wageCents, spread: weights },
     { cents: check.ptoPayCents, spread: timeOff(check.ptoRecords) },
     { cents: check.holidayPayCents, spread: timeOff(check.holidayRecords) },
-    ...(check.lines || []).map((line) => ({ cents: line.cents, spread: [{ date: line.earnedOn, weight: 1 }] })),
+    ...(check.lines || []).flatMap(lineComponents),
     ...(check.lineOvertimeWeeks || []).map((w) => ({ cents: w.premiumCents, week: w.weekStart })),
   ];
   const known = components.reduce((sum, c) => sum + c.cents, 0);
@@ -312,13 +325,15 @@ async function readTimeOffRecords(conn, technicianId, weekStart) {
   return { ptoRecords: records('pto'), holidayRecords: records('holiday') };
 }
 
-// The day a pay line was EARNED (the same dating the commission year to date uses): a commission ledger line on the day
-// of the payment it pays (covers_to), a review bonus on the day the review was credited, any other line (a hand-made
-// commission, a bonus, an allowance) in its own pay week (earned_week_start). `l` is payroll_pay_lines.
-const LINE_EARNED_ON_SQL = `COALESCE(CASE l.source_type
+// The day a pay line was EARNED: a commission ledger line on the day of the payment it pays (covers_to), a review
+// bonus on the day the review was credited; null for any other line (a hand-made commission, a bonus, an allowance),
+// which has only its pay week (earned_week_start). `l` is payroll_pay_lines.
+const LINE_DAY_SQL = `CASE l.source_type
     WHEN ? THEN l.covers_to
     WHEN ? THEN (SELECT (p.earned_at AT TIME ZONE ?)::date FROM review_incentive_payouts p WHERE p.id::text = l.source_id)
-  END, l.earned_week_start)`;
+  END`;
+// The commission year to date dates a line by its day, else by its pay week.
+const LINE_EARNED_ON_SQL = `COALESCE(${LINE_DAY_SQL}, l.earned_week_start)`;
 const lineEarnedOnBindings = () => [COMMISSION_SOURCE_TYPE, REVIEW_BONUS_SOURCE_TYPE, STAFF_TIME_ZONE];
 // the pay line kinds that are in a check's gross (the employer HSA is not)
 const GROSS_LINE_KINDS = ['review_bonus', 'commission', 'health_allowance'];
@@ -341,7 +356,9 @@ async function readGross(conn, technicianId, from, to) {
     .whereIn('l.check_id', rows.map((row) => row.id))
     .where('l.status', 'paid')
     .whereIn('l.kind', GROSS_LINE_KINDS)
-    .select('l.check_id', 'l.amount_cents', conn.raw(`to_char(${LINE_EARNED_ON_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()));
+    .select('l.check_id', 'l.amount_cents', conn.raw("to_char(l.earned_week_start, 'YYYY-MM-DD') AS week_start"),
+      conn.raw("to_char(l.covers_from, 'YYYY-MM-DD') AS covers_from"), conn.raw("to_char(l.covers_to, 'YYYY-MM-DD') AS covers_to"),
+      conn.raw(`to_char(${LINE_DAY_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()));
   const checks = [];
   for (const row of rows) {
     const check = {
@@ -352,7 +369,7 @@ async function readGross(conn, technicianId, from, to) {
       overtimeMinutes: Number(row.overtime_minutes) || 0,
       ptoPayCents: toCents(row.pto_pay_cents),
       holidayPayCents: toCents(row.holiday_pay_cents),
-      lines: lineRows.filter((line) => line.check_id === row.id).map((line) => ({ cents: toCents(line.amount_cents), earnedOn: line.earned_on })),
+      lines: lineRows.filter((line) => line.check_id === row.id).map((line) => ({ cents: toCents(line.amount_cents), earnedOn: line.earned_on, weekStart: line.week_start, coversFrom: line.covers_from, coversTo: line.covers_to })),
       lineOvertimeWeeks: (Array.isArray(row.line_overtime_weeks) ? row.line_overtime_weeks : [])
         .map((w) => ({ weekStart: w.weekStart, premiumCents: toCents(w.premiumCents) })),
     };
@@ -398,15 +415,17 @@ async function readScore(conn, technicianId, season) {
 // The day before a date (ET calendar).
 const dayBefore = (dateStr) => addStaffWorkDays(dateStr, -1);
 
-// How far the commission ledger is recorded: the newest pay run that is not voided (every draft, recompute and
-// finalize of a run syncs commission for all W-2 technicians, payroll-commission.js), as its pay date and the end of
-// its pay week (the sync records payments up to that day). null when no pay run exists.
-async function readCommissionRecordedThrough(conn) {
-  const row = await conn('payroll_runs')
-    .whereNot({ status: 'voided' })
-    .orderBy('week_start', 'desc')
-    .first(conn.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"), conn.raw("to_char(week_start + 6, 'YYYY-MM-DD') AS week_end"));
-  return row ? { payDate: row.pay_date, weekEnd: row.week_end } : null;
+// How far the commission ledger is proven recorded for this technician: the end of the pay week of their newest
+// ledger line (payroll-commission.js writes a commission_payment line only in a sync whose week end is on or after the
+// payment day, and a pay week ends on a Sunday, so a line paid in week W proves a sync through W + 6). A lower bound,
+// never a guess: null when the technician has no ledger line, and the board then shows no date.
+async function readCommissionRecordedThrough(conn, technicianId) {
+  const row = await conn('payroll_pay_lines')
+    .where({ technician_id: technicianId, kind: 'commission', source_type: COMMISSION_SOURCE_TYPE })
+    .whereIn('status', ['open', 'paid'])
+    .select(conn.raw("to_char(MAX(earned_week_start), 'YYYY-MM-DD') AS week"))
+    .first();
+  return row && row.week ? { weekEnd: addStaffWorkDays(row.week, 6) } : null;
 }
 
 async function readAll(conn, technicianId, today) {
@@ -425,7 +444,7 @@ async function readAll(conn, technicianId, today) {
     grossSeasonCents: await readGross(conn, technicianId, season.start, season.asOf),
     priorYearGrossCents: due && due.estimateCents !== null ? await readGross(conn, technicianId, due.earningsStart, stayEnd) : 0,
     commission: await readCommission(conn, technicianId, today),
-    commissionRecordedThrough: await readCommissionRecordedThrough(conn),
+    commissionRecordedThrough: await readCommissionRecordedThrough(conn, technicianId),
   };
 }
 

@@ -1,13 +1,12 @@
 import { useEffect, useState } from 'react';
 import { adminFetch } from '../lib/adminFetch';
 
-// The caller's own rewards scoreboard (GATE_TECH_REWARDS_SCOREBOARD). One request: a 404 means the gate is off, so the
-// Scoreboard tab stays hidden. status is 'loading' | 'off' | 'ready' | 'error'. Anything but 'ready' hides the tab,
-// so it fails closed.
-export default function useTechScoreboard(enabled = true) {
+// The caller's own rewards scoreboard (GATE_TECH_REWARDS_SCOREBOARD). One request, made when the Scoreboard tab opens
+// (the Staff page's every-load check is useTechScoreboardAvailability): a 404 means the gate is off. status is
+// 'loading' | 'off' | 'ready' | 'error'.
+export default function useTechScoreboard() {
   const [state, setState] = useState({ status: 'loading', scoreboard: null, error: '' });
   useEffect(() => {
-    if (!enabled) { setState({ status: 'off', scoreboard: null, error: '' }); return undefined; }
     const controller = new AbortController();
     adminFetch('/tech/rewards-scoreboard', { signal: controller.signal })
       .then(async response => {
@@ -23,6 +22,6 @@ export default function useTechScoreboard(enabled = true) {
       })
       .catch(() => { if (!controller.signal.aborted) setState({ status: 'error', scoreboard: null, error: 'Unable to load the scoreboard.' }); });
     return () => controller.abort();
-  }, [enabled]);
+  }, []);
   return state;
 }

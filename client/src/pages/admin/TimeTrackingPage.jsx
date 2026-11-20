@@ -11,7 +11,7 @@ import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import PayrollSettings from "../../components/payroll/PayrollSettings";
 import ProtocolAudit from "../../components/techRewards/ProtocolAudit";
 import Scoreboard, { ScoreboardPreview } from "../../components/techRewards/Scoreboard";
-import useTechScoreboard from "../../hooks/useTechScoreboard";
+import useTechScoreboardAvailability from "../../hooks/useTechScoreboardAvailability";
 import ServiceLinesCard from "./ServiceLinesCard";
 import TerritoryReadoutCard from "./TerritoryReadoutCard";
 import usePayrollAvailable from "../../hooks/usePayrollAvailable";
@@ -276,7 +276,7 @@ export default function TimeTrackingPage() {
   const payGrowthAvailable = usePayGrowthAvailable();
   const payrollAvailable = usePayrollAvailable(readStaffRole() === "admin");
   const payStubs = useTechPayStubs();
-  const scoreboard = useTechScoreboard();
+  const scoreboard = useTechScoreboardAvailability();
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
   const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
@@ -368,7 +368,7 @@ export default function TimeTrackingPage() {
       {tab === "scoreboard-preview" && <ScoreboardPreview />}
       {tab === "payroll" && <PayrollSettings />}
       {tab === "pay-stubs" && <TechPayStubs stubs={payStubs} />}
-      {tab === "scoreboard" && <Scoreboard board={scoreboard} />}
+      {tab === "scoreboard" && <Scoreboard />}
       {tab === null && <p role="status" style={{ color: "#71717A" }}>{AVAILABILITY_WORDS[rawTab] || "Checking pay and growth availability…"}</p>}
       <div
         style={{

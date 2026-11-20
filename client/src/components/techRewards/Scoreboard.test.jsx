@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Scoreboard, { ScoreboardPreview } from './Scoreboard';
-import useTechScoreboard from '../../hooks/useTechScoreboard';
+import useTechScoreboardAvailability from '../../hooks/useTechScoreboardAvailability';
 import { adminFetch } from '../../lib/adminFetch';
 
 vi.mock('../../lib/adminFetch', () => ({ adminFetch: vi.fn() }));
@@ -23,22 +23,26 @@ const BOARD = {
     },
   },
   reviews: { count: 6, asks: 30, rateBps: 2000, multiplierPartE4: 3333 },
-  commission: { year: 2026, yearToDateCents: 30000, paidCents: 20000, unpaidCents: 10000, recordedThrough: { payDate: '2026-11-13', weekEnd: '2026-11-08' } },
+  commission: { year: 2026, yearToDateCents: 30000, paidCents: 20000, unpaidCents: 10000, recordedThrough: { weekEnd: '2026-11-08' } },
   multiplier: { multiplierE4: 15833, parts: { baseE4: 10000, tenureE4: 2500, reviewRateE4: 3333, levelE4: 0 }, tenureYears: 1, level: 1, levelSource: 'entry_default' },
   seasonBonus: { grossCents: 1000000, estimate: true, estimateCents: 63332, rateBps: 400, multiplierE4: 15833 },
   stayBonus: { dueDate: '2027-01-05', years: 1, rateBps: 200, estimateCents: 40000, estimate: true },
 };
 
 beforeEach(() => { adminFetch.mockReset(); });
+
+// Open the Scoreboard tab with the server answering `board`; resolves once the board has rendered.
+async function showBoard(board) {
+  adminFetch.mockImplementation(() => reply({ scoreboard: board }));
+  render(<Scoreboard />);
+  await screen.findByLabelText(`Scoreboard for ${board.technician.name}`);
+}
 afterEach(cleanup);
 
 describe('Tech scoreboard tab', () => {
-  it('loads the caller own board in one request and shows score, parts, review rate, commission and estimates', async () => {
-    adminFetch.mockImplementation(() => reply({ scoreboard: BOARD }));
-    const { result } = renderHook(() => useTechScoreboard());
-    await waitFor(() => expect(result.current.status).toBe('ready'));
+  it('loads the caller own board when the tab opens, in one request, and shows score, parts, review rate, commission and estimates', async () => {
+    await showBoard(BOARD);
     expect(adminFetch.mock.calls.map(c => c[0])).toEqual(['/tech/rewards-scoreboard']);
-    render(<Scoreboard board={result.current} />);
     expect(screen.getByText(/2026 season.*over\. Bonus pay is scheduled for Sep 25, 2026\. Figures stay estimates until the office finalizes the pay\./)).toBeInTheDocument();
     expect(screen.getByText('91.5%')).toBeInTheDocument();
     const parts = screen.getByRole('table', { name: 'Score parts' });
@@ -48,7 +52,7 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText('6 Google reviews from 30 asks this season.')).toBeInTheDocument();
     expect(screen.getByText('$300.00')).toBeInTheDocument();
     expect(screen.getByText('Commission recorded, 2026')).toBeInTheDocument();
-    expect(screen.getByText(/Recorded through the pay run of Nov 13, 2026\. \$200\.00 paid, \$100\.00 not paid yet\. A payment after that pay run is not counted yet\./)).toBeInTheDocument();
+    expect(screen.getByText(/Payments through Nov 8\. \$200\.00 paid, \$100\.00 not paid yet\. A later payment is not counted until a pay run records it\./)).toBeInTheDocument();
     expect(screen.getByText('$633.32')).toBeInTheDocument();
     expect(screen.getByText(/Estimate, final at season end\. 4\.0% of \$10,000\.00 pay x 1\.58x multiplier\./)).toBeInTheDocument();
     expect(screen.getByText('Jan 5, 2027')).toBeInTheDocument();
@@ -56,23 +60,33 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText(/your level is not recorded yet/)).toBeInTheDocument();
   });
 
-  it('reads a 404 as off: nothing renders and no other request is made', async () => {
+  it('the Staff page check asks only whether the tab shows: no board request', async () => {
+    adminFetch.mockImplementation(() => reply({ available: true }));
+    const { result } = renderHook(() => useTechScoreboardAvailability());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(adminFetch.mock.calls.map(c => c[0])).toEqual(['/tech/rewards-scoreboard/availability']);
+  });
+
+  it.each([[{ available: false }, true, 'off'], [{}, false, 'error']])('the availability check %j fails closed', async (body, ok, status) => {
+    adminFetch.mockImplementation(() => reply(body, ok, ok ? 200 : 500));
+    const { result } = renderHook(() => useTechScoreboardAvailability());
+    await waitFor(() => expect(result.current.status).toBe(status));
+  });
+
+  it('a 404 when the tab opens renders nothing', async () => {
     adminFetch.mockImplementation(() => reply({ enabled: false }, false, 404));
-    const { result } = renderHook(() => useTechScoreboard());
-    await waitFor(() => expect(result.current.status).toBe('off'));
-    const { container } = render(<Scoreboard board={result.current} />);
-    expect(container).toBeEmptyDOMElement();
+    const { container } = render(<Scoreboard />);
+    await waitFor(() => expect(container).toBeEmptyDOMElement());
     expect(adminFetch).toHaveBeenCalledTimes(1);
   });
 
-  it('fails closed on an error', async () => {
+  it('shows the server error when the board fails to load', async () => {
     adminFetch.mockImplementation(() => reply({ error: 'boom' }, false, 500));
-    const { result } = renderHook(() => useTechScoreboard());
-    await waitFor(() => expect(result.current.status).toBe('error'));
-    expect(render(<Scoreboard board={result.current} />).container).toBeEmptyDOMElement();
+    render(<Scoreboard />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('boom');
   });
 
-  it('says what is missing when the score is incomplete and gives no bonus number', () => {
+  it('says what is missing when the score is incomplete and gives no bonus number', async () => {
     const board = {
       ...BOARD,
       season: { ...BOARD.season, status: 'running' },
@@ -81,7 +95,7 @@ describe('Tech scoreboard tab', () => {
       seasonBonus: { grossCents: 500000, estimate: true, estimateCents: null, reason: 'score_incomplete' },
       stayBonus: null,
     };
-    render(<Scoreboard board={{ status: 'ready', scoreboard: board }} />);
+    await showBoard(board);
     expect(screen.getByText(/Not complete: Protocol audit, Owner rating have no data yet\./)).toBeInTheDocument();
     expect(screen.getAllByText('No data yet')).toHaveLength(2);
     expect(screen.getByText('Not estimated yet')).toBeInTheDocument();
@@ -91,21 +105,21 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText(/running, the numbers so far/)).toBeInTheDocument();
   });
 
-  it('shows the stay bonus date but no amount while its 12 months of pay have not begun', () => {
+  it('shows the stay bonus date but no amount while its 12 months of pay have not begun', async () => {
     const board = { ...BOARD, stayBonus: { dueDate: '2028-04-01', years: 3, rateBps: 400, estimateCents: null, estimate: true, earningsStart: '2027-04-01' } };
-    render(<Scoreboard board={{ status: 'ready', scoreboard: board }} />);
+    await showBoard(board);
     expect(screen.getByText('Apr 1, 2028')).toBeInTheDocument();
     expect(screen.getByText(/3-year bonus\. Estimate starts Apr 1, 2027/)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/about \$0\.00/);
   });
 
-  it('shows the score and bonus as unavailable when no score settings are in force, with the rest intact', () => {
+  it('shows the score and bonus as unavailable when no score settings are in force, with the rest intact', async () => {
     const board = {
       ...BOARD,
       score: { complete: false, value: null, missing: [], parts: {}, band: null, settingsVersion: null, unavailable: 'no_settings' },
       seasonBonus: { grossCents: 1000000, estimate: true, estimateCents: null, reason: 'no_settings' },
     };
-    render(<Scoreboard board={{ status: 'ready', scoreboard: board }} />);
+    await showBoard(board);
     expect(screen.getByText('Not available yet: the score settings for this season are not set.')).toBeInTheDocument();
     expect(screen.queryByRole('table', { name: 'Score parts' })).not.toBeInTheDocument();
     expect(screen.getByText('No estimate yet: the score settings for this season are not set.')).toBeInTheDocument();
@@ -114,14 +128,14 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText('Jan 5, 2027')).toBeInTheDocument();
   });
 
-  it('says so when there is no pay run yet', () => {
+  it('shows no cutoff date when none can be established', async () => {
     const board = { ...BOARD, commission: { year: 2026, yearToDateCents: 0, paidCents: 0, unpaidCents: 0, recordedThrough: null } };
-    render(<Scoreboard board={{ status: 'ready', scoreboard: board }} />);
-    expect(screen.getByText(/^No pay run yet\. \$0\.00 paid/)).toBeInTheDocument();
+    await showBoard(board);
+    expect(screen.getByText(/^Recorded through the last pay run\. \$0\.00 paid/)).toBeInTheDocument();
   });
 
-  it('shows no customer data', () => {
-    render(<Scoreboard board={{ status: 'ready', scoreboard: BOARD }} />);
+  it('shows no customer data', async () => {
+    await showBoard(BOARD);
     expect(document.body.textContent).not.toMatch(/customer name|address|@/i);
   });
 });
