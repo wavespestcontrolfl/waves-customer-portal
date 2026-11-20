@@ -548,9 +548,8 @@ function StageChangeDialog({
 // the same way openDetail/load already stayed out as their own callbacks.
 // refreshFailed: the page's in-place re-read of this application failed (after an
 // offer action), so the stage on screen may be out of date. It holds Confirm, as it
-// holds the stage buttons behind the dialog. offerFlow: the offer card's read, for
-// the line about what a move withdraws.
-function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refreshFailed, offerFlow) {
+// holds the stage buttons behind the dialog.
+function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refreshFailed) {
   const [stageDialog, setStageDialog] = useState(null);
   const [preview, setPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -570,12 +569,13 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
   // the old one, so Confirm could only be refused again. The owner closes
   // it and decides from the refreshed detail.
   const stale = Boolean(stageDialog && detail && stageDialog.fromStatus !== detail.status);
-  // Confirm writes only while the stage on screen is the one the dialog opened
-  // on and the last re-read of the application worked.
-  const held = stale || Boolean(refreshFailed);
-  const offerNote = stageDialog
-    ? stageMoveOfferNote(stageDialog.fromStatus, stageDialog.status, offerFlow, detail?.contact_snapshot?.name)
-    : null;
+  // The preview says what the move does to the application's job offers (the
+  // server's rule, with the offer gate on or off). Confirm writes only while the
+  // stage on screen is the one the dialog opened on, the last re-read of the
+  // application worked, and this account may make the move: one that withdraws an
+  // offer the applicant holds is the owner account's alone.
+  const offerNote = preview ? stageMoveOfferNote(preview.offers, detail?.contact_snapshot?.name) : null;
+  const held = stale || Boolean(refreshFailed) || Boolean(preview?.offers?.owner_only);
 
   // Invalidates an in-flight preview fetch the same way detailSeq guards
   // openDetail — closing the dialog (or reopening it for a different
@@ -1049,8 +1049,8 @@ export default function RecruitingPage() {
     setDetail(application);
   }, []);
 
+  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError));
   const offerFlow = useOfferFlow(detail?.id, detail?.status);
-  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError), offerFlow);
   const detailIdRef = useRef(null);
   detailIdRef.current = detail?.id ?? null;
 

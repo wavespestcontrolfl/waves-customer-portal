@@ -727,10 +727,33 @@ async function withdrawOffer(applicationId, offerId, actor, precondition = {}, n
  * The offers on an application that the applicant still holds: a sent offer not past expires_at, or a date request.
  * Locked. A stage move that would withdraw one is the owner account's call, like POST .../withdraw.
  */
+// An offer the applicant holds: a date request (held past the expiry, since the owner answers it), or a sent offer
+// that has not expired.
+const HELD_STATUSES = ['sent', 'date_requested'];
+const isHeldOffer = (o, now) => HELD_STATUSES.includes(o.status)
+  && (o.status === 'date_requested' || !o.expires_at || new Date(o.expires_at).getTime() >= now.getTime());
+
 async function heldOffersOf(trx, applicationId, now = new Date()) {
   const rows = await trx('job_offers').where({ application_id: applicationId })
-    .whereIn('status', ['sent', 'date_requested']).forUpdate().select('id', 'status', 'expires_at');
-  return rows.filter((o) => o.status === 'date_requested' || !o.expires_at || new Date(o.expires_at).getTime() >= now.getTime());
+    .whereIn('status', HELD_STATUSES).forUpdate().select('id', 'status', 'expires_at');
+  return rows.filter((o) => isHeldOffer(o, now));
+}
+
+/**
+ * Leaving the offer stage (back to review or interview), or closing the application (rejected, withdrawn, hired),
+ * withdraws its live offers. The stage move applies this rule (admin-careers.js applyStatusTransition) and the stage
+ * dialog's preview reads it, with GATE_JOB_OFFERS on or off.
+ */
+function stageMoveClosesOffers(fromStatus, toStatus) {
+  return (fromStatus === 'offer' && toStatus !== 'offer')
+    || (['rejected', 'withdrawn', 'hired'].includes(toStatus) && fromStatus !== toStatus);
+}
+
+/** What such a move would withdraw, for the stage dialog's preview: a plain read (the move re-checks under its lock). */
+async function liveOfferStake(knex, applicationId, now = new Date()) {
+  const rows = await knex('job_offers').where({ application_id: applicationId })
+    .whereIn('status', LIVE_STATUSES).select('status', 'expires_at');
+  return { held: rows.some((o) => isHeldOffer(o, now)), draft: rows.some((o) => o.status === 'draft') };
 }
 
 async function closeOffersWithApplication(trx, applicationId, actorId, now = new Date()) {
@@ -1165,7 +1188,7 @@ module.exports = {
   snapshotHashOf, signatureHashOf, renderLetterMarkdown, readableTerms, payDayLineFrom,
   publicStateOf, closedMessage, presentOffer, timelineOf, buildSnapshot,
   // admin
-  loadIssuedTerms, draftHashOf, heldOffersOf, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
+  loadIssuedTerms, draftHashOf, heldOffersOf, stageMoveClosesOffers, liveOfferStake, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
 };

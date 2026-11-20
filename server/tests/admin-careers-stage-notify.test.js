@@ -762,6 +762,53 @@ describe('PATCH /:id/status — closing an application withdraws its outstanding
   });
 });
 
+// The stage dialog reads what a move does to the job offers from the preview: the same rule and the same owner check as
+// the move itself, with the offer gate on or off.
+describe('GET /:id/stage-preview — what the move does to job offers', () => {
+  const APP_ID = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const inDays = (n) => new Date(Date.now() + n * 86400000).toISOString();
+  const offersFor = async (status) => {
+    const res = await fetch(`${base}/api/admin/careers/${APP_ID}/stage-preview?status=${status}`);
+    expect(res.status).toBe(200);
+    return (await res.json()).offers;
+  };
+  const NONE = { held: false, draft: false, owner_only: false };
+  afterEach(() => { mockStaffEmail = null; });
+
+  test('a move out of Offer names the held offer and the draft; only the owner account may make it', async () => {
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }, { id: 'o2', status: 'draft', expires_at: null }]);
+    expect(await offersFor('reviewed')).toEqual({ held: true, draft: true, owner_only: true });
+    expect(await offersFor('interview')).toEqual({ held: true, draft: true, owner_only: true }); // the templated preview too
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    expect(await offersFor('rejected')).toEqual({ held: true, draft: true, owner_only: false });
+  });
+
+  test('a date request is held past its expiry, an expired sent offer is not, and a draft alone needs no owner', async () => {
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'date_requested', expires_at: inDays(-2) }]);
+    expect(await offersFor('hired')).toEqual({ held: true, draft: false, owner_only: true });
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(-2) }]);
+    expect(await offersFor('hired')).toEqual(NONE);
+    mockDb.__setHeldOffers([{ id: 'o2', status: 'draft', expires_at: null }]);
+    expect(await offersFor('reviewed')).toEqual({ held: false, draft: true, owner_only: false });
+  });
+
+  test('a move that keeps the offers says nothing about them', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }]);
+    expect(await offersFor('interview')).toEqual(NONE);
+    expect(await offersFor('offer')).toEqual(NONE);
+  });
+
+  test('with the offer gate off the move still withdraws, so the preview still says so', async () => {
+    mockIsEnabled.mockImplementation((name) => name !== 'jobOffers');
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }]);
+    expect(await offersFor('withdrawn')).toEqual({ held: true, draft: false, owner_only: true });
+  });
+});
+
 describe('PATCH /:id/status — an offer the applicant holds is withdrawn only by the owner account', () => {
   const APP_ID = 'aaaaaaaa-0000-4000-8000-000000000001';
   const inDays = (n) => new Date(Date.now() + n * 86400000).toISOString();

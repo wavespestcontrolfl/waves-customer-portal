@@ -4,7 +4,8 @@
  *   GET   /                  list (status/role filters, newest first, ai fields)
  *   GET   /:id                full application detail, plus same_phone: the
  *                             person's other applications (same phone number)
- *   GET   /:id/stage-preview  rendered notify preview for a candidate status
+ *   GET   /:id/stage-preview  rendered notify preview for a candidate status, and what
+ *                             the move does to the application's job offers
  *   PATCH /:id/status         owner status transition + optional notify/resend;
  *                             optional expected_status refuses a stale decision (409)
  *   GET   /:id/offer, POST /:id/offer, POST /:id/offer/:offerId/{send,withdraw,revise},
@@ -227,6 +228,15 @@ router.get('/:id', async (req, res) => {
 // only for 'interview' in this PR. Never mints a token — an application
 // with no token yet previews with the literal placeholder text; the PATCH
 // below mints lazily, only when it actually sends.
+// What a stage move does to the application's job offers, by the rule the move applies (applyStatusTransition), with
+// GATE_JOB_OFFERS on or off: whether it withdraws an offer the applicant holds or discards a draft, and whether this
+// account may make it (a held offer is withdrawn only by the owner account). The stage dialog says it before Confirm.
+async function stageOfferEffect(req, row, status) {
+  if (!JobOffers.stageMoveClosesOffers(row.status, status)) return { held: false, draft: false, owner_only: false };
+  const { held, draft } = await JobOffers.liveOfferStake(db, row.id);
+  return { held, draft, owner_only: held && !ibFullAccess(req) };
+}
+
 router.get('/:id/stage-preview', async (req, res) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
@@ -238,11 +248,12 @@ router.get('/:id/stage-preview', async (req, res) => {
 
     const sendingEnabled = isEnabled('recruitingComms');
     const channels = await RecruitingComms.channelEligibility(row);
+    const offers = await stageOfferEffect(req, row, status);
 
     if (status !== 'interview') {
       return res.json({
         status, sending_enabled: sendingEnabled, templated: false,
-        channels, sms_body: null, email_subject: null, email_body: null, interview_url: null,
+        channels, sms_body: null, email_subject: null, email_body: null, interview_url: null, offers,
       });
     }
 
@@ -263,6 +274,7 @@ router.get('/:id/stage-preview', async (req, res) => {
       email_subject: emailContent.subject || null,
       email_body: emailContent.text || null,
       interview_url: hasToken ? RecruitingComms.interviewUrlFor(row.interview_token) : null,
+      offers,
     });
   } catch (err) {
     logger.error(`[admin-careers] stage-preview failed: ${RecruitingComms.errorSummary(err)}`);
@@ -444,8 +456,7 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan, { o
   // Leaving the offer stage (back to review or interview, or closed: rejected, withdrawn, hired) withdraws the application's
   // outstanding job offers in the same transaction, so an old link cannot sign over the owner's newer decision or revive
   // when the application is moved back (the offer flow, GATE_JOB_OFFERS).
-  const closesOffers = (row.status === 'offer' && plan.status !== 'offer')
-    || (['rejected', 'withdrawn', 'hired'].includes(plan.status) && row.status !== plan.status);
+  const closesOffers = JobOffers.stageMoveClosesOffers(row.status, plan.status);
   // An offer the applicant holds is withdrawn only by the owner account, as on POST .../withdraw: any other admin's
   // stage move is refused here, before anything is written.
   if (closesOffers && !ownerAccount && (await JobOffers.heldOffersOf(trx, applicationId)).length) {

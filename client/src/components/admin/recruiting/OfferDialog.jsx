@@ -47,7 +47,7 @@ function fieldsFrom(source) {
 }
 
 function toPayload(fields) {
-  const num = (v) => (v === "" ? null : Number(v));
+  const num = (v) => (v === "" ? null : Number(v.trim()));
   return {
     jobTitle: fields.jobTitle.trim(),
     startDate: fields.startDate,
@@ -91,7 +91,7 @@ function Row({ label, children }) {
   );
 }
 
-function OfferFields({ fields, onChange, startError, sendTo, disabled }) {
+function OfferFields({ fields, onChange, startError, rateErrors, sendTo, disabled }) {
   const set = (key) => (e) => onChange(key, e.target.value);
   return (
     <div className="flex flex-col gap-3">
@@ -105,12 +105,12 @@ function OfferFields({ fields, onChange, startError, sendTo, disabled }) {
         <span className="text-14 text-zinc-800">{expiryLabel()}</span>
         <span className="text-14 text-zinc-500"> · 7 days from the day you send</span>
       </Row>
-      <Field label="Hourly rate ($)">
-        <Input type="number" inputMode="decimal" step="0.01" min="0" value={fields.hourlyRate} onChange={set("hourlyRate")} disabled={disabled} />
+      <Field label="Hourly rate ($)" error={rateErrors.hourlyRate}>
+        <Input type="text" inputMode="decimal" value={fields.hourlyRate} onChange={set("hourlyRate")} disabled={disabled} />
       </Field>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Field label="Step rate ($)">
-          <Input type="number" inputMode="decimal" step="0.01" min="0" value={fields.stepRate} onChange={set("stepRate")} disabled={disabled} />
+        <Field label="Step rate ($)" error={rateErrors.stepRate}>
+          <Input type="text" inputMode="decimal" value={fields.stepRate} onChange={set("stepRate")} disabled={disabled} />
         </Field>
         {/* A save sends a step date only with a step rate, so the date is set only once a rate is. */}
         <Field label="Step date" help="First Monday after day 90.">
@@ -186,10 +186,18 @@ function startDateError({ startDate, stepRate }) {
   return stepRate !== "" && !stepDateFor(startDate) ? "That start date is too far out for a pay step date." : null;
 }
 
+// The rates are text fields, so the form checks exactly what the owner sees: a number field reports text it cannot
+// read as empty, and an empty step rate means no raise (it clears the step date). A rate is dollars and cents, the
+// server's own format; the server checks the range.
+const RATE_TEXT = /^\d+(\.\d{1,2})?$/;
+const rateError = (value) => (value === "" || RATE_TEXT.test(value.trim()) ? null : "Enter dollars and cents, like 23.50.");
+
 function fieldChecks(fields) {
   const startError = startDateError(fields);
-  const fieldsOk = Boolean(fields.startDate) && !startError && fields.hourlyRate !== "" && fields.hoursLine.trim() !== "";
-  return { startError, fieldsOk };
+  const rateErrors = { hourlyRate: rateError(fields.hourlyRate), stepRate: rateError(fields.stepRate) };
+  const ratesOk = fields.hourlyRate !== "" && !rateErrors.hourlyRate && !rateErrors.stepRate;
+  const fieldsOk = Boolean(fields.startDate) && !startError && ratesOk && fields.hoursLine.trim() !== "";
+  return { startError, rateErrors, fieldsOk };
 }
 
 // The step date follows the start date whenever a step rate is set, and is
@@ -217,7 +225,7 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
   const email = maskEmail(contact?.email);
   const base = fieldsFrom(pinned || data.defaults);
   const fields = { ...base, ...edits };
-  const { startError, fieldsOk } = fieldChecks(fields);
+  const { startError, rateErrors, fieldsOk } = fieldChecks(fields);
   const dirty = !pinned || FIELD_KEYS.some((k) => fields[k] !== base[k]);
   // Send needs a phone or an email to send to, and the letter preview of this exact draft on
   // screen: what the owner reads is what goes out.
@@ -228,6 +236,7 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
     firstName: String(contact?.name || "the applicant").trim().split(/\s+/)[0],
     sendTo: [phone && `Text ${phone}`, email && `Email ${email}`].filter(Boolean).join(" · "),
     startError,
+    rateErrors,
     fieldsOk,
     dirty,
     sendReady,
@@ -310,7 +319,7 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
   const { newer, changed, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict });
   // A refused write's sentence shows once, in the read-only notice (after the re-read).
   const notice = conflict ? error : null;
-  const { base, fields, firstName, sendTo, startError, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
+  const { base, fields, firstName, sendTo, startError, rateErrors, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
   // A read that changes the draft, or locks the form, while the Send question is open closes
   // the question: Send carries only the hash of the draft whose letter is on screen.
   useEffect(() => {
@@ -526,7 +535,7 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
               refreshFailed={stale && !needRead}
             />
           )}
-          <OfferFields fields={fields} onChange={onChange} startError={startError} sendTo={sendTo} disabled={busy || locked} />
+          <OfferFields fields={fields} onChange={onChange} startError={startError} rateErrors={rateErrors} sendTo={sendTo} disabled={busy || locked} />
           <Row label="Shared terms attached">
             <TermsBlock data={data} />
           </Row>

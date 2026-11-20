@@ -164,8 +164,8 @@ describe('RecruitingPage offer flow: form', () => {
     await openForm();
     expect(screen.getByLabelText('Job')).toHaveValue('Pest Control Technician');
     expect(screen.getByLabelText('Start date')).toHaveValue('2027-01-04');
-    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(23);
-    expect(screen.getByLabelText('Step rate ($)')).toHaveValue(25);
+    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue('23');
+    expect(screen.getByLabelText('Step rate ($)')).toHaveValue('25');
     expect(screen.getByLabelText('Step date')).toHaveValue('2027-04-05');
     expect(screen.getByLabelText('Hours')).toHaveValue(DEFAULTS.hoursLine);
     expect(screen.getByText(/Offer Letter: Technician Terms/)).toBeInTheDocument();
@@ -286,11 +286,11 @@ describe('RecruitingPage offer flow: form', () => {
     fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Send offer' }));
     expect(await screen.findByText('This draft changed after you opened it, so nothing was done. Review the new version first.')).toBeInTheDocument();
     // Nothing replaces the form by itself: it is read-only, with no Send, until the owner loads the new version.
-    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(23);
+    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue('23');
     expect(screen.getByLabelText('Hourly rate ($)')).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
-    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue('24'));
     expect(screen.getByText('Rate 24')).toBeInTheDocument();
     expect(calls.filter((c) => c.path.endsWith('/send'))).toHaveLength(1);
     // The next send carries the new hash.
@@ -640,13 +640,50 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(screen.getByRole('button', { name: 'Offer' })).toBeInTheDocument();
   });
 
+  // The stage dialog words what the server's stage preview says the move does to the job offers: the same rule and owner
+  // check as the move itself, with the offer gate on or off.
+  const stagePreview = (offers) => () => res(200, { status: 'reviewed', templated: false, channels: {}, sending_enabled: false, offers });
+  const openMove = async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }));
+    return (await screen.findByRole('heading', { name: 'Move to Reviewed' })).closest('[role="dialog"]');
+  };
+
   it('says before Confirm that moving out of Offer withdraws the offer that is out', async () => {
-    setupFetch({}, { offer: offerPayload({ current: { ...sent, status: 'sent' } }), detail: detailFixture({ status: 'offer' }) });
+    setupFetch(
+      { 'GET /admin/careers/app-1/stage-preview?status=reviewed': stagePreview({ held: true, draft: false, owner_only: false }) },
+      { offer: offerPayload({ current: { ...sent, status: 'sent' } }), detail: detailFixture({ status: 'offer' }) },
+    );
     await openDetail();
     await screen.findByTestId('offer-card');
-    fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }));
-    const stage = (await screen.findByRole('heading', { name: 'Move to Reviewed' })).closest('[role="dialog"]');
-    expect(within(stage).getByText('This move also withdraws the offer you sent to Jordan, so their link stops working.')).toBeInTheDocument();
+    const stage = await openMove();
+    expect(await within(stage).findByText('This move also withdraws the offer you sent to Jordan, so their link stops working.')).toBeInTheDocument();
+    expect(within(stage).getByRole('button', { name: 'Confirm' })).toBeEnabled();
+  });
+
+  it('keeps Confirm off for a move only the owner account may make, and sends nothing', async () => {
+    const { calls } = setupFetch(
+      { 'GET /admin/careers/app-1/stage-preview?status=reviewed': stagePreview({ held: true, draft: false, owner_only: true }) },
+      { offer: offerPayload({ current: { ...sent, status: 'sent' }, viewer: { ownerActions: false } }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    await screen.findByTestId('offer-card');
+    const stage = await openMove();
+    expect(await within(stage).findByText('This application has a job offer out. Only the owner account can move it out of Offer.')).toBeInTheDocument();
+    const confirm = within(stage).getByRole('button', { name: 'Confirm' });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+  });
+
+  it('with offers turned off, still says what the move withdraws, from the preview', async () => {
+    setupFetch(
+      { 'GET /admin/careers/app-1/stage-preview?status=reviewed': stagePreview({ held: true, draft: true, owner_only: false }) },
+      { offer: () => res(404, { enabled: false }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    const stage = await openMove();
+    expect(await within(stage).findByText('This move also withdraws the offer you sent to Jordan, so their link stops working, and discards the unsent draft.')).toBeInTheDocument();
+    expect(screen.queryByTestId('offer-card')).toBeNull();
   });
 
   it('drops a Revise result that comes back after the owner opened another applicant', async () => {
@@ -962,9 +999,9 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     // What the owner typed stays visible, read-only, until they choose to load the newer version.
     expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
     expect(screen.getByLabelText('Hours')).toBeDisabled();
-    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(23);
+    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue('23');
     fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
-    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue('24'));
     expect(screen.getByLabelText('Hours')).toHaveValue(DEFAULTS.hoursLine);
     expect(screen.getByLabelText('Hours')).not.toBeDisabled();
     expect(screen.queryByText('This draft changed after you opened it, so nothing was done. Review the new version first.')).toBeNull();
@@ -1028,7 +1065,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
     expect(screen.getByLabelText('Hours')).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
-    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue('24'));
     expect(calls[0].draftId).toBeUndefined();
     fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
@@ -1441,10 +1478,10 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     fireEvent.click(confirmButton);
     expect(await screen.findByText('This draft changed. Review the new version.')).toBeInTheDocument();
     expect(screen.getByLabelText('Hourly rate ($)')).toBeDisabled();
-    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(23);
+    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue('23');
     expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
-    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue('24'));
     expect(screen.getByLabelText('Hourly rate ($)')).not.toBeDisabled();
     expect(screen.getByLabelText('Hours')).toHaveValue(DEFAULTS.hoursLine);
   });

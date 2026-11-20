@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   describeSend,
   shownOffer,
-  stageMoveClosesOffers,
   stageMoveOfferNote,
   expiryLabel,
   formatDay,
@@ -141,40 +140,18 @@ describe('offer helpers', () => {
   });
 });
 
-// The stage dialog's line mirrors the server's rule (admin-careers.js applyStatusTransition `closesOffers`): leaving
-// Offer, or closing the application, withdraws the draft and the offer that is out.
-describe('stage moves that withdraw an offer', () => {
-  it('names the moves the server withdraws offers on', () => {
-    expect(stageMoveClosesOffers('offer', 'reviewed')).toBe(true);
-    expect(stageMoveClosesOffers('offer', 'interview')).toBe(true);
-    expect(stageMoveClosesOffers('interview', 'hired')).toBe(true);
-    expect(stageMoveClosesOffers('reviewed', 'rejected')).toBe(true);
-    expect(stageMoveClosesOffers('interview', 'reviewed')).toBe(false);
-    expect(stageMoveClosesOffers('interview', 'offer')).toBe(false);
-    expect(stageMoveClosesOffers('hired', 'hired')).toBe(false);
-  });
-
-  it('says what the move withdraws, from the offer read', () => {
-    const flow = (data, more = {}) => ({ enabled: true, off: false, refreshError: null, data, ...more });
-    const sent = { id: 'o1', status: 'sent', expiresAt: '2099-01-01T00:00:00Z' };
+// The stage dialog's line words what the server's stage preview says (admin-careers.js stageOfferEffect).
+describe('stageMoveOfferNote', () => {
+  it('words what the move withdraws, and who may make it', () => {
     const name = 'Jordan Rivera';
-    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: sent, draft: null }), name))
+    expect(stageMoveOfferNote({ held: true, draft: false, owner_only: false }, name))
       .toBe('This move also withdraws the offer you sent to Jordan, so their link stops working.');
-    expect(stageMoveOfferNote('offer', 'hired', flow({ current: { ...sent, status: 'date_requested' }, draft: null }), name))
-      .toBe('This move also withdraws the offer you sent to Jordan, so their link stops working.');
-    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: sent, draft: { id: 'o2', status: 'draft' } }), name))
+    expect(stageMoveOfferNote({ held: true, draft: true, owner_only: false }, name))
       .toBe('This move also withdraws the offer you sent to Jordan, so their link stops working, and discards the unsent draft.');
-    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: { id: 'o1', status: 'draft' }, draft: null }), name))
-      .toBe('This move also discards the unsent offer draft.');
-    // Nothing the applicant holds: an expired offer, a signed one, or a move that keeps the offer.
-    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: { ...sent, expiresAt: '2020-01-01T00:00:00Z' }, draft: null }), name)).toBeNull();
-    expect(stageMoveOfferNote('offer', 'hired', flow({ current: { ...sent, status: 'accepted' }, draft: null }), name)).toBeNull();
-    expect(stageMoveOfferNote('interview', 'reviewed', flow({ current: sent, draft: null }), name)).toBeNull();
-    // Offers off: no offer to withdraw. A read that is loading, failed or out of date: what may happen.
-    expect(stageMoveOfferNote('offer', 'reviewed', { off: true, enabled: false }, name)).toBeNull();
-    expect(stageMoveOfferNote('offer', 'reviewed', { off: false, enabled: false }, name))
-      .toBe('If an offer is out, this move also withdraws it, and their link stops working.');
-    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: sent, draft: null }, { refreshError: 'Read failed' }), name))
-      .toBe('If an offer is out, this move also withdraws it, and their link stops working.');
+    expect(stageMoveOfferNote({ held: false, draft: true, owner_only: false }, name)).toBe('This move also discards the unsent offer draft.');
+    expect(stageMoveOfferNote({ held: true, draft: true, owner_only: true }, name))
+      .toBe('This application has a job offer out. Only the owner account can move it out of Offer.');
+    expect(stageMoveOfferNote({ held: false, draft: false, owner_only: false }, name)).toBeNull();
+    expect(stageMoveOfferNote(undefined, name)).toBeNull(); // a server from before the field says nothing
   });
 });

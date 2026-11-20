@@ -113,13 +113,13 @@ describe("OfferDialog", () => {
     fireEvent.change(rate(), { target: { value: "24" } });
     fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
     expect(await screen.findByText("This draft changed. Review the new version.")).toBeInTheDocument();
-    expect(rate()).toHaveValue(24);
+    expect(rate()).toHaveValue("24");
     expect(rate()).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
     expect(screen.queryByText("Letter for hash-3.")).toBeNull();
     expect(saveOfferDraft).toHaveBeenCalledWith("app-1", expect.objectContaining({ hourlyRate: 24, draftId: "offer-1", draftHash: "hash-1" }));
     fireEvent.click(screen.getByRole("button", { name: "Show the new version" }));
-    expect(rate()).toHaveValue(26);
+    expect(rate()).toHaveValue("26");
     expect(screen.getByRole("button", { name: "Send offer" })).toBeEnabled();
   });
 
@@ -132,7 +132,7 @@ describe("OfferDialog", () => {
     expect(await screen.findByText("Letter for hash-2.")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: "Send offer" })).toBeEnabled());
     expect(screen.queryByText("This draft changed. Review the new version.")).toBeNull();
-    expect(rate()).toHaveValue(24);
+    expect(rate()).toHaveValue("24");
     expect(rate()).toBeEnabled();
   });
 
@@ -146,7 +146,7 @@ describe("OfferDialog", () => {
     expect(await screen.findByText(/The offer could not be loaded after your last change/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
     expect(rate()).toBeDisabled();
-    expect(rate()).toHaveValue(24);
+    expect(rate()).toHaveValue("24");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Save draft" })).toBeNull());
   });
@@ -228,11 +228,11 @@ describe("OfferDialog", () => {
     act(() => outside.fail());
     fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
     expect(await screen.findByText("This draft changed. Review the new version.")).toBeInTheDocument();
-    expect(rate()).toHaveValue(24);
+    expect(rate()).toHaveValue("24");
     expect(rate()).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show the new version" }));
-    expect(rate()).toHaveValue(27);
+    expect(rate()).toHaveValue("27");
     expect(rate()).toBeEnabled();
   });
 
@@ -250,6 +250,22 @@ describe("OfferDialog", () => {
     await act(async () => landed());
     await waitFor(() => expect(screen.getByRole("button", { name: "Close" })).toBeEnabled());
     expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1");
+  });
+
+  // A rate field holds the text the owner typed. Text that is not dollars and cents is an error to fix, never a cleared
+  // rate: a number field reports such text as empty, which read as "no raise" and dropped the step date on Save.
+  it("keeps a raise whose step rate text is not a number, says so, and keeps Save off", () => {
+    render(<Harness initial={panel(draftRow())} reads={[]} />);
+    fireEvent.change(screen.getByLabelText("Step rate ($)"), { target: { value: "2e" } });
+    expect(screen.getByLabelText("Step rate ($)")).toHaveValue("2e");
+    expect(screen.getByText("Enter dollars and cents, like 23.50.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Step date")).toBeEnabled();
+    expect(screen.getByLabelText("Step date")).toHaveValue(STEP);
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Step rate ($)"), { target: { value: "26.5" } });
+    expect(screen.queryByText("Enter dollars and cents, like 23.50.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeEnabled();
+    expect(saveOfferDraft).not.toHaveBeenCalled();
   });
 
   // A save sends a step date only with a step rate, so the date can be set only once a rate is.

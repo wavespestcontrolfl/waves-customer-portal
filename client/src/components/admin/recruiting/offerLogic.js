@@ -219,26 +219,20 @@ export function describeSend(comms, firstName, offerStatus = "sent") {
 
 // A 'sent' offer past its expiresAt reads as closed unsigned even before the
 // server's own status says so.
-// A stage move that leaves Offer, or closes the application (rejected, withdrawn,
-// hired), withdraws its offer records in the same write (server: admin-careers.js
-// applyStatusTransition, `closesOffers`). The stage dialog says so before Confirm.
-export function stageMoveClosesOffers(from, to) {
-  return (from === "offer" && to !== "offer") || (["rejected", "withdrawn", "hired"].includes(to) && from !== to);
-}
+// The stage dialog's line about the application's job offers, or null. The server's stage preview says what the move
+// would withdraw, by the rule the move applies, with the offer gate on or off (admin-careers.js stageOfferEffect); this
+// only words it. owner_only: the move withdraws an offer the applicant holds, which only the owner account may do, so
+// the dialog keeps Confirm off. No `offers` (a server from before it) says nothing.
+export const OWNER_ONLY_MOVE_TEXT = "This application has a job offer out. Only the owner account can move it out of Offer.";
 
-// The stage dialog's line about what a move withdraws, or null. `flow` is the offer
-// flow (useOfferFlow). While its read is loading, failed or out of date, the line says
-// what may happen.
-export function stageMoveOfferNote(from, to, flow, name) {
-  if (!stageMoveClosesOffers(from, to) || flow.off) return null;
-  if (!flow.enabled || flow.refreshError) return "If an offer is out, this move also withdraws it, and their link stops working.";
-  const current = shownOffer(flow.data.current);
-  const held = Boolean(current) && ["sent", "date_requested"].includes(current.status);
-  const draft = Boolean(flow.data.draft) || current?.status === "draft";
+export function stageMoveOfferNote(offers, name) {
+  if (!offers) return null;
+  if (offers.owner_only) return OWNER_ONLY_MOVE_TEXT;
   const firstName = String(name || "the applicant").trim().split(/\s+/)[0];
-  if (held && draft) return `This move also withdraws the offer you sent to ${firstName}, so their link stops working, and discards the unsent draft.`;
-  if (held) return `This move also withdraws the offer you sent to ${firstName}, so their link stops working.`;
-  return draft ? "This move also discards the unsent offer draft." : null;
+  if (offers.held) {
+    return `This move also withdraws the offer you sent to ${firstName}, so their link stops working${offers.draft ? ", and discards the unsent draft" : ""}.`;
+  }
+  return offers.draft ? "This move also discards the unsent offer draft." : null;
 }
 
 export function shownOffer(offer, now = new Date()) {
