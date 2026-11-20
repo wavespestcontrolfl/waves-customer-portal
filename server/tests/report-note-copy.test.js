@@ -79,22 +79,48 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
     expect(unsafe.body).toBeNull();
     expect(unsafe.violations.length).toBeGreaterThan(0);
     expect(reportNoteCustomerCopy(stored({ text: 'I treated the garage. The gate code is 4471.' })).body).toBeNull();
-    // A shape only the completion access-code check names (the report check
-    // in customerCopyViolations does not).
-    const access = reportNoteCustomerCopy(stored({ text: 'I treated the yard. Side access 4417 for the yard.' }));
-    expect(access.body).toBeNull();
-    expect(access.violations).toEqual(['note_record_access_code']);
-    // A split code after a location word: only the completion check sees it
-    // (the redactor wants a run of 3 to 8 digits).
-    const split = reportNoteCustomerCopy(stored({ text: 'I treated the yard. Side gate 12-34 for the yard.' }));
-    expect(split.body).toBeNull();
-    expect(split.violations).toEqual(['note_record_access_code']);
-    // Digits before the access word: only the visit-history redactor
-    // (context-aggregator.js redactAccessCodes) sees this form.
-    const before = reportNoteCustomerCopy(stored({ text: 'I treated the yard. I used 1234 to get through the gate.' }));
-    expect(before.body).toBeNull();
-    expect(before.violations).toEqual(['note_record_access_code']);
+    // Forms the report check in customerCopyViolations does not name.
+    for (const text of [
+      'I treated the yard. Side access 4417 for the yard.',
+      'I treated the yard. Side gate 12-34 for the yard.',
+      'I treated the yard. I used 1234 to get through the gate.',
+    ]) {
+      const held = reportNoteCustomerCopy(stored({ text }));
+      expect(held.body).toBeNull();
+      expect(held.violations).toEqual(['note_record_access_code']);
+    }
+    // A code noun beside a location word: only the completion check.
+    expect(noteRecordCopyViolations('I treated the yard. The side gate has a code.')).toEqual(['note_record_access_code']);
+    // A word after a code noun, far from it: only the visit-history redactor
+    // (context-aggregator.js redactAccessCodes).
+    expect(noteRecordCopyViolations('I treated the yard. The password for the side gate came from the owner today: Bluebird.')).toEqual(['note_record_access_code']);
     expect(noteRecordCopyViolations('I treated the yard and the garage door frame.')).toEqual([]);
+  });
+
+  test('a code-shaped number withholds the note, whatever words surround it; small counts stand', () => {
+    // Only the code's shape catches each of these: 3 or more digits, with up
+    // to 3 spaces or hyphens between any two, or 3 or more number words.
+    for (const text of [
+      'I treated the yard. The pedestrian entrance unlocks with 1234.',
+      'I treated the yard. I punched 1234 into the padlock.',
+      'I treated the yard. I punched 12 34 into the padlock.',
+      'I treated the yard. I punched 1 2 3 4 into the padlock.',
+      'I treated the yard. I punched 12 - 34 into the padlock.',
+      'I treated the yard. I punched one two three four into the padlock.',
+      'I treated the yard. I punched twelve thirty-four into the padlock.',
+    ]) {
+      expect([text, noteRecordCopyViolations(text)]).toEqual([text, ['note_record_access_code']]);
+    }
+    for (const text of [
+      'I treated 3 stations and 12 feet of fence.',
+      'I applied 1.25 oz per gallon.',
+      'I checked stations 1, 2 and 3.',
+      'I treated two or three spots.',
+      'I treated twenty-five feet of fence line.',
+      'I will check the stations in 14 days.',
+    ]) {
+      expect([text, noteRecordCopyViolations(text)]).toEqual([text, []]);
+    }
   });
 
   test('a time figure in any form withholds the note; the sanctioned wording and days stand', () => {

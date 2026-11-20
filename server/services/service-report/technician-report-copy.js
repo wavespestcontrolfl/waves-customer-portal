@@ -783,18 +783,37 @@ const NOTE_MARKED_SENTENCE_RE = new RegExp([
   `${NOTE_DAY_WORD_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_REENTRY_VERB_SRC}`,
 ].join('|'), 'iu');
 
-// Two access-code checks beside the report's own (customerCopyViolations):
-// the completion check (COMPLETION_ACCESS_CODE_RE: "Side access 4417 for the
-// yard") and the visit-history reader's redactor (context-aggregator.js
-// redactAccessCodes: digits before an access word, a code word after a code
-// noun, a card number: "I used 1234 to get through the gate."). Each customer
-// reader that screens with this module withholds a value either one catches:
+// A code-shaped number, whatever words surround it: 3 or more digits, with
+// up to 3 spaces or hyphens between any two ("I punched 1234 into the
+// padlock.", "12-34", "1 2 3 4"), or 3 or more number words in a row ("one
+// two three four", "twelve thirty-four"). Pre-push audit rounds 18, 24 and 26
+// each found one more phrasing around a code ("Side access 4417", "I used
+// 1234 to get through the gate", "The pedestrian entrance unlocks with
+// 1234"), and main's report check went through the same rounds (its comments
+// cite codex r83, r84, r86): no word list ends that, so the note screen
+// judges the code's own shape. A figure with a unit ("150 feet") is refused
+// too. Production (2026-11-20, read-only, counts only): it adds 10 of 401
+// raw pest technician notes (the screen already refused 97), and no recap,
+// finding field or form value.
+const NOTE_NUMBER_WORD_SRC = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)';
+const CODE_SHAPED_NUMBER_RE = new RegExp([
+  '(?<!\\p{N})\\p{N}(?:[ \\t\\-\\u2010-\\u2015]{0,3}\\p{N}){2,}',
+  `(?<!\\p{L})${NOTE_NUMBER_WORD_SRC}(?:[\\s,\\-\\u2010-\\u2015]+${NOTE_NUMBER_WORD_SRC}){2,}(?!\\p{L})`,
+].join('|'), 'iu');
+
+// Three access-code checks beside the report's own (customerCopyViolations):
+// the code's shape (CODE_SHAPED_NUMBER_RE), the completion check
+// (COMPLETION_ACCESS_CODE_RE: "The side gate has a code."), and the
+// visit-history reader's redactor (context-aggregator.js redactAccessCodes:
+// a word after a code noun, "The gate password is bluebird."). Each customer
+// reader that screens with this module withholds a value any one catches:
 // the note record (noteRecordCopyViolations) and the Documents PDF lists on
 // every record (routes/documents.js). The redactor is required at call time:
 // context-aggregator loads this module.
 function heldAccessCode(text) {
   const value = String(text || '');
-  return COMPLETION_ACCESS_CODE_RE.test(value)
+  return CODE_SHAPED_NUMBER_RE.test(value)
+    || COMPLETION_ACCESS_CODE_RE.test(value)
     || require('../context-aggregator').redactAccessCodes(value) !== value;
 }
 
