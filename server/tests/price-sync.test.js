@@ -11,7 +11,7 @@ const { syncPricesToEstimator } = require('../services/price-sync');
 // Minimal thenable Knex chain stub (mirrors server/tests/payment-lifecycle-email.test.js).
 function chain({ result = [] } = {}) {
   const q = {};
-  ['where', 'whereNotNull', 'whereRaw', 'select', 'orderBy'].forEach((m) => {
+  ['where', 'whereNotNull', 'select', 'orderBy'].forEach((m) => {
     q[m] = jest.fn(() => q);
   });
   q.update = jest.fn(() => q);
@@ -160,26 +160,24 @@ describe('syncPricesToEstimator', () => {
   });
 
   // A package price the inventory marked needs_pricing is one it cannot trust (the estimate links and job costing skip it too):
-  // the mix is skipped like one with an unpriced product, never recosted on the untrusted price (pre-push audit 15). Its last cost
-  // may have used that price, so the marked product is flagged cost_unknown and the list reports the mix incomplete (audit 16).
-  test('skips a mix whose product price is marked needs_pricing and flags that product cost-unknown', async () => {
+  // the mix is skipped like one with an unpriced product and never written, never recosted on the untrusted price (pre-push
+  // audit 15). Like every skipped mix it keeps its last cost and is reported in `skipped` (main's contract above; audit 18).
+  test('skips (never writes) a mix whose product price is marked needs_pricing', async () => {
     const products = [
       ...PRODUCTS,
       { id: 'P4', name: 'Synthetic bifenthrin', best_price: 58.42, unit_size_oz: 128, category: 'pest', needs_pricing: true },
     ];
-    const markedMix = () => mix({
+    const tankRead = chain({ result: [mix({
       cost_per_tank: 0.91,
       products: JSON.stringify([
         { product_id: 'P1', oz_per_tank: 2, cost_in_tank: 0 },
         { product_id: 'P4', oz_per_tank: 2, cost_in_tank: 0.91 },
       ]),
-    });
-    const tankRead = chain({ result: [markedMix()] });
-    const tankWrite = chain({ result: [] });
+    })] });
     const productsRead = chain({ result: products });
     setDbQueues({
       products_catalog: [productsRead],
-      tank_mixes: [tankRead, tankWrite],
+      tank_mixes: [tankRead], // a write would exhaust the queue and throw
     });
 
     const result = await syncPricesToEstimator({ dryRun: false });
@@ -189,29 +187,7 @@ describe('syncPricesToEstimator', () => {
       { mix: 'Mix A', blockers: [{ product_id: 'P4', reason: 'needs_pricing' }] },
     ]);
     expect(tankRead.update).not.toHaveBeenCalled();
-    expect(tankWrite.update).toHaveBeenCalledTimes(1);
-    // The flag lands only on the recipe the sync read: an edit made in between leaves the row unmatched (audit 17).
-    expect(tankWrite.where).toHaveBeenCalledWith({ id: 'M1' });
-    expect(tankWrite.whereRaw).toHaveBeenCalledWith('products = ?::jsonb', [JSON.stringify([
-      { product_id: 'P1', oz_per_tank: 2, cost_in_tank: 0 },
-      { product_id: 'P4', oz_per_tank: 2, cost_in_tank: 0.91 },
-    ])]);
-    const written = tankWrite.update.mock.calls[0][0];
-    expect(written).not.toHaveProperty('cost_per_tank');
-    expect(JSON.parse(written.products)).toEqual([
-      { product_id: 'P1', oz_per_tank: 2, cost_in_tank: 0 },
-      { product_id: 'P4', oz_per_tank: 2, cost_in_tank: 0.91, cost_unknown: true },
-    ]);
     // The catalog query reads the mark with the price (a stubbed row carries it either way).
     expect(productsRead.select.mock.calls[0]).toContain('needs_pricing');
-
-    // A dry run writes nothing; a mix already flagged is not written again.
-    const dryRead = chain({ result: [markedMix()] });
-    setDbQueues({ products_catalog: [chain({ result: products })], tank_mixes: [dryRead] });
-    await syncPricesToEstimator({ dryRun: true });
-    expect(dryRead.update).not.toHaveBeenCalled();
-    const flagged = mix({ products: JSON.stringify([{ product_id: 'P4', oz_per_tank: 2, cost_in_tank: 0.91, cost_unknown: true }]) });
-    setDbQueues({ products_catalog: [chain({ result: products })], tank_mixes: [chain({ result: [flagged] })] });
-    await expect(syncPricesToEstimator({ dryRun: false })).resolves.toMatchObject({ mixes_updated: 0 });
   });
 });

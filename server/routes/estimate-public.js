@@ -9582,7 +9582,13 @@ async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = 
       replaySavedPricingKnobs: true,
       ...(verifiedWaiverKeys ? { setupWaiverPriorQualifyingServices: verifiedWaiverKeys } : {}),
     });
-    if (reprice.recomputed) {
+    // The reprice overwrites the issued totals that the termiticide hold reads (termiticideRequoteNeeded). A reprice that moves
+    // the issued one-time total while a slab or trench line no pin priced cannot show it kept its quoted bottle cost, so it
+    // fails closed like a reprice that could not run (pre-push audit 18).
+    const termiticideMoved = reprice.recomputed && termiticideRequoteNeeded(
+      { [UNISSUED_ESTIMATE]: estimateNeverIssued(estimate) }, estimate, reprice.rawEngineResult, reprice.serverTotals?.onetimeTotal,
+    );
+    if (reprice.recomputed && !termiticideMoved) {
       applyMembershipRepriceToEstimate(estimate, estData, reprice);
     } else {
       estData.membershipLapsedRequote = true;
@@ -9593,6 +9599,7 @@ async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = 
     // here to force a fresh recompute with the new-customer setup fee + annual
     // prepay restored.
     clearEstimatePricingCache(estimate.id);
+    if (termiticideMoved) return { ok: false, error: 'termiticide_price_changed_requote' };
     if (!reprice.recomputed) return { ok: false, error: reprice.reason || 'membership_lapsed_requote' };
   } catch (err) {
     logger.warn(`[estimate-public] membership snapshot reconcile skipped: ${err.message}`);

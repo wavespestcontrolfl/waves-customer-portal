@@ -2822,7 +2822,10 @@ quoteRequired: true, quoteRequiredReason: 'termiticide_price_changed_requote'
 quote was sent — call Waves and we’ll refresh your quote with current
 pricing." copy. Every gate that reads `resolveEstimateQuoteRequirement` then
 treats it as any other quote requirement, so the page shows the requote state
-instead of an acceptable price. A never-issued draft replays its pins like
+instead of an acceptable price. A lapsed-membership reprice overwrites the
+issued totals this check reads, so a reprice that would move the issued
+one-time total while such a line lacks the mark fails closed instead
+(`membershipLapsedRequote`, as a reprice that could not run). A never-issued draft replays its pins like
 every other pin, so its first send and every later replay agree, and it is
 never held; a quote whose replayed total still matches its issued total is not
 held; a send snapshot that serves as sent is unchanged.
