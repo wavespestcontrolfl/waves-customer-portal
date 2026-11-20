@@ -491,7 +491,7 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
     setBusy(true);
     setError(null);
     try {
-      const out = await sendOffer(applicationId, pinned.id, pinned.draftHash);
+      const out = await sendOffer(applicationId, pinned.id, pinned.draftHash, data.outStamp);
       // The answer's offer row is read after delivery: it can already be withdrawn or replaced.
       setResult({ comms: out.comms || {}, offerStatus: out.offer?.status });
       await onSent();

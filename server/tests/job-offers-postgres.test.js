@@ -271,6 +271,28 @@ jest.setTimeout(120000);
       expect((await JobOffers.adminPanel(app.id, actor(), later)).sendReplacesId).toBeNull();
     });
 
+    test('a revision Send is refused when the offer out changed after the read, and nothing is replaced or sent', async () => {
+      const app = await newApplication();
+      const sent = await sendNew(app);
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor());
+      const read = await JobOffers.adminPanel(app.id, actor());
+      // The applicant asks for another start date after the owner's read; the revision's own hash is unchanged.
+      const wanted = addStaffWorkDays(JobOffers.suggestStartDate(), 14);
+      await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks', version: await shownVersion(token) });
+      mockSendStageComms.mockClear();
+      await expect(JobOffers.sendOffer(app.id, revised.id, actor(), revised.draftHash, new Date(), { expectedOut: read.outStamp }))
+        .rejects.toMatchObject({ status: 409, code: 'OFFERS_CHANGED' });
+      expect((await root('job_offers').where({ id: sent.offer.id }).first()).status).toBe('date_requested');
+      expect((await root('job_offers').where({ id: revised.id }).first()).status).toBe('draft');
+      expect(mockSendStageComms).not.toHaveBeenCalled();
+      // A read after the request carries it, and that send goes through.
+      const fresh = await JobOffers.adminPanel(app.id, actor());
+      expect(fresh.outStamp).not.toBe(read.outStamp);
+      const resent = await JobOffers.sendOffer(app.id, revised.id, actor(), revised.draftHash, new Date(), { expectedOut: fresh.outStamp });
+      expect(resent.offer.status).toBe('sent');
+    });
+
     test('a date request becomes a revised offer at the requested date', async () => {
       const app = await newApplication();
       const sent = await sendNew(app);

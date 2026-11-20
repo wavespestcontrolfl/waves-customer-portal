@@ -54,6 +54,8 @@ function offerPayload(overrides = {}) {
     sendTo: { sms: '(941) ***-0123', email: 'j***@example.com' },
     // The offer out now that sending the open draft replaces, or null.
     sendReplacesId: null,
+    // The offers out as this read saw them; Send carries it back.
+    outStamp: 'out-stamp-1',
     current: null,
     draft: null,
     history: [],
@@ -271,7 +273,7 @@ describe('RecruitingPage offer flow: form', () => {
     const sends = calls.filter((c) => c.path.endsWith('/send'));
     expect(sends).toHaveLength(1);
     // Send names the draft the owner read, by the hash of that draft.
-    expect(sends[0].body).toEqual({ draftHash: 'hash-saved' });
+    expect(sends[0].body).toEqual({ draftHash: 'hash-saved', expectedOut: 'out-stamp-1' });
   });
 
   it('shows the terms issue day in Eastern, not as the UTC day', async () => {
@@ -1070,6 +1072,41 @@ describe('RecruitingPage offer flow: one source of truth', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
     const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
     expect(within(confirm).getByText('It replaces the offer you sent before. That link stops working when you press Send offer, even if this one does not reach Jordan.')).toBeInTheDocument();
+  });
+
+  it('a revision Send refused because the offer out changed re-reads, says nothing was sent, and the next Send carries the new read', async () => {
+    const revision = offerRecord({ id: 'offer-2', draftHash: 'hash-draft', supersedesId: 'offer-1' });
+    let answered = false;
+    const { calls } = setupFetch(
+      {
+        'POST /admin/careers/app-1/offer/offer-2/send': () => {
+          if (answered) return res(200, { offer: { ...revision, status: 'sent' }, comms: { sms: { outcome: 'sent' }, email: { outcome: 'sent' } } });
+          answered = true;
+          return res(409, { error: 'The offer you sent before changed after you opened this, so nothing was sent.', code: 'OFFERS_CHANGED' });
+        },
+      },
+      {
+        offer: () => res(200, offerPayload({ current: answered ? { ...sent, status: 'date_requested' } : sent, draft: revision, sendReplacesId: 'offer-1', outStamp: answered ? 'out-stamp-2' : 'out-stamp-1' })),
+        detail: detailFixture({ status: 'offer' }),
+      },
+    );
+    await openDetail();
+    fireEvent.click(await within(await screen.findByTestId('offer-card')).findByRole('button', { name: 'Open the updated draft' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    let confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText(/The offer you sent before changed after you opened this/)).toBeInTheDocument();
+    expect(screen.queryByText(/Send this offer to Jordan/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
+    // The owner looks again, then sends on the new read.
+    fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    await waitFor(() => expect(calls.filter((c) => c.path.endsWith('/offer-2/send'))).toHaveLength(2));
+    expect(calls.filter((c) => c.path.endsWith('/offer-2/send')).map((c) => c.body.expectedOut)).toEqual(['out-stamp-1', 'out-stamp-2']);
   });
 
   it('a failed re-read with no offer yet shows Try again in the section after the dialog is closed', async () => {

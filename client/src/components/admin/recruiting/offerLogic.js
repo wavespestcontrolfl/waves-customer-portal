@@ -90,6 +90,7 @@ export function sendChannels(sendTo) {
 export const STALE_CODES = [
   "DRAFT_CHANGED",
   "OFFER_CHANGED",
+  "OFFERS_CHANGED",
   "OFFER_NOT_DRAFT",
   "OFFER_NOT_WITHDRAWABLE",
   "OFFER_NOT_REVISABLE",
@@ -141,6 +142,8 @@ const ERROR_TEXT = {
   // Save, Send and Discard all answer these two codes: the words name no action.
   DRAFT_CHANGED: "This draft changed after you opened it, so nothing was done. Review the new version first.",
   OFFER_CHANGED: "This offer changed after you opened it. Review it again.",
+  // Only Send answers this one: the offer out (the one a revision replaces) changed after the read.
+  OFFERS_CHANGED: "The offer you sent before changed after you opened this (an answer or a date request), so nothing was sent. Check the offer card before you send.",
   OFFER_NOT_WITHDRAWABLE: "This offer expired before you withdrew it. Nothing was changed.",
   OFFER_NOT_REVISABLE: "This offer expired before you revised it. Make a new offer instead.",
   DRAFT_HASH_REQUIRED: "The draft could not be checked, so nothing was done. Reload the offer and review it first.",

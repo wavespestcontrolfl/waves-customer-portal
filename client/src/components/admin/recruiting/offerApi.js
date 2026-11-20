@@ -45,10 +45,12 @@ export function saveOfferDraft(applicationId, fields) {
 }
 
 // draftHash = the hash of the draft whose letter preview the owner read.
-export function sendOffer(applicationId, offerId, draftHash) {
+// expectedOut = that read's outStamp: the offers out then (an answer or a date
+// request since then refuses the send with OFFERS_CHANGED).
+export function sendOffer(applicationId, offerId, draftHash, expectedOut) {
   return offerRequest(`/admin/careers/${applicationId}/offer/${offerId}/send`, {
     method: "POST",
-    body: JSON.stringify({ draftHash }),
+    body: JSON.stringify({ draftHash, expectedOut }),
   });
 }
 

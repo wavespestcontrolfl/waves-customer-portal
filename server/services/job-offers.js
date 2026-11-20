@@ -558,6 +558,9 @@ async function adminPanel(applicationId, actor, now = new Date()) {
     // The offer out now that sending the open draft replaces (its link stops working at the send), or null. `out` is
     // already null for an offer past its expiry, whose link no longer works.
     sendReplacesId: replacedBySend(out, revision),
+    // The offers out now (sent, date requested) as this read saw them, each with its version. Send carries it back
+    // (expectedOut), so an answer or a date request after this read refuses the send (commitSend).
+    outStamp: offerStampOf(rows.filter((r) => OUT_STATUSES.includes(r.status))),
     // The preview names the offer its letter belongs to (the open draft, else the frozen letter of the current offer, else
     // none: the defaults) and that draft's hash, so a Save, Send or Discard can be tied to what was read.
     letterPreview: {
@@ -850,12 +853,19 @@ function sentHistoryEntry(application, actor) {
   };
 }
 
-async function commitSend(applicationId, offerId, actor, now, draftHash) {
+async function commitSend(applicationId, offerId, actor, now, draftHash, expectedOut) {
   return db.transaction(async (trx) => {
     const application = await loadApplication(trx, applicationId, { lock: true });
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
     const name = await actorName(trx, actor);
     const { terms, payDayLine } = await assertSendable(trx, application, offer, { now, ownerName: name, draftHash });
+    // The owner sends on a read of the offers out now (the offer read's outStamp). An answer, a date request or any
+    // other write to them since that read refuses the send, before anything is replaced or sent: the owner sees it
+    // first. Every offer writer locks the application row first, so this read holds until the commit.
+    const outNow = (await liveOffersOf(trx, applicationId, { lock: true })).filter((o) => OUT_STATUSES.includes(o.status));
+    if (expectedOut != null && offerStampOf(outNow) !== expectedOut) {
+      throw new OfferError(409, 'OFFERS_CHANGED', 'The offer you sent before changed after you opened this, so nothing was sent.');
+    }
     await supersedePrior(trx, applicationId, offer, now);
 
     const owner = { name, reportTo: ownerReportTo(name) };
@@ -936,11 +946,12 @@ const outcomesOf = (comms) => ({
 });
 
 /** POST /:id/offer/:offerId/send */
-async function sendOffer(applicationId, offerId, actor, draftHash, now = new Date()) {
+// expectedOut: the offer read's outStamp, which the page always sends; null skips the check.
+async function sendOffer(applicationId, offerId, actor, draftHash, now = new Date(), { expectedOut = null } = {}) {
   if (typeof draftHash !== 'string' || !draftHash) {
     throw new OfferError(400, 'DRAFT_HASH_REQUIRED', 'Send needs the hash of the preview you reviewed.');
   }
-  const committed = await commitSend(applicationId, offerId, actor, now, draftHash);
+  const committed = await commitSend(applicationId, offerId, actor, now, draftHash, expectedOut);
   const comms = await deliverOfferComms(committed, actor);
   const fresh = await db('job_offers').where({ id: committed.offer.id }).first();
   return { offer: presentOffer(fresh || committed.offer, { sentByName: committed.ownerName, includeUrl: true }), comms };

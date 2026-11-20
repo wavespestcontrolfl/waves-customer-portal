@@ -47,6 +47,7 @@ function panel(current) {
     defaults: DEFAULTS,
     sendTo: { sms: "(941) ***-0142", email: "j***@example.com" },
     sendReplacesId: null,
+    outStamp: "out-1",
     draft: null,
     current,
     letterPreview: { offerId: current.id, draftHash: current.draftHash, markdown: `Letter for ${current.draftHash}.` },
@@ -163,7 +164,7 @@ describe("OfferDialog", () => {
     expect(await screen.findByText(/The offer could not be loaded after your last change/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
     expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
-    expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1");
+    expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1", "out-1");
   });
 
   // A send refused for a reason the form does not show (the Terms lost their issued status, say): nothing was sent. The
@@ -251,7 +252,7 @@ describe("OfferDialog", () => {
     expect(await screen.findByRole("button", { name: "Close" })).toBeDisabled();
     await act(async () => landed());
     await waitFor(() => expect(screen.getByRole("button", { name: "Close" })).toBeEnabled());
-    expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1");
+    expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1", "out-1");
   });
 
   // A rate field holds the text the owner typed. Text that is not dollars and cents is an error to fix, never a cleared
