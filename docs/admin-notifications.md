@@ -56,7 +56,9 @@ quote in `detail`. One exception: the SMS reader's review bell ("Comms — check
 note") never stores the text, because a text can hold a code or a word that opens a door and no
 screen catches every form; the bell list reads it from the text itself while it serves the list
 (`withTextNoteSources` in `server/services/sms-operational-actions.js`, admin role only, masked
-the same way) and the bell shows it in quotes as `source_text`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
+the same way) and the bell shows it in quotes as `source_text`. The phone-yes card bell (`server/services/call-phone-yes-bell.js`)
+never stores the caller's words either, for the same reason (a spoken turn can hold a gate code or a card number); the card in
+Triage shows them. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
 long name inside the 60-character headline; `whyWithQuote` budgets the quote; `nameOnFileForPhone` names the
 person behind a number with no customer link: the customer records on it, then estimates, then leads, only when
 they agree on one person. The promise chaser, a text to a website line and a voicemail use it; owner 2026-10-21 and
@@ -752,6 +754,51 @@ fact, a one-time job over the limit, an engine line to review, a possible curren
 relevance sweep (class `tech_estimate_office_first`) closes the row once the estimate is sent, accepted, declined, expired, archived
 or gone. A send that is only queued, in flight or failed keeps the row open, because the close is final. A failure to raise is
 logged with ids only and never fails the technician's create. It sends nothing to a customer.
+
+Phone-yes card bell (owner 2026-11-18 "ok go", phone-yes step 1, page v4; under `GATE_CALL_PHONE_YES_ACCEPT`, no gate of its own):
+`server/services/call-phone-yes-bell.js`, run by the phone-yes sweep (every 10 minutes while the gate is on, after its filing and its
+moot close), rings the bell once for each `call_phone_yes` card when it is filed, and once more while the card is open and time runs
+short: an open estimate on the card expires within 24 hours, or the soonest visit to come that keeps the card open (a pest visit the
+call booked, on the calendar and not linked to an estimate) starts within 48 hours. Only a visit still to come (`pending`,
+`confirmed`, `en_route`) makes time short: a visit parked for a new slot (`rescheduled`, which keeps its old date and time), under
+way or done keeps the card open but is no time to ring for. Only a card with status `open` whose evidence
+still matches it rings or is rewritten: the pass reads the card's state again under the lock (`cardState`), and a card with a
+change not yet written (an estimate accepted, a yes taken back) or whose read fails rings nothing until a later run writes it.
+While a call in the card's word window still owes a read, or the call with the card's yes is read again (the card's
+`yes_rechecking` mark, which the moot pass sets; a resend can move the window past that call), the card rings nothing new (the
+read may take the yes back, and the tap refuses meanwhile), but its open row still follows the card quietly. A ring held this
+way is not spent: it goes out once the read ends.
+The time short is read by the clock after the card's lock. A claimed card (`in_progress`) keeps its row until it closes. Nothing rings while every active admin has the type's Bell switch off in
+Push Settings (no row, so no banner either; open rows are still rewritten and closed): the switch is read for each ring, under the
+card's lock, by the rule `triggerNotification` writes a shared bell row by (`bellWanted`); a card that rang nothing meanwhile
+rings once the switch is on again, if it is still open. Category `estimate` with
+`bell: true`, headline "Estimates — check <who>'s estimate" (the why says whether the caller said yes, no yes was heard, or the
+yes is being read again) or "check <who>'s booked visit" once an estimate on the card was accepted and the visit is not linked;
+never "accept": the card's tap decides whether it can accept, checking everything again under its own locks when tapped, and no
+bell can keep that answer true until the office taps. Subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
+Keys `call-phone-yes:<card id>` (filed) and `call-phone-yes-due:<card id>` (time short), both without `dedupeOpenOnly`: a closed row
+still holds its key, so each key rings at most once and no `RERING` entry is owed. The filed row closes in the commit that writes the
+time-short row (every pass retries that close, and a raise that wrote no row closes nothing), so a card has one open row; the close also
+takes over a filed row a person already marked Done, so Reopen cannot bring it back beside the time-short row; a card filed when
+time is already short rings the time-short bell alone, and nothing rings for a card after its time-short bell. Between rings the
+open row is rewritten quietly when the card's words change (a yes taken back, an estimate accepted, the visit moved):
+`refreshOnDedupe` with `ringOnRefresh` false, so no ring, no banner, and the row keeps its read state. The bell never stores the
+caller's words (headline, why, detail or metadata), as the SMS reader's review bell keeps a text's words off its row: a spoken turn
+can hold a gate code or a card number, no screen catches every form, and the why reaches a phone's lock screen. The why says the
+caller said yes to pay per application and names the visit day; `detail` holds the card's summary and points to the card in
+Triage, which shows the words. Each card rings in a transaction of its own that holds its call's
+triage lock (`lockTriageCall`, which every card writer takes first) and reads the card and its evidence again there, so a card the
+tap accepts, a person claims or a customer's accept changes while the pass runs rings nothing. A customer's own accept takes no
+triage lock, so the ring also holds every row it reads FOR SHARE to its commit, as the tap does (`holdCardRows`: the customer's row,
+whose numbers decide which unlinked calls are theirs, their estimates, their calls in the window the card's check reads, by id
+the booking call and the call the yes came from (the check reads both by id, also when a resend moved the window past them), the
+service catalog with the tap's own SHARE lock taken before the visits, the call's visits); a row changing right now skips the card this run
+(NOWAIT). A call or a visit inserted meanwhile has no row to hold; the next run reads it. Each ring sends a phone banner with the New lead sound
+(`bell-banners.js` kind `call_phone_yes`, 7:00 AM to 9:00 PM Eastern; the 8 AM banner counts a ring at night). The same pass closes
+the rows of every card that is no longer open, listed again after the rings: accepted by the tap, resolved or dismissed by a
+person, or closed as moot. With the
+gate off the sweep does not run, so open rows stay as they are until it runs again. A failed ring is logged with ids only and is
+tried again on the next run. It sends nothing to a customer.
 
 Paid-at-the-visit receipt check (owner 2026-11-18, "the daily check"; no gate, read-only): `server/services/paid-visit-receipt-check.js`
 runs hourly at :50 from 9 AM to 7 PM Eastern (scheduler job `paid-visit-receipt-check`, under `runExclusive`). A customer paid by

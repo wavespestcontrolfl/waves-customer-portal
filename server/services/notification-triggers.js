@@ -1098,6 +1098,23 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/estimates',
     }),
   },
+  // The phone banner for a phone-yes card (owner 2026-11-18 "ok go", phone-yes step 1; under GATE_CALL_PHONE_YES_ACCEPT):
+  // a call booked a visit while the customer's estimate was open, so its card waits for the office, or time runs short
+  // on an open card. call-phone-yes-bell.js writes the bell row and names this kind with notifyAdmin's bannerKind;
+  // `build` takes the row's own words. The sweep closes the row once the card closes. Admin-only.
+  call_phone_yes: {
+    label: 'A call booked a visit on an open estimate',
+    category: 'estimate',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'phone_yes_card_closed', closedBy: 'server/services/call-phone-yes-bell.js' },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'Estimates — check a call on an open estimate',
+      body: p.alertBody || 'A call booked a visit while the estimate was open.',
+      link: p.alertLink || '/admin/communications#tab=triage',
+    }),
+  },
   bundle_quote_requested: {
     label: 'Bundle quote requested',
     category: 'estimate',
@@ -1633,7 +1650,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
 
     const prefsByUser = new Map(prefs.map((p) => [p.admin_user_id, p]));
     // No row = the trigger's default (on, or off for quietByDefault triggers).
-    const anyBellEnabled = activeAdmins.some((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).bell_enabled !== false);
+    const anyBellEnabled = bellWanted(trigger, activeAdmins, prefs);
     const pushEnabledIds = activeAdmins
       .filter((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).push_enabled !== false)
       .map((u) => u.id);
@@ -1941,6 +1958,14 @@ function defaultPreference(trigger) {
   return { bell_enabled: on, push_enabled: on, sound_enabled: on };
 }
 
+// Whether the trigger's shared bell row is wanted: some recipient has its Bell switch on (Push Settings), an admin with
+// no preference row getting the trigger's default. `prefs`: the trigger's notification_preferences rows. Used by
+// triggerNotification for its bell write, and by call-phone-yes-bell.js, which writes its own rows.
+function bellWanted(trigger, recipients, prefs) {
+  const byUser = new Map(prefs.map((p) => [String(p.admin_user_id), p]));
+  return recipients.some((u) => (byUser.get(String(u.id)) || defaultPreference(trigger)).bell_enabled !== false);
+}
+
 function listTriggers() {
   return Object.entries(TRIGGER_REGISTRY).map(([key, t]) => ({
     key, label: t.label, group: t.group, priority: t.priority, quietByDefault: t.quietByDefault === true,
@@ -1951,6 +1976,7 @@ module.exports = {
   triggerNotification,
   listTriggers,
   defaultPreference,
+  bellWanted,
   TRIGGER_REGISTRY,
   technicianCopy,
   technicianRowCopy,
