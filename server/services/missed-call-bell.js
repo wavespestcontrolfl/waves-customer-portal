@@ -449,6 +449,11 @@ function otherGbpLineSql(row) {
 //    reply still sending (its reservation, the only row while the provider's
 //    outcome is unknown) or scheduled is contact too, so no reservation filter
 //    applies (pre-push audit r18);
+//  - no STOP from it: the SMS webhook commits a STOP's opt-out receipt (with
+//    the suppression) before it requires the inbox row, so a STOP whose inbox
+//    write failed leaves only inbound_sms_optout_receipts; every other inbound
+//    text waits for its inbox row (routes/twilio-webhook.js). A receipt of the
+//    number in the window is contact (pre-push audit r21);
 //  - in the unified inbox, which the SMS webhook writes first and the text log
 //    only as best effort (pre-push audit r14), nothing in the window but
 //    mirrors of silent calls and our text-back, on threads linked to no
@@ -547,6 +552,11 @@ function silentRecordClauses(row, key, at, checkedAt) {
           .whereRaw(`${phoneKeySql('s.from_phone')} = ?`, [key])
           .orWhereRaw(`${phoneKeySql('s.to_phone')} = ?`, [key]))
         .whereRaw("(s.direction = 'outbound' AND s.message_type = 'missed_call_text_back') IS NOT TRUE");
+    })
+    .whereNotExists(function optOutReceipt() {
+      this.select(1).from('inbound_sms_optout_receipts as oo')
+        .where('oo.applied_at', '>=', since)
+        .whereRaw(`${phoneKeySql('oo.phone')} = ?`, [key]);
     })
     .whereNotExists(function inboxMessage() {
       this.select(1).from('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')

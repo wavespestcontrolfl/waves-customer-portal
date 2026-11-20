@@ -43,7 +43,7 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call bell: robodialer wave on PostgreSQL', () => {
   let database;
   const schema = `missed_call_wave_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'technicians', 'conversations', 'messages'];
+  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'technicians', 'conversations', 'messages', 'inbound_sms_optout_receipts'];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
@@ -602,6 +602,10 @@ jest.setTimeout(30000);
     const CALLER = '+17275550611';
     // The staff cell a form-callback bridge rings first (pre-push audit r20).
     const STAFF_CELL = '+19415550100';
+    // A STOP's opt-out receipt, which the SMS webhook commits before it
+    // requires the inbox row (pre-push audit r21).
+    const optOutReceipt = (appliedAt) => database('inbound_sms_optout_receipts')
+      .insert({ message_sid: `SM${randomUUID().replaceAll('-', '')}`, phone: CALLER, applied_at: appliedAt });
     const repeat = (row) => isRepeatSilentCaller(row);
     const lead = (phone, extra = {}) => database('leads').insert({ id: randomUUID(), phone, created_at: new Date(), ...extra });
     // The call judged: the caller's latest silent hang-up on the Parrish GBP line
@@ -669,6 +673,7 @@ jest.setTimeout(30000);
       ['a conversation with the number linked to a customer', () => inbox(CALLER, null, { customer_id: LINKED_CUSTOMER })],
       ['a lead saved for the number', () => lead('727.555.0611')],
       ['a customer saved with the number on a secondary slot', () => database('customers').insert({ id: randomUUID(), first_name: 'Test', service_contact_phone: '727-555-0611', created_at: new Date(), updated_at: new Date() })],
+      ['a STOP that left only its opt-out receipt', () => optOutReceipt(new Date())],
       ['a staff reply still sending, its reservation the only row', () => database('sms_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_type: 'manual', message_body: 'Hi, Waves returning your call', status: 'sending', metadata: { manual_send_reservation: true }, created_at: new Date() })],
       ['a reply in a customer thread a promotion moved it to', () => inbox(null, { channel: 'sms', direction: 'inbound', body: 'who is this', metadata: { sms_contact_phone: CALLER } }, { contact_phone: null, unknown_contact: false, customer_id: LINKED_CUSTOMER })],
     ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15, r16, r18, r20)', async (label, lateWrite) => {
@@ -929,6 +934,19 @@ jest.setTimeout(30000);
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
       await database('call_log').insert(call(GBP_LINE, 60 * 24 * 4, { direction: 'outbound', to_phone: STAFF_CELL, answered_by: null, source: 'lead-webhook-auto-bridge', metadata: { type: 'lead_auto_bridge', leadPhone: '(727) 555-0611' } }));
+      expect(await repeat(row)).toBe(false);
+    });
+
+    // A STOP whose inbox write failed leaves only its opt-out receipt: no text
+    // log row and no inbox message (pre-push audit r21). One from before the
+    // window does not count, as with texts.
+    test('a STOP that left only its opt-out receipt means it is never a repeat; one from before the window does not count (pre-push audit r21)', async () => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      await optOutReceipt(new Date(Date.now() - 20 * 86400 * 1000));
+      expect(await repeat(row)).toBe(true);
+      await optOutReceipt(new Date(Date.now() - 3 * 86400 * 1000));
       expect(await repeat(row)).toBe(false);
     });
 
