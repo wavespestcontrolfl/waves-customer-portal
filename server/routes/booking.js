@@ -1634,7 +1634,13 @@ function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, 
 // new stop, with the visit being moved (excludeServiceIds) left out of the
 // day. The voice agent is never filtered: its check runs detached, in shadow
 // only, after the answer is built (its tool call times out at 3 seconds).
-function routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today }) {
+// `floor: false` (a crew build: a floor over the crew's slots is not /book's)
+// keeps every removal. `verifiedOnly` (the hourly route check's asks, which
+// count openings and run in the background) waits up to
+// VERIFIED_CHECK_BUDGET_MS, and takes no list the check kept unchecked
+// (applyRouteCheck throws).
+const VERIFIED_CHECK_BUDGET_MS = 15000;
+function routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today, floor = true, verifiedOnly = false }) {
   if (!surface) return null;
   try {
     const routeCheck = require('../services/scheduling/customer-route-check');
@@ -1645,8 +1651,11 @@ function routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today 
       mode: surface === 'voice' ? 'shadow' : mode,
       durationMinutes: duration,
       target: { prospective: { lat, lng, estimated_duration_minutes: duration }, excludeServiceIds },
+      floor, verifiedOnly,
+      ...(verifiedOnly ? { budgetMs: VERIFIED_CHECK_BUDGET_MS } : {}),
     };
   } catch (err) {
+    if (verifiedOnly) throw new Error(`route check unavailable: ${err.message}`);
     logger.warn(`[customer-route-check] unavailable: ${err.message}`);
     return null;
   }
@@ -1654,12 +1663,19 @@ function routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today 
 
 async function applyRouteCheck(plan, candidates) {
   if (!plan || plan.voice) return candidates;
+  let slots;
+  let report;
   try {
-    return (await plan.routeCheck.filterOfferedSlots({ ...plan, slots: candidates })).slots || candidates;
+    ({ slots, report } = await plan.routeCheck.filterOfferedSlots({ ...plan, slots: candidates }));
   } catch (err) {
+    if (plan.verifiedOnly) throw new Error(`route check failed: ${err.message}`);
     logger.warn(`[customer-route-check] check failed, serving the unfiltered list: ${err.message}`);
     return candidates;
   }
+  // A caller that counts openings takes no list the check kept unchecked (customer-route-check.js uncheckedReason).
+  const unchecked = plan.verifiedOnly && plan.routeCheck.uncheckedReason(report);
+  if (unchecked) throw new Error(`route check: ${unchecked}`);
+  return slots || candidates;
 }
 
 function detachVoiceRouteCheck(plan, candidates) {
@@ -1673,7 +1689,9 @@ function detachVoiceRouteCheck(plan, candidates) {
 // unknown. A slot of a technician outside a date's known crew is dropped before
 // any candidate is built, so the one-technician-per-start pick below chooses only
 // among the technicians who work the day. A date the map leaves out or marks null
-// keeps every technician; no map keeps every slot, as before.
+// keeps every technician; no map keeps every slot, as before. A crew build's
+// customer route check keeps no floor (routeCheckPlan `floor: false`): the floor
+// looks at the whole pool /book offers, and the crew's pool is a part of it.
 function crewSlots(slots, crew) {
   if (!crew) return slots;
   return slots.filter((slot) => {
@@ -1714,7 +1732,7 @@ function crewSlots(slots, crew) {
 // that already has a technician keeps that technician.
 // `zoneFunnelAddress`: opt-in address text. With GATE_SOUTH_ZONE_DAY_FUNNEL live and an address in a
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, paidLookups, crew }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, paidLookups, crew, verifiedOnly }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -1917,6 +1935,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       occupiedByDate.get(row.date).push(row);
     }
   } catch (occErr) {
+    // A caller that counts openings (availabilityForPin `verifiedOnly`) never counts an unfiltered list.
+    if (verifiedOnly) throw new Error(`occupancy mirror unread: ${occErr.message}`);
     logger.warn(`[booking] availability occupancy filter unavailable — serving unfiltered slots: ${occErr.message}`);
     occupiedByDate = null;
   }
@@ -2123,7 +2143,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const stampedCandidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
   // GATE_CUSTOMER_ROUTE_CHECK (customer-route-check.js): null with the gate
   // off or no surface named, and nothing below runs.
-  const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today });
+  const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today, floor: !crew, verifiedOnly });
   // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL), opt-in per caller with the address text
   // (the lead assessment link): the pool narrows BEFORE the customer route check, as on the estimate page.
   const funneledCandidates = await funnelOfferPool(stampedCandidates, {
@@ -2307,20 +2327,26 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
 // (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
 // so a text-offered time and the website's come from one finder. Null when
 // /book is off, the service is no funnel service or the pin is missing.
-// Five options only the hourly route check's slot-rule decision passes
+// Six options only the hourly route check's slot-rule decision passes
 // (day-replan/route-check.js, which only reads the offer); unset = as before:
 //   `paidLookups: false` buys nothing: no road lookup (find-time
 //     travelAllowance) and no forecast (the rain chips and the rain rank; both
 //     only stamp or order the offers, never add or drop one);
 //   `through` (YYYY-MM-DD) searches at least to that date, as /book's own
 //     "Find more dates" request can, never past the 90-day horizon;
-//   `crew` offers each date only from the technicians who work it (crewSlots);
+//   `crew` offers each date only from the technicians who work it (crewSlots),
+//     and its customer route check keeps no floor (a floor over part of the
+//     pool is not /book's; the decision asks /book's own pool for that);
 //   `now` (a Date) is the clock the offer is built for (the offer window and
 //     the notice window): the run's own; unset = the wall clock;
 //   `surface` labels the ask for the customer route check (default 'book'):
 //     the route check's asks log as 'route_check', apart from customer
-//     searches, under the same rules.
-async function availabilityForPin({ lat, lng, serviceKey, internal = false, paidLookups, through, crew, now, surface }) {
+//     searches, under the same rules;
+//   `verifiedOnly` takes no fallback list: a failed occupancy read, or a
+//     customer route check that failed, ran out of time, could not score a
+//     route or kept its whole week (the floor), throws instead of serving the
+//     unchecked list the customer keeps. Its check waits up to 15 seconds.
+async function availabilityForPin({ lat, lng, serviceKey, internal = false, paidLookups, through, crew, now, surface, verifiedOnly }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
   const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
@@ -2347,6 +2373,7 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false, paid
     bookArrivalGrace: true,
     paidLookups,
     crew,
+    verifiedOnly,
   });
 }
 

@@ -29,7 +29,9 @@
  *     technician) per request.
  *   - Filter only: order and object shapes are the input's, never mutated.
  *   - Floor: if removals would leave nothing dated today..today+6 (ET), the
- *     original list is returned (report.floorKept).
+ *     original list is returned (report.floorKept). A caller whose list is
+ *     not a customer's (the hourly route check's asks for the staffed
+ *     technicians) turns it off: `floor: false`.
  *   - Budget about 1500 ms: slots not yet evaluated are kept (timedOut).
  *   - Never throws: on any error the original list comes back (report.error).
  *   - Spends nothing: the default route-optimizer estimate drives every leg
@@ -235,9 +237,9 @@ async function evaluateAll({ arrivalRoute, slots, target, durationMinutes, conn,
   return remove;
 }
 
-// Removals that would leave nothing dated today..today+6 keep the list whole.
-function floorBlocks({ slots, remove, pick, today }) {
-  if (!remove.size) return false;
+// Removals that would leave nothing dated today..today+6 keep the list whole, unless the caller has no floor.
+function floorBlocks({ slots, remove, pick, today, floor }) {
+  if (floor === false || !remove.size) return false;
   const todayEt = todayEtString(today);
   const end = floorEndDate(todayEt);
   return !slots.some((slot, i) => {
@@ -263,9 +265,10 @@ function floorBlocks({ slots, remove, pick, today }) {
  * @param {string} [args.mode]    'shadow' | 'on' (default: the gate)
  * @param {Function} [args.pick]  slot -> { date, startMin, technicianId }
  * @param {number} [args.budgetMs]
+ * @param {boolean} [args.floor]  false: no floor, a removal always stands (default true)
  * @returns {Promise<{ slots: Array, report: object }>} never throws
  */
-async function filterOfferedSlots({ surface, slots, target, durationMinutes, today, conn, mode, pick = defaultPick, budgetMs = DEFAULT_BUDGET_MS } = {}) {
+async function filterOfferedSlots({ surface, slots, target, durationMinutes, today, conn, mode, pick = defaultPick, budgetMs = DEFAULT_BUDGET_MS, floor } = {}) {
   const startedAt = Date.now();
   const original = Array.isArray(slots) ? slots : [];
   const runMode = mode || customerRouteCheckMode();
@@ -281,7 +284,7 @@ async function filterOfferedSlots({ surface, slots, target, durationMinutes, tod
       arrivalRoute, slots: original, target: checkTarget, durationMinutes: duration,
       conn: conn || require('../../models/db'), pick, deadline: startedAt + budgetMs, report,
     });
-    if (floorBlocks({ slots: original, remove, pick, today })) {
+    if (floorBlocks({ slots: original, remove, pick, today, floor })) {
       report.floorKept = true;
       return { slots: original, report };
     }
@@ -297,4 +300,21 @@ async function filterOfferedSlots({ surface, slots, target, durationMinutes, tod
   }
 }
 
-module.exports = { customerRouteCheckMode, filterOfferedSlots, _internals: { defaultPick, floorEndDate, DEFAULT_BUDGET_MS } };
+/**
+ * For a caller that counts openings (routes/booking.js `verifiedOnly`, the hourly route check's asks): why a check's
+ * list still holds a slot that did not pass it, or null when none does. A check that filters nothing (shadow) holds the
+ * picker's own list, so it is null too, as is a skipped one (no slots, arrival windows off, no target), which flags
+ * nothing. Otherwise: the check's own error, its time budget, a route it could not load or score, a slot with no
+ * technician, or the floor.
+ */
+function uncheckedReason(report) {
+  if (!report) return 'no_report';
+  if (report.mode !== 'on') return null;
+  if (report.error) return `error ${String(report.error).slice(0, 120)}`;
+  if (report.timedOut) return 'timed_out';
+  if (report.errors) return `errors=${report.errors}`;
+  if (report.keptUnverified) return `kept_unverified=${report.keptUnverified}`;
+  return report.floorKept ? 'floor_kept' : null;
+}
+
+module.exports = { customerRouteCheckMode, filterOfferedSlots, uncheckedReason, _internals: { defaultPick, floorEndDate, DEFAULT_BUDGET_MS } };

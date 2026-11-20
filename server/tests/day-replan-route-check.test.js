@@ -658,13 +658,17 @@ describe('runRouteCheck', () => {
       mode: 'full',
       zones: [FLOOR.zones[0], { zone: 'South', byDate: { '2026-11-20': 0, '2026-11-21': 2, '2026-11-23': 0 }, first: '2026-11-21 10:00' }],
     });
-    // Each zone's center is asked once, as a lead is offered times there (no staff-side `internal` read), buying
-    // nothing (no road lookup, no forecast), searched through the last next staffed day, with the run's crew, on the
-    // run's own clock, under the probe's own label (the customer route check logs it apart from customer searches).
-    expect(availabilityForPin.mock.calls.map(([ask]) => ask)).toEqual(ZONES.map((z) => ({
+    // Each zone's center is asked as a lead is offered times there (no staff-side `internal` read), buying nothing
+    // (no road lookup, no forecast), searched through the last next staffed day, on the run's own clock, under the
+    // probe's own label (the customer route check logs it apart from customer searches), taking no fallback list:
+    // first with the run's crew; then, for North (no crew slot), /book's own pool. South's slot needs no second ask.
+    const askAt = (z, extra = {}) => ({
       lat: z.center_lat, lng: z.center_lng, serviceKey: 'pest_control', paidLookups: false,
-      through: '2026-11-23', crew: expect.any(Map), now: NOW, surface: 'route_check',
-    })));
+      through: '2026-11-23', now: NOW, surface: 'route_check', verifiedOnly: true, ...extra,
+    });
+    expect(availabilityForPin.mock.calls.map(([ask]) => ask)).toEqual([
+      askAt(ZONES[0], { crew: expect.any(Map) }), askAt(ZONES[0]), askAt(ZONES[1], { crew: expect.any(Map) }),
+    ]);
     // Hour mode: /book's own drive times are the same free model, so the answer carries no travel mark.
     expect(JSON.parse(writes[0][1].ad_shadow).decision.travel).toBeUndefined();
     expect(result.status).toBe('completed');
@@ -690,6 +694,27 @@ describe('runRouteCheck', () => {
     expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
     expect(JSON.parse(some.writes[0][1].ad_shadow).decision).toMatchObject({
       mode: 'full', zones: [{ zone: 'North', error: 'no_offer' }, { zone: 'South', first: '2026-11-23 09:00' }],
+    });
+  });
+
+  test("slot rule (A3): with no crew slot, /book's own pool says whether the zero is an answer (its whole-week floor)", async () => {
+    // /book's own pool answers too: its check kept no whole week, so the crew's zero is the zone's answer.
+    const zero = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
+    expect(JSON.parse(zero.writes[0][1].ad_shadow).decision).toEqual(FLOOR);
+    expect(availabilityForPin.mock.calls.map(([ask]) => [ask.lat, ask.crew instanceof Map])).toEqual([
+      [27.5, true], [27.5, false], [27.1, true], [27.1, false],
+    ]);
+    // /book's check would keep its whole week (every slot in it makes a customer late, and /book shows them): that ask
+    // throws (routes/booking.js verifiedOnly), so the zone has no answer and the decision is unknown, never floor.
+    availabilityForPin.mockImplementation(async ({ crew }) => {
+      if (!crew) throw new Error('route check: floor_kept');
+      return { days: [] };
+    });
+    const kept = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(kept.writes[0][1].ad_shadow).decision).toEqual({
+      ...FLOOR, mode: 'unknown', zones: FLOOR.zones.map((z) => ({ ...z, error: 'route check: floor_kept' })),
     });
   });
 

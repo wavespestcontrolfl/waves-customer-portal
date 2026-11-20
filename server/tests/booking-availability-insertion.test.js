@@ -215,6 +215,87 @@ describe("availabilityForPin — the hourly route check's read-only ask", () => 
       filter.mockRestore();
     }
   });
+
+  test('verifiedOnly: a failed occupancy read is no answer; every other caller still serves the unfiltered list', async () => {
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    const pin = { lat: 27.4, lng: -82.4, serviceKey: 'pest_control', paidLookups: false };
+    findAvailableSlots.mockResolvedValue({ slots: [sharedStart('tech-1', 1)], total_feasible: 1 });
+    listOccupiedWindows.mockRejectedValue(new Error('pool exhausted'));
+    await expect(availabilityForPin({ ...pin, verifiedOnly: true })).rejects.toThrow('occupancy mirror unread: pool exhausted');
+    // The customer's fallback is unchanged: the commit gate still owns correctness.
+    expect(offeredAt9(await availabilityForPin(pin))).toEqual(['tech-1']);
+  });
+
+  test('verifiedOnly: a route check that kept a slot unchecked is no answer; a customer keeps its list as before', async () => {
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    const routeCheck = require('../services/scheduling/customer-route-check');
+    const mode = jest.spyOn(routeCheck, 'customerRouteCheckMode').mockReturnValue('on');
+    let report = {};
+    const filter = jest.spyOn(routeCheck, 'filterOfferedSlots').mockImplementation(async ({ slots }) => ({ slots, report: { mode: 'on', ...report } }));
+    findAvailableSlots.mockResolvedValue({ slots: [sharedStart('tech-1', 1)], total_feasible: 1 });
+    const pin = { lat: 27.4, lng: -82.4, serviceKey: 'pest_control', paidLookups: false, surface: 'route_check' };
+    try {
+      // A finished check stands. The verified ask waits up to 15 seconds; a customer's keeps the 1.5-second default.
+      expect(offeredAt9(await availabilityForPin({ ...pin, verifiedOnly: true }))).toEqual(['tech-1']);
+      expect(filter.mock.calls[0][0]).toMatchObject({ budgetMs: 15000, floor: true, verifiedOnly: true });
+      filter.mockClear();
+      expect(offeredAt9(await availabilityForPin(pin))).toEqual(['tech-1']);
+      expect(filter.mock.calls[0][0]).not.toHaveProperty('budgetMs');
+      for (const [kept, reason] of [[{ timedOut: true }, 'timed_out'], [{ errors: 2 }, 'errors=2'], [{ floorKept: true }, 'floor_kept']]) {
+        report = kept;
+        await expect(availabilityForPin({ ...pin, verifiedOnly: true })).rejects.toThrow(`route check: ${reason}`);
+        expect(offeredAt9(await availabilityForPin(pin))).toEqual(['tech-1']);
+      }
+      report = {};
+      // A check that throws, or a check that cannot start: no answer for the verified ask; a customer gets the list.
+      filter.mockRejectedValueOnce(new Error('router down'));
+      await expect(availabilityForPin({ ...pin, verifiedOnly: true })).rejects.toThrow('route check failed: router down');
+      filter.mockRejectedValueOnce(new Error('router down'));
+      expect(offeredAt9(await availabilityForPin(pin))).toEqual(['tech-1']);
+      mode.mockImplementation(() => { throw new Error('gates unreadable'); });
+      await expect(availabilityForPin({ ...pin, verifiedOnly: true })).rejects.toThrow('route check unavailable: gates unreadable');
+      expect(offeredAt9(await availabilityForPin(pin))).toEqual(['tech-1']);
+    } finally {
+      mode.mockRestore();
+      filter.mockRestore();
+    }
+  });
+
+  test("crew: the route check keeps no floor over the crew's slots, so a start /book removes stays removed", async () => {
+    // Pre-push audit r5 / Codex r1 on #8068. Friday's only start would make a customer late. An idle technician's
+    // Sunday start (no stop that day, so not in Sunday's crew) is fine. /book removes Friday and shows Sunday.
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    const routeCheck = require('../services/scheduling/customer-route-check');
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const FRI = dayOffset(2);
+    const SUN = dayOffset(3);
+    const startOn = (date, techId) => ({ ...sharedStart(techId, 1), date });
+    const spies = [
+      jest.spyOn(routeCheck, 'customerRouteCheckMode').mockReturnValue('on'),
+      jest.spyOn(arrivalRoute, 'arrivalWindowRoutingEnabled').mockReturnValue(true),
+      jest.spyOn(arrivalRoute, 'loadArrivalRouteContext').mockImplementation(async ({ date }) => ({ date, rows: [] })),
+      jest.spyOn(arrivalRoute, 'evaluateArrivalPlacement').mockImplementation((context) => (context.date === FRI
+        ? { feasible: false, reason: 'arrival_window', lateness: { newlyLateStopIds: ['visit-9'], baselineLateStopIds: [] } }
+        : { feasible: true })),
+    ];
+    const offered = (result) => result.days.flatMap((d) => d.slots.map((s) => `${d.date} ${s.start_time} ${s.technician_id}`));
+    const pin = { lat: 27.4, lng: -82.4, serviceKey: 'pest_control', paidLookups: false, surface: 'route_check' };
+    const crew = new Map([[FRI, new Set(['tech-1'])], [SUN, new Set()]]);
+    findAvailableSlots.mockResolvedValue({ slots: [startOn(FRI, 'tech-1'), startOn(SUN, 'tech-2')], total_feasible: 2 });
+    try {
+      expect(offered(await availabilityForPin(pin))).toEqual([`${SUN} 09:00 tech-2`]);
+      // The crew's ask: Sunday is nobody's, and Friday stays removed (a floor over Friday alone would bring it back).
+      expect(offered(await availabilityForPin({ ...pin, crew, verifiedOnly: true }))).toEqual([]);
+      // /book's own pool, verified: Sunday survives, so its check keeps no whole week, and the answer stands.
+      expect(offered(await availabilityForPin({ ...pin, verifiedOnly: true }))).toEqual([`${SUN} 09:00 tech-2`]);
+      // With no Sunday at all, /book's floor keeps Friday for the customer, and the verified ask has no answer.
+      findAvailableSlots.mockResolvedValue({ slots: [startOn(FRI, 'tech-1')], total_feasible: 1 });
+      expect(offered(await availabilityForPin(pin))).toEqual([`${FRI} 09:00 tech-1`]);
+      await expect(availabilityForPin({ ...pin, verifiedOnly: true })).rejects.toThrow('route check: floor_kept');
+    } finally {
+      spies.forEach((spy) => spy.mockRestore());
+    }
+  });
 });
 
 // Codex round 2 P1 on PR #5231: an offer minted while capacityPlacement is
