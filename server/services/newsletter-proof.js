@@ -365,9 +365,11 @@ function issueFyiAddresses(issue) {
 }
 
 // Records the address a planned issue's FYI copy is about to go to, and the copy's text by digest
-// (fyiCopyDigest), before it goes out.
-function recordFyiRecipient(sendId, to, copyText) {
-  return db('pest_insider_issues').where({ send_id: sendId }).update({
+// (fyiCopyDigest), before it goes out. Only while the issue is still linked and 'drafted': a draft
+// deleted in History while the copy rendered holds the issue and clears its link. Returns whether
+// the row was written.
+async function recordFyiRecipient(sendId, to, copyText) {
+  const written = await db('pest_insider_issues').where({ send_id: sendId, status: 'drafted' }).update({
     diagnostics: db.raw(
       "coalesce(diagnostics, '{}'::jsonb) || jsonb_build_object("
         + "'fyiTo', coalesce(diagnostics->'fyiTo', '{}'::jsonb) || jsonb_build_object(?::text, true), "
@@ -375,6 +377,7 @@ function recordFyiRecipient(sendId, to, copyText) {
       [normalizeEmail(to), fyiCopyDigest(copyText)],
     ),
   });
+  return Number(written) > 0;
 }
 
 /** Who may HOLD a planned issue, before the sender is verified: an approver, or an address its FYI copy went to (the current proof address when none was recorded). */
@@ -407,12 +410,14 @@ function verifiedHoldSender(email, fyiTos) {
 }
 
 /**
- * A planned issue's FYI copy as its text part reads, whitespace and case aside: the issue's row
- * records it with the address the copy goes to, before it goes out (recordFyiRecipient). SendGrid
- * leaves that part as sent (no text click tracking, no subscription footer).
+ * A planned issue's FYI copy as its text part reads, with no whitespace and case aside, so a line
+ * wrapped again on its way still matches: the issue's row records it with the address the copy goes
+ * to, before it goes out (recordFyiRecipient). SendGrid leaves that part as sent (no text click
+ * tracking, no subscription footer); it rewrites the HTML part's links and adds an open-tracking
+ * image, so the HTML part is not read.
  */
 function fyiCopyDigest(text) {
-  return crypto.createHash('sha256').update(String(text || '').replace(/\s+/g, ' ').trim().toLowerCase()).digest('hex');
+  return crypto.createHash('sha256').update(String(text || '').replace(/\s+/g, '').toLowerCase()).digest('hex');
 }
 
 /** The FYI copies a planned issue's row recorded, by digest (recordFyiRecipient). */
@@ -886,8 +891,10 @@ async function sendNewsletterProof(sendId) {
     }, to);
     // Every address a copy of a planned issue's FYI goes to may HOLD it (verifiedHoldSender), and the
     // copy itself never does (isProofCopyItself): both are recorded with its row before the copy goes
-    // out; a write that fails sends nothing.
-    if (issueContext) await recordFyiRecipient(send.id, to, text);
+    // out. A write that fails, or finds the issue no longer drafted, sends nothing.
+    if (issueContext && !(await recordFyiRecipient(send.id, to, text))) {
+      throw new Error('its planned issue is no longer drafted (its draft was deleted in History, or it was held)');
+    }
 
     const result = await sendgrid.sendOne({
       to,

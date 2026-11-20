@@ -910,7 +910,9 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(queue).toEqual(expect.objectContaining({ status: 'scheduled', scheduled_for: ISSUE_SEND_AT, proof_approval_email_id: null }));
     expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted']);
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
-    // The address the copy goes to is recorded with the row before it goes out: it may HOLD the issue.
+    // The address the copy goes to is recorded with the row, while it is drafted and linked, before
+    // the copy goes out: it may HOLD the issue.
+    expect(issuesChain.where).toHaveBeenCalledWith({ send_id: 'send-1', status: 'drafted' });
     expect(issuesChain.update).toHaveBeenCalledWith(recordedFyi('contact@wavespestcontrol.com'));
     expect(issuesChain.update.mock.invocationCallOrder[0]).toBeLessThan(mockSendOne.mock.invocationCallOrder[0]);
     // The send and its issue row are queued in one transaction.
@@ -951,6 +953,16 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(sendsChain.update.mock.calls.at(-1)[0]).toEqual({ proof_sent_at: null, updated_at: expect.any(Date) });
   });
 
+  test('an issue no longer drafted when its copy is about to go out (its draft deleted in History meanwhile, which holds it and clears its link) gets no copy: the record writes only a drafted issue linked to the send, finds none, and nothing goes out', async () => {
+    const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE, update: 0 } });
+    const r = await sendNewsletterProof('send-1');
+
+    expect(issuesChain.where).toHaveBeenCalledWith({ send_id: 'send-1', status: 'drafted' });
+    expect(r.reason).toBe('proof_send_failed');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    expect(sendsChain.update.mock.calls.at(-1)[0]).toEqual({ proof_sent_at: null, updated_at: expect.any(Date) });
+  });
+
   test('its retry sends the token the failed attempt kept, so every copy of its FYI carries one token', async () => {
     const { sendsChain } = wireDb({ sends: { first: { ...PI_DRAFT, proof_token: 'AB12CD34' } }, issues: { first: ISSUE } });
     const r = await sendNewsletterProof('send-1');
@@ -961,8 +973,10 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
   });
 
   test('an issue row that is no longer drafted rolls the queueing back, and the owner is told', async () => {
-    // The send's queue update matches, but its issue row does not move: the transaction fails.
-    wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE, update: 0 } });
+    // The send's queue update matches, but its issue row does not move: the transaction fails. (The
+    // row was still drafted when the copy went out: its record, the first write, found it.)
+    const { issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE, update: 0 } });
+    issuesChain.update.mockImplementationOnce(async () => 1);
     mockTrigger.mockResolvedValueOnce({ bellWritten: true });
     const r = await sendNewsletterProof('send-1');
 
@@ -1135,8 +1149,8 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(await maybeHandleProofApproval({
       ...HOLD, subject: HOLD.subject.slice(4), from_address: PI_QUEUED.from_email, label_ids: ['INBOX'],
       authentication_results: 'mx.google.com; dkim=pass header.i=@wavespestcontrol.com header.s=s1 header.b=abc',
-      // As it arrives: the same words, its own line breaks.
-      body_text: COPY.replace(/\n/g, '\r\n'),
+      // As it arrives: the same words, its own line breaks, and a long line wrapped again mid-word.
+      body_text: COPY.replace(/\n/g, '\r\n').replace('readers', 'read\r\ners'),
     })).toBe(true); // proof traffic: the sync skips classification and auto-actions for it
     expect(issuesChain.update).not.toHaveBeenCalled();
     expect(mockTrigger).not.toHaveBeenCalled();
