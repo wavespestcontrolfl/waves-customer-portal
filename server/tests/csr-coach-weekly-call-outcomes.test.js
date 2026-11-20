@@ -71,9 +71,13 @@ test('a recommendation asked for a period reads scores from its first date, with
   expect(reads).toHaveLength(1);
   const read = reads[0][1];
   expect(read.where).toHaveBeenCalledWith('s.call_date', '>=', '2026-11-13');
-  const [lateral] = read.joinRaw.mock.calls[0];
+  const [lateral, bindings] = read.joinRaw.mock.calls[0];
   expect(lateral).toContain("cl.twilio_call_sid = s.metadata->>'callSid'");
   expect(lateral).toContain(require('../services/sms-pending-conversations').callStartedAtSql('cl'));
+  // A voice sandbox or tech-line row gives no start (whereNotSandboxCall's two sources), so its score keeps call_date.
+  const { VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE } = require('../services/voice-agent/relay-protocol');
+  expect(lateral).toContain("AND COALESCE(cl.source, '') <> ? AND COALESCE(cl.source, '') <> ?) call_start ON TRUE");
+  expect(bindings).toEqual([VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE]);
 });
 
 test.each([

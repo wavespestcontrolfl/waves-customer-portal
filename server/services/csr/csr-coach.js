@@ -5,7 +5,7 @@ const { dispatchWithFallback } = require('../llm/call');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('../staff-contact');
-const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
+const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE } = require('../voice-agent/relay-protocol');
 const { isV2Extraction } = require('../../utils/extraction-compat');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { nanpNationalDigits } = require('../../utils/phone');
@@ -919,11 +919,15 @@ Return JSON:
   async generateWeeklyTeamRecommendation({ between = null } = {}) {
     // A period's scores carry their call's start time (metadata.callSid is the call's twilio_call_sid), and
     // scoreInTipPeriod places each by it. A call is scored after it starts, so every call that started in the period
-    // has call_date >= fromDate; a later call_date (scored after the period ended) stays in this read.
+    // has call_date >= fromDate; a later call_date (scored after the period ended) stays in this read. A voice sandbox
+    // or tech-line row never gives a start (whereNotSandboxCall's rule, row-level in this raw join), so such a score
+    // keeps its call_date.
     const allScores = between
       ? (await db('csr_call_scores as s')
         .joinRaw(`LEFT JOIN LATERAL (SELECT MIN(${callStartedAtSql('cl')}) AS started_at FROM call_log cl`
-          + " WHERE cl.twilio_call_sid = s.metadata->>'callSid') call_start ON TRUE")
+          + " WHERE cl.twilio_call_sid = s.metadata->>'callSid'"
+          + " AND COALESCE(cl.source, '') <> ? AND COALESCE(cl.source, '') <> ?) call_start ON TRUE",
+        [VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE])
         .where('s.call_date', '>=', between.fromDate)
         .select('s.*', 'call_start.started_at as call_started_at'))
         .filter((score) => scoreInTipPeriod(score, between))
