@@ -122,6 +122,11 @@ describe('readableEmail', () => {
     // Pre-push audit on 34ab1e253a (P1): a header wrapped onto a second line kept the old offer.
     const wrapped = 'Thanks. On Mon, Apr 13, 2026 at 9:00 AM,\nSam Rep wrote: Flash sale ends tomorrow.';
     expect(readableEmail({ subject: 'Deal', body_text: wrapped })).toEqual({ subject: 'Deal', text: 'Thanks.', cut: false, partial: true });
+    // Pre-push audit on 76e2aab5e7 (P1): the cut started at the sender's own "on" and dropped the deadline.
+    const ownOn = 'The sale ends on April 30. On Apr 13, 2026 at 9:00 AM Sam Rep wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: ownOn })).toEqual({ subject: 'Deal', text: 'The sale ends on April 30.', cut: false, partial: true });
+    const ownCapitalOn = 'Hi. On April 30 prices go up. On Apr 13, 2026 at 9:00 AM Sam Rep wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: ownCapitalOn }).text).toBe('Hi. On April 30 prices go up.');
     // Prose is no header: with no date, time or address before "wrote:", the text stays whole.
     const prose = 'Big savings. On sale now: our rep wrote: ends Friday.';
     expect(readableEmail({ subject: 'Deal', body_text: prose })).toEqual({ subject: 'Deal', text: prose, cut: false, partial: false });
@@ -576,6 +581,16 @@ describe('readDealEndDates', () => {
     const found = await readDealEndDates(conn, [deal(1, { subject: 'April 15' })]);
 
     expect(found.get(1)).toEqual({ endDate: '2026-04-16', quote: 'Tomorrow only', priceIncrease: false });
+  });
+
+  // Pre-push audit on 76e2aab5e7 (P1): a date that starts the body was a later day in the subject's sentence.
+  test('a date that starts the body is no later day for the subject', async () => {
+    const { conn } = fakeConn([{ id: 1, body_text: '4/15 was the launch date.', body_html: null }]);
+    mockCreate.mockResolvedValue(reply('{"end_date": "2026-04-30", "quote": "Sale ends April 30", "price_increase": false}'));
+
+    const found = await readDealEndDates(conn, [deal(1, { subject: 'Sale ends April 30' })]);
+
+    expect(found.get(1)).toEqual({ endDate: '2026-04-30', quote: 'Sale ends April 30', priceIncrease: false });
   });
 
   // Pre-push audit on 75797b78e6 (P1): a reply's old subject "ends tomorrow" counted from the reply's day.

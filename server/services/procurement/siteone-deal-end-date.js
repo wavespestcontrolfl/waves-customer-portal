@@ -168,7 +168,8 @@ const INHERITED_SUBJECT = /^(?:re|fwd?) ?:/i;
  * text is body_text, else body_html with
  * tags removed (line breaks kept); entities decoded, links removed, spaces and blank lines
  * collapsed, and quoted mail dropped: reply history as the date patterns drop it, reply history
- * written inline (email-strip's HISTORY_HEADERS: "Thanks. On Apr 13, 2026 ... wrote: ..."), every
+ * written inline (email-strip's HISTORY_HEADERS: "Thanks. On Apr 13, 2026 ... wrote: ...", from the
+ * header's own "On", see historyStart), every
  * line that starts with ">", and in HTML every <blockquote>. It is capped at what the subject
  * leaves of MODEL_TEXT_CHARS. `cut` is true when a cap cut the end of the text: the body
  * re-read cap (unless it cut only reply history, which is dropped anyway) or the model cap.
@@ -184,15 +185,35 @@ function readableEmail(email) {
   const html = typeof email?.body_html === 'string' ? email.body_html : '';
   const read = flatten(decodeEntities(text ?? htmlText(html)));
   const kept = stripQuotedHistory(read);
-  // The headers are matched on the text as one line (same length), so a header wrapped onto two lines still cuts.
-  const oneLine = kept.replace(/\n/g, ' ');
-  const own = kept.slice(0, Math.min(...HISTORY_HEADERS.map((re) => re.exec(oneLine)?.index ?? kept.length)));
+  const own = kept.slice(0, historyStart(kept));
   const whole = own.replace(QUOTED_LINE, '').trim();
   const room = MODEL_TEXT_CHARS - subject.length;
   const readCut = own.length === read.length && (text !== null ? text.length >= BODY_TEXT_CHARS : html.length >= BODY_HTML_CHARS);
   const cut = readCut || whole.length > room;
   const dropped = subject !== flat || whole.length < kept.trim().length || (text === null && /<blockquote/i.test(html));
   return { subject, text: whole.slice(0, room), cut, partial: cut || dropped };
+}
+
+// email-strip's inline "On ... wrote:" pattern takes any case, so its match can start at an "on" of
+// the sender's own words ("The sale ends on April 30. On Apr 13, 2026 at 9:00 AM Sam wrote: ..."),
+// and a cut there drops the deadline. The header starts at its own "On": the last capital "On" before
+// "wrote:" that a digit, a weekday or a month follows ("On Mon, ...", "On Apr 13, ...", "On 4/13/26,
+// ..."). With no such "On", the cut stays at the match.
+const HEADER_ON = /\bOn\s+(?=\d|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))/g;
+const WROTE = /\swrote:/i;
+
+/** Where reply history starts in `kept` (its length when it has none): the earliest of email-strip's headers. */
+function historyStart(kept) {
+  // The headers are matched on the text as one line (same length), so a header wrapped onto two lines still cuts.
+  const oneLine = kept.replace(/\n/g, ' ');
+  return Math.min(kept.length, ...HISTORY_HEADERS.map((re) => {
+    const m = re.exec(oneLine);
+    if (!m) return kept.length;
+    if (!/^on\s/i.test(m[0])) return m.index;
+    const end = m.index + (WROTE.exec(oneLine.slice(m.index))?.index ?? 0);
+    const ons = [...oneLine.slice(m.index, end).matchAll(HEADER_ON)];
+    return ons.length ? m.index + ons[ons.length - 1].index : m.index;
+  }));
 }
 
 // Compare text the way a reader would: one space for any run of spaces, any case, and the
@@ -247,8 +268,9 @@ const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'frida
 // business April 30"). A weekday that labels the day itself ("April 30 (Thursday)") is the same
 // day. This leans to "not the end": a refused answer keeps the date-pattern line.
 const RANGE_GAP = 48;
-// A sentence ends at ". ", "! ", "? " or "; " before a letter; "a.m." and "p.m." do not end one.
-const SENTENCE_END = /[.!?;] [a-z]/;
+// A sentence ends at ". ", "! ", "? " or "; " before a letter, and at a pilcrow (the end of the
+// subject, FIELD_BREAK) before anything; "a.m." and "p.m." do not end one.
+const SENTENCE_END = /[.!?;] [a-z]|\u00b6/;
 const oneSentence = (stretch) => !SENTENCE_END.test(stretch.replace(/\b([ap])\.m\./g, '$1m'));
 // Beside dates, a day word names a day only as the close of a range that one of these words
 // opens from the date right before it: "April 20 through Friday", "4/14 until tomorrow".
@@ -409,9 +431,11 @@ function checkAnswer(answer, emailText, receivedAt, cut = false) {
   return { ok: true, endDate, quote, priceIncrease: answer.price_increase };
 }
 
-// The check reads the subject and the body as two sentences, so a date that ends the subject
-// neither labels the body's first word ("April 15" + "Tomorrow only!") nor opens a range with it.
-const FIELD_BREAK = '\n.\n';
+// The check reads the subject and the body as two sentences (a pilcrow ends one before any
+// character), so a date that ends the subject neither labels the body's first word ("April 15" +
+// "Tomorrow only!") nor opens a range with it, and a date that starts the body ("Sale ends April
+// 30" + "4/15 was the launch date") is no later day in the subject's sentence.
+const FIELD_BREAK = '\n\u00b6\n';
 
 /** One model read of one email (its whole body on it). Never throws. */
 async function readOne(client, email) {
