@@ -63,8 +63,11 @@ function renderInBoundary(Page) {
 }
 
 // #8121's gate around the routes, as App.jsx has it, with the /admin index's
-// redirect. Hands back a move: a path, or -1 for Back.
-function renderGate(entries) {
+// redirect. Hands back a move: a path, or -1 for Back. The Blog page's code
+// never arrives. With `transitions`, each move is a transition, as
+// BrowserRouter makes it in App.jsx: a move to Blog then stays out of view,
+// and its render is dropped when another move replaces it.
+function renderGate(entries, { transitions = false } = {}) {
   let navigate;
   function Navigator() {
     navigate = useNavigate();
@@ -73,14 +76,18 @@ function renderGate(entries) {
   function Where() {
     return <div>{useLocation().pathname}</div>;
   }
+  const Blog = lazy(() => new Promise(() => {}));
   render(
-    <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
+    <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1} future={{ v7_startTransition: transitions }}>
       <PortalUpdateGate fallback={<div>Gate placeholder</div>}>
         <Navigator />
-        <Routes>
-          <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
-          <Route path="*" element={<Where />} />
-        </Routes>
+        <Suspense fallback={<div>Loading the page</div>}>
+          <Routes>
+            <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
+            <Route path="/admin/blog" element={<Blog />} />
+            <Route path="*" element={<Where />} />
+          </Routes>
+        </Suspense>
       </PortalUpdateGate>
     </MemoryRouter>,
   );
@@ -390,6 +397,43 @@ describe('on a staff page', () => {
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
   });
 
+  // A page waits for open work only when a reload can follow.
+  test('after the one reload, a page whose code is missing does not wait for open work: the connection retry comes at once, and Retry names the work', async () => {
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    const target = { fetch: () => new Promise(() => {}) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      target.fetch('/api/admin/dashboard');
+      renderInBoundary(lazyWithRetry(missingChunk));
+      expect(await screen.findByText('Check your connection and try again.')).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+      tap(screen.getByRole('button', { name: 'Retry' }));
+      expect(screen.getByText('A request is still on its way.')).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      uninstall();
+    }
+  });
+
+  test('a page used before its code failed does not wait for open work: it says new version at once, and Reload names the work and the page', async () => {
+    const target = { fetch: () => new Promise(() => {}) };
+    const uninstall = installPortalVersionWatch({ target });
+    const stop = watchPageUse(document);
+    try {
+      fireEvent.input(document.body);
+      target.fetch('/api/admin/dashboard');
+      renderInBoundary(lazyWithRetry(missingChunk));
+      expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+      tap(screen.getByRole('button', { name: 'Reload' }));
+      expect(screen.getByText('A request is still on its way. Anything not saved on this page will be lost.')).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      stop();
+      uninstall();
+    }
+  });
+
   test('after the one reload, a chunk still missing under a page that loaded gets the retry screen, not another reload', async () => {
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
     resetStaleChunkReloadForTests(); // the page load the one reload opened
@@ -447,8 +491,9 @@ describe('on a staff page', () => {
     }
   });
 
-  // The gate notes the page each move leaves (notePageMove). Each move below
-  // ends on /admin/dashboard, the location this describe stubs.
+  // The gate notes each move (notePageMove, notePageInView). Each move below
+  // ends on /admin/dashboard, the location this describe stubs, unless a
+  // test stubs another.
   test('Back from a field page, with no use of it, opens a page that never reloads by itself', () => {
     const move = renderGate(['/admin/dashboard', '/admin/today']);
     move(-1);
@@ -477,6 +522,72 @@ describe('on a staff page', () => {
     handleVitePreloadError(stale, reload);
     expect(stale.defaultPrevented).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('a move ends the use of the page it leaves: Back to a page used before the move, with no use since, reloads at once', () => {
+    const stop = watchPageUse(document);
+    try {
+      const move = renderGate(['/admin/dashboard']);
+      fireEvent.input(document.body);
+      const used = preloadErrorEvent();
+      handleVitePreloadError(used, reload);
+      expect(used.defaultPrevented).toBe(false);
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/reviews', reload });
+      move('/admin/reviews');
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/dashboard', reload });
+      move(-1);
+      expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+      const stale = preloadErrorEvent();
+      handleVitePreloadError(stale, reload);
+      expect(stale.defaultPrevented).toBe(true);
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+    }
+  });
+
+  // React drops the render of a move that Back undoes while the new page's
+  // code loads: the page stays in view, with its use and its move.
+  test('a move that never comes into view keeps the use of the page: Back while the next page loads', () => {
+    const stop = watchPageUse(document);
+    try {
+      const move = renderGate(['/admin/dashboard'], { transitions: true });
+      fireEvent.input(document.body);
+      move('/admin/blog');
+      expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+      move(-1);
+      expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+      const stale = preloadErrorEvent();
+      handleVitePreloadError(stale, reload);
+      expect(stale.defaultPrevented).toBe(false);
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+
+  test('a move that never comes into view keeps the bar on a page a move from a field page opened', () => {
+    const move = renderGate(['/admin/today'], { transitions: true });
+    move('/admin/dashboard');
+    expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+    move('/admin/blog');
+    move(-1);
+    expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a move from a field page bars the reload before the new page is in view', () => {
+    const move = renderGate(['/admin/today'], { transitions: true });
+    move('/admin/blog');
+    expect(screen.getByText('/admin/today')).toBeInTheDocument();
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
   });
 
   test('in Waves Admin a missing chunk never reloads by itself', () => {
@@ -585,5 +696,19 @@ describe('on a staff page', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage blocked'); });
     await expect(reloadForMissingCode({ reload })).resolves.toBe('storage');
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('without session storage no reload can follow, so it does not wait for open work: it names that work at once', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage blocked'); });
+    const target = { fetch: () => new Promise(() => {}) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      target.fetch('/api/admin/dashboard');
+      const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 500); });
+      await expect(Promise.race([reloadForMissingCode({ reload }), waited])).resolves.toBe('request');
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      uninstall();
+    }
   });
 });

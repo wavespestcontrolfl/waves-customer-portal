@@ -31,8 +31,8 @@ installStaffSessionGuard({ getToken: getAdminAuthToken, onRejected: clearStaffDe
 // marks the reload pending so the import it swallows (it resolves undefined)
 // shows a loading placeholder, not the crash screen — see staleChunkReload.js.
 window.addEventListener('vite:preloadError', (event) => handleVitePreloadError(event));
-// A staff tab last used on its current path keeps the tab at a missing
-// chunk: a part of the page asks before it reloads.
+// A staff tab used on the page in view since the last page move keeps the
+// tab at a missing chunk: a part of the page asks before it reloads.
 watchPageUse();
 
 ReactDOM.createRoot(document.getElementById('root')).render(

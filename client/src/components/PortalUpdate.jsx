@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useLocation, useNavigationType } from 'react-router-dom';
 import { Button } from './ui';
 import { isAdminPath, isFieldPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
 import { isPageUse, PAGE_USE_EVENTS, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
-import { notePageMove } from '../lib/staleChunkReload';
+import { notePageInView, notePageMove } from '../lib/staleChunkReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
 // (lib/portalReload.js) it shows `fallback` in place of the routes, so the old
@@ -27,14 +27,18 @@ export function PortalUpdateGate({ fallback, children }) {
   // move. So when the move started on a field page, its redirects leave that
   // page too: Today -> /admin -> the dashboard, Today -> /admin/leads ->
   // Pipeline.
-  const [gate, setGate] = useState({ pathname, origin: pathname, reloading: false });
+  const [gate, setGate] = useState({ pathname, origin: pathname, from: null, reloading: false });
   if (gate.pathname !== pathname) {
     const origin = navigationType === 'REPLACE' ? gate.origin : gate.pathname;
     const from = isFieldPath(origin) ? origin : gate.pathname;
-    // The stale-chunk reload follows the same rule (lib/staleChunkReload.js).
-    notePageMove(from);
-    setGate({ pathname, origin, reloading: reloadDueAtMove(pathname, Date.now(), from) });
+    // The stale-chunk reload follows the same rule (lib/staleChunkReload.js),
+    // from this render on: the new page's code can fail before the move is
+    // in view.
+    notePageMove(from, pathname);
+    setGate({ pathname, origin, from, reloading: reloadDueAtMove(pathname, Date.now(), from) });
   }
+  // A layout effect, so that no tap comes between the move and this note.
+  useLayoutEffect(() => { notePageInView(gate.from, gate.pathname); }, [gate.from, gate.pathname]);
 
   useEffect(() => {
     if (!gate.reloading) return undefined;
@@ -86,13 +90,16 @@ const HOLD_TEXT = {
 // lost.", so the next Reload asks again. `pageUsed`: a use of the page in view
 // since it opened (below). `beforeReload` runs right before the reload.
 export function useHoldAwareReload(resetKey, beforeReload) {
-  const [held, setHeld] = useState([]);
-  useEffect(() => { setHeld((named) => (named.length ? [] : named)); }, [resetKey]);
-  const clearNamed = useCallback(() => setHeld((named) => (named.length ? [] : named)), []);
+  // A new resetKey clears the named work as it renders. An effect would run
+  // late on a button that just appeared and wipe what a first click named.
+  const [naming, setNaming] = useState({ key: resetKey, held: [] });
+  if (naming.key !== resetKey) setNaming({ key: resetKey, held: [] });
+  const { held } = naming;
+  const clearNamed = useCallback(() => setNaming((state) => (state.held.length ? { ...state, held: [] } : state)), []);
   const tryReload = (pageUsed) => {
     const blockers = [...reloadBlockers(), ...(pageUsed ? ['page-use'] : [])];
     if (blockers.some((name) => !held.includes(name))) {
-      setHeld(blockers);
+      setNaming({ key: resetKey, held: blockers });
       return;
     }
     beforeReload?.();

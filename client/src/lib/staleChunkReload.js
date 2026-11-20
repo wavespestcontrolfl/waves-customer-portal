@@ -30,11 +30,11 @@
 // its place (components/LazyPanel.jsx).
 //
 // A part opens in place, so the page around it can hold unsaved work in
-// component state that no hold names. So a staff tab whose last use was on
-// its current path (watchPageUse) keeps the tab too: a part asks before it
-// reloads, and any other import() fails to its caller. A page move opens a
-// new path, so a page whose code is missing still reloads at once when
-// nothing holds the tab.
+// component state that no hold names. So a staff tab used on the page in
+// view since the last page move (watchPageUse) keeps the tab too: a part
+// asks before it reloads, and any other import() fails to its caller. A page
+// move ends that use once it is in view (notePageInView), so a page whose
+// code is missing still reloads at once when nothing holds the tab.
 //
 // Waves Admin and the field pages never reload by themselves, as at a page
 // move (selfReloadBarred, lib/portalReload.js): a reload with no signal opens
@@ -66,19 +66,41 @@ export function isChunkError(err) {
 // navigation never committed keeps placeholders before it reloads.
 const NAVIGATION_WINDOW_MS = 30000;
 
+const NO_MOVE = { from: null, to: null };
+
 let reloadPending = false;
 let navigatingUntil = 0;
 let chunkHeld = false;
 let usedPath = null;
-let moveFrom = null;
+let renderedMove = NO_MOVE;
+let shownMove = NO_MOVE;
 let reloadedPath = pathOpenedByChunkReload();
 
-// PortalUpdateGate (components/PortalUpdate.jsx) notes the page each page
-// move leaves, as #8121's rule judges it: a redirect continues the move it
-// ends, so Today -> /admin -> the dashboard still leaves Today. It notes it
-// as it renders, before the new page's code starts to load.
-export function notePageMove(from) {
-  moveFrom = from;
+// PortalUpdateGate (components/PortalUpdate.jsx) notes each page move: `to`
+// the page it opens, `from` the page it leaves as #8121's rule judges it (a
+// redirect continues the move it ends, so Today -> /admin -> the dashboard
+// still leaves Today). It notes the move as it renders, before the new
+// page's code starts to load, and again once the move is in view. React can
+// drop a render: Back can undo a move while the new page's code loads. So a
+// rendered move counts only on the page it opens; elsewhere the move in view
+// does.
+export function notePageMove(from, to) {
+  renderedMove = { from, to };
+}
+
+// A move in view also ends the use of the page it left, as for the Reload
+// bar (usePageUsed): the move remounted the routes, so nothing unsaved stays
+// from that use, and Back to that page opens it unused. A move React dropped
+// leaves the page and its use.
+export function notePageInView(from, to) {
+  shownMove = { from, to };
+  usedPath = null;
+}
+
+// The page that the move to `pathname` left.
+function moveFromFor(pathname) {
+  if (renderedMove.to === pathname) return renderedMove.from;
+  return shownMove.to === pathname ? shownMove.from : null;
 }
 
 // Notes the path of each use of a page, as the Reload bar counts a use
@@ -89,7 +111,8 @@ export function watchPageUse(target = document) {
   return () => PAGE_USE_EVENTS.forEach((type) => target.removeEventListener(type, noteUse, true));
 }
 
-// Whether the tab's last use was on the staff page in view.
+// Whether the tab was used on the staff page in view since the last page
+// move.
 export function usedOnThisStaffPage() {
   const { pathname } = window.location;
   return isAdminPath(pathname) && usedPath === pathname;
@@ -98,7 +121,7 @@ export function usedOnThisStaffPage() {
 // A staff page that never reloads by itself (see the top of this file).
 function staffSelfReloadBarred() {
   const { pathname } = window.location;
-  return isAdminPath(pathname) && selfReloadBarred(pathname, moveFrom);
+  return isAdminPath(pathname) && selfReloadBarred(pathname, moveFromFor(pathname));
 }
 
 // The path this page load opened on, when the one reload for a missing chunk
@@ -195,9 +218,9 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
     event.preventDefault();
     return;
   }
-  // A staff tab with open or held work, last used on this path, or on a page
-  // that never reloads by itself: the import fails as it would with no
-  // handler (see the top of this file).
+  // A staff tab with open or held work, used on the page in view since the
+  // last page move, or on a page that never reloads by itself: the import
+  // fails as it would with no handler (see the top of this file).
   if (staffReloadBlocker() || usedOnThisStaffPage() || staffSelfReloadBarred()) return;
   if (!takeChunkReload()) return;
   markStaleChunkReloadPending();
@@ -205,28 +228,44 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
   reload();
 }
 
+// Why a staff page whose code is missing cannot reload by itself, whatever
+// open work does: 'reloaded' when this tab already reloaded once for a
+// missing chunk (a real outage then gets the retry screen, not a reload
+// loop), 'storage' when session storage is blocked (no one-shot guard),
+// 'page-use' when the tab was used on this page (its retry screen asks
+// first, as the preload error would), or 'manual' on a page that never
+// reloads by itself. Null when it can.
+function selfReloadRuledOut() {
+  try {
+    if (chunkReloadAttempted()) return 'reloaded';
+  } catch {
+    return 'storage';
+  }
+  if (usedOnThisStaffPage()) return 'page-use';
+  return staffSelfReloadBarred() ? 'manual' : null;
+}
+
 // A staff page whose code is missing (App.jsx): waits for open work, as a
 // page move does, then reloads once, as for a stale chunk, when nothing holds
-// the tab. Resolves why it did not reload: what holds the tab, 'reloaded'
-// when this tab already reloaded once for a missing chunk (a real outage then
-// gets the retry screen, not a reload loop), 'page-use' when the tab was used
-// on this page meanwhile (its retry screen asks first, as the preload error
-// would), 'manual' on a page that never reloads by itself (no wait there),
-// 'storage' when session storage is blocked (no one-shot guard), or 'moved'
-// when the page closed meanwhile.
+// the tab. It waits only when a reload can follow; otherwise its screen comes
+// at once. Resolves why it did not reload: 'reloaded' first, whatever holds
+// the tab (after the one reload a missing page is an outage, so its screen
+// offers the connection retry); then what holds the tab; then the other
+// reasons of selfReloadRuledOut; or 'moved' when the page closed meanwhile.
 export async function reloadForMissingCode({
   current = () => true,
   reload = () => window.location.reload(),
   now,
 } = {}) {
-  const manual = staffSelfReloadBarred();
-  const blocker = manual ? staffReloadBlocker() : await staffBlockerAfterWork({ now });
+  const ruledOut = selfReloadRuledOut();
+  const blocker = ruledOut ? staffReloadBlocker() : await staffBlockerAfterWork({ now });
   if (!current()) return 'moved';
+  // The wait can outlast a use of the page or another reload.
+  const reason = ruledOut || selfReloadRuledOut();
+  if (reason === 'reloaded') return reason;
   if (blocker) return blocker;
+  if (reason) return reason;
   try {
-    if (chunkReloadAttempted()) return 'reloaded';
-    if (usedOnThisStaffPage()) return 'page-use';
-    if (manual) return 'manual';
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
   } catch {
     return 'storage';
@@ -243,6 +282,7 @@ export function resetStaleChunkReloadForTests() {
   navigatingUntil = 0;
   chunkHeld = false;
   usedPath = null;
-  moveFrom = null;
+  renderedMove = NO_MOVE;
+  shownMove = NO_MOVE;
   reloadedPath = pathOpenedByChunkReload();
 }

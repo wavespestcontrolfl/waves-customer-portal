@@ -4,7 +4,7 @@
 // in an out-of-date tab loads the live code, the first page never reloads, a
 // tab inside a page is not a move, held work stops it, and the Reload bar
 // shows on staff pages only.
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
@@ -14,7 +14,7 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => false }));
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
 import { registerReloadHold } from '../lib/reloadHolds';
 import { countDeviceWrite } from '../lib/deviceWrites';
-import { PortalUpdateBar, PortalUpdateGate } from './PortalUpdate';
+import { PortalReloadPrompt, PortalUpdateBar, PortalUpdateGate } from './PortalUpdate';
 
 let holding = false;
 registerReloadHold('test-hold', () => holding);
@@ -398,10 +398,44 @@ describe('PortalUpdateBar', () => {
     expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
   });
 
+  // No use of the page here: only the new key clears the named work.
+  test('a newer build clears the named work', () => {
+    renderAt('/admin/dashboard');
+    goLive('bbb222bbb222');
+    holding = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(screen.getByText('Something in this tab is still open.')).toBeTruthy();
+    goLive('ccc333ccc333');
+    expect(screen.getByText('A new version of the portal is ready.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
+  });
+
   test('with nothing held, Reload reloads at once', () => {
     renderAt('/admin/dashboard');
     goLive('bbb222bbb222');
     fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PortalReloadPrompt', () => {
+  // A click can reach a Reload prompt before React runs the effects of the
+  // render that showed it, as on a busy device. Here a layout effect clicks it
+  // in that render.
+  test('a click as the prompt appears still names the work', () => {
+    holding = true;
+    function ClickAsItAppears() {
+      useLayoutEffect(() => { screen.getByRole('button', { name: 'Reload' }).click(); }, []);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/admin/dashboard']}>
+        <PortalReloadPrompt message="The portal has a new version." />
+        <ClickAsItAppears />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Something in this tab is still open. Anything not saved on this page will be lost.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reload anyway' })).toBeTruthy();
+    expect(reload).not.toHaveBeenCalled();
   });
 });

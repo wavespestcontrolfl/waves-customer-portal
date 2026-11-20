@@ -306,8 +306,8 @@ function showReloadToast() {
 // (MissingPageCode, `newVersion`): the page's code is then most likely gone
 // because the portal has a new version, so it says so. Its button names that
 // work first, as the Reload bar does (components/PortalUpdate.jsx), and
-// becomes "Reload anyway". When the tab's last use was on this page, it asks
-// once about the page too, as the bar does after a use.
+// becomes "Reload anyway". When the tab was used on this page since the last
+// page move, it asks once about the page too, as the bar does after a use.
 function ChunkLoadFallback({ newVersion = false }) {
   // Case-insensitive, as the routes match: /ADMIN/... is a staff page too.
   const operatorPath = /^\/(admin|tech)(\/|$)/i.test(window.location.pathname);
