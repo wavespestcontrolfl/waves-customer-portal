@@ -1717,9 +1717,12 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
           firstId = await visit(made.customerId, made.bookingCallId, { scheduled_date: inDays(5), status: 'cancelled' });
           // A visit the office booked that the call was attached to: not one the call booked, so neither count reads it.
           staffId = await visit(made.customerId, made.bookingCallId, { scheduled_date: inDays(20), source_action: 'admin' });
-          await expect(sweep()).resolves.toMatchObject({ filed: 1 });
-          [card] = await cards(made.bookingCallId);
+          // This call's card alone, filed as the sweep files one (a sweep on committed rows would act on every call).
           ev = await evaluatePhoneYes({ callLogId: made.bookingCallId, customerId: made.customerId });
+          const call = await trx('call_log').where({ id: made.bookingCallId }).first('id', 'customer_id', 'ai_extraction_enriched');
+          const extraction = require('../services/call-held-visits').parseExtraction(call.ai_extraction_enriched);
+          await expect(PhoneYesPrivate.fileCardForTest({ call, extraction, evaluation: ev })).resolves.toBeTruthy();
+          [card] = await cards(made.bookingCallId);
         } finally {
           trx = perTest;
           mockConn = perTest;
