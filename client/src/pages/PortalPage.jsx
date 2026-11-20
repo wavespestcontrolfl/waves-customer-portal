@@ -11110,13 +11110,16 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   // Everything stays with the tap's own session (codex pre-push P0/P1): the API client answers a
   // request whose session changed while it waited, so a late reply could hand this account's
   // estimate link, or file its request, under another account. The check is the API client's own
-  // (sameRequestSession); a requestSuperseded cancel means it already failed.
+  // (sameRequestSession); a requestSuperseded cancel means it already failed. It reads the stored
+  // credential too: a login or logout in another tab rewrites waves_token before this tab's storage
+  // handler updates api.token (codex pre-push P0).
   const startPlan = async () => {
     if (minting || startingPlan || requesting || loading || !selected) return;
     const seq = planStartSeq.current;
     const tapToken = api.token;
     const tapSession = tokenSessionIdentity(tapToken);
-    const tapSessionActive = () => api.token === tapToken || sameRequestSession(tapSession, tokenSessionIdentity(api.token));
+    const tapSessionActive = () => [api.token, localStorage.getItem('waves_token')]
+      .every((token) => token === tapToken || sameRequestSession(tapSession, tokenSessionIdentity(token)));
     setMinting(true);
     setStartingPlan(true);
     const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;

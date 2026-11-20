@@ -382,8 +382,8 @@ function seedCageEvidence(estData) {
   return null;
 }
 
-// Rows per page of the seed read: main's old cap, so a customer with a dozen
-// accepted quotes or fewer still costs one query.
+// Rows per pricing-JSON read of the seed: main's old cap, so a premises with a
+// dozen accepted quotes or fewer costs one JSON read after the address list.
 const SEED_PAGE_SIZE = 12;
 
 async function loadEstimateSeed(database, customerId, scopeStreet) {
@@ -393,48 +393,57 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   // acceptance and premises checks, so a run of newer quotes (open ones here,
   // or accepted ones at another premises) hid the accepted estimate whose
   // review markers must demote a seeded price, and the seed read as absent.
-  // Read in newest-first pages that stop at the first eligible row (r23): one
-  // unbounded read parsed every accepted quote's pricing JSON on each report
-  // and portal-offer answer. The id tie-breaker keeps the order stable across
-  // pages. The in-loop status check keeps the accepted-only rule independent
-  // of the query.
+  // One read lists the accepted history's addresses, newest first, the id
+  // breaking created_at ties (r27): offset pages each saw a fresh snapshot,
+  // so a row that left the set between reads pushed the next row past the
+  // next page. The pricing JSON is then read only for rows at this premises,
+  // a dozen at a time, stopping at the first eligible row (r23: one unbounded
+  // read parsed every accepted quote's pricing JSON on each report and
+  // portal-offer answer). The status checks keep the accepted-only rule
+  // independent of the query; a row that left the set before its JSON read
+  // reads as having no inputs.
   const linkage = require('../estimate-property-linkage');
+  const listed = await database('estimates')
+    .where({ customer_id: customerId, status: 'accepted' })
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .select('id', 'address', 'status');
+  const candidates = listed.filter((row) => {
+    if (row.status !== 'accepted') return false;
+    const street = linkage.normalizedEstimateStreet(row.address);
+    if (!street || !linkage.sameScopeKey(street, scopeStreet)) return false;
+    // A street-only key (no city, no zip) wildcard-matches EVERY
+    // same-street property under sameScopeKey's lenient locality rule
+    // (codex #3367 PR r3): a multi-property customer with the same street
+    // name in two cities could seed the wrong premises. The scope
+    // machinery marks these ambiguous legacy keys explicitly — no
+    // disambiguation, no seed (an older fully-qualified estimate may still
+    // seed instead).
+    if (linkage.scopeKeyLacksLocality(street)) return false;
+    // Same shared-locality proof as the visit stamp (PR r6): disjoint
+    // locality fields (city-only vs zip-only) must not match across cities.
+    return scopeKeysShareLocality(street, scopeStreet);
+  });
   let pick = null;
-  for (let offset = 0; !pick; offset += SEED_PAGE_SIZE) {
-    let page = database('estimates')
+  for (let at = 0; !pick && at < candidates.length; at += SEED_PAGE_SIZE) {
+    const batch = candidates.slice(at, at + SEED_PAGE_SIZE);
+    const bodies = await database('estimates')
+      .whereIn('id', batch.map((row) => row.id))
       .where({ customer_id: customerId, status: 'accepted' })
-      .orderBy('created_at', 'desc')
-      .orderBy('id', 'desc')
-      .limit(SEED_PAGE_SIZE);
-    if (offset > 0) page = page.offset(offset);
-    const rows = await page.select('id', 'address', 'status', 'estimate_data');
-    // Rows arrive newest-first, so the first surviving row is the most
-    // recently accepted same-property estimate.
-    for (const row of rows) {
-      if (row.status !== 'accepted') continue;
-      const estData = parseJsonColumn(row.estimate_data);
+      .select('id', 'estimate_data');
+    const dataById = new Map(bodies.map((body) => [body.id, body.estimate_data]));
+    // The batch keeps the listed order, so the first surviving row is the
+    // most recently accepted same-property estimate.
+    for (const row of batch) {
+      const estData = parseJsonColumn(dataById.get(row.id));
       // engineInputs / inputs (admin + agent saves) or the public quote's
       // singular engineInput — the normalized request it priced, which is
       // where its footprint-trust stamp lives (Codex #6398 r20).
       const inputs = estData?.engineInputs || estData?.inputs || estData?.engineInput;
       if (!inputs || typeof inputs !== 'object') continue;
-      const street = linkage.normalizedEstimateStreet(row.address);
-      if (!street || !linkage.sameScopeKey(street, scopeStreet)) continue;
-      // A street-only key (no city, no zip) wildcard-matches EVERY
-      // same-street property under sameScopeKey's lenient locality rule
-      // (codex #3367 PR r3): a multi-property customer with the same street
-      // name in two cities could seed the wrong premises. The scope
-      // machinery marks these ambiguous legacy keys explicitly — no
-      // disambiguation, no seed (an older fully-qualified estimate may still
-      // seed instead).
-      if (linkage.scopeKeyLacksLocality(street)) continue;
-      // Same shared-locality proof as the visit stamp (PR r6): disjoint
-      // locality fields (city-only vs zip-only) must not match across cities.
-      if (!scopeKeysShareLocality(street, scopeStreet)) continue;
       pick = { row, inputs, estData };
       break;
     }
-    if (rows.length < SEED_PAGE_SIZE) break;
   }
   if (!pick) return null;
   const inputs = pick.inputs;

@@ -39,6 +39,7 @@ function dbForTables(tables = {}, { failCatalogJoin = false } = {}) {
     ));
     const q = {
       where(criteria) { applyFilter(criteria); return q; },
+      whereIn() { return q; },
       whereNotIn() { return q; },
       orWhereNull() { return q; },
       leftJoin() { return q; },
@@ -636,8 +637,10 @@ describe('buildReportCrossSell', () => {
     }
   });
 
-  // A fake that honors where, every orderBy in turn, limit and offset, and counts the pages read.
-  const pagedEstimates = (rows) => {
+  // A fake that honors where, whereIn, every orderBy in turn, limit and offset, and counts the reads.
+  // `afterRead` changes rows after a read returns, as another writer between two statements does; each
+  // read returns copies, so a change never reaches rows already read.
+  const pagedEstimates = (rows, { afterRead = () => {} } = {}) => {
     let reads = 0;
     const database = () => {
       const filters = [];
@@ -645,13 +648,14 @@ describe('buildReportCrossSell', () => {
       let cap = Infinity;
       let skip = 0;
       const q = {
-        where(criteria) { filters.push(criteria); return q; },
+        where(criteria) { filters.push((r) => Object.entries(criteria).every(([k, v]) => r[k] === v)); return q; },
+        whereIn(col, vals) { filters.push((r) => vals.includes(r[col])); return q; },
         orderBy(col, dir) { order.push([col, dir]); return q; },
         limit(n) { cap = n; return q; },
         offset(n) { skip = n; return q; },
         async select() {
           reads += 1;
-          const hit = rows.filter((r) => filters.every((c) => Object.entries(c).every(([k, v]) => r[k] === v)));
+          const hit = rows.filter((r) => filters.every((f) => f(r)));
           hit.sort((x, y) => {
             for (const [col, dir] of order) {
               const cmp = String(x[col]).localeCompare(String(y[col]));
@@ -659,7 +663,9 @@ describe('buildReportCrossSell', () => {
             }
             return 0;
           });
-          return hit.slice(skip, skip + cap);
+          const out = hit.slice(skip, skip + cap).map((r) => ({ ...r }));
+          afterRead(reads, rows);
+          return out;
         },
       };
       return q;
@@ -676,8 +682,9 @@ describe('buildReportCrossSell', () => {
     // A cap on the newest dozen rows ran before the acceptance and premises
     // checks: 13 newer open quotes here, or 13 newer accepted quotes at
     // another premises, hid the accepted estimate whose field-verification
-    // marker must demote a seeded price. The read pages on, so the marked
-    // estimate on the second page still seeds.
+    // marker must demote a seeded price. The address list covers the whole
+    // history, so the marked estimate still seeds: one list read, then one
+    // pricing-JSON read for the one row at this premises.
     const { loadEstimateSeed } = _private;
     const rows = [
       seedRow('est-marked', SEED_HERE, 'accepted', 0, { ...seedInputs, fieldVerify: ['lawn_sqft'] }),
@@ -690,7 +697,7 @@ describe('buildReportCrossSell', () => {
     expect(fake.reads()).toBe(2);
   });
 
-  test('the seed read stops at the first page with an eligible row, newest first, ties broken by id (codex pre-push r23 P1)', async () => {
+  test('the seed reads pricing JSON a dozen same-premises rows at a time and stops at the first eligible row, newest first, ties broken by id (codex pre-push r23 P1)', async () => {
     // One unbounded read parsed every accepted quote's pricing JSON on each
     // report and portal-offer answer.
     const { loadEstimateSeed } = _private;
@@ -705,7 +712,37 @@ describe('buildReportCrossSell', () => {
     const seed = await loadEstimateSeed(fake.database, 'cust-1', street);
     expect(seed).toMatchObject({ homeSqFt: 2600 });
     expect(seed.requiresFieldVerification).toBeFalsy();
-    expect(fake.reads()).toBe(1);
+    // The address list, then one JSON read of the newest 12 of the 32 rows at this premises.
+    expect(fake.reads()).toBe(2);
+  });
+
+  test('a row that leaves the accepted set between reads cannot hide an older marked estimate (codex pre-push r27 P1)', async () => {
+    // Offset pages each saw a fresh snapshot: once a row on the first page
+    // left the set, the next row moved back into the first page's range and
+    // the second page skipped it. Here that row is the only one at this
+    // premises, and it carries a field-verification marker.
+    const { loadEstimateSeed } = _private;
+    const rows = [
+      seedRow('est-marked', SEED_HERE, 'accepted', 5, { ...seedInputs, fieldVerify: ['lawn_sqft'] }),
+      ...Array.from({ length: 12 }, (_, i) => seedRow(`est-elsewhere-${String(i).padStart(2, '0')}`, '9 Bayshore Rd, Venice, FL 34285', 'accepted', 10 + i)),
+      seedRow('est-older', '9 Bayshore Rd, Venice, FL 34285', 'accepted', 1),
+    ];
+    // After the first read, staff mark one of the newest rows declined.
+    const fake = pagedEstimates(rows, { afterRead: (read, all) => { if (read === 1) all.find((r) => r.id === 'est-elsewhere-11').status = 'declined'; } });
+    const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(SEED_HERE);
+    expect(await loadEstimateSeed(fake.database, 'cust-1', street)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+  });
+
+  test('a row that leaves the accepted set after the address list never seeds: the next accepted row does (codex pre-push r27 P1)', async () => {
+    const { loadEstimateSeed } = _private;
+    const rows = [
+      seedRow('est-marked', SEED_HERE, 'accepted', 5, { ...seedInputs, fieldVerify: ['lawn_sqft'] }),
+      seedRow('est-newest', SEED_HERE, 'accepted', 9, { engineInputs: { homeSqFt: 1500, lotSqFt: 6000, stories: 1 } }),
+    ];
+    // Between the address list and the pricing-JSON read, staff mark the newest row declined.
+    const fake = pagedEstimates(rows, { afterRead: (read, all) => { if (read === 1) all.find((r) => r.id === 'est-newest').status = 'declined'; } });
+    const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(SEED_HERE);
+    expect(await loadEstimateSeed(fake.database, 'cust-1', street)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
   });
 
   test('an uncorroborated NON-ladder report identity never claims a current plan (PR r13 P2)', async () => {

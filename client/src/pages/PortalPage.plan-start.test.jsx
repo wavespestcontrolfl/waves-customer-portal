@@ -12,8 +12,18 @@ vi.mock('../utils/api', async (importOriginal) => {
   const methods = {};
   return { sameRequestSession, tokenSessionIdentity, default: new Proxy(methods, {
     get(target, key) {
-      if (typeof key !== 'string') return target[key];
+      if (typeof key !== 'string' || key === 'token') return target[key];
       return target[key] ||= vi.fn(() => new Promise(() => {}));
+    },
+    // As the real client's setToken and clearTokens do, a token change in this tab also writes the
+    // stored credential (waves_token). Another tab's change writes only the stored one.
+    set(target, key, value) {
+      target[key] = value;
+      if (key === 'token') {
+        if (typeof value === 'string') localStorage.setItem('waves_token', value);
+        else localStorage.removeItem('waves_token');
+      }
+      return true;
     },
   }) };
 });
@@ -32,6 +42,7 @@ const optionSelect = () => screen.getAllByRole('combobox').find((el) => el.query
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.token = null;
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
   api.getNextService.mockResolvedValue({ next: null });
   api.getSchedule.mockResolvedValue({ upcoming: [] });
@@ -188,7 +199,7 @@ async function withNavigation(body) {
   } finally {
     Object.defineProperty(window, 'location', { configurable: true, value: original });
     vi.useRealTimers();
-    api.token = undefined;
+    api.token = null;
   }
 }
 
@@ -212,18 +223,27 @@ it.each([
     expect(alerts).toEqual([]);
   } finally {
     stop();
-    api.token = undefined;
+    api.token = null;
   }
 });
 
-it.each([
+// How the account changes after the tap. Another tab writes only the stored credential, and this tab's
+// api.token keeps the tap's token until its storage handler runs (codex pre-push P0).
+const ACCOUNT_SWITCHES = [
+  ['in this tab', () => { api.token = OTHER_ACCOUNT; }],
+  ['by a login in another tab that this tab has not heard of yet', () => { localStorage.setItem('waves_token', OTHER_ACCOUNT); }],
+  ['by a logout in another tab that this tab has not heard of yet', () => { localStorage.removeItem('waves_token'); }],
+];
+const REPLIES = [
   ['an estimate link', () => Promise.resolve({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false })],
   ['a refusal that files a request', () => Promise.reject(Object.assign(new Error('The price changed.'), { status: 409, code: 'offer_changed' }))],
-])('a reply that lands after another account became active is dropped: %s never reaches that account (codex pre-push P0)', async (_label, reply) => {
+];
+
+it.each(REPLIES.flatMap(([replyLabel, reply]) => ACCOUNT_SWITCHES.map(([switchLabel, switchAccount]) => [replyLabel, switchLabel, reply, switchAccount])))('a reply that lands after the account changed is dropped: %s never reaches the account that took over %s (codex pre-push P0s)', async (_replyLabel, _switchLabel, reply, switchAccount) => {
   await withNavigation(async (assign) => {
     api.token = TAP_TOKEN;
     api.startPlan.mockImplementationOnce(() => {
-      api.token = OTHER_ACCOUNT; // the API client still answers a request whose session changed
+      switchAccount(); // the API client still answers a request whose session changed
       return reply();
     });
     const { alerts, stop } = watchAlerts();
@@ -242,14 +262,14 @@ it.each([
   });
 });
 
-it('the hand-off checks the session again before it opens the estimate (codex pre-push P0)', async () => {
+it.each(ACCOUNT_SWITCHES)('the hand-off checks the session again before it opens the estimate: an account changed %s opens nothing (codex pre-push P0s)', async (_label, switchAccount) => {
   await withNavigation(async (assign) => {
     api.token = TAP_TOKEN;
     api.startPlan.mockResolvedValue({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false });
     await priceIt(priced(OFFER));
     fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
     await screen.findByRole('button', { name: 'Open it now' });
-    api.token = OTHER_ACCOUNT; // another account became active during the beat on screen
+    switchAccount(); // during the beat on screen
     vi.advanceTimersByTime(1600);
     expect(assign).not.toHaveBeenCalled();
     // The hand-off is dropped, so nothing on screen can open it later.
@@ -257,14 +277,14 @@ it('the hand-off checks the session again before it opens the estimate (codex pr
   });
 });
 
-it('"Open it now" checks the tap\'s session when tapped: under another account it opens nothing and drops the hand-off (codex pre-push P0)', async () => {
+it.each(ACCOUNT_SWITCHES)('"Open it now" checks the tap\'s session when tapped: after the account changed %s, it opens nothing and drops the hand-off (codex pre-push P0s)', async (_label, switchAccount) => {
   await withNavigation(async (assign) => {
     api.token = TAP_TOKEN;
     api.startPlan.mockResolvedValue({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false });
     await priceIt(priced(OFFER));
     fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
     const open = await screen.findByRole('button', { name: 'Open it now' });
-    api.token = OTHER_ACCOUNT; // another account became active while the card stayed on screen
+    switchAccount(); // while the card stayed on screen
     fireEvent.click(open);
     expect(assign).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Open it now' })).toBeNull());
@@ -284,11 +304,14 @@ it('"Open it now" in the tap\'s session opens the estimate at once', async () =>
   });
 });
 
-it('a token refreshed within the same session keeps the reply: the hand-off goes ahead (codex pre-push P0)', async () => {
+it.each([
+  ['in this tab', () => { api.token = REFRESHED_TAP; }],
+  ['in another tab', () => { localStorage.setItem('waves_token', REFRESHED_TAP); }],
+])('a token refreshed %s within the same session keeps the reply: the hand-off goes ahead (codex pre-push P0s)', async (_label, refresh) => {
   await withNavigation(async (assign) => {
     api.token = TAP_TOKEN;
     api.startPlan.mockImplementationOnce(() => {
-      api.token = REFRESHED_TAP; // same customer, same session: only the access token is new
+      refresh(); // same customer, same session: only the access token is new
       return Promise.resolve({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false });
     });
     await priceIt(priced(OFFER));
