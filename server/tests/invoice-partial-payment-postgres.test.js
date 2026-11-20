@@ -122,16 +122,15 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     invoice_id: invoice.id, customer_id: invoice.customer_id, status: 'active', step_index: 1, touches_sent: 1, next_touch_at: new Date(Date.now() + 3600 * 1000),
   });
 
-  it('the same part payment submitted twice at once records once: the second meets $60 owed, not the $100 the page showed', async () => {
+  it('concurrent $40 submissions record one payment and a retry sees the $60 still owed', async () => {
     const invoice = await makeInvoice();
-    const results = await Promise.allSettled([
-      record(invoice.id, { amountCents: 4000, owedCentsSeen: 10000 }),
-      record(invoice.id, { amountCents: 4000, owedCentsSeen: 10000 }),
-    ]);
+    const submit = () => record(invoice.id, { amountCents: 4000, owedCentsSeen: 10000 });
+    const results = await Promise.allSettled([submit(), submit()]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const refused = results.find((r) => r.status === 'rejected');
     expect(refused.reason).toMatchObject({ statusCode: 409 });
-    expect(refused.reason.message).toMatch(/changed to \$60\.00/);
+    expect(refused.reason.message).toMatch(/changed to \$60\.00|The customer balance is changing/);
+    await expect(submit()).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('changed to $60.00') });
     expect(Number((await row(invoice.id)).amount_paid)).toBe(40);
     expect(await database('payments').where({ customer_id: invoice.customer_id })).toHaveLength(1);
   });

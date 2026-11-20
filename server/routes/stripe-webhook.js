@@ -435,25 +435,14 @@ async function findMatchingSavedCardAttempt(
   database,
   invoice,
   paymentIntent,
-  {
-    lock = false,
-    allowResolvedSucceeded = false,
-    requireWorkerPaymentIntent = false,
-    allowVerifiedCancellationWithoutMethod = false,
-    allowRecordedOwner = false,
-    reportWorkerConflict = false,
-  } = {},
+  { lock, allowResolvedSucceeded, allowVerifiedCancellationWithoutMethod, allowRecordedOwner, reportWorkerConflict } = {},
 ) {
-  if (!invoice || paymentIntent.metadata?.source !== 'admin_card_on_file') return null;
+  const { saved_card_attempt_id: attemptId, source, waves_customer_id: originalCustomerId } = paymentIntent.metadata || {};
+  const lookupId = attemptId || paymentIntent.id;
+  if (!invoice || source !== 'admin_card_on_file' || !lookupId) return null;
   let query = database('stripe_invoice_charge_attempts')
-    .where({ invoice_id: invoice.id });
-  if (paymentIntent.metadata?.saved_card_attempt_id) {
-    query = query.where({ id: paymentIntent.metadata.saved_card_attempt_id });
-  } else if (paymentIntent.id) {
-    query = query.where({ stripe_payment_intent_id: paymentIntent.id });
-  } else {
-    return null;
-  }
+    .where({ invoice_id: invoice.id })
+    .where({ [attemptId ? 'id' : 'stripe_payment_intent_id']: lookupId });
   // A closed authentication decline can still settle. When checking worker
   // identity, inspect the named attempt before considering its lifecycle.
   if (!reportWorkerConflict) {
@@ -476,19 +465,17 @@ async function findMatchingSavedCardAttempt(
     ...(allowVerifiedCancellationWithoutMethod ? ['authentication_canceled_intent_id'] : []),
   ];
   const candidate = await query.first(...attemptFields);
-  if (candidate?.worker_payment_intent_id && candidate.worker_payment_intent_id !== paymentIntent.id) {
+  if (!candidate) return null;
+  if (candidate.worker_payment_intent_id && candidate.worker_payment_intent_id !== paymentIntent.id) {
     return reportWorkerConflict ? CONFLICTING_WORKER_INTENT : null;
   }
-  const originalCustomerId = paymentIntent.metadata?.waves_customer_id;
-  const provenInvoiceOwner = Boolean((allowVerifiedCancellationWithoutMethod || allowRecordedOwner) && candidate && originalCustomerId
-    && originalCustomerId !== invoice.customer_id
-    && await require('../services/invoice-payment-authentication').invoiceHasRecordedOwner(invoice, originalCustomerId, database));
+  const provenInvoiceOwner = (allowVerifiedCancellationWithoutMethod || allowRecordedOwner)
+    && await require('../services/invoice-payment-authentication').invoiceHasRecordedOwner(invoice, originalCustomerId, database);
   return savedCardAttemptMatchesPaymentIntent({
     attempt: candidate,
     invoice,
     paymentIntent,
     allowResolvedSucceeded,
-    requireWorkerPaymentIntent,
     allowVerifiedCancellationWithoutMethod,
     allowCancellationAwaitingWorker: allowVerifiedCancellationWithoutMethod,
     provenInvoiceOwner,
@@ -1981,8 +1968,40 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
       // Bank returns and office settlement lock customer, invoice, attempt, then
       // payment. A ledger row can already exist when the succeeded event arrives.
       const invoice = invoiceForTenderGuard || await findInvoiceForPaymentIntent(paymentIntent, trx);
-      if (invoice?.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      const lockedInvoice = invoice && await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      const canceledCheckoutSnapshot = authenticatingAttempt?.canceled_checkout_payment_intent_id
+        ? String(authenticatingAttempt.canceled_checkout_payment_intent_id)
+        : null;
+      let lockedInvoice = null;
+      if (invoice && authenticatingAttempt) {
+        // Authentication recovery can replace a checkout the saved-card worker
+        // already canceled. A rollback may have restored that PI on siblings
+        // while parking cleared or replaced the target pointer. Freeze the live
+        // owner namespace, then lock the union of both allocations in canonical
+        // invoice-id order before taking the target or later clearing stamps.
+        const PayCombined = require('../services/pay-combined');
+        const stableCustomerId = await PayCombined.lockCombinedCustomerStable(
+          trx,
+          invoice.id,
+          invoice.customer_id,
+        );
+        if (stableCustomerId) {
+          await trx('customers').where({ id: stableCustomerId }).forUpdate().first('id');
+        }
+        const invoiceSnapshot = await trx('invoices').where({ id: invoice.id })
+          .first('stripe_payment_intent_id');
+        const { lockInvoicePaymentIntentAllocation } = require('../services/invoice-payment-intent-allocation');
+        lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {
+          id: invoice.id,
+          piId: invoiceSnapshot?.stripe_payment_intent_id || null,
+          additionalPiIds: canceledCheckoutSnapshot ? [canceledCheckoutSnapshot] : [],
+          customerId: stableCustomerId || invoice.customer_id,
+          combinedCustomerLocked: true,
+          targetForUpdate: true,
+        });
+      } else {
+        if (invoice?.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+        lockedInvoice = invoice && await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      }
       const matchingAmbiguousAttempt = lockedInvoice && await findMatchingSavedCardAttempt(
         trx, lockedInvoice, paymentIntent, { lock: true, reportWorkerConflict: true },
       );
@@ -2095,7 +2114,14 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
         return quarantineAuthentication('the saved-card attempt no longer matches');
       }
       await assertNoConflictingAuthenticationSettlement(paymentIntent, lockedInvoice, lockedAuthentication, trx);
-      const canceledCheckoutId = lockedAuthentication?.canceled_checkout_payment_intent_id;
+      const canceledCheckoutId = lockedAuthentication?.canceled_checkout_payment_intent_id
+        ? String(lockedAuthentication.canceled_checkout_payment_intent_id)
+        : null;
+      if (lockedAuthentication && canceledCheckoutId !== canceledCheckoutSnapshot) {
+        throw Object.assign(new Error('Saved-card canceled checkout changed while locking authenticated settlement; retry'), {
+          code: 'SAVED_CARD_SETTLEMENT_ALLOCATION_CHANGED',
+        });
+      }
       const replacesCanceledCheckout = !!activePi && activePi === canceledCheckoutId && activePi !== piId;
       if (!exactPaidAuthentication && invoicePaymentIntentBlocksFallback({
         invoiceStatus: lockedInvoice.status,

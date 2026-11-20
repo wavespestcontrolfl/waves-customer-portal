@@ -13,6 +13,7 @@ postgres('invoice PaymentIntent allocation locking', () => {
   let database;
   let InvoiceService;
   let StripeService;
+  let settleSucceededPaymentIntent;
   let stripeClient;
   let customerId;
   let invoiceIds;
@@ -54,11 +55,30 @@ postgres('invoice PaymentIntent allocation locking', () => {
       secretKey: 'sk_test_local_allocation_lock',
       publishableKey: 'pk_test_local_allocation_lock',
     }));
+    jest.doMock('../services/invoice-issued-closeout', () => ({
+      ...jest.requireActual('../services/invoice-issued-closeout'),
+      closeOutVisitForIssuedInvoice: jest.fn(),
+      recordApprovedPaidCloseoutTarget: jest.fn(async () => {}),
+    }));
+    jest.doMock('../services/receipt-delivery-queue', () => ({
+      ...jest.requireActual('../services/receipt-delivery-queue'),
+      enqueueReceiptDelivery: jest.fn(), scheduleReceiptDeliveryDrain: jest.fn(),
+    }));
+    jest.doMock('../services/notification-triggers', () => ({
+      ...jest.requireActual('../services/notification-triggers'), triggerNotification: jest.fn(),
+    }));
+    jest.doMock('../services/annual-prepay-renewals', () => ({
+      ...jest.requireActual('../services/annual-prepay-renewals'), syncTermForInvoicePayment: jest.fn(),
+    }));
+    jest.doMock('../services/invoice-followups', () => ({
+      ...jest.requireActual('../services/invoice-followups'), stopOnPayment: jest.fn(async () => {}),
+    }));
     previousPayIncludeBalanceGate = process.env.GATE_PAY_INCLUDE_BALANCE;
     delete process.env.GATE_PAY_INCLUDE_BALANCE;
     database = knex({ client: 'pg', connection, pool: { min: 0, max: 6 } });
     InvoiceService = require('../services/invoice');
     StripeService = require('../services/stripe');
+    ({ _handlePaymentIntentSucceeded: settleSucceededPaymentIntent } = require('../routes/stripe-webhook'));
   });
 
   beforeEach(async () => {
@@ -199,6 +219,82 @@ postgres('invoice PaymentIntent allocation locking', () => {
       await blocker.rollback().catch(() => {});
       if (outcome) await outcome.catch(() => {});
       await database('customer_credit_ledger').where({ invoice_id: targetId }).del().catch(() => {});
+      await database('stripe_invoice_charge_attempts').where({ id: attemptId }).del().catch(() => {});
+    }
+  });
+
+  test('authenticated success locks a restored canceled sibling before its higher-id target', async () => {
+    const targetId = invoiceIds[1];
+    const siblingId = invoiceIds[0];
+    const attemptId = randomUUID();
+    const succeededPiId = `pi_authenticated_${attemptId.replaceAll('-', '')}`;
+    const paymentMethodId = `pm_authenticated_${attemptId.replaceAll('-', '')}`;
+    await database('customers').where({ id: customerId }).update({ account_credits: 40 });
+    await database('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: targetId,
+      idempotency_key: `saved-card-auth-${attemptId}`,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_method_id: paymentMethodId,
+      canceled_checkout_payment_intent_id: piId,
+      amount: 75,
+      credit_applied_delta: 25,
+      credit_applied_total: 25,
+      submitted_at: new Date('2026-11-19T18:00:00.000Z'),
+      resolved_at: new Date('2026-11-19T18:00:01.000Z'),
+    });
+    const intent = {
+      id: succeededPiId,
+      status: 'succeeded',
+      amount: 7500,
+      amount_received: 7500,
+      payment_method: {
+        id: paymentMethodId,
+        type: 'card',
+        card: { brand: 'visa', last4: '4242', funding: 'credit' },
+      },
+      payment_method_types: ['card'],
+      metadata: {
+        source: 'admin_card_on_file',
+        saved_card_attempt_id: attemptId,
+        waves_invoice_id: targetId,
+        waves_customer_id: customerId,
+        base_amount: '75',
+        card_surcharge: '0',
+        surcharge_policy_version: 'test',
+      },
+    };
+
+    const blocker = await database.transaction();
+    let outcome;
+    try {
+      await blocker('invoices').where({ id: siblingId }).forUpdate().first('id');
+      outcome = settleSucceededPaymentIntent(intent);
+      await waitForBlockedBackend(blocker);
+
+      // Settlement is waiting on the lower-id canceled allocation member and
+      // has not skipped ahead to lock the higher-id target.
+      await database.transaction(async (probe) => {
+        await probe.raw("SET LOCAL lock_timeout = '250ms'");
+        await expect(probe('invoices').where({ id: targetId }).forUpdate().first('id'))
+          .resolves.toMatchObject({ id: targetId });
+      });
+
+      await blocker.commit();
+      await expect(outcome).resolves.toBeUndefined();
+      await expect(database('invoices').where({ id: siblingId }).first('stripe_payment_intent_id'))
+        .resolves.toMatchObject({ stripe_payment_intent_id: null });
+      await expect(database('invoices').where({ id: targetId }).first('status', 'stripe_payment_intent_id', 'credit_applied'))
+        .resolves.toMatchObject({ status: 'paid', stripe_payment_intent_id: succeededPiId, credit_applied: '25.00' });
+      await expect(database('customers').where({ id: customerId }).first('account_credits'))
+        .resolves.toMatchObject({ account_credits: '15.00' });
+    } finally {
+      await blocker.rollback().catch(() => {});
+      if (outcome) await outcome.catch(() => {});
+      await database('customer_credit_ledger').where({ invoice_id: targetId }).del().catch(() => {});
+      await database('payments').where({ stripe_payment_intent_id: succeededPiId }).del().catch(() => {});
+      await database('stripe_orphan_charges').where({ stripe_payment_intent_id: succeededPiId }).del().catch(() => {});
       await database('stripe_invoice_charge_attempts').where({ id: attemptId }).del().catch(() => {});
     }
   });

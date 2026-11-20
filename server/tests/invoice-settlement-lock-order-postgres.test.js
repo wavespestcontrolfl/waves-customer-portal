@@ -328,10 +328,16 @@ test('every production caller of postCreditMovement that locks an invoice first 
       invoiceLock: "const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
     },
     {
-      file: 'routes/stripe-webhook.js', label: 'succeeded-PI fallback handler',
-      anchor: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = invoice && await trx('invoices')",
-      customerLock: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
-      invoiceLock: "const lockedInvoice = invoice && await trx('invoices')",
+      file: 'routes/stripe-webhook.js', label: 'authenticated succeeded-PI fallback handler',
+      anchor: 'if (invoice && authenticatingAttempt) {',
+      customerLock: "await trx('customers').where({ id: stableCustomerId }).forUpdate().first('id');",
+      invoiceLock: 'lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {',
+    },
+    {
+      file: 'routes/stripe-webhook.js', label: 'ordinary succeeded-PI fallback handler',
+      anchor: '} else {\n        if (invoice?.customer_id)',
+      customerLock: "if (invoice?.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
+      invoiceLock: "lockedInvoice = invoice && await trx('invoices')",
     },
     {
       file: 'routes/stripe-webhook.js', label: 'ACH processing handler',
@@ -430,7 +436,7 @@ test('the two stripe-webhook.js reorders left unguarded still source every downs
   };
 
   customerIdWrites(
-    "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = invoice && await trx('invoices')",
+    "if (invoice?.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n        lockedInvoice = invoice && await trx('invoices')",
     'succeeded-PI fallback handler',
     'if (fallbackOutcome ===',
   );

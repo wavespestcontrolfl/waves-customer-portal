@@ -470,6 +470,11 @@ describe('stripe-webhook wiring', () => {
 
     const insertIdx = src.indexOf("payment_state: 'paid',");
     const insert = src.slice(insertIdx, insertIdx + 600);
-    expect(insert).toContain('settled_event_at: eventCreated');
+    // A replay of a row that is already paid must retain the first settlement
+    // stamp; a newly settled row derives the stamp from Stripe's event clock.
+    expect(insert).toContain('settled_event_at:');
+    expect(insert).toContain("existingPayment?.status === 'paid'");
+    expect(insert).toContain('existingPayment.metadata?.settled_event_at');
+    expect(insert).toContain('eventCreated ? new Date(eventCreated * 1000).toISOString() : null');
   });
 });

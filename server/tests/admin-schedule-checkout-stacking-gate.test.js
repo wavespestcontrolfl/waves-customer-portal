@@ -142,7 +142,10 @@ describe('POST /:id/invoice — expected_discount_stacking', () => {
     await handler(req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(409);
-    expect(res.body).toEqual({ error: 'Discount rules changed since this was previewed — reload and try again' });
+    expect(res.body).toEqual({
+      error: 'Discount rules changed since this was previewed — reload and try again',
+      code: 'DISCOUNT_STACKING_GATE_DIVERGED',
+    });
     expect(next).not.toHaveBeenCalled();
   });
 });

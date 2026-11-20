@@ -966,7 +966,8 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
         orWhere() { return chain; },
         andWhereRaw() { return chain; },
         andWhere() { return chain; },
-        first: async () => (table === 'payments' ? { id: 'prepaid-marker' }
+        sum() { return chain; },
+        first: async () => (table === 'payments' ? { amount: 50 }
           : (table === 'scheduled_services' ? { id: 's1', customer_id: 'c1' } : null)),
       };
       return chain;

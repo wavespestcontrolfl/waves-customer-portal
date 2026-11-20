@@ -87,7 +87,28 @@ const mockDb = jest.fn((table) => {
   return q;
 });
 mockDb.schema = { hasTable: jest.fn(async () => false) };
+mockDb.raw = jest.fn(async () => ({}));
+mockDb.transaction = jest.fn(async (callback) => callback(mockDb));
 jest.mock('../models/db', () => mockDb);
+
+// Existing-invoice reuse now rechecks the invoice owner, checkout allocation,
+// and visit marker inside one transaction even when the fixture carries no
+// prepayment. Keep those locks represented while letting this suite stay
+// focused on sibling-coverage decisions.
+const mockLockCombinedCustomerStable = jest.fn(async () => {});
+jest.mock('../services/pay-combined', () => ({
+  ...jest.requireActual('../services/pay-combined'),
+  lockCombinedCustomerStable: (...args) => mockLockCombinedCustomerStable(...args),
+}));
+const mockLockInvoicePaymentIntentAllocation = jest.fn();
+jest.mock('../services/invoice-payment-intent-allocation', () => ({
+  lockInvoicePaymentIntentAllocation: (...args) => mockLockInvoicePaymentIntentAllocation(...args),
+}));
+const mockLockVisitForSettlement = jest.fn();
+jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'),
+  lockVisitForSettlement: (...args) => mockLockVisitForSettlement(...args),
+}));
 
 const mockMint = jest.fn();
 jest.mock('../services/scheduled-invoice-mint', () => ({
@@ -152,6 +173,8 @@ beforeEach(() => {
   mockDb.__ownRefundInvoiceRow = undefined;
   mockDb.__splitOffInvoiceRows = [];
   mockDb.__invoiceRows = [];
+  mockLockInvoicePaymentIntentAllocation.mockImplementation(async () => mockDb.__existingInvoiceRow);
+  mockLockVisitForSettlement.mockImplementation(async () => mockDb.__svcRow);
   mockResolveForInvoice.mockResolvedValue({ payerId: null });
   mockBuildLineItems.mockResolvedValue({ lineItems: [], discountIds: [] });
 });
@@ -601,7 +624,7 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
       mockDb.__svcRow = { ...SVC_ROW, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7 };
       mockDb.__existingInvoiceRow = {
         id: 'inv-legacy', status: 'sent', total: 74.7, token: 'tok-legacy',
-        scheduled_service_id: 'svc-lawn', payer_id: null,
+        scheduled_service_id: 'svc-lawn', customer_id: 'cust-1', payer_id: null,
       };
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
       const { req, res, next } = makeReqRes({});
