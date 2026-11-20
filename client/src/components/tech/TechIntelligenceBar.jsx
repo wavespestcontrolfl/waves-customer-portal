@@ -10,6 +10,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { getAdminAuthToken, getAdminDisplayName } from '../../lib/adminAuth';
 import { filesToImageParts, MAX_ATTACHMENTS } from '../../utils/ibImages';
 import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
+import useAskDraftHold from '../../hooks/useAskDraftHold';
 import { renderAnswerInline } from '../admin/answerInline';
 import TechInstantAnswers from './TechInstantAnswers';
 
@@ -60,6 +61,7 @@ export default function TechIntelligenceBar() {
   const [expanded, setExpanded] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  useAskDraftHold(prompt, attachments.length, attachmentsLoading);
   const fileInputRef = useRef(null);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
