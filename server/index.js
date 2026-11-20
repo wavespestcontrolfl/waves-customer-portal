@@ -323,6 +323,14 @@ app.use('/api/social/series', require('./middleware/no-store').noStore, (req, re
 // response the page never reads, so this route sets no CORS headers.
 app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
 
+// Anonymous, cookie-free quote-form and quiz step counter — a near copy of
+// the read-depth beacon above (routes/public-form-steps.js). Same position
+// rules: ABOVE the global cors(), the `/api/` limiter and the body parsers,
+// its own per-IP limiter and capped text parse, terminal 404, no CORS
+// headers. No gate: it only counts anonymous daily totals and cannot message,
+// charge, reprice, delete data or spend money.
+app.use('/api/public/form-steps', require('./routes/public-form-steps'));
+
 // /book "Can't find a time?" preferred-time request (GATE_BOOK_PREFERRED_TIME,
 // dark). The guard (no-store/noindex/no-referrer headers + the generic
 // unknown-route 404 while the gate is off) is mounted ABOVE the global cors()

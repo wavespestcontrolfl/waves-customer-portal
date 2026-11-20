@@ -8987,6 +8987,60 @@ a write failure is warn-logged by error kind ONLY). No cookie, user agent
 or referrer is ever read; the network address is used only by the
 one-minute per-IP limiter; nothing per-visitor is ever stored or logged. This is a pure aggregate count, never
 a session/visitor record.)
+`/api/public/form-steps` (write; anonymous, cookie-free quote-form and quiz
+step counter — a near copy of `/api/public/blog-read-depth` above. Owner
+approval: *build* 2026-11-19, quiz funnel scope ("Step counts with no cookie"
+on the two quizzes and the main form, all 17 sites). The quote
+form on every fleet site and the hub's two quiz pages fire one `fetch(url, {
+method: 'POST', body, keepalive: true, credentials: 'omit', mode: 'no-cors' })`
+per funnel step; the response is opaque to the browser by design, so it matters
+only for tests/abuse posture. **No gate**: it counts anonymous aggregate steps
+and cannot message a customer, change a price, charge, delete data, spend money
+or add a token page, so it ships live (`waves-ship` §6), unlike the read-depth
+route's `GATE_BLOG_READ_DEPTH`. Mounted in `server/index.js` right after the
+read-depth mount, ABOVE the global `cors({ origin: allowedOrigins })`, the
+global `app.use('/api/', limiter)` and the body parsers (own 120 req/min per-IP
+limiter, `FORM_STEPS_RATE_MAX`, applied before its own `express.text({ type: ()
+=> true, limit: '1kb' })` parse, which runs for `POST /` ONLY: every other
+method and subpath reaches the terminal 404 with its body unread), so a
+visitor's beacons never spend the shared budget a customer's quote-form or
+booking calls need. The router sets no-store/
+noindex/no-referrer headers first, sets no CORS headers, and ends in a terminal
+generic unknown-route 404, so no request that reaches it (any method, any
+subpath other than `POST /`) falls through to the app's request logger.
+Body: `{"f":"<form>","s":"<step>"}` as `text/plain`. The allowlist
+(`FORM_STEPS` in `server/routes/public-form-steps.js`, own-property lookup
+only) is: `quote` (the main quote form on any site) = `view`, `start`,
+`interest`, `frequency`, `family`, `product`, `cadence`, `name`, `email`,
+`phone`, `address`, `lead`; `pest_quiz` and `lawn_quiz` (same list for both) =
+`view`, `start`, `seeing`, `property`, `timeline`, `name`, `email`, `phone`,
+`address`, `lead`, `end_call`, `end_business`, `end_price`, `end_review`,
+`call_tap`, `price_tap`. An unknown form, a step from another form's list, a
+non-JSON or non-object body, a body over 1 KB, or `__proto__`/`constructor`
+style keys is dropped silently: the answer is ALWAYS 204 (the only other answer
+is the limiter's 429), sent before any write, so the response never says what
+counted. `site` is derived ONLY from the `Origin` header (never the body). The
+header must be ONE serialized `https` origin with no port (`scheme://host`
+and nothing else: a bare domain, a path, a JSON list or a comma-joined pair is
+refused before the registry sees it), and its hostname must be a fleet site in
+the spoke registry (`normalizeSpokeSites`); a missing/`null`/malformed/unknown
+origin drops the beacon with 204 and writes nothing. The Origin is attribution, not
+authentication (a non-browser caller can claim any fleet origin, and an
+anonymous beacon cannot be authenticated without a visitor identifier, which
+the approved scope rules out), so the bounds on a forged beacon are the fixed allowlist and
+a cap of 2,000 per `(day, site, form, step)` bucket a day (the upsert's `WHERE
+count < 2000`).
+Stored: daily totals only, in `form_step_daily` (migration
+`20261120020000_form_step_daily.js`), one row per `(day, site, form, step)`
+via `INSERT ... ON CONFLICT DO UPDATE SET count = count + 1`, `day` computed in
+SQL as the America/New_York calendar day. The table has NO timestamp column
+(no `created_at` / `updated_at`): a bucket records how many, never when. The write is fire-and-forget after
+the 204; a failure is warn-logged by error kind ONLY. Never stored or logged: a
+visitor id, IP address, cookie, user agent, referrer, the raw body, or any
+form field value (the beacon carries a step name, never what the visitor
+typed); the network address is used only by the one-minute per-IP limiter.
+Safe in either deploy order: a site without the beacon sends nothing; a
+portal without the route answers 404 and the site ignores it.)
 Typed-decision labeler token (`POST /api/admin/typed-decisions/reviews/:id/label`
 with header `X-Labeler-Token`; `server/routes/typed-decisions-labeler.js`;
 owner 2026-10-02, "token is fine"). The Claude labeling runner (two blind
