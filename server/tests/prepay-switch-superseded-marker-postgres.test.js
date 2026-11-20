@@ -102,7 +102,7 @@ postgres('prepay switch on an accepted per-application plan (real Postgres)', ()
       invoice_number: `TEST-${f.invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'draft',
       total: SETUP_FEE + PER_VISIT, subtotal: SETUP_FEE + PER_VISIT, service_date: day(3), line_items: JSON.stringify(lines),
       notes: acceptNote });
-    return f;
+    return { ...f, acceptNote };
   }
 
   const switchVisit = (f) => runPrepaySwitch({
@@ -121,11 +121,10 @@ postgres('prepay switch on an accepted per-application plan (real Postgres)', ()
 
     const first = await trx('invoices').where({ id: f.invoiceId }).first('status', 'notes');
     expect(first.status).toBe('void');
-    // The note keeps the accept stamp and gains the marker on a new line, so
-    // restoreSwitchSupersededInvoicesForPrepay can find it after a refund.
-    expect(first.notes).toMatch(new RegExp(`^Auto-generated from accepted estimate #${f.estimateId}\\.`));
-    expect(first.notes).toContain(`\n`);
-    expect(first.notes.split('\n').pop()).toContain(out.invoice.id);
+    // The note keeps the accept stamp and gains, on a new line, the exact
+    // marker restoreSwitchSupersededInvoicesForPrepay looks up after a refund.
+    const { prepaySwitchSupersededByMarker } = require('../services/invoice');
+    expect(first.notes).toBe(`${f.acceptNote}\n${prepaySwitchSupersededByMarker(out.invoice.id)}`);
 
     const prepay = await trx('invoices').where({ id: out.invoice.id }).first('status', 'annual_prepay_term_id');
     expect(prepay.annual_prepay_term_id).toBeTruthy();
