@@ -139,9 +139,14 @@ describe('POST /subscribe with the bot check', () => {
     expect(line).not.toContain('reader@example.com');
   });
 
-  test('a dropped signup with a bad address still answers like a real one', async () => {
-    const r = await post({ email: 'not-an-email', source: 'astro-website' }, null);
-    expect(r).toEqual({ status: 200, body: { success: true, pending: true } });
+  test('a bad or missing address gets the same 400 whether or not the bot check would drop it', async () => {
+    const bot = await post({ email: 'not-an-email', source: 'astro-website', website: 'x' }, null);
+    const personBad = await post({ ...person, email: 'not-an-email' });
+    expect(bot).toEqual({ status: 400, body: { error: 'valid email required' } });
+    expect(personBad).toEqual(bot);
+    expect(await post({ source: 'astro-website' }, null)).toEqual({ status: 400, body: { error: 'email required' } });
+    expect(subscribeOrResubscribe).not.toHaveBeenCalled();
+    expect(logger.info).not.toHaveBeenCalled();
   });
 
   test('the portal form source is unchanged: no form time or Origin needed', async () => {
