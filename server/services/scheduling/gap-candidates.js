@@ -102,6 +102,34 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
     label: slots.formatServiceProfileLabel(performed) || profile.serviceLabel, prospective: true, dayOpen };
 }
 
+/**
+ * An open lead's visit as a gap candidate (the 07:05 fill list, owner 2026-11-20 *1a*): the Waves Assessment or the
+ * inspection the lead asked for (`visit`: its catalog row, day-replan/fill-list.js leadVisit), at the catalog's length,
+ * which the Leads screen's Schedule button books (admin-leads.js schedule-appointment: the catalog default, else 60
+ * minutes). It stands at the lead's customer's stored location (`lead.latitude`/`lead.longitude`, the customer row the
+ * booking routes by), never geocoded. A new stop, checked as an estimate's first visit is (`prospective`). The
+ * customer's day and time rules and the capability rule apply as for estimateGapCandidate. `{ unavailable:
+ * 'no_stored_location' }` when the customer has none. A failed read throws.
+ */
+async function leadGapCandidate(lead, visit, conn) {
+  const lat = Number(lead.latitude);
+  const lng = Number(lead.longitude);
+  if (lead.latitude == null || lead.longitude == null || !Number.isFinite(lat) || !Number.isFinite(lng) || !lat || !lng) {
+    return { unavailable: 'no_stored_location' };
+  }
+  const length = Number(visit.default_duration_minutes);
+  const service = {
+    id: '__candidate__', customer_id: lead.customer_id, status: 'pending', lat, lng,
+    estimated_duration_minutes: Number.isInteger(length) && length > 0 ? length : 60,
+    service_type: visit.name, service_id: visit.id, service_key_snapshot: visit.service_key || null,
+  };
+  const preferences = await getCustomerSchedulingPreferences(lead.customer_id, service.service_type, conn,
+    { serviceId: visit.id, serviceKey: service.service_key_snapshot });
+  const categories = [...new Set(await categoriesForServices(conn, [service]))];
+  const deactivated = await conn('technician_capabilities').whereIn('service_category', categories).where('active', false).pluck('technician_id');
+  return { service, preferences, holds: [], siblingDates: [], deactivated, label: visit.name, prospective: true, dayOpen: () => true };
+}
+
 function analyzeGapCandidate(candidate, rows, {
   date, technicianId, now, today, departureMinutes, targetReturnMinutes, breakMinutes, closed,
   // The tech's start point (GATE_TECH_START_POINTS); absent = the office.
@@ -176,9 +204,10 @@ function analyzeGapCandidate(candidate, rows, {
   // vanDepartureMin: with GATE_SCHEDULING_CAPACITY on the route opens at the
   // van's departure (the Settings time; 08:00 with the day rules off), not at
   // the 08:00 shift open, the way the night tool's arrival search plans it.
-  // A new visit (`prospective`: an estimate's first visit, estimateGapCandidate) is tried at every place in the route:
-  // the staff finder's check of a new customer (arrival-route.js staffPlacement, with its margin for later stops). A
-  // saved visit keeps the order its save would produce.
+  // A new stop on the day (`prospective`: an estimate's or a lead's first visit, or a booked plan visit tried on an
+  // earlier day, day-replan/fill-list.js) is tried at every place in the route: the staff finder's check of a new
+  // customer (arrival-route.js staffPlacement, with its margin for later stops). A saved visit keeps the order its save
+  // would produce.
   const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home, vanDepartureMin: modeledDepartureMinutes,
     prospective, blocks };
   const result = enumerateArrivalPlacements(context, { durationMinutes: duration, earliestStartMin: earliestStart,
@@ -202,4 +231,4 @@ function analyzeGapCandidate(candidate, rows, {
       : 'Fits preserve the dispatch order produced by the existing save. They do not authorize a date/time change or create a booking hold.' };
 }
 
-module.exports = { loadGapCandidate, estimateGapCandidate, analyzeGapCandidate };
+module.exports = { loadGapCandidate, estimateGapCandidate, leadGapCandidate, analyzeGapCandidate };
