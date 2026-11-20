@@ -473,12 +473,14 @@ describe('confirm', () => {
     describe('a close deferred past the visit day (GATE_REPORT_AFTER_PAY)', () => {
       const deferred = { ...closeout, status: 'on_site', deferred: true };
 
-      test('the probe asks for a deferred target, and the card says the visit stays open today for the report', async () => {
+      test('the probe asks for a deferred target, and the card says the visit stays open today for its technician (no report promised)', async () => {
         issuedCloseoutTarget.mockResolvedValue(deferred);
         const card = await preview();
         expect(issuedCloseoutTarget).toHaveBeenLastCalledWith(expect.anything(), { trigger: 'paid', includeDeferred: true });
         const text = card.effects.map((e) => e.text).join('\n');
-        expect(text).toMatch(/The linked visit \(Pest Control on 2099-01-01\) stays open today so its technician can send the report\. If it is still open after today, the daily closeout check completes it quietly/);
+        expect(text).toMatch(/The linked visit \(Pest Control on 2099-01-01\) stays open today for its technician to complete\. If it is still open after today, the daily closeout check completes it quietly/);
+        // A visit whose completion sends no report is held the same way: the card never promises one.
+        expect(text).not.toMatch(/send the report/);
         expect(text).not.toMatch(/Also completes the linked visit/);
         expect(card._version).toMatchObject({ closeout_visit: 'visit-77', closeout_deferred: true });
         expect(card._approved.settlementFence.closeoutTarget).toBe('visit-77');
@@ -509,13 +511,13 @@ describe('confirm', () => {
         }
       });
 
-      test('the closeout\'s same-day refusal is the promise kept: the result says the visit stays open for the report', async () => {
+      test('the closeout\'s same-day refusal is the promise kept: the result says the visit stays open for its technician', async () => {
         issuedCloseoutTarget.mockResolvedValue(deferred);
         const card = await preview();
         Invoices.recordPaymentFromBar.mockResolvedValue({ status: 200, json: { ok: true, invoice: { status: 'paid' }, closeout: { closed: false, reason: 'visit_scheduled_today', visitId: 'visit-77' } } });
         const res = await confirm(card);
         expect(res).toMatchObject({ success: true, status: 'paid', visit_closeout: 'deferred' });
-        expect(res.note).toMatch(/The linked visit stays open today so its technician can send the report; if it is still open after today, the daily closeout check completes it\./);
+        expect(res.note).toMatch(/The linked visit stays open today for its technician to complete; if it is still open after today, the daily closeout check completes it\./);
       });
 
       test('an immediate card refused for the day still reports the visit as not closed', async () => {

@@ -281,9 +281,10 @@ function planEffects({ invoice, dueCents, method, reference, note, closeout }) {
     { kind: 'operational', text: 'A billing pause on the account that was waiting for a payment can clear.' },
   ];
   if (closeout?.deferred) {
-    // GATE_REPORT_AFTER_PAY (owner 2026-11-19): paid on its own day, the visit stays with its technician for the report. The daily
-    // retry sweep completes it once that day has passed, and only this visit: the payment pins it.
-    effects.push({ kind: 'operational', text: `The linked visit (${closeout.serviceType || 'visit'} on ${closeout.date}) stays open today so its technician can send the report. If it is still open after today, the daily closeout check completes it quietly: creates its service record; no completion text, report, review request or charge.` });
+    // GATE_REPORT_AFTER_PAY (owner 2026-11-19): paid on its own day, the visit stays with its technician, who completes it. The
+    // daily retry sweep completes it once that day has passed, and only this visit: the payment pins it. The words promise no report:
+    // a visit whose completion sends none (internal-only, delivery off) is held the same way (pre-push audit P1).
+    effects.push({ kind: 'operational', text: `The linked visit (${closeout.serviceType || 'visit'} on ${closeout.date}) stays open today for its technician to complete. If it is still open after today, the daily closeout check completes it quietly: creates its service record; no completion text, report, review request or charge.` });
   } else if (closeout) {
     effects.push({ kind: 'operational', text: closeout.resuming
       ? `Also finishes a closeout already started for the linked visit (${closeout.serviceType || 'visit'} on ${closeout.date}); no completion text, report, review request or charge.`
@@ -404,13 +405,13 @@ async function actorOf(actionContext) {
 }
 
 // What happened to the linked-visit closeout the card promised (null = none was promised). The payment is recorded either way.
-// deferred: the card said the visit stays open today for its technician's report, so the closeout's same-day refusal keeps that promise.
+// deferred: the card said the visit stays open today for its technician to complete, so the closeout's same-day refusal keeps that promise.
 function closeoutReport(promisedVisitId, closeout, { deferred = false } = {}) {
   if (!promisedVisitId) return null;
   if (closeout?.closed) return { state: 'completed', note: 'The linked visit was closed.' };
   const reason = closeout?.reason || 'not_completed';
   if (deferred && reason === 'visit_scheduled_today') {
-    return { state: 'deferred', note: 'The linked visit stays open today so its technician can send the report; if it is still open after today, the daily closeout check completes it.' };
+    return { state: 'deferred', note: 'The linked visit stays open today for its technician to complete; if it is still open after today, the daily closeout check completes it.' };
   }
   if (['approved_visit_changed', 'approved_target_mismatch'].includes(reason)) {
     return { state: 'skipped_visit_changed', note: 'The visit changed since the card; the payment is recorded, close the visit from its page.' };
