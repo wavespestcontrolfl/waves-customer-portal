@@ -8755,13 +8755,14 @@ from before the version (#8012) has only the paths without `/v2`, whose handlers
 rollback a page that read a version never posts an answer to a handler that ignores it. That post answers 404 and
 writes nothing, and the page reads the offer before it calls the link dead: a 404 read shows the dead link, and an
 open read keeps the offer and marks the page out of date. So does a read from a server that does not match the page
-(an open offer without its version, or a state the page does not know), the first read included: reading again gets
-the same answer. Out of date, the page locks every answer and says "This page is out of date. Please reload it and try
+(an open offer without its version, or a state the page does not know), the first read included, and every later read
+whatever asked for it (the text choice's check after a lost reply too): reading again gets the same answer. Out of date, the page locks every answer and says "This page is out of date. Please reload it and try
 again." with a "Reload page" button, shown only while no send is in flight or lost (a reload would drop a send whose
 outcome is not known). When the read after a refusal fails, the page locks every answer, and its Check again reads with
 that refusal's status, so a 404 still counts. After a lost reply, a resend's 404 does not mark the page: that send may
 still land on a server that has the route, so its resend stays the only action, and its banner adds "If this keeps
-happening, call us at (941) 297-5749 and we will check it for you." An open read missing a term the page
+happening, call us at (941) 297-5749 and we will check it for you." The line stays until that send has a definite
+answer, through resends that fail again. An open read missing a term the page
 shows stays a failed read (the load error, or Check again). Here the paths without `/v2` run the same handlers with the same check,
 for a tab that opened the page from before `/v2` (#8091 posts there with its version). A signature is also refused
 the same way (409 `{state:'open'}`, no write, a warning logged) when the frozen offer lacks a term the page shows (the
