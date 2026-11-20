@@ -171,8 +171,12 @@ async function recordLiveOwnerReply(reviewId, live, fresh) {
     // google_uncertain / persist_failed park whose earlier PUT had actually
     // landed (its posted provenance and Retract). A transient error keeps
     // the row's state and retries; the next live read reconciles again.
-    logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`);
-    throw new ReviewReplyError(CODES.RECONCILE_FAILED, `${RECONCILE_FAILED_MSG}: ${e.message}`, { status: 503, cause: e });
+    // The failed write carried the live reply text, so a database error
+    // message can quote it (and the reviewer's name): only its code goes
+    // into the log, the bell and the row (AGENTS.md, PII in logs).
+    const summary = require('../notification-service').safeErrorSummary(e);
+    logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${summary}`);
+    throw new ReviewReplyError(CODES.RECONCILE_FAILED, `${RECONCILE_FAILED_MSG}: ${summary}`, { status: 503, cause: e });
   });
   // A landed write that parked (review / account facts moved since the
   // draft) needs a person: the retrying edited-after-post bell (codex r54).

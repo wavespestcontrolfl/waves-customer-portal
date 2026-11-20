@@ -213,9 +213,9 @@ async function loadOpenPastVisits({ now = new Date(), database = db, findStaleVi
 // a real reviewer row, not dismissed, not gone from Google. No park reason is
 // left out, so a park with no reply cannot drop off this list. A park whose
 // reply may already be on Google (google_uncertain or persist_failed: ours may
-// have landed; reconcile_failed: Google showed an owner reply not recorded
-// here) is listed with "check Google first"; the sync records a live reply
-// when it reads one, and the row then leaves the list.
+// have landed; a google_failed park whose message says Google showed an owner
+// reply not recorded here) is listed with "check Google first"; the sync
+// records a live reply when it reads one, and the row then leaves the list.
 async function loadParkedReviews({ database = db } = {}) {
   const { WAVES_LOCATIONS } = require('../config/locations');
   const { whereNeedsRealReply } = require('./review-reply/draft-prefix');
@@ -237,9 +237,9 @@ async function loadParkedReviews({ database = db } = {}) {
       name: r.reviewer_name,
       at: r.review_created_at,
       location: locationNames.get(r.location_id) || null,
-      // A reply may already be on Google. Before 2026-11-20 an exhausted
-      // reconciliation parked as google_failed; only its message tells.
-      checkGoogle: RECONCILE_REASONS.has(r.auto_reply_reason) || r.auto_reply_reason === 'reconcile_failed'
+      // A reply may already be on Google. An exhausted reconciliation parks
+      // as google_failed; only its message tells.
+      checkGoogle: RECONCILE_REASONS.has(r.auto_reply_reason)
         || (r.auto_reply_reason === 'google_failed' && String(r.auto_reply_error || '').startsWith(RECONCILE_FAILED_MSG)),
     })),
   };

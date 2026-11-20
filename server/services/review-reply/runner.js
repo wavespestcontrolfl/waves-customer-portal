@@ -62,7 +62,7 @@ const GOOGLE_RETRY_DELAYS_MIN = [10, 30, 60, 180, 360, 720];
 // the short MAX_ATTEMPTS retry, as before.
 const GOOGLE_TEMPORARY_STATUSES = new Set([404, 408, 429]);
 const googleMayAcceptLater = (cause) => cause?.timedOut === true || GOOGLE_TEMPORARY_STATUSES.has(cause?.googleStatus) || cause?.googleStatus >= 500;
-const PUBLISH_RETRYABLE_CODES = new Set([CODES.LOCK_BUSY, CODES.GOOGLE_FAILED, CODES.NO_RESOURCE, 'account_read_failed', 'unexpected']);
+const PUBLISH_RETRYABLE_CODES = new Set([CODES.LOCK_BUSY, CODES.GOOGLE_FAILED, CODES.NO_RESOURCE, CODES.RECONCILE_FAILED, 'account_read_failed', 'unexpected']);
 const LAST_RETRY_MARGIN_MS = 60 * 60 * 1000;
 const IDENTITY_BACKOFF_MIN = 60;
 // Deploy-forward is a property of the REVIEW: nothing older than this at
@@ -456,11 +456,6 @@ async function bell(row, { title, body, reason, action = false, extra = {}, link
   await stampBellFailed(row.id, reason, { action }).catch(() => {});
   return false;
 }
-// RECONCILE_FAILED: Google shows an owner reply that the publisher could not
-// record here. Nothing to write; a person confirms it once the sync reads it.
-function reconcileFailedBell(row, detail = '') {
-  return bell(row, { title: 'Review reply needs reconciling', body: `${summarize(row)} — Google shows a reply to this review that was not recorded here${detail}. Open Reviews and confirm it after the next sync.`, reason: CODES.RECONCILE_FAILED, action: true, link: `/admin/reviews?responded=all&review=${encodeURIComponent(row.id)}` });
-}
 const BELL_STAMP_RE = /(?:^| \|\| )bell_failed:([^|]*)$/;
 async function stampBellFailed(reviewId, reason, { action = true, conn = db } = {}) {
   const cur = await conn('google_reviews').where({ id: reviewId }).first('auto_reply_error');
@@ -687,14 +682,6 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // Hard invariant, independent of config: unrated and 1-3★ never auto-post
   // (Post now on such a row parks the freshly drafted text for the person).
   const humanOnly = rating === 0 || rating <= 3 || rating < cfg.minStars;
-
-  // A reconcile_failed retry row from before 2026-11-20 (the runner no
-  // longer retries reconciliation, see the publish catch): it parks for
-  // reconciliation with no draft, and the hourly sync records the reply.
-  if (intent !== 'post_now' && merged.auto_reply_status === STATUS.FAILED && merged.auto_reply_reason === CODES.RECONCILE_FAILED) {
-    if (await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: CODES.RECONCILE_FAILED })) await reconcileFailedBell(merged);
-    return { outcome: 'parked', reason: CODES.RECONCILE_FAILED };
-  }
 
   // A publish retry reuses the verifier-approved draft it already produced —
   // redrafting would burn attempts on the model (and could park as
@@ -976,10 +963,8 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     const dueMs = Date.now() + delayMin * 60000;
     const windowMs = cfg.maxQueueAgeHours * 3600000;
     const lastRetryMs = new Date(merged.review_created_at).getTime() + windowMs - Math.min(LAST_RETRY_MARGIN_MS, windowMs / 4);
-    // RECONCILE_FAILED (codex r74) is never "already replied", and it is not
-    // retried: a retry re-ran the whole publish path, where a later failure
-    // could hide what Google showed. It parks for reconciliation (below),
-    // and the hourly sync records the reply Google shows.
+    // RECONCILE_FAILED (codex r74): Google shows an owner reply but the
+    // local record of it failed — transient, retry; never "already replied".
     if (PUBLISH_RETRYABLE_CODES.has(code) && dueMs < lastRetryMs) {
       const due = new Date(dueMs).toISOString();
       await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: (draft.reused && merged.auto_reply_drafted_at) || new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
@@ -990,13 +975,9 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       : code === CODES.NO_RESOURCE ? 'no_gbp_resource'
         : code === CODES.LOCK_BUSY ? 'lock_busy'
           : code === 'account_read_failed' ? 'account_read_failed'
-            // Google already shows an owner reply: keep the reason, so the
-            // Monday list marks it "check Google first".
-            : code === CODES.RECONCILE_FAILED ? CODES.RECONCILE_FAILED
-              : 'google_failed';
+            : 'google_failed';
     if (!(await storeDraft(merged, draft, STATUS.PARKED, parkReason, { grounding: snapshot, fields: { auto_reply_attempts: attempts, auto_reply_error: String(err.message || err).slice(0, 1000) } }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
-    if (parkReason === CODES.RECONCILE_FAILED) await reconcileFailedBell(merged, ` (${err.message})`);
-    else await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — Google did not accept the reply (${err.message}). The draft is saved on the review.`, reason: 'google_failed', action: true });
+    await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — Google did not accept the reply (${err.message}). The draft is saved on the review.`, reason: 'google_failed', action: true });
     logger.error(`[review-auto-reply] publish failed for ${merged.id}: ${code} (${err.message})`);
     return { outcome: 'parked', reason: code };
   }
@@ -1714,18 +1695,6 @@ async function retryFailedEditedBells({ limit = 20 } = {}) {
     const m = err.match(BELL_STAMP_RE);
     if (!m) continue;
     const [reason, actionFlag] = String(m[1]).split(':');
-    if (reason === CODES.RECONCILE_FAILED) {
-      // Re-ring only while the row is still parked for reconciliation. Once
-      // the sync has recorded the reply, the stamp is obsolete: clear it,
-      // compare-and-set on the row as read, so a newer stamp is never lost.
-      if (r.auto_reply_status === STATUS.PARKED && r.auto_reply_reason === CODES.RECONCILE_FAILED) {
-        if (await reconcileFailedBell(r)) n++;
-      } else {
-        await db('google_reviews').where({ id: r.id, auto_reply_status: r.auto_reply_status, auto_reply_reason: r.auto_reply_reason, auto_reply_error: r.auto_reply_error })
-          .update({ auto_reply_error: err.replace(BELL_STAMP_RE, '') || null });
-      }
-      continue;
-    }
     const action = actionFlag !== '0';
     // Re-ring with a generic body: the original wording is not stored, the
     // row state is what the person needs.
