@@ -47,6 +47,12 @@ const SOURCES = {
 // The base filter every query shares: a named builder, not an owner-builder.
 const BUILDER_ONLY = "AND BTRIM(COALESCE(contractor_name, '')) <> '' AND UPPER(COALESCE(contractor_license, '')) NOT LIKE 'OWN%'";
 
+// A listed kind only: an inherited name such as "constructor" is not a key of SOURCES and never reaches a query.
+function sourceFor(kind) {
+  if (!KINDS.includes(kind)) throw new Error('unknown builder kind');
+  return SOURCES[kind];
+}
+
 /** Upper case, punctuation gone, one space between words, trailing company words (LLC, INC, ...) dropped. */
 function builderKey(name) {
   const words = String(name == null ? '' : name)
@@ -126,7 +132,8 @@ function mergeGroup(key, group, { newSince, customerKeys }) {
 
 /**
  * Pure merge. rows: one per upper-cased name and license from the database. Returns the builders (permits in the last
- * 365 days only), sorted by 90-day permits, then 12-month permits, then name, and the newest-week summary.
+ * 365 days only), sorted by 90-day permits, then 12-month permits, then name, and the newest-week summary. The week is
+ * counted before the 12-month cut: it ends on the newest permit on file, which can be older than 12 months.
  */
 function mergeBuilders(rows, { newSince, customerKeys = new Set() }) {
   const groups = new Map();
@@ -136,11 +143,11 @@ function mergeBuilders(rows, { newSince, customerKeys = new Set() }) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
-  const builders = [...groups.entries()]
-    .map(([key, group]) => mergeGroup(key, group, { newSince, customerKeys }))
+  const merged = [...groups.entries()].map(([key, group]) => mergeGroup(key, group, { newSince, customerKeys }));
+  const active = merged.filter((builder) => builder.permits7 > 0);
+  const builders = merged
     .filter((builder) => builder.permits365 > 0)
     .sort((a, b) => b.permits90 - a.permits90 || b.permits365 - a.permits365 || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  const active = builders.filter((builder) => builder.permits7 > 0);
   return {
     week: { permits: active.reduce((total, builder) => total + builder.permits7, 0), builders: active.length },
     builders: builders.map(({ permits7, ...builder }) => builder),
@@ -186,8 +193,7 @@ async function readCustomerKeys() {
 }
 
 async function listBuilders({ kind, now = new Date() }) {
-  const source = SOURCES[kind];
-  if (!source) throw new Error(`unknown builder kind: ${kind}`);
+  const source = sourceFor(kind);
   const started = Date.now();
   const today = etDateString(now);
   const dataThrough = await readDataThrough(source, today);
@@ -199,30 +205,33 @@ async function listBuilders({ kind, now = new Date() }) {
 }
 
 // The names (upper-cased, trimmed) that fold into one builder key.
-async function namesForKey(source, key) {
+async function namesForKey(source, key, today) {
   const result = await db.raw(
     `SELECT DISTINCT UPPER(BTRIM(contractor_name)) AS name FROM ${source.table}
-      WHERE issued_date IS NOT NULL ${BUILDER_ONLY} ${source.where}`,
+      WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}`,
+    [today],
   );
   return result.rows.map((row) => row.name).filter((name) => builderKey(name) === key);
 }
 
-async function builderPermits({ kind, key, limit = DEFAULT_PERMIT_LIMIT }) {
-  const source = SOURCES[kind];
-  if (!source) throw new Error(`unknown builder kind: ${kind}`);
+// Job sites, newest first. Like the list, a permit dated after today is left out, so it can never push a real job
+// site off the page. The limit is a whole number from 1 to 100 (PostgreSQL refuses a fraction).
+async function builderPermits({ kind, key, limit = DEFAULT_PERMIT_LIMIT, now = new Date() }) {
+  const source = sourceFor(kind);
   const started = Date.now();
-  const names = await namesForKey(source, key);
+  const today = etDateString(now);
+  const names = await namesForKey(source, key, today);
   if (!names.length) return [];
-  const take = Math.min(Math.max(Number(limit) || DEFAULT_PERMIT_LIMIT, 1), MAX_PERMIT_LIMIT);
+  const take = Math.min(Math.max(Math.trunc(Number(limit)) || DEFAULT_PERMIT_LIMIT, 1), MAX_PERMIT_LIMIT);
   const result = await db.raw(
     `SELECT ${source.id} AS id, issued_date, ${source.status} AS status, ${source.address} AS address,
             ${source.city} AS city, zip, ${source.typeOfWork} AS type_of_work
        FROM ${source.table}
-      WHERE issued_date IS NOT NULL ${BUILDER_ONLY} ${source.where}
+      WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}
         AND UPPER(BTRIM(contractor_name)) IN (${names.map(() => '?').join(', ')})
       ORDER BY issued_date DESC, ${source.id}
       LIMIT ?`,
-    [...names, take],
+    [today, ...names, take],
   );
   logger.info(`[builder-list] ${kind} permits: ${result.rows.length} rows in ${Date.now() - started} ms`);
   return result.rows.map((row) => ({
