@@ -863,12 +863,13 @@ function stripBedBugInternalPricing(result) {
 // Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): the V2 pricer inputs for a request that asks for it,
 // else null (a spot seal, or the gate off). The home size is the request's, else the property's TOTAL living
 // area (input homeSqFt), and only then its footprint (the ground floor: a two-story home would tier too low).
+// With none of them it stays 0: the pricer then flags its rows footprintWasDefaulted (a guessed size).
 function wholeHomeSealInputs(exclusion, property) {
   if (exclusion.sealScope !== 'whole_home') return null;
   if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true) return null;
   return {
     sealScope: 'whole_home',
-    homeSqFt: exclusion.homeSqFt || property.homeSqFt || property.footprint || 2000,
+    homeSqFt: exclusion.homeSqFt || property.homeSqFt || property.footprint || 0,
     stories: exclusion.stories || property.stories || 1,
     roofType: exclusion.roofType || property.roofType || 'shingle',
   };

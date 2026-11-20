@@ -7,7 +7,8 @@ import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import EstimateToolViewV2 from "./EstimateToolViewV2";
+import fs from "node:fs";
+import EstimateToolViewV2, { exclusionScopeReset, wholeHomeRegenerateBlock } from "./EstimateToolViewV2";
 
 function jsonResponse(body) {
   return Promise.resolve({
@@ -89,5 +90,31 @@ describe("Whole-home rodent seal choice", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(container.querySelector("#estimate-exclSealScope")).toBeNull();
     }
+  });
+});
+
+describe("Saved whole-home picks and new estimates", () => {
+  it("blocks regenerating a saved Whole home pick until the gate read confirms it", () => {
+    const saved = { svcExclusion: true, exclSealScope: "whole_home" };
+    expect(wholeHomeRegenerateBlock(saved, false)).toMatch(/Whole home seal is not confirmed available/);
+    expect(wholeHomeRegenerateBlock(saved, true)).toBe("");
+    expect(wholeHomeRegenerateBlock({ ...saved, exclSealScope: "spot" }, false)).toBe("");
+    expect(wholeHomeRegenerateBlock({ ...saved, svcExclusion: false }, false)).toBe("");
+  });
+
+  it("shows the reason beside the scope choice only while the gate is not confirmed", async () => {
+    const { container } = await openExclusion({ data: {}, exclusionWholeHome: true });
+    await waitFor(() => expect(container.querySelector("#estimate-exclSealScope")).toBeTruthy());
+    fireEvent.change(container.querySelector("#estimate-exclSealScope"), { target: { value: "whole_home" } });
+    expect(container.querySelector('[data-testid="exclusion-whole-home-blocked"]')).toBeNull();
+  });
+
+  it("a new estimate resets the seal scope and the checklist", () => {
+    expect(exclusionScopeReset()).toEqual({ exclSealScope: "spot", exclusionChecklist: [] });
+    expect(exclusionScopeReset().exclusionChecklist).not.toBe(exclusionScopeReset().exclusionChecklist);
+    // nextEstimate (the Next estimate button) must apply it to the form it carries over.
+    const source = fs.readFileSync("src/pages/admin/EstimateToolViewV2.jsx", "utf8");
+    const nextEstimate = source.slice(source.indexOf("function nextEstimate()"));
+    expect(nextEstimate.slice(0, nextEstimate.indexOf("fleaOfferKey"))).toContain("...exclusionScopeReset()");
   });
 });

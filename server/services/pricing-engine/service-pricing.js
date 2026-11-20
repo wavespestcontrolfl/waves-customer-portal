@@ -9731,12 +9731,13 @@ function priceExclusion(options = {}) {
 function wholeHomeSealTerms(options = {}) {
   if (options.sealScope !== 'whole_home') return null;
   if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true) return null;
-  const sqFt = Number(options.homeSqFt) > 0 ? Number(options.homeSqFt) : 2000;
+  const sized = Number(options.homeSqFt) > 0;
+  const sqFt = sized ? Number(options.homeSqFt) : 2000;
   // The same home-size table the spot-seal pricer reads: Settings (pricing_config
   // onetime_exclusion.minimums_by_home_sqft, hydrated by db-bridge) reaches whole-home quotes.
   const tier = _bracketLookup(sqFt, SPECIALTY.exclusion.minimumsByHomeSqFt, 'maxSqFt');
   return {
-    minimum: tier.minimum, homeSqFt: sqFt, stories: options.stories, roofType: options.roofType,
+    minimum: tier.minimum, homeSqFt: sqFt, sized, stories: options.stories, roofType: options.roofType,
   };
 }
 
@@ -9751,6 +9752,9 @@ function exclusionJobFloor(cfg, wholeHome, totalLinearMeshLF) {
 function wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLinearMeshLF) {
   if (!wholeHome) return {};
   return {
+    // No measured home size: the minimum rests on a guessed 2,000 sq ft, so the estimator's
+    // guessed-size guard (footprintWasDefaulted) makes staff enter the size before the quote goes out.
+    ...(wholeHome.sized ? {} : { footprintWasDefaulted: true }),
     sealScope: 'whole_home',
     includesReentryGuarantee: true,
     reentryGuaranteeMonths: RODENT.exclusionV2.wholeHomeReentryGuaranteeMonths,

@@ -183,6 +183,21 @@ describe('estimate engine with a whole-home exclusion', () => {
     });
   });
 
+  test('gate on: an unknown home size is a guessed size, flagged on every row (never a firm minimum)', () => {
+    gateOn(() => {
+      const unsized = generateEstimate(baseInput({ homeSqFt: 0, services: { exclusion: exclusion({ sealScope: 'whole_home' }) } }));
+      const rows = unsized.lineItems.filter((li) => li.service === 'rodent_exclusion');
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((li) => li.footprintWasDefaulted === true)).toBe(true);
+      const mapped = mapV1ToLegacyShape(unsized);
+      const mappedRows = [...(mapped.oneTime.items || []), ...(mapped.oneTime.specItems || [])].filter((r) => r.service === 'rodent_exclusion');
+      expect(mappedRows.every((r) => r.footprintWasDefaulted === true)).toBe(true);
+      // A measured size carries no such flag.
+      const sized = generateEstimate(baseInput({ homeSqFt: 1800, services: { exclusion: exclusion({ sealScope: 'whole_home' }) } }));
+      expect(sized.lineItems.filter((li) => li.service === 'rodent_exclusion').some((li) => li.footprintWasDefaulted)).toBe(false);
+    });
+  });
+
   test('gate on: no second, paid guarantee line beside an included guarantee', () => {
     const services = (sealScope) => ({
       exclusion: exclusion({ sealScope, homeSqFt: 2000 }),

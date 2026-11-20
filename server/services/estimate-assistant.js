@@ -11,6 +11,7 @@ const { GUARANTEE_COPY, resolveOneTimeServiceCopy } = require('./estimate-one-ti
 const {
   collapseMirroredRows,
   hasPurchasedTrenchingWarranty,
+  includedReentryPurchasedTerms,
   isPreSlabTreatmentItem,
   preSlabExtendedWarrantySelected,
   preSlabSelectedWarrantyPart,
@@ -475,6 +476,12 @@ function purchasedTermsForRow(item) {
   return (copy?.includes || []).filter((line) => GUARANTEE_COPY.test(line));
 }
 
+// A whole-home exclusion row's included guarantee, as the row's service-specific terms (nothing without the flag).
+function includedReentryProjection(item) {
+  const purchasedTerms = includedReentryPurchasedTerms(item);
+  return purchasedTerms.length ? { purchasedTerms } : {};
+}
+
 function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
   const primaryLabelsByService = new Map();
   for (const row of primaryRows) {
@@ -559,6 +566,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         ...(trenchingServiceIdentity(item) === 'termite_trenching'
           ? { purchasedTerms: purchasedTermsForRow(evidence) }
           : {}),
+        ...includedReentryProjection(item),
         ...preSlabProjectionFields(item, preSlabEvidence),
         ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
@@ -603,6 +611,7 @@ function oneTimeRowsFromResult(result = {}) {
         label: cleanText(item.label || item.displayName || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
+        ...includedReentryProjection(item),
         ...preSlabProjectionFields(item),
         ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,

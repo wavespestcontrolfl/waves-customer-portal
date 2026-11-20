@@ -20,6 +20,14 @@ function includedReentryTerms(item = {}) {
   return renewal > 0 ? REENTRY_TERMS_TEMPLATE.replace('{renewal}', String(renewal)) : null;
 }
 
+// What Ask Waves may say about a row that includes the guarantee: the bullet and the renewal clause
+// (the terms line without its payment sentence). [] without the row's own flag (fail closed).
+function includedReentryPurchasedTerms(item = {}) {
+  if (!hasIncludedReentryGuarantee(item)) return [];
+  const renewal = (includedReentryTerms(item) || '').replace(/^Pay on service day\.\s*/, '');
+  return [INCLUDED_REENTRY_GUARANTEE_BULLET, ...(renewal ? [renewal] : [])];
+}
+
 // The row keys that carry the included guarantee to the customer page: the
 // flag, its length in months and the yearly renewal price. {} unless the flag is true.
 function includedReentryGuaranteeFields(item = {}) {
@@ -365,6 +373,7 @@ module.exports = {
   hasPurchasedTrenchingWarranty,
   hasIncludedReentryGuarantee,
   includedReentryGuaranteeFields,
+  includedReentryPurchasedTerms,
   includedReentryTerms,
   matchingTrenchingWarrantyRow,
   rawOneTimeWarrantyEvidenceItems,

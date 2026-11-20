@@ -1244,6 +1244,19 @@ const EXCLUSION_CHECKLIST_POINTS = [
   { key: "other_utility_penetrations", label: "Other utility penetrations" },
 ];
 
+// A new estimate never inherits the last customer's seal scope or checked points.
+export function exclusionScopeReset() {
+  return { exclSealScope: "spot", exclusionChecklist: [] };
+}
+
+// A saved Whole home pick cannot be regenerated while the server has not confirmed the gate is on
+// (the read is pending or failed, or the gate is off): the request would silently price a spot seal
+// and drop the included guarantee. Returns the reason shown to staff, or "" when generating is fine.
+export function wholeHomeRegenerateBlock(form, available) {
+  if (!form?.svcExclusion || form.exclSealScope !== "whole_home" || available === true) return "";
+  return "Whole home seal is not confirmed available yet, so this estimate would price as a spot seal. Wait for it to load, or change Seal scope to Spot seal.";
+}
+
 // The included re-entry guarantee a generated whole-home quote carries: its yearly renewal price.
 function wholeHomeGuaranteeRenewal(estimate) {
   const rows = [...(estimate?.oneTime?.items || []), ...(estimate?.oneTime?.specItems || [])];
@@ -1252,7 +1265,7 @@ function wholeHomeGuaranteeRenewal(estimate) {
 }
 
 // The Seal scope choice and, for Whole home, the point checklist and the included guarantee note.
-function ExclusionSealScope({ estimate }) {
+function ExclusionSealScope({ estimate, blockedReason = "" }) {
   const { form, set } = useContext(FormCtx);
   const picked = Array.isArray(form.exclusionChecklist) ? form.exclusionChecklist : [];
   const guarantee = form.exclSealScope === "whole_home" ? wholeHomeGuaranteeRenewal(estimate) : null;
@@ -1267,6 +1280,7 @@ function ExclusionSealScope({ estimate }) {
           ]}
         />
       </Field>
+      {blockedReason && <div className="text-14 text-zinc-600" data-testid="exclusion-whole-home-blocked">{blockedReason}</div>}
       {form.exclSealScope === "whole_home" && (
         <div data-testid="exclusion-whole-home" className="space-y-2">
           <p className="text-14 text-zinc-400 font-medium">Check these points (enter the counts below)</p>
@@ -4361,6 +4375,11 @@ export default function EstimateToolViewV2({
     if (generating) return null;
     // An open scope question blocks pricing (the server refuses it too).
     if (scopeQuestion) return null;
+    const wholeHomeBlock = wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable);
+    if (wholeHomeBlock) {
+      alert(wholeHomeBlock);
+      return null;
+    }
     // Snapshot the invalidation version. Inputs stay editable while the
     // calculate call is in flight, so an edit that lands mid-flight must make
     // this generate discard its result (it was priced from pre-edit inputs).
@@ -5312,6 +5331,7 @@ export default function EstimateToolViewV2({
       roachFeeOverride: "",
       standaloneRoachFeeOverride: "",
       linePriceOverrides: {},
+      ...exclusionScopeReset(),
       fleaOfferKey: "flea_elimination_two_visit",
       fleaComplexity: "light",
       fleaExteriorSourceSuspected: false,
@@ -8436,7 +8456,9 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion Service" />
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
-                  {exclusionWholeHomeAvailable && <ExclusionSealScope estimate={estimate} />}
+                  {(exclusionWholeHomeAvailable || form.exclSealScope === "whole_home") && (
+                    <ExclusionSealScope estimate={estimate} blockedReason={wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable)} />
+                  )}
                   <p className="text-14 text-zinc-400 font-medium">Wire Mesh Points</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <Field label="Standard — $75/pt" id="estimate-exclStandardWireMesh" className="mb-4">

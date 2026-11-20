@@ -389,6 +389,32 @@ describe('estimate assistant no-guarantee context', () => {
     expect(context.guarantees).toMatchObject({ recurringTermsEligible: false, recurring: null });
   });
 
+  test.each(['pricing', 'saved'])('%s: a whole-home exclusion states its included re-entry guarantee and renewal price (flag only)', (source) => {
+    const row = { service: 'rodent_exclusion', label: 'Rodent Exclusion — Whole-home seal minimum', amount: 595, price: 595,
+      includesReentryGuarantee: true, reentryGuaranteeMonths: 12, guaranteeRenewalPrice: 249, detail: 'Lifetime rodent-free guarantee' };
+    const input = (item) => ({
+      estimate: { onetime_total: 595 },
+      estData: { result: { oneTime: { items: source === 'saved' ? [item] : [] } } },
+      pricingBundle: { anchorOneTimePrice: 595, oneTimeBreakdown: { items: source === 'pricing' ? [item] : [] } },
+      noGuaranteeClaims: true,
+    });
+    const context = buildEstimateAssistantContext(input(row));
+    expect(context.oneTime.items[0].purchasedTerms).toEqual([
+      'Includes a 1-year re-entry guarantee: if a rodent gets back in through the work we sealed, Waves reseals and traps at no extra charge.',
+      'Renew the guarantee yearly for $249.',
+    ]);
+    const answer = answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context);
+    expect(answer).toContain('1-year re-entry guarantee');
+    expect(answer).toContain('$249');
+    expect(answer).not.toMatch(/lifetime/i);
+    // Fail closed: the same row with no flag (or a false one) carries no guarantee terms.
+    for (const flagged of [{ includesReentryGuarantee: undefined }, { includesReentryGuarantee: false }]) {
+      const bare = buildEstimateAssistantContext(input({ ...row, ...flagged }));
+      expect(bare.oneTime.items[0].purchasedTerms || []).toEqual([]);
+      expect(answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', bare)).not.toContain('1-year re-entry guarantee');
+    }
+  });
+
   test.each(['pricing', 'saved'])('%s purchased warranty scope survives without allowing arbitrary warranty prose', (source) => {
     const row = { service: 'termite_trenching', label: 'Front foundation', amount: 1200, price: 1200,
       warrantyTier: 'one_year_retreat', warrantyAdder: 100, detail: 'Guaranteed termite-free forever' };
