@@ -8,6 +8,7 @@ const {
   UNATTRIBUTED,
   planRateLedgerEnabled,
   estimateFamilySlices,
+  loadComponents,
   applyAcceptToLedger,
   resetLedgerToScalar,
   syncScalarWriteToLedger,
@@ -594,6 +595,21 @@ describe('codex r5 hardening', () => {
       customerId: 'cust-1', slices: { pest_control: 40 }, previousScalar: 0,
     })).rejects.toThrow('metadata query timeout');
     featureGates.isEnabled.mockReturnValue(false);
+  });
+
+  test('loadComponents strictProbe: a table-probe FAILURE throws in advisory mode too; the default answer stays []', async () => {
+    const db = makeLedgerDb([{ customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 40 }]);
+    // A healthy probe: the option changes nothing.
+    expect(await loadComponents(db, 'cust-1', { strictProbe: true })).toEqual(await loadComponents(db, 'cust-1'));
+    expect(await loadComponents(db, 'cust-1')).toHaveLength(1);
+    db.schema = { hasTable: async () => { throw new Error('metadata query timeout'); } };
+    // Advisory, default: absent-equivalent, as before.
+    await expect(loadComponents(db, 'cust-1')).resolves.toEqual([]);
+    // Advisory, strict: the caller reads a component as evidence, so it takes the failure.
+    await expect(loadComponents(db, 'cust-1', { strictProbe: true })).rejects.toThrow('metadata query timeout');
+    // An ABSENT table in advisory mode is a real "no ledger" for both forms.
+    db.schema = { hasTable: async () => false };
+    await expect(loadComponents(db, 'cust-1', { strictProbe: true })).resolves.toEqual([]);
   });
 
   test('a genuinely ABSENT table throws under the authority gate instead of legacy fallback (codex r21)', async () => {
