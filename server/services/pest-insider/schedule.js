@@ -102,7 +102,8 @@ async function issueContextForSend(send, { database, now = new Date() } = {}) {
 /**
  * Moves the planned issue linked to a send from one of the `from` statuses to `to`, with the reason.
  * Returns whether a row moved. The send row stays the record of what was mailed; this one is the
- * planner's, so callers log a failure here and carry on.
+ * planner's, so callers log a failure here and carry on. The one exception is the proof step's
+ * queueing (queueAutoSendIssue), which queues the send only together with this row.
  */
 async function moveIssueForSend(sendId, from, to, { reason, database } = {}) {
   const db = database || require('../../models/db');
@@ -253,10 +254,12 @@ function proofOutcome(proof) {
   return proof.reason || 'skipped';
 }
 
-// The proof step already told the owner, or another worker is on it, or its FYI copy went out
-// earlier: no second notice from the planner.
+// The proof step told the owner in this run, or another worker is on its FYI copy right now: no
+// second notice from the planner. A copy an EARLIER run claimed (proof_already_sent) is not
+// enough: that run may have stopped after the claim, before the copy went out or the issue was
+// queued (a restart), and then nobody told the owner.
 const proofInformed = (proof) => Boolean(proof && (proof.sent || proof.notified
-  || proof.reason === 'proof_already_sent' || proof.reason === 'proof_claimed_elsewhere'));
+  || proof.reason === 'proof_claimed_elsewhere'));
 
 // Why an issue will not send, in plain words for the admin notification.
 const REASON_COPY = [
@@ -270,6 +273,7 @@ const REASON_COPY = [
   [/^no_approvers_configured$/, 'NEWSLETTER_PROOF_APPROVERS is empty, so the FYI copy did not go out'],
   [/^sendgrid_not_configured$/, 'SendGrid is not set up, so the FYI copy did not go out'],
   [/^proof_send_failed$/, 'SendGrid did not accept the FYI copy'],
+  [/^proof_already_sent$/, 'an earlier run started its FYI copy but never queued it'],
   [/^draft_missing$/, 'its draft was deleted'],
 ];
 function reasonCopy(reason) {
@@ -285,13 +289,16 @@ const issueDayLabel = (issueDate) => new Intl.DateTimeFormat('en-US', {
 /**
  * The last tick's check: with the auto-send switch on, an issue that is not queued, sent or held
  * by now will not go out. Unless the proof step already told the owner why, raise one admin
- * notification (the same one the proof step raises for a refused check).
+ * notification (the same one the proof step raises for a refused check). `failure`: the error
+ * that stopped the last run part way, given as the reason.
  */
-async function noticeIfIssueWillNotSend(db, issueDate, proof) {
+async function noticeIfIssueWillNotSend(db, issueDate, proof, failure = null) {
   const row = await db('pest_insider_issues').where({ issue_date: issueDate }).first('status', 'reason');
   if (row && ['scheduled', 'sent', 'held'].includes(row.status)) return false;
-  if (row && row.status === 'drafted' && proofInformed(proof)) return false;
-  const reason = !row ? 'no issue was recorded' : reasonCopy(row.status === 'drafted' ? (proof && proof.reason) || 'draft_missing' : row.reason);
+  if (!failure && row && row.status === 'drafted' && proofInformed(proof)) return false;
+  const reason = failure
+    ? `the planner's last run stopped with an error: ${String(failure.message || failure).slice(0, 200)}`
+    : !row ? 'no issue was recorded' : reasonCopy(row.status === 'drafted' ? (proof && proof.reason) || 'draft_missing' : row.reason);
   const { triggerNotification } = require('../notification-triggers');
   await triggerNotification('newsletter_proof_blocked', {
     sendId: null,
@@ -317,22 +324,36 @@ async function runIssuePlanner({ now = new Date(), fetchImpl, database, finalTic
   const db = database || require('../../models/db');
   const autoSend = pestInsiderAutoSendLive();
   const proofStep = sendProof || ((sendId) => require('../newsletter-proof').sendNewsletterProof(sendId));
-  const existing = await db('pest_insider_issues').where({ issue_date: issueDate }).first('id', 'status', 'send_id');
+  try {
+    const existing = await db('pest_insider_issues').where({ issue_date: issueDate }).first('id', 'status', 'send_id');
 
-  let result;
-  if (existing && existing.status === 'drafted' && autoSend) {
-    const proof = existing.send_id ? await proofStep(existing.send_id) : { skipped: true, reason: 'draft_missing' };
-    result = { skipped: false, issueDate, status: 'drafted', reason: null, written: false, retried: true, sendId: existing.send_id, proof: proofOutcome(proof) };
-    result.noticeRaised = finalTick && await noticeIfIssueWillNotSend(db, issueDate, proof);
-    require('../logger').info(`[pest-insider] issue ${issueDate}: proof step again for its draft: ${result.proof}`);
+    let result;
+    if (existing && existing.status === 'drafted' && autoSend) {
+      const proof = existing.send_id ? await proofStep(existing.send_id) : { skipped: true, reason: 'draft_missing' };
+      result = { skipped: false, issueDate, status: 'drafted', reason: null, written: false, retried: true, sendId: existing.send_id, proof: proofOutcome(proof) };
+      result.noticeRaised = finalTick && await noticeIfIssueWillNotSend(db, issueDate, proof);
+      require('../logger').info(`[pest-insider] issue ${issueDate}: proof step again for its draft: ${result.proof}`);
+      return result;
+    }
+    if (existing && !rebuildable(autoSend).includes(existing.status)) return { skipped: true, reason: 'already_built' };
+
+    const { proof, ...built } = await buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImpl, proofStep });
+    result = { ...built, proof: proofOutcome(proof) };
+    if (finalTick && autoSend) result.noticeRaised = await noticeIfIssueWillNotSend(db, issueDate, proof);
     return result;
+  } catch (err) {
+    // The last run stopped part way (the audience read, the draft, the proof step): unless the
+    // issue is already queued, sent or held, tell the owner it will not send. Then fail as
+    // before, so the cron logs the error.
+    if (finalTick && autoSend) {
+      try {
+        await noticeIfIssueWillNotSend(db, issueDate, null, err);
+      } catch (noticeErr) {
+        require('../logger').error(`[pest-insider] issue ${issueDate}: the will-not-send notice failed: ${noticeErr.message}`);
+      }
+    }
+    throw err;
   }
-  if (existing && !rebuildable(autoSend).includes(existing.status)) return { skipped: true, reason: 'already_built' };
-
-  const { proof, ...built } = await buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImpl, proofStep });
-  result = { ...built, proof: proofOutcome(proof) };
-  if (finalTick && autoSend) result.noticeRaised = await noticeIfIssueWillNotSend(db, issueDate, proof);
-  return result;
 }
 
 // One build: post check, history, builder, then the row (and, with the switch on, the draft and

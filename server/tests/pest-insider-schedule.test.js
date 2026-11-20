@@ -462,6 +462,31 @@ describe('runIssuePlanner with GATE_PEST_INSIDER_AUTO_SEND on', () => {
       expect(triggerNotification.mock.calls[0][1].errors).toEqual(['It will not send this time: SendGrid did not accept the FYI copy (proof_send_failed)']);
     });
 
+    test('a draft whose FYI copy an earlier run claimed but never queued raises the notice', async () => {
+      // The 7:00 AM run stopped after its claim (a restart): the proof step now only sees the claim.
+      const database = fakeDb({ existing: { id: 'row-1', status: 'drafted', send_id: 'send-1' }, after: { status: 'drafted', reason: null } });
+      const result = await runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof: jest.fn(async () => ({ skipped: true, reason: 'proof_already_sent' })) });
+
+      expect(result).toMatchObject({ status: 'drafted', proof: 'proof_already_sent', noticeRaised: true });
+      expect(triggerNotification.mock.calls[0][1].errors).toEqual(['It will not send this time: an earlier run started its FYI copy but never queued it (proof_already_sent)']);
+    });
+
+    test('a last run that stops with an error raises the notice with the error, then fails as before', async () => {
+      buildIssue.mockImplementationOnce(() => { throw new Error('fact bank unreadable'); });
+      const database = fakeDb();
+
+      await expect(runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof: jest.fn() })).rejects.toThrow('fact bank unreadable');
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      expect(triggerNotification.mock.calls[0][1].errors).toEqual(["It will not send this time: the planner's last run stopped with an error: fact bank unreadable"]);
+    });
+
+    test('a 7:00 AM run that stops with an error raises nothing: the 1:00 PM run tries again', async () => {
+      buildIssue.mockImplementationOnce(() => { throw new Error('fact bank unreadable'); });
+
+      await expect(runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb(), sendProof: jest.fn() })).rejects.toThrow('fact bank unreadable');
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
     test('no second notice when the proof step already told the owner why', async () => {
       const database = fakeDb({ after: { status: 'drafted', reason: null } });
       const sendProof = jest.fn(async () => ({ skipped: true, reason: 'validation_failed', errors: ['x'], notified: true }));

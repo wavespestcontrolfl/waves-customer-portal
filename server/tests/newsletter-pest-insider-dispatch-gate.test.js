@@ -244,6 +244,32 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     });
   });
 
+  test('a send that fails before its claim marks its planned issue failed (nothing went out)', async () => {
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = { conds: [] };
+      ['whereNull', 'whereIn', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.where = jest.fn((cond) => { q.conds.push(cond); return q; });
+      q.limit = jest.fn(async () => [AUTO_QUEUED_INSIDER]);
+      q.first = jest.fn(async () => (table === 'pest_insider_issues' ? PLANNED : undefined));
+      // Nothing claimed the row: it is still scheduled, not sending.
+      q.update = jest.fn(async (patch) => {
+        updates.push({ table, patch });
+        return q.conds.some((cond) => cond && cond.status === 'sending') ? 0 : 1;
+      });
+      return q;
+    });
+
+    // sendCampaign throws before its claim here (no SendGrid in tests, and no row to read).
+    await processScheduledSends();
+
+    expect(updates).toEqual([
+      { table: 'newsletter_sends', patch: { status: 'failed' } },
+      { table: 'newsletter_sends', patch: expect.objectContaining({ status: 'failed' }) },
+      { table: 'pest_insider_issues', patch: expect.objectContaining({ status: 'failed', reason: expect.stringMatching(/^send failed before it started: /) }) },
+    ]);
+  });
+
   test('9:59 AM ET is still inside the window', async () => {
     at('2026-12-03T14:59:00Z');
     wireInsider([AUTO_QUEUED_INSIDER]);

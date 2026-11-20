@@ -95,7 +95,7 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
 
 // `mailboxCustomers`: subscriber id -> the customers behind its mailbox, as the
 // planned audience's own query reads them (withMailboxCustomers).
-function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, skipUpdated = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false, mailboxCustomers = {} } = {}) {
+function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, skipUpdated = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false, mailboxCustomers = {}, retryableLeft = 0, onIssueUpdate } = {}) {
   const queues = {
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
@@ -136,8 +136,10 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
       // re-check — only consumed when eligibleAtDispatch drops someone.
       ...(eligibleAtDispatch ? [chain({ updated: skipUpdated ?? (subscribers.length - eligibleAtDispatch.length), onUpdate: onSkipUpdate })] : []),
       chain({ updated: (eligibleAtDispatch || subscribers).length }), // bulk update post-send
-      chain({ count: 0 }),                                  // final retryable ledger count
+      chain({ count: retryableLeft }),                      // final retryable ledger count
     ],
+    // A planned Waves Pest Insider issue's row (moveIssueForSend).
+    pest_insider_issues: [chain({ updated: 1, onUpdate: onIssueUpdate })],
     // Calendar lifecycle: sendCampaign advances the linked calendar row to
     // 'sent' on a successful send. (markEventsFeatured only touches events_raw
     // when send.event_ids is non-empty — the fixtures leave it empty, so no
@@ -382,6 +384,33 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
 
     await expect(sendCampaign('send-1')).rejects.toMatchObject({ code: 'INCOMPLETE_PLAN', audienceRefusal: true });
     expect(mockSendBroadcast).not.toHaveBeenCalled();
+  });
+
+  test('a planned issue whose every batch SendGrid refused ends failed, and so does its planned issue row', async () => {
+    mockSendBroadcast.mockRejectedValueOnce(new Error('SendGrid 503'));
+    let issueUpdate = null;
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', newsletter_type: 'pest-insider-monthly', html_body: '<p>Body</p>', text_body: 'Body',
+        subject: 'Hello', from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: PLANNED_PI, subject_b: null,
+      },
+      subscribers: [
+        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
+        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+      ],
+      retryableLeft: 2,
+      onIssueUpdate: (payload) => { issueUpdate = payload; },
+    });
+
+    const result = await sendCampaign('send-1');
+
+    expect(result).toMatchObject({ accepted: 0, failed: 2 });
+    expect(issueUpdate).toMatchObject({ status: 'failed', reason: 'every SendGrid batch failed' });
   });
 
   test('a holdout name this server does not know stops a first send before anything is sent', async () => {

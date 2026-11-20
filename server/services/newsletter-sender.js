@@ -41,7 +41,7 @@ const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-f
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
 const { pestInsiderProofLive, newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
-const { issueContextForSend, inSendWindow, moveIssueForSend } = require('./pest-insider/schedule');
+const { issueContextForSend, inSendWindow, moveIssueForSend, SEND_WINDOW_MS } = require('./pest-insider/schedule');
 const NewsletterSubscribers = require('./newsletter-subscribers');
 const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 
@@ -1003,6 +1003,10 @@ async function sendCampaign(sendId, opts = {}) {
       if (opts.expect.proofApprovedAt) {
         claim = claim.whereNotNull('proof_approved_at').where('proof_approved_at', '<', noLaterThan(opts.expect.proofApprovedAt));
       }
+      // A deadline (a Waves Pest Insider issue's 10:00 AM ET window end) binds the claim itself,
+      // on the database clock: the checks before this line take time, and a tick that passed
+      // the window check at 9:59 must not start the send after 10:00.
+      if (opts.expect.notAfter) claim = claim.whereRaw('clock_timestamp() < ?::timestamptz', [opts.expect.notAfter]);
     } else {
       claim = claim.whereIn('status', ['draft', 'scheduled']);
     }
@@ -1026,8 +1030,12 @@ async function sendCampaign(sendId, opts = {}) {
           logger.warn(`[newsletter] claim re-read for ${send.id} failed: ${readErr.message}`);
         }
       }
-      const err = new Error(claimedElsewhere ? 'already sent or in progress' : 'row changed since it was validated');
-      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : 'VERSION_CHANGED';
+      // A deadline that passed explains an empty claim on a row nobody else took.
+      const windowClosed = !claimedElsewhere && Boolean(opts.expect?.notAfter)
+        && Date.now() >= new Date(opts.expect.notAfter).getTime();
+      const err = new Error(claimedElsewhere ? 'already sent or in progress'
+        : windowClosed ? 'its send window closed before the send could start' : 'row changed since it was validated');
+      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : windowClosed ? 'SEND_WINDOW_CLOSED' : 'VERSION_CHANGED';
       throw err;
     }
   }
@@ -1492,6 +1500,9 @@ async function sendCampaign(sendId, opts = {}) {
     return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, skipped_ineligible: skippedIneligible, lostClaim: true };
   }
 
+  // Nothing went out: a planned Waves Pest Insider issue's row says so.
+  if (finalSendUpdate.status === 'failed') await markIssueSendFailed(send, 'every SendGrid batch failed');
+
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
     // Advance the calendar lifecycle (idempotent) so a sent newsletter's
     // calendar row reflects reality instead of being stuck at 'drafted'.
@@ -1763,6 +1774,20 @@ async function resumeCampaign(sendId) {
  * skipped, nothing went out (owner 2026-10-30, option A). Returns whether
  * this tick reverted it.
  */
+/**
+ * A planned Waves Pest Insider issue whose send did not go out: its planned row moves to failed,
+ * so the planner's history stops counting its picks. A resume that sends it later moves the row
+ * to sent. The send row stays the record of what was mailed, so a failure here is logged only.
+ */
+async function markIssueSendFailed(send, reason) {
+  if (send.newsletter_type !== PEST_INSIDER_TYPE) return;
+  try {
+    await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'failed', { reason: String(reason).slice(0, 500) });
+  } catch (err) {
+    logger.warn(`[newsletter] Pest Insider issue status update failed for send ${send.id}: ${err.message}`);
+  }
+}
+
 async function revertBlockedScheduledSend(row, reason) {
   // Bound to the version this tick read, as the dispatch claim is: a row
   // edited, re-approved or rescheduled since then is left as it is now.
@@ -1784,13 +1809,7 @@ async function revertBlockedScheduledSend(row, reason) {
   await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
   // A planned Waves Pest Insider issue stopped at send time does not go out:
   // its date has a fixed send time, and the planner never queues it again.
-  if (row.newsletter_type === PEST_INSIDER_TYPE) {
-    try {
-      await moveIssueForSend(row.id, ['drafted', 'scheduled'], 'failed', { reason: `stopped at send time: ${reason}`.slice(0, 500) });
-    } catch (err) {
-      logger.warn(`[newsletter-scheduler] Pest Insider issue status update failed for send ${row.id}: ${err.message}`);
-    }
-  }
+  await markIssueSendFailed(row, `stopped at send time: ${reason}`);
   try {
     const { triggerNotification } = require('./notification-triggers');
     await triggerNotification('newsletter_proof_blocked', {
@@ -1873,6 +1892,7 @@ async function processScheduledSends() {
       // A Waves Pest Insider issue the switch queued goes out only from its
       // planned issue, still scheduled, at its own Thursday 7:00 AM ET target,
       // inside the 7:00-10:00 AM ET window. Anything else stops it for good.
+      let notAfter = null;
       if (autoQueued && pestInsider) {
         const stop = await pestInsiderDispatchStop(row);
         if (stop) {
@@ -1880,6 +1900,8 @@ async function processScheduledSends() {
           await revertBlockedScheduledSend(row, stop);
           continue;
         }
+        // The window's end also binds the claim (sendCampaign's expect.notAfter).
+        notAfter = new Date(new Date(row.scheduled_for).getTime() + SEND_WINDOW_MS);
       }
       const eventSelection = await validateFlagshipEventSelection(row);
       if (eventSelection.flagship) {
@@ -1934,7 +1956,7 @@ async function processScheduledSends() {
       // edit (or re-approval) landing in between leaves the claim empty and
       // the row is picked up again, re-validated, on a later tick.
       await sendCampaign(row.id, {
-        expect: { status: 'scheduled', updatedAt: row.updated_at, proofApprovedAt: row.proof_approved_at },
+        expect: { status: 'scheduled', updatedAt: row.updated_at, proofApprovedAt: row.proof_approved_at, notAfter },
       });
       processed++;
     } catch (err) {
@@ -1949,14 +1971,15 @@ async function processScheduledSends() {
         logger.info(`[newsletter-scheduler] send ${row.id} changed after this tick validated it — not dispatching this version`);
         continue;
       }
-      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID' || err.audienceRefusal) {
+      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID' || err.code === 'SEND_WINDOW_CLOSED' || err.audienceRefusal) {
         // sendCampaign's own pre-claim gates re-run the lineup checks and
         // can newly fail even though the tick's gate just passed (the
         // recheck fetches live pages). A generic 'failed' flip would
         // strand the week uneditable — take the same
         // revert-to-editable-draft exit as the tick's gate. An audience
         // refusal (audienceRefusal) takes the same exit: nothing went out,
-        // and the alert says why.
+        // and the alert says why. So does a Pest Insider window that closed
+        // before the claim (SEND_WINDOW_CLOSED), as a missed window does.
         logger.error(`[newsletter-scheduler] send ${row.id} blocked at dispatch: ${err.message}`);
         try {
           await revertBlockedScheduledSend(row, err.message);
@@ -1966,15 +1989,17 @@ async function processScheduledSends() {
       logger.error(`[newsletter-scheduler] send ${row.id} failed: ${err.message}`);
       try {
         const flipped = await db('newsletter_sends').where({ id: row.id, status: 'sending' }).update({ status: 'failed' });
-        if (!flipped) {
-          // Pre-claim throw (e.g. SendGrid unconfigured): the row never
-          // reached 'sending' and would otherwise stay 'scheduled' — due
-          // forever, retried every tick, invisible as a failure. Same
-          // status-guarded flip as the route's fire-and-forget catch.
-          await db('newsletter_sends')
-            .where({ id: row.id, status: 'scheduled' })
-            .update({ status: 'failed', updated_at: new Date() });
-        }
+        // Pre-claim throw (e.g. SendGrid unconfigured): the row never
+        // reached 'sending' and would otherwise stay 'scheduled' — due
+        // forever, retried every tick, invisible as a failure. Same
+        // status-guarded flip as the route's fire-and-forget catch.
+        const failedBeforeClaim = !flipped && await db('newsletter_sends')
+          .where({ id: row.id, status: 'scheduled' })
+          .update({ status: 'failed', updated_at: new Date() });
+        // Nothing went out, so a planned issue's row says so. After the
+        // claim some readers may have it: that row stays as it is, and a
+        // resume that finishes the send moves it to sent.
+        if (failedBeforeClaim) await markIssueSendFailed(row, `send failed before it started: ${err.message}`);
       } catch { /* swallow */ }
     }
   }

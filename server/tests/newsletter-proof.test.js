@@ -116,6 +116,8 @@ function wireDb({ sends, subscribers, calendar, issues } = {}) {
     if (table === 'pest_insider_issues') return issuesChain;
     return subsChain;
   });
+  // A transaction reaches the same tables; a throw inside it rejects, as knex's does.
+  db.transaction = jest.fn(async (work) => work((table) => db(table)));
   return { sendsChain, subsChain, calendarChain, issuesChain };
 }
 
@@ -868,6 +870,8 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(queue).toEqual(expect.objectContaining({ status: 'scheduled', scheduled_for: ISSUE_SEND_AT, proof_approval_email_id: null }));
     expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted']);
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    // The send and its issue row are queued in one transaction.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(calendarChain.update).not.toHaveBeenCalled();
 
     const args = mockSendOne.mock.calls[0][0];
@@ -881,6 +885,18 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(args.html).toContain('Fact T03 · What&#39;s this? brown-widow · Tool none'.replace('&#39;', "'"));
     expect(args.html).toContain('Readers: 85 (92 opened a Waves email in the last 90 days; 7 customers held out to measure the issue)');
     expect(mockTrigger).not.toHaveBeenCalledWith('newsletter_proof_sent', expect.anything());
+  });
+
+  test('an issue row that is no longer drafted rolls the queueing back, and the owner is told', async () => {
+    // The send's queue update matches, but its issue row does not move: the transaction fails.
+    wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE, update: 0 } });
+    const r = await sendNewsletterProof('send-1');
+
+    expect(r).toEqual(expect.objectContaining({ sent: true, queued: false }));
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: ['The FYI copy went out, but the issue changed before it could be queued, so it will not send by itself.'],
+    }));
   });
 
   test('switch off: a planned issue is not queued by the flagship switch either', async () => {

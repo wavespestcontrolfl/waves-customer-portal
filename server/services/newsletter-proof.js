@@ -554,24 +554,35 @@ function proofDelivery(calendarContext, recipientCount, issueContext = null) {
  * tell an auto-queued issue from a reply-approved one.
  */
 async function queueAutoSendIssue(send, token, claimedAt, calendarContext, issueContext = null) {
+  const queueSend = (conn) => conn('newsletter_sends')
+    .where({ id: send.id, proof_token: token, status: 'draft' })
+    .whereNull('proof_approved_at')
+    .whereRaw("date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)", [claimedAt])
+    .update({
+      status: 'scheduled',
+      scheduled_for: issueContext ? issueContext.scheduledFor : calendarContext.scheduledFor,
+      proof_approved_at: new Date(),
+      proof_approval_email_id: null,
+      proof_refused_at: null,
+      updated_at: new Date(),
+    });
   let queued = 0;
   try {
-    queued = await db('newsletter_sends')
-      .where({ id: send.id, proof_token: token, status: 'draft' })
-      .whereNull('proof_approved_at')
-      .whereRaw("date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)", [claimedAt])
-      .update({
-        status: 'scheduled',
-        scheduled_for: issueContext ? issueContext.scheduledFor : calendarContext.scheduledFor,
-        proof_approved_at: new Date(),
-        proof_approval_email_id: null,
-        proof_refused_at: null,
-        updated_at: new Date(),
+    if (issueContext) {
+      // A planned Waves Pest Insider issue is queued together with its planned row, in one
+      // transaction: the dispatcher sends only an issue whose row is scheduled, so a send queued
+      // alone would be stopped on Thursday after its FYI copy said it goes out. A row that is no
+      // longer drafted rolls the queueing back, and the owner is told below.
+      queued = await db.transaction(async (trx) => {
+        const moved = await queueSend(trx);
+        if (moved && !(await moveIssueForSend(send.id, ['drafted'], 'scheduled', { database: trx }))) {
+          throw new Error('its planned issue is no longer drafted');
+        }
+        return moved;
       });
-    if (queued && issueContext) {
-      await moveIssueForSend(send.id, ['drafted'], 'scheduled');
-    } else if (queued) {
-      await db('newsletter_calendar').where({ id: calendarContext.linkedCalendar.id }).update({ status: 'scheduled', updated_at: new Date() });
+    } else {
+      queued = await queueSend(db);
+      if (queued) await db('newsletter_calendar').where({ id: calendarContext.linkedCalendar.id }).update({ status: 'scheduled', updated_at: new Date() });
     }
   } catch (err) {
     logger.error(`[newsletter-proof] queueing auto-send issue ${send.id} failed: ${err.message}`);
