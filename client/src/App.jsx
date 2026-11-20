@@ -2,8 +2,8 @@ import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import {
-  CHUNK_RELOAD_FLAG, chunkReloadAttempted, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending,
-  noteChunkLoaded, reloadForMissingCode, usedOnThisStaffPage,
+  CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, noteChunkLoaded,
+  reloadForMissingCode, takeChunkReload, usedOnThisStaffPage,
 } from './lib/staleChunkReload';
 import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload, usePageUsed } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -321,7 +321,7 @@ function ChunkLoadFallback({ newVersion = false }) {
       <CustomerFailureScreen
         title="Couldn’t load this page"
         message="Check your connection and try again."
-        onRetry={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
+        onRetry={() => { clearChunkReloadFlag(); window.location.reload(); }}
       />
     );
   }
@@ -415,15 +415,14 @@ export function lazyWithRetry(factory) {
         // A staff page obeys the holds of an out-of-date tab
         // (lib/staleChunkReload.js).
         if (isAdminPath(window.location.pathname)) return { default: MissingPageCode };
-        if (!chunkReloadAttempted()) {
-          sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+        if (takeChunkReload()) {
           markStaleChunkReloadPending();
           showReloadToast();
           setTimeout(() => window.location.reload(), 1200);
           return { default: () => null };
         }
-        // Already auto-reloaded once — show a retry screen instead of
-        // rethrowing into a blank page.
+        // Already auto-reloaded once, or no session storage to stop a loop —
+        // show a retry screen instead of rethrowing into a blank page.
         return { default: ChunkLoadFallback };
       }
       throw err;

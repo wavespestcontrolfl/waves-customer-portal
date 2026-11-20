@@ -36,12 +36,20 @@
 // new path, so a page whose code is missing still reloads at once when
 // nothing holds the tab.
 //
+// Waves Admin and the field pages never reload by themselves, as at a page
+// move (selfReloadBarred, lib/portalReload.js): a reload with no signal opens
+// an offline screen. Nor does a move away from a field page, which the tab's
+// last use there marks: field work can still be on its way. There a missing
+// chunk always leaves the import to fail, so the page or the part asks.
+//
 // The one reload for a missing chunk counts until the tab leaves the path it
 // reopened (chunkReloadAttempted): a route can load in parts, and the part
 // that loads clears the one-shot flag before the part still missing fails.
 
 import { isAdminPath } from './adminBookmarkMeta';
-import { isPageUse, PAGE_USE_EVENTS, staffBlockerAfterWork, staffReloadBlocker } from './portalReload';
+import {
+  isPageUse, PAGE_USE_EVENTS, selfReloadBarred, staffBlockerAfterWork, staffReloadBlocker,
+} from './portalReload';
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 
@@ -77,6 +85,13 @@ export function usedOnThisStaffPage() {
   return isAdminPath(pathname) && usedPath === pathname;
 }
 
+// A staff page that never reloads by itself (see the top of this file). The
+// page of the tab's last use stands for the page a move left.
+function staffSelfReloadBarred() {
+  const { pathname } = window.location;
+  return isAdminPath(pathname) && selfReloadBarred(pathname, usedPath);
+}
+
 // The path this page load opened on, when the one reload for a missing chunk
 // opened it: the flag is set only right before that reload.
 function pathOpenedByChunkReload() {
@@ -88,20 +103,35 @@ function pathOpenedByChunkReload() {
 }
 
 // Whether this tab already reloaded once for a missing chunk. A page that
-// loads clears the flag (noteChunkLoaded), and a route can load in parts: on
-// /admin/today/protocols the Today shell loads, then its page. So the path
-// that reload reopened counts too, or a page still missing under a shell that
-// loaded would reload the tab at every load. Throws when storage is blocked.
-export function chunkReloadAttempted() {
+// loads clears the flag (noteChunkLoaded), and a route can load in parts: a
+// page, then a part that opens with it, such as a panel its URL names. So the
+// path that reload reopened counts too, or a part still missing under a page
+// that loaded would reload the tab at every load. Throws when storage is
+// blocked.
+function chunkReloadAttempted() {
   return window.location.pathname === reloadedPath || Boolean(sessionStorage.getItem(CHUNK_RELOAD_FLAG));
+}
+
+// Takes the one reload for a missing chunk: sets the flag and returns true.
+// Returns false when this tab already took it, or when session storage is
+// blocked: with no one-shot guard, the tab never reloads by itself.
+export function takeChunkReload() {
+  try {
+    if (chunkReloadAttempted()) return false;
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // A page loaded (App.jsx lazyWithRetry): the live build serves its code, so a
 // later deploy may reload the tab again. The path the one reload reopened
-// counts until a page loads on another path.
+// counts until a page loads on another path. Best effort: blocked storage
+// must not fail a page whose code loaded.
 export function noteChunkLoaded() {
   if (window.location.pathname !== reloadedPath) reloadedPath = null;
-  sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
+  try { sessionStorage.removeItem(CHUNK_RELOAD_FLAG); } catch { /* storage blocked */ }
 }
 
 function pageNavigating() {
@@ -144,23 +174,19 @@ export function markPageNavigating(reload = () => window.location.reload()) {
   };
 }
 
-// One-shot guard (chunkReloadAttempted) so a genuine outage still surfaces
-// instead of reload-looping.
+// One-shot guard (takeChunkReload) so a genuine outage still surfaces instead
+// of reload-looping.
 export function handleVitePreloadError(event, reload = () => window.location.reload()) {
   if (pageNavigating()) {
     chunkHeld = true;
     event.preventDefault();
     return;
   }
-  // A staff tab with open or held work, or last used on this path: the
-  // import fails as it would with no handler (see the top of this file).
-  if (staffReloadBlocker() || usedOnThisStaffPage()) return;
-  try {
-    if (chunkReloadAttempted()) return;
-    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
-  } catch {
-    return;
-  }
+  // A staff tab with open or held work, last used on this path, or on a page
+  // that never reloads by itself: the import fails as it would with no
+  // handler (see the top of this file).
+  if (staffReloadBlocker() || usedOnThisStaffPage() || staffSelfReloadBarred()) return;
+  if (!takeChunkReload()) return;
   markStaleChunkReloadPending();
   event.preventDefault();
   reload();
@@ -172,19 +198,22 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
 // when this tab already reloaded once for a missing chunk (a real outage then
 // gets the retry screen, not a reload loop), 'page-use' when the tab was used
 // on this page meanwhile (its retry screen asks first, as the preload error
-// would), 'storage' when session storage is blocked (no one-shot guard), or
-// 'moved' when the page closed meanwhile.
+// would), 'manual' on a page that never reloads by itself (no wait there),
+// 'storage' when session storage is blocked (no one-shot guard), or 'moved'
+// when the page closed meanwhile.
 export async function reloadForMissingCode({
   current = () => true,
   reload = () => window.location.reload(),
   now,
 } = {}) {
-  const blocker = await staffBlockerAfterWork({ now });
+  const manual = staffSelfReloadBarred();
+  const blocker = manual ? staffReloadBlocker() : await staffBlockerAfterWork({ now });
   if (!current()) return 'moved';
   if (blocker) return blocker;
   try {
     if (chunkReloadAttempted()) return 'reloaded';
     if (usedOnThisStaffPage()) return 'page-use';
+    if (manual) return 'manual';
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
   } catch {
     return 'storage';

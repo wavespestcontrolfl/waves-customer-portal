@@ -65,12 +65,19 @@ function hasSignal(now) {
 // move it continues (PortalUpdateGate in components/PortalUpdate.jsx).
 const adminIndex = (pathname) => /^\/admin\/?$/i.test(String(pathname ?? ''));
 
+// Waves Admin never reloads by itself, nor does a field page, at a move to or
+// away from one (see the top of this file). The stale-chunk reload asks it
+// too (staleChunkReload.js).
+export function selfReloadBarred(pathname, from = null) {
+  return isFieldPath(pathname) || isFieldPath(from) || isWavesAdminApp();
+}
+
 // `from`: the page the move leaves.
 export function reloadDueAtMove(pathname, now = Date.now(), from = null) {
   const build = newerBuild();
   return Boolean(build)
     && isAdminPath(pathname) && !adminIndex(pathname)
-    && !isFieldPath(pathname) && !isFieldPath(from) && !isWavesAdminApp()
+    && !selfReloadBarred(pathname, from)
     && hasSignal(now)
     && reloadTries(build) < RELOAD_TRIES
     && !reloadHoldName()
