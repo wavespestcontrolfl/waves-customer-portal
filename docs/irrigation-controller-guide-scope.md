@@ -4,7 +4,9 @@ Concept scope · Waves Lawn Care · 2026-09-05. **Update 2026-09-26:** the Phase
 email send has shipped (see below), and the hub index (`/sprinkler-timers/`) and the
 Rain Bird guide are live: the weekly irrigation email links both (migration
 `20260907000010_irrigation_guide_resources.js`). Further brand pages live in the Astro
-repo and are not tracked here; brand capture (Phase 3) is not built.
+repo and are not tracked here; brand capture (Phase 3) is not built. **Update 2026-11-19:**
+the brand, the Hunter model and a phone-app answer are now recorded on My Property and in
+Customer 360 (`docs/design/DECISIONS.md`, 2026-11-19); the email's one-button collapse is not built.
 
 The concept: a brand-by-brand guide that teaches lawn customers to operate
 the irrigation controller on their own wall — an email with brand buttons,

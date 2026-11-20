@@ -28,6 +28,7 @@ import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/Station
 import CancelFlow from '../components/portal/CancelFlow';
 import MovingEntry, { useMovingEntry } from '../components/portal/MovingEntry';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
+import SprinklerTimerCard from '../components/portal/SprinklerTimerCard';
 import MistingSystemCard from '../components/portal/MistingSystemCard';
 import YardWrappedCard from '../components/portal/YardWrappedCard';
 import PetNameAskCard from '../components/portal/PetNameAskCard';
@@ -9488,6 +9489,16 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         onOpenProperty={onOpenWateringProperty}
         pending={wateringPlanRevision !== savedWateringRevision}
         refreshKey={savedWateringRevision}
+      />}
+
+      {/* The timer on file for THIS home (step 1 of sprinkler timer connect). Lawn customers only; it saves through
+          this tab's autosave. Not in IRRIGATION_EDIT_FIELDS: a timer is not a watering input, so the plan does not reload. */}
+      {hasLawnCare && <SprinklerTimerCard
+        brand={prefs.irrigationControllerBrand}
+        model={prefs.irrigationControllerModel}
+        app={prefs.irrigationControllerApp}
+        error={fieldErrors.irrigationControllerBrand || fieldErrors.irrigationControllerModel || fieldErrors.irrigationControllerApp}
+        onChange={(fields) => Object.entries(fields).forEach(([field, value]) => updateField(field, value))}
       />}
 
       <ServicePrefsSection />

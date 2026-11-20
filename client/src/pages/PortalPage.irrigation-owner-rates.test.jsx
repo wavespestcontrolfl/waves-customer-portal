@@ -3,7 +3,7 @@
 // "typical head rates" only. A typed Weekly Inches entry still wins over the derived figure.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
@@ -55,5 +55,55 @@ describe('water source (phase 2 of "water you saved")', () => {
     expect(screen.getByRole('button', { name: 'County water' })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByRole('button', { name: 'Reclaimed' })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByText(/well water/)).toBeInTheDocument();
+  });
+});
+
+describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
+  it('a lawn customer sees the timer on file, and a new pick saves brand, model and a cleared app answer in one request', async () => {
+    api.getPropertyPreferences.mockResolvedValue({
+      preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' },
+      hasLawnCare: true,
+    });
+    api.updatePropertyPreferences.mockResolvedValue({ saved: true, preferences: {} });
+    render(<PropertyTab customer={lawnCustomer} />);
+    expect(await screen.findByText('Hunter X2')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'true');
+    // The plan card reads the week's plan once when it mounts; take the count after that read.
+    await waitFor(() => expect(api.getWateringPlan).toHaveBeenCalled());
+    const planReads = api.getWateringPlan.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change my timer' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Pro-C/ }));
+    expect(await screen.findByText('Hunter Pro-C')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'false');
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 8000 });
+    expect(api.updatePropertyPreferences).toHaveBeenCalledWith(expect.objectContaining({
+      irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: null,
+    }));
+    // A timer is not a watering input: recording one does not reload the week's plan.
+    expect(api.getWateringPlan.mock.calls.length).toBe(planReads);
+  }, 15000); // real autosave timer (about a second) plus two awaited renders: room for a loaded CI runner
+
+  // The server refuses a timer whole (all three fields, one reason), as a 400 when the timer was the batch's only
+  // change. The card must show that reason and stop calling the timer on file.
+  it('a timer the server refuses shows its reason, and the card no longer calls it on file', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: true });
+    const message = 'The home on this account changed. Reload, then set the sprinkler timer again.';
+    const refusal = Object.assign(new Error(message), {
+      rejected: ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'].map((field) => ({ field, message })),
+    });
+    api.updatePropertyPreferences.mockRejectedValue(refusal);
+    render(<PropertyTab customer={lawnCustomer} />);
+    fireEvent.click(await screen.findByRole('button', { name: /^X2/ }));
+    expect(await screen.findByText(`We could not save your timer. ${message}`, {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.getByText('Not saved')).toBeInTheDocument();
+    expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
+  }, 15000);
+
+  it('a customer with no lawn service does not get the card', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: false });
+    render(<PropertyTab customer={{ ...lawnCustomer, tier: 'Bronze' }} />);
+    await screen.findByText('Controller Location');
+    expect(screen.queryByText('Your sprinkler timer')).not.toBeInTheDocument();
   });
 });
