@@ -329,15 +329,15 @@ test('every production caller of postCreditMovement that locks an invoice first 
     },
     {
       file: 'routes/stripe-webhook.js', label: 'authenticated succeeded-PI fallback handler',
-      anchor: 'if (invoice && authenticatingAttempt) {',
-      customerLock: "await trx('customers').where({ id: stableCustomerId }).forUpdate().first('id');",
-      invoiceLock: 'lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {',
+      anchor: 'async function lockFallbackSettlementInvoice(',
+      customerLock: "if (customerId) await trx('customers').where({ id: customerId }).forUpdate().first('id');",
+      invoiceLock: 'return lockInvoicePaymentIntentAllocation(trx, {',
     },
     {
       file: 'routes/stripe-webhook.js', label: 'ordinary succeeded-PI fallback handler',
-      anchor: '} else {\n        if (invoice?.customer_id)',
-      customerLock: "if (invoice?.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
-      invoiceLock: "lockedInvoice = invoice && await trx('invoices')",
+      anchor: 'async function lockFallbackSettlementInvoice(',
+      customerLock: "if (customerId) await trx('customers').where({ id: customerId }).forUpdate().first('id');",
+      invoiceLock: "if (!authenticatingAttempt) return trx('invoices').where({ id: invoice.id }).forUpdate().first();",
     },
     {
       file: 'routes/stripe-webhook.js', label: 'ACH processing handler',
@@ -417,14 +417,10 @@ test('the two stripe-webhook.js reorders left unguarded still source every downs
   const path = require('path');
   const source = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
 
-  const customerIdWrites = (lockAnchor, fnLabel, endMarker) => {
-    // Start AFTER the upfront customer-lock line itself — that line
-    // legitimately reads the stale `invoice.customer_id` (it is only
-    // choosing which row to lock, not writing anything) — so the "never
-    // the stale read" assertion below is not tripped by its own lock.
-    const lockAt = source.indexOf(lockAnchor);
-    if (lockAt === -1) throw new Error(`stripe-webhook.js: lock anchor for ${fnLabel} not found`);
-    const bodyStart = lockAt + lockAnchor.length;
+  const customerIdWrites = (anchor, fnLabel, endMarker) => {
+    const start = source.indexOf(anchor);
+    if (start === -1) throw new Error(`stripe-webhook.js: anchor for ${fnLabel} not found`);
+    const bodyStart = start + anchor.length;
     const bodyEnd = source.indexOf(endMarker, bodyStart);
     expect(bodyEnd).toBeGreaterThan(bodyStart);
     const body = source.slice(bodyStart, bodyEnd);
@@ -435,11 +431,14 @@ test('the two stripe-webhook.js reorders left unguarded still source every downs
     expect(body).not.toMatch(/customer_?[Ii]d:\s*invoice\.customer_id/);
   };
 
-  customerIdWrites(
-    "if (invoice?.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n        lockedInvoice = invoice && await trx('invoices')",
-    'succeeded-PI fallback handler',
-    'if (fallbackOutcome ===',
-  );
+  // The customer read before the lock can differ from the final invoice
+  // owner. Follow the locked row through to both downstream money writes.
+  const fallback = source.slice(source.indexOf('const fallbackOutcome ='), source.indexOf('if (fallbackOutcome ==='));
+  expect(fallback).toContain('const lockedInvoice = await lockFallbackSettlementInvoice(');
+  expect(fallback).toContain('saveFallbackPayment(trx, capture, invoice, lockedInvoice, existing)');
+  expect(fallback).toContain('applySavedCardCreditAdjustment(trx, lockedInvoice, creditAttempt,');
+  customerIdWrites('function capturedFallbackPayment(', 'succeeded payment row', 'async function saveFallbackPayment(');
+  customerIdWrites('async function applySavedCardCreditAdjustment(', 'saved-card credit draw', 'function paidInvoiceFields(');
   customerIdWrites(
     "if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n    const lockedInvoice = await trx('invoices')",
     'ACH processing handler',
