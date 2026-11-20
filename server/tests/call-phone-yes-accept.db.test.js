@@ -1706,9 +1706,9 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         }
       });
 
-      test("a status change on another visit the call booked: in flight, the link step refuses at once (visit_busy); after the step, it waits for the accept's commit; a staff visit only attached to the call never stops the step", async () => {
+      test("the call's visits, locked without waiting: a status change in flight refuses (visit_busy), one after waits for the commit, a staff visit only attached never stops the step, and a booked visit moved to another call refuses without waiting on it", async () => {
         const perTest = trx;
-        let ev; let card; let firstId; let staffId;
+        let ev; let card; let firstId; let staffId; let movedTo;
         try {
           trx = pool;
           mockConn = pool;
@@ -1717,11 +1717,14 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
           firstId = await visit(made.customerId, made.bookingCallId, { scheduled_date: inDays(5), status: 'cancelled' });
           // A visit the office booked that the call was attached to: not one the call booked, so neither count reads it.
           staffId = await visit(made.customerId, made.bookingCallId, { scheduled_date: inDays(20), source_action: 'admin' });
+          // Another call of the customer's, before the estimate was sent (outside the word's window): where the booked
+          // visit moves below.
+          movedTo = await call(made.customerId, null, { created_at: new Date(Date.now() - 3 * DAY) });
           // This call's card alone, filed as the sweep files one (a sweep on committed rows would act on every call).
           ev = await evaluatePhoneYes({ callLogId: made.bookingCallId, customerId: made.customerId });
-          const call = await trx('call_log').where({ id: made.bookingCallId }).first('id', 'customer_id', 'ai_extraction_enriched');
-          const extraction = require('../services/call-held-visits').parseExtraction(call.ai_extraction_enriched);
-          await expect(PhoneYesPrivate.fileCardForTest({ call, extraction, evaluation: ev })).resolves.toBeTruthy();
+          const bookingRow = await trx('call_log').where({ id: made.bookingCallId }).first('id', 'customer_id', 'ai_extraction_enriched');
+          const extraction = require('../services/call-held-visits').parseExtraction(bookingRow.ai_extraction_enriched);
+          await expect(PhoneYesPrivate.fileCardForTest({ call: bookingRow, extraction, evaluation: ev })).resolves.toBeTruthy();
           [card] = await cards(made.bookingCallId);
         } finally {
           trx = perTest;
@@ -1756,6 +1759,19 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         } finally {
           await accept.rollback();
           await staffEdit.rollback();
+        }
+        // The booked visit moved to another call since the check, with an edit to it in flight: it is not among the call's
+        // visits, so the step refuses at once instead of waiting on its row.
+        await pool('scheduled_services').where({ id: made.visitId }).update({ source_call_log_id: movedTo });
+        const movedEdit = await pool.transaction();
+        accept = await pool.transaction();
+        try {
+          await movedEdit('scheduled_services').where({ id: made.visitId }).forUpdate().first('id');
+          await waitNoLonger(accept);
+          await expect(step(accept, { estimate: ev.estimate })).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+        } finally {
+          await accept.rollback();
+          await movedEdit.rollback();
         }
       });
 

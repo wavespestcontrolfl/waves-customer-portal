@@ -1051,10 +1051,12 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     // before the counts: a status change that brings one back waits for this accept's commit, and one in flight now
     // refuses at once (visit_busy) instead of a wait while the step holds the accept's locks. The booked visit is one of
     // them; a visit the call was only attached to is not.
-    await noWaitOrStop(visitsCallBooked(trx, bookingCallId, customerId).orderBy('id').forUpdate().noWait().select('id'), 'visit_busy');
-    // The locked visit passes the evaluation's own visit checks again (family, property, price and discounts, invoice,
-    // add-ons, series and assessment flags), not only the pin.
-    const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
+    const callVisits = await noWaitOrStop(visitsCallBooked(trx, bookingCallId, customerId).orderBy('id').forUpdate().noWait()
+      .select('*'), 'visit_busy');
+    // The booked visit is its locked row among them: a visit moved to another call or customer since the check is not,
+    // and the step never reads or waits on a row it did not lock. It passes the evaluation's own visit checks again
+    // (family, property, price and discounts, invoice, add-ons, series and assessment flags), not only the pin.
+    const row = callVisits.find((v) => String(v.id) === String(visit.id));
     if (!row || Manual.bookedVisitsPinOf([row]) !== pin || await visitProblem(trx, row, estimate, new Date())) throw stop('changed_since_check');
     // The call still booked exactly this one visit: the only live one, and the only one on the calendar.
     const live = await require('./call-prepay-choice').liveVisitsOfCall(trx, bookingCallId, customerId);
