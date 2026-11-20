@@ -14607,6 +14607,7 @@ export function CompletionPanel({
     isIncompleteVisit,
     backfillQuietCloseout,
     lateCloseAskKept: reviewLateCloseAskKept,
+    oneTimeRecapOnly,
     visitOutcome,
     customerConcernInteraction:
       isCustomerConcernInteraction(customerInteraction),

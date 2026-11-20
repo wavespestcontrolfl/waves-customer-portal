@@ -732,19 +732,23 @@ function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(
 // completion never do. The caller decides once at the commit and freezes the answer in structured_notes.requestReview.
 // Pure but for the gate read, which comes last. Exported for testability.
 function lateCloseReviewAskKept({
-  isBackfillCompletion = false,
-  systemQuietCloseout = false,
-  issuedInvoiceCloseout = null,
-  visitOutcome = null,
-  isInternalOnlyCompletion = false,
+  isBackfillCompletion,
+  systemQuietCloseout,
+  issuedInvoiceCloseout,
+  visitOutcome,
+  isInternalOnlyCompletion,
   // Whether the delivery posture ALONE (typed internal-only or disabled delivery, before the backfill override) silences
   // customer comms. Only the backfill's own silence is lifted, so the default is silenced.
   deliverySuppressed = true,
-  svc = null,
-  closedAt = null,
+  // The one-time recap closeout has its own review rule; the late-close ask never applies to it.
+  recapReviewOnly,
+  // The locked row's service identity differs from the one the delivery posture was resolved for: fail closed, no re-resolve.
+  identityMoved,
+  svc,
+  closedAt,
 } = {}) {
-  if (!isBackfillCompletion || systemQuietCloseout || issuedInvoiceCloseout || deliverySuppressed) return false;
-  if (visitOutcome !== 'completed' || isInternalOnlyCompletion) return false;
+  const blocked = [systemQuietCloseout, issuedInvoiceCloseout, deliverySuppressed, recapReviewOnly, identityMoved, isInternalOnlyCompletion];
+  if (!isBackfillCompletion || visitOutcome !== 'completed' || blocked.some(Boolean)) return false;
   if (!require('../config/feature-gates').reviewLateCloseAskLive()) return false;
   return require('./review-visit-day').closedWithinDaysOfWorkedDay({
     arrivedAt: svc?.arrived_at, scheduledDate: svc?.scheduled_date, closedAt,
@@ -7365,12 +7369,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const lateCloseEligible = lateCloseReviewAskKept({
             isBackfillCompletion, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, isInternalOnlyCompletion,
             deliverySuppressed: deliveryPosture.suppressCustomerComms,
+            recapReviewOnly,
+            identityMoved: !!lockedSvcRow && (lockedSvcRow.service_id !== svc.service_id || lockedSvcRow.service_type !== svc.service_type),
             svc: { ...svc, ...(lockedSvcRow || {}) }, closedAt: completionEndedAt,
           });
           // The review choice resolved once, as the initial enrollment reads it (an omitted requestReview is no ask): the one
           // boolean frozen below and restored on a resume. A backdated closeout the commit finds ineligible drops the
           // first-ask lock the earlier read applied, so only a kept ask can mark the customer reviewed.
-          lateCloseReviewKept = lateCloseEligible && !!requestReview && !(wrapUpReviewAsk === true && !reviewAskAllowed);
+          // The same verdict immediate enrollment reads (effectiveRequestReview): a blocking client suppression or a refused
+          // re-service ask freezes false, so the paid-invoice enrollment, which reads only the frozen boolean, cannot send it.
+          lateCloseReviewKept = lateCloseEligible && !!requestReview && reviewAskAllowed
+            && !(reviewSuppression && reviewSuppression !== 'invoice_created');
           if (isBackfillCompletion && !lateCloseEligible) reviewFirstAskLock = null;
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),

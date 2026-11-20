@@ -1022,6 +1022,16 @@ describe('lateCloseReviewAskKept — late backdated closeouts keep the review as
     expect(lateCloseReviewAskKept(unsaid)).toBe(false);
   });
 
+  test('the one-time recap closeout never keeps it', () => {
+    expect(lateCloseReviewAskKept({ ...base, recapReviewOnly: true })).toBe(false);
+    expect(lateCloseReviewAskKept({ ...base, recapReviewOnly: false })).toBe(true);
+  });
+
+  test('a locked row whose service identity moved from the one the delivery posture was resolved for fails closed', () => {
+    expect(lateCloseReviewAskKept({ ...base, identityMoved: true })).toBe(false);
+    expect(lateCloseReviewAskKept({ ...base, identityMoved: false })).toBe(true);
+  });
+
   test('an unreadable worked day does not keep it', () => {
     expect(lateCloseReviewAskKept({ ...base, svc: {} })).toBe(false);
   });
@@ -1056,7 +1066,11 @@ describe('lateCloseReviewAskKept — late backdated closeouts keep the review as
     test('the decision is made once at the commit, from the locked row, and frozen with the normal expression', () => {
       expect((src.match(/const lateCloseEligible = lateCloseReviewAskKept\(/g) || []).length).toBe(1);
       // The choice is resolved once, as the initial enrollment reads it (an omitted requestReview is no ask), and frozen as that boolean.
-      expect(src).toMatch(/lateCloseReviewKept = lateCloseEligible && !!requestReview && !\(wrapUpReviewAsk === true && !reviewAskAllowed\);/);
+      // The same verdict immediate enrollment reads: a blocking client suppression or a refused re-service ask freezes false.
+      expect(src).toMatch(/lateCloseReviewKept = lateCloseEligible && !!requestReview && reviewAskAllowed\s*\n\s*&& !\(reviewSuppression && reviewSuppression !== 'invoice_created'\);/);
+      // The identity check is the one the report freeze uses, and the recap mode is passed in.
+      expect(src).toMatch(/identityMoved: !!lockedSvcRow && \(lockedSvcRow\.service_id !== svc\.service_id \|\| lockedSvcRow\.service_type !== svc\.service_type\),/);
+      expect(src).toMatch(/recapReviewOnly,\s*\n\s*identityMoved:/);
       expect(src).toMatch(/if \(isBackfillCompletion && !lateCloseEligible\) reviewFirstAskLock = null;/);
       expect(src).toMatch(/svc: \{ \.\.\.svc, \.\.\.\(lockedSvcRow \|\| \{\}\) \}, closedAt: completionEndedAt/);
       expect(src).toMatch(/customerRequestedReview: \(isIncompleteVisit \|\| isInternalOnlyCompletion \|\| \(isBackfillCompletion && !lateCloseReviewKept\)\)/);

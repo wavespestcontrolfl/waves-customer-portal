@@ -261,6 +261,11 @@ describe('late close ask (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
     expect(completionReviewSuppressionReason({ backfillQuietCloseout: true })).toBe('backfill');
   });
 
+  test('one-time recap mode is never lifted: the recap box keeps the backfill reason, so the hint and the payload agree', () => {
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, oneTimeRecapOnly: true })).toBe('backfill');
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, oneTimeRecapOnly: false })).toBeNull();
+  });
+
   test('kept lifts only the backfill reason: incomplete, declined and concern visits stay suppressed', () => {
     expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, isIncompleteVisit: true })).toBe('incomplete');
     expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, visitOutcome: 'customer_declined' })).toBe('customer_declined');

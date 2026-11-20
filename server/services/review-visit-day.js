@@ -28,7 +28,7 @@
  * record's date (rate page, click guard, retry reuse).
  */
 const db = require('../models/db');
-const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
+const { etCalendarDayOf, etCalendarDaysUntil, etDateString } = require('../utils/datetime-et');
 const { staleTimestampBounds, isStaleTimestamp } = require('./service-report/visit-timeline');
 
 function instantOf(value) {
@@ -94,11 +94,6 @@ async function draftServiceDate({ recordDate = null, serviceRecordId = null, sch
   }
 }
 
-// Whole ET calendar days from one "YYYY-MM-DD" to a later one.
-function etDaysBetween(fromDay, toDay) {
-  return Math.round((Date.parse(`${toDay}T00:00:00Z`) - Date.parse(`${fromDay}T00:00:00Z`)) / 86400000);
-}
-
 /**
  * A late closeout inside the window (owner 2026-11-20, D6 R3): the visit was worked no more than `maxDays` ET
  * calendar days before it was closed. The worked day is the one the drafter uses (visitWorkedOn). A worked day that
@@ -109,8 +104,9 @@ function closedWithinDaysOfWorkedDay({ arrivedAt = null, scheduledDate = null, c
   if (!closeInstant) return false;
   const workedDay = workedOnDay(visitWorkedOn({ arrivedAt, scheduledDate, completedAt: closeInstant }));
   if (!workedDay) return false;
-  const gap = etDaysBetween(workedDay, etDateString(new Date(closeInstant)));
-  return gap >= 0 && gap <= maxDays;
+  // Days from the close to the worked day: 0 the same day, negative before it. After the close (positive) is outside.
+  const gap = etCalendarDaysUntil(workedDay, new Date(closeInstant));
+  return gap <= 0 && gap >= -maxDays;
 }
 
 /**

@@ -306,6 +306,12 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     expect(src).not.toMatch(/if \(data\) \{[^}]*setReviewLateCloseAskKept/);
   });
 
+  it("the page passes the recap mode into the suppression reason, so a draft restored into recap mode agrees with the hint (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect(src).toMatch(/lateCloseAskKept: reviewLateCloseAskKept,\s*\n\s*oneTimeRecapOnly,/);
+    expect(src).toMatch(/reviewAskGoes: reviewLateCloseAskKept && willReview && !oneTimeRecapOnly,/);
+  });
+
   it("both backdate checkbox layouts word the line from the review answer, not a fixed promise of silence", () => {
     const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
     expect((src.match(/backfillCheckboxHint\(\{/g) || []).length).toBe(2);
