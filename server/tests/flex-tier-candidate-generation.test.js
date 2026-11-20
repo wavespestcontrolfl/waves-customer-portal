@@ -31,12 +31,6 @@ const db = require('../models/db');
 const { findValidCandidateSlots } = require('../services/auto-dispatch/candidate-slots');
 const { parseETDateTime } = require('../utils/datetime-et');
 
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
-beforeAll(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; });
-afterAll(() => {
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
-});
 
 function chain(result) {
   const c = {};

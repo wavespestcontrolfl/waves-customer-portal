@@ -5,24 +5,26 @@
 // and an estimate text sent from this tab.
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { registerReloadHold, reloadHoldName } from './reloadHolds';
+import { registerReloadHold, reloadHoldName, reloadHoldNames } from './reloadHolds';
 import { setDictationPending } from '../hooks/dictationPending';
 import TechNavigationLock, { useTechNavigationLock } from '../components/tech/TechNavigationLock';
 
 afterEach(cleanup);
 
 describe('reloadHolds', () => {
-  it('names the first held work, and a check that throws counts as held', () => {
+  it('names held work in registration order, and a check that throws counts as held', () => {
     let on = false;
     registerReloadHold('test-a', () => on);
     expect(reloadHoldName()).toBeNull();
     on = true;
     expect(reloadHoldName()).toBe('test-a');
-    on = false;
     registerReloadHold('test-b', () => { throw new Error('broken check'); });
+    expect(reloadHoldNames()).toEqual(['test-a', 'test-b']);
+    on = false;
     expect(reloadHoldName()).toBe('test-b');
     registerReloadHold('test-b', () => false);
     expect(reloadHoldName()).toBeNull();
+    expect(reloadHoldNames()).toEqual([]);
   });
 
   it('dictation still turning into text holds it', () => {

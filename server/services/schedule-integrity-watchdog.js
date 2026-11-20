@@ -39,6 +39,17 @@
  *     churn done outside the app's cancel path (a direct database edit skips
  *     its steps, leaving open visits on the books and a draft unvoided). One
  *     bell per customer; it clears once the work is cancelled or voided.
+ *  5. SAME-START VISITS — one customer with two or more live visits on one
+ *     upcoming day that start at the same time, for one technician or with
+ *     one unassigned (owner 2026-11-19: split them so they run back to back;
+ *     a visit is one hour unless its booking says otherwise). One bell per
+ *     customer; it clears once no upcoming day has such a pair. It rings last,
+ *     within what the other classes and the combined-booking check left of
+ *     the budget; a new pair for today (start still ahead) or tomorrow always
+ *     rings, and still counts (owner 2026-11-19, decision page option A).
+ *     It runs only under alert episodes: with ALERT_EPISODES off it stands
+ *     down, since its bells close and re-ring only through them.
+ *     The finder and the copy are in same-start-visits-check.js.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
@@ -87,7 +98,7 @@ const { createHash } = require('node:crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const alertEpisodes = require('./admin-alert-episodes');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 
 // Upcoming look-ahead for the unpriced-series class. Two weeks: far enough
 // out that Adam can price the series before the visit day, small enough that
@@ -105,6 +116,7 @@ const LAWN_GAP_PREFIX = 'lawn-email-gap:';
 const PREPAY_PREFIX = 'prepay-coverage:';
 const ACCEPTED_PREFIX = 'accepted-schedule:';
 const CHURNED_PREFIX = 'churned-live-work:';
+const { SAME_START_PREFIX, sameStartVisitAlerts } = require('./same-start-visits-check');
 // Invoice statuses that have not reached the customer (the status column has no
 // CHECK; 'send_failed' is an estimate status, never an invoice one).
 const UNSENT_INVOICE_STATUSES = ['draft', 'scheduled'];
@@ -271,6 +283,13 @@ function seriesRootId(row) {
   return row?.id;
 }
 
+// The Eastern wall clock as HH:MM: the same-start finder counts today's pairs
+// whose start is still ahead of it.
+function etClock(date) {
+  const { hour, minute } = etParts(date);
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
 async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('scheduleIntegrityWatchdog')) {
@@ -281,7 +300,17 @@ async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
   // — serialize ticks so deploy overlap can't build two different alert sets
   // from an overlapping read.
   const { runExclusive } = require('../utils/cron-lock');
-  return runExclusive('schedule-integrity-watchdog', () => runInner({ now }));
+  return runExclusive('schedule-integrity-watchdog', async () => {
+    const result = await runInner({ now });
+    // The same-start class's only output is the bell: a failed scan or a lost
+    // bell fails the run, after every class did its work, so the run's job
+    // health shows it.
+    const n = result.sameStartUndelivered;
+    if (result.sameStartCheckFailed || n) {
+      throw new Error(`[schedule-integrity] ${n ? `${n} same-start ${n === 1 ? 'bell' : 'bells'} not delivered` : 'the same-start check failed'}`);
+    }
+    return result;
+  });
 }
 
 // The coverage scan's shared FROM/joins/select: the main scan adds its own
@@ -789,10 +818,14 @@ async function runInner({ now = new Date() } = {}) {
   // above under the per-run cap.
   const churned = await churnedLiveWorkAlerts(todayET);
   alerts.push(...churned.alerts);
+  // Two visits at one start: a schedule fix with days to spare. Found here so
+  // the close pass judges its bells with the rest, but rung only after the
+  // combined-booking check below, with what is left of the shared budget.
+  const sameStart = await sameStartFindings(episodes, todayET, now);
 
-  const delivered = await deliverAlerts({
-    alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed, acceptedScheduleCheckFailed,
-    churnedWorkCheckFailed: churned.failed,
+  const { rings: classRings, ...delivered } = await deliverAlerts({
+    alerts, lateAlerts: sameStart.alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed,
+    acceptedScheduleCheckFailed, churnedWorkCheckFailed: churned.failed, sameStartCheckFailed: sameStart.failed,
   });
 
   // Combined-booking check (owner request 2026-09-29): a multi-service accept's
@@ -807,12 +840,19 @@ async function runInner({ now = new Date() } = {}) {
     // It rings within what is left of this run's shared budget
     // (docs/admin-notifications.md: non-customer rows ring at most 10 a day).
     combinedBooking = await require('./combined-booking-check').runCombinedBookingCheck({
-      now, ringBudget: Math.max(0, MAX_ALERTS_PER_RUN - delivered.alerted),
+      now, ringBudget: Math.max(0, MAX_ALERTS_PER_RUN - classRings),
     });
   } catch (err) {
     combinedBookingCheckFailed = true;
     logger.error(`[schedule-integrity] combined-booking check failed: ${err.message}`);
   }
+
+  // Last: two visits at one start, within what is left of the shared budget;
+  // a new pair for tomorrow rings past it (owner 2026-11-19, "A").
+  const late = await ringWithinBudget(sameStart.alerts, {
+    now, budget: lateBudget(classRings, combinedBooking), prefix: SAME_START_PREFIX,
+    alwaysRingBy: etDateString(addETDays(now, 1)),
+  });
 
   return {
     skipped: false,
@@ -826,89 +866,212 @@ async function runInner({ now = new Date() } = {}) {
     acceptedScheduleCheckFailed,
     churnedLiveWork: churned.alerts.length,
     churnedWorkCheckFailed: churned.failed,
+    sameStartVisits: sameStart.alerts.length,
+    sameStartCheckFailed: sameStart.failed,
+    // Same-start bells not delivered (each logged); the job wrapper fails the run.
+    sameStartUndelivered: late.undelivered,
     combinedBooking,
     combinedBookingCheckFailed,
+    // Same-start bells closed past the budget, none of their days still a finding.
+    sameStartClosed: late.closed,
     // alerted, plus closed / closePassFailed under episodes.
     ...delivered,
+    alerted: delivered.alerted + late.rang,
   };
+}
+
+// One finding to the bell: [dedupeKey, title, body, metadata, options].
+// Returns the notification result; realRing says whether it was a real ring.
+async function ringAlert(episodes, dedupeKey, title, body, metadata, { link = '/admin/dispatch', detail, refreshOnDedupe, bumpOnRefresh, ringOnRefresh, dedupeVersion } = {}) {
+  // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
+  // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
+  // site-level tag these money-loss pages would return a suppressed
+  // sentinel instead of ringing.
+  // Forever-dedupe (or refreshed-on-change with dedupeVersion) now runs
+  // through notifyAdmin's own advisory-locked dedupe — passing dedupeKey
+  // here instead of a local read-then-insert (the old alreadyAlerted())
+  // that raced across overlapping ticks and could double-ring.
+  const alertOpts = {
+    link,
+    ...(detail ? { detail } : {}),
+    bell: true,
+    dedupeKey,
+    ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
+    // Only the same-start class asks for it: its ringing refresh moves to the top.
+    ...(bumpOnRefresh ? { bumpOnRefresh: true } : {}),
+    ...(ringOnRefresh ? { ringOnRefresh } : {}),
+    ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
+    metadata: { dedupeKey, ...metadata },
+  };
+  // Episodes: the reopen wrapper (an auto-cleared row rings again; a
+  // standing one is a silent dedupe). Killed: exactly the pre-episode call.
+  const created = episodes
+    ? await alertEpisodes.raiseAdminAlertWithReopen('alert', title, body, alertOpts)
+    : await NotificationService.notifyAdmin('alert', title, body, alertOpts);
+  // NotificationService.create swallows insert errors into a null result;
+  // this job's ONLY output is the bell, so a lost bell must fail the run
+  // loudly instead of logging success. Internal-test suppression
+  // ({ suppressed: true }) is a deliberate success-without-a-row.
+  if (!created || (created.id == null && !created.suppressed)) {
+    throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
+  }
+  return created;
+}
+
+// Whether one delivery was a REAL ring for the run's cap. A suppressed alert
+// (an internal test customer) made no bell in either mode, so it never takes a
+// cap slot from a real one. Under episodes the cap counts a row created or
+// re-rung (a reopen, or a refresh that rang) — never a silent dedupe onto a
+// standing row. Killed, the classes rung by deliverAlerts keep the
+// pre-episode rule for their own cap (a deduped result never counts: a pure
+// kill switch). `countRefreshRings` counts a refresh that rang as well: the
+// classes' rings that the later budgets subtract (the combined-booking check's
+// and the late class's).
+function realRing(created, episodes, { countRefreshRings = false } = {}) {
+  if (created.suppressed) return false;
+  if (episodes) return Boolean(created.rang);
+  return !created.deduped || (countRefreshRings && Boolean(created.refreshed && created.rung));
+}
+
+// What the classes' real rings so far (`classRings`, deliverAlerts) and the
+// combined-booking check left of the run's shared budget. The check's
+// time-critical problems ring whatever the budget, and those rings count here
+// too. A check that failed (null) may have rung some bells before it threw, so
+// its rings are unknown: nothing is left, and the late class rings on a later run.
+function lateBudget(classRings, combinedBooking) {
+  if (!combinedBooking) return 0;
+  return Math.max(0, MAX_ALERTS_PER_RUN - classRings - (Number(combinedBooking.rings) || 0));
+}
+
+const capHit = () => logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
+
+// The same-start class's findings. With ALERT_EPISODES off it stands down (no
+// scan, no bell), as followup-due-alerts.js and caller-callback-bell.js do: its
+// bells close and re-ring only through admin-alert-episodes, so it never raises
+// one it could not close.
+async function sameStartFindings(episodes, todayET, now) {
+  if (!episodes) return { alerts: [], failed: false };
+  return sameStartVisitAlerts(todayET, etClock(now));
+}
+
+// The days each standing bell under `prefix` carries: the newest row per key,
+// the one a delivery lands on (notifyAdmin's own lookup). A key whose newest
+// row is auto-cleared maps to null: the reopen wrapper reopens it and it rings.
+async function standingBellDays(prefix) {
+  const rows = await db('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [prefix])
+    .orderBy('created_at', 'desc')
+    .select(db.raw("metadata->>'dedupeKey' as dedupe_key"), db.raw("metadata->>'autoCleared' as auto_cleared"), db.raw("metadata->'itemKeys' as item_keys"));
+  const days = new Map();
+  for (const row of rows) {
+    const key = String(row.dedupe_key || '');
+    if (!key.startsWith(prefix) || days.has(key)) continue;
+    days.set(key, row.auto_cleared === 'true' ? null : (Array.isArray(row.item_keys) ? row.item_keys.map(String) : []));
+  }
+  return days;
+}
+
+// The late class's alerts, with real rings up to `budget`, through the reopen
+// wrapper: the class runs only under episodes (runInner never scans it with
+// ALERT_EPISODES off). The standing bells are read first, and the alerts that
+// would ring go in order of their earliest day the bell does not carry yet: a day the office already
+// knows never takes a ring from a nearer new pair. An alert whose earliest new
+// day is `alwaysRingBy` (tomorrow) or sooner (today, start still ahead) always
+// rings, past the budget too, and counts toward it (owner 2026-11-19, "A";
+// docs/admin-notifications.md rule 3): by the next run it may be under way.
+// Past the budget a standing bell still gets its quiet update, so it never points at a visit
+// already fixed: the bell rebuilt from only the days it already carried
+// (`forDays`: why, detail, link, visits and itemKeys), never ringing, so a new
+// day is not shown yet and rings on a later run. A standing bell none of whose
+// days is still a finding closes (that episode is over; its new days ring as a
+// new one later). A finding with no standing bell, or an auto-cleared one (a
+// delivery would reopen it), waits. Only a real wait (a new bell, a reopen, or
+// a day not shown yet) logs the cap hit: a standing bell that carries all its
+// days gets its whole update. Returns the real rings
+// and the bells closed, and the bells not delivered: a lost write never holds
+// back the rest (every alert is tried and the closes run), and the job wrapper
+// then fails the run.
+const NO_NEW_DAY = '9999-12-31';
+async function ringWithinBudget(alerts, { now, budget, prefix, alwaysRingBy }) {
+  let rang = 0;
+  let held = 0;
+  const over = [];
+  let undelivered = 0;
+  const standing = alerts.length ? await standingBellDays(prefix) : new Map();
+  const firstNewDay = (alert) => {
+    const carried = standing.get(alert[0]) || [];
+    // itemKeys run in date order, so the first one missing is the earliest.
+    return (alert[3].itemKeys || []).find((day) => !carried.includes(day)) || NO_NEW_DAY;
+  };
+  const ranked = alerts.map((alert) => ({ alert, day: firstNewDay(alert) }));
+  // A stable sort: equal days keep the class's own order (earliest first day first).
+  ranked.sort((a, b) => (a.day < b.day ? -1 : (a.day > b.day ? 1 : 0)));
+  for (const { alert, day } of ranked) {
+    let delivery = alert;
+    const tomorrowOrSooner = day <= alwaysRingBy;
+    if (rang >= budget && !tomorrowOrSooner) {
+      const carried = standing.get(alert[0]);
+      if (!carried || day !== NO_NEW_DAY) held += 1;
+      if (!carried) continue;
+      const kept = typeof alert[4]?.forDays === 'function' ? alert[4].forDays(carried) : null;
+      if (!kept) { over.push(alert[0]); continue; }
+      delivery = [...kept.slice(0, 4), { ...kept[4], ringOnRefresh: () => false }];
+    }
+    // A lost write is logged and counted, never thrown, so it never holds back
+    // the next customer. The code, never err.message: a failed knex write's
+    // message carries its SQL with the bound title, which names the customer
+    // (AGENTS.md: no PII in logs).
+    try {
+      if (realRing(await ringAlert(true, ...delivery), true)) rang += 1;
+    } catch (err) {
+      undelivered += 1;
+      logger.error(`[schedule-integrity] ${delivery[0]} not delivered (${err.code || err.name || 'error'})`);
+    }
+  }
+  if (held) capHit();
+  const closed = over.length ? await alertEpisodes.closeAdminAlertKeys(db, over, 'its days no longer start together', { now }) : 0;
+  return { rang, closed, undelivered };
 }
 
 // Delivers one run's findings: rings them in order, capped at
 // MAX_ALERTS_PER_RUN real rings, and — under episodes — closes every
 // standing bell the findings no longer name (closeResolvedAlerts).
-async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed, churnedWorkCheckFailed }) {
+// `lateAlerts` are findings rung later in the run (ringWithinBudget): they
+// count as live here, so the close pass never closes a bell that is still
+// standing, but this pass does not ring them.
+async function deliverAlerts({ alerts, lateAlerts = [], episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed, churnedWorkCheckFailed, sameStartCheckFailed }) {
   let alerted = 0;
-  const capped = () => {
-    if (alerted < MAX_ALERTS_PER_RUN) return false;
-    logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
-    return true;
-  };
-  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', detail, refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) => {
-    // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
-    // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
-    // site-level tag these money-loss pages would return a suppressed
-    // sentinel instead of ringing.
-    // Forever-dedupe (or refreshed-on-change with dedupeVersion) now runs
-    // through notifyAdmin's own advisory-locked dedupe — passing dedupeKey
-    // here instead of a local read-then-insert (the old alreadyAlerted())
-    // that raced across overlapping ticks and could double-ring.
-    const alertOpts = {
-      link,
-      ...(detail ? { detail } : {}),
-      bell: true,
-      dedupeKey,
-      ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
-      ...(ringOnRefresh ? { ringOnRefresh } : {}),
-      ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
-      metadata: { dedupeKey, ...metadata },
-    };
-    // Episodes: the reopen wrapper (an auto-cleared row rings again; a
-    // standing one is a silent dedupe). Killed: exactly the pre-episode call.
-    const created = episodes
-      ? await alertEpisodes.raiseAdminAlertWithReopen('alert', title, body, alertOpts)
-      : await NotificationService.notifyAdmin('alert', title, body, alertOpts);
-    // NotificationService.create swallows insert errors into a null result;
-    // this job's ONLY output is the bell, so a lost bell must fail the run
-    // loudly instead of logging success. Internal-test suppression
-    // ({ suppressed: true }) is a deliberate success-without-a-row.
-    if (!created || (created.id == null && !created.suppressed)) {
-      throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
-    }
-    // A deduped result (the standing row already exists and either matched
-    // or was just refreshed) is not a NEW alert for this run's count. Under
-    // episodes the cap counts REAL rings: a row created or re-rung (a reopen,
-    // or a refresh that rang) — never a silent dedupe onto a standing row.
-    // A suppressed alert (an internal test customer) made no bell in either
-    // mode, so it never takes a cap slot from a real one.
-    if (created.suppressed || (episodes ? !created.rang : created.deduped)) return false;
-    alerted += 1;
-    return true;
-  };
-
+  // Every real ring this pass made, a refresh that rang included. Under
+  // episodes it equals `alerted`; killed, `alerted` keeps the pre-episode count
+  // and the cap, and `rings` is what the late class's budget subtracts.
+  let rings = 0;
   // Live keys per class, from the COMPLETE findings — computed before the
   // loop so the per-run cap (which only limits new rings) never changes
   // what the close pass judges.
-  const liveKeys = new Set(alerts.map((alert) => alert[0]));
+  const liveKeys = new Set([...alerts, ...lateAlerts].map((alert) => alert[0]));
   // Keys this run actually delivered (created, re-rung, or standing): a
   // finding the cap held back has no bell yet.
   const deliveredKeys = new Set();
   for (const alert of alerts) {
-    if (capped()) break;
-    await ring(...alert);
+    if (alerted >= MAX_ALERTS_PER_RUN) { capHit(); break; }
+    const created = await ringAlert(episodes, ...alert);
+    if (realRing(created, episodes)) alerted += 1;
+    if (realRing(created, episodes, { countRefreshRings: true })) rings += 1;
     deliveredKeys.add(alert[0]);
   }
-  if (!episodes) return { alerted };
+  if (!episodes) return { alerted, rings };
   // A class whose check failed has an unknown live set: closing on it would
   // clear every standing bell of the class.
   const skipPrefixes = [];
   if (lawnGapCheckFailed) skipPrefixes.push(LAWN_GAP_PREFIX);
   if (acceptedScheduleCheckFailed) skipPrefixes.push(ACCEPTED_PREFIX);
   if (churnedWorkCheckFailed) skipPrefixes.push(CHURNED_PREFIX);
+  if (sameStartCheckFailed) skipPrefixes.push(SAME_START_PREFIX);
   try {
-    return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, skipPrefixes }), closePassFailed: false };
+    return { alerted, rings, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, skipPrefixes }), closePassFailed: false };
   } catch (err) {
     logger.error(`[schedule-integrity] alert close pass failed: ${err.message}`);
-    return { alerted, closed: 0, closePassFailed: true };
+    return { alerted, rings, closed: 0, closePassFailed: true };
   }
 }
 
@@ -1139,6 +1302,8 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, s
   closed += await closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, horizonDay });
   // Cleaned up, or the customer came back (reactivated / merged away).
   closed += await close(await absentOf(CHURNED_PREFIX), 'no live work left');
+  // Split, moved, cancelled or past: no upcoming day of the customer has two visits at one start.
+  closed += await close(await absentOf(SAME_START_PREFIX), 'no upcoming visits at the same time');
   return closed;
 }
 

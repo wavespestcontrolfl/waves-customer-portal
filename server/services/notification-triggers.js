@@ -113,11 +113,13 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
   const cleanTitle = (value) => stripEmoji(String(value || 'Notification')) || String(value || 'Notification');
   const cleanBody = (value) => (value === null || value === undefined ? value : stripEmoji(value));
   if (trigger.allowContactDetails) {
-    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body) };
+    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body),
+      ...(built.pushTitle ? { pushTitle: cleanTitle(built.pushTitle) } : {}) };
   }
   return {
     ...built,
     title: cleanTitle(redactSensitiveText(built.title || 'Notification')),
+    ...(built.pushTitle ? { pushTitle: cleanTitle(redactSensitiveText(built.pushTitle)) } : {}),
     body: built.body === null || built.body === undefined ? built.body : cleanBody(redactSensitiveText(built.body)),
     ...(built.detail ? { detail: cleanBody(redactSensitiveText(built.detail)) } : {}),
   };
@@ -259,7 +261,14 @@ const TRIGGER_REGISTRY = {
       const bodyParts = [
         `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
       ];
-      if (p.service) bodyParts.push(`Wants ${p.service}`);
+      // A quiz lead names its three tap answers (fixed tokens from
+      // services/lead-quiz.js, e.g. "Roaches, condo, wants it today"). They
+      // stand in for the service line only when all three are known and name
+      // a problem (quizNamesRequest); a "Not sure" or partly answered quiz
+      // keeps the service line, so the bell never reads only "Ants" or only
+      // "wants it today".
+      if (p.service && !(p.quizAnswers && p.quizNamesRequest)) bodyParts.push(`Wants ${p.service}`);
+      if (p.quizAnswers) bodyParts.push(p.quizAnswers);
       if (p.phone) bodyParts.push(`Phone: ${maskPhone(p.phone)}`);
       if (p.message) bodyParts.push(p.leadId ? 'Message included on lead record' : 'Message in the SMS inbox');
       return {
@@ -680,6 +689,10 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
+      // A quiet call's bell row is titled likely robocall; its push goes only
+      // when no bell row was written, and keeps the ordinary caller title
+      // (missed-call-bell.js pushName; pre-push audit r23).
+      ...(p.pushName ? { pushTitle: `Missed call — ${p.pushName}` } : {}),
       // The producer adds line / duration / next visit to the payload; without
       // them this is the original sentence.
       body: require('./missed-call-alert-detail').formatMissedCallBody(p),
@@ -1865,7 +1878,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             // A technician recipient gets its own copy when the trigger names techOmit keys.
             const shown = techCopy && !adminRoleIds.has(adminUserId) ? techCopy : built;
             return {
-              title: shown.title,
+              // pushTitle: a push-only title (customer_missed_call); the bell row keeps title.
+              title: shown.pushTitle || shown.title,
               body: shown.body,
               url: built.link || '/admin',
               // promise_chaser: the push tag IS the bell's own dedupeKey

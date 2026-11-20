@@ -19,6 +19,7 @@ import {
 import { filesToImageParts, MAX_ATTACHMENTS } from '../utils/ibImages';
 import { createRequestIdentity, definitiveFailure, ibSessionId } from '../utils/ibSession';
 import { retainTaskReceipt } from '../utils/ibTaskReceipts';
+import useAskDraftHold from './useAskDraftHold';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -69,6 +70,7 @@ export function useIntelligenceBar({
   // Attached photos for the next query (vision). Each: {mediaType,data,name,previewUrl}.
   const [attachments, setAttachments] = useState([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  useAskDraftHold(prompt, attachments.length, attachmentsLoading);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
   const epochRef = useRef(0);

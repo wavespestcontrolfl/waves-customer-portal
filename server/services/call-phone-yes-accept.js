@@ -99,6 +99,7 @@ const REASONS = {
   estimate_has_visits: 'A visit is already linked to the estimate.',
   visit_already_linked: 'The booked visit is already linked to an estimate.',
   visit_not_one_off: 'The booked visit is already part of a series or a reservation.',
+  visit_follow_up: "The booked visit is a follow-up to another visit, not a plan's first visit.",
   not_a_plan_visit: 'The booked visit is a callback or an assessment, not a plan visit.',
   service_mismatch: 'The booked visit is not the service the estimate quoted.',
   property_mismatch: 'The booked visit is at a different property than the estimate.',
@@ -113,6 +114,7 @@ const REASONS = {
   visit_unreviewed: 'The booked visit waits for the office to review it (the customer cannot see it yet).',
   visit_off_hour: 'The booked visit starts off the hour, and the plan would copy that start to every next visit.',
   visit_call_rate: "The booking call recorded a rate that is not the plan's per-visit price. Set up the plan from the estimate at the agreed rate.",
+  plan_unresolved: 'The plan or its per-visit price could not be set from this estimate and visit.',
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
   existing_plan: 'The customer already has a live plan, a WaveGuard membership, or an annual prepay (paid, or invoiced and not yet paid).',
   estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
@@ -330,6 +332,13 @@ function callQuotedRateOf(row) {
 // The tap's own rules on the booked visit row and the estimate, in order (visitProblem reads them after the price and
 // invoice checks).
 const TAP_ROW_RULES = [
+  // A follow-up visit: linked to its first by parent_service_id (visit 2 of a call's or a package's booking) or
+  // followup_source_service_id (booked from a finished visit), or written by a follow-up booking path (its source action
+  // stays when deleting the first visit clears both links). Not a plan's first visit, even when its first was cancelled,
+  // skipped or deleted and it is the call's only visit left: the converter would make it a series parent.
+  ['visit_follow_up', (row) => row.parent_service_id != null || row.followup_source_service_id != null
+    || [require('./call-booking-source-actions').CALL_FOLLOWUP_SOURCE_ACTION, require('./package-followup-booking').PACKAGE_FOLLOWUP_SOURCE_ACTION]
+      .includes(row.source_action)],
   // A billing party set on this visit alone: the converter's next visits do not carry it, so the plan's first visit and
   // the rest would bill different parties.
   ['visit_payer', ownBillingParty],
@@ -369,6 +378,9 @@ async function acceptProblem(conn, { estimate, visit, customerId, now }) {
   if (!visit) return 'more_than_one_visit';
   return (await estimateProblem(conn, estimate))
     || (await visitProblem(conn, visit, estimate, now))
+    // The plan and its per-visit price the tap would book (planTermsOf): none means the converter books no pest series
+    // from this visit (a twice-a-year line), so neither the tap nor an automatic accept would go ahead.
+    || (planTermsOf(estimate, visit) ? null : 'plan_unresolved')
     || ((await existingPlan(conn, customerId, visit.id)) ? 'existing_plan' : null);
 }
 
@@ -551,14 +563,17 @@ function cardEstimateIds(card) {
 // null to keep it as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of
 // its estimates is not yet declined, archived or deleted: an expiry, a held-back re-send or an accept alone never
 // closes it (the visit is still unlinked). While a call in its window still owes a read, the card shows nothing new.
-// Every visit the call booked that is still on the calendar (any status but cancelled or skipped: also one en route, on
-// site or done), by the call's id and a source_action only a call writes.
-function callVisitsOnCalendar(conn, callLogId, customerId) {
+// Every visit the call booked, any status: by the call's id and a source_action only a call writes (the rows
+// call-prepay-choice.js liveVisitsOfCall reads too). A visit a person booked and the call was only attached to is not one.
+function visitsCallBooked(conn, callLogId, customerId) {
   return conn('scheduled_services')
     .where({ source_call_log_id: callLogId, customer_id: customerId })
-    .whereIn('source_action', require('./call-prepay-choice').callCreatedSourceActions())
-    .whereIn('status', CALENDAR_VISIT_STATUSES)
-    .select('*');
+    .whereIn('source_action', require('./call-prepay-choice').callCreatedSourceActions());
+}
+// Every visit the call booked that is still on the calendar (any status but cancelled or skipped: also one en route, on
+// site or done).
+function callVisitsOnCalendar(conn, callLogId, customerId) {
+  return visitsCallBooked(conn, callLogId, customerId).whereIn('status', CALENDAR_VISIT_STATUSES).select('*');
 }
 
 // `conn`: the global handle, or the close's own transaction when it reads the card again under the lock (a cron job
@@ -795,6 +810,7 @@ const TAP_UNAVAILABLE = {
   plan_not_shown: "The plan's visits or per-visit price would not be the ones the card showed. Accept it from the estimate instead.",
   customer_busy: 'Another change to this customer is being saved. Try again in a minute.',
   call_busy: 'The call or its card is being changed. Try again in a minute.',
+  visit_busy: 'A visit this call booked is being changed. Try again in a minute.',
   estimate_no_send_time: 'The estimate has no send time on record. Accept it from the estimate.',
   accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
 };
@@ -884,10 +900,9 @@ async function tapCheck(shown, { now }) {
   // estimate links and the accepted state as they stand. A tap never acts on words the card no longer holds.
   if (await cardState(card)) return { ok: false, reason: 'card_out_of_date', note: note(TAP_UNAVAILABLE.card_out_of_date) };
   // The plan and its per-visit price, as the accept will bill them: the card shows them before the tap, and the accept
-  // pins the price (priceSeriesStep). A price the card cannot show means no tap.
-  const terms = planTermsOf(evaluation.estimate, evaluation.visit);
-  if (!terms) return { ok: false, reason: 'price_unresolved', note: note(TAP_UNAVAILABLE.price_unresolved) };
-  return { ok: true, evaluation, customerId, terms };
+  // pins the price (priceSeriesStep). The evaluation's own check refused a visit with none (acceptProblem:
+  // plan_unresolved), so there are terms here.
+  return { ok: true, evaluation, customerId, terms: planTermsOf(evaluation.estimate, evaluation.visit) };
 }
 
 // The plan the tap accepts and its per-visit price, by the converter's own rule for one recurring unit
@@ -1032,9 +1047,16 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     } catch {
       throw stop('catalog_busy');
     }
-    // The locked visit passes the evaluation's own visit checks again (family, property, price and discounts, invoice,
-    // add-ons, series and assessment flags), not only the pin.
-    const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
+    // Every visit this call booked, cancelled and skipped ones too (the rows both counts below read), locked in id order
+    // before the counts: a status change that brings one back waits for this accept's commit, and one in flight now
+    // refuses at once (visit_busy) instead of a wait while the step holds the accept's locks. The booked visit is one of
+    // them; a visit the call was only attached to is not.
+    const callVisits = await noWaitOrStop(visitsCallBooked(trx, bookingCallId, customerId).orderBy('id').forUpdate().noWait()
+      .select('*'), 'visit_busy');
+    // The booked visit is its locked row among them: a visit moved to another call or customer since the check is not,
+    // and the step never reads or waits on a row it did not lock. It passes the evaluation's own visit checks again
+    // (family, property, price and discounts, invoice, add-ons, series and assessment flags), not only the pin.
+    const row = callVisits.find((v) => String(v.id) === String(visit.id));
     if (!row || Manual.bookedVisitsPinOf([row]) !== pin || await visitProblem(trx, row, estimate, new Date())) throw stop('changed_since_check');
     // The call still booked exactly this one visit: the only live one, and the only one on the calendar.
     const live = await require('./call-prepay-choice').liveVisitsOfCall(trx, bookingCallId, customerId);

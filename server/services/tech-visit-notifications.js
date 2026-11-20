@@ -52,11 +52,9 @@ const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-act
 const { awaitingCustomerPick } = require('./scheduling/self-serve-notice');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
-// Auto-dispatch moves many visits in one nightly run. With this gate on, its
-// cards are still written one per visit, but their per-visit pushes are held
-// and the run sends ONE push per tech instead (owner ruling 2026-10-03: "yes
-// once is fine"). Read at call time; unset = one push per visit, as before.
-const SUMMARY_GATE = 'GATE_AUTO_DISPATCH_PUSH_SUMMARY';
+// Auto-dispatch moves many visits in one nightly run. Its cards are written
+// one per visit, but their per-visit pushes are held and the run sends ONE
+// push per tech instead (owner ruling 2026-10-03: "yes once is fine").
 const AUTO_DISPATCH_ACTOR_TEXT = 'by auto-dispatch';
 // A burst from any other mover — an office script, many single moves in a
 // row — gets the same treatment (owner 2026-10-22: "the dispatch alerts need
@@ -690,13 +688,13 @@ async function deliver(notices) {
   let dropped = 0;
   // An auto-dispatch card's push is held for the run's one summary push; the
   // decision is made once, before the write, and recorded on the row.
-  const holdRun = currentAutoDispatchRun && gateEnvValue(SUMMARY_GATE) ? currentAutoDispatchRun : null;
+  const holdRun = currentAutoDispatchRun || null;
   // Every other card's push waits for its tech's bundle (same once-only rule).
   for (const raw of notices.filter((x) => x && x.ok)) {
     let n = raw;
     if (holdRun && raw.actorText === AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForRun: holdRun };
-    // An auto-dispatch move is never bundled: its run summary covers it, and
-    // with that summary off it pushes on its own, as before (Codex #6459 r1).
+    // An auto-dispatch move is never bundled: its run summary covers it
+    // (Codex #6459 r1).
     else if (raw.actorText !== AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForBundle: true };
     try {
       const card = await writeCard(n);
@@ -951,8 +949,7 @@ function heldPushDelivered(result) {
 // push is handed off; a failed send releases the claim, and a crash leaves it
 // to expire, so the next run's start recovers the batch either way (Codex
 // #5786 P2). A card the tech already cleared is not counted: they saw it.
-// The summary gate decided at hold time; only the notifications kill switch
-// stops a held batch.
+// Only the notifications kill switch stops a held batch.
 async function flushHeldAutoDispatchPushes({ runId = null, tag }) {
   if (!enabled()) {
     await dropHeld('run', runId);
@@ -1698,7 +1695,6 @@ module.exports = {
   notifyVisitCancelled,
   pushAutoDispatchSummary,
   beginAutoDispatchRun,
-  SUMMARY_GATE,
   flushBundledPushes,
   BUNDLE_QUIET_MS,
   BUNDLE_MAX_WAIT_MS,

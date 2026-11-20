@@ -134,6 +134,31 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/invoices?invoice=inv_123');
   });
 
+  test('a quiz lead\'s bell names the quiz and its answers in place of the service line', () => {
+    const built = TRIGGER_REGISTRY.new_lead.build({
+      name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Cockroach Control',
+      quizAnswers: 'Roaches, condo, wants it today', quizNamesRequest: true, leadId: 'lead-9',
+    });
+    expect(built.title).toBe('New lead');
+    expect(built.body).toBe('Pat Sample via Pest Quiz (34202) - Roaches, condo, wants it today');
+    expect(built.link).toBe('/admin/leads?lead=lead-9');
+    // A "Not sure" or partly answered quiz does not say what the visitor
+    // wants, so the service line stays beside the answers.
+    const partial = (quizAnswers) => TRIGGER_REGISTRY.new_lead.build({
+      name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Pest Control', quizAnswers, quizNamesRequest: false, leadId: 'lead-9',
+    }).body;
+    expect(partial('Not sure, condo, wants it today')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - Not sure, condo, wants it today');
+    expect(partial('wants it today')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - wants it today');
+    // A named problem with no property or timing is partial too.
+    expect(partial('Ants')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - Ants');
+    // A caller that sends answers with no flag keeps the service line too.
+    expect(TRIGGER_REGISTRY.new_lead.build({ name: 'Pat Sample', source: 'Pest Quiz', service: 'Pest Control', quizAnswers: 'condo' }).body)
+      .toBe('Pat Sample via Pest Quiz - Wants Pest Control - condo');
+    // Every other lead keeps the service line.
+    expect(TRIGGER_REGISTRY.new_lead.build({ name: 'Pat Sample', source: 'Main site', zip: '34202', service: 'Pest Control', leadId: 'lead-9' }).body)
+      .toBe('Pat Sample via Main site (34202) - Wants Pest Control');
+  });
+
   test('new lead trigger can carry tracking number context', () => {
     const built = TRIGGER_REGISTRY.new_lead.build({
       title: 'New lead from palmettoexterminator.com',
@@ -473,6 +498,22 @@ describe('triggerNotification bell outcome', () => {
     // Without the option the same call writes its bell as before.
     await triggerNotification('customer_missed_call', { customerId: null, name: 'Test Caller', phone: '+19415550100', callLogId: 'call-1' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  // A quiet missed call's bell row is titled likely robocall; its push goes only when no bell row
+  // was written (missed-call-bell.js pushGuard) and keeps the ordinary caller title (pre-push audit r23).
+  test('a missed-call push carries its push-only title while the bell row keeps its own', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'likely robocall (GBP — Parrish)', pushName: 'unknown caller (GBP — Parrish)', phone: '+19415550100', callLogId: 'call-2' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('Missed call — likely robocall (GBP — Parrish)');
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').title).toBe('Missed call — unknown caller (GBP — Parrish)');
+    // With no push name the push carries the bell's title, as before.
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'unknown caller (GBP — Parrish)', phone: '+19415550100', callLogId: 'call-3' });
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').title).toBe('Missed call — unknown caller (GBP — Parrish)');
   });
 
   // A banner for a bell row its writer rang under bell: true keeps that authorization, so a type the

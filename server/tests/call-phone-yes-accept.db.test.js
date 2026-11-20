@@ -350,6 +350,13 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     // A rate the booking call quoted for the recurring service (call processing's own note): the tap bills the plan's
     // per-visit price (45 here), so another rate refuses.
     ['the booking call quoted another rate for the plan', { visitOver: { internal_notes: callRateNote('30.00') } }, 'visit_call_rate'],
+    // A twice-a-year pest plan: the converter seeds no series from it (planTermsOf), so the tap offers no plan and an
+    // automatic accept would not go ahead either.
+    ['the estimate is a twice-a-year plan', {
+      estimateOver: { estimate_data: JSON.stringify(planData({ customerSelection: { frequency: 'semiannual' }, result: { ...planData().result, recurring: { ...planData().result.recurring, services: [
+        { name: 'Pest Control', service: 'pest_control', mo: 15, visitsPerYear: 2, perTreatment: 90 },
+      ] } } })) },
+    }, 'plan_unresolved'],
     // Visit types completion never bills, by the label or the catalog key: a plan from one would bill $0.
     ['the visit is a re-service by its label', { visitOver: { service_type: 'Pest Control Re-Service' } }, 'visit_free_type'],
     ['the visit is a re-service by its catalog key', { visitOver: { service_key_snapshot: 'pest_re_service' } }, 'visit_free_type'],
@@ -413,6 +420,21 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     }), 'caller_declined_price'],
     ['two open estimates', ({ customerId }) => estimate(customerId), 'more_than_one_estimate'],
     ['two visits on the booking call', ({ customerId, bookingCallId }) => visit(customerId, bookingCallId, { scheduled_date: inDays(12) }), 'more_than_one_visit'],
+    // A follow-up visit is the call's only visit left: not a plan's first visit. Each row holds one sign of a follow-up
+    // alone: a link to its first visit (cancelled here), or a follow-up path's source action with both links cleared
+    // (deleting the first visit sets them null).
+    ['the only visit left is linked to a cancelled first visit', async ({ customerId, bookingCallId, visitId }) => {
+      const first = await visit(customerId, bookingCallId, { scheduled_date: inDays(5), status: 'cancelled' });
+      await trx('scheduled_services').where({ id: visitId }).update({ parent_service_id: first });
+    }, 'visit_follow_up'],
+    ["the only visit left is a call's follow-up whose first visit was deleted", ({ visitId }) => trx('scheduled_services').where({ id: visitId })
+      .update({ source_action: 'ai_call_pipeline_followup' }), 'visit_follow_up'],
+    ["the only visit left is a package's follow-up whose first visit was deleted", ({ visitId }) => trx('scheduled_services').where({ id: visitId })
+      .update({ source_action: 'package_followup_auto' }), 'visit_follow_up'],
+    ['the visit is a follow-up booked from a finished visit', async ({ customerId, visitId }) => {
+      const first = await visit(customerId, null, { source_action: 'admin', scheduled_date: inDays(-20), status: 'completed' });
+      await trx('scheduled_services').where({ id: visitId }).update({ followup_source_service_id: first });
+    }, 'visit_follow_up'],
     ['another live plan', ({ customerId }) => visit(customerId, null, {
       source_action: 'admin', is_recurring: true, recurring_pattern: 'quarterly', scheduled_date: inDays(30),
     }), 'existing_plan'],
@@ -1590,6 +1612,13 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       // These rows are committed, on a pool of their own, so a second connection sees them; each test deletes its own.
       let pool; let made = null;
       beforeAll(() => { pool = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } }); });
+      // The deadline for a step that must refuse at once: no lock timeout (it raises 55P03, the code NOWAIT raises, which
+      // the step maps to its refusal), and a statement timeout instead, so a take that waits fails as a cancel (57014).
+      // Long, since it bounds each whole statement: a loaded machine can stretch one past a few seconds.
+      const waitNoLonger = async (conn) => {
+        await conn.raw('SET LOCAL lock_timeout = 0');
+        await conn.raw("SET LOCAL statement_timeout = '30s'");
+      };
       afterAll(async () => { await pool.destroy(); });
       afterEach(async () => {
         if (!made) return;
@@ -1669,12 +1698,80 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         const accept = await pool.transaction();
         try {
           await other('call_log').where({ id: bookingCallId }).forUpdate().first('id');
-          // A bounded wait: a blocking take would fail as a raw lock timeout, not as call_busy.
-          await accept.raw("SET LOCAL lock_timeout = '2s'");
+          await waitNoLonger(accept);
           await expect(step(accept, { estimate: {} })).rejects.toMatchObject({ phoneYesRefusal: 'call_busy' });
         } finally {
           await accept.rollback();
           await other.rollback();
+        }
+      });
+
+      test("the call's visits, locked without waiting: a status change in flight refuses (visit_busy), one after waits for the commit, a staff visit only attached never stops the step, and a booked visit moved to another call refuses without waiting on it", async () => {
+        const perTest = trx;
+        let ev; let card; let firstId; let staffId; let movedTo;
+        try {
+          trx = pool;
+          mockConn = pool;
+          made = await phoneYes();
+          // The call's other visit, cancelled: bringing it back would make two visits on the calendar.
+          firstId = await visit(made.customerId, made.bookingCallId, { scheduled_date: inDays(5), status: 'cancelled' });
+          // A visit the office booked that the call was attached to: not one the call booked, so neither count reads it.
+          staffId = await visit(made.customerId, made.bookingCallId, { scheduled_date: inDays(20), source_action: 'admin' });
+          // Another call of the customer's, before the estimate was sent (outside the word's window): where the booked
+          // visit moves below.
+          movedTo = await call(made.customerId, null, { created_at: new Date(Date.now() - 3 * DAY) });
+          // This call's card alone, filed as the sweep files one (a sweep on committed rows would act on every call).
+          ev = await evaluatePhoneYes({ callLogId: made.bookingCallId, customerId: made.customerId });
+          const bookingRow = await trx('call_log').where({ id: made.bookingCallId }).first('id', 'customer_id', 'ai_extraction_enriched');
+          const extraction = require('../services/call-held-visits').parseExtraction(bookingRow.ai_extraction_enriched);
+          await expect(PhoneYesPrivate.fileCardForTest({ call: bookingRow, extraction, evaluation: ev })).resolves.toBeTruthy();
+          [card] = await cards(made.bookingCallId);
+        } finally {
+          trx = perTest;
+          mockConn = perTest;
+        }
+        expect(ev).toMatchObject({ card: true, acceptProblem: null });
+        const step = PhoneYesPrivate.linkVisitStepForTest({
+          visit: ev.visit, customerId: made.customerId, bookingCallId: made.bookingCallId, cardId: card.id,
+          expectedUpdatedAt: card.updated_at, word: PhoneYesPrivate.tapWordOfForTest(ev),
+        });
+        const other = await pool.transaction();
+        let accept = await pool.transaction();
+        try {
+          await other('scheduled_services').where({ id: firstId }).forUpdate().first('id');
+          await waitNoLonger(accept);
+          await expect(step(accept, { estimate: ev.estimate })).rejects.toMatchObject({ phoneYesRefusal: 'visit_busy' });
+        } finally {
+          await accept.rollback();
+          await other.rollback();
+        }
+        const staffEdit = await pool.transaction();
+        accept = await pool.transaction();
+        try {
+          // An office edit in flight on the attached staff visit: the step still goes ahead.
+          await staffEdit('scheduled_services').where({ id: staffId }).forUpdate().first('id');
+          await waitNoLonger(accept);
+          await step(accept, { estimate: ev.estimate });
+          await expect(pool.transaction(async (later) => {
+            await later.raw("SET LOCAL lock_timeout = '300ms'");
+            await later('scheduled_services').where({ id: firstId }).update({ status: 'confirmed' });
+          })).rejects.toMatchObject({ code: '55P03' });
+        } finally {
+          await accept.rollback();
+          await staffEdit.rollback();
+        }
+        // The booked visit moved to another call since the check, with an edit to it in flight: it is not among the call's
+        // visits, so the step refuses at once instead of waiting on its row.
+        await pool('scheduled_services').where({ id: made.visitId }).update({ source_call_log_id: movedTo });
+        const movedEdit = await pool.transaction();
+        accept = await pool.transaction();
+        try {
+          await movedEdit('scheduled_services').where({ id: made.visitId }).forUpdate().first('id');
+          await waitNoLonger(accept);
+          await expect(step(accept, { estimate: ev.estimate })).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+        } finally {
+          await accept.rollback();
+          await movedEdit.rollback();
         }
       });
 

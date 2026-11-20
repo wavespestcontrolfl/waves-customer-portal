@@ -628,7 +628,7 @@ describe('notifyTechVisitChange', () => {
   });
 });
 
-describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owner ruling 2026-10-03)', () => {
+describe('auto-dispatch: one push per run (owner ruling 2026-10-03)', () => {
   const move = (actorId) => notices.notifyTechVisitChange({
     visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1', actorId,
     previous: { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' },
@@ -636,14 +636,12 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.GATE_TECH_VISIT_NOTIFICATIONS = 'true';
-    process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
     cardRows.length = 0;
     notices._test.setCurrentAutoDispatchRun(null);
     prime();
   });
   afterAll(() => {
     delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
-    delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
   });
 
   test('a move card carries its ISO days, so the Today page can tell a today/tomorrow change from a far one', async () => {
@@ -665,7 +663,7 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     ]);
   });
 
-  test('gate on, inside a run: an auto-dispatch move writes its card marked with the run and holds its push; any other mover is bundled', async () => {
+  test('inside a run: an auto-dispatch move writes its card marked with the run and holds its push; any other mover is bundled', async () => {
     notices._test.setCurrentAutoDispatchRun('run-1');
     await move('auto_dispatch');
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
@@ -677,18 +675,6 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     expect(mockWriteCard.mock.calls[1][1].payload).not.toHaveProperty('push_held_run');
     expect(mockWriteCard.mock.calls[1][1].payload).toHaveProperty('push_bundle');
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
-  });
-
-  test('gate off: an auto-dispatch move pushes per visit, as before, and is never marked held', async () => {
-    notices._test.setCurrentAutoDispatchRun('run-1');
-    delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
-    await move('auto_dispatch');
-    expect(mockWriteCard.mock.calls[0][1].payload).not.toHaveProperty('push_held_run');
-    // A push sent at once says what its card was just written with.
-    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
-      title: 'A visit on your route moved',
-      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W\nWas Wed Sep 9, 1–3 PM',
-    }));
   });
 
   test('the run sends ONE push per tech for exactly the cards it held, opening /admin/today; a second run starts from zero', async () => {
@@ -710,14 +696,6 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     mockSendToAdminUser.mockClear();
     expect(await notices.pushAutoDispatchSummary({ runId: 'run-10' })).toEqual({ pushed: 0 });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
-  });
-
-  test('a summary gate turned off mid-run still sends the summary for cards it held (their own push never went out)', async () => {
-    notices._test.setCurrentAutoDispatchRun('r1');
-    await move('auto_dispatch');
-    delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
-    expect(await notices.pushAutoDispatchSummary({ runId: 'r1' })).toEqual({ pushed: 1 });
-    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'Auto-dispatch moved 1 visit' }));
   });
 
   test('the notifications kill switch off DROPS the held batch: no push now, none when it comes back on (Codex #5786 P2)', async () => {
@@ -941,16 +919,11 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
   });
 
   test('an auto-dispatch move inside a run keeps the run\'s own summary, never the bundle', async () => {
-    process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
-    try {
-      notices._test.setCurrentAutoDispatchRun('run-1');
-      await officeMove('v-1', { actorId: 'auto_dispatch' });
-      expect(cardRows[0].payload).toMatchObject({ push_held_run: 'run-1' });
-      expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
-      expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
-    } finally {
-      delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
-    }
+    notices._test.setCurrentAutoDispatchRun('run-1');
+    await officeMove('v-1', { actorId: 'auto_dispatch' });
+    expect(cardRows[0].payload).toMatchObject({ push_held_run: 'run-1' });
+    expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
   });
 
   test('the notifications kill switch off DROPS held bundles: no push now, none later', async () => {
@@ -1277,8 +1250,8 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     }));
   });
 
-  test('with the run summary off, an auto-dispatch move still pushes on its own and is never bundled (Codex #6459 r1 P2)', async () => {
-    notices._test.setCurrentAutoDispatchRun('run-1');
+  test('outside a run, an auto-dispatch move still pushes on its own and is never bundled (Codex #6459 r1 P2)', async () => {
+    notices._test.setCurrentAutoDispatchRun(null);
     await officeMove('v-1', { actorId: 'auto_dispatch' });
     expect(cardRows[0].payload).not.toHaveProperty('push_bundle');
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-1' }));
@@ -1432,20 +1405,15 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
   });
 
   test('the run summary and the bundle share one claim core: a run claim carries an owner token too', async () => {
-    process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
-    try {
-      notices._test.setCurrentAutoDispatchRun('run-7');
-      await officeMove('v-1', { actorId: 'auto_dispatch' });
-      mockSendToAdminUser.mockImplementationOnce(async () => {
-        expect(cardRows[0].payload).toMatchObject({ push_held_run: 'run-7', push_claimed_at: expect.any(String), push_claim: expect.any(String) });
-        return { subscriptions: 1, sent: 1 };
-      });
-      expect(await notices.pushAutoDispatchSummary({ runId: 'run-7' })).toEqual({ pushed: 1 });
-      expect(cardRows[0].payload).not.toHaveProperty('push_held_run');
-      expect(cardRows[0].payload).not.toHaveProperty('push_claim');
-    } finally {
-      delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
-    }
+    notices._test.setCurrentAutoDispatchRun('run-7');
+    await officeMove('v-1', { actorId: 'auto_dispatch' });
+    mockSendToAdminUser.mockImplementationOnce(async () => {
+      expect(cardRows[0].payload).toMatchObject({ push_held_run: 'run-7', push_claimed_at: expect.any(String), push_claim: expect.any(String) });
+      return { subscriptions: 1, sent: 1 };
+    });
+    expect(await notices.pushAutoDispatchSummary({ runId: 'run-7' })).toEqual({ pushed: 1 });
+    expect(cardRows[0].payload).not.toHaveProperty('push_held_run');
+    expect(cardRows[0].payload).not.toHaveProperty('push_claim');
   });
 
   test('a sweep read failure never throws to the scheduler', async () => {

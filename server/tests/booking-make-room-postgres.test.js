@@ -88,7 +88,9 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     await mockConn('technicians').insert({ id: techId, name: 'Synthetic room tech', employment_status: 'active', field_dispatchable: true });
     visits = [
       { name: 'a', hour: 8, dLat: 0, dLng: 0.05 },
-      { name: 'b', hour: 9, dLat: 0, dLng: 0.2 },
+      // ~10 miles east: far enough to save drive over the noon and 3 PM times, near enough that the drive clock's per-leg
+      // overhead still lets the chain keep every moved stop's arrival window (0.2 degrees east did not).
+      { name: 'b', hour: 9, dLat: 0, dLng: 0.16 },
       { name: 'c', hour: 10, dLat: 0.1, dLng: 0 },
       { name: 'd', hour: 11, dLat: 0.12, dLng: 0 },
       { name: 'e', hour: 13, dLat: 0.13, dLng: 0.01 },
@@ -134,7 +136,7 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
   const visitOf = (name) => visits.find((v) => v.name === name);
   const FREE = () => [{ date: DAY, windowStart: '12:00', techId }, { date: DAY, windowStart: '15:00', techId }];
   const admit = (slot) => slot.date === DAY && slot.windowStart >= '09:00' && slot.windowStart <= '16:00';
-  const PIN = { lat: HQ.lat + 0.005, lng: HQ.lng + 0.2 };
+  const PIN = { lat: HQ.lat + 0.005, lng: HQ.lng + 0.16 };
   // Each test reads the WHOLE check, so it gets a test-sized budget and must finish. Production's 4-second budget
   // is about a slow page, and it has its own tests (booking-make-room.test.js). CI's database is shared by two suite
   // halves at once: on 2026-11-08 (#7766's run) a busy check ran out of the 4 seconds before the hour under test,

@@ -84,7 +84,9 @@ maybeDescribe('make-room accept on real PostgreSQL', () => {
     await mockConn('technicians').insert({ id: techId, name: 'Synthetic room tech', employment_status: 'active', field_dispatchable: true });
     visits = [
       { name: 'a', hour: 8, dLat: 0, dLng: 0.05 },
-      { name: 'b', hour: 9, dLat: 0, dLng: 0.2 },
+      // ~10 miles east: far enough to save drive over the noon and 3 PM times, near enough that the drive clock's per-leg
+      // overhead still lets the chain keep every moved stop's arrival window (0.2 degrees east did not).
+      { name: 'b', hour: 9, dLat: 0, dLng: 0.16 },
       { name: 'c', hour: 10, dLat: 0.1, dLng: 0 },
       { name: 'd', hour: 11, dLat: 0.12, dLng: 0 },
       { name: 'e', hour: 13, dLat: 0.13, dLng: 0.01 },
@@ -122,7 +124,7 @@ maybeDescribe('make-room accept on real PostgreSQL', () => {
   });
 
   const visitOf = (name) => visits.find((v) => v.name === name);
-  const PIN = { lat: HQ.lat + 0.005, lng: HQ.lng + 0.2 };
+  const PIN = { lat: HQ.lat + 0.005, lng: HQ.lng + 0.16 };
   const idsOf = () => visits.map((v) => v.id);
   const rowsNow = async () => Object.fromEntries((await mockConn('scheduled_services').whereIn('id', idsOf()).select('id', 'window_start', 'window_end')).map((r) => [r.id, `${String(r.window_start).slice(0, 5)}-${String(r.window_end).slice(0, 5)}`]));
   const sentAnything = () => Object.entries(mockOutbound).filter(([, fn]) => fn.mock && fn.mock.calls.length > 0).map(([name]) => name);

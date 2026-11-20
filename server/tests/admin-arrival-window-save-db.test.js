@@ -89,7 +89,7 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
   let database;
   let server;
   let baseUrl;
-  const gateNames = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_EDIT_APPT_ADDRESS', 'GATE_DRIVE_TIME_CALIBRATION'];
+  const gateNames = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_EDIT_APPT_ADDRESS'];
   const savedGates = Object.fromEntries(gateNames.map(key => [key, process.env[key]]));
   const savedAddressGate = gates.editApptAddress;
   beforeAll(async () => {
