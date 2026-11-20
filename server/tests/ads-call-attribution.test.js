@@ -1085,6 +1085,31 @@ describe('phone successor arm requires durable lead evidence (codex P1 r18)', ()
       && u.row.source_call_id === 'call-vm-lead')).toBeTruthy();
   });
 
+  test('a customer-less PHONE-ONLY call the processor stamped as left open inherits (owner 2026-11-19)', async () => {
+    // The processor links a live phone-only prospect call only when its stored
+    // extraction carries call_left_open: true. The same call without the stamp
+    // (processed before it existed, or closed on the phone) is the
+    // "NO reachability" case above and keeps failing the mirror.
+    const successor = {
+      id: 'call-phone-only-open',
+      to_phone: '+19415550001',
+      from_phone: '+12025550101',
+      created_at: '2026-11-20T12:00:00Z',
+      metadata: {},
+      ai_extraction: evidence({ email: undefined, call_left_open: true }),
+    };
+    firstQueueByTable.call_log = [undefined, successor];
+    firstQueueByTable.leads = [PHONE_LEAD, undefined];
+    listQueueByTable.call_log = [[successor]];
+    firstByTable.lead_sources = { source_type: 'main_site', name: 'Sarasota city page' };
+
+    const n = await CallAttribution.retireCallAttributionRow(mockDb, 'call-rejected', 'lead-1');
+
+    expect(n).toBe(1);
+    expect(updateCalls.find((u) => u.table === 'ad_service_attribution'
+      && u.row.source_call_id === 'call-phone-only-open')).toBeTruthy();
+  });
+
   test('the scan PAGES past ten rejected candidates to an older valid successor (codex P1 r19)', async () => {
     const routine = (i) => ({
       id: `call-routine-${i}`,

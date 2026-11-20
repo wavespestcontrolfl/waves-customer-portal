@@ -1123,6 +1123,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     isNonLeadCallContent,
     leadContactCompleteness,
     hasWorkableLeadSignal,
+    stampCallLeftOpen,
     normalizeCallExtraction,
   } = CallRecordingProcessor._test;
 
@@ -1392,6 +1393,51 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
       extracted: { matched_service: '   ', email: '  ' },
       phone: '+19415550100',
     })).toBe(false);
+  });
+
+  test('a phone-only prospect makes a lead only when the call was left open (owner 2026-11-19)', () => {
+    // A caller heard the WDO price and said "I will call back": no name, no
+    // street, no email. The caller ID is the only reachback.
+    const phoneOnly = { matched_service: 'WDO Inspection Service', requested_service: 'WDO inspection' };
+    const phone = '+19415550100';
+    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, call_left_open: true }, phone })).toBe(true);
+    // Waves closed the call on the phone, or the call predates the stamp.
+    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, call_left_open: false }, phone })).toBe(false);
+    expect(hasWorkableLeadSignal({ extracted: phoneOnly, phone })).toBe(false);
+    // Only the processor's boolean counts, never a model-written string.
+    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, call_left_open: 'true' }, phone })).toBe(false);
+    // No service intent: nothing to sell.
+    expect(hasWorkableLeadSignal({ extracted: { call_left_open: true }, phone })).toBe(false);
+    // No caller ID: the stamp is no reachback, a valid email is still required.
+    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, call_left_open: true }, phone: null })).toBe(false);
+  });
+
+  test('stampCallLeftOpen writes the V2 verdict on the stored extraction on every pass', () => {
+    const v2 = (over = {}) => ({
+      status: 'valid',
+      extraction: {
+        meta: { schema_version: '1.28.0', is_voicemail: false },
+        recommended_disposition: 'lead_response_flow_triggered',
+        scheduling: { status: 'none', follow_up_mentioned: false },
+        service_request: { quote_promised: false },
+        ...over,
+      },
+    });
+    const stored = { matched_service: 'WDO Inspection Service' };
+    // The caller will call back: the model left the call open.
+    expect(stampCallLeftOpen(stored, v2())).toEqual({ ...stored, call_left_open: true });
+    // Waves does not sell the service: the model closed it with nothing to do.
+    expect(stampCallLeftOpen(stored, v2({ recommended_disposition: 'no_action_needed' })).call_left_open).toBe(false);
+    // ...but a quote Waves promised keeps the same call open (the canonical rule).
+    expect(stampCallLeftOpen(stored, v2({
+      recommended_disposition: 'no_action_needed', service_request: { quote_promised: true },
+    })).call_left_open).toBe(true);
+    // No valid V2 extraction: the old rule stands.
+    expect(stampCallLeftOpen(stored, null).call_left_open).toBe(false);
+    expect(stampCallLeftOpen(stored, { ...v2(), status: 'invalid' }).call_left_open).toBe(false);
+    expect(stampCallLeftOpen(stored, { status: 'valid', extraction: { recommended_disposition: 'estimate_send' } }).call_left_open).toBe(false);
+    // A retry overwrites an earlier pass's true.
+    expect(stampCallLeftOpen({ ...stored, call_left_open: true }, null).call_left_open).toBe(false);
   });
 
   test('normalizeCallExtraction carries is_lead + call_type through', () => {
