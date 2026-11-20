@@ -99,6 +99,12 @@ function parseUsDate(value) {
 // list of those places; it decides by city name or by a Punta Gorda-only ZIP. Each value is cleaned first, as it is
 // stored: a check on the raw value could pass a city whose stored copy is excluded ("PUNTA\0GORDA" stores as
 // "PUNTA GORDA").
+// A row with no county cannot be placed: it is malformed, not outside the area, so a file whose county cells went
+// blank fails instead of passing with no prospects. A blank city or ZIP only means no excluded place.
+function hasNoCounty(county) {
+  return !clean(county);
+}
+
 function inServiceArea(county, city, zip) {
   return isInServiceAreaCounty(clean(county)) && !isExcludedLocality(clean(city)) && !isExcludedZip(clean(zip));
 }
@@ -145,6 +151,10 @@ function parseInspectionRows(rows, counts = {}, today = null) {
   const out = [];
   for (const row of rows) {
     if (!hasEveryColumn(row, 'inspection')) {
+      counts.malformed += 1;
+      continue;
+    }
+    if (hasNoCounty(row['County Name'])) {
       counts.malformed += 1;
       continue;
     }
@@ -198,6 +208,10 @@ function parseLicenseRows(rows, kind, counts = {}, today = null) {
   const out = [];
   for (const row of rows) {
     if (!hasEveryColumn(row, kind)) {
+      counts.malformed += 1;
+      continue;
+    }
+    if (hasNoCounty(row['Location County'])) {
       counts.malformed += 1;
       continue;
     }

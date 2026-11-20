@@ -558,6 +558,20 @@ describe('syncRestaurantProspects', () => {
     expect((await sync({ fetchText, store })).failures).toBe(0);
   });
 
+  test('a row with no county is malformed, not outside the area: a file whose county cells went blank fails', async () => {
+    store = makeStore();
+    const noCounty = Array.from({ length: 10 }, (_, i) => inspRow({ visit: String(9001 + i), county: '' }));
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv(noCounty), 'newfood.csv': () => licCsv([licRow({ app: '7001', county: ' ' })]) });
+    const blank = await sync({ fetchText, store });
+    expect(blank.files.inspection).toEqual({ failed: true });
+    expect(blank.files.new_license).toEqual({ failed: true });
+    expect(reads.inspection).toBeUndefined();
+    // One beside nine good rows is a stray row, counted.
+    const good = Array.from({ length: 9 }, (_, i) => inspRow({ visit: String(9001 + i) }));
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...good, inspRow({ visit: '9101', county: '' })]) });
+    expect((await sync({ fetchText, store })).files.inspection).toEqual({ kept: 9, malformed: 1, upserted: 9 });
+  });
+
   test('a license row loads only with the usual 36 cells: a cell added, two added or one lost is malformed', async () => {
     store = makeStore();
     // 37 cells: an extra cell before Secondary Phone Number would move the phone and the license number.
