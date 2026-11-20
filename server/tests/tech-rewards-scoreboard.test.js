@@ -1,0 +1,264 @@
+// Tech Rewards Plan D5-4: the pure parts of the scoreboard service (which season, review rate, the compose step),
+// with synthetic fixtures. The reads run against Postgres in tech-rewards-scoreboard-postgres.test.js.
+jest.mock('../models/db', () => jest.fn());
+
+const { composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents } = require('../services/tech-rewards-scoreboard');
+
+const WEIGHTS = { onTime: 25, audit: 25, callbacks: 20, truck: 10, ownerRating: 20 };
+const CUTS = { top: 90, mid: 80, low: 70 };
+const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 85 };
+
+const complete = (parts = PARTS) => ({
+  complete: true, year: 2026, parts, score: 91.5, rateBps: 400, settings: { version: 0, weights: WEIGHTS, cutLines: CUTS },
+});
+const incomplete = { complete: false, year: 2026, parts: { ...PARTS, audit: null }, missing: ['audit'] };
+
+function inputs(over = {}) {
+  const today = over.today || '2026-11-20';
+  return {
+    technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2025-04-01' },
+    today,
+    season: pickSeason(today),
+    seasonScore: complete(),
+    settings: null,
+    reviews: 6,
+    asks: 30,
+    grossSeasonCents: 1000000,
+    priorYearGrossCents: 2000000,
+    commission: { paidCents: 20000, unpaidCents: 10000 },
+    commissionRecordedThrough: { weekEnd: '2026-11-08' },
+    ...over,
+  };
+}
+
+describe('pickSeason (the off-season choice)', () => {
+  test.each([
+    ['2026-03-01', 2026, 'running', '2026-03-01'],
+    ['2026-06-15', 2026, 'running', '2026-06-15'],
+    ['2026-08-31', 2026, 'running', '2026-08-31'],
+    ['2026-09-01', 2026, 'final', '2026-08-31'],
+    ['2026-11-20', 2026, 'final', '2026-08-31'],
+    ['2026-12-31', 2026, 'final', '2026-08-31'],
+    ['2027-01-01', 2026, 'final', '2026-08-31'],
+    ['2027-02-28', 2026, 'final', '2026-08-31'],
+    ['2027-03-01', 2027, 'running', '2027-03-01'],
+  ])('%s shows the %i season as %s (asOf %s)', (today, year, status, asOf) => {
+    const season = pickSeason(today);
+    expect([season.year, season.status, season.asOf]).toEqual([year, status, asOf]);
+  });
+
+  test('the bonus pay date is the last Friday of September', () => {
+    expect(pickSeason('2026-11-20').payDate).toBe('2026-09-25');
+  });
+});
+
+describe('reviewRateBps', () => {
+  test('reviews over asks in basis points, null with no asks, capped at 100%', () => {
+    expect(reviewRateBps(6, 30)).toBe(2000);
+    expect(reviewRateBps(1, 3)).toBe(3333);
+    expect(reviewRateBps(0, 0)).toBeNull();
+    expect(reviewRateBps(5, 2)).toBe(10000);
+  });
+});
+
+describe('earnedGrossCents (by component earning date)', () => {
+  const FROM = '2026-03-01';
+  const TO = '2026-08-31';
+  const plain = (weekStart, cents, extra = {}) => ({
+    weekStart, grossCents: cents, regularPayCents: cents, overtimePayCents: 0, overtimeMinutes: 0, ptoPayCents: 0, holidayPayCents: 0, ...extra,
+  });
+  const mins = (...pairs) => pairs.map(([workDate, minutes]) => ({ workDate, minutes }));
+  const sum = (check) => checkComponents(check).reduce((total, c) => total + c.cents, 0);
+
+  test('the components of a plain week add up to its gross; so do the components of a full check', () => {
+    const week = plain('2026-04-06', 70000);
+    expect(sum(week)).toBe(week.grossCents);
+    const full = {
+      weekStart: '2026-09-07', grossCents: 40000 + 12000 + 8000 + 4000 + 3000 + 500 + 1500,
+      regularPayCents: 40000, overtimePayCents: 12000, overtimeMinutes: 480, ptoPayCents: 8000, holidayPayCents: 4000,
+      lines: [{ cents: 3000, earnedOn: '2026-05-10' }, { cents: 500, earnedOn: '2026-04-10' }],
+      lineOvertimeWeeks: [{ weekStart: '2026-05-04', premiumCents: 1500 }],
+    };
+    expect(sum(full)).toBe(full.grossCents);
+    expect(checkComponents(full).at(-1).cents).toBe(0); // nothing left undated
+  });
+
+  test('whole weeks inside the window count in full; a week before or after counts nothing', () => {
+    expect(earnedGrossCents([plain('2026-03-02', 70000), plain('2026-08-24', 70000), plain('2026-02-16', 70000)], FROM, TO)).toBe(140000);
+    expect(earnedGrossCents([plain('2026-09-07', 70000)], FROM, TO)).toBe(0);
+  });
+
+  test('an edge week with no day records (no summaries, no time off) counts its in-window days / 7', () => {
+    expect(earnedGrossCents([plain('2026-08-31', 70000)], FROM, TO)).toBe(10000); // Mon Aug 31 only
+    expect(earnedGrossCents([plain('2026-02-23', 70000)], FROM, TO)).toBe(10000); // Sun Mar 1 only
+    expect(earnedGrossCents([plain('2028-08-28', 100000)], '2028-03-01', '2028-08-31')).toBe(57143); // Mon-Thu = 4 of 7
+    expect(earnedGrossCents([plain('2026-08-31', 70000, { dayMinutes: [] })], FROM, TO)).toBe(10000);
+    expect(earnedGrossCents([plain('2026-08-31', 70000, { dayMinutes: mins(['2026-08-31', 0]) })], FROM, TO)).toBe(10000);
+  });
+
+  test('wages in an edge week follow the shift dates: all inside is full, all outside is 0, a split is proportional', () => {
+    expect(earnedGrossCents([plain('2026-02-23', 70000, { dayMinutes: mins(['2026-03-01', 480]) })], FROM, TO)).toBe(70000);
+    expect(earnedGrossCents([plain('2026-08-31', 70000, { dayMinutes: mins(['2026-09-01', 480], ['2026-09-02', 480]) })], FROM, TO)).toBe(0);
+    expect(earnedGrossCents([plain('2026-08-31', 50000, { dayMinutes: mins(['2026-08-31', 480], ['2026-09-01', 480], ['2026-09-02', 480]) })], FROM, TO)).toBe(16667);
+  });
+
+  test('overtime minutes are the last minutes worked, at 1.5x: Monday of a 48 hour week carries 960 of 6240 weight', () => {
+    const days = mins(['2026-08-31', 480], ['2026-09-01', 480], ['2026-09-02', 480], ['2026-09-03', 480], ['2026-09-04', 480], ['2026-09-05', 480]);
+    const week = plain('2026-08-31', 100000, { regularPayCents: 70000, overtimePayCents: 30000, overtimeMinutes: 480, dayMinutes: days });
+    expect(earnedGrossCents([week], FROM, TO)).toBe(Math.round((100000 * 960) / 6240)); // 15385
+  });
+
+  test('paid time off on Aug 31 in a boundary week counts by its dated record, not by the shift minutes', () => {
+    // 10000 of PTO taken Mon Aug 31 and Tue Sep 1 (half in the window), wages 30000 worked a third in the window
+    const week = plain('2026-08-31', 40000, {
+      regularPayCents: 30000, ptoPayCents: 10000,
+      dayMinutes: mins(['2026-08-31', 480], ['2026-09-01', 480], ['2026-09-02', 480]),
+      ptoRecords: mins(['2026-08-31', 480], ['2026-09-01', 480]), holidayRecords: [],
+    });
+    expect(earnedGrossCents([week], FROM, TO)).toBe(10000 + 5000);
+    // a week of nothing but PTO (no shifts) is still dated by its record
+    const onlyPto = plain('2026-08-31', 8000, { regularPayCents: 0, ptoPayCents: 8000, dayMinutes: [], ptoRecords: mins(['2026-08-31', 480]), holidayRecords: [] });
+    expect(earnedGrossCents([onlyPto], FROM, TO)).toBe(8000);
+  });
+
+  test('holiday pay is dated by its own record', () => {
+    const week = plain('2026-02-23', 12000, { regularPayCents: 0, holidayPayCents: 12000, dayMinutes: [], ptoRecords: [], holidayRecords: mins(['2026-02-27', 480]) });
+    expect(earnedGrossCents([week], FROM, TO)).toBe(0);
+  });
+
+  test('catch-up overtime premium earned in May and paid in September counts in the season', () => {
+    const paidSeptember = plain('2026-09-07', 10000, {
+      regularPayCents: 7000, lineOvertimePremiumCents: 3000,
+      lineOvertimeWeeks: [{ weekStart: '2026-05-04', premiumCents: 2000 }, { weekStart: '2026-05-11', premiumCents: 1000 }],
+    });
+    expect(earnedGrossCents([paidSeptember], FROM, TO)).toBe(3000);
+    // a premium earned in a September week stays out of it
+    expect(earnedGrossCents([{ ...paidSeptember, lineOvertimeWeeks: [{ weekStart: '2026-09-07', premiumCents: 3000 }] }], FROM, TO)).toBe(0);
+  });
+
+  test('pay lines count on the day they were earned, wherever they were paid', () => {
+    const check = plain('2026-09-07', 12500, {
+      regularPayCents: 2000,
+      lines: [{ cents: 8000, earnedOn: '2026-05-10' }, { cents: 1500, earnedOn: '2026-04-10' }, { cents: 1000, earnedOn: '2026-09-07' }],
+    });
+    expect(earnedGrossCents([check], FROM, TO)).toBe(9500);
+  });
+
+  test('a line with only an earned pay week counts that week in-window days / 7; a day-dated line takes its one day', () => {
+    // Mon Aug 31 week: 1 of 7 days in the season
+    const weekOnly = plain('2026-09-07', 7000, { regularPayCents: 0, lines: [{ cents: 7000, earnedOn: null, weekStart: '2026-08-31' }] });
+    expect(earnedGrossCents([weekOnly], FROM, TO)).toBe(1000);
+    const dayDated = plain('2026-09-07', 7000, { regularPayCents: 0, lines: [{ cents: 7000, earnedOn: '2026-08-31', weekStart: '2026-08-31' }] });
+    expect(earnedGrossCents([dayDated], FROM, TO)).toBe(7000);
+    // a week-only line in a week fully inside is whole
+    expect(earnedGrossCents([plain('2026-09-07', 7000, { regularPayCents: 0, lines: [{ cents: 7000, earnedOn: null, weekStart: '2026-04-06' }] })], FROM, TO)).toBe(7000);
+  });
+
+  test('a manual allowance covering August, paid in a September week, is split over its workweeks like the overtime premium', () => {
+    // Aug 1 - Aug 31 covers the weeks of Jul 27, Aug 3, 10, 17, 24 and 31: 6 x 1000; the Aug 31 week has 1 of 7 days in the season
+    const allowance = plain('2026-09-07', 6000, { regularPayCents: 0, lines: [{ cents: 6000, earnedOn: null, weekStart: '2026-09-07', coversFrom: '2026-08-01', coversTo: '2026-08-31' }] });
+    expect(earnedGrossCents([allowance], FROM, TO)).toBe(5000 + 143);
+    // the same line in the stay window of a later year takes the weeks by the same split; cents that do not divide go to the first weeks
+    const odd = plain('2026-09-07', 1000, { regularPayCents: 0, lines: [{ cents: 1000, earnedOn: null, weekStart: '2026-09-07', coversFrom: '2026-04-06', coversTo: '2026-04-26' }] });
+    expect(checkComponents(odd).filter((c) => c.week).map((c) => c.cents).slice(0, 3)).toEqual([334, 333, 333]);
+    expect(earnedGrossCents([odd], FROM, TO)).toBe(1000);
+    // a ledger commission line (a span, but a payment day) keeps its one day
+    const ledger = plain('2026-09-07', 4000, { regularPayCents: 0, lines: [{ cents: 4000, earnedOn: '2026-05-10', weekStart: '2026-05-04', coversFrom: '2026-03-02', coversTo: '2026-05-10' }] });
+    expect(earnedGrossCents([ledger], FROM, TO)).toBe(4000);
+  });
+
+  test('a gross the components do not explain is undated: it takes its week in-window days / 7', () => {
+    expect(earnedGrossCents([{ weekStart: '2026-08-31', grossCents: 70000, regularPayCents: 0, overtimePayCents: 0, ptoPayCents: 0, holidayPayCents: 0 }], FROM, TO)).toBe(10000);
+  });
+
+  test('both edges prorate in the stay bonus window, and a week after the window is out', () => {
+    // window 2026-04-01 (Wed) .. 2026-11-20 (Fri): Mon Mar 30 week has 5 of 7 days in; Mon Nov 16 week has 5 of 7 in; Nov 23 is out
+    expect(earnedGrossCents([plain('2026-03-30', 70000), plain('2026-11-16', 70000), plain('2026-11-23', 70000)], '2026-04-01', '2026-11-20')).toBe(100000);
+  });
+});
+
+describe('composeScoreboard', () => {
+  test('a finished season: score, band, review rate, commission, bonus estimate and stay bonus from the calculator', () => {
+    const board = composeScoreboard(inputs());
+    expect(board.technician).toEqual({ id: 'tech-1', name: 'Sample Alpha' });
+    expect(board.season).toMatchObject({ year: 2026, status: 'final', payDate: '2026-09-25' });
+    expect(board.score).toMatchObject({ complete: true, value: 91.5, band: { rateBps: 400, cutLines: CUTS } });
+    expect(board.score.parts.audit).toEqual({ value: 90, weight: 25 });
+    expect(board.reviews).toEqual({ count: 6, asks: 30, rateBps: 2000, multiplierPartE4: 3333 });
+    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 30000, paidCents: 20000, unpaidCents: 10000, recordedThrough: { weekEnd: '2026-11-08' } });
+    // 1 year of tenure on Mar 1 2026 (hired 2025-04-01 -> 0 full years: Apr 1 is after Mar 1)
+    expect(board.multiplier).toMatchObject({ tenureYears: 0, level: 1, levelSource: 'entry_default', multiplierE4: 13333 });
+    // 400 bps x $10,000.00 x 1.3333 = $533.32
+    expect(board.seasonBonus).toEqual({ grossCents: 1000000, estimate: true, estimateCents: 53332, rateBps: 400, multiplierE4: 13333 });
+    // hired 2025-04-01: the 1-year bonus was due 2026-04-01 (past); the next is the 3-year on 2028-04-01, whose pay window has not begun
+    expect(board.stayBonus).toMatchObject({ dueDate: '2028-04-01', estimateCents: null });
+  });
+
+  test('an incomplete score names what is missing, still shows its parts and gives no bonus number', () => {
+    const board = composeScoreboard(inputs({ seasonScore: incomplete, settings: { version: 0, weights: WEIGHTS, cutLines: CUTS } }));
+    expect(board.score).toMatchObject({ complete: false, value: null, missing: ['audit'], band: null });
+    expect(board.score.parts.audit).toEqual({ value: null, weight: 25 });
+    expect(board.score.parts.onTime).toEqual({ value: 95, weight: 25 });
+    expect(board.seasonBonus).toEqual({ grossCents: 1000000, estimate: true, estimateCents: null, reason: 'score_incomplete' });
+  });
+
+  test('no pay run yet: the commission cutoff is null', () => {
+    expect(composeScoreboard(inputs({ commissionRecordedThrough: null })).commission.recordedThrough).toBeNull();
+  });
+
+  test('no score settings in force: no score, no band, no bonus; the rest of the board is intact', () => {
+    const board = composeScoreboard(inputs({ seasonScore: null, settings: null }));
+    expect(board.score).toEqual({ complete: false, value: null, missing: [], parts: {}, band: null, settingsVersion: null, unavailable: 'no_settings' });
+    expect(board.seasonBonus).toEqual({ grossCents: 1000000, estimate: true, estimateCents: null, reason: 'no_settings' });
+    expect(board.reviews.rateBps).toBe(2000);
+    expect(board.commission.yearToDateCents).toBe(30000);
+    expect(board.stayBonus).toMatchObject({ dueDate: '2028-04-01' });
+  });
+
+  test('no asks: the review rate is null and counts 0 in the multiplier', () => {
+    const board = composeScoreboard(inputs({ reviews: 0, asks: 0 }));
+    expect(board.reviews).toEqual({ count: 0, asks: 0, rateBps: null, multiplierPartE4: 0 });
+    expect(board.multiplier.multiplierE4).toBe(10000);
+  });
+
+  test('a score below the lowest band estimates $0', () => {
+    const board = composeScoreboard(inputs({ seasonScore: { ...complete(), score: 60, rateBps: 0 } }));
+    expect(board.seasonBonus.estimateCents).toBe(0);
+  });
+
+  test('no hire date: no multiplier, no bonus estimate, no stay bonus', () => {
+    const board = composeScoreboard(inputs({ technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: null } }));
+    expect(board.multiplier).toEqual({ reason: 'no_hire_date' });
+    expect(board.seasonBonus).toMatchObject({ estimateCents: null, reason: 'no_hire_date' });
+    expect(board.stayBonus).toBeNull();
+    expect(board.reviews.multiplierPartE4).toBeNull();
+  });
+
+  test('hired after the season: no multiplier and no estimate', () => {
+    const board = composeScoreboard(inputs({ technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2026-10-01' } }));
+    expect(board.multiplier).toEqual({ reason: 'hired_after_season' });
+    expect(board.seasonBonus).toMatchObject({ estimateCents: null, reason: 'hired_after_season' });
+    // the first stay bonus is still ahead
+    expect(board.stayBonus).toMatchObject({ dueDate: '2027-10-01', years: 1, rateBps: 200 });
+  });
+
+  test('a milestone whose 12 months of pay have not begun keeps its date and has no amount', () => {
+    const board = composeScoreboard(inputs({ priorYearGrossCents: 0 }));
+    // hired 2025-04-01 -> the 3-year bonus is due 2028-04-01; its pay window opens 2027-04-01
+    expect(board.stayBonus).toEqual({ dueDate: '2028-04-01', years: 3, rateBps: 400, estimateCents: null, estimate: true, earningsStart: '2027-04-01' });
+  });
+
+  test('an open window gives an amount, with the window start named', () => {
+    const board = composeScoreboard(inputs({ technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2025-12-01' }, priorYearGrossCents: 230000 }));
+    expect(board.stayBonus).toEqual({ dueDate: '2026-12-01', years: 1, rateBps: 200, estimateCents: 4600, estimate: true, earningsStart: '2025-12-01' });
+  });
+
+  test('past the 5-year bonus there is no next stay bonus', () => {
+    const board = composeScoreboard(inputs({ technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2018-01-01' } }));
+    expect(board.stayBonus).toBeNull();
+  });
+
+  test('the output carries no customer fields', () => {
+    expect(JSON.stringify(composeScoreboard(inputs()))).not.toMatch(/customer|address|phone|email/i);
+  });
+});
