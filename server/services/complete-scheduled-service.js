@@ -10750,7 +10750,30 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     }
     let existingCompletionInvoice = null;
+    // GATE_REPORT_AFTER_PAY (pre-push audit rounds 5-6): the payment this
+    // visit is held on (reportAfterPayPaidInvoice: paid on the visit's day
+    // after its technician arrived, while it was the only bill; null with the
+    // gate off). Both invoice lookups below reuse it, never a bill added after
+    // the payment, which stays the office's. Read before any invoice is linked
+    // or reused, and FAIL CLOSED: without it those lookups could link, text a
+    // pay link for, or charge the later bill. A failure releases the attempt
+    // for resume and 503s, as the refunded-invoice check below does. An
+    // issued-invoice closeout pins its own invoice.
     let reportAfterPayHeld = null;
+    if (!packetEffects && !systemQuietCloseout && !issuedInvoiceCloseout) {
+      try {
+        reportAfterPayHeld = await require('../services/invoice-issued-closeout').reportAfterPayPaidInvoice(db, svc);
+      } catch (heldErr) {
+        logger.error(`[dispatch] held-payment check FAILED for ${svc.id} — closeout NOT finalized: ${heldErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, heldErr);
+        return ({ status: 503, body: {
+          error: 'The paid-invoice check for this visit failed — the closeout is saved but NOT finalized. Retry the closeout.',
+          code: 'held_payment_lookup_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
+      }
+    }
     // A REFUNDED invoice on THIS visit (codex #3456): the suppressor
     // above skips it (it collects nothing), but a fresh mint beside it is
     // unsafe while its refund can still bounce — so it blocks the mint via
@@ -10774,15 +10797,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } else {
           existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
         }
-        // GATE_REPORT_AFTER_PAY (pre-push audit round 5): a visit held on its
-        // same-day payment completes on that invoice, here and in the
-        // pre-minted lookup below, never on a bill added after the payment,
-        // which stays the office's (reportAfterPayPaidInvoice; null with the
-        // gate off).
-        if (!issuedInvoiceCloseout) {
-          reportAfterPayHeld = await require('../services/invoice-issued-closeout').reportAfterPayPaidInvoice(db, svc);
-          if (reportAfterPayHeld) existingCompletionInvoice = reportAfterPayHeld;
-        }
+        // GATE_REPORT_AFTER_PAY: the held payment read above.
+        if (reportAfterPayHeld) existingCompletionInvoice = reportAfterPayHeld;
         if (!existingCompletionInvoice && !issuedInvoiceCloseout) {
           existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
         }

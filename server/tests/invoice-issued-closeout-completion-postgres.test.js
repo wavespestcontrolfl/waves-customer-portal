@@ -611,7 +611,8 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
       await fixture({ serviceType: 'Fixture Quarterly Pest Control Service', day: etDateString() });
       const { completeScheduledService } = require('../services/complete-scheduled-service');
       const paidAt = new Date();
-      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site' });
+      // The technician arrived before the payment: the rule's hold (paymentHeldVisit).
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site', arrived_at: new Date(paidAt.getTime() - 1800000) });
       await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: paidAt });
       const otherId = randomUUID();
       await mockPg('invoices').insert({ id: otherId, customer_id: f.customerId, scheduled_service_id: f.serviceId, invoice_number: `TST-${otherId.slice(0, 8)}`,

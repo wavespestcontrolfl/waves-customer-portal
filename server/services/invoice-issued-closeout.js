@@ -194,50 +194,88 @@ async function probeVisitRefusal(conn, svc) {
   return (profile?.requiresProject || profile?.projectBacked) ? 'project_backed' : null;
 }
 
-// No other row on the visit stood before a completion mint when `invoice` was
-// paid: `rows` are completionInvoicesOnVisits' (every live row, plus a
-// refunded one; void and canceled rows collected nothing), and a row made
-// after the invoice's `paid_at` does not count. With no `paid_at` (a card
-// probe before the payment) every other row counts.
-function onlyBillWhenPaid(rows, invoice) {
-  const paidAt = invoice.paid_at ? new Date(invoice.paid_at).getTime() : NaN;
+// GATE_REPORT_AFTER_PAY: did this payment hold the visit open for its
+// report? One rule, from durable stamps only, so every reader reaches the
+// same answer on any day (pre-push audit rounds 4-6): the resolver, the
+// completion's locked recheck and its held payment, the record_payment fence,
+// and, as SQL (heldPaymentSql), both sweeps and the Dispatch row. The payment
+// landed on the visit's own ET day, after its technician arrived
+// (`arrived_at`, written by every on-site transition: a payment made before
+// the arrival is a prepayment the rule never held), while the invoice was the
+// visit's only bill. `rows` are completionInvoicesOnVisits' (every live row,
+// plus a refunded one; void and canceled rows collected nothing), and a row
+// made after the payment does not count. A settled invoice's payment is its
+// `paid_at` (none: no proof, not held). An unsettled invoice is a card preview
+// of a payment about to land now: every other row counts, and the caller
+// checks the day.
+function paymentHeldVisit(rows, visit, invoice) {
+  const arrivedAt = visit.arrived_at ? new Date(visit.arrived_at).getTime() : NaN;
+  if (!Number.isFinite(arrivedAt)) return false;
+  let paidAt = Infinity;
+  if (SETTLED_INVOICE_STATUSES.includes(String(invoice.status))) {
+    paidAt = invoice.paid_at ? new Date(invoice.paid_at).getTime() : NaN;
+    if (!Number.isFinite(paidAt) || arrivedAt > paidAt || etDateString(new Date(paidAt)) !== dateOnly(visit.scheduled_date)) return false;
+  }
   return rows.every((row) => String(row.id) === String(invoice.id) || new Date(row.created_at).getTime() > paidAt);
 }
 
-// GATE_REPORT_AFTER_PAY's `onlyInvoice` (issuedCloseoutVisitRefusal), asked
-// by the resolver, again by the completion's locked recheck and by the
-// record_payment settlement fence: true only for an arrived visit paid on its
-// own day with the gate on, when the paid invoice was the visit's only bill
-// (onlyBillWhenPaid). Like the prepayment proof, the verdict comes from
-// durable stamps, so the payment, a redelivered webhook, the visit-day sweep
-// and the lock all reach the same one, and a held visit stays held for its
-// day (pre-push audit round 4).
+// paymentHeldVisit as SQL, for a settled invoice `i` on visit `s`.
+function heldPaymentSql(q) {
+  return q.whereNotNull('i.paid_at').whereNotNull('s.arrived_at').whereRaw('s.arrived_at <= i.paid_at')
+    .whereRaw("((i.paid_at) AT TIME ZONE 'America/New_York')::date = s.scheduled_date")
+    .whereNotExists((other) => other.select(1).from('invoices as oi')
+      .whereRaw('oi.scheduled_service_id = s.id').whereRaw('oi.id <> i.id')
+      .whereRaw('(oi.created_at IS NULL OR oi.created_at <= i.paid_at)')
+      .whereNotIn('oi.status', require('./completion-invoice-candidate').replacedByMintStatuses()));
+}
+
+// The visit's arrival stamp, read on the caller's handle (under a lock, the
+// locked row).
+async function arrivalStampOf(conn, visitId) {
+  const row = await conn('scheduled_services').where({ id: visitId }).first('arrived_at');
+  return row?.arrived_at || null;
+}
+
+// GATE_REPORT_AFTER_PAY's `onlyInvoice` (issuedCloseoutVisitRefusal): true
+// only for a payment on an arrived visit's own day with the gate on, when the
+// payment holds the visit (paymentHeldVisit). Asked by the resolver, again by
+// the completion's locked recheck and by the record_payment settlement fence.
 async function paidInvoiceIsVisitsOnlyBill(conn, { visit, invoice, today, trigger }) {
   if (trigger !== 'paid' || !isArrivedVisitStatus(visit.status) || dateOnly(visit.scheduled_date) !== today || !reportAfterPayLive()) return false;
   const { completionInvoicesOnVisits } = require('./completion-invoice-candidate');
-  return onlyBillWhenPaid(await completionInvoicesOnVisits(conn, [visit.id]), invoice);
+  const subject = { ...visit, arrived_at: await arrivalStampOf(conn, visit.id) };
+  return paymentHeldVisit(await completionInvoicesOnVisits(conn, [visit.id]), subject, invoice);
 }
 
-// GATE_REPORT_AFTER_PAY (pre-push audit round 5): the payment a visit is held
-// on, or null: an invoice settled on the visit's own ET day (`paid_at`) while
-// it was the visit's only bill. A bill added after that payment is the
+// GATE_REPORT_AFTER_PAY (pre-push audit rounds 5-6): the payment a visit is
+// held on (paymentHeldVisit), or null. A bill added after that payment is the
 // office's: the completion reuses this invoice and never the newer row (so it
 // never charges or texts a pay link for the later bill), and no other
 // invoice's closeout closes the visit (`visit_paid_on_other_invoice`), so the
-// visit completes on its payment, as a close at the payment would have. From
-// durable stamps, not the visit's status, so a resumed completion (its visit
-// already committed completed) and the next day's sweep read the same row.
-// Gate off: null.
+// visit completes on its payment, as a close at the payment would have. It
+// reads no visit status, so a resumed completion (its visit already committed
+// completed) and the next day's sweep read the same row. Gate off: null.
 async function reportAfterPayPaidInvoice(conn, visit) {
   if (!reportAfterPayLive()) return null;
-  const day = dateOnly(visit.scheduled_date);
-  const sameDay = (await conn('invoices').where({ scheduled_service_id: visit.id })
-    .whereIn('status', SETTLED_INVOICE_STATUSES).whereNotNull('paid_at').orderBy('paid_at', 'desc'))
-    .filter((row) => etDateString(new Date(row.paid_at)) === day);
-  if (!sameDay.length) return null;
+  const settled = await conn('invoices').where({ scheduled_service_id: visit.id })
+    .whereIn('status', SETTLED_INVOICE_STATUSES).whereNotNull('paid_at').orderBy('paid_at', 'desc');
+  if (!settled.length) return null;
   const { completionInvoicesOnVisits } = require('./completion-invoice-candidate');
   const rows = await completionInvoicesOnVisits(conn, [visit.id]);
-  return sameDay.find((row) => onlyBillWhenPaid(rows, row)) || null;
+  const subject = { ...visit, arrived_at: await arrivalStampOf(conn, visit.id) };
+  return settled.find((row) => paymentHeldVisit(rows, subject, row)) || null;
+}
+
+// The visits among `visitIds` that a payment holds open (heldPaymentSql), as
+// a Set of ids; empty with the gate off. The Dispatch row's "Paid, report not
+// sent" badge reads it, never the row's newest bill: a bill added after the
+// payment is the office's and must not hide the report still owed.
+async function reportAfterPayHeldVisitIds(conn, visitIds) {
+  const ids = [...new Set((visitIds || []).filter(Boolean).map(String))];
+  if (!ids.length || !reportAfterPayLive()) return new Set();
+  const rows = await conn('scheduled_services as s').join('invoices as i', 'i.scheduled_service_id', 's.id')
+    .whereIn('s.id', ids).whereIn('i.status', SETTLED_INVOICE_STATUSES).where((q) => heldPaymentSql(q)).distinct('s.id');
+  return new Set(rows.map((row) => String(row.id)));
 }
 
 // The visit this invoice bills, or null with the reason it was left alone.
@@ -403,9 +441,9 @@ const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempt
 // invoice `i`, visit `s`): an unstarted visit on a past day; an arrived one on
 // a past day, or today when the invoice / statement is SETTLED (`settledSql`,
 // a boolean SQL expression — a send never closes a same-day visit) and, with
-// GATE_REPORT_AFTER_PAY on, another invoice stood on the visit at the payment
-// (the rule's `onlyInvoice`, counted as paidInvoiceIsVisitsOnlyBill counts it)
-// — or a visit already completed with THIS closeout's own attempt still parked.
+// GATE_REPORT_AFTER_PAY on, the payment did not hold the visit (the rule's
+// `onlyInvoice`: heldPaymentSql, paymentHeldVisit's own rule) — or a visit
+// already completed with THIS closeout's own attempt still parked.
 function retryableVisitFilter(q, today, settledSql) {
   const reportAfterPay = reportAfterPayLive();
   return q
@@ -415,12 +453,7 @@ function retryableVisitFilter(q, today, settledSql) {
         .where((day) => day.where('s.scheduled_date', '<', today)
           .orWhere((sameDay) => {
             sameDay.where('s.scheduled_date', '=', today).whereRaw(settledSql);
-            if (reportAfterPay) {
-              sameDay.whereExists((other) => other.select(1).from('invoices as oi')
-                .whereRaw('oi.scheduled_service_id = s.id').whereRaw('oi.id <> i.id')
-                .whereRaw('(i.paid_at IS NULL OR oi.created_at IS NULL OR oi.created_at <= i.paid_at)')
-                .whereNotIn('oi.status', require('./completion-invoice-candidate').replacedByMintStatuses()));
-            }
+            if (reportAfterPay) sameDay.whereNot((held) => heldPaymentSql(held));
           }))))
     .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL));
 }
@@ -1054,6 +1087,7 @@ module.exports = {
   issuedCloseoutVisitRefusal,
   paidInvoiceIsVisitsOnlyBill,
   reportAfterPayPaidInvoice,
+  reportAfterPayHeldVisitIds,
   approvedVisitChanged,
   invoiceIssuedDay,
   issuedDayForInvoice,

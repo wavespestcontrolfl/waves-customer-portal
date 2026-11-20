@@ -6,6 +6,12 @@
  * "Paid, report not sent" badge shows only on it (client visitInvoice.js
  * paidReportNotSent). Pre-push audit P1: without it the badge showed with the
  * gate off and on visits whose completion sends no report.
+ *
+ * `reportAfterPayHeld` (pre-push audit round 6): true only for a visit a
+ * payment holds open for its report (invoice-issued-closeout.js
+ * reportAfterPayHeldVisitIds, the held-payment rule). The badge reads it, not
+ * the row's newest bill, so a bill the office adds after the payment does not
+ * hide the report still owed. A failed lookup shows no badge.
  */
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('linked-project lookup is optional'); }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -89,5 +95,35 @@ describe('reportAfterPayEnabled', () => {
   test('the day and the week payload both carry the context flag, strictly true', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     expect(src.match(/reportAfterPayEnabled: projectCompletionContext\.reportAfterPayEnabled === true/g)).toHaveLength(2);
+  });
+});
+
+describe('reportAfterPayHeld', () => {
+  const closeout = require('../services/invoice-issued-closeout');
+  const logger = require('../services/logger');
+  const two = [{ id: 'svc-1', service_type: 'Quarterly Pest Control' }, { id: 'svc-2', service_type: 'Quarterly Pest Control' }];
+  let spy = null;
+  beforeEach(() => { mockProfile.current = ROUTINE; mockProfile.fail = false; });
+  afterEach(() => { if (spy) spy.mockRestore(); spy = null; });
+
+  test('true only for the visits the held-payment rule names', async () => {
+    spy = jest.spyOn(closeout, 'reportAfterPayHeldVisitIds').mockResolvedValue(new Set(['svc-1']));
+    const map = await loadProjectCompletionContextByServiceId(two);
+    expect(spy).toHaveBeenCalledWith(expect.anything(), ['svc-1', 'svc-2']);
+    expect(map.get('svc-1').reportAfterPayHeld).toBe(true);
+    expect(map.get('svc-2').reportAfterPayHeld).toBe(false);
+  });
+
+  test('a failed lookup shows no badge and does not fail the schedule', async () => {
+    spy = jest.spyOn(closeout, 'reportAfterPayHeldVisitIds').mockRejectedValue(new Error('connection reset'));
+    logger.warn.mockClear();
+    const map = await loadProjectCompletionContextByServiceId(two);
+    expect([map.get('svc-1').reportAfterPayHeld, map.get('svc-2').reportAfterPayHeld]).toEqual([false, false]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('report-after-pay hold lookup failed'));
+  });
+
+  test('the day and the week payload both carry the hold flag, strictly true', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(src.match(/reportAfterPayHeld: projectCompletionContext\.reportAfterPayHeld === true/g)).toHaveLength(2);
   });
 });

@@ -144,6 +144,10 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   // for a send-triggered closeout; the same-day rule has its own assertions
   // in the resolver test below, which date their visit to TODAY explicitly.
   const YESTERDAY = '2040-03-03';
+  // GATE_REPORT_AFTER_PAY holds a visit paid on its own day AFTER its technician arrived (paymentHeldVisit, pre-push audit
+  // round 6): the held fixtures arrive at 9:00 AM ET and are paid at 10:00 AM ET, both on TODAY.
+  const ARRIVED_AT = new Date(`${TODAY}T14:00:00Z`);
+  const PAID_AT = new Date(`${TODAY}T15:00:00Z`);
 
   beforeAll(() => {
     const url = new URL(process.env.DATABASE_URL);
@@ -837,8 +841,8 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   test('report after pay (GATE_REPORT_AFTER_PAY): an arrived visit paid on its own day stays open for the payment and for that day\'s sweep; the next day\'s sweep closes it', async () => {
     const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
     mockGate.reportAfterPay = true;
-    const svc = await visit({ status: 'on_site', date: TODAY });
-    const inv = await invoice({ status: 'paid', paid_at: new Date(), scheduled_service_id: svc.id, date: TODAY });
+    const svc = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
+    const inv = await invoice({ status: 'paid', paid_at: PAID_AT, scheduled_service_id: svc.id, date: TODAY });
     // The payment rail's own closeout: refused for the day, nothing completed.
     expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: svc.id });
     // The audit module is mocked here; write the row it would have written.
@@ -858,7 +862,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const { settlementFenceFor } = require('../services/intelligence-bar/record-payment-fences');
     const techId = randomUUID();
     await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
-    const svc = await visit({ status: 'on_site', date: TODAY, technician_id: techId });
+    const svc = await visit({ status: 'on_site', date: TODAY, technician_id: techId, arrived_at: ARRIVED_AT });
     const open = await invoice({ status: 'sent', scheduled_service_id: svc.id, date: TODAY });
     // Gate off: the payment closes the visit now, so the card's target is an immediate one.
     const immediate = await issuedCloseoutTarget(open, { today: TODAY, conn: trx, includeDeferred: true });
@@ -878,7 +882,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const fence = settlementFenceFor({ invoiceId: open.id, closeoutTarget: target.visitId, paymentDate: TODAY,
       closeout: { visitId: target.visitId, serviceType: target.serviceType, date: target.date, status: target.status, updatedAtMs: new Date(target.updatedAt).getTime(), resuming: false, deferred: true } });
     expect(fence.closeoutVisit).toEqual({ serviceType: svc.service_type, date: TODAY, status: 'on_site' });
-    await trx('invoices').where({ id: open.id }).update({ status: 'paid', paid_at: new Date() });
+    await trx('invoices').where({ id: open.id }).update({ status: 'paid', paid_at: PAID_AT });
     await recordApprovedPaidCloseoutTarget(open.id, fence.closeoutTarget, { conn: trx, approvedVisit: fence.closeoutVisit });
     // The audit module is mocked here; write the rows it would have written.
     const [pin] = recordAuditEvent.mock.calls.map(([event]) => event).filter((event) => event.action === 'invoice.send_closeout_target_approved');
@@ -903,13 +907,13 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   // Now, the completion and the sweep. The gate holds only a visit its paid invoice alone bills; any other closes as with it off.
   test('report after pay: a visit with another invoice on it is not held: the card names an immediate close, and the same-day payment closes it on the paid invoice, as with the gate off', async () => {
     mockGate.reportAfterPay = true;
-    const svc = await visit({ status: 'on_site', date: TODAY });
+    const svc = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
     const open = await invoice({ status: 'sent', scheduled_service_id: svc.id, date: TODAY });
     const draft = await invoice({ status: 'draft', scheduled_service_id: svc.id, date: TODAY });
     const target = await issuedCloseoutTarget(open, { today: TODAY, conn: trx, includeDeferred: true });
     expect(target).toMatchObject({ visitId: svc.id, status: 'on_site' });
     expect(target).not.toHaveProperty('deferred');
-    await trx('invoices').where({ id: open.id }).update({ status: 'paid', paid_at: new Date() });
+    await trx('invoices').where({ id: open.id }).update({ status: 'paid', paid_at: PAID_AT });
     expect(await closeOutVisitForIssuedInvoice({ invoiceId: open.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: true, visitId: svc.id });
     expect(mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout])).toEqual([[svc.id, { invoiceId: open.id, trigger: 'paid' }]]);
     // The other row is left as it was, for the office.
@@ -919,21 +923,57 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   test('report after pay: on the visit day the sweep admits a settled invoice whose visit carried another invoice at the payment, never one its invoice alone billed (a void row, or a bill made after the payment, does not count)', async () => {
     const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
     mockGate.reportAfterPay = true;
-    const paidAt = new Date();
+    const paidAt = PAID_AT;
     const before = new Date(paidAt.getTime() - 3600000);
     const after = new Date(paidAt.getTime() + 60000);
     const settled = (svc) => invoice({ status: 'paid', paid_at: paidAt, created_at: before, scheduled_service_id: svc.id, date: TODAY });
-    const shared = await visit({ status: 'on_site', date: TODAY });
+    const shared = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
     const paid = await settled(shared);
     await invoice({ status: 'draft', created_at: before, scheduled_service_id: shared.id, date: TODAY });
-    const alone = await visit({ status: 'on_site', date: TODAY });
+    const alone = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
     await settled(alone);
     await invoice({ status: 'void', created_at: before, scheduled_service_id: alone.id, date: TODAY });
-    const later = await visit({ status: 'on_site', date: TODAY });
+    const later = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
     await settled(later);
     await invoice({ status: 'draft', created_at: after, scheduled_service_id: later.id, date: TODAY });
     expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 1, retried: 1, closed: 1 });
     expect(mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout])).toEqual([[shared.id, { invoiceId: paid.id, trigger: 'paid' }]]);
+  });
+
+  // Pre-push audit round 6: the hold belongs to the payment, not to the visit's state when it is read. Only a payment made on the
+  // visit's own day after its technician arrived holds the visit: a prepayment made before the arrival, a payment on an earlier
+  // day, or one on a later day (an overdue visit paid the next day) is a payment the rule never held. The payment's closeout, the visit-day sweep, the held payment the completion reuses and the
+  // Dispatch row's flag all read the same stamps.
+  test('report after pay: only a payment made on the visit\'s own day after its technician arrived holds the visit; one made before the arrival or on another day does not, in every reader', async () => {
+    const { retryIssuedInvoiceCloseouts, reportAfterPayPaidInvoice, reportAfterPayHeldVisitIds } = require('../services/invoice-issued-closeout');
+    mockGate.reportAfterPay = true;
+    const held = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
+    const heldInv = await invoice({ status: 'paid', paid_at: PAID_AT, created_at: ARRIVED_AT, scheduled_service_id: held.id, date: TODAY });
+    // Paid at 10:00 AM ET; the technician arrived at 10:30 AM: a prepayment.
+    const paidFirst = await visit({ status: 'on_site', date: TODAY, arrived_at: new Date(PAID_AT.getTime() + 1800000) });
+    const paidFirstInv = await invoice({ status: 'paid', paid_at: PAID_AT, created_at: ARRIVED_AT, scheduled_service_id: paidFirst.id, date: TODAY });
+    // Paid the day before the visit.
+    const paidEarlier = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
+    const paidEarlierInv = await invoice({ status: 'paid', paid_at: new Date(`${YESTERDAY}T15:00:00Z`), created_at: new Date(`${YESTERDAY}T14:00:00Z`), scheduled_service_id: paidEarlier.id, date: TODAY });
+    // Yesterday's visit, its technician there yesterday, paid today: after the arrival, but not on the visit's own day.
+    const paidLate = await visit({ status: 'on_site', date: YESTERDAY, arrived_at: new Date(`${YESTERDAY}T14:00:00Z`) });
+    const paidLateInv = await invoice({ status: 'paid', paid_at: PAID_AT, created_at: new Date(`${YESTERDAY}T14:30:00Z`), scheduled_service_id: paidLate.id, date: YESTERDAY });
+    expect(await resolveVisitForIssuedInvoice(trx, heldInv, { today: TODAY, trigger: 'paid' })).toMatchObject({ svc: null, reason: 'visit_scheduled_today' });
+    expect((await resolveVisitForIssuedInvoice(trx, paidFirstInv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(paidFirst.id);
+    expect((await resolveVisitForIssuedInvoice(trx, paidEarlierInv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(paidEarlier.id);
+    expect((await resolveVisitForIssuedInvoice(trx, paidLateInv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(paidLate.id);
+    expect((await reportAfterPayPaidInvoice(trx, held))?.id).toBe(heldInv.id);
+    expect(await reportAfterPayPaidInvoice(trx, paidFirst)).toBeNull();
+    expect(await reportAfterPayPaidInvoice(trx, paidEarlier)).toBeNull();
+    expect(await reportAfterPayPaidInvoice(trx, paidLate)).toBeNull();
+    expect([...await reportAfterPayHeldVisitIds(trx, [held.id, paidFirst.id, paidEarlier.id, paidLate.id])]).toEqual([String(held.id)]);
+    // The visit-day sweep agrees: it closes the three the rule never held and leaves the held one for its technician.
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 3, retried: 3, closed: 3 });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([paidFirst.id, paidEarlier.id, paidLate.id].sort());
+    // Gate off: nothing is held.
+    mockGate.reportAfterPay = false;
+    expect(await reportAfterPayPaidInvoice(trx, held)).toBeNull();
+    expect((await reportAfterPayHeldVisitIds(trx, [held.id])).size).toBe(0);
   });
 
   // Pre-push audit round 4: a bill made after the payment must not end the hold the payment (and the record_payment card)
@@ -943,9 +983,9 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   test('report after pay: a bill made after the payment keeps the hold for the day; the next day the visit closes on the paid invoice, never on the later bill', async () => {
     const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
     mockGate.reportAfterPay = true;
-    // Paid at 10:00 AM ET on the visit's own day.
-    const paidAt = new Date(`${TODAY}T15:00:00Z`);
-    const svc = await visit({ status: 'on_site', date: TODAY });
+    // Paid at 10:00 AM ET on the visit's own day, after the technician arrived.
+    const paidAt = PAID_AT;
+    const svc = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
     // Ids that sort the later bill first: the sweep reaches it before the paid invoice.
     const paidId = 'ffffffff-ffff-4fff-bfff-fffffffffff1';
     const laterId = '00000000-0000-4000-8000-000000000001';
@@ -980,13 +1020,13 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   test('report after pay: a visit held on a statement child\'s same-day settlement closes on that child; a bill sent after it never closes the visit, in either sweep', async () => {
     const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
     mockGate.reportAfterPay = true;
-    const paidAt = new Date(`${TODAY}T15:00:00Z`);
+    const paidAt = PAID_AT;
     const [payerId] = await trx('payers').insert({ display_name: 'Fixture Bill-To' }).returning('id').then((r) => r.map((x) => x.id ?? x));
     const [statementId] = await trx('payer_statements').insert({
       payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status: 'paid', terms_snapshot: 'net30',
       token: randomUUID().replace(/-/g, ''), paid_at: paidAt,
     }).returning('id').then((r) => r.map((x) => x.id ?? x));
-    const svc = await visit({ status: 'on_site', date: TODAY });
+    const svc = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
     const child = await invoice({ status: 'paid', paid_at: paidAt, created_at: new Date(paidAt.getTime() - 3600000), payer_statement_id: statementId, scheduled_service_id: svc.id, date: TODAY });
     const madeAfter = new Date(paidAt.getTime() + 60000);
     const later = await invoice({ status: 'sent', sent_at: madeAfter, created_at: madeAfter, scheduled_service_id: svc.id, date: TODAY });
@@ -1010,9 +1050,9 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const { settlementFenceFor, pinnedColumnsOf } = require('../services/intelligence-bar/record-payment-fences');
     const { etDateString } = require('../utils/datetime-et');
     mockGate.reportAfterPay = true;
-    // The fence checks the ET day the payment runs on, so this visit is dated today.
+    // The fence checks the ET day the payment runs on, so this visit is dated today; its technician arrived an hour ago.
     const day = etDateString();
-    const svc = await visit({ status: 'on_site', date: day });
+    const svc = await visit({ status: 'on_site', date: day, arrived_at: new Date(Date.now() - 3600000) });
     const open = await invoice({ status: 'sent', scheduled_service_id: svc.id, date: day });
     const fenceFor = (deferred) => settlementFenceFor({ invoiceId: open.id, status: 'sent', updatedAtMs: null, columns: pinnedColumnsOf(open), paymentDate: day, closeoutTarget: svc.id,
       closeout: { visitId: svc.id, serviceType: svc.service_type, date: day, status: 'on_site', updatedAtMs: svc.updated_at ? new Date(svc.updated_at).getTime() : null, resuming: false, ...(deferred ? { deferred: true } : {}) } });

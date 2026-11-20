@@ -126,14 +126,25 @@ async function cleanup(f) {
 // flags); the full form posts the same names.
 const SHEET_FLAGS = { sendCompletionSms: true, includePayLink: true, requestReview: true, reviewTiming: 'auto' };
 
-async function complete(f, invoiceFields) {
+async function complete(f, invoiceFields, idempotencyKey = randomUUID()) {
   const { completeScheduledService } = require('../services/complete-scheduled-service');
-  return completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+  return completeScheduledService({ serviceId: f.serviceId, idempotencyKey,
     actor: { techRole: 'admin', technicianId: f.techId, technician: null },
     body: { customerRecap: 'Visit closed out.', visitOutcome: 'completed', products: [], areasServiced: [], ...SHEET_FLAGS, ...invoiceFields } });
 }
 
 const invoicesOf = (f) => mockPg('invoices').where({ customer_id: f.customerId });
+// A bill the office adds to the visit (an add-on draft), made at `createdAt`.
+async function laterBill(f, createdAt) {
+  const id = randomUUID();
+  await mockPg('invoices').insert({ id, customer_id: f.customerId, scheduled_service_id: f.serviceId, invoice_number: `TST-${id.slice(0, 8)}`,
+    token: randomUUID().replace(/-/g, ''), status: 'draft', total: 45, subtotal: 45, service_date: etDateString(new Date()), service_type: LAWN_TYPE,
+    created_at: createdAt, line_items: JSON.stringify([{ description: 'Fixture add-on', amount: 45, quantity: 1, unit_price: 45 }]) });
+  return id;
+}
+// The technician arrived at `arrivedAt` (the visit is on site).
+const arrive = (f, arrivedAt) => mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site', arrived_at: arrivedAt, check_in_time: arrivedAt });
+const paidAtOf = async (f) => new Date((await mockPg('invoices').where({ id: f.invoiceId }).first('paid_at')).paid_at);
 const completionTexts = () => sendCustomerMessage.mock.calls.map(([input]) => input).filter((input) => input?.purpose === 'service_completion');
 const textsWithPayLink = () => completionTexts().filter((input) => /\/pay\/|pay_url|[?&]pay=|invoice/i.test(`${input.body} ${input.metadata?.templateKey || ''}`));
 
@@ -274,13 +285,9 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
     try {
       // The technician arrived, then the customer paid: the payment left the visit open for its report.
-      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site', arrived_at: new Date(), check_in_time: new Date() });
-      const { paid_at: paidAt } = await mockPg('invoices').where({ id: f.invoiceId }).first('paid_at');
-      const laterId = randomUUID();
-      await mockPg('invoices').insert({ id: laterId, customer_id: f.customerId, scheduled_service_id: f.serviceId, invoice_number: `TST-${laterId.slice(0, 8)}`,
-        token: randomUUID().replace(/-/g, ''), status: 'draft', total: 45, subtotal: 45, service_date: etDateString(new Date()), service_type: LAWN_TYPE,
-        created_at: new Date(new Date(paidAt).getTime() + 60000),
-        line_items: JSON.stringify([{ description: 'Fixture add-on', amount: 45, quantity: 1, unit_price: 45 }]) });
+      const paidAt = await paidAtOf(f);
+      await arrive(f, new Date(paidAt.getTime() - 1800000));
+      const laterId = await laterBill(f, new Date(paidAt.getTime() + 60000));
       const out = await complete(f, {});
       expect(out.status).toBe(200);
       const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id');
@@ -290,6 +297,63 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
       expect(byId[laterId]).toMatchObject({ status: 'draft', service_record_id: null });
       expect(textsWithPayLink()).toEqual([]);
       expect(out.body.invoicePaymentActionRequired).toBe(false);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;
+      await cleanup(f);
+    }
+  });
+
+  // Pre-push audit round 6: a payment made before the technician arrived is a prepayment the rule never held, so the completion
+  // does not treat it as the visit's bill: a bill the office adds for the completion is the visit's newest row, as with the gate off.
+  test('report after pay: a payment made before the technician arrived holds nothing: the completion takes the newest bill, as with the gate off', async () => {
+    const saved = process.env.GATE_REPORT_AFTER_PAY;
+    process.env.GATE_REPORT_AFTER_PAY = 'true';
+    const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
+    try {
+      // Paid a minute ago, the technician arrived 30 s ago, then the office added the bill due at completion.
+      const now = Date.now();
+      await mockPg('invoices').where({ id: f.invoiceId }).update({ paid_at: new Date(now - 60000), created_at: new Date(now - 120000) });
+      await arrive(f, new Date(now - 30000));
+      const laterId = await laterBill(f, new Date(now - 10000));
+      const out = await complete(f, {});
+      expect(out.status).toBe(200);
+      const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id');
+      const byId = Object.fromEntries((await invoicesOf(f)).map((row) => [row.id, row]));
+      expect(byId[f.invoiceId]).toMatchObject({ status: 'paid', service_record_id: null });
+      expect(byId[laterId]).toMatchObject({ service_record_id: record.id });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;
+      await cleanup(f);
+    }
+  });
+
+  // Pre-push audit round 6: without the held payment the newest-row lookups would link, text a pay link for or charge the later
+  // bill, so a failed read fails the completion closed: the attempt is released, and the retry completes on the paid invoice.
+  test('report after pay: a failed held-payment check fails the completion closed (503, nothing linked, no pay link, no charge); the retry completes on the paid invoice', async () => {
+    const saved = process.env.GATE_REPORT_AFTER_PAY;
+    process.env.GATE_REPORT_AFTER_PAY = 'true';
+    const { chargeInvoiceWithSavedCard } = require('../services/stripe');
+    chargeInvoiceWithSavedCard.mockClear();
+    const closeout = require('../services/invoice-issued-closeout');
+    const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
+    try {
+      const paidAt = await paidAtOf(f);
+      await arrive(f, new Date(paidAt.getTime() - 1800000));
+      const laterId = await laterBill(f, new Date(paidAt.getTime() + 60000));
+      const key = randomUUID();
+      jest.spyOn(closeout, 'reportAfterPayPaidInvoice').mockRejectedValueOnce(new Error('connection reset'));
+      const first = await complete(f, {}, key);
+      expect(first).toMatchObject({ status: 503, body: { code: 'held_payment_lookup_failed' } });
+      expect((await invoicesOf(f)).map((row) => row.service_record_id)).toEqual([null, null]);
+      expect(textsWithPayLink()).toEqual([]);
+      const retry = await complete(f, {}, key);
+      expect(retry.status).toBe(200);
+      const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id');
+      const byId = Object.fromEntries((await invoicesOf(f)).map((row) => [row.id, row]));
+      expect(byId[f.invoiceId]).toMatchObject({ status: 'paid', service_record_id: record.id });
+      expect(byId[laterId]).toMatchObject({ status: 'draft', service_record_id: null });
+      expect(textsWithPayLink()).toEqual([]);
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     } finally {
       if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;

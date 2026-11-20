@@ -57,15 +57,17 @@ export function attachedVisitInvoice(service) {
 }
 
 // "Paid, report not sent" on the Dispatch phone card: a visit its technician
-// arrived at (on_site) whose attached invoice is settled. With
-// GATE_REPORT_AFTER_PAY on, a payment on the visit day no longer closes the
-// visit, so its report is still owed (owner 2026-11-19, *report after pay*).
-// The schedule row's reportAfterPayEnabled is true only while that gate is on
-// and the visit's completion sends the customer a report.
+// arrived at (on_site) that a payment holds open. With GATE_REPORT_AFTER_PAY
+// on, a payment on the visit day after the technician arrived no longer
+// closes the visit, so its report is still owed (owner 2026-11-19, *report
+// after pay*). The schedule row says so in reportAfterPayHeld (the server's
+// rule, not the row's newest bill: a bill the office adds after the payment
+// must not hide the badge), and reportAfterPayEnabled is true only while the
+// gate is on and the visit's completion sends the customer a report.
 export function paidReportNotSent(service) {
   return service?.reportAfterPayEnabled === true
-    && String(service.status || '').toLowerCase() === 'on_site'
-    && Boolean(attachedVisitInvoice(service)?.settled);
+    && service.reportAfterPayHeld === true
+    && String(service.status || '').toLowerCase() === 'on_site';
 }
 
 export function visitInvoiceStatusNote(inv) {
