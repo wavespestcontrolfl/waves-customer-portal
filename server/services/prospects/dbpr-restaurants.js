@@ -336,7 +336,7 @@ const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
  *   (visitDate, visitNumber) as the file counted for it (cited35): the missing one could be 35A. A follow-up report
  *   also lists earlier visits' rows; only a row with a note of the read visit is its own. Without the count only a
  *   35A row answers;
- * - its 35A rows were cited at the read visit: every 35A row of a routine report; on a follow-up report, for the
+ * - its own 35A rows were cited at the read visit: every 35A row of a routine report; on a follow-up report, for the
  *   first visit, a row with the initial note (the citation itself). A later visit's note is free text that may clear
  *   the sighting ("No flies observed"), so a follow-up visit's 35A rows give no answer.
  * findings holds the 35A rows cited at the visit, each with that visit's note first, cut at FINDING_TEXT_MAX.
@@ -389,12 +389,13 @@ function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNu
   // visit (a status alone counts: the violation was still open at the visit).
   const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => isVisitNote(note, visit)));
   if (!ofVisit.length) return null;
-  const rows35A = rows35.filter((row) => /^35A-/.test(row.code));
+  // The visit's own 35A rows: another visit's rows (one with no note of this visit) say nothing about this one.
+  const rows35A = ofVisit.filter((row) => /^35A-/.test(row.code));
   // Fewer of the visit's 35 rows than the file counted: the missing one could be 35A. Without the count (a row stored
   // before it was kept), only a 35A row answers: "no pests" needs the count.
   if (Number.isInteger(cited35) ? ofVisit.length < cited35 : !rows35A.length) return null;
   // 35A rows cited at the read visit: every one of a routine report; on a follow-up report only the first visit's,
-  // by the initial note. 35A rows but none cited at the visit (a follow-up visit, an earlier citation): no answer.
+  // by the initial note. The visit's 35A rows but none cited (a follow-up visit's own note): no answer.
   const cited = rows35A.filter((row) => row.notes.routine
     || (visit.number === 1 && row.notes.notes.some((note) => note.date === null)));
   if (rows35A.length && !cited.length) return null;

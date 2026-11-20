@@ -293,6 +293,9 @@ describe('parseInspectionReport', () => {
     // Two counted, one of this visit's: the other could be 35A.
     const other = '<tr><td>35B-03-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Screen torn.</td></tr>';
     expect(read(`${door('- From follow-up inspection 2026-09-03: **Time Extended**')}${other}`, 2)).toBeNull();
+    // A 35A row with no note of this visit is another visit's: it does not block this visit's answer.
+    const flies = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : High Priority - Live flies.</td></tr>';
+    expect(read(`${door('- From follow-up inspection 2026-09-03: **Time Extended**')}${flies}`, 1)).toEqual({ pestEvidence: false, findings: [] });
   });
 
   test('a page that lists fewer violation-35 rows than the file counted cannot answer: the missing one could be 35A', () => {
