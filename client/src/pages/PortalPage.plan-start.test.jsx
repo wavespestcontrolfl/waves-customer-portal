@@ -6,9 +6,11 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MyPlanTab } from './PortalPage';
 import api from '../utils/api';
 
-vi.mock('../utils/api', () => {
+vi.mock('../utils/api', async (importOriginal) => {
+  // The card's session check runs the API client's own helpers; every API call is a stub.
+  const { sameRequestSession, tokenSessionIdentity } = await importOriginal();
   const methods = {};
-  return { default: new Proxy(methods, {
+  return { sameRequestSession, tokenSessionIdentity, default: new Proxy(methods, {
     get(target, key) {
       if (typeof key !== 'string') return target[key];
       return target[key] ||= vi.fn(() => new Promise(() => {}));
@@ -170,30 +172,108 @@ it.each([
   }
 });
 
-it.each([
-  ['the API client cancels it (requestSuperseded)', () => Object.assign(new Error('Request canceled because the active account changed.'), { requestSuperseded: true }), []],
-  ['its answer is lost', lostAnswer, ['We could not confirm your estimate. Please tap again in a moment, or call us at (941) 297-5749.']],
-])('a start whose account changed while it waited, where %s, is never repeated under the new account (codex pre-push P1)', async (_label, failure, expectedAlerts) => {
-  api.token = 'token-a';
-  // Any repeat would fail too, so a wrong repeat shows up as a second call, never as a hang.
-  api.startPlan.mockRejectedValue(lostAnswer()).mockImplementationOnce(() => {
-    api.token = 'token-b'; // another account became active while the start waited
-    return Promise.reject(failure());
-  });
+// Customer access tokens as the API client reads them (header.claims.signature).
+const tokenFor = (claims) => `e30.${btoa(JSON.stringify(claims)).replace(/=+$/, '')}.sig`;
+const TAP_TOKEN = tokenFor({ customerId: 'cust-a', sessionId: 'family-a' });
+const OTHER_ACCOUNT = tokenFor({ customerId: 'cust-b', sessionId: 'family-b' });
+const REFRESHED_TAP = tokenFor({ customerId: 'cust-a', sessionId: 'family-a', iat: 2 });
+function watchAlerts() {
   const alerts = [];
   const onDialog = (event) => alerts.push(event.detail.message);
   window.addEventListener('waves:customer-dialog', onDialog);
+  return { alerts, stop: () => window.removeEventListener('waves:customer-dialog', onDialog) };
+}
+// Runs `body` with window.location.assign recorded and fake timers, then puts both back.
+async function withNavigation(body) {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const assign = vi.fn();
+  const original = window.location;
+  Object.defineProperty(window, 'location', { configurable: true, value: { ...original, assign } });
+  try {
+    await body(assign);
+  } finally {
+    Object.defineProperty(window, 'location', { configurable: true, value: original });
+    vi.useRealTimers();
+    api.token = undefined;
+  }
+}
+
+it.each([
+  ['the API client cancels it (requestSuperseded)', () => Object.assign(new Error('Request canceled because the active account changed.'), { requestSuperseded: true })],
+  ['its answer is lost', lostAnswer],
+])('a start whose session changed while it waited, where %s, is never repeated and ends with nothing filed or shown (codex pre-push P0/P1)', async (_label, failure) => {
+  api.token = TAP_TOKEN;
+  // Any repeat would fail too, so a wrong repeat shows up as a second call, never as a hang.
+  api.startPlan.mockRejectedValue(lostAnswer()).mockImplementationOnce(() => {
+    api.token = OTHER_ACCOUNT; // another account became active while the start waited
+    return Promise.reject(failure());
+  });
+  const { alerts, stop } = watchAlerts();
   try {
     await priceIt(priced(OFFER));
     fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'See my price and book' })).toBeEnabled());
     expect(api.startPlan).toHaveBeenCalledOnce();
     expect(api.createRequest).not.toHaveBeenCalled();
-    expect(alerts).toEqual(expectedAlerts);
+    expect(alerts).toEqual([]);
   } finally {
-    window.removeEventListener('waves:customer-dialog', onDialog);
+    stop();
     api.token = undefined;
   }
+});
+
+it.each([
+  ['an estimate link', () => Promise.resolve({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false })],
+  ['a refusal that files a request', () => Promise.reject(Object.assign(new Error('The price changed.'), { status: 409, code: 'offer_changed' }))],
+])('a reply that lands after another account became active is dropped: %s never reaches that account (codex pre-push P0)', async (_label, reply) => {
+  await withNavigation(async (assign) => {
+    api.token = TAP_TOKEN;
+    api.startPlan.mockImplementationOnce(() => {
+      api.token = OTHER_ACCOUNT; // the API client still answers a request whose session changed
+      return reply();
+    });
+    const { alerts, stop } = watchAlerts();
+    try {
+      await priceIt(priced(OFFER));
+      fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'See my price and book' })).toBeEnabled());
+      vi.advanceTimersByTime(1600);
+      expect(screen.queryByRole('link', { name: 'Open it now' })).toBeNull();
+      expect(assign).not.toHaveBeenCalled();
+      expect(api.createRequest).not.toHaveBeenCalled();
+      expect(alerts).toEqual([]);
+    } finally {
+      stop();
+    }
+  });
+});
+
+it('the hand-off checks the session again before it opens the estimate (codex pre-push P0)', async () => {
+  await withNavigation(async (assign) => {
+    api.token = TAP_TOKEN;
+    api.startPlan.mockResolvedValue({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false });
+    await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    await screen.findByRole('link', { name: 'Open it now' });
+    api.token = OTHER_ACCOUNT; // another account became active during the beat on screen
+    vi.advanceTimersByTime(1600);
+    expect(assign).not.toHaveBeenCalled();
+  });
+});
+
+it('a token refreshed within the same session keeps the reply: the hand-off goes ahead (codex pre-push P0)', async () => {
+  await withNavigation(async (assign) => {
+    api.token = TAP_TOKEN;
+    api.startPlan.mockImplementationOnce(() => {
+      api.token = REFRESHED_TAP; // same customer, same session: only the access token is new
+      return Promise.resolve({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false });
+    });
+    await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    expect(await screen.findByRole('link', { name: 'Open it now' })).toHaveAttribute('href', '/estimate/tok-a');
+    vi.advanceTimersByTime(1600);
+    expect(assign).toHaveBeenCalledWith('/estimate/tok-a');
+  });
 });
 
 it('turns the button off while a new answer loads: the option on screen is the old answer\'s', async () => {

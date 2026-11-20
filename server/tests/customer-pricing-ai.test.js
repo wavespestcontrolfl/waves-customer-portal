@@ -2116,11 +2116,12 @@ describe('r9: field-confident tree counts, story evidence, authoritative types, 
 
 describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
   const restart = require('../services/cancellation-resolution/restart');
-  const ask = (customer, db = null, prompt = 'I am interested in adding lawn care') => buildCustomerPricingResponse({
+  const ask = (customer, db = null, prompt = 'I am interested in adding lawn care', includePlanStartHint = true) => buildCustomerPricingResponse({
     db,
     propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
     prompt,
     customer,
+    includePlanStartHint,
   });
   // A plain account: no plan membership on the row (propertyCustomer defaults to a Bronze member).
   const plain = (overrides = {}) => propertyCustomer({
@@ -2142,6 +2143,39 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     premises = jest.spyOn(crossSell, 'customerHasOnlyPrimaryPremises').mockResolvedValue(true);
   });
   afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); premises.mockRestore(); otherProfile.mockRestore(); seed.mockRestore(); });
+
+  test('absent unless the caller asks: the report cross-sell and portal-offer answers run no plan-start reads (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain(), null, undefined, false);
+    expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in result).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+    expect(premises).not.toHaveBeenCalled();
+    expect(seed).not.toHaveBeenCalled();
+  });
+
+  test('a turf profile that cannot be read: no lawn button, as the mint refuses that price; the lawn is still priced (codex pre-push P0)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const turfReadFails = (table) => {
+      const q = dbForTables({})(table);
+      if (table === 'customer_turf_profiles') q.first = () => Promise.reject(new Error('pg down'));
+      return q;
+    };
+    // The same answer with a readable (absent) profile offers the button.
+    expect((await ask(plain(), dbForTables({}))).planStart?.optionIds?.length).toBeGreaterThan(0);
+    const result = await ask(plain(), turfReadFails);
+    expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in result).toBe(false);
+    // A pest price reads no turf facts, so its button stays.
+    const pest = await buildCustomerPricingResponse({
+      db: turfReadFails,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, lotSqFt: 7000, stories: 1 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: plain(),
+      includePlanStartHint: true,
+    });
+    expect(pest.planStart).toEqual({ optionIds: ['pest-quarterly'] });
+  });
 
   test('applies the mint\'s seed checks: no button for a price the mint would refuse (codex pre-push P1)', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
@@ -2261,6 +2295,7 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
       propertyLookup: async () => ({ enriched: { homeSqFt: 2200, propertyType: 'single_family' } }),
       prompt: 'I am interested in adding lawn care',
       customer,
+      includePlanStartHint: true,
     });
     expect((await askWith(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
     const commercial = await askWith(plain({ property_type: 'commercial' }));
@@ -2304,6 +2339,7 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
       propertyLookup: async () => ({ enriched: { homeSqFt: 2200, lotSqFt: 7000, stories: 1 } }),
       prompt: 'I am interested in adding pest control',
       customer: plain(),
+      includePlanStartHint: true,
     });
     const priced = result.options.filter((o) => o.monthly > 0 && !o.manualReview).map((o) => o.id);
     expect(priced).toEqual(['pest-quarterly', 'pest-bimonthly', 'pest-monthly']);

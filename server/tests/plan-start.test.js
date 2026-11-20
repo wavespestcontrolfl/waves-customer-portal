@@ -69,6 +69,9 @@ jest.mock('../middleware/auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/requests');
+// The portal pricing route reads its answer builder at require time, so the spy goes first.
+const pricingAnswer = jest.spyOn(require('../services/customer-pricing-ai'), 'buildCustomerPricingResponse');
+const pricingRouter = require('../routes/customer-pricing-ai');
 const restart = require('../services/cancellation-resolution/restart');
 // The route tests mock the mint; the unit tests below run the real one.
 const actualRestart = jest.requireActual('../services/cancellation-resolution/restart');
@@ -79,6 +82,7 @@ beforeAll((done) => {
   const app = express();
   app.use(express.json());
   app.use('/api/requests', router);
+  app.use('/api/customer-pricing', pricingRouter);
   app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
   server = app.listen(0, '127.0.0.1', () => { baseUrl = `http://127.0.0.1:${server.address().port}`; done(); });
 });
@@ -94,6 +98,19 @@ async function post(body = GOOD_BODY) {
   try { json = await res.json(); } catch { /* none */ }
   return { status: res.status, body: json || {} };
 }
+
+describe('POST /api/customer-pricing/query', () => {
+  test('the portal card\'s pricing answer is the one that asks for the plan-start hint (codex pre-push P1)', async () => {
+    pricingAnswer.mockResolvedValueOnce({ ok: true, options: [] });
+    const res = await fetch(`${baseUrl}/api/customer-pricing/query`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'lawn care' }),
+    });
+    expect(res.status).toBe(200);
+    expect(pricingAnswer).toHaveBeenCalledWith(expect.objectContaining({
+      customer: expect.objectContaining({ id: 'cust-1' }), prompt: 'lawn care', includePlanStartHint: true,
+    }));
+  });
+});
 
 describe('POST /api/requests/start-plan', () => {
   test('dark = 404 { error: Not found }, nothing minted, and the shared limit is not spent (codex pre-push P1)', async () => {
@@ -597,6 +614,29 @@ describe('mintPlanStartEstimate', () => {
 
     test('an unreadable estimate seed is priced by hand: its review guards could not run (codex pre-push P0)', async () => {
       await refused('pricing_unavailable', {}, { crossSell: { loadEstimateSeed: async () => { throw new Error('pg down'); } } });
+    });
+
+    test('a lawn price whose turf profile cannot be read is priced by hand; a missing profile still prices (codex pre-push P0)', async () => {
+      // The lawn area and track come from the profile: a failed read would price on older
+      // fallback facts that a stored zero-lawn profile rules out.
+      const reads = [];
+      let readFails = true;
+      const turf = { pricingAi: { ...deps().pricingAi, loadTurfProfile: async (_db, _id, options) => {
+        reads.push(options);
+        if (readFails && options?.strict) throw new Error('pg down');
+        return null;
+      } } };
+      const LAWN = { serviceKey: 'lawn_care', optionId: 'lawn-premium', shown: shownOf(PREMIUM_LAWN_LINE) };
+      await refused('pricing_unavailable', LAWN, turf);
+      expect(reads).toEqual([{ strict: true }]);
+      readFails = false;
+      recompute.mockResolvedValue(pricedAs(PREMIUM_LAWN_LINE));
+      await expect(mint(LAWN, turf)).resolves.toMatchObject({ reused: false });
+      // A pest price reads no lawn facts: the forgiving read stays, so a failed read still prices.
+      readFails = true;
+      recompute.mockResolvedValue(pricedAs(PEST_LINE));
+      await expect(mint({}, turf)).resolves.toMatchObject({ reused: false });
+      expect(reads).toEqual([{ strict: true }, { strict: true }, { strict: false }]);
     });
 
     test('the mint runs the strict premises proof: a visit whose property link cannot be resolved is priced by hand (codex pre-push P1)', async () => {

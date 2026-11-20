@@ -112,6 +112,11 @@ function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }
 // Pricing-ai speaks 'termite' for the termite_bait family (LINE_SERVICE_KEYS).
 const pricingKeyFor = (family) => (family === 'termite_bait' ? 'termite' : family);
 
+// The pricing keys whose price reads the turf profile (lawn area and grass track). A plan
+// start refuses such a price when that read fails, and the card's hint offers no button for
+// it (codex pre-push P0).
+const TURF_PRICED_KEYS = ['lawn_care'];
+
 // The seed guards a priced quote must pass (codex pre-push P0; cross-sell's
 // own tree guard): an accepted estimate at this street that carried its own
 // verification markers, or, for a Tree & Shrub price, a stored zero tree
@@ -842,10 +847,18 @@ async function mintPricedEstimate({
   // mint could not continue on the property/cache/seed fallbacks it
   // documents and would 500 on the next transactional query. A null
   // profile from a rolled-back savepoint degrades exactly as intended.
+  // A plan start reads the profile strictly for a price that reads it (codex pre-push P0): a
+  // failed read would price on older fallback measurements that a stored zero-lawn profile
+  // rules out. A missing row is not a failure. Restart keeps main's forgiving read.
+  const strictTurf = strictEvidence === true && toPrice.some((key) => TURF_PRICED_KEYS.includes(key));
   let turfProfile = null;
   try {
-    turfProfile = await trx.transaction((sp) => pricingAi.loadTurfProfile(sp, fresh.id));
+    turfProfile = await trx.transaction((sp) => pricingAi.loadTurfProfile(sp, fresh.id, { strict: strictTurf }));
   } catch (err) {
+    if (strictTurf) {
+      logger.warn(`[${logTag}] turf profile unreadable for ${fresh.id} — refusing: ${err.message}`);
+      throw new RestartUnavailableError('pricing_unavailable', handMessage);
+    }
     logger.warn(`[${logTag}] turf profile skipped for ${fresh.id}: ${err.message}`);
   }
   // Verified-correction probe discipline (codex GH r4 P1), mirrored from
@@ -1537,6 +1550,7 @@ module.exports = {
   engineResultNeedsReview,
   seedRefusesPrice,
   pricingKeyFor,
+  TURF_PRICED_KEYS,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },

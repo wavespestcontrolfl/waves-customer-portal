@@ -5,7 +5,7 @@ import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import usePortalActivity from '../hooks/usePortalActivity';
-import api from '../utils/api';
+import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
@@ -11092,51 +11092,53 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   // Opens the priced estimate (pick a time, save a card there). A pricing or eligibility refusal,
   // or a refusal before the mint ran (a 4xx with no code), falls back to today's request, so the
   // customer never hits a dead end. A failure with no sure answer asks once more (a repeat hands
-  // back the quote the first call may have made), under the tap's own credentials only: a repeat
-  // after the account changed could mint on the new account (codex pre-push P1). It never files a
-  // request, so one tap never makes both a quote and a request. Off while a new answer loads (the
-  // option on screen is the old answer's) and while an earlier start still mints (codex pre-push P1s).
+  // back the quote the first call may have made) and never files a request, so one tap never
+  // makes both a quote and a request. Off while a new answer loads (the option on screen is the
+  // old answer's) and while an earlier start still mints (codex pre-push P1s).
+  //
+  // Everything stays with the tap's own session (codex pre-push P0/P1): the API client answers a
+  // request whose session changed while it waited, so a late reply could hand this account's
+  // estimate link, or file its request, under another account. The check is the API client's own
+  // (sameRequestSession); a requestSuperseded cancel means it already failed.
   const startPlan = async () => {
     if (minting || startingPlan || requesting || loading || !selected) return;
     const seq = planStartSeq.current;
     const tapToken = api.token;
+    const tapSession = tokenSessionIdentity(tapToken);
+    const tapSessionActive = () => api.token === tapToken || sameRequestSession(tapSession, tokenSessionIdentity(api.token));
     setMinting(true);
     setStartingPlan(true);
     const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;
     const start = () => api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
     let out = null;
     let refusal = null;
-    // The API client cancels a request whose account changed while it waited (requestSuperseded).
-    // It swapped the token first, so the token check below already refuses that repeat.
-    let superseded = false;
     try {
       out = await start();
     } catch (err) {
-      superseded = err?.requestSuperseded === true;
       if (startRefused(err)) refusal = err;
-      else if (seq === planStartSeq.current && api.token === tapToken) {
-        out = await start().catch((again) => {
-          superseded = again?.requestSuperseded === true;
-          return null;
-        });
-      }
+      else if (seq === planStartSeq.current && tapSessionActive()) out = await start().catch(() => null);
     } finally {
       setMinting(false);
     }
     if (seq !== planStartSeq.current) return; // another option or a new answer took over
+    if (!tapSessionActive()) {
+      setStartingPlan(false); // another session is active now: this reply is not its own
+      return;
+    }
     if (out?.url) {
       // Same hand-off as the cancelled-plan restart: a beat on screen, plus a link if navigation is blocked.
       setPlanStartUrl(out.url);
-      planStartTimer.current = setTimeout(() => window.location.assign(out.url), 1500);
+      planStartTimer.current = setTimeout(() => {
+        if (tapSessionActive()) window.location.assign(out.url);
+      }, 1500);
       return;
     }
     setStartingPlan(false);
-    if (superseded) return; // another account is active now: this card is not its card
     if (refusal && (!refusal.code || PLAN_START_REQUEST_CODES.includes(refusal.code))) {
       await submitRequest();
       return;
     }
-    showCustomerAlert(refusal?.message || 'We could not confirm your estimate. Please tap again in a moment, or call us at (941) 297-5749.');
+    showCustomerAlert(refusal ? refusal.message : 'We could not confirm your estimate. Please tap again in a moment, or call us at (941) 297-5749.');
   };
 
   const promptChips = [

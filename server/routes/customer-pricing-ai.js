@@ -33,6 +33,8 @@ router.post('/query', pricingLimiter, async (req, res, next) => {
       prompt: value.prompt,
       targetTier: value.targetTier,
       db,
+      // The portal card is the one caller that offers "See my price and book" (GATE_PORTAL_PLAN_START).
+      includePlanStartHint: true,
     });
 
     res.json(result);

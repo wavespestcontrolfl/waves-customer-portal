@@ -739,10 +739,13 @@ describe('mintRestartEstimate', () => {
 
   test('a failing turf-profile read degrades to a null profile — the savepoint keeps the mint alive (codex GH r23 P2)', async () => {
     const d = deps();
-    d.pricingAi.loadTurfProfile = async () => { throw new Error('schema skew boom'); };
+    const reads = [];
+    d.pricingAi.loadTurfProfile = async (_db, _id, options) => { reads.push(options); throw new Error('schema skew boom'); };
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d, randomBytes: () => Buffer.from('abcdef0123456789') });
     expect(result.reused).toBe(false);
     expect(tables.estimates).toHaveLength(1);
+    // Restart keeps main's forgiving read, lawn included (plan start reads it strictly).
+    expect(reads).toEqual([{ strict: false }]);
   });
 
   test('a failing request lookup falls back to case-only correlation — the savepoint keeps the outer transaction usable (codex GH r25 P2)', async () => {
