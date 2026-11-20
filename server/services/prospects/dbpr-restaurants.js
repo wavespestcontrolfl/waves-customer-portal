@@ -128,6 +128,16 @@ function pickPhone(row) {
 // insert batch).
 const wholeNumber = (v) => (/^\d{1,9}$/.test(String(v || '').trim()) ? Number(String(v).trim()) : null);
 
+// A visit number: a whole number from 1, or null when blank or 0 (not known); undefined when it does not read
+// ("Visit 1"), which makes the row malformed, like a bad date.
+function visitNumberOf(value) {
+  const text = clean(value);
+  if (!text) return null;
+  const number = wholeNumber(text);
+  if (number === null) return undefined;
+  return number || null;
+}
+
 // The public report page's address is built from these two ids only (the page reads are the next change), so both
 // must be digits.
 const ID_RE = /^\d{1,12}$/;
@@ -163,9 +173,11 @@ function parseInspectionRows(rows, counts = {}, today = null) {
     const licenseId = clean(row['License ID'], 40);
     const eventDate = parseUsDate(row['Inspection Date']);
     const cited = wholeNumber(row['Violation 35']);
+    const visitNumber = visitNumberOf(row['Visit Number']);
     // A row without both report ids is left out: its report could never be read, and once stored it would block a
     // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
-    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || (today && eventDate > today) || cited === null) {
+    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || (today && eventDate > today) || cited === null
+      || visitNumber === undefined) {
       counts.malformed += 1;
       continue;
     }
@@ -193,7 +205,7 @@ function parseInspectionRows(rows, counts = {}, today = null) {
         violation35: cited,
         // Which visit of the inspection this is: only the first visit's report page answers. A 0 or a blank is not
         // known: null, so a re-read of a later file fills it.
-        visitNumber: wholeNumber(row['Visit Number']) || null,
+        visitNumber,
       },
     });
   }
@@ -298,9 +310,15 @@ async function upsertRecords(records) {
   return n;
 }
 
-async function pendingInspections({ cutoff, limit }) {
+// The unanswered first visits to read, newest first, at most `limit`: inspections of the window (event_date on or
+// after `cutoff`) under the attempt cap, whose key is in `keys`. `keys` holds the visits the run's own good read of
+// the inspection file lists as first visits with a violation-35 citation, so a visit a later file corrected, dropped
+// or replayed from an older file is never read. No keys, no rows.
+async function pendingInspections({ cutoff, limit, keys }) {
+  if (!Array.isArray(keys) || !keys.length) return [];
   const rows = await db('restaurant_prospects')
     .where({ kind: 'inspection' })
+    .whereIn('source_key', keys)
     .whereNull('pest_evidence')
     .where('detail_attempts', '<', REPORT_MAX_ATTEMPTS)
     .where('event_date', '>=', cutoff)

@@ -125,12 +125,17 @@ describe('parseInspectionRows', () => {
     });
   });
 
-  test('a visit number of 0, or blank, is not known: stored as null, so a re-read of a later file fills it', () => {
+  test('a visit number of 0, or blank, is not known (null); one that does not read is a malformed row', () => {
     const row = (number) => inspRow({ visit: '9012' }).replace('"34208","1","1","Food"', `"34208","1","${number}","Food"`);
     expect(row('0')).toContain('"34208","1","0","Food"');
     const visitNumber = (number) => svc.parseInspectionRows(parseDbprCsv(inspCsv([row(number)])))[0].detail.visitNumber;
     for (const number of ['0', '00', '', ' ']) expect(visitNumber(number)).toBeNull();
     expect(visitNumber('2')).toBe(2);
+    for (const number of ['Visit 1', '-1', '1.5', 'one']) {
+      const counts = { malformed: 0, valid: 0 };
+      expect(svc.parseInspectionRows(parseDbprCsv(inspCsv([row(number), inspRow({ visit: '9013' })])), counts).map((r) => r.source_key)).toEqual(['9013']);
+      expect(counts).toEqual({ malformed: 1, valid: 1 });
+    }
   });
 });
 

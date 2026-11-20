@@ -184,7 +184,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(found.map((r) => r.business_name)).toEqual(['SAMPLE DINER TWO']);
   });
 
-  test('pending reads only unanswered first visits under 3 attempts inside the window, newest first', async () => {
+  test('pending reads only unanswered first visits under 3 attempts inside the window, newest first, of the keys given', async () => {
     const first = (violation35) => ({ disposition: 'Warning Issued', violation35, visitNumber: 1 });
     await svc.upsertRecords([
       rec(10, { event_date: '2026-10-21', detail: first(1) }),
@@ -199,8 +199,9 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     const id = (n) => stored.find((r) => r.source_key === key(n)).id;
     await db('restaurant_prospects').where({ id: id(13) }).update({ detail_attempts: 3 });
     await svc.bumpAttempts(id(10));
-    const pending = async () => (await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100 }))
-      .filter((p) => [10, 11, 12, 13, 14, 15, 16].some((n) => p.id === id(n)));
+    // The keys of the run's own good read: every visit above.
+    const keys = [10, 11, 12, 13, 14, 15, 16].map(key);
+    const pending = async (given = keys) => svc.pendingInspections({ cutoff: '2026-10-05', limit: 100, keys: given });
     const mine = await pending();
     expect(mine.map((p) => p.id)).toEqual([id(11), id(10)]);
     // The file's count and visit number ride along with the visit's date.
@@ -208,8 +209,13 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     // The old row becomes eligible once a re-read of the file fills its visit number.
     await svc.upsertRecords([rec(16, { event_date: '2026-11-19', detail: first(1) })]);
     expect((await pending()).map((p) => p.id)).toEqual([id(16), id(11), id(10)]);
-    const [one] = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 1 });
-    expect(one).toBeDefined();
+    const [one] = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 1, keys });
+    expect(one.id).toBe(id(16));
+    // A visit the run's read does not list (a later file corrected it to no citation, or dropped it) is never read,
+    // and no keys means no rows.
+    expect((await pending(keys.filter((k) => k !== key(11)))).map((p) => p.id)).toEqual([id(16), id(10)]);
+    expect(await pending([])).toEqual([]);
+    expect(await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100 })).toEqual([]);
     expect((await rows().where({ id: id(10) }))[0].detail_attempts).toBe(1);
   });
 });
