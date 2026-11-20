@@ -112,6 +112,25 @@ describe('MobileDispatchList closeout-owed badge', () => {
   });
 });
 
+describe('MobileDispatchList paid-report badge', () => {
+  it('flags an arrived stop whose attached invoice is paid, and no other stop', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const invoice = { checkoutInvoiceId: 'inv-1', checkoutInvoiceTotal: 115, checkoutInvoiceStatus: 'paid' };
+    const paidOnSite = { ...SERVICE, ...invoice, id: 'svc-paid', status: 'on_site', technicianId: 'tech-1' };
+    const unpaidOnSite = { ...SERVICE, ...invoice, id: 'svc-unpaid', customerName: 'Unpaid Customer', status: 'on_site', checkoutInvoiceStatus: 'sent', technicianId: 'tech-1' };
+    const paidDone = { ...SERVICE, ...invoice, id: 'svc-done', customerName: 'Done Customer', status: 'completed', technicianId: 'tech-1' };
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[paidOnSite, unpaidOnSite, paidDone]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getAllByText('Paid, report not sent')).toHaveLength(1);
+  });
+});
+
 describe('MobileDispatchList protocol opener', () => {
   it('focuses the trigger before opening the protocol panel', () => {
     let focusedAtOpen = null;

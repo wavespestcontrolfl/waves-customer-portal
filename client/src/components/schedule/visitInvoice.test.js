@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
+import { attachedVisitInvoice, paidReportNotSent, visitInvoiceStatusNote } from './visitInvoice';
 
 const ACCEPT_MINTED_FIRST_VISIT = {
   estimatedPrice: 115,
@@ -113,5 +113,22 @@ describe('visitInvoiceStatusNote', () => {
       .toBe('Refunded — not collectible; bill via a new invoice.');
     expect(visitInvoiceStatusNote(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceStatus: 'cancelled' })))
       .toBe('Canceled — not collectible; bill via a new invoice.');
+  });
+});
+
+describe('paidReportNotSent', () => {
+  it('marks only an arrived visit whose attached invoice is paid or covered', () => {
+    const paidOnSite = { ...ACCEPT_MINTED_FIRST_VISIT, status: 'on_site', checkoutInvoiceStatus: 'paid' };
+    expect(paidReportNotSent(paidOnSite)).toBe(true);
+    expect(paidReportNotSent({ ...paidOnSite, checkoutInvoiceStatus: 'prepaid' })).toBe(true);
+    // Money not in yet: the card keeps its usual state.
+    expect(paidReportNotSent({ ...paidOnSite, checkoutInvoiceStatus: 'sent' })).toBe(false);
+    expect(paidReportNotSent({ ...paidOnSite, checkoutInvoiceStatus: 'processing' })).toBe(false);
+    // Not arrived yet, or the report is already done.
+    expect(paidReportNotSent({ ...paidOnSite, status: 'en_route' })).toBe(false);
+    expect(paidReportNotSent({ ...paidOnSite, status: 'completed' })).toBe(false);
+    // No attached invoice.
+    expect(paidReportNotSent({ status: 'on_site' })).toBe(false);
+    expect(paidReportNotSent(null)).toBe(false);
   });
 });

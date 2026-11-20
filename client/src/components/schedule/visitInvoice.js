@@ -56,6 +56,15 @@ export function attachedVisitInvoice(service) {
   };
 }
 
+// "Paid, report not sent" on the Dispatch phone card: a visit its technician
+// arrived at (on_site) whose attached invoice is settled. With
+// GATE_REPORT_AFTER_PAY on, a payment on the visit day no longer closes the
+// visit, so its report is still owed (owner 2026-11-19, *report after pay*).
+export function paidReportNotSent(service) {
+  return String(service?.status || '').toLowerCase() === 'on_site'
+    && Boolean(attachedVisitInvoice(service)?.settled);
+}
+
 export function visitInvoiceStatusNote(inv) {
   if (!inv) return '';
   if (inv.status === 'prepaid') return 'Covered by account credit — nothing to collect.';

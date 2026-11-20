@@ -34,8 +34,8 @@ jest.mock('../services/service-completion-profiles', () => {
 });
 // The gate table is built at module load from process.env; the test flips
 // the gate through a mock instead of racing the require.
-const mockGate = { on: true };
-jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false, reviewLateCloseAskLive: () => false, gateEnvTimestamp: () => null, isEnabled: (gate) => gate === 'invoiceIssuedClosesVisit' && mockGate.on }));
+const mockGate = { on: true, reportAfterPay: false };
+jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false, reviewLateCloseAskLive: () => false, gateEnvTimestamp: () => null, isEnabled: (gate) => gate === 'invoiceIssuedClosesVisit' && mockGate.on, reportAfterPayLive: () => mockGate.reportAfterPay === true }));
 const { randomUUID } = require('node:crypto');
 const {
   resolveVisitForIssuedInvoice,
@@ -96,6 +96,22 @@ describe('backfillCompletionPlan same-day switch', () => {
     }
   });
 
+  test('report after pay (GATE_REPORT_AFTER_PAY, owner 2026-11-19): a payment on the visit day no longer closes an arrived visit; a past day still does', () => {
+    const rule = (status, day, trigger) => issuedCloseoutVisitRefusal(status, day, { today: '2040-03-04', trigger });
+    mockGate.reportAfterPay = true;
+    try {
+      expect(rule('on_site', '2040-03-04', 'paid')).toBe('visit_scheduled_today');
+      expect(rule('on_site', '2040-03-04', 'sent')).toBe('visit_scheduled_today');
+      expect(rule('on_site', '2040-03-03', 'paid')).toBeNull();
+      expect(rule('on_site', '2040-03-03', 'sent')).toBeNull();
+      // A visit nobody arrived at keeps the prepayment rule.
+      expect(rule('confirmed', '2040-03-04', 'paid')).toBe('visit_scheduled_today');
+    } finally {
+      mockGate.reportAfterPay = false;
+    }
+    expect(rule('on_site', '2040-03-04', 'paid')).toBeNull();
+  });
+
   test('the panel rule stays past-only; the internal issued-invoice trigger admits today, never the future', () => {
     const base = { backfill: true, role: 'admin', today: '2040-03-04' };
     expect(backfillCompletionPlan({ ...base, scheduledDate: '2040-03-04' }).error.code).toBe('backfill_not_past');
@@ -133,6 +149,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   });
   beforeEach(async () => {
     mockGate.on = true;
+    mockGate.reportAfterPay = false;
     mockProbe.packetAssert = null;
     mockProbe.profile = null;
     mockProbe.profileCalls = [];
@@ -811,6 +828,23 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     for (const [args] of mockCompleteScheduledService.mock.calls) expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
     mockGate.on = false;
     expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 0, retried: 0, closed: 0 });
+  });
+
+  test('report after pay (GATE_REPORT_AFTER_PAY): an arrived visit paid on its own day stays open for the payment and for that day\'s sweep; the next day\'s sweep closes it', async () => {
+    const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
+    mockGate.reportAfterPay = true;
+    const svc = await visit({ status: 'on_site', date: TODAY });
+    const inv = await invoice({ status: 'paid', paid_at: new Date(), scheduled_service_id: svc.id, date: TODAY });
+    // The payment rail's own closeout: refused for the day, nothing completed.
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: svc.id });
+    // The audit module is mocked here; write the row it would have written.
+    await trx('audit_log').insert({ actor_type: 'system', action: 'visit.completion_on_invoice_issued_refused', resource_type: 'scheduled_services', resource_id: svc.id, metadata: JSON.stringify({ invoiceId: inv.id, trigger: 'paid', code: 'visit_scheduled_today' }) });
+    // The sweep on the visit day does not pick it up.
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 0, retried: 0, closed: 0 });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    // The day after: the refusal was about the day, so the sweep closes the visit quietly.
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: '2040-03-05' })).toEqual({ candidates: 1, retried: 1, closed: 1 });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout.trigger])).toEqual([[svc.id, 'paid']]);
   });
 
   test('a refused completion is reported, audited as refused, and never thrown', async () => {

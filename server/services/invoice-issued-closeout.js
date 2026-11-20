@@ -11,7 +11,7 @@
 // invoice is explicitly linked to — never inferred) and asks for the closeout.
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, reportAfterPayLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 
 // A visit the technician has NOT started (job-status.js live vocabulary,
@@ -24,7 +24,8 @@ const OPEN_VISIT_STATUSES = ['pending', 'confirmed'];
 // so refusing on_site left the closeout with nothing to close: from the gate
 // flip (2026-09-24) to 2026-10-04 it closed no visit at all. An arrived visit
 // closes like an unstarted one once its day has passed; on its own day only
-// money received closes it (see issuedCloseoutVisitRefusal). en_route is NOT
+// money received closes it, and with GATE_REPORT_AFTER_PAY on nothing does
+// (see issuedCloseoutVisitRefusal). en_route is NOT
 // here: nobody has reached the property, so the visit stays with its
 // technician. The r9 P1 concern (#4127: a quiet closeout would complete a
 // visit whose job timer is still running) is answered by its real condition
@@ -90,7 +91,10 @@ function newestStamp(...values) {
 //  - ARRIVED (on_site): the technician was there. A past day closes on a
 //    send or a payment; today closes only on money received (a send proves
 //    nothing about today — the office picker sends pre-completion invoices
-//    before the tech arrives, Codex P1 r7 #4131).
+//    before the tech arrives, Codex P1 r7 #4131). With GATE_REPORT_AFTER_PAY
+//    on, today never closes (owner 2026-11-19, *report after pay*): the visit
+//    stays with its technician, who sends the report on the paid invoice, and
+//    the daily retry sweep closes it once its day has passed.
 //  - UNSTARTED (pending / confirmed / NULL): nobody is known to have gone, so
 //    the INVOICE must carry the proof: it was settled / delivered on a LATER
 //    ET day than the visit (`issuedDay`, from the invoice's own stamps).
@@ -113,7 +117,7 @@ function issuedCloseoutVisitRefusal(status, scheduledDate, { today = etDateStrin
   if (!arrived && !isLiveVisitStatus(status)) return `visit_${status}`;
   const day = dateOnly(scheduledDate);
   if (!day || day > today) return 'visit_in_future';
-  if (day === today) return arrived && trigger === 'paid' ? null : 'visit_scheduled_today';
+  if (day === today) return arrived && trigger === 'paid' && !reportAfterPayLive() ? null : 'visit_scheduled_today';
   if (arrived) return null;
   // Never later than the call: a stamp from the future proves nothing yet.
   const proofDay = issuedDay && issuedDay < today ? issuedDay : today;
@@ -327,15 +331,19 @@ const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempt
 // The rule's status + day admission, as SQL, for both sweeps: an unstarted
 // visit on a past day; an arrived one on a past day, or today when the
 // invoice / statement is SETTLED (`settledSql`, a boolean SQL expression —
-// a send never closes a same-day visit) — or a visit already completed with
-// THIS closeout's own attempt still parked.
+// a send never closes a same-day visit) and GATE_REPORT_AFTER_PAY is off (on,
+// today never closes) — or a visit already completed with THIS closeout's own
+// attempt still parked.
 function retryableVisitFilter(q, today, settledSql) {
+  const sameDayClosesOnPayment = !reportAfterPayLive();
   return q
     .where((open) => open
       .where((unstarted) => unstarted.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<', today))
       .orWhere((arrived) => arrived.whereIn('s.status', ARRIVED_VISIT_STATUSES)
-        .where((day) => day.where('s.scheduled_date', '<', today)
-          .orWhere((sameDay) => sameDay.where('s.scheduled_date', '=', today).whereRaw(settledSql)))))
+        .where((day) => {
+          day.where('s.scheduled_date', '<', today);
+          if (sameDayClosesOnPayment) day.orWhere((sameDay) => sameDay.where('s.scheduled_date', '=', today).whereRaw(settledSql));
+        })))
     .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL));
 }
 
