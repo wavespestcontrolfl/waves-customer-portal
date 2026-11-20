@@ -7,13 +7,30 @@ const mockRaw = jest.fn();
 // A read inside the snapshot transaction reaches mockRaw with a third argument, 'snapshot', so a test can tell them apart.
 const mockSnapshots = [];
 jest.mock('../models/db', () => {
-  const db = () => { throw new Error('the builders list uses raw SQL only'); };
+  // A builder query is a real knex builder with no connection: awaiting it sends the SQL and bindings it built to
+  // mockRaw, so a test sees builder queries the same way as raw ones.
+  const knex = jest.requireActual('knex')({ client: 'pg' });
+  const db = (table) => {
+    const qb = knex(table);
+    qb.then = (resolve, reject) => {
+      const { sql, bindings } = qb.toSQL();
+      return Promise.resolve().then(() => mockRaw(sql, bindings)).then((result) => result.rows).then(resolve, reject);
+    };
+    return qb;
+  };
   db.raw = (...args) => mockRaw(...args);
   db.transaction = async (work, options) => {
     mockSnapshots.push(options);
     return work({ raw: (sql, bindings) => mockRaw(sql, bindings, 'snapshot') });
   };
   return db;
+});
+
+// The shared live-customer rule, wrapped so a test can see the list call it.
+const mockLiveCustomer = jest.fn();
+jest.mock('../services/customer-stages', () => {
+  const actual = jest.requireActual('../services/customer-stages');
+  return { ...actual, whereLiveCustomer: (qb) => { mockLiveCustomer(); return actual.whereLiveCustomer(qb); } };
 });
 
 const { builderKey, mergeBuilders, cutoffsFor, listBuilders, builderPermits } = require('../services/prospects/builder-list');
@@ -131,7 +148,7 @@ describe('listBuilders', () => {
   function answer({ groups = [], newest = null, customers = [] } = {}) {
     mockRaw.mockImplementation(async (sql) => {
       if (/MAX\(issued_date\) AS newest/.test(sql)) return { rows: [{ newest }] };
-      if (/FROM customers/.test(sql)) return { rows: customers };
+      if (/from "customers"/.test(sql)) return { rows: customers };
       return { rows: groups };
     });
   }
@@ -184,18 +201,26 @@ describe('listBuilders', () => {
     expect(inSnapshot).toEqual([expect.stringMatching(/AS newest/), expect.stringMatching(/GROUP BY/)]);
   });
 
-  test('the customer lookup counts only live customers (the shared stages), never a CRM lead row', async () => {
+  test('the customer lookup is the shared live-customer rule itself, so a CRM lead row is never a customer', async () => {
     answer({ newest: '2026-11-16' });
+    mockLiveCustomer.mockClear();
     await listBuilders({ kind: 'pool', now: new Date('2026-11-19T15:00:00Z') });
-    const [sql, bindings] = mockRaw.mock.calls.find(([text]) => /FROM customers/.test(text));
-    expect(sql).toMatch(/WHERE active AND deleted_at IS NULL AND pipeline_stage IN \(\?, \?, \?\)/);
-    expect(bindings).toEqual(require('../services/customer-stages').CUSTOMER_STAGES);
-    expect(bindings).toEqual(['active_customer', 'won', 'at_risk']);
+    expect(mockLiveCustomer).toHaveBeenCalledTimes(1);
+    const [sql, bindings] = mockRaw.mock.calls.find(([text]) => /from "customers"/.test(text));
+    expect(sql).toMatch(/"deleted_at" is null and "pipeline_stage" in \(\?, \?, \?\)/);
+    expect(sql).toMatch(/union select "company_name" as "name" from "payers"/);
+    expect(bindings).toEqual(expect.arrayContaining(['active_customer', 'won', 'at_risk']));
+  });
+
+  test('with no permit on file yet, the answer has no week to name and no builders', async () => {
+    answer({ newest: null });
+    const result = await listBuilders({ kind: 'pool', now: new Date('2026-11-19T15:00:00Z') });
+    expect(result).toEqual({ kind: 'pool', dataThrough: null, week: null, builders: [] });
   });
 
   test('a failed customer lookup fails the list, so no customer is shown as a fresh prospect', async () => {
     mockRaw.mockImplementation(async (sql) => {
-      if (/FROM customers/.test(sql)) throw new Error('boom');
+      if (/from "customers"/.test(sql)) throw new Error('boom');
       if (/AS newest/.test(sql)) return { rows: [{ newest: '2026-11-16' }] };
       return { rows: [{ name: 'ACME POOLS INC', license: 'CPC3', permits7: 0, permits30: 0, permits90: 1, permits365: 1, first_permit: '2026-02-01', last_permit: '2026-10-01' }] };
     });
