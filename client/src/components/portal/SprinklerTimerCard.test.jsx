@@ -49,12 +49,13 @@ it('asks the phone-app question for exactly the timers the server takes an answe
   }
 });
 
-it('says so when the timer did not save, and does not call it on file', () => {
+it('calls the timer on file only once the server holds it, and says why when it was refused', () => {
   const { rerender } = render(<SprinklerTimerCard brand="hunter" model="x2" error="The home on this account changed. Reload, then set the sprinkler timer again." onChange={vi.fn()} />);
   expect(screen.getByRole('alert')).toHaveTextContent('We could not save your timer. The home on this account changed.');
   expect(screen.getByText('Not saved')).toBeInTheDocument();
-  expect(screen.queryByText('On file')).not.toBeInTheDocument();
   rerender(<SprinklerTimerCard brand="hunter" model="x2" onChange={vi.fn()} />);
+  expect(screen.getByText('Not saved yet')).toBeInTheDocument();
+  rerender(<SprinklerTimerCard brand="hunter" model="x2" saved onChange={vi.fn()} />);
   expect(screen.getByText('On file')).toBeInTheDocument();
 });
 

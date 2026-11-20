@@ -64,9 +64,11 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
       preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' },
       hasLawnCare: true,
     });
-    api.updatePropertyPreferences.mockResolvedValue({ saved: true, preferences: {} });
+    // The server answers with the row it now holds.
+    api.updatePropertyPreferences.mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...payload } }));
     render(<PropertyTab customer={lawnCustomer} />);
     expect(await screen.findByText('Hunter X2')).toBeInTheDocument();
+    expect(screen.getByText('On file')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'true');
     // The plan card reads the week's plan once when it mounts; take the count after that read.
     await waitFor(() => expect(api.getWateringPlan).toHaveBeenCalled());
@@ -75,28 +77,34 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Change my timer' }));
     fireEvent.click(screen.getByRole('button', { name: /^Pro-C/ }));
     expect(await screen.findByText('Hunter Pro-C')).toBeInTheDocument();
+    // Not on file until the server holds it.
+    expect(screen.getByText('Not saved yet')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'false');
     await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 8000 });
     expect(api.updatePropertyPreferences).toHaveBeenCalledWith(expect.objectContaining({
       irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: null,
     }));
+    expect(await screen.findByText('On file')).toBeInTheDocument();
     // A timer is not a watering input: recording one does not reload the week's plan.
     expect(api.getWateringPlan.mock.calls.length).toBe(planReads);
   }, 15000); // real autosave timer (about a second) plus two awaited renders: room for a loaded CI runner
 
   // The server refuses a timer whole (all three fields, one reason), as a 400 when the timer was the batch's only
-  // change. The card must show that reason and stop calling the timer on file.
-  it('a timer the server refuses shows its reason, and the card no longer calls it on file', async () => {
+  // change: the card shows that reason. A network failure re-queues the edit with no reason. Neither is on file.
+  const REFUSED = 'The home on this account changed. Reload, then set the sprinkler timer again.';
+  it.each([
+    ['refused, with its reason', Object.assign(new Error(REFUSED), {
+      rejected: ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'].map((field) => ({ field, message: REFUSED })),
+    }), `We could not save your timer. ${REFUSED}`, 'Not saved'],
+    ['lost to a network failure', new Error('Failed to fetch'), 'Could not save. Please check your connection and try again.', 'Not saved yet'],
+  ])('a timer whose save is %s is not called on file', async (_case, failure, shown, status) => {
     api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: true });
-    const message = 'The home on this account changed. Reload, then set the sprinkler timer again.';
-    const refusal = Object.assign(new Error(message), {
-      rejected: ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'].map((field) => ({ field, message })),
-    });
-    api.updatePropertyPreferences.mockRejectedValue(refusal);
+    api.updatePropertyPreferences.mockRejectedValue(failure);
     render(<PropertyTab customer={lawnCustomer} />);
     fireEvent.click(await screen.findByRole('button', { name: /^X2/ }));
-    expect(await screen.findByText(`We could not save your timer. ${message}`, {}, { timeout: 8000 })).toBeInTheDocument();
-    expect(screen.getByText('Not saved')).toBeInTheDocument();
+    expect(await screen.findByText(shown, {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.getByText(status)).toBeInTheDocument();
+    expect(screen.queryByText('On file')).not.toBeInTheDocument();
     expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
   }, 15000);
 

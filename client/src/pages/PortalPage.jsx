@@ -8664,6 +8664,11 @@ const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationWaterSource', 'irrigationIssues',
 ]);
 
+// The sprinkler timer on file as one comparable value: the card calls the timer on screen "On file" only when it is
+// the one the server last returned.
+const sprinklerTimerKey = (p) => ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp']
+  .map((field) => p?.[field] ?? '').join('|');
+
 // Away Watch dates. The pair saves whole or not at all, so nothing is sent until both days are chosen (one autosave
 // carries both); clearing both, or Remove, sends two nulls. A draft that loses a day before its autosave leaves
 // withdraws the queued pair (withdrawPair), so a pair the screen no longer shows never saves.
@@ -8787,6 +8792,8 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   const awayWatchPairRevision = useRef(0);
   const [wateringPlanRevision, setWateringPlanRevision] = useState(0);
   const [savedWateringRevision, setSavedWateringRevision] = useState(0);
+  // The sprinkler timer the server holds: the load, then every save response (sprinklerTimerKey).
+  const [savedTimerKey, setSavedTimerKey] = useState(null);
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
@@ -8796,6 +8803,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         setPrefs(d.preferences);
         lastSavedRef.current = d.preferences;
         screenStampRef.current = d.preferences?.irrigationHomeChangedAt ?? null;
+        setSavedTimerKey(sprinklerTimerKey(d.preferences));
         // Server-side lawn eligibility (tier / turf type OR recurring lawn
         // service evidence) — the same test the PUT applies to Weekly
         // Inches, so the field never renders and then drops on save.
@@ -8859,7 +8867,10 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         const savingAwayWatchRevision = awayWatchPairRevision.current;
         try {
           const result = await api.updatePropertyPreferences(toSave);
-          if (result && result.preferences) lastSavedRef.current = result.preferences;
+          if (result && result.preferences) {
+            lastSavedRef.current = result.preferences;
+            setSavedTimerKey(sprinklerTimerKey(result.preferences));
+          }
           // A pair the member withdrew while this save was in flight saved anyway: show the window the server now
           // holds, so the summary (and the inputs, when the section reopens) never hide an active Away Watch. A newer
           // Away Watch edit still queued (Remove, a new pair) wins: saves run one after another, so it is still in
@@ -9497,6 +9508,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         brand={prefs.irrigationControllerBrand}
         model={prefs.irrigationControllerModel}
         app={prefs.irrigationControllerApp}
+        saved={sprinklerTimerKey(prefs) === savedTimerKey}
         error={fieldErrors.irrigationControllerBrand || fieldErrors.irrigationControllerModel || fieldErrors.irrigationControllerApp}
         onChange={(fields) => Object.entries(fields).forEach(([field, value]) => updateField(field, value))}
       />}
