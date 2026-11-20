@@ -351,6 +351,24 @@ export function backfillCheckboxHint({ backfillCloseout = false, reviewAskGoes =
     : "Records to the visit day, sends no customer messages, and skips auto-charge.";
 }
 
+// The one-shot send-time-preview read the panel makes while its review box is off. `apply(data)` gets each answer (null =
+// a failed read) unless stopped. With `retry` (a backdated closeout, whose ask stays suppressed until an answer says
+// otherwise) a failed read is read again every `intervalMs`, the normal poll's interval, until one answer lands. The returned
+// function stops it: the box was unchecked, the panel closed, or the effect re-ran.
+export function runPreviewReadWithRetry({ read, apply, retry = false, intervalMs = 60 * 1000 }) {
+  let gone = false;
+  let timer = null;
+  const stopTimer = () => { if (timer !== null) { clearInterval(timer); timer = null; } };
+  const attempt = () => read().then((data) => {
+    if (gone) return;
+    apply(data);
+    if (data) stopTimer();
+  });
+  attempt();
+  if (retry) timer = setInterval(attempt, intervalMs);
+  return () => { gone = true; stopTimer(); };
+}
+
 // The preview's own verdict on the first ask, only when the server sent one (no visit named: no key).
 export const firstReviewAskFrom = (preview) => (typeof preview?.firstReviewAsk === "boolean" ? preview.firstReviewAsk : null);
 

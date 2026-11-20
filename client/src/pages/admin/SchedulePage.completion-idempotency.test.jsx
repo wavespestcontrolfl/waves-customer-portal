@@ -297,7 +297,10 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
   it("the late-close read lands only for the active request and a failed read clears it (source contract)", () => {
     const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
     // One-shot read: skipped once the effect is cleaned up; a failed read (null) sets false.
-    expect(src).toMatch(/if \(!gone\) setReviewLateCloseAskKept\(lateCloseAskKeptFrom\(data\)\);/);
+    expect(src).toMatch(/return runPreviewReadWithRetry\(\{\s*\n\s*read: fetchReviewSendPreview,\s*\n\s*retry: backfillQuietCloseout,/);
+    expect(src).toMatch(/\/\/ A failed read never keeps the late-close ask: fewer texts\.\s*\n\s*setReviewLateCloseAskKept\(lateCloseAskKeptFrom\(data\)\);/);
+    // The effect re-runs when the backdate box changes, so a retry stops when it is unchecked.
+    expect(src).toMatch(/\[service\?\.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly, backfillQuietCloseout\]/);
     // Poll: set only after the cancellation check, so an obsolete response cannot overwrite the verdict.
     const cancelAt = src.indexOf("if (cancelled) return;\n      // Only the active request sets it");
     const setAt = src.indexOf("setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));", cancelAt);

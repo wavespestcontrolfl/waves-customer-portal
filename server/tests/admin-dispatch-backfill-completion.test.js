@@ -76,7 +76,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseFirstAskEligible, firstAskCustomerMoved, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
+const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseFirstAskEligible, firstAskCustomerMoved, effectiveReviewAskDecision, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
@@ -994,6 +994,24 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
     expect(frozenResumeCompletionState({ requestReview: true }).lateCloseReviewKept).toBe(false);
   });
 
+  describe('effectiveReviewAskDecision: a kept ask reads only its frozen verdict', () => {
+    test('a resumed backfill whose frozen ask was kept still asks after the recap gate (reviewAskAllowed) or a body suppression changed', () => {
+      const frozen = frozenResumeCompletionState({ backfill: true, requestReview: true });
+      expect(frozen.lateCloseReviewKept).toBe(true);
+      // standardRequestReview is false: the live re-check now refuses (recap gate flipped off / suppression on the retry body).
+      expect(effectiveReviewAskDecision({ lateCloseReviewKept: frozen.lateCloseReviewKept, packetEffects: false, standardRequestReview: false })).toBe(true);
+    });
+    test('a frozen "no ask" stays no ask, and the packet-effects guard still wins', () => {
+      const frozen = frozenResumeCompletionState({ backfill: true, requestReview: false });
+      expect(frozen.lateCloseReviewKept).toBe(false);
+      // A backfill's standard decision is silenced (suppressTypedCustomerComms), so a frozen no-ask stays no ask.
+      expect(effectiveReviewAskDecision({ lateCloseReviewKept: frozen.lateCloseReviewKept, packetEffects: false, standardRequestReview: false })).toBe(false);
+      // Every other completion keeps its live decision.
+      expect(effectiveReviewAskDecision({ lateCloseReviewKept: false, packetEffects: false, standardRequestReview: true })).toBe(true);
+      expect(effectiveReviewAskDecision({ lateCloseReviewKept: true, packetEffects: true, standardRequestReview: true })).toBe(false);
+    });
+  });
+
   describe('firstAskCustomerMoved: the first-ask choice is for the customer it was checked for', () => {
     test('no check run, or the same customer (number or string): not moved', () => {
       expect(firstAskCustomerMoved(null, { customer_id: 'c-1' })).toBe(false);
@@ -1046,7 +1064,7 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
     });
 
     test('a kept ask is let through the backfill comms silence, and ONLY the ask (the completion text stays forced off)', () => {
-      expect(src).toMatch(/&& \(!suppressTypedCustomerComms \|\| lateCloseReviewKept\)/);
+      expect(src).toMatch(/const effectiveRequestReview = effectiveReviewAskDecision\(\{ lateCloseReviewKept, packetEffects, standardRequestReview \}\);/);
       const forced = src.match(/if \(isBackfillCompletion\) \{\s*\n\s*suppressTypedCustomerComms = true;\s*\n\s*effectiveSendCompletionSms = false;\s*\n\s*\}/g) || [];
       expect(forced.length).toBe(2);
     });

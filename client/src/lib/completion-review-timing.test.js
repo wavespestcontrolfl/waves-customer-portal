@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   customReviewTimeProblem,
   reviewDelayMinutesOf,
@@ -13,6 +13,7 @@ import {
   FIRST_REVIEW_ASK_LABEL,
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
+  runPreviewReadWithRetry,
   backfillCheckboxHint,
   LATE_CLOSE_ASK_LABEL,
   completionReviewSuppressionReason,
@@ -313,5 +314,51 @@ describe('backdate checkbox hint (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
   });
   test('unchecked: the normal-messages line either way', () => {
     expect(backfillCheckboxHint({ backfillCloseout: false, reviewAskGoes: true })).toBe('Unchecked: completes as today with the normal customer messages.');
+  });
+});
+
+describe('runPreviewReadWithRetry: a backdated closeout re-reads a failed preview', () => {
+  afterEach(() => { vi.useRealTimers(); });
+  const flush = () => vi.advanceTimersByTimeAsync(0);
+
+  test('retry on: a failed read is read again each interval until an answer lands, then it stops', async () => {
+    vi.useFakeTimers();
+    const answers = [null, null, { lateCloseAskKept: true }];
+    const read = vi.fn(async () => (answers.length ? answers.shift() : { lateCloseAskKept: true }));
+    const apply = vi.fn();
+    runPreviewReadWithRetry({ read, apply, retry: true, intervalMs: 60000 });
+    await flush();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenLastCalledWith(null);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(read).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(apply).toHaveBeenLastCalledWith({ lateCloseAskKept: true });
+    await vi.advanceTimersByTimeAsync(300000);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  test('stopping it (box unchecked, panel closed) ends the retries and drops a late answer', async () => {
+    vi.useFakeTimers();
+    let resolveRead;
+    const read = vi.fn(() => new Promise((r) => { resolveRead = r; }));
+    const apply = vi.fn();
+    const stop = runPreviewReadWithRetry({ read, apply, retry: true, intervalMs: 60000 });
+    stop();
+    resolveRead(null);
+    await vi.advanceTimersByTimeAsync(300000);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  test('retry off (not a backdated closeout): one read, no timer', async () => {
+    vi.useFakeTimers();
+    const read = vi.fn(async () => null);
+    const apply = vi.fn();
+    runPreviewReadWithRetry({ read, apply, retry: false });
+    await vi.advanceTimersByTimeAsync(600000);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenCalledTimes(1);
   });
 });

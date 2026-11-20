@@ -78,6 +78,7 @@ import {
   completionWillReview,
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
+  runPreviewReadWithRetry,
   backfillCheckboxHint,
   customReviewTimeProblem,
   firstAskReasonsFrom,
@@ -14677,19 +14678,22 @@ export function CompletionPanel({
       if (oneTimeRecapOnly) return undefined;
       // One read still names the first ask, so a box restored off from a
       // draft knows the server will keep that ask on. No poll, and the timing preview stays unknown.
-      let gone = false;
-      fetchReviewSendPreview().then((data) => {
-        const firstAsk = firstReviewAskFrom(data);
-        if (!gone && firstAsk !== null) setReviewFirstAsk(firstAsk);
-        // GATE_REVIEW_ALREADY_REVIEWED: an answer (not a failed read) also says whether the customer is marked reviewed.
-        if (!gone && data) {
-          setReviewAlreadyReviewed(alreadyReviewedFrom(data));
-          setReviewFirstAskReasons(firstAskReasonsFrom(data));
-        }
-        // A failed read, or one for a visit the panel has left, never keeps the late-close ask: fewer texts.
-        if (!gone) setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
+      // A backdated closeout keeps its ask suppressed until an answer lands, so a failed read is read again on the poll's interval.
+      return runPreviewReadWithRetry({
+        read: fetchReviewSendPreview,
+        retry: backfillQuietCloseout,
+        apply: (data) => {
+          const firstAsk = firstReviewAskFrom(data);
+          if (firstAsk !== null) setReviewFirstAsk(firstAsk);
+          // GATE_REVIEW_ALREADY_REVIEWED: an answer (not a failed read) also says whether the customer is marked reviewed.
+          if (data) {
+            setReviewAlreadyReviewed(alreadyReviewedFrom(data));
+            setReviewFirstAskReasons(firstAskReasonsFrom(data));
+          }
+          // A failed read never keeps the late-close ask: fewer texts.
+          setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
+        },
       });
-      return () => { gone = true; };
     }
     let cancelled = false;
     const load = () => fetchReviewSendPreview().then((data) => {
@@ -14714,7 +14718,7 @@ export function CompletionPanel({
     // answer (codex #4140 r1).
     const timer = setInterval(load, 60 * 1000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [service?.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly]);
+  }, [service?.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly, backfillQuietCloseout]);
   // A first ask stays on: a draft restored with the box off, or a verdict that lands late, turns it
   // back on unless the tech already confirmed the one reason.
   useEffect(() => {

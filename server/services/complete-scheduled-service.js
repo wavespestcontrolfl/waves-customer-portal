@@ -726,6 +726,12 @@ function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(
   return { active: true, serviceDate };
 }
 
+// Whether this completion makes the visit-time review ask. A kept late-close ask reads ONLY its frozen verdict; every other
+// completion keeps its live decision. Exported for testability.
+function effectiveReviewAskDecision({ lateCloseReviewKept, packetEffects, standardRequestReview }) {
+  return lateCloseReviewKept === true ? !packetEffects : standardRequestReview;
+}
+
 // The first-ask check ran for one customer before the visit row was locked. A locked visit that belongs to another customer
 // (or whose customer cannot be read) voids that choice: no "already reviewed" mark, no kept late-close ask. Exported for testability.
 function firstAskCustomerMoved(checkedCustomerId, lockedVisit) {
@@ -14091,9 +14097,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // (enrollPostService below). The link still never rides inside the pay-link text:
     // shouldBundleReview keeps refusing an unpaid invoice.
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
-    const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview
-      // A backfill silences every customer text; only a kept late-close ask (frozen at the commit) is let through.
-      && (!suppressTypedCustomerComms || lateCloseReviewKept)
+    const standardRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview
+      && !suppressTypedCustomerComms
       // The fixed re-service text is the ONE text: no review ask rides it or
       // follows it (scope: "leave it off on re-services"). A re-service asks for
       // a review by default (owner 2026-10-10, "show on"): the sheet's Wrap-up sends requestReview and
@@ -14101,6 +14106,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // enrollPostService below (shouldBundleReview refuses fixed mode). Decided once,
       // above, by ReserviceFixedRecap.reviewAskAllowed.
       && reviewAskAllowed;
+    // A kept late-close ask (backdated closeout, GATE_REVIEW_LATE_CLOSE_ASK) reads ONLY its frozen verdict: the same answer
+    // the first close made, a resumed completion restores from the record, and the paid-invoice enrollment reads. A live
+    // re-check of the suppression or the re-service recap gate could not agree with it. The packet-effects guard stays.
+    const effectiveRequestReview = effectiveReviewAskDecision({ lateCloseReviewKept, packetEffects, standardRequestReview });
     // NOTE: includePayLink (the "report only, no pay link" operator choice) is
     // deliberately NOT folded in here. suppressCompletionInvoiceLink also drives
     // invoicePaymentActionRequired (the mobile in-person payment sheet), so
@@ -16597,6 +16606,7 @@ module.exports = {
   backfillCompletionPlan,
   lateCloseFirstAskEligible,
   firstAskCustomerMoved,
+  effectiveReviewAskDecision,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   backfillTimeOnSiteMinutes,
   BACKFILL_INFERRED_START_FIELDS,
