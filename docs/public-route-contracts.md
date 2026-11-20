@@ -3104,8 +3104,8 @@ or without a figure ("30+ minutes", "eighteen minutes", "½ hour", "a few
 minutes"); a figure with h or m; a clock time in any marked form ("3:30", any
 pm or a.m., "four am", "3 o'clock", "half past three", "four in the
 afternoon") or as an hour after at, after, until, till, by, before, around,
-past, between or from ("after four"); overnight, tonight, tomorrow, noon or
-midnight. AGENTS.md bans a fixed re-entry or drying time, and a figure can be
+past, between or from ("after four"), a 24-hour clock there too ("at 1600");
+overnight, tonight, tomorrow, noon or midnight. AGENTS.md bans a fixed re-entry or drying time, and a figure can be
 written in more ways than any list names, so a marker alone decides (the unit
 word, the clock marker, the time word before an hour) and each match withholds
 the copy. A count after such a time word ("at 3 stations") is withheld too.
@@ -3151,12 +3151,13 @@ the same rule. The Documents API
 PDF (`routes/documents.js` `generateServiceReportPDF`, at the signed-in
 `/api/documents/service-report/:serviceRecordId` and the shared
 `/api/documents/shared/:token`) prints every record's observation and
-recommendation lists as the web report shows them to a customer
-(`buildProtocolPayload` `structuredObservations` / `structuredRecommendations`:
-the completion form's values, screened as above on such a record, with lines
-that hold an access code dropped), never the merged `structured_notes` lists
-(which fold in raw `[Found]` / `[Next]` lines) or `ai_report`, on a record with
-no note too. The payload adds
+recommendation lists from the completion form's values (`buildProtocolPayload`
+`structuredObservations` / `structuredRecommendations`, screened as above on
+such a record), never the merged `structured_notes` lists (which fold in raw
+`[Found]` / `[Next]` lines) or `ai_report`, on a record with no note too. On
+every record each value passes `customerCopyViolations` before it prints (the
+web payload screens its recommendations with it too), and a line that holds an
+access code drops (`withoutAccessCodeLines`); a refused value is left out. The payload adds
 one key and no query parameter: `summaryIsOwnNote: true`, present only when
 `summary` is the note (on such a record a `technician_report` summary is always
 the note). The page's Visit Summary and the PDF print that summary as stored
@@ -3165,7 +3166,8 @@ stored legacy recap, and the lawn layout takes no applied sentence out of it. A 
 `reportNote` renders exactly as before, and its payload has no
 `summaryIsOwnNote` key; its Documents API PDF prints the form's lists, as
 above (production 2026-11-20, read-only: 3 of 654 completed visits lose a line
-from that PDF, none from the last 30 days, and no visit has `ai_report` lists).
+from that PDF, none from the last 30 days; no visit has `ai_report` lists; no
+stored form value fails the screen).
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the

@@ -25,6 +25,7 @@ const {
 } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
+const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { applyReportIdentitySnapshotToLegacyPdf, readReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
@@ -399,13 +400,17 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // structured_notes.observations / recommendations, which fold in raw
   // [Found] / [Next] lines of technician_notes, and never ai_report: no
   // reviewed path prints either (AGENTS.md, report egress; #3516;
-  // docs/public-route-contracts.md). On a record that carries the
-  // technician's own note each value also passes the note's screen
-  // (noteRecordCopyViolations), and on every record a line that holds an
-  // access code drops, as the web payload's lists drop it.
+  // docs/public-route-contracts.md). On every record each value passes the
+  // complete customer-copy screen before it prints (customerCopyViolations,
+  // AGENTS.md; the web payload screens its recommendations with it too,
+  // report-data.js buildReportV1Data), and a line that holds an access code
+  // drops, as the web payload's lists drop it. On a record that carries the
+  // technician's own note each value has passed the note's screen as well
+  // (noteRecordCopyViolations). A refused value is left out; the rest print.
   const { buildProtocolPayload, withoutAccessCodeLines } = require('../services/service-report/report-data');
   const formLists = buildProtocolPayload(service);
-  const observations = withoutAccessCodeLines(formLists.structuredObservations);
+  const printable = (lines) => withoutAccessCodeLines(lines).filter((line) => !customerCopyViolations(line).length);
+  const observations = printable(formLists.structuredObservations);
 
   if (observations.length) {
     if (y > 620) y = addContinuationPage();
@@ -422,7 +427,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WHAT WE RECOMMEND — property-specific tips
   // ══════════════════════════════════════════════════════
-  const recommendations = withoutAccessCodeLines(formLists.structuredRecommendations);
+  const recommendations = printable(formLists.structuredRecommendations);
   if (service.irrigation_recommendation) {
     try {
       const irr = typeof service.irrigation_recommendation === 'string' ? JSON.parse(service.irrigation_recommendation) : service.irrigation_recommendation;

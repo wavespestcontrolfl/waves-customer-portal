@@ -114,6 +114,10 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the lanai. Pets can go out once it is 3 o\'clock.',
       'I treated the lanai. Pets can go out once it is four in the afternoon.',
       'I treated the lanai. Pets can go out at a quarter to four.',
+      // A 24-hour clock after a time word.
+      'I treated the lanai. Pets may re-enter at 1600.',
+      'I treated the lanai. Pets may re-enter after 0830.',
+      'I treated the lanai. Keep pets inside until 2400.',
       'I treated the perimeter. The spray dries in 30 minutes.',
       'I treated the perimeter. Allow a 30-minute drying period.',
       'I treated the lanai. Return to the treated area after 30+ minutes.',

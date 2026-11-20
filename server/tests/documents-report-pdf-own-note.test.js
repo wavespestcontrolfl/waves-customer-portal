@@ -6,9 +6,11 @@
 // buildProtocolPayload: structuredObservations, structuredRecommendations):
 // only what the completion form recorded. The merged lists fold in raw
 // [Found] / [Next] lines of technician_notes, and no reviewed path prints
-// ai_report. On a record that carries the technician's own note
-// (structured_notes.reportNote) each value is screened too. The real pdfkit
-// renders; a spy on its text() reads what the PDF prints.
+// ai_report. On every record each value passes the complete customer-copy
+// screen (customerCopyViolations) before it prints, and on a record that
+// carries the technician's own note (structured_notes.reportNote) the note's
+// screen too. The real pdfkit renders; a spy on its text() reads what the PDF
+// prints.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../middleware/auth', () => ({
@@ -166,9 +168,8 @@ describe.each([
     expect(text).not.toContain('Sprayed the eaves');
     expect(text).not.toContain('Wasp nest');
     expect(text).not.toContain('Seal the soffit');
-    // The note's own screen runs only beside a note: the web report prints
-    // this form value on a record with no note, and so does the PDF.
-    expect(text).toContain('Safe for pets once dry');
+    // The complete screen runs on every record: "Safe for pets" never prints.
+    expect(text).not.toContain('Safe for pets');
   });
 
   test('a record with no note and no form lists prints no list, never the merged ones', async () => {
@@ -183,9 +184,21 @@ describe.each([
   });
 
   test('a form value that holds an access code drops, on every record', async () => {
-    serviceRow = visit(JSON.stringify({ ...LISTS, formRecommendations: ['Trim the hedge back from the wall', 'Gate code 4545 for next time'] }));
+    // The second value only the completion access-code check catches
+    // (withoutAccessCodeLines); the complete screen catches the first too.
+    serviceRow = visit(JSON.stringify({ ...LISTS, formRecommendations: ['Trim the hedge back from the wall', 'Gate code 4545 for next time', 'Side access 4417 for the yard'] }));
     const text = await printed(path);
     expect(text).toContain('Trim the hedge back from the wall');
     expect(text).not.toContain('4545');
+    expect(text).not.toContain('4417');
+  });
+
+  test('a recommendation the complete screen refuses never prints, on a record with no note too', async () => {
+    // A value stored before completion screened the list: the web payload
+    // drops it (customerCopyViolations), and so does the PDF.
+    serviceRow = visit(JSON.stringify({ ...LISTS, formRecommendations: ['Trim the hedge back from the wall', 'Toxic residue on the sill'] }));
+    const text = await printed(path);
+    expect(text).toContain('Trim the hedge back from the wall');
+    expect(text).not.toContain('Toxic residue');
   });
 });

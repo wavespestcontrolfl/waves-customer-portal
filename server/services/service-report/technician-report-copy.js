@@ -659,7 +659,8 @@ function customerCopyViolations(text) {
 // figure with h or m ("2h"); a clock time, written in any of its marked forms
 // ("3:30", any pm or a.m., "4am" or "four am", "3 o'clock", "half past three",
 // "four in the afternoon") or as an hour after at, after, until, till, by,
-// before, around, past, between or from ("after four", "until 4"); or
+// before, around, past, between or from ("after four", "until 4"), the
+// hour written as a 24-hour clock too ("at 1600", "after 0830"); or
 // overnight, tonight, tomorrow, noon or midnight. AGENTS.md bans a fixed
 // re-entry or drying time in customer copy. A figure can be written in more
 // ways than any list names (each pre-push audit round on this PR found one
@@ -676,6 +677,9 @@ function customerCopyViolations(text) {
 // (2026-11-20): a match in 2 of 474 pest customer recaps, both clock times,
 // none from a unit word, and none in the form lists or the finding fields.
 const NOTE_HOUR_SRC = '(?:\\p{N}{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
+// A 24-hour clock with no colon: 3 or 4 digits, hour 0 to 23 and minutes 00
+// to 59, or 2400 (midnight).
+const NOTE_24H_CLOCK_SRC = '(?:(?:[01]?\\p{Nd}|2[0-3])[0-5]\\p{Nd}|2400)';
 // The number words of a clock's hour and minutes (0 to 59: "four thirty am").
 const NOTE_CLOCK_WORD_SRC = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|oh)';
 const NOTE_RECORD_TIME_RE = new RegExp([
@@ -688,7 +692,7 @@ const NOTE_RECORD_TIME_RE = new RegExp([
   "(?<!\\p{L})o['\\u2019]?\\s*clock(?!\\p{L})",
   '\\bhalf\\s+past\\b|\\bquarter\\s+(?:past|to|after|till|til)\\b',
   `(?<!\\p{L})${NOTE_HOUR_SRC}\\s+(?:in\\s+the\\s+(?:morning|afternoon|evening|night)|at\\s+night|this\\s+(?:morning|afternoon|evening))`,
-  `(?<!\\p{L})(?:at|after|until|till|til|by|before|around|past|between|from)\\s+(?:about\\s+|around\\s+)?${NOTE_HOUR_SRC}(?![\\p{L}\\p{N}])`,
+  `(?<!\\p{L})(?:at|after|until|till|til|by|before|around|past|between|from)\\s+(?:about\\s+|around\\s+)?(?:${NOTE_HOUR_SRC}|${NOTE_24H_CLOCK_SRC})(?![\\p{L}\\p{N}])`,
   '\\b(?:overnight|tonight|tomorrow|noon|midnight)\\b',
 ].join('|'), 'iu');
 
