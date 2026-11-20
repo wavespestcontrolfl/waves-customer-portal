@@ -133,6 +133,8 @@ describe('selectIssueAudience', () => {
         // The open's own time; a row logged before occurred_at existed falls back to its log time.
         ['whereRaw', 'coalesce(opened.occurred_at, opened.created_at) >= ?', [since]],
         ['whereRaw', 'coalesce(opened.occurred_at, opened.created_at) <= ?', [asOf]],
+        // A machine open (Apple Mail Privacy Protection) is not a reader.
+        ['whereRaw', 'opened.machine_open IS NOT TRUE'],
       ]],
     ]);
   });
