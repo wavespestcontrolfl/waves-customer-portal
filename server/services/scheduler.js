@@ -4618,9 +4618,10 @@ function initScheduledJobs() {
       logger.error(`Newsletter scheduler tick failed: ${err.message}`);
     }
     // Then a planned Waves Pest Insider issue that did not go out as its FYI copy said gets its
-    // one admin alert (settlePlannedIssues), retried each minute until it reaches the owner.
+    // one admin alert (settlePlannedIssues), retried each minute until it reaches the owner. One
+    // settler at a time: an issue's failure alert and a later tick's recovery of it never overlap.
     try {
-      await require('./newsletter-sender').settlePlannedIssues();
+      await runExclusive('pest-insider-settle', () => require('./newsletter-sender').settlePlannedIssues());
     } catch (err) {
       logger.error(`Pest Insider settle tick failed: ${err.message}`);
     }

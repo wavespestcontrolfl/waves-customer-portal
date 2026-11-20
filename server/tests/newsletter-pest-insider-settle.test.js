@@ -119,7 +119,9 @@ test('it locks the send row first, then the issue row, as every writer of both d
 test.each([
   ['its send failed and no reader got it', { status: 'failed' }, { got: 0, left: 85 }, 'Did not go out: its send failed, and no reader got it'],
   ['its send failed part way', { status: 'failed' }, { got: 40, left: 45 }, 'Did not go out: its send failed after 40 of 85 readers got it; Resume in Newsletter → History sends it to the rest'],
-  ['it was sent to nobody (every reader dropped out)', { status: 'sent', recipient_count: 0 }, undefined, 'Did not go out: no planned reader was still eligible when it sent'],
+  ['it was sent to nobody (every reader dropped out)', { status: 'sent', recipient_count: 0 }, { got: 0, left: 0 }, 'Did not go out: no planned reader was still eligible when it sent'],
+  // A worker that stopped after SendGrid took its batches left recipient_count at 0; the webhooks then moved the send to sent.
+  ['its count says nobody, but its ledger shows readers left to resume', { status: 'sent', recipient_count: 0 }, { got: 80, left: 5 }, 'Did not go out: its send ended after 80 of 85 readers got it; Resume in Newsletter → History sends it to the rest'],
   ['its send ended with readers left to resume (a batch SendGrid refused)', { status: 'sent', recipient_count: 85 }, { got: 80, left: 5 }, 'Did not go out: its send ended after 80 of 85 readers got it; Resume in Newsletter → History sends it to the rest'],
 ])('%s: the row fails at once, and one alert says so', async (_label, sendPatch, counts, text) => {
   const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, ...sendPatch }], counts });
@@ -194,6 +196,14 @@ test('a failed issue whose send recovered to sent (its delivery confirmations ca
     },
     toldMark('issue-1', 'sent'),
   ]);
+});
+
+test('a send whose count says nobody, but whose ledger shows every planned reader got it, is sent, quietly', async () => {
+  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sent', recipient_count: 0 }], counts: { got: 85, left: 0 } });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(mockTrigger).not.toHaveBeenCalled();
+  expect(writes).toEqual([{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent' }) }]);
 });
 
 test('a worker that delivered the failure alert but stopped before marking the row told: its keyed bell row still gets the correction', async () => {

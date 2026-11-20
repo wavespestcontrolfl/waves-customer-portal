@@ -128,6 +128,12 @@ function withoutReplyPrefixes(subject) {
 // A forwarded subject is someone else's words, never the sender's: "Fwd:
 // Please cancel service" asks nothing of its own.
 const FORWARD_PREFIX = new RegExp(String.raw`^\s*(?:(?:re|r|aw|sv|vs|antw)\s*(?:\[\d+\])?\s*:\s*)*(?:${FORWARD_WORDS})\s*(?:\[\d+\])?\s*:`, 'i');
+// The message is itself a forward: its subject's FIRST prefix is a forward word. "Re: Fwd: ..." is a
+// reply (to a forward), so it is not one.
+const OWN_FORWARD_PREFIX = new RegExp(String.raw`^\s*(?:${FORWARD_WORDS})\s*(?:\[\d+\])?\s*:`, 'i');
+function isForwardSubject(subject) {
+  return OWN_FORWARD_PREFIX.test(decodeEntities(String(subject || '')));
+}
 function ownReplySubject(subject, threadSubjects = []) {
   if (FORWARD_PREFIX.test(decodeEntities(subject))) return '';
   const own = withoutReplyPrefixes(subject);
@@ -174,4 +180,4 @@ async function ownSubjectsInThreads(conn, rows) {
   return own;
 }
 
-module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText, ownReplySubject, ownSubjectsInThreads, settledSql };
+module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText, ownReplySubject, ownSubjectsInThreads, settledSql, isForwardSubject };

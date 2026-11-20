@@ -1114,6 +1114,22 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(mockTrigger).not.toHaveBeenCalled();
   });
 
+  test('a forward of its FYI copy holds nothing, even from a verified sender with a hold word in its note: the owner is told once that only a reply holds', async () => {
+    const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
+    expect(await maybeHandleProofApproval({ ...HOLD, subject: `Fwd: ${HOLD.subject.slice(4)}`, body_text: 'please hold this for review' })).toBe(true);
+    expect(issuesChain.update).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      outcome: true, errors: [expect.stringContaining('only a reply to the FYI copy holds it, so this issue still sends')],
+    }), { dedupeKey: 'pest-insider-forwarded-hold:send-1' });
+  });
+
+  test('a reply to a forwarded copy of its FYI (Re: Fwd:) is a reply, and holds the issue', async () => {
+    const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
+    expect(await maybeHandleProofApproval({ ...HOLD, subject: `Re: Fwd: ${HOLD.subject.slice(4)}` })).toBe(true);
+    expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
+    expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
   test('HOLD holds the queued issue and its planned row, in one transaction', async () => {
     const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_QUEUED } });
     expect(await maybeHandleProofApproval(HOLD)).toBe(true);
@@ -1211,9 +1227,16 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     ['the FYI copy itself (it quotes the HOLD line, and the newsletter address cannot HOLD)', received('newsletter@news.wavespestcontrol.com', signedBy('news.wavespestcontrol.com'), { subject: FYI_SUBJECT, body_text: 'To skip this issue, reply HOLD by 6:30 AM ET that day' })],
     ['an APPROVED reply that only quotes the HOLD line', reply({ body_text: 'approved\n\nOn Wed, Aug 5 wrote:\n> To skip this issue, reply HOLD by 6:30 AM ET that day' })],
     ['a reply whose subject carries a different token that only starts the same', reply({ subject: 'Re: FYI: [PROOF-ab12cd34x] other' })],
+    ['a forward of the FYI copy this mailbox sent to itself, with a note that says hold', reply({ subject: `Fwd: ${FYI_SUBJECT}`, body_text: 'please hold this for review' })],
+    ['a forward of the FYI copy from an approver Gmail authenticated', received('contact@wavespestcontrol.com', signedBy('wavespestcontrol.com'), { subject: `FW: ${FYI_SUBJECT}`, body_text: 'hold for review' })],
   ])('not a HOLD, in either witness: %s', async (_label, email) => {
     wireMailbox({ stored: [email], searched: [email] });
     expect(await holdReplyOnRecord(SEND)).toBe(false);
+  });
+
+  test('a reply to a forwarded copy of the FYI (Re: Fwd:) is a reply: its HOLD stops the issue', async () => {
+    wireMailbox({ searched: [reply({ subject: `Re: Fwd: ${FYI_SUBJECT}`, body_text: 'HOLD' })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
   });
 
   test.each([null, '', 'ab12cd34" OR in:anywhere'])('a send with no valid FYI token (%p) throws before it reads anything: it never answers "no HOLD" unread', async (token) => {

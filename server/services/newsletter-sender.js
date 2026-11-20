@@ -2116,13 +2116,18 @@ async function ledgerProgress(trx, send) {
 async function plannedSendOutcome(issue, send, now, trx) {
   const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, alert: 'outcome', ...more });
   if (!send) return notOut('its draft no longer exists');
-  if (send.status === 'sent' && !(Number(send.recipient_count) > 0)) return notOut('no planned reader was still eligible when it sent');
   // sendingClaimIsStale is false for any status but 'sending'. A stale claim is revoked with the
   // outcome, so its paused worker can send no further batch.
   const stale = sendingClaimIsStale(send, now);
   if (['sent', 'failed'].includes(send.status) || stale) {
+    // The delivery ledger decides, never the send's recipient_count: a worker that stopped after
+    // SendGrid took a batch leaves that count at 0, and the delivery webhooks can still move the
+    // send to 'sent' (reconcileNewsletterSendStatus).
     const { got, left } = await ledgerProgress(trx, send);
-    if (send.status === 'sent' && left === 0) return { status: 'sent' };
+    if (send.status === 'sent' && left === 0) {
+      // No reader got it: every planned reader failed the send-time re-check ('skipped'), or the plan held none.
+      return got > 0 ? { status: 'sent' } : notOut('no planned reader was still eligible when it sent');
+    }
     const how = { sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' }[send.status];
     return got > 0
       ? notOut(`${how} after ${got} of ${got + left} readers got it; Resume in Newsletter → History sends it to the rest`, { revokeClaim: stale })
@@ -2252,7 +2257,10 @@ const SETTLE_LOOKBACK_SQL = "issue_date >= (now() at time zone 'America/New_York
 
 /**
  * The one place that tells the owner a planned Waves Pest Insider issue did not go out as its
- * FYI copy said (the plan's skip rule: one admin alert). Runs every minute, after the dispatcher:
+ * FYI copy said (the plan's skip rule: one admin alert). Runs every minute, after the dispatcher,
+ * under one lease (the scheduler's runExclusive 'pest-insider-settle'): two ticks (a slow one, or
+ * an overlapping deploy) never settle at once, so a recovery never reads an issue while another
+ * tick is still delivering its failure alert. Each tick:
  * - a 'scheduled' issue whose send reached every reader becomes 'sent', quietly;
  * - one whose send ended without that (failed, sent to nobody, or with readers a Resume would
  *   still mail), stopped part way (its claim went stale; the claim is revoked), or is still not

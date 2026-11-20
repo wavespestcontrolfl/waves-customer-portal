@@ -403,11 +403,20 @@ function verifiedHoldSender(email, fyiTos) {
   return hasAlignedAuth(email.authentication_results, domainFromAddress(from), { strict: true });
 }
 
-/** A HOLD reply to the FYI copy with this token, read as the reply handler reads it, from a verified sender. */
+/**
+ * A planned issue's HOLD, read one way by the reply handler and the send-time check: a reply to its
+ * FYI copy, not a forward of it (email-strip.isForwardSubject: a forward passes the copy on, and its
+ * note, such as "please hold this for review", is not an answer to it), whose own text asks to stop.
+ */
+function isPlannedHoldReply(email) {
+  const { isForwardSubject } = require('./email/email-strip');
+  return !isForwardSubject(email?.subject)
+    && isHoldReply(extractTopReplyText(email?.body_text || htmlReplyToText(email?.body_html)));
+}
+
+/** A HOLD reply to the FYI copy with this token (isPlannedHoldReply), from a verified sender. */
 function isVerifiedHold(email, token, fyiTos) {
-  return parseProofToken(email?.subject) === token
-    && isHoldReply(extractTopReplyText(email.body_text || htmlReplyToText(email.body_html)))
-    && verifiedHoldSender(email, fyiTos);
+  return parseProofToken(email?.subject) === token && isPlannedHoldReply(email) && verifiedHoldSender(email, fyiTos);
 }
 
 /** More messages than this carrying one FYI copy's token: the search did not read them all. */
@@ -909,15 +918,26 @@ async function notifyHoldFailed(send, err) {
   });
 }
 
-// A HOLD reply to a planned issue whose sender Gmail could not verify stops nothing. The owner is
-// told once per send, so a real HOLD sent through a relay that breaks DKIM is not lost silently.
-async function ignoreUnverifiedHold(send, from) {
-  logger.warn(`[newsletter-proof] HOLD for planned issue send ${send.id} from ${maskEmail(from)} failed sender verification — ignored`);
+// A hold word to a planned issue that stops nothing: in a forward of its FYI copy ('forwarded'), or
+// from a sender Gmail could not verify ('unverified'). The owner is told once per send and kind, so a
+// real HOLD sent that way (a forward, a relay that breaks DKIM) is not lost silently.
+const IGNORED_HOLD = {
+  forwarded: {
+    log: 'came in a forward of its FYI copy',
+    text: (who) => `A forward of the FYI copy from ${who} asks to hold this issue, but only a reply to the FYI copy holds it, so this issue still sends. To skip it, reply HOLD to the FYI copy, or press Cancel schedule in Newsletter → History`,
+  },
+  unverified: {
+    log: 'failed sender verification',
+    text: (who) => `A HOLD reply from ${who} was ignored: Gmail could not verify that this address sent it, so this issue still sends. If you sent it, reply HOLD from the inbox the FYI copy reached, or press Cancel schedule in Newsletter → History`,
+  },
+};
+async function ignorePlannedHold(send, from, kind) {
+  logger.warn(`[newsletter-proof] HOLD for planned issue send ${send.id} from ${maskEmail(from)} ${IGNORED_HOLD[kind].log} — ignored`);
   await notifyProof('newsletter_proof_blocked', { sendId: send.id,
     subject: send.subject,
-    errors: [`A HOLD reply from ${maskEmail(from)} was ignored: Gmail could not verify that this address sent it, so this issue still sends. If you sent it, reply HOLD from the inbox the FYI copy reached, or press Cancel schedule in Newsletter → History`],
+    errors: [IGNORED_HOLD[kind].text(maskEmail(from))],
     outcome: true,
-  }, { dedupeKey: `pest-insider-unverified-hold:${send.id}` });
+  }, { dedupeKey: `pest-insider-${kind}-hold:${send.id}` });
   return true;
 }
 
@@ -1026,18 +1046,20 @@ async function maybeHandleProofApproval(email) {
   const replyText = extractTopReplyText(email.body_text || htmlReplyToText(email.body_html));
 
   // A planned Waves Pest Insider issue sends itself on its own Thursday: its own rules below. Its
-  // HOLD follows the send-time check's one rule (verifiedHoldSender): it holds when the sender is
-  // verified, also an FYI address outside the approvers; one from an approver or an FYI address
-  // that Gmail could not verify is ignored with a warning, since anyone can type such an address
-  // into a From line.
+  // HOLD follows the send-time check's rules (isPlannedHoldReply, verifiedHoldSender): a reply, not
+  // a forward, from a verified sender, also an FYI address outside the approvers. A hold word from
+  // an approver or an FYI address in a forward, or in a message Gmail could not verify (anyone can
+  // type such an address into a From line), stops nothing, and the owner is told once.
   const planned = send ? await resolvePestInsiderIssueContext(send) : null;
   if (planned && isHoldReply(replyText)) {
     const fyiTos = issueFyiAddresses(planned.issue);
-    if (!verifiedHoldSender(email, fyiTos)) {
-      if (holdAddresses(fyiTos).has(from)) return ignoreUnverifiedHold(send, from);
+    const verified = verifiedHoldSender(email, fyiTos);
+    if (!verified && !holdAddresses(fyiTos).has(from)) {
       logger.info(`[newsletter-proof] ignoring a HOLD for planned issue send ${send.id} from ${maskEmail(from)}, who may not hold it`);
       return false;
     }
+    if (!isPlannedHoldReply(email)) return ignorePlannedHold(send, from, 'forwarded');
+    if (!verified) return ignorePlannedHold(send, from, 'unverified');
   } else if (!approvalSenders().includes(from)) {
     // Ignore our own outbound proof (SendGrid copies can sync back in):
     // a proof has no "Re:" and comes FROM the newsletter address — the
