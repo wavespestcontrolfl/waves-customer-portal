@@ -76,6 +76,9 @@ function roofFetch(path, options = {}) {
   });
 }
 
+const READ_GATE_OFF = "Roof read is switched off on the server.";
+const READ_ERRORS = { __proto__: null, reference_mismatch: "This estimate belongs to a different customer, so no read was made." };
+
 const PROBLEM_COPY = {
   no_image: "No county photo for this spot, so nothing was read. No charge.",
   model_failed: "The photo was found but the read failed. Try again in a minute.",
@@ -113,7 +116,7 @@ const PIN_BASE = "absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 p-0 rounded
 
 // The county crop with the AI's suggestions (faded, with the type letter) and the technician's confirmed points
 // (solid, numbered) on it. The photo is a click target for adding a point; every point is a button.
-function RoofImage({ url, imageKey, onImageLoad, onImageError, suggestions, points, selectedId, editable, frameRef, onAdd, onConfirm, onSelect, onMove, onNudge, onRemove }) {
+function RoofImage({ url, imageKey, imageState, onImageLoad, onImageError, onRetry, suggestions, points, selectedId, editable, frameRef, onAdd, onConfirm, onSelect, onMove, onNudge, onRemove }) {
   const drag = useRef(null);
   const suppressClick = useRef(false);
   const letters = [...new Set(suggestions.map((s) => s.type))];
@@ -226,7 +229,337 @@ function RoofImage({ url, imageKey, onImageLoad, onImageError, suggestions, poin
           Faded letters are the AI's suggestions: {letters.map((t) => `${TYPE_LETTERS[t]} ${TYPE_LABELS[t]}`).join(" · ")}
         </p>
       )}
+      {imageState === "loading" && <p className="text-14 text-zinc-600" role="status" data-testid="roof-read-image-loading">Loading the roof photo…</p>}
+      {imageState === "error" && (
+        <div className="flex items-center gap-3" data-testid="roof-read-image-error">
+          <p className="text-14 text-zinc-600" role="alert">The roof photo did not load.</p>
+          <Button variant="secondary" size="sm" onClick={onRetry} data-testid="roof-read-image-retry">Try again</Button>
+        </div>
+      )}
     </div>
+  );
+}
+
+// False once the component unmounts, so a late server answer never sets state on a panel that is gone.
+function useMounted() {
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  return mounted;
+}
+
+const IDLE = { busy: false, msg: "", err: "" };
+const countText = (n) => (n == null ? "" : String(n));
+
+// The result line beside a save button: "Saved." or the error.
+function SaveNote({ state, statusTestId, errorTestId }) {
+  return (
+    <>
+      {state.msg && <span className="text-14 text-zinc-600" role="status" data-testid={statusTestId}>{state.msg}</span>}
+      {state.err && <span className="text-14 text-zinc-600" role="alert" data-testid={errorTestId}>{state.err}</span>}
+    </>
+  );
+}
+
+// The photo and the technician's confirmed points. It mounts with each loaded read (the panel hides it while a read
+// runs), so its state starts from what the server holds. `saved` is the server's last answer for the points and the
+// checkbox: the baseline a save is checked against, set at load and by each points save. A count save never touches it.
+function RoofPointsEditor({ read, imageUrl, spot, estimateId, onReadAgain }) {
+  const pointId = useRef(0);
+  const nextId = () => { pointId.current += 1; return `pt${pointId.current}`; };
+  const frameRef = useRef(null);
+  const mounted = useMounted();
+  const [saved, setSaved] = useState(() => ({ pins: read.tech_pins ?? null, hidden: !!read.hide_on_estimate }));
+  const [points, setPoints] = useState(() => pointsFrom(read, nextId));
+  const [selectedId, setSelectedId] = useState(null);
+  const [showOnEstimate, setShowOnEstimate] = useState(() => !read.hide_on_estimate);
+  // True only after staff click the checkbox here: an untouched checkbox is never sent, so a save from this panel never
+  // reverses a hide choice another tab made.
+  const [hideEdited, setHideEdited] = useState(false);
+  const [pointsEdited, setPointsEdited] = useState(false);
+  const [pointsState, setPointsState] = useState(IDLE);
+  // The county photo: points are placed on it, so nothing can be added until it has loaded.
+  const [imageState, setImageState] = useState("loading");
+  const [imageTry, setImageTry] = useState(0);
+
+  // A read whose AI answer did not work (tier unknown) is never reopened and the server refuses points on it.
+  const readUsable = read.tier !== "unknown";
+  const locked = !estimateId || pointsState.busy;
+  const editable = !locked && imageState === "loaded" && readUsable;
+  const atMax = points.length >= MAX_POINTS;
+  // A suggestion stays hidden while any point, saved or not, names it as its source, even after the point moved or changed type.
+  const suggestions = suggestionsFrom(read).filter((sg) => !points.some((p) => p.source === sg.key));
+  // Whether the checkbox differs from what the server holds: only then is hide_on_estimate sent.
+  const hideChanged = hideEdited && !showOnEstimate !== saved.hidden;
+  const selected = points.find((p) => p.id === selectedId) || null;
+
+  const clearNote = () => setPointsState((st) => (st.busy ? st : IDLE));
+  const edited = (fn) => { fn(); setPointsEdited(true); clearNote(); };
+  function addPoint(x, y, type = "other", source = null) {
+    if (!editable || atMax) return;
+    const id = nextId();
+    edited(() => {
+      setPoints((list) => (list.length >= MAX_POINTS ? list : [...list, { id, x: round4(x), y: round4(y), type, note: "", source }]));
+      setSelectedId(id);
+    });
+  }
+  const confirmSuggestion = (sg) => addPoint(sg.x, sg.y, sg.type, sg.key);
+  function changePoint(id, patch) {
+    if (!editable) return;
+    edited(() => setPoints((list) => list.map((p) => (p.id === id ? { ...p, ...patch } : p))));
+  }
+  const movePoint = (id, x, y) => changePoint(id, { x: round4(clamp01(x)), y: round4(clamp01(y)) });
+  const nudgePoint = (id, dx, dy) => {
+    const p = points.find((q) => q.id === id);
+    if (p) movePoint(id, p.x + dx, p.y + dy);
+    setSelectedId(id);
+  };
+  function removePoint(id) {
+    if (!editable) return;
+    edited(() => {
+      setPoints((list) => list.filter((p) => p.id !== id));
+      setSelectedId((cur) => (cur === id ? null : cur));
+    });
+  }
+
+  async function savePoints() {
+    if (locked) return;
+    if (!pointsEdited && !hideChanged) {
+      setPointsState({ ...IDLE, err: "Change a point or the checkbox first." });
+      return;
+    }
+    if (pointsEdited && !spot) {
+      setPointsState({ ...IDLE, err: "The map point is missing. Look up the address again." });
+      return;
+    }
+    setPointsState({ ...IDLE, busy: true });
+    try {
+      const r = await roofFetch(`/admin/roof-entry-read/${encodeURIComponent(read.id)}/tech-count`, {
+        method: "PATCH",
+        // Only what changed in this panel goes, so a stale tab cannot overwrite points another tab saved.
+        body: JSON.stringify({
+          ...(pointsEdited ? {
+            pins: points.map((p) => ({
+              x: round4(p.x), y: round4(p.y), type: p.type, note: p.note.trim() || null, ...(p.source ? { source: p.source } : {}),
+            })),
+            crop: { lat: spot.lat, lng: spot.lng },
+            // The list these edits started from: the server refuses the save (409) if another window changed it since.
+            expected_pins: saved.pins,
+          } : {}),
+          ...(hideChanged ? { hide_on_estimate: !showOnEstimate } : {}),
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!mounted.current) return;
+      if (!r.ok || !body?.read) {
+        // The edits stay on screen; a 409 offers "Read the roof again" to load the other window's points.
+        setPointsState({ ...IDLE, err: body?.error || "Could not save the points. Try again.", conflict: r.status === 409 });
+        return;
+      }
+      // What the server holds now, then clear the edited markers.
+      setSaved({ pins: body.read.tech_pins ?? null, hidden: !!body.read.hide_on_estimate });
+      setPoints(pointsFrom(body.read, nextId));
+      setSelectedId(null);
+      setShowOnEstimate(!body.read.hide_on_estimate);
+      setHideEdited(false);
+      setPointsEdited(false);
+      setPointsState({ ...IDLE, msg: "Points saved." });
+    } catch {
+      if (mounted.current) setPointsState({ ...IDLE, err: "Could not reach the server. Try again." });
+    }
+  }
+
+  return (
+    <>
+      <RoofImage
+        url={imageUrl}
+        imageKey={`${imageUrl}|${imageTry}`}
+        imageState={imageState}
+        onImageLoad={() => setImageState("loaded")}
+        onImageError={() => setImageState("error")}
+        onRetry={() => { setImageState("loading"); setImageTry((n) => n + 1); }}
+        suggestions={suggestions}
+        points={points}
+        selectedId={selectedId}
+        editable={editable}
+        frameRef={frameRef}
+        onAdd={(x, y) => addPoint(x, y)}
+        onConfirm={confirmSuggestion}
+        onSelect={setSelectedId}
+        onMove={movePoint}
+        onNudge={nudgePoint}
+        onRemove={removePoint}
+      />
+      <div className="space-y-2" data-testid="roof-read-points">
+        <p className="text-14 text-zinc-400 font-medium">Points the tech confirmed</p>
+        {!readUsable && (
+          <p className="text-14 text-zinc-600" role="alert" data-testid="roof-read-points-unusable">
+            This roof read did not work. Read the roof again before adding points.
+          </p>
+        )}
+        {(!readUsable || pointsState.conflict) && (
+          <Button variant="secondary" size="sm" onClick={onReadAgain} data-testid="roof-read-again">
+            Read the roof again
+          </Button>
+        )}
+        <p className="text-14 text-zinc-600">
+          Tap a faded letter to confirm it, or tap the photo to add a point. Drag a point to move it, or select it and press the arrow keys.
+          The customer estimate shows only the points confirmed here.
+        </p>
+        <div className="flex items-center gap-3 flex-wrap">
+          <Button variant="secondary" size="sm" onClick={() => addPoint(0.5, 0.5)} disabled={!editable || atMax} data-testid="roof-read-add-point">
+            Add a point
+          </Button>
+          <span className="text-14 text-zinc-600" data-testid="roof-read-point-count">{points.length} of {MAX_POINTS} points</span>
+          {atMax && <span className="text-14 text-zinc-600" data-testid="roof-read-point-max">That is the most. Remove a point to add another.</span>}
+        </div>
+        {points.length > 0 && (
+          <ol className="text-14 text-zinc-900 space-y-1" data-testid="roof-read-point-list">
+            {points.map((p, i) => (
+              <li key={p.id} data-testid={`roof-read-point-row-${i + 1}`}>{i + 1}. {pointText(p)}</li>
+            ))}
+          </ol>
+        )}
+        {selected && (
+          <div className="p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-2" data-testid="roof-read-point-editor">
+            <p className="text-14 text-zinc-400 font-medium">Point {points.indexOf(selected) + 1}</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <Field label="Type" id="roof-read-point-type" className="mb-0">
+                <Select value={selected.type} disabled={!editable} onChange={(e) => changePoint(selected.id, { type: e.target.value })}>
+                  {POINT_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+                </Select>
+              </Field>
+              <Field label="Note" id="roof-read-point-note" className="mb-0">
+                <Input value={selected.note} maxLength={MAX_NOTE} placeholder="front left" disabled={!editable} onChange={(e) => changePoint(selected.id, { note: e.target.value.slice(0, MAX_NOTE) })} />
+              </Field>
+            </div>
+            <div className="flex items-center gap-3">
+              <Button variant="secondary" size="sm" onClick={() => removePoint(selected.id)} disabled={!editable} data-testid="roof-read-point-remove">Remove</Button>
+              <Button variant="secondary" size="sm" onClick={() => setSelectedId(null)} data-testid="roof-read-point-done">Done</Button>
+            </div>
+          </div>
+        )}
+        <Checkbox
+          id="roof-read-show-on-estimate"
+          label="Show these points on the customer estimate"
+          checked={showOnEstimate}
+          disabled={locked}
+          onChange={() => { setShowOnEstimate((v) => !v); setHideEdited(true); clearNote(); }}
+        />
+        <div className="flex items-center gap-3 flex-wrap">
+          <Button variant="secondary" size="sm" onClick={savePoints} loading={pointsState.busy} disabled={locked} data-testid="roof-read-points-save">
+            Save points
+          </Button>
+          {!estimateId && (
+            <span className="text-14 text-zinc-600" data-testid="roof-read-points-save-first">Save the estimate first to record the tech's points.</span>
+          )}
+          <SaveNote state={pointsState} statusTestId="roof-read-points-status" errorTestId="roof-read-points-error" />
+        </div>
+      </div>
+    </>
+  );
+}
+
+// The technician's count and "Tech saw it" flags. Like the points editor it mounts with each loaded read; `saved` is the
+// server's last answer for the count and flags, set at load and by each count save. A points save never touches it.
+function TechCountForm({ read, estimateId }) {
+  const mounted = useMounted();
+  const [saved, setSaved] = useState(() => ({ tech_final_count: read.tech_final_count, tech_final_flags: read.tech_final_flags }));
+  const [count, setCount] = useState(() => countText(read.tech_final_count));
+  const [techFlags, setTechFlags] = useState(() => techFlagsFrom(read));
+  // What the tech changed since the read was loaded or last saved. Only edited fields are sent.
+  const [touched, setTouched] = useState({});
+  const [countEdited, setCountEdited] = useState(false);
+  const [saveState, setSaveState] = useState(IDLE);
+  const locked = saveState.busy || !estimateId;
+
+  async function saveTech() {
+    if (locked) return;
+    const trimmed = countEdited ? count.trim() : "";
+    if (trimmed !== "" && !(/^\d+$/.test(trimmed) && Number(trimmed) <= MAX_TECH_COUNT)) {
+      setSaveState({ ...IDLE, err: `Count must be a whole number from 0 to ${MAX_TECH_COUNT}.` });
+      return;
+    }
+    const touchedKeys = ROOF_TYPES.map((t) => t.key).filter((key) => touched[key]);
+    if (trimmed === "" && !touchedKeys.length) {
+      setSaveState({ ...IDLE, err: "Change the count or an entry point first." });
+      return;
+    }
+    // The server merges the flags into the saved ones and writes the count only when sent, so only edited fields go.
+    const payload = {};
+    if (trimmed !== "") payload.count = Number(trimmed);
+    if (touchedKeys.length) payload.flags = Object.fromEntries(touchedKeys.map((key) => [key, techFlags[key] ? "yes" : "no"]));
+    setSaveState({ ...IDLE, busy: true });
+    try {
+      const r = await roofFetch(`/admin/roof-entry-read/${encodeURIComponent(read.id)}/tech-count`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!mounted.current) return;
+      if (!r.ok || !body?.read) {
+        setSaveState({ ...IDLE, err: body?.error || "Could not save the count. Try again." });
+        return;
+      }
+      // What the server holds now, then clear the edited markers.
+      setSaved({ tech_final_count: body.read.tech_final_count, tech_final_flags: body.read.tech_final_flags });
+      setCount(countText(body.read.tech_final_count));
+      setTechFlags(techFlagsFrom(body.read));
+      setTouched({});
+      setCountEdited(false);
+      setSaveState({ ...IDLE, msg: "Saved." });
+    } catch {
+      if (mounted.current) setSaveState({ ...IDLE, err: "Could not reach the server. Try again." });
+    }
+  }
+
+  return (
+    <>
+      <div className="space-y-2" data-testid="roof-read-flags">
+        <div className="grid grid-cols-[1fr_4.5rem_5rem_5rem] gap-2 text-14 text-zinc-400 font-medium">
+          <span>Entry point</span><span>AI read</span><span>Tech saved</span><span>Tech saw it</span>
+        </div>
+        {ROOF_TYPES.map(({ key, label }) => {
+          const likely = read.flags?.[key]?.likely;
+          return (
+            <div key={key} className="grid grid-cols-[1fr_4.5rem_5rem_5rem] gap-2 items-center text-14 text-zinc-900" data-testid={`roof-read-row-${key}`}>
+              <span>{label}</span>
+              <span data-testid={`roof-read-ai-${key}`}>{LIKELY_LABELS[likely] || "Not read"}</span>
+              <span data-testid={`roof-read-saved-${key}`}>{LIKELY_LABELS[saved.tech_final_flags?.[key]] || "None"}</span>
+              <Checkbox
+                id={`roof-read-tech-${key}`}
+                aria-label={`Tech saw: ${label}`}
+                checked={!!techFlags[key]}
+                disabled={locked}
+                onChange={() => {
+                  setTechFlags((f) => ({ ...f, [key]: !f[key] }));
+                  setTouched((t) => ({ ...t, [key]: true }));
+                }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      <Field label="Entry points the tech counted" id="roof-read-tech-count" className="mb-2">
+        <Input type="number" inputMode="numeric" min="0" max={String(MAX_TECH_COUNT)} step="1" value={count} disabled={locked} onChange={(e) => { setCount(e.target.value); setCountEdited(true); }} />
+      </Field>
+      <div className="flex items-center gap-3">
+        <Button variant="secondary" size="sm" onClick={saveTech} loading={saveState.busy} disabled={locked} data-testid="roof-read-save">
+          Save the tech's count
+        </Button>
+        {!estimateId && (
+          <span className="text-14 text-zinc-600" data-testid="roof-read-save-first">Save the estimate first to record the tech's count.</span>
+        )}
+        <SaveNote state={saveState} />
+      </div>
+      <p className="text-14 text-zinc-600" data-testid="roof-read-saved">
+        {saved.tech_final_count == null && !saved.tech_final_flags
+          ? "No tech count saved yet."
+          : `Saved tech count: ${saved.tech_final_count == null ? "none" : saved.tech_final_count}.`}
+      </p>
+    </>
   );
 }
 
@@ -234,33 +567,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   const [phase, setPhase] = useState("idle");
   const [problem, setProblem] = useState("");
   const [result, setResult] = useState(null);
-  const [count, setCount] = useState("");
-  const [techFlags, setTechFlags] = useState(() => techFlagsFrom(null));
-  // What the tech changed since the read was loaded or last saved. Only edited fields are sent.
-  const [touched, setTouched] = useState({});
-  const [countEdited, setCountEdited] = useState(false);
-  const [saveState, setSaveState] = useState({ busy: false, msg: "", err: "" });
-  // The technician's confirmed points, whether to show them on the customer estimate, and whether they changed since the
-  // read was loaded or last saved.
-  const [points, setPoints] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
-  const [showOnEstimate, setShowOnEstimate] = useState(true);
-  // True only after staff click the checkbox here: an untouched checkbox is never sent, so a save from this panel never
-  // reverses a hide choice another tab made.
-  const [hideEdited, setHideEdited] = useState(false);
-  const [pointsEdited, setPointsEdited] = useState(false);
-  const [pointsState, setPointsState] = useState({ busy: false, msg: "", err: "" });
-  // The county photo: points are placed on it, so nothing can be added until it has loaded.
-  const [imageState, setImageState] = useState("loading");
-  const [imageTry, setImageTry] = useState(0);
-  const pointId = useRef(0);
-  const nextId = () => { pointId.current += 1; return `pt${pointId.current}`; };
-  const frameRef = useRef(null);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
+  const mounted = useMounted();
 
   async function readRoof() {
     if (phase === "loading" || !spot || addressDoubt) return;
@@ -279,33 +586,15 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
       });
       const body = await r.json().catch(() => ({}));
       if (!mounted.current) return;
-      if (r.status === 404 && body?.enabled === false) {
-        setPhase("error");
-        setProblem("Roof read is switched off on the server.");
-        return;
-      }
       if (!r.ok && r.status !== 202) {
+        // Only the gate answers { enabled: false } (a 404); other refusals carry an error code or message.
         setPhase("error");
-        setProblem(body?.error === "reference_mismatch"
-          ? "This estimate belongs to a different customer, so no read was made."
-          : body?.error || "The roof read failed. Try again.");
+        setProblem(body.enabled === false ? READ_GATE_OFF : READ_ERRORS[body.error] || body.error || "The roof read failed. Try again.");
         return;
       }
       if (body.status === "ok" && body.read && body.image_url) {
+        // The points editor and the count form mount fresh with this read, so their state starts from what it holds.
         setResult(body);
-        setCount(body.read.tech_final_count == null ? "" : String(body.read.tech_final_count));
-        setTechFlags(techFlagsFrom(body.read));
-        setTouched({});
-        setCountEdited(false);
-        setSaveState({ busy: false, msg: "", err: "" });
-        setPoints(pointsFrom(body.read, nextId));
-        setSelectedId(null);
-        setShowOnEstimate(!body.read.hide_on_estimate);
-        setHideEdited(false);
-        setPointsEdited(false);
-        setPointsState({ busy: false, msg: "", err: "" });
-        setImageState("loading");
-        setImageTry(0);
         setPhase("ok");
         return;
       }
@@ -318,150 +607,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
     }
   }
 
-  async function saveTech() {
-    const read = result?.read;
-    if (!read || saveState.busy || !estimateId) return;
-    const trimmed = countEdited ? count.trim() : "";
-    if (trimmed !== "" && !(/^\d+$/.test(trimmed) && Number(trimmed) <= MAX_TECH_COUNT)) {
-      setSaveState({ busy: false, msg: "", err: `Count must be a whole number from 0 to ${MAX_TECH_COUNT}.` });
-      return;
-    }
-    const touchedKeys = ROOF_TYPES.map((t) => t.key).filter((key) => touched[key]);
-    if (trimmed === "" && !touchedKeys.length) {
-      setSaveState({ busy: false, msg: "", err: "Change the count or an entry point first." });
-      return;
-    }
-    // The server merges the flags into the saved ones and writes the count only when sent, so only edited fields go.
-    const flags = touchedKeys.length
-      ? Object.fromEntries(touchedKeys.map((key) => [key, techFlags[key] ? "yes" : "no"]))
-      : null;
-    setSaveState({ busy: true, msg: "", err: "" });
-    try {
-      const r = await roofFetch(`/admin/roof-entry-read/${encodeURIComponent(read.id)}/tech-count`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          ...(trimmed === "" ? {} : { count: Number(trimmed) }),
-          ...(flags ? { flags } : {}),
-        }),
-      });
-      const body = await r.json().catch(() => ({}));
-      if (!mounted.current) return;
-      if (!r.ok || !body?.read) {
-        setSaveState({ busy: false, msg: "", err: body?.error || "Could not save the count. Try again." });
-        return;
-      }
-      // A count answer updates only the count and flags. The points, the list they were edited from and the checkbox keep
-      // their own baseline (set when the read loads and when points save), so a count save can never make a later points
-      // save look current against another window's list, or change what the checkbox will send.
-      setResult((prev) => ({
-        ...prev,
-        read: { ...prev.read, tech_final_count: body.read.tech_final_count, tech_final_flags: body.read.tech_final_flags },
-      }));
-      // What the server holds now, then clear the edited markers.
-      setCount(body.read.tech_final_count == null ? "" : String(body.read.tech_final_count));
-      setTechFlags(techFlagsFrom(body.read));
-      setTouched({});
-      setCountEdited(false);
-      setSaveState({ busy: false, msg: "Saved.", err: "" });
-    } catch {
-      if (mounted.current) setSaveState({ busy: false, msg: "", err: "Could not reach the server. Try again." });
-    }
-  }
-
   const read = phase === "ok" ? result?.read : null;
-  const imageLoaded = imageState === "loaded";
-  // A read whose AI answer did not work (tier unknown) is never reopened and the server refuses points on it.
-  const readUsable = read?.tier !== "unknown";
-  const editable = !!estimateId && !pointsState.busy && imageLoaded && readUsable;
-  const atMax = points.length >= MAX_POINTS;
-  // A suggestion stays hidden while any point, saved or not, names it as its source, even after the point moved or changed type.
-  const suggestions = read ? suggestionsFrom(read).filter((sg) => !points.some((p) => p.source === sg.key)) : [];
-  // Whether the checkbox differs from what the server holds: only then is hide_on_estimate sent.
-  const hideChanged = !!read && hideEdited && !showOnEstimate !== Boolean(read.hide_on_estimate);
-  const selected = points.find((p) => p.id === selectedId) || null;
-
-  const edited = (fn) => { fn(); setPointsEdited(true); setPointsState((st) => (st.busy ? st : { busy: false, msg: "", err: "" })); };
-  function addPoint(x, y, type = "other", source = null) {
-    if (!editable || points.length >= MAX_POINTS) return;
-    const id = nextId();
-    edited(() => {
-      setPoints((list) => (list.length >= MAX_POINTS ? list : [...list, { id, x: round4(x), y: round4(y), type, note: "", source }]));
-      setSelectedId(id);
-    });
-  }
-  const confirmSuggestion = (sg) => addPoint(sg.x, sg.y, sg.type, sg.key);
-  function movePoint(id, x, y) {
-    if (!editable) return;
-    edited(() => setPoints((list) => list.map((p) => (p.id === id ? { ...p, x: round4(clamp01(x)), y: round4(clamp01(y)) } : p))));
-  }
-  const nudgePoint = (id, dx, dy) => {
-    const p = points.find((q) => q.id === id);
-    if (p) movePoint(id, p.x + dx, p.y + dy);
-    setSelectedId(id);
-  };
-  function changePoint(id, patch) {
-    if (!editable) return;
-    edited(() => setPoints((list) => list.map((p) => (p.id === id ? { ...p, ...patch } : p))));
-  }
-  function removePoint(id) {
-    if (!editable) return;
-    edited(() => {
-      setPoints((list) => list.filter((p) => p.id !== id));
-      setSelectedId((cur) => (cur === id ? null : cur));
-    });
-  }
-
-  async function savePoints() {
-    const rd = result?.read;
-    if (!rd || pointsState.busy || !estimateId) return;
-    if (!pointsEdited && !hideChanged) {
-      setPointsState({ busy: false, msg: "", err: "Change a point or the checkbox first." });
-      return;
-    }
-    if (pointsEdited && !spot) {
-      setPointsState({ busy: false, msg: "", err: "The map point is missing. Look up the address again." });
-      return;
-    }
-    setPointsState({ busy: true, msg: "", err: "" });
-    try {
-      const r = await roofFetch(`/admin/roof-entry-read/${encodeURIComponent(rd.id)}/tech-count`, {
-        method: "PATCH",
-        // Only what changed in this panel goes, so a stale tab cannot overwrite points another tab saved.
-        body: JSON.stringify({
-          ...(pointsEdited ? {
-            pins: points.map((p) => ({
-              x: round4(p.x), y: round4(p.y), type: p.type, note: p.note.trim() || null, ...(p.source ? { source: p.source } : {}),
-            })),
-            crop: { lat: spot.lat, lng: spot.lng },
-            // The list these edits started from: the server refuses the save (409) if another window changed it since.
-            expected_pins: rd.tech_pins ?? null,
-          } : {}),
-          ...(hideChanged ? { hide_on_estimate: !showOnEstimate } : {}),
-        }),
-      });
-      const body = await r.json().catch(() => ({}));
-      if (!mounted.current) return;
-      if (!r.ok || !body?.read) {
-        // The edits stay on screen; a 409 offers "Read the roof again" to load the other window's points.
-        setPointsState({ busy: false, msg: "", err: body?.error || "Could not save the points. Try again.", conflict: r.status === 409 });
-        return;
-      }
-      // What the server holds now, then clear the edited marker.
-      // A points answer updates only the point fields, so it cannot roll back a count or flags saved meanwhile.
-      setResult((prev) => ({
-        ...prev,
-        read: { ...prev.read, tech_pins: body.read.tech_pins, hide_on_estimate: body.read.hide_on_estimate },
-      }));
-      setPoints(pointsFrom(body.read, nextId));
-      setSelectedId(null);
-      setShowOnEstimate(!body.read.hide_on_estimate);
-      setHideEdited(false);
-      setPointsEdited(false);
-      setPointsState({ busy: false, msg: "Points saved.", err: "" });
-    } catch {
-      if (mounted.current) setPointsState({ busy: false, msg: "", err: "Could not reach the server. Try again." });
-    }
-  }
 
   return (
     <div className="space-y-3" data-testid="roof-read-panel">
@@ -492,97 +638,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
       )}
       {read && (
         <div className="space-y-4" data-testid="roof-read-result">
-          <RoofImage
-            url={result.image_url}
-            imageKey={`${result.image_url}|${imageTry}`}
-            onImageLoad={() => setImageState("loaded")}
-            onImageError={() => setImageState("error")}
-            suggestions={suggestions}
-            points={points}
-            selectedId={selectedId}
-            editable={editable}
-            frameRef={frameRef}
-            onAdd={(x, y) => addPoint(x, y)}
-            onConfirm={confirmSuggestion}
-            onSelect={setSelectedId}
-            onMove={movePoint}
-            onNudge={nudgePoint}
-            onRemove={removePoint}
-          />
-          {imageState === "loading" && <p className="text-14 text-zinc-600" role="status" data-testid="roof-read-image-loading">Loading the roof photo…</p>}
-          {imageState === "error" && (
-            <div className="flex items-center gap-3" data-testid="roof-read-image-error">
-              <p className="text-14 text-zinc-600" role="alert">The roof photo did not load.</p>
-              <Button variant="secondary" size="sm" onClick={() => { setImageState("loading"); setImageTry((n) => n + 1); }} data-testid="roof-read-image-retry">Try again</Button>
-            </div>
-          )}
-          <div className="space-y-2" data-testid="roof-read-points">
-            <p className="text-14 text-zinc-400 font-medium">Points the tech confirmed</p>
-            {!readUsable && (
-              <p className="text-14 text-zinc-600" role="alert" data-testid="roof-read-points-unusable">
-                This roof read did not work. Read the roof again before adding points.
-              </p>
-            )}
-            {(!readUsable || pointsState.conflict) && (
-              <Button variant="secondary" size="sm" onClick={readRoof} disabled={phase === "loading"} data-testid="roof-read-again">
-                Read the roof again
-              </Button>
-            )}
-            <p className="text-14 text-zinc-600">
-              Tap a faded letter to confirm it, or tap the photo to add a point. Drag a point to move it, or select it and press the arrow keys.
-              The customer estimate shows only the points confirmed here.
-            </p>
-            <div className="flex items-center gap-3 flex-wrap">
-              <Button variant="secondary" size="sm" onClick={() => addPoint(0.5, 0.5)} disabled={!editable || atMax} data-testid="roof-read-add-point">
-                Add a point
-              </Button>
-              <span className="text-14 text-zinc-600" data-testid="roof-read-point-count">{points.length} of {MAX_POINTS} points</span>
-              {atMax && <span className="text-14 text-zinc-600" data-testid="roof-read-point-max">That is the most. Remove a point to add another.</span>}
-            </div>
-            {points.length > 0 && (
-              <ol className="text-14 text-zinc-900 space-y-1" data-testid="roof-read-point-list">
-                {points.map((p, i) => (
-                  <li key={p.id} data-testid={`roof-read-point-row-${i + 1}`}>{i + 1}. {pointText(p)}</li>
-                ))}
-              </ol>
-            )}
-            {selected && (
-              <div className="p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-2" data-testid="roof-read-point-editor">
-                <p className="text-14 text-zinc-400 font-medium">Point {points.indexOf(selected) + 1}</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <Field label="Type" id="roof-read-point-type" className="mb-0">
-                    <Select value={selected.type} disabled={!editable} onChange={(e) => changePoint(selected.id, { type: e.target.value })}>
-                      {POINT_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
-                    </Select>
-                  </Field>
-                  <Field label="Note" id="roof-read-point-note" className="mb-0">
-                    <Input value={selected.note} maxLength={MAX_NOTE} placeholder="front left" disabled={!editable} onChange={(e) => changePoint(selected.id, { note: e.target.value.slice(0, MAX_NOTE) })} />
-                  </Field>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Button variant="secondary" size="sm" onClick={() => removePoint(selected.id)} disabled={!editable} data-testid="roof-read-point-remove">Remove</Button>
-                  <Button variant="secondary" size="sm" onClick={() => setSelectedId(null)} data-testid="roof-read-point-done">Done</Button>
-                </div>
-              </div>
-            )}
-            <Checkbox
-              id="roof-read-show-on-estimate"
-              label="Show these points on the customer estimate"
-              checked={showOnEstimate}
-              disabled={!estimateId || pointsState.busy}
-              onChange={() => { setShowOnEstimate((v) => !v); setHideEdited(true); setPointsState((st) => (st.busy ? st : { busy: false, msg: "", err: "" })); }}
-            />
-            <div className="flex items-center gap-3 flex-wrap">
-              <Button variant="secondary" size="sm" onClick={savePoints} loading={pointsState.busy} disabled={pointsState.busy || !estimateId} data-testid="roof-read-points-save">
-                Save points
-              </Button>
-              {!estimateId && (
-                <span className="text-14 text-zinc-600" data-testid="roof-read-points-save-first">Save the estimate first to record the tech's points.</span>
-              )}
-              {pointsState.msg && <span className="text-14 text-zinc-600" role="status" data-testid="roof-read-points-status">{pointsState.msg}</span>}
-              {pointsState.err && <span className="text-14 text-zinc-600" role="alert" data-testid="roof-read-points-error">{pointsState.err}</span>}
-            </div>
-          </div>
+          <RoofPointsEditor read={read} imageUrl={result.image_url} spot={spot} estimateId={estimateId} onReadAgain={readRoof} />
           <p className="text-14 text-zinc-600">
             {String(read.county).replace(/^./, (c) => c.toUpperCase())} County aerial, {read.image_year}.
             {result.cached ? " Reused from an earlier read." : ""}
@@ -590,49 +646,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
           <p className="text-14 text-zinc-900" data-testid="roof-read-tier">
             Entry-point tier: <span className="font-medium">{TIER_LABELS[read.tier] || read.tier}</span>
           </p>
-          <div className="space-y-2" data-testid="roof-read-flags">
-            <div className="grid grid-cols-[1fr_4.5rem_5rem_5rem] gap-2 text-14 text-zinc-400 font-medium">
-              <span>Entry point</span><span>AI read</span><span>Tech saved</span><span>Tech saw it</span>
-            </div>
-            {ROOF_TYPES.map(({ key, label }) => {
-              const likely = read.flags?.[key]?.likely;
-              return (
-                <div key={key} className="grid grid-cols-[1fr_4.5rem_5rem_5rem] gap-2 items-center text-14 text-zinc-900" data-testid={`roof-read-row-${key}`}>
-                  <span>{label}</span>
-                  <span data-testid={`roof-read-ai-${key}`}>{LIKELY_LABELS[likely] || "Not read"}</span>
-                  <span data-testid={`roof-read-saved-${key}`}>{LIKELY_LABELS[read.tech_final_flags?.[key]] || "None"}</span>
-                  <Checkbox
-                    id={`roof-read-tech-${key}`}
-                    aria-label={`Tech saw: ${label}`}
-                    checked={!!techFlags[key]}
-                    disabled={saveState.busy || !estimateId}
-                    onChange={() => {
-                      setTechFlags((f) => ({ ...f, [key]: !f[key] }));
-                      setTouched((t) => ({ ...t, [key]: true }));
-                    }}
-                  />
-                </div>
-              );
-            })}
-          </div>
-          <Field label="Entry points the tech counted" id="roof-read-tech-count" className="mb-2">
-            <Input type="number" inputMode="numeric" min="0" max={String(MAX_TECH_COUNT)} step="1" value={count} disabled={saveState.busy || !estimateId} onChange={(e) => { setCount(e.target.value); setCountEdited(true); }} />
-          </Field>
-          <div className="flex items-center gap-3">
-            <Button variant="secondary" size="sm" onClick={saveTech} loading={saveState.busy} disabled={saveState.busy || !estimateId} data-testid="roof-read-save">
-              Save the tech's count
-            </Button>
-            {!estimateId && (
-              <span className="text-14 text-zinc-600" data-testid="roof-read-save-first">Save the estimate first to record the tech's count.</span>
-            )}
-            {saveState.msg && <span className="text-14 text-zinc-600" role="status">{saveState.msg}</span>}
-            {saveState.err && <span className="text-14 text-zinc-600" role="alert">{saveState.err}</span>}
-          </div>
-          <p className="text-14 text-zinc-600" data-testid="roof-read-saved">
-            {read.tech_final_count == null && !read.tech_final_flags
-              ? "No tech count saved yet."
-              : `Saved tech count: ${read.tech_final_count == null ? "none" : read.tech_final_count}.`}
-          </p>
+          <TechCountForm read={read} estimateId={estimateId} />
         </div>
       )}
     </div>

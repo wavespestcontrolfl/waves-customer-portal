@@ -675,14 +675,12 @@ function validateTechPins(pins) {
   if (!Array.isArray(pins) || pins.length > MAX_TECH_PINS) return null;
   const out = [];
   for (const p of pins) {
-    if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+    // The same shape checks the AI read's pins pass (isPlainObject, inUnit), plus a known point type.
+    if (!isPlainObject(p) || !inUnit(p.x) || !inUnit(p.y) || !TECH_PIN_TYPES.includes(p.type)) return null;
     const { x, y, type } = p;
-    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return null;
-    if (!TECH_PIN_TYPES.includes(type)) return null;
     let note = null;
     if (p.note != null) {
       if (typeof p.note !== 'string') return null;
-       
       note = p.note.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
       if (note.length > MAX_PIN_NOTE) return null;
       if (!note) note = null;
@@ -803,6 +801,7 @@ module.exports = {
   pinAction,
   MAX_TECH_PINS,
   validateTechPins,
+  isPlainObject,
   cropImageUrl,
   customerPointsFromRow,
 };

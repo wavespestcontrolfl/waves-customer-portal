@@ -36,7 +36,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { roofEntryReadLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const {
-  ENTRY_TYPES, LIKELY, MAX_TECH_PINS, countyKey, runRoofEntryRead, saveTechCount, validateTechPins,
+  ENTRY_TYPES, LIKELY, MAX_TECH_PINS, countyKey, isPlainObject, runRoofEntryRead, saveTechCount, validateTechPins,
 } = require('../services/roof-entry-read');
 
 const router = express.Router();
@@ -62,40 +62,41 @@ function readInput(body) {
   };
 }
 
+// The tech-count PATCH fields that stand alone, each with its check. One loop applies the shared rule: a field left out
+// is skipped, and a field sent must pass its check or the whole request is refused. pins, crop and expected_pins depend
+// on each other, so techCountInput checks them together.
+const TECH_FIELDS = [
+  { key: 'count', as: 'count', ok: (v) => Number.isInteger(v) && v >= 0 && v <= MAX_TECH_COUNT },
+  {
+    key: 'flags',
+    as: 'flags',
+    ok: (f) => isPlainObject(f) && Object.entries(f).every(([type, likely]) => ENTRY_TYPES.includes(type) && LIKELY.includes(likely)),
+  },
+  { key: 'hide_on_estimate', as: 'hideOnEstimate', ok: (v) => typeof v === 'boolean' },
+];
+
 function techCountInput(body) {
-  const b = body && typeof body === 'object' ? body : {};
+  const b = isPlainObject(body) ? body : {};
   const out = {};
-  if (b.count !== undefined) {
-    if (!Number.isInteger(b.count) || b.count < 0 || b.count > MAX_TECH_COUNT) return null;
-    out.count = b.count;
-  }
-  if (b.flags !== undefined) {
-    const f = b.flags;
-    const valid = f && typeof f === 'object' && !Array.isArray(f)
-      && Object.entries(f).every(([type, likely]) => ENTRY_TYPES.includes(type) && LIKELY.includes(likely));
-    if (!valid) return null;
-    out.flags = f;
+  for (const { key, as, ok } of TECH_FIELDS) {
+    if (b[key] === undefined) continue;
+    if (!ok(b[key])) return null;
+    out[as] = b[key];
   }
   if (b.pins !== undefined) {
+    const clear = b.pins === null;
+    const pins = clear ? null : validateTechPins(b.pins);
+    const c = b.crop;
+    // A list needs the crop centre it was drawn on; a clear (null) needs none.
+    const pointsOk = clear || (pins && isPlainObject(c) && isCoord(c.lat, 90) && isCoord(c.lng, 180));
     // The list the panel last loaded (null = none saved yet): required with any points change, so a stale tab's save
     // or clear is refused (409).
     const e = b.expected_pins;
-    const expectedOk = e === null || (Array.isArray(e) && e.length <= MAX_TECH_PINS
-      && e.every((p) => p && typeof p === 'object' && !Array.isArray(p)));
-    if (!expectedOk) return null;
+    const expectedOk = e === null || (Array.isArray(e) && e.length <= MAX_TECH_PINS && e.every(isPlainObject));
+    if (!pointsOk || !expectedOk) return null;
+    out.pins = pins;
     out.expectedPins = e;
-    if (b.pins === null) out.pins = null;
-    else {
-      const pins = validateTechPins(b.pins);
-      const c = b.crop;
-      if (!pins || !c || typeof c !== 'object' || !isCoord(c.lat, 90) || !isCoord(c.lng, 180)) return null;
-      out.pins = pins;
-      out.crop = { lat: c.lat, lng: c.lng };
-    }
-  }
-  if (b.hide_on_estimate !== undefined) {
-    if (typeof b.hide_on_estimate !== 'boolean') return null;
-    out.hideOnEstimate = b.hide_on_estimate;
+    if (!clear) out.crop = { lat: c.lat, lng: c.lng };
   }
   return Object.keys(out).length ? out : null;
 }
