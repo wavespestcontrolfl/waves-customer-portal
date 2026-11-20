@@ -19,8 +19,8 @@
  *         pins list (over 20 points, x or y outside 0-1, an unknown type, a note over 40 characters) is 400.
  *         source (optional) is "<entry type>:<index into that type's AI pins>", the AI suggestion a point was confirmed from;
  *         the staff panel uses it to keep that suggestion hidden, and the customer estimate never gets it.
- *         With a pins list, expected_pins is required too: the list the panel last loaded (null = none saved). The save
- *         lands only while the row still holds exactly that list, else 409 (another window changed the points).
+ *         With pins (a list or null), expected_pins is required too: the list the panel last loaded (null = none saved).
+ *         The save or clear lands only while the row still holds exactly that list, else 409 (another window changed it).
  *         Points need a finished, readable read (else 400 "Read the roof again").
  *         hide_on_estimate true keeps the points off the customer estimate. Send only what changed: pins and crop only when
  *         the points were edited, hide_on_estimate only when the checkbox changed.
@@ -77,19 +77,20 @@ function techCountInput(body) {
     out.flags = f;
   }
   if (b.pins !== undefined) {
+    // The list the panel last loaded (null = none saved yet): required with any points change, so a stale tab's save
+    // or clear is refused (409).
+    const e = b.expected_pins;
+    const expectedOk = e === null || (Array.isArray(e) && e.length <= MAX_TECH_PINS
+      && e.every((p) => p && typeof p === 'object' && !Array.isArray(p)));
+    if (!expectedOk) return null;
+    out.expectedPins = e;
     if (b.pins === null) out.pins = null;
     else {
       const pins = validateTechPins(b.pins);
       const c = b.crop;
       if (!pins || !c || typeof c !== 'object' || !isCoord(c.lat, 90) || !isCoord(c.lng, 180)) return null;
-      // The list the panel last loaded (null = none saved yet): required, so a stale tab's save is refused (409).
-      const e = b.expected_pins;
-      const expectedOk = e === null || (Array.isArray(e) && e.length <= MAX_TECH_PINS
-        && e.every((p) => p && typeof p === 'object' && !Array.isArray(p)));
-      if (!expectedOk) return null;
       out.pins = pins;
       out.crop = { lat: c.lat, lng: c.lng };
-      out.expectedPins = e;
     }
   }
   if (b.hide_on_estimate !== undefined) {

@@ -658,6 +658,23 @@ describe("saving only what changed", () => {
     expect(patches()).toHaveLength(0);
   });
 
+  it("names the list the points were loaded with, not one a count answer carried from another window", async () => {
+    await opened();
+    fetchMock.mockImplementationOnce(() => reply({
+      read: READ({ tech_final_count: 1, tech_pins: [{ x: 0.9, y: 0.9, type: "other", note: null }] }),
+    }));
+    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "1" } });
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    await screen.findByText("Saved.");
+    // The panel still shows (and edits) the list it loaded, so the server must compare against that list.
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(1);
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    fetchMock.mockImplementationOnce(() => reply({ error: "These points were changed in another window. Read the roof again to load them." }, 409));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByTestId("roof-read-points-error");
+    expect(lastBody().expected_pins).toEqual(SAVED);
+  });
+
   it("sends the list the edits started from, and on a 409 keeps the edits and offers to read again", async () => {
     await opened();
     fireEvent.click(frame(), { clientX: 100, clientY: 50 });
@@ -709,15 +726,14 @@ describe("saving only what changed", () => {
     expect(screen.getByRole("checkbox", SHOW)).not.toBeChecked();
   });
 
-  it("lets an untouched checkbox follow a hide choice another tab saved, and never reverses it", async () => {
+  it("never sends an untouched checkbox, even after a count answer shows another tab's hide choice", async () => {
     await opened();
     expect(screen.getByRole("checkbox", SHOW)).toBeChecked();
-    // A count save comes back with the points hidden by another tab.
+    // A count save comes back with the points hidden by another tab; a count answer changes only the count and flags.
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_final_count: 2, hide_on_estimate: true, tech_pins: SAVED }) }));
     fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "2" } });
     fireEvent.click(screen.getByTestId("roof-read-save"));
     await screen.findByText("Saved.");
-    expect(screen.getByRole("checkbox", SHOW)).not.toBeChecked();
     // A later points save sends the points only, not a hide_on_estimate the staff member never chose.
     fireEvent.click(frame(), { clientX: 100, clientY: 50 });
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ hide_on_estimate: true, tech_pins: [...SAVED, { x: 0.5, y: 0.5, type: "other", note: null }] }) }));

@@ -734,14 +734,17 @@ async function saveTechCount(id, { count, flags, pins, crop, expectedPins, hideO
     where.lookup_key = row.lookup_key;
   }
   let query = db(TABLE).where(where);
-  // A list save names the points it was edited from (expectedPins, the list the panel last loaded; null = none saved).
-  // The UPDATE only lands while the row still holds exactly that list, so a save from a stale tab cannot erase points
-  // another tab saved in between: it throws code 'points_changed' and writes nothing.
-  const checked = Array.isArray(pins) && expectedPins !== undefined;
+  // A points save or clear names the list it was edited from (expectedPins, the list the panel last loaded; null = none
+  // saved). The UPDATE only lands while the row still holds exactly that list, so a stale tab cannot erase points another
+  // tab saved in between: it throws code 'points_changed' and writes nothing.
+  const checked = pins !== undefined && expectedPins !== undefined;
   if (checked) query = query.whereRaw('tech_pins IS NOT DISTINCT FROM ?::jsonb', [expectedPins === null ? null : JSON.stringify(expectedPins)]);
   const [row] = await query.update(patch).returning('*');
-  if (!row && checked) throw Object.assign(new Error('The points changed since they were loaded'), { code: 'points_changed' });
-  return row ? publicRead(row) : null;
+  if (row) return publicRead(row);
+  if (checked && await db(TABLE).where({ id }).first('id')) {
+    throw Object.assign(new Error('The points changed since they were loaded'), { code: 'points_changed' });
+  }
+  return null;
 }
 
 /** The county crop URL the stored pins sit on (built here from the stored centre, never from caller input), or null. */

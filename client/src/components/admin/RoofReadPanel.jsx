@@ -245,13 +245,9 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   const [points, setPoints] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [showOnEstimate, setShowOnEstimate] = useState(true);
-  // True only after staff click the checkbox here: an untouched checkbox follows the server, so a save from this panel
-  // never reverses a hide choice another tab made.
-  const [hideEdited, setHideEditedState] = useState(false);
-  const hideEditedRef = useRef(false);
-  // Counts the checkbox saves that landed: a count answer that started before one of them carries an older hide value.
-  const hideSavesRef = useRef(0);
-  const setHideEdited = (v) => { hideEditedRef.current = v; setHideEditedState(v); };
+  // True only after staff click the checkbox here: an untouched checkbox is never sent, so a save from this panel never
+  // reverses a hide choice another tab made.
+  const [hideEdited, setHideEdited] = useState(false);
   const [pointsEdited, setPointsEdited] = useState(false);
   const [pointsState, setPointsState] = useState({ busy: false, msg: "", err: "" });
   // The county photo: points are placed on it, so nothing can be added until it has loaded.
@@ -325,7 +321,6 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   async function saveTech() {
     const read = result?.read;
     if (!read || saveState.busy || !estimateId) return;
-    const hideSavesAtStart = hideSavesRef.current;
     const trimmed = countEdited ? count.trim() : "";
     if (trimmed !== "" && !(/^\d+$/.test(trimmed) && Number(trimmed) <= MAX_TECH_COUNT)) {
       setSaveState({ busy: false, msg: "", err: `Count must be a whole number from 0 to ${MAX_TECH_COUNT}.` });
@@ -355,9 +350,13 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
         setSaveState({ busy: false, msg: "", err: body?.error || "Could not save the count. Try again." });
         return;
       }
-      setResult((prev) => ({ ...prev, read: body.read }));
-      // An untouched checkbox follows the server (another tab may have hidden the points).
-      if (!hideEditedRef.current && hideSavesRef.current === hideSavesAtStart) setShowOnEstimate(!body.read.hide_on_estimate);
+      // A count answer updates only the count and flags. The points, the list they were edited from and the checkbox keep
+      // their own baseline (set when the read loads and when points save), so a count save can never make a later points
+      // save look current against another window's list, or change what the checkbox will send.
+      setResult((prev) => ({
+        ...prev,
+        read: { ...prev.read, tech_final_count: body.read.tech_final_count, tech_final_flags: body.read.tech_final_flags },
+      }));
       // What the server holds now, then clear the edited markers.
       setCount(body.read.tech_final_count == null ? "" : String(body.read.tech_final_count));
       setTechFlags(techFlagsFrom(body.read));
@@ -447,7 +446,6 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
         setPointsState({ busy: false, msg: "", err: body?.error || "Could not save the points. Try again.", conflict: r.status === 409 });
         return;
       }
-      if (hideChanged) hideSavesRef.current += 1;
       // What the server holds now, then clear the edited marker.
       setResult((prev) => ({ ...prev, read: body.read }));
       setPoints(pointsFrom(body.read, nextId));

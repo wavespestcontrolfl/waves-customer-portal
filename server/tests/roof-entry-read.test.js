@@ -1629,9 +1629,17 @@ describe('PATCH /:id/tech-count with points', () => {
     const hide = await patch({ hide_on_estimate: true });
     expect(hide.status).toBe(200);
     expect(hide.json.read.tech_pins).toHaveLength(2);
-    const cleared = await patch({ pins: null });
+    expect((await patch({ pins: null })).status).toBe(400);
+    const cleared = await patch({ pins: null, expected_pins: hide.json.read.tech_pins });
     expect(cleared.status).toBe(200);
     expect(cleared.json.read.tech_pins).toBeNull();
+  });
+
+  it('answers 409 for a clear that started from an older list, and keeps the saved points', async () => {
+    expect((await patch({ pins: PINS, crop: CROP, expected_pins: null })).status).toBe(200);
+    const stale = await patch({ pins: null, expected_pins: null });
+    expect(stale.status).toBe(409);
+    expect(JSON.parse(mockRows[0].tech_pins)).toHaveLength(2);
   });
 
   it('still takes a count and flags with the points in one save', async () => {
