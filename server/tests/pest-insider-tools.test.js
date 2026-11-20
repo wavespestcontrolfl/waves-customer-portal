@@ -63,7 +63,9 @@ describe('the reviewed tool list', () => {
     ['a product sold somewhere else', {}, indexWith(MESH, ({ row }) => ({ row: { ...row, merchant: 'domyown' } })), /not an Amazon product/],
     ['a registry URL with more than our tag', {}, indexWith(MESH, ({ row }) => ({ row: { ...row, approved_affiliate_url: `${row.approved_affiliate_url}&ref=email` } })), /not a tagged Amazon product page/],
     ['a brand in the name', { name: 'Stuff-it mesh' }, index, /name/],
-    ['a capitalized brand word in the name', { name: 'Copper stuff' }, indexWith(MESH, ({ row }) => ({ row: { ...row, display_name: 'Copper Stuff mesh roll' } })), /brand word "copper"/],
+    ['a brand word in the name', { name: 'Copper stuff' }, indexWith(MESH, ({ row }) => ({ row: { ...row, display_name: 'Copper Stuff mesh roll' } })), /name word "copper" is not a generic word/],
+    ['a name word its registry name does not have (pre-push PR 3 r5)', { name: 'Florida mesh', lines: ['Florida mesh fills small gaps.'] }, index, /name word "florida" is not a generic word/],
+    ['a sales word in the name, the link text (pre-push PR 3 r5)', { name: 'Buy to support us' }, index, /name has a sales word/],
     ['a name in title case', { name: 'Copper Mesh' }, index, /name must be/],
     ['no lines', { lines: [] }, index, /1 or 2 lines/],
     ['three lines', { lines: ['A.', 'B.', 'C.'] }, index, /1 or 2 lines/],
@@ -80,6 +82,8 @@ describe('the reviewed tool list', () => {
     ['a line that asks the reader to buy', { lines: ['It is worth it to buy through our link and support us.'] }, index, /sales word/],
     ['a line that says a purchase helps us', { lines: ['Every roll helps us keep this email free.'] }, index, /sales word/],
     ['a line with a name', { lines: ['It is the roll Home Depot sells.'] }, index, /name not in the source/],
+    ['a line with a place the tool name lacks (pre-push PR 3 r5)', { lines: ['It works across Florida.'] }, index, /capitalized word that is not an opener or a word of the tool's name: Florida/],
+    ['a line that opens with a place', { lines: ['Florida lawns dry out fast.'] }, index, /capitalized word .*: Florida/],
     ['a service the fact bank does not have', { services: ['pool'] }, index, /services must list/],
   ])('leaves out %s', (_label, over, idx, message) => {
     const { tools, problems } = checkTools({ tools: [entry(over)] }, idx);
@@ -176,5 +180,15 @@ describe('toolLineProblem', () => {
     expect(toolLineProblem('A soil moisture meter reads the water down at the roots.', { name: 'Soil moisture meter' })).toBeNull();
     expect(toolLineProblem('A rain gauge reads to the nearest meter.', { name: 'Rain gauge' })).toMatch(/unit:meter/);
     expect(toolLineProblem('', { name: 'Rain gauge' })).toBe('empty sentence');
+  });
+
+  test('a capitalized word passes only as a plain opener first or as a word of the tool name (pre-push PR 3 r5)', () => {
+    const gauge = { name: 'Rain gauge' };
+    expect(toolLineProblem("It's a gauge for the yard.", gauge)).toBeNull();
+    expect(toolLineProblem('Gauge readings beat the airport.', gauge)).toBeNull();
+    // Each run of letters counts, so a hyphen or an apostrophe hides no name.
+    expect(toolLineProblem('It works in south-Florida yards.', gauge)).toMatch(/: Florida$/);
+    expect(toolLineProblem("It works across 'Florida' yards.", gauge)).toMatch(/: Florida$/);
+    expect(toolLineProblem('Waves uses it on every lawn.', gauge)).toMatch(/: Waves$/);
   });
 });

@@ -33,7 +33,7 @@
 
 const data = require('../../data/pest-insider-tools-v1.json');
 const registry = require('../../../packages/affiliate-registry');
-const { toolLineProblem, bannedReason } = require('./claim-check');
+const { toolLineProblem, salesWordProblem, bannedReason } = require('./claim-check');
 const { FACTS } = require('./facts');
 
 /** Amazon's required sentence, next to every tool link. */
@@ -46,10 +46,13 @@ const AMAZON_URL = /^https:\/\/www\.amazon\.com\/dp\/[A-Z0-9]{10}\?tag=wavespest
 const NAME = /^[A-Z][a-z]+(?: [a-z]+){0,3}$/;
 const SERVICES = new Set(FACTS.map((f) => f.service));
 
-// The brand words of a registry display name: its words that start with a
-// capital or a digit ("AcuRite", "00810A2", "Stuff-It" = stuff, it). The
-// generic name uses none.
-const brandWords = (displayName) => String(displayName || '').split(/[\s()/,-]+/).filter((w) => /^[A-Z0-9]/.test(w)).map((w) => w.toLowerCase());
+// The generic words of a registry display name: its words that start with a
+// lowercase letter ("glass rain gauge" in "AcuRite 00810A2 glass rain
+// gauge"). A brand or model word starts with a capital or a digit ("AcuRite",
+// "00810A2", "Stuff-It"). The tool's name is the link text and the source of
+// its lines, so every word of it is one of these: it says only what the
+// approved product is, with no brand, place or sales word (pre-push PR 3 r5).
+const genericWords = (displayName) => String(displayName || '').split(/[\s()/,-]+/).filter((w) => /^[a-z]/.test(w));
 
 const idOf = (entry) => (entry && typeof entry.product_id === 'string' && entry.product_id) || '(no product_id)';
 
@@ -61,6 +64,7 @@ function entryProblem(entry, counts) {
   if (counts.get(id) > 1) return 'is listed twice';
   const { name } = entry;
   if (typeof name !== 'string' || !NAME.test(name) || bannedReason(name)) return 'name must be a plain generic name in sentence case ("Rain gauge")';
+  if (salesWordProblem(name)) return `name has ${salesWordProblem(name)}`;
   if (!Array.isArray(entry.lines) || entry.lines.length < 1 || entry.lines.length > 2) return 'needs 1 or 2 lines';
   for (const line of entry.lines) {
     if (typeof line !== 'string' || !line.trim() || line !== line.trim() || /[\r\n]/.test(line)) return 'each line must be one trimmed line of text';
@@ -81,9 +85,9 @@ function rowProblem(entry, index) {
   if (hit.row.risk_class !== 'green') return `its registry row is ${hit.row.risk_class}, not green (no pesticide in this email)`;
   if (hit.row.merchant !== 'amazon') return 'its registry row is not an Amazon product';
   if (!AMAZON_URL.test(String(hit.row.approved_affiliate_url))) return 'its registry URL is not a tagged Amazon product page';
-  const brands = brandWords(hit.row.display_name);
-  const brand = entry.name.toLowerCase().split(' ').find((w) => brands.includes(w));
-  return brand ? `name uses the brand word "${brand}"` : null;
+  const generic = genericWords(hit.row.display_name);
+  const word = entry.name.toLowerCase().split(' ').find((w) => !generic.includes(w));
+  return word ? `name word "${word}" is not a generic word of its registry name` : null;
 }
 
 // Runs the list's own checks once: the entries that pass, and a line for
