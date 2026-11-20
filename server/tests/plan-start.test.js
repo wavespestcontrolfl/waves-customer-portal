@@ -1005,6 +1005,18 @@ describe('mintPlanStartEstimate', () => {
       tables.estimates = [tables.estimates[0]];
       await mint();
       expect(tables.estimates.find((r) => r.id === 'est-restart').archived_at).toBeFalsy();
+      // A grouped send from a sibling stamps a delivery claim and leaves the status (codex pre-push P1):
+      // a fresh claim refuses the mint and archives nothing; a claim past its TTL is a crashed send's.
+      const claimed = (at) => ({
+        id: 'est-claimed', customer_id: 'cust-1', source: 'plan_start', status: 'viewed', token: 'c', expires_at: '2099-01-01', archived_at: null,
+        estimate_data: JSON.stringify({ estimatorEngine: { delivering_at: at } }),
+      });
+      tables.estimates = [claimed('2026-11-19T11:58:00.000Z')];
+      await expect(mint()).rejects.toMatchObject({ code: 'delivery_in_flight' });
+      expect(tables.estimates[0].archived_at).toBeNull();
+      tables.estimates = [claimed('2026-11-19T11:40:00.000Z')];
+      await mint();
+      expect(tables.estimates.find((r) => r.id === 'est-claimed').archived_at).toBeTruthy();
     });
   });
 });

@@ -134,6 +134,11 @@ function seedRefusesPrice(seed, pricingKeys) {
 const SEND_CLAIM_LIVE_MS = 15 * 60 * 1000;
 function sendInFlight(row, now) {
   const { priorMintStillLive } = require('../service-report/click-estimate-mint');
+  // A grouped send stamps a delivery claim on each link-visible sibling and
+  // leaves its status (codex pre-push P1), so a fresh claim is a delivery in
+  // flight too, under the persistence module's own claim TTL.
+  const claim = parseJson(row.estimate_data, {})?.estimatorEngine;
+  if (require('../admin-estimate-persistence').deliveryClaimFresh(claim, Number(now))) return true;
   if (!['sending', 'scheduled'].includes(row.status)) return false;
   if (priorMintStillLive(row, now)) return true;
   return row.status === 'sending' && now - new Date(row.updated_at || 0) < SEND_CLAIM_LIVE_MS;
@@ -1144,7 +1149,7 @@ async function retireLineage({
     .whereNull('archived_at')
     .whereNot('status', 'accepted')
     .forUpdate()
-    .select('id', 'status', 'archived_at', 'expires_at', 'updated_at');
+    .select('id', 'status', 'archived_at', 'expires_at', 'updated_at', 'estimate_data');
   // Mid-delivery lineage refuses the mint FIRST (codex GH r19 P0 — the
   // same guard click-estimate-mint applies): an operator send claims the
   // row 'sending' and its finalization does not reject an archived row,
