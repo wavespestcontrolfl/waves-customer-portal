@@ -49,6 +49,9 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       t.decimal('credit_applied', 12, 2).defaultTo(0);
       t.date('due_date');
       t.timestamp('viewed_at');
+      t.timestamp('paid_at');
+      t.timestamp('ach_processing_notified_at');
+      t.timestamp('updated_at');
       t.string('stripe_payment_intent_id');
     });
     await app.schema.createTable('customer_merge_journal', (t) => {
@@ -947,20 +950,29 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
 
   test('only the locally settled authentication challenge stays resolved when a dispute reopens its invoice', async () => {
     const { invoiceId, attemptId, intent, customerId } = await authenticationFixture(app);
-    const paid = { ...intent, status: 'succeeded' };
+    const paid = { ...intent, status: 'succeeded', amount: 2000, amount_received: 2000 };
+    await app('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ amount: 20, credit_applied_total: 5 });
     const invoice = () => app('invoices').where({ id: invoiceId });
     const attempt = () => app('stripe_invoice_charge_attempts').where({ id: attemptId }).first();
     const settle = (pi = paid) => app.transaction((trx) => recordAuthenticationSettlement(pi, trx));
     await invoice().update({ status: 'paid', stripe_payment_intent_id: paid.id });
     await settle();
     expect((await attempt()).status).toBe('failed');
-    await app('payments').insert({ id: randomUUID(), customer_id: customerId, status: 'paid', stripe_payment_intent_id: paid.id });
+    await app('payments').insert({ id: randomUUID(), customer_id: customerId, status: 'paid', amount: 20, processor: 'stripe', stripe_payment_intent_id: paid.id });
+    await settle();
+    expect((await attempt()).status).toBe('failed');
+    await invoice().update({ credit_applied: 5 });
+    await settle({ ...paid, amount_received: 1999 });
+    expect((await attempt()).status).toBe('failed');
     await settle({ ...paid, payment_method: 'pm_wrong' });
     await settle({ ...paid, metadata: { ...paid.metadata, saved_card_attempt_id: randomUUID() } });
     await settle({ ...paid, status: 'processing' });
     expect((await attempt()).status).toBe('failed');
     const payment = () => app('payments').where({ stripe_payment_intent_id: paid.id });
-    await payment().update({ metadata: { invoice_id: randomUUID() } });
+    await payment().update({ processor: 'manual' });
+    await settle();
+    expect((await attempt()).status).toBe('failed');
+    await payment().update({ processor: 'stripe', metadata: { invoice_id: randomUUID() } });
     await settle();
     expect((await attempt()).status).toBe('failed');
     await payment().update({ metadata: { invoice_id: invoiceId } });

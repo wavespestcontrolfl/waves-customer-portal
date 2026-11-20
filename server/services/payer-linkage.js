@@ -13,9 +13,16 @@
 // (scheduled_send_error LIKE 'payer_billed:%' — a withdrawn combined-visit invoice keeps payer_id NULL).
 const db = require('../models/db');
 
-function metadataOf(p) {
+function metadataOf(payment) {
+  const isObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
   try {
-    return typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+    const metadata = typeof payment?.metadata === 'string' ? JSON.parse(payment.metadata) : payment?.metadata;
+    if (isObject(metadata)) return metadata;
+    if (!Array.isArray(metadata) || typeof metadata[0] !== 'string') return null;
+    const original = JSON.parse(metadata[0]);
+    const suffix = metadata.slice(1);
+    if (!isObject(original) || !suffix.every(isObject)) return null;
+    return Object.fromEntries([original, ...suffix].flatMap(Object.entries));
   } catch {
     return null;
   }
@@ -76,18 +83,32 @@ function buildPayerLinkage(payerInvRows, { failed = false } = {}) {
 // or jsonb concatenation turns it into ["{...}", {"new_key": ...}].
 function paymentMetadataObjectSql(alias) {
   const column = `${alias}.metadata`;
-  return `(CASE WHEN jsonb_typeof(${column}) = 'string' AND pg_input_is_valid(${column} #>> '{}', 'jsonb')
-    THEN CASE WHEN jsonb_typeof((${column} #>> '{}')::jsonb) = 'object'
-      THEN (${column} #>> '{}')::jsonb ELSE '{}'::jsonb END
-    WHEN jsonb_typeof(${column}) = 'object' THEN ${column} ELSE '{}'::jsonb END)`;
+  const original = `${column} #>> '{}'`;
+  const first = `${column}->>0`;
+  const preserve = `jsonb_build_object('legacy_metadata', ${column})`;
+  // Older writers used jsonb concatenation on a string, creating an array
+  // of the original encoded object followed by one or more notice objects.
+  // Merge those in chronological order, preserving unrelated metadata.
+  return `(CASE jsonb_typeof(${column})
+    WHEN 'object' THEN ${column}
+    WHEN 'string' THEN CASE WHEN pg_input_is_valid(${original}, 'jsonb')
+      THEN CASE WHEN jsonb_typeof((${original})::jsonb) = 'object' THEN (${original})::jsonb ELSE ${preserve} END
+      ELSE ${preserve} END
+    WHEN 'array' THEN CASE WHEN jsonb_typeof(${column}->0) = 'string'
+      AND pg_input_is_valid(${first}, 'jsonb')
+      AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(${column} - 0) AS suffix(item) WHERE jsonb_typeof(item) <> 'object')
+      THEN CASE WHEN jsonb_typeof((${first})::jsonb) = 'object'
+        THEN (${first})::jsonb || COALESCE((
+          SELECT jsonb_object_agg(entry.key, entry.value ORDER BY suffix.n)
+          FROM jsonb_array_elements(${column} - 0) WITH ORDINALITY AS suffix(item, n)
+          CROSS JOIN LATERAL jsonb_each(suffix.item) AS entry
+        ), '{}'::jsonb) ELSE ${preserve} END
+      ELSE ${preserve} END
+    ELSE CASE WHEN ${column} IS NULL THEN '{}'::jsonb ELSE ${preserve} END END)`;
 }
 
-// Values keep the compact reader used by bounded filters. Keys are internal
-// literals.
 function paymentMetadataValueSql(alias, key) {
-  const column = `${alias}.metadata`;
-  return `(CASE WHEN jsonb_typeof(${column}) = 'string' AND pg_input_is_valid(${column} #>> '{}', 'jsonb')
-    THEN ((${column} #>> '{}')::jsonb)->>'${key}' ELSE ${column}->>'${key}' END)`;
+  return `(${paymentMetadataObjectSql(alias)}->>'${key}')`;
 }
 
 function excludeDirectPayerPayments(query) {
@@ -144,7 +165,7 @@ const LIVE_CANDIDATE_PAYER_SQL = `(EXISTS (SELECT 1 FROM customers c WHERE c.id 
 const LIVE_SCAN_MAX_RESOLUTIONS = 30;
 const LIVE_PACKET_SCAN_MAX_PACKETS = 30;
 const LIVE_SETTLED_EXCLUSION_SQL = "lower(coalesce(invoices.status, '')) NOT IN ('paid', 'prepaid', 'refunded', 'partially_refunded', 'void', 'voided', 'canceled', 'cancelled', 'written_off')";
-const LIVE_ANNUAL_PREPAY_MARKER_SQL = 'EXISTS (SELECT 1 FROM annual_prepay_terms apt WHERE apt.prepay_invoice_id = invoices.id) AS annual_prepay_linked';
+const LIVE_ANNUAL_PREPAY_MARKER_SQL = '(invoices.annual_prepay_term_id IS NOT NULL OR EXISTS (SELECT 1 FROM annual_prepay_terms apt WHERE apt.prepay_invoice_id = invoices.id)) AS annual_prepay_linked';
 async function loadLivePayerLinkage(customerId, dbh = db) {
   const base = await loadPayerLinkage(customerId, dbh);
   if (base.failed) return { ...base, liveOwnedIds: new Set(), liveOwnedRows: [] };
@@ -255,6 +276,6 @@ function excludeLiveOwnedPayerPayments(qb, linkage) {
 module.exports = {
   LIVE_CANDIDATE_PAYER_SQL, LIVE_SETTLED_EXCLUSION_SQL, LIVE_ANNUAL_PREPAY_MARKER_SQL,
   LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, LIVE_PACKET_SCAN_MAX_PACKETS,
-  paymentMetadataObjectSql, paymentMetadataValueSql, uuidFromMetadata, excludeLiveOwnedPayerPayments,
+  metadataOf, paymentMetadataObjectSql, paymentMetadataValueSql, uuidFromMetadata, excludeLiveOwnedPayerPayments,
   invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage, excludeDirectPayerPayments,
 };

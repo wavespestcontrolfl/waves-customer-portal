@@ -99,7 +99,9 @@ describe('codex #5568 r13', () => {
     expect(fence).toBeGreaterThan(visitLock);
     const visitHelper = src.slice(src.indexOf('async function lockPrepaidVisit('), src.indexOf('// Shared pre-completion mint'));
     expect(visitHelper.indexOf("FOR KEY SHARE', [ownerId]")).toBeGreaterThan(-1);
-    expect(visitHelper.indexOf("trx('scheduled_services')")).toBeGreaterThan(visitHelper.indexOf("FOR KEY SHARE', [ownerId]"));
+    const lockedVisit = visitHelper.indexOf('await lockVisitForSettlement(trx, visitId');
+    expect(lockedVisit).toBeGreaterThan(visitHelper.indexOf("FOR KEY SHARE', [ownerId]"));
+    expect(visitHelper.indexOf("String(visit?.customer_id || '') === String(ownerId || '')")).toBeGreaterThan(lockedVisit);
     expect(src).toMatch(/assertEligibleInTrx: assertTechStillOwnsLiveVisit,/);
   });
 });

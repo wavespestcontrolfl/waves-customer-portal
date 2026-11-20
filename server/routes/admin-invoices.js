@@ -3152,7 +3152,12 @@ router.get('/:id/credit-context', async (req, res, next) => {
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     const total = CustomerCredit.round2(invoice.total || 0);
     const amountDue = invoiceAmountDue(invoice);
-    const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
+    const snapshot = await CustomerCredit.accountCreditSnapshotForInvoice({
+      customerId: invoice.customer_id,
+      invoiceId: invoice.id,
+    }, db);
+    const balance = CustomerCredit.round2(snapshot.balance || 0);
+    const spendable = CustomerCredit.round2(snapshot.spendable || 0);
     res.json({
       customer_id: invoice.customer_id,
       invoice_number: invoice.invoice_number,
@@ -3160,6 +3165,7 @@ router.get('/:id/credit-context', async (req, res, next) => {
       credit_applied: CustomerCredit.round2(invoice.credit_applied || 0),
       amount_due: amountDue,
       balance,
+      spendable,
     });
   } catch (err) { next(err); }
 });

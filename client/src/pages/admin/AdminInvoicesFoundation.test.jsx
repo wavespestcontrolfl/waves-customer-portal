@@ -267,6 +267,16 @@ describe("Invoice foundation workflow preservation", () => {
     expect(requests.find(request => request.key === key).body).toEqual({ waiveSetupFee: true, note: "Retain waiver note" });
   });
 
+  it("uses spendable credit for coverage even when the gross balance is sufficient", async () => {
+    const read = `GET /api/admin/invoices/${invoice.id}/credit-context`;
+    overrides.set(read, () => response({ balance: 100, spendable: 75, amount_due: 100 }));
+    await openPage(); await expand();
+    const dialog = await dialogFrom("Apply credit", "Apply account credit");
+    await dialog.findByText("$75.00");
+    expect(dialog.getByText(/Available credit \(\$75\.00\).*\$25\.00 short/)).toBeInTheDocument();
+    expect(dialog.getByRole("button", { name: "Apply & mark prepaid" })).toBeDisabled();
+  });
+
   it("keeps annual-prepay writes disabled until its existing coverage is available", async () => {
     await openPage(); await expand();
     const read = `GET /api/admin/invoices/${invoice.id}`;

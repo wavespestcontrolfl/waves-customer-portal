@@ -874,6 +874,7 @@ async function persistSavedCardChargeCreditDelta({
     await postCreditMovement({
       customerId,
       delta: -round2(target - current),
+      currentChargeAttemptId: attemptId,
       source: 'adjustment',
       invoiceId,
       note: `Account credit reserved for saved-card reconciliation ${reference}`,

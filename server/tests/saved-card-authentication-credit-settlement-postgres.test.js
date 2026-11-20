@@ -179,6 +179,66 @@ jest.setTimeout(20000);
     expect(payment.payment_date.toISOString().slice(0, 10)).toBe('2026-09-30');
   });
 
+  test.each([[0, 0], [1.88, 12]])('recovers missing credit after a $%s surcharge and $%s in prior cash', async (surcharge, priorCash) => {
+    const paidAt = new Date('2026-09-30T18:00:00Z');
+    const captured = 75 + surcharge;
+    intent.amount = intent.amount_received = Math.round(captured * 100);
+    intent.metadata.card_surcharge = String(surcharge);
+    await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ amount: captured });
+    if (priorCash) await mockDatabase('payments').insert({
+      customer_id: customerId, amount: priorCash, payment_date: '2026-09-29', status: 'paid',
+      metadata: { invoice_id: invoiceId, partial_payment: true },
+    });
+    await mockDatabase('invoices').where({ id: invoiceId }).update({
+      status: 'paid', total: 100 + surcharge + priorCash, paid_at: paidAt, stripe_payment_intent_id: intent.id,
+    });
+    const [originalPayment] = await mockDatabase('payments').insert({
+      customer_id: customerId, stripe_payment_intent_id: intent.id, amount: captured,
+      status: 'paid', processor: 'stripe', payment_date: '2026-09-30', metadata: { invoice_id: invoiceId },
+    }).returning('*');
+
+    // A bank return already holding this invoice must still be able to lock
+    // the payment while the success delivery is waiting for the invoice.
+    const holder = await mockDatabase.transaction();
+    let delivery;
+    try {
+      const { rows: [session] } = await holder.raw('SELECT pg_backend_pid() AS pid');
+      await holder('invoices').where({ id: invoiceId }).forUpdate().first();
+      delivery = settle(intent);
+      await waitForBlockedSettlement(session.pid);
+      await holder('payments').where({ id: originalPayment.id }).forUpdate().noWait().first();
+    } finally {
+      await holder.rollback();
+      await delivery;
+    }
+
+    expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id })).toEqual([originalPayment]);
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+      status: 'paid', total: (100 + surcharge + priorCash).toFixed(2), paid_at: paidAt, credit_applied: '25.00',
+    });
+    expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first()).toMatchObject({
+      status: 'succeeded', stripe_payment_intent_id: intent.id, decline_code: null,
+    });
+    expect(await mockDatabase('customers').where({ id: customerId }).first()).toMatchObject({ account_credits: '15.00' });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId }).pluck('delta')).toEqual(['-25.00']);
+    expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id })).toHaveLength(0);
+  });
+
+  test('a paid receipt one cent short of the captured cash and reserved credit stays under review', async () => {
+    await mockDatabase('invoices').where({ id: invoiceId }).update({
+      status: 'paid', total: 99.99, stripe_payment_intent_id: intent.id,
+    });
+    await mockDatabase('payments').insert({ customer_id: customerId, stripe_payment_intent_id: intent.id,
+      amount: 75, payment_date: '2026-09-30', processor: 'stripe', status: 'paid', metadata: { invoice_id: invoiceId } });
+    await settle(intent);
+    expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first()).toMatchObject({
+      status: 'failed', decline_code: 'authentication_required',
+    });
+    expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first())
+      .toMatchObject({ amount: '75.00', resolved: false });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
+  });
+
   test.each(['refunded', 'disputed'])('a delayed success closes the original challenge after a %s ledger entry', async (status) => {
     await mockDatabase('payments').insert({ customer_id: customerId, stripe_payment_intent_id: intent.id,
       amount: 75, payment_date: '2026-09-30', processor: 'stripe', status, metadata: { invoice_id: invoiceId } });

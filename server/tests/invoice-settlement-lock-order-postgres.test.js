@@ -329,9 +329,9 @@ test('every production caller of postCreditMovement that locks an invoice first 
     },
     {
       file: 'routes/stripe-webhook.js', label: 'succeeded-PI fallback handler',
-      anchor: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = await trx('invoices')",
+      anchor: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = invoice && await trx('invoices')",
       customerLock: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
-      invoiceLock: "const lockedInvoice = await trx('invoices')",
+      invoiceLock: "const lockedInvoice = invoice && await trx('invoices')",
     },
     {
       file: 'routes/stripe-webhook.js', label: 'ACH processing handler',
@@ -411,7 +411,7 @@ test('the two stripe-webhook.js reorders left unguarded still source every downs
   const path = require('path');
   const source = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
 
-  const customerIdWrites = (lockAnchor, fnLabel) => {
+  const customerIdWrites = (lockAnchor, fnLabel, endMarker) => {
     // Start AFTER the upfront customer-lock line itself — that line
     // legitimately reads the stale `invoice.customer_id` (it is only
     // choosing which row to lock, not writing anything) — so the "never
@@ -419,7 +419,9 @@ test('the two stripe-webhook.js reorders left unguarded still source every downs
     const lockAt = source.indexOf(lockAnchor);
     if (lockAt === -1) throw new Error(`stripe-webhook.js: lock anchor for ${fnLabel} not found`);
     const bodyStart = lockAt + lockAnchor.length;
-    const body = source.slice(bodyStart, bodyStart + 8000);
+    const bodyEnd = source.indexOf(endMarker, bodyStart);
+    expect(bodyEnd).toBeGreaterThan(bodyStart);
+    const body = source.slice(bodyStart, bodyEnd);
     // Both the payments insert (customer_id: lockedInvoice.customer_id) and
     // postCreditMovement's argument (customerId: lockedInvoice.customer_id)
     // key off the post-wait re-read.
@@ -428,12 +430,14 @@ test('the two stripe-webhook.js reorders left unguarded still source every downs
   };
 
   customerIdWrites(
-    "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = await trx('invoices')",
+    "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = invoice && await trx('invoices')",
     'succeeded-PI fallback handler',
+    'if (fallbackOutcome ===',
   );
   customerIdWrites(
     "if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n    const lockedInvoice = await trx('invoices')",
     'ACH processing handler',
+    'if (processingOutcome ===',
   );
 });
 

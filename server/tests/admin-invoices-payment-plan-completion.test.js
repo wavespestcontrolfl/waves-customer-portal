@@ -56,7 +56,7 @@ jest.mock('../services/payment-lifecycle-email', () => ({
 jest.mock('../services/customer-credit', () => ({
   round2: (v) => Math.round((Number(v) || 0) * 100) / 100,
   getBalance: jest.fn(async () => 100),
-  accountCreditSnapshotForInvoice: jest.fn(async () => ({ spendable: 500 })),
+  accountCreditSnapshotForInvoice: jest.fn(async () => ({ balance: 500, spendable: 500 })),
   spendableAccountCreditForInvoice: jest.fn(async ({ balance }) => Number(balance)),
   postCreditMovement: jest.fn(async () => ({ balanceAfter: 400 })),
 }));
@@ -434,12 +434,12 @@ describe('active payment plans auto-complete when the invoice settles', () => {
 
   test('the staff credit context reports the account balance while posting checks spendable credit before retiring a payment session', async () => {
     const CustomerCredit = require('../services/customer-credit');
-    CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValueOnce({ spendable: 75 });
+    CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValue({ balance: 100, spendable: 75 });
 
     await withServer(async (baseUrl) => {
       const preview = await fetch(`${baseUrl}/admin/invoices/inv-1/credit-context`);
       expect(preview.status).toBe(200);
-      await expect(preview.json()).resolves.toMatchObject({ balance: 100, amount_due: 100 });
+      await expect(preview.json()).resolves.toMatchObject({ balance: 100, spendable: 75, amount_due: 100 });
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -453,6 +453,8 @@ describe('active payment plans auto-complete when the invoice settles', () => {
         customerId: INVOICE.customer_id,
         invoiceId: INVOICE.id,
       }, db);
+      expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledTimes(2);
+      expect(CustomerCredit.getBalance).not.toHaveBeenCalled();
       expect(db.transaction).not.toHaveBeenCalled();
       expect(CustomerCredit.postCreditMovement).not.toHaveBeenCalled();
     });

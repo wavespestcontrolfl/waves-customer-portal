@@ -495,8 +495,8 @@ async function findMatchingSavedCardAttempt(
   }) ? candidate : null;
 }
 
-async function findInvoiceForPaymentIntent(paymentIntent) {
-  const byPaymentIntent = await db('invoices')
+async function findInvoiceForPaymentIntent(paymentIntent, database = db) {
+  const byPaymentIntent = await database('invoices')
     .where({ stripe_payment_intent_id: paymentIntent.id })
     .first();
   const invoiceId = paymentIntent.metadata?.waves_invoice_id || null;
@@ -510,12 +510,12 @@ async function findInvoiceForPaymentIntent(paymentIntent) {
   }
 
   if (invoiceId) {
-    const byMetadata = await db('invoices').where({ id: invoiceId }).first();
+    const byMetadata = await database('invoices').where({ id: invoiceId }).first();
     if (byMetadata?.stripe_payment_intent_id
       && String(byMetadata.stripe_payment_intent_id) !== String(paymentIntent.id)) {
-      const savedCardAttempt = await findMatchingSavedCardAttempt(db, byMetadata, paymentIntent);
+      const savedCardAttempt = await findMatchingSavedCardAttempt(database, byMetadata, paymentIntent);
       if (savedCardAttempt) return byMetadata;
-      const authentication = await findSettlingAuthenticationAttempt(paymentIntent, byMetadata, db);
+      const authentication = await findSettlingAuthenticationAttempt(paymentIntent, byMetadata, database);
       if (authentication?.canceled_checkout_payment_intent_id === byMetadata.stripe_payment_intent_id) return byMetadata;
       logger.warn(
         `[stripe-webhook] PI ${paymentIntent.id} metadata invoice ${invoiceId} is already bound to ${byMetadata.stripe_payment_intent_id}; ignoring metadata fallback`,
@@ -646,6 +646,7 @@ async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) 
 // Sentinel: the succeeded-PI fallback transaction quarantined this charge, so
 // the rest of the handler (invoice-paid update, settlement effects) is skipped.
 const QUARANTINED = Symbol('quarantined');
+const ALREADY_PAID_AUTHENTICATION = Symbol('already paid authentication');
 
 async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason, { database = db, invoice = null } = {}) {
   const latestCharge = paymentIntent.latest_charge;
@@ -1977,36 +1978,25 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
   } else {
     const fallbackOutcome = await db.transaction(async (trx) => {
       await lockPaymentIntentPaymentRow(trx, piId);
-      if (authenticatingAttempt) {
-        // A merge locks the customer before its ledger rows. Recovery can
-        // update an existing payment and debit credit in this transaction.
-        await trx('customers').where({ id: invoiceForTenderGuard.customer_id }).forUpdate().first('id');
+      // Bank returns and office settlement lock customer, invoice, attempt, then
+      // payment. A ledger row can already exist when the succeeded event arrives.
+      const invoice = invoiceForTenderGuard || await findInvoiceForPaymentIntent(paymentIntent, trx);
+      if (invoice?.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+      const lockedInvoice = invoice && await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      const matchingAmbiguousAttempt = lockedInvoice && await findMatchingSavedCardAttempt(
+        trx, lockedInvoice, paymentIntent, { lock: true, reportWorkerConflict: true },
+      );
+      if (matchingAmbiguousAttempt === CONFLICTING_WORKER_INTENT) {
+        await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal ?? centsToDollars(paymentIntent.amount),
+          'Succeeded PaymentIntent differs from the locked saved-card worker response', { database: trx, invoice: lockedInvoice });
+        return QUARANTINED;
       }
       const existingPayment = await trx('payments')
         .where({ stripe_payment_intent_id: piId })
         .forUpdate()
         .first();
       if (existingPayment && !authenticatingAttempt) {
-        // The direct processing flip above and this fallback existing-row path
-        // must enforce the same worker identity fence. Lock the invoice and
-        // named attempt before changing this row to paid (or adding the
-        // settlement stamp), because the worker may have bound a different PI
-        // since the preflight read.
-        if (invoiceForTenderGuard?.id) {
-          const lockedInvoice = await trx('invoices').where({ id: invoiceForTenderGuard.id })
-            .forUpdate().first();
-          const matchingAttempt = lockedInvoice
-            ? await findMatchingSavedCardAttempt(trx, lockedInvoice, paymentIntent, {
-              lock: true, reportWorkerConflict: true,
-            })
-            : null;
-          if (matchingAttempt === CONFLICTING_WORKER_INTENT) {
-            await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal ?? centsToDollars(paymentIntent.amount),
-              'Succeeded PaymentIntent differs from the locked saved-card worker response', { database: trx });
-            return QUARANTINED;
-          }
-          if (lockedInvoice) await assertNoConflictingAuthenticationSettlement(paymentIntent, lockedInvoice, null, trx);
-        }
+        if (lockedInvoice) await assertNoConflictingAuthenticationSettlement(paymentIntent, lockedInvoice, null, trx);
         // 'disputed' is terminal here: a delayed/reclaimed succeeded
         // event arriving after charge.dispute.created must not flip a
         // chargeback back to paid (dispute resolution owns that row now).
@@ -2034,7 +2024,6 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
         return;
       }
 
-      const invoice = authenticatingAttempt ? invoiceForTenderGuard : await findInvoiceForPaymentIntent(paymentIntent);
       if (!invoice?.customer_id) {
         await recordOrphanSucceededPaymentIntent(
           paymentIntent,
@@ -2045,59 +2034,16 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
         return QUARANTINED;
       }
 
-      // Codex pre-push P2 (round 2 of the owner's audit): lock the
-      // customer row before the invoice row — postCreditMovement further
-      // down (only reached on a matching ambiguous saved-card attempt)
-      // also locks the customer, and this handler's old invoice-then-
-      // customer order could deadlock against settleZeroBalance's now
-      // customer-first order (server/services/invoice.js). invoice.customer_id
-      // is already known from the unlocked findInvoiceForPaymentIntent read
-      // above.
-      if (!authenticatingAttempt) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      const lockedInvoice = await trx('invoices')
-        .where({ id: invoice.id })
-        .forUpdate()
-        .first();
       if (!lockedInvoice) return;
-      // Local pre-push audit P1 (round 2, Claude fallback) raised the same
-      // concern here as the other reorders in this sweep: the customer lock
-      // above is sourced from the unlocked findInvoiceForPaymentIntent read,
-      // so it can name the WRONG (retired) customer if a merge repoints this
-      // invoice's owner before the lock lands. NOT guarded with a throw here
-      // — unlike the other five callers in this sweep, this handler already
-      // has its own deliberate, tested, documented answer to a stale
-      // pre-lock owner: every actual write below (the payments insert, and
-      // postCreditMovement's customerId on a matching ambiguous attempt)
-      // sources customer_id from `lockedInvoice` — the post-wait re-read —
-      // never from `invoice`. See the "OWNERSHIP COMES FROM THE LOCKED ROW"
-      // comment on the payments insert below, and
-      // tests/stripe-webhook-settlement-ownership.test.js, which pins that a
-      // concurrent ownership change must be FOLLOWED to its new owner, not
-      // refused. A mismatch here only means the upfront lock above landed on
-      // the previous owner's row rather than the current one — a narrow
-      // lock-order edge case (this handler racing a merge racing
-      // settleZeroBalance on the very same invoice), not a correctness gap,
-      // and Stripe's own webhook retry already recovers from a 40P01 if that
-      // ever collides.
       const activePi = lockedInvoice.stripe_payment_intent_id
         ? String(lockedInvoice.stripe_payment_intent_id)
         : '';
-      const matchingAmbiguousAttempt = await findMatchingSavedCardAttempt(
-        trx,
-        lockedInvoice,
-        paymentIntent,
-        { lock: true, reportWorkerConflict: true },
-      );
-      if (matchingAmbiguousAttempt === CONFLICTING_WORKER_INTENT) {
-        await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal ?? centsToDollars(paymentIntent.amount),
-          'Succeeded PaymentIntent differs from the locked saved-card worker response', { database: trx, invoice: lockedInvoice });
-        return QUARANTINED;
-      }
       const quarantineAuthentication = async (reason) => {
         await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal,
           `Saved-card authentication on invoice ${lockedInvoice.id}: ${reason}`, { database: trx, invoice: lockedInvoice });
         return QUARANTINED;
       };
+      let exactPaidAuthentication = false;
       if (authenticatingAttempt && existingPayment) {
         const ledgerInvoiceId = existingPayment.metadata?.invoice_id;
         if (existingPayment.customer_id !== lockedInvoice.customer_id
@@ -2112,7 +2058,10 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
         if (existingPayment.status === 'paid' && Number(existingPayment.amount) !== chargedTotal) {
           return quarantineAuthentication('the recorded payment amount differs from the captured amount');
         }
-        if (existingPayment.status === 'paid' && activePi === piId && lockedInvoice.status === 'paid') return;
+        exactPaidAuthentication = existingPayment.status === 'paid' && activePi === piId && lockedInvoice.status === 'paid';
+        if (exactPaidAuthentication && existingPayment.processor !== 'stripe') {
+          return quarantineAuthentication('the recorded payment does not identify Stripe as its processor');
+        }
       }
       // The withdrawal read UNDER THE ROW LOCK (audit P0): the pre-lock check
       // earlier in this handler can be overtaken by a Bill-To transaction that
@@ -2136,11 +2085,18 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
       }
       const lockedAuthentication = authenticatingAttempt
         && await findSettlingAuthenticationAttempt(paymentIntent, lockedInvoice, trx, { lock: true });
-      if (authenticatingAttempt && !lockedAuthentication) return quarantineAuthentication('the saved-card attempt no longer matches');
+      if (authenticatingAttempt && !lockedAuthentication) {
+        // A concurrent delivery may have completed the same attempt while we
+        // waited for its invoice. Its committed settlement needs no more work.
+        if (exactPaidAuthentication && await trx('stripe_invoice_charge_attempts').where({
+          id: authenticatingAttempt.id, invoice_id: lockedInvoice.id, status: 'succeeded', stripe_payment_intent_id: piId,
+        }).first('id')) return ALREADY_PAID_AUTHENTICATION;
+        return quarantineAuthentication('the saved-card attempt no longer matches');
+      }
       await assertNoConflictingAuthenticationSettlement(paymentIntent, lockedInvoice, lockedAuthentication, trx);
       const canceledCheckoutId = lockedAuthentication?.canceled_checkout_payment_intent_id;
       const replacesCanceledCheckout = !!activePi && activePi === canceledCheckoutId && activePi !== piId;
-      if (invoicePaymentIntentBlocksFallback({
+      if (!exactPaidAuthentication && invoicePaymentIntentBlocksFallback({
         invoiceStatus: lockedInvoice.status,
         activePaymentIntentId: replacesCanceledCheckout ? null : activePi,
         incomingPaymentIntentId: piId,
@@ -2165,8 +2121,17 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
           if (creditAdjustment && creditAdjustment.delta > Number(creditAttempt.credit_applied_delta)) {
             return quarantineAuthentication('the required credit exceeds the submitted draw');
           }
-          const expectedInvoice = creditAdjustment ? { ...lockedInvoice, credit_applied: creditAdjustment.target } : lockedInvoice;
-          const amountDue = invoiceAmountDue(expectedInvoice);
+          const expectedInvoice = { ...lockedInvoice, credit_applied: creditAdjustment?.target ?? lockedInvoice.credit_applied };
+          if (exactPaidAuthentication && (creditAttempt.amount == null || creditAttempt.credit_applied_delta == null
+            || creditAttempt.credit_applied_total == null
+            || Number(creditAttempt.credit_applied_total) !== Number(expectedInvoice.credit_applied || 0))) {
+            return quarantineAuthentication('the paid invoice does not match the submitted credit');
+          }
+          // The paid total already includes the captured surcharge. An open
+          // invoice still carries the pre-surcharge price.
+          if (exactPaidAuthentication) expectedInvoice.amount_paid = (await handPartsPaidCents(trx, lockedInvoice.id)) / 100;
+          const paidSurcharge = exactPaidAuthentication ? Number(paymentIntent.metadata?.card_surcharge || 0) : 0;
+          const amountDue = invoiceAmountDue(expectedInvoice) - paidSurcharge;
           if (!authenticatedSavedCardAmountMatches(paymentIntent, creditAttempt, amountDue)) {
             return quarantineAuthentication('the locked invoice, submitted base and surcharge, or captured cents disagree');
           }
@@ -2182,6 +2147,7 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
             await postCreditMovement({
               customerId: lockedInvoice.customer_id,
               delta: -creditAdjustment.delta,
+              currentChargeAttemptId: creditAttempt.id,
               source: 'adjustment',
               invoiceId: lockedInvoice.id,
               note: `Account credit consumed by reconciled saved-card attempt ${creditAttempt.id}`,
@@ -2197,6 +2163,14 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
           });
           lockedInvoice.credit_applied = creditAdjustment.target;
         }
+      }
+
+      if (exactPaidAuthentication) {
+        // The cash and invoice already settled. Commit the verified credit and
+        // close its hold together, preserving the original receipt and paid date.
+        const recorded = await recordAuthenticationSettlement(paymentIntent, trx);
+        if (!recorded) throw new Error(`Paid saved-card attempt ${lockedAuthentication.id} changed during reconciliation`);
+        return ALREADY_PAID_AUTHENTICATION;
       }
 
       const fallbackInvoiceUpdates = {
@@ -2339,9 +2313,8 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
       logger.info(`[stripe-webhook] Settled payment row for PI: ${piId}`);
       return null;
     });
-    // Quarantined: no payments row exists for this PI on purpose, so the
-    // invoice-paid update and the settlement effects below must not run.
-    if (fallbackOutcome === QUARANTINED) return;
+    // Neither a quarantined capture nor a repaired paid receipt creates a new settlement.
+    if (fallbackOutcome === QUARANTINED || fallbackOutcome === ALREADY_PAID_AUTHENTICATION) return;
   }
 
   // A disputed chargeback owns this PI now — a late or reclaimed
@@ -6689,6 +6662,7 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
       await postCreditMovement({
         customerId: lockedInvoice.customer_id,
         delta: -creditAdjustment.delta,
+        currentChargeAttemptId: matchingSavedCardAttempt.id,
         source: 'adjustment',
         invoiceId: lockedInvoice.id,
         note: `Account credit consumed by processing saved-card attempt ${matchingSavedCardAttempt.id}`,

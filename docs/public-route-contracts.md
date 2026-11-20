@@ -832,7 +832,9 @@ the invoice lock before recording a new charge attempt. On a held invoice,
 staff credit application returns HTTP 409 and automatic credit application
 skips the invoice. On another invoice for the same customer, staff and
 automatic applications can draw the balance above the earlier attempt's
-unposted credit. Amount edits to the held invoice wait for the challenge to resolve.
+unposted credit. The staff credit dialog shows this spendable amount. Manual
+credit deductions and automated debits also preserve the reservation.
+Amount edits to the held invoice wait for the challenge to resolve.
 A cancellation clears the hold only when the original charge worker recorded
 that exact PaymentIntent independently of the webhook. A disagreement between
 the two IDs keeps checkout held. A legacy ID without worker provenance
@@ -840,8 +842,11 @@ keeps checkout on HTTP 409 even if the supplied intent was canceled. After webho
 verify the PaymentIntent directly using the saved-card cancellation command
 in `ops/agents/README.md`. A successful challenge settles the matching card
 payment and any missing portion of its submitted account credit in one invoice
-transaction. A funding shortfall or amount mismatch records the captured
-payment for reconciliation and keeps the invoice open. A later dispute can
+transaction. If the invoice was already paid, a replay can post the missing
+credit once when the signed capture, Stripe ledger entry, submitted credit,
+and paid total agree after accounting for surcharge and prior cash. The
+original receipt and paid date stand. A funding shortfall or amount mismatch
+keeps the hold in place for reconciliation. A later dispute can
 reopen a settled invoice after the original authentication hold has cleared.
 If the original create timed out, a signed failure event identifying that submitted
 request can release its reserved credit. Other unproven attempts stay held.

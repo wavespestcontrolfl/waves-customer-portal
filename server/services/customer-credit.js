@@ -66,16 +66,19 @@ async function getLedger(customerId, { limit = 100 } = {}) {
  *   delta > 0  → add credit to the balance (issuance, refund, referral)
  *   delta < 0  → consume credit (applied to an invoice)
  *
- * Locks the customer row, recomputes the balance, refuses to let the
- * balance go negative, updates the cache, and writes the ledger row. Pass
- * an existing knex transaction as `trx` to fold this into a larger unit of
- * work (e.g. the invoice prepaid transition); otherwise it opens its own.
+ * Locks the customer row, recomputes the balance, preserves credit reserved
+ * by pending saved-card attempts, updates the cache, and writes the ledger
+ * row. Pass an existing knex transaction as `trx` to fold this into a larger
+ * unit of work (e.g. the invoice prepaid transition); otherwise it opens its
+ * own. A saved-card settlement passes its verified `currentChargeAttemptId`;
+ * the exception applies only when that attempt belongs to `invoiceId`.
  *
  * Returns { balanceAfter, entry }.
  */
 async function postCreditMovement({
   customerId, delta, source, invoiceId = null, referralId = null,
   note = null, createdBy = null, stampInsertOrder = false,
+  currentChargeAttemptId = null,
 }, trx = null) {
   const amount = round2(delta);
   if (!customerId) throw new Error('customerId is required');
@@ -99,16 +102,27 @@ async function postCreditMovement({
     }
     const current = round2(customer.account_credits || 0);
     const balanceAfter = round2(current + amount);
-    if (balanceAfter < 0) {
+    const reserved = amount < 0
+      ? await unpostedSavedCardCredit({
+        customerId,
+        invoiceId,
+        currentChargeAttemptId,
+        includeCurrentInvoice: true,
+      }, t)
+      : 0;
+    if (balanceAfter < reserved) {
       const err = new Error(
         `Insufficient account credit — balance is $${current.toFixed(2)}, `
+        + (reserved > 0
+          ? `$${reserved.toFixed(2)} is reserved for pending card payment, `
+          : '')
         + `cannot apply $${Math.abs(amount).toFixed(2)}`,
       );
       err.statusCode = 400;
       err.isOperational = true;
-      // Typed so callers can tell "the money is genuinely gone" apart from
-      // a transient DB fault — the inspection-credit reversal alerts the
-      // office ONLY on this code (PR #3178 r18 P2).
+      // Typed so callers can tell "the money is unavailable" apart from a
+      // transient DB fault — the inspection-credit reversal alerts the office
+      // ONLY on this code (PR #3178 r18 P2).
       err.code = 'INSUFFICIENT_CREDIT';
       throw err;
     }
@@ -264,11 +278,15 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
 // serializes on the customer row, and both sides of a claimed -> failed/
 // ambiguous transition match this predicate, so the reservation cannot vanish
 // at that seam.
-function unpostedSavedCardCreditQuery({ customerId, invoiceId }, dbh) {
-  return dbh('stripe_invoice_charge_attempts as attempt')
+function unpostedSavedCardCreditQuery({
+  customerId,
+  invoiceId = null,
+  currentChargeAttemptId = null,
+  includeCurrentInvoice = false,
+}, dbh) {
+  const query = dbh('stripe_invoice_charge_attempts as attempt')
     .join('invoices as held_invoice', 'held_invoice.id', 'attempt.invoice_id')
     .where('held_invoice.customer_id', customerId)
-    .whereNot('attempt.invoice_id', invoiceId)
     .whereNotNull('attempt.submitted_at')
     .where('attempt.credit_applied_delta', '>', 0)
     .where(function savedCardMaySettle() {
@@ -279,10 +297,33 @@ function unpostedSavedCardCreditQuery({ customerId, invoiceId }, dbh) {
         whereAwaitingAuthentication(this, 'attempt');
       });
     });
+  if (invoiceId && !includeCurrentInvoice) {
+    query.whereNot('attempt.invoice_id', invoiceId);
+  }
+  // A settlement may spend the reservation made by its own attempt. Match
+  // BOTH identities so a caller cannot name a sibling attempt and consume
+  // credit promised to another invoice.
+  if (invoiceId && currentChargeAttemptId) {
+    query.where(function otherAttemptOrInvoice() {
+      this.whereNot('attempt.id', currentChargeAttemptId)
+        .orWhereNot('attempt.invoice_id', invoiceId);
+    });
+  }
+  return query;
 }
 
-async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }, dbh) {
-  const attempts = await unpostedSavedCardCreditQuery({ customerId, invoiceId }, dbh)
+async function unpostedSavedCardCredit({
+  customerId,
+  invoiceId = null,
+  currentChargeAttemptId = null,
+  includeCurrentInvoice = false,
+}, dbh) {
+  const attempts = await unpostedSavedCardCreditQuery({
+    customerId,
+    invoiceId,
+    currentChargeAttemptId,
+    includeCurrentInvoice,
+  }, dbh)
     .select(
       'attempt.credit_applied_delta',
       'attempt.credit_applied_total',
@@ -296,6 +337,10 @@ async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }
     const stillUnposted = Math.max(0, round2(submittedTarget - alreadyPosted));
     return sum + Math.min(submittedDelta, stillUnposted);
   }, 0));
+}
+
+async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }, dbh) {
+  return unpostedSavedCardCredit({ customerId, invoiceId }, dbh);
 }
 
 // Checkout pricing needs the balance and sibling reservation from the SAME
@@ -569,6 +614,7 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
       invoiceId,
       note: 'Account credit applied to invoice',
       createdBy,
+      currentChargeAttemptId,
     }, t);
 
     const updates = { credit_applied: newCreditApplied, updated_at: t.fn.now() };

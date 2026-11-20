@@ -66,9 +66,9 @@ describe('payer-linked SQL exclusion matches the in-memory linkage', () => {
     expect(excludeLiveOwnedPayerPayments(qb, linkage)).toBe(qb);
 
     const sql = calls.map(([text]) => text).join('\n');
-    expect(sql).toContain("metadata->>'invoice_id'");
-    expect(sql).toContain("metadata->>'dispute_invoice_id'");
-    expect(sql).toContain("metadata->>'waves_invoice_id'");
+    expect(sql).toContain(")->>'invoice_id'");
+    expect(sql).toContain(")->>'dispute_invoice_id'");
+    expect(sql).toContain(")->>'waves_invoice_id'");
     expect(sql).toContain('stripe_payment_intent_id <> ALL');
     expect(sql).toContain('stripe_charge_id <> ALL');
     expect(sql).toContain("substring(payments.description from '^Invoice\\s+([A-Za-z0-9-]+)\\s+—')");
@@ -224,6 +224,20 @@ describe('loadLivePayerLinkage is bounded', () => {
     })], dbh, { maxResolutions: 30, byCandidatePayer: true });
     expect(out.failed).toBe(false);
     expect(out.liveOwnedIds).toEqual(new Set());
+  });
+
+  test('a directly linked annual invoice resolves the account payer despite its self-pay visit', async () => {
+    const row = { ...invoices(1)[0], scheduled_service_id: 'self-pay-visit', annual_prepay_linked: true };
+    const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([[row]]));
+    liveInvoiceOwnership.mockImplementationOnce(async (_customerId, rows) => ({
+      ownedIds: new Set(rows.filter((invoice) => !invoice.scheduled_service_id).map((invoice) => invoice.id)),
+      unverifiable: false,
+    }));
+    const { LIVE_ANNUAL_PREPAY_MARKER_SQL } = require('../services/payer-linkage');
+    expect(LIVE_ANNUAL_PREPAY_MARKER_SQL).toContain('invoices.annual_prepay_term_id IS NOT NULL OR EXISTS');
+    const result = await loadLivePayerLinkage('c1', dbh);
+    expect(result.failed).toBe(false);
+    expect(result.isPayerLinked({ metadata: { invoice_id: row.id } })).toBe(true);
   });
 
   test('packet ownership lookup errors and an over-bound packet set fail closed', async () => {

@@ -114,6 +114,7 @@ test.each([
   JSON.stringify({ billed_month: '2026-11', deferred_resolution: 'absorbed_annual_prepay' }),
   [
     JSON.stringify({ billed_month: '2026-11', deferred_reason: 'collection_hold' }),
+    { email_obligation: 'sent' },
     { deferred_resolution: 'absorbed_annual_prepay' },
   ],
 ])('an annual-prepay-absorbed retry is resolved, not pending verification (%p)', async (metadata) => {

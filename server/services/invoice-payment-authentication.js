@@ -234,21 +234,28 @@ async function recordAuthenticationSettlement(intent, trx, { returnedPaymentId =
   if (!match) return;
   const { query, methodId } = match;
   if (!methodId) query.where({ stripe_payment_intent_id: intent.id });
+  const cents = intent.amount_received;
+  if (!Number.isSafeInteger(cents) || cents <= 0 || intent.amount !== cents) return 0;
+  const amount = cents / 100;
   const currentInvoiceOwner = trx('invoices')
     .select('customer_id')
     .where({ id: intent.metadata.waves_invoice_id });
   const ledger = trx('payments').select('id').whereIn('customer_id', currentInvoiceOwner)
-    .where({ stripe_payment_intent_id: intent.id });
+    .where({ stripe_payment_intent_id: intent.id, processor: 'stripe', amount });
   if (returnedPaymentId) {
     // A prior refund/dispute owns the invoice and ledger. Prove the original
     // capture and close only its challenge, leaving both terminal states alone.
-    const cents = Number(intent.amount_received || intent.amount);
-    if (!Number.isSafeInteger(cents) || cents <= 0) return 0;
-    query.where({ amount: cents / 100 });
-    ledger.where({ id: returnedPaymentId, amount: cents / 100 }).whereIn('status', ['disputed', 'refunded'])
+    query.where({ amount });
+    ledger.where({ id: returnedPaymentId }).whereIn('status', ['disputed', 'refunded'])
       .whereRaw("(metadata->>'invoice_id' = ? OR (metadata->>'invoice_id' IS NULL AND EXISTS (SELECT 1 FROM invoices WHERE id = ? AND stripe_payment_intent_id = ?)))",
         [intent.metadata.waves_invoice_id, intent.metadata.waves_invoice_id, intent.id]);
   } else {
+    // A worker can report the authentication decline after the webhook's
+    // initial read. A paid ledger alone cannot release the reserved credit.
+    query.where(function matchingQuote() { this.whereNull('amount').orWhere({ amount }); })
+      .whereExists(trx('invoices as settled').select('id')
+        .whereColumn('settled.id', 'stripe_invoice_charge_attempts.invoice_id')
+        .whereRaw('COALESCE(settled.credit_applied, 0) = COALESCE(stripe_invoice_charge_attempts.credit_applied_total, 0)'));
     ledger.where({ status: 'paid' })
       .whereRaw("(metadata->>'invoice_id' IS NULL OR metadata->>'invoice_id' = ?)", [intent.metadata.waves_invoice_id]);
   }

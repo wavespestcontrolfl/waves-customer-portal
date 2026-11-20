@@ -7,7 +7,7 @@ const db = require('../models/db');
 const { excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const StripeService = require('./stripe');
 const logger = require('./logger');
-const { loadPayerLinkage, excludeDirectPayerPayments, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
+const { metadataOf: paymentMetadataOf, loadPayerLinkage, excludeDirectPayerPayments, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
 const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer, neverRanVisitStatus } = require('./invoice-helpers');
 const { isNeverAttemptedDeferral } = require('./failed-payments');
 const { isParkedOrSupersededAttempt } = require('./retry-collectibility');
@@ -23,33 +23,6 @@ const { whereAwaitingAuthentication } = require('./invoice-payment-authenticatio
 //      the payment-success SMS/email uses). View-only, no PDF.
 // Customer-scoped lookup: a token is only ever returned for an invoice
 // belonging to the requesting customer.
-const paymentMetadataOf = (payment) => {
-  try {
-    let metadata = typeof payment?.metadata === 'string'
-      ? JSON.parse(payment.metadata)
-      : payment?.metadata;
-    // Before billing-cron normalized legacy JSONB strings, PostgreSQL's
-    // string || object concatenation stored ["{...}", { resolution... }].
-    // Recover that one historical shape so a self-superseded retry reads as
-    // resolved, not as an uncertain charge awaiting verification.
-    if (Array.isArray(metadata) && metadata.length === 2
-      && typeof metadata[0] === 'string'
-      && metadata[1] && typeof metadata[1] === 'object' && !Array.isArray(metadata[1])) {
-      let original = null;
-      try {
-        const parsed = JSON.parse(metadata[0]);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) original = parsed;
-      } catch {
-        // The cron-authored resolution object remains authoritative even if
-        // the older inner text was malformed.
-      }
-      metadata = { ...(original || {}), ...metadata[1] };
-    }
-    return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : null;
-  } catch {
-    return null;
-  }
-};
 const stripeReceiptOf = (p) => paymentMetadataOf(p)?.stripe_receipt_url || p.receipt_url || null;
 // Invoice resolution mirrors the canonical webhook resolver
 // (stripe-webhook.js): metadata.invoice_id, then the dispute/legacy

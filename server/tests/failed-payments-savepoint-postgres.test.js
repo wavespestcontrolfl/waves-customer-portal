@@ -78,6 +78,7 @@ postgres('failed-payment status lookup savepoint (PostgreSQL)', () => {
     const lockId = randomUUID();
     const holdId = randomUUID();
     const absorbedId = randomUUID();
+    const arrayAbsorbedId = randomUUID();
     await app('payments').insert([
       {
         id: paidId, customer_id: customerId, status: 'paid', amount: 33,
@@ -103,6 +104,13 @@ postgres('failed-payment status lookup savepoint (PostgreSQL)', () => {
         retry_count: 0, superseded_by_payment_id: absorbedId,
         payment_date: '2026-11-04', created_at: new Date('2026-11-04T14:00:00Z'),
       },
+      {
+        id: arrayAbsorbedId, customer_id: customerId, status: 'failed', amount: 33,
+        metadata: app.raw('?::jsonb', [JSON.stringify([JSON.stringify({ deferred_reason: 'collection_hold' }),
+          { email_obligation: 'sent' }, { deferred_resolution: 'absorbed_annual_prepay' }])]),
+        retry_count: 0, superseded_by_payment_id: arrayAbsorbedId,
+        payment_date: '2026-11-05', created_at: new Date('2026-11-05T14:00:00Z'),
+      },
     ]);
 
     const latest = await excludeNeverAttemptedDeferrals(app('payments')
@@ -126,6 +134,8 @@ postgres('failed-payment status lookup savepoint (PostgreSQL)', () => {
     const customerId = randomUUID();
     const legacyId = randomUUID();
     const objectId = randomUUID();
+    const noticeId = randomUUID();
+    const unknownId = randomUUID();
     const legacy = { billed_month: '2026-08', base_amount: 33 };
     const object = { billed_month: '2026-09', base_amount: 44 };
     await app('payments').insert([
@@ -137,17 +147,27 @@ postgres('failed-payment status lookup savepoint (PostgreSQL)', () => {
         id: objectId, customer_id: customerId, status: 'failed', amount: 44,
         metadata: object,
       },
+      {
+        id: noticeId, customer_id: customerId, status: 'failed', amount: 33,
+        metadata: app.raw('?::jsonb', [JSON.stringify([JSON.stringify(legacy), { notice_id: 'original' }, { notice_id: 'current' }])]),
+      },
+      {
+        id: unknownId, customer_id: customerId, status: 'failed', amount: 33,
+        metadata: app.raw('?::jsonb', [JSON.stringify([3, 'opaque'])]),
+      },
     ]);
 
-    await app('payments').whereIn('id', [legacyId, objectId]).update({
+    await app('payments').whereIn('id', [legacyId, objectId, noticeId, unknownId]).update({
       metadata: app.raw(`${paymentMetadataObjectSql('payments')} || ?::jsonb`, [
         JSON.stringify({ deferred_resolution: 'absorbed_annual_prepay' }),
       ]),
     });
 
-    const byId = new Map((await app('payments').whereIn('id', [legacyId, objectId])
+    const byId = new Map((await app('payments').whereIn('id', [legacyId, objectId, noticeId, unknownId])
       .select('id', 'metadata')).map((row) => [row.id, row.metadata]));
     expect(byId.get(legacyId)).toEqual({ ...legacy, deferred_resolution: 'absorbed_annual_prepay' });
+    expect(byId.get(noticeId)).toEqual({ ...legacy, notice_id: 'current', deferred_resolution: 'absorbed_annual_prepay' });
+    expect(byId.get(unknownId)).toEqual({ legacy_metadata: [3, 'opaque'], deferred_resolution: 'absorbed_annual_prepay' });
     expect(byId.get(objectId)).toEqual({ ...object, deferred_resolution: 'absorbed_annual_prepay' });
   });
 

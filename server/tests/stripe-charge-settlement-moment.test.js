@@ -100,7 +100,11 @@ describe('StripeService.chargeInvoiceWithSavedCard settlement moment', () => {
         }
         return 1;
       });
-      chain.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      chain.then = (resolve, reject) => {
+        const locksCheckout = table === 'invoices' && chain.forUpdate.mock.calls.length
+          && chain.whereRaw.mock.calls.some(([, bindings]) => bindings?.[0] === invoice.id && bindings[1] === checkoutIntent?.id);
+        return Promise.resolve(locksCheckout ? [invoice] : []).then(resolve, reject);
+      };
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));

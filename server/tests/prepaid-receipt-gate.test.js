@@ -14,6 +14,7 @@ const path = require('path');
 const {
   shouldAttemptPrepaidReceipt,
   resolveScheduledServiceCharge,
+  lockPrepaidVisit,
   schedulePrepaidAmountRefusal,
 } = require('../routes/admin-schedule')._test;
 const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
@@ -140,7 +141,60 @@ describe('Schedule prepaid invoice writers share the locked saved-card fence', (
     expect(billing).toMatch(/return \(await remainingVisitPrepaidCents\(dbConn, svc, invoice\.id\)\) > 0;/);
     expect(source).not.toMatch(/async function remainingVisitPrepaidCents\(/);
     expect(source).toContain('remainingVisitPrepaidCents(trx, paymentVisit, lockedInvoice.id)');
-    expect(completion).toContain('remainingVisitPrepaidCents(trx, svc, lockedInvoice.id)');
+    expect(completion).toContain('remainingVisitPrepaidCents(trx, paymentVisit, lockedInvoice.id)');
+  });
+
+  test('completion fences saved-card work, locks the current visit marker, and caps cash at the canonical amount due', () => {
+    const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const start = completion.indexOf('const applyPrepaidCreditToInvoice = async (invoiceRow)');
+    const body = completion.slice(start, completion.indexOf('// Secure plan-choice setup fee', start));
+    expectInOrder(body, [
+      'lockCombinedCustomerStable(trx, invoiceRow.id, invoiceRow.customer_id)',
+      "const reservedInvoice = await trx('invoices')",
+      'lockInvoicePaymentIntentAllocation(trx, {',
+      'combinedCustomerLocked: true',
+      'targetForUpdate: true',
+      'lockedInvoice.payer_id || lockedInvoice.payer_statement_id',
+      'invoiceWithdrawnFromCustomer(lockedInvoice)',
+      'isInvoiceCollectibleStatus(lockedInvoice.status)',
+      'assertNoInvoiceChargeReconciliationPending(',
+      '{ checkout: true }',
+      'lockVisitForSettlement(trx, svc.id',
+      'const dueCents = Math.round(invoiceAmountDue(lockedInvoice) * 100)',
+      'remainingVisitPrepaidCents(trx, paymentVisit, lockedInvoice.id)',
+      'lockedInvoice.stripe_payment_intent_id && prepaidCents < dueCents',
+      'guardOpenPaymentIntentForPrepaid(lockedInvoice, { database: trx })',
+      'Math.min(prepaidCents, dueCents)',
+      'dueCents - creditCents <= 0',
+      "stripe_payment_intent_id: null",
+      "payment_method: paymentVisit.prepaid_method",
+      "trx('payments').insert({",
+    ]);
+    expect(body.indexOf('guardOpenPaymentIntentForPrepaid(invoiceRow)')).toBe(-1);
+  });
+
+  test('Schedule translates a busy visit lock to retryable receipt or Charge Now 409 responses', () => {
+    expect(source).toContain('lockVisitForSettlement(trx, visitId');
+    expect(source).toContain("if (e?.code === 'visit_busy')");
+    expect(source).toContain("reason: 'visit_busy'");
+    expect(source).toContain('retryable: true');
+    expect(source).toContain('err.status || err.statusCode');
+  });
+
+  test('the shared visit lock translates PostgreSQL NOWAIT contention to the settlement retry contract', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.forUpdate = jest.fn(() => chain);
+    chain.noWait = jest.fn(() => chain);
+    chain.first = jest.fn(async () => { throw Object.assign(new Error('lock unavailable'), { code: '55P03' }); });
+    const trx = jest.fn(() => chain);
+    trx.raw = jest.fn(async () => ({}));
+
+    await expect(lockPrepaidVisit(trx, 'visit-1', 'customer-1')).rejects.toMatchObject({
+      code: 'visit_busy',
+      statusCode: 409,
+      isOperational: true,
+    });
   });
 
   test('the shared allocation helper locks every collectible PI member in canonical order', () => {

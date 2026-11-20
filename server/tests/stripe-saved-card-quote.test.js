@@ -101,7 +101,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
       });
 
     expect(attemptQuery.where).toHaveBeenCalledWith({ 'stripe_invoice_charge_attempts.status': 'failed' });
-    expect(attemptQuery.orderByRaw).toHaveBeenCalledWith("CASE WHEN status = 'failed' THEN 0 ELSE 1 END");
+    expect(attemptQuery.orderByRaw).toHaveBeenCalledWith("CASE WHEN status IN ('failed', 'succeeded') THEN 0 ELSE 1 END");
     expect(db.mock.calls.some(([table]) => table === 'payment_methods')).toBe(false);
     expect(db.transaction).not.toHaveBeenCalled();
     expect(attemptInsert).not.toHaveBeenCalled();

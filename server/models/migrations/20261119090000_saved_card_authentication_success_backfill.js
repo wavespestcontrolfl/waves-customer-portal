@@ -9,9 +9,10 @@
  * exact disputed/refunded ledger row remains independent settlement evidence.
  * Every repair requires two independent records: a retained, processed
  * payment_intent.succeeded event whose immutable attempt/invoice/customer/card
- * identity matches, and an exact Stripe payment ledger row for that PI. This
- * migration predates worker_payment_intent_id, so the legacy general PI column
- * cannot identify the attempt: a failure webhook may have written it first.
+ * identity and captured-money parts match, and an exact Stripe payment ledger
+ * row for that PI. This migration predates worker_payment_intent_id, so the
+ * legacy general PI column cannot identify the attempt: a failure webhook may
+ * have written it first.
  *
  * Multiple candidate PIs or any conflicting local linkage fail closed. The
  * update mirrors recordAuthenticationSettlement and is idempotent.
@@ -41,7 +42,25 @@ exports.up = async function up(knex) {
         webhook.payload->'object'->'metadata'->>'source' AS source,
         webhook.payload->'object'->'metadata'->>'saved_card_attempt_id' AS saved_card_attempt_id,
         webhook.payload->'object'->'metadata'->>'waves_invoice_id' AS waves_invoice_id,
-        webhook.payload->'object'->'metadata'->>'waves_customer_id' AS waves_customer_id
+        webhook.payload->'object'->'metadata'->>'waves_customer_id' AS waves_customer_id,
+        CASE
+          WHEN jsonb_typeof(webhook.payload->'object'->'amount') = 'number'
+            AND webhook.payload->'object'->>'amount' ~ '^[0-9]+$'
+            THEN (webhook.payload->'object'->>'amount')::numeric
+        END AS intended_cents,
+        CASE
+          WHEN jsonb_typeof(webhook.payload->'object'->'amount_received') = 'number'
+            AND webhook.payload->'object'->>'amount_received' ~ '^[0-9]+$'
+            THEN (webhook.payload->'object'->>'amount_received')::numeric
+        END AS captured_cents,
+        CASE
+          WHEN webhook.payload->'object'->'metadata'->>'base_amount' ~ '^[0-9]+([.][0-9]{1,2}){0,1}$'
+            THEN ROUND((webhook.payload->'object'->'metadata'->>'base_amount')::numeric * 100)
+        END AS base_cents,
+        CASE
+          WHEN webhook.payload->'object'->'metadata'->>'card_surcharge' ~ '^[0-9]+([.][0-9]{1,2}){0,1}$'
+            THEN ROUND((webhook.payload->'object'->'metadata'->>'card_surcharge')::numeric * 100)
+        END AS surcharge_cents
       FROM stripe_webhook_events webhook
       WHERE webhook.processed = true
         AND webhook.event_type = 'payment_intent.succeeded'
@@ -55,6 +74,13 @@ exports.up = async function up(knex) {
         attempt.payment_method_id,
         attempt.stripe_payment_method_id,
         attempt.authentication_canceled_intent_id,
+        attempt.amount AS attempt_amount,
+        attempt.credit_applied_delta,
+        attempt.credit_applied_total,
+        success.intended_cents,
+        success.captured_cents,
+        success.base_cents,
+        success.surcharge_cents,
         success.pi_id
       FROM eligible_attempts attempt
       JOIN retained_successes success
@@ -77,6 +103,27 @@ exports.up = async function up(knex) {
         ON payment.stripe_payment_intent_id = candidate.pi_id
        AND payment.customer_id = candidate.customer_id
        AND payment.processor = 'stripe'
+       -- The retained Stripe event supplies the actual capture and its quoted
+       -- principal/surcharge split. Both independent local money records must
+       -- agree to the cent before this historical hold can close.
+       AND candidate.captured_cents > 0
+       AND candidate.intended_cents = candidate.captured_cents
+       AND candidate.base_cents >= 0
+       AND candidate.surcharge_cents >= 0
+       AND candidate.base_cents + candidate.surcharge_cents = candidate.captured_cents
+       AND candidate.attempt_amount IS NOT NULL
+       AND ROUND(candidate.attempt_amount * 100) = candidate.captured_cents
+       AND payment.amount IS NOT NULL
+       AND ROUND(payment.amount * 100) = candidate.captured_cents
+       -- Older ledger writers did not always populate these columns. Their
+       -- absence is not contradictory when the event, attempt, cash and paid
+       -- invoice gross agree; a present value remains corroboration.
+       AND (payment.base_amount_cents IS NULL OR payment.base_amount_cents = candidate.base_cents)
+       AND (payment.surcharge_amount_cents IS NULL OR payment.surcharge_amount_cents = candidate.surcharge_cents)
+       AND candidate.credit_applied_delta IS NOT NULL
+       AND candidate.credit_applied_total IS NOT NULL
+       AND candidate.credit_applied_delta >= 0
+       AND candidate.credit_applied_total >= candidate.credit_applied_delta
        AND (
          payment.status IN ('disputed', 'refunded')
          OR (
@@ -88,6 +135,21 @@ exports.up = async function up(knex) {
                AND completed_invoice.customer_id = candidate.customer_id
                AND completed_invoice.status = 'paid'
                AND completed_invoice.stripe_payment_intent_id = candidate.pi_id
+               AND ROUND(COALESCE(completed_invoice.credit_applied, 0) * 100)
+                 = ROUND(candidate.credit_applied_total * 100)
+               -- A paid flip folds earlier hand-recorded part payments into
+               -- invoice.total and resets amount_paid. Match the same durable
+               -- ledger predicate used by stripe-webhook's reopen paths.
+               AND ROUND(completed_invoice.total * 100)
+                 = candidate.captured_cents
+                   + ROUND(candidate.credit_applied_total * 100)
+                   + COALESCE((
+                     SELECT SUM(ROUND(part.amount * 100))
+                     FROM payments part
+                     WHERE part.metadata->>'invoice_id' = candidate.invoice_id::text
+                       AND part.metadata->>'partial_payment' = 'true'
+                       AND part.status = 'paid'
+                   ), 0)
            )
          )
        )
@@ -114,6 +176,10 @@ exports.up = async function up(knex) {
               OR conflicting_event.saved_card_attempt_id IS DISTINCT FROM candidate.attempt_id::text
               OR conflicting_event.waves_invoice_id IS DISTINCT FROM candidate.invoice_id::text
               OR conflicting_event.waves_customer_id IS DISTINCT FROM candidate.customer_id::text
+              OR conflicting_event.intended_cents IS DISTINCT FROM candidate.intended_cents
+              OR conflicting_event.captured_cents IS DISTINCT FROM candidate.captured_cents
+              OR conflicting_event.base_cents IS DISTINCT FROM candidate.base_cents
+              OR conflicting_event.surcharge_cents IS DISTINCT FROM candidate.surcharge_cents
             )
         )
         AND NOT EXISTS (
@@ -121,10 +187,6 @@ exports.up = async function up(knex) {
           FROM payments conflicting
           WHERE conflicting.stripe_payment_intent_id = candidate.pi_id
             AND conflicting.id <> payment.id
-            AND (
-              conflicting.customer_id IS DISTINCT FROM candidate.customer_id
-              OR conflicting.metadata->>'invoice_id' IS DISTINCT FROM candidate.invoice_id::text
-            )
         )
     )
     UPDATE stripe_invoice_charge_attempts attempt

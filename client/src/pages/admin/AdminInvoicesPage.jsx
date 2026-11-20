@@ -5012,7 +5012,7 @@ function ApplyCreditModal({
       alive = false;
     };
   }, [invoice.id, readAttempt]);
-  const balance = Number(ctx?.balance || 0);
+  const balance = Number(ctx?.spendable ?? ctx?.balance ?? 0);
   const amountDue = Number(ctx?.amount_due || 0);
   const canCover = amountDue > 0 && balance + 0.005 >= amountDue;
   const shortfall = Math.max(0, amountDue - balance);

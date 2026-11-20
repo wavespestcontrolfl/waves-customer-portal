@@ -270,7 +270,7 @@ describe('GET /balance — phantom failed-row exclusion', () => {
       .filter(([method]) => method === 'whereRaw')
       .map(([, args]) => args[0])
       .join('\n');
-    expect(sql).toContain("metadata->>'waves_invoice_id'");
+    expect(sql).toContain(")->>'waves_invoice_id'");
     expect(sql).toContain("pg_input_is_valid(payments.metadata #>> '{}', 'jsonb')");
     expect(sql).toContain("->>'deferred_reason'");
     expect(sql).toContain('stripe_payment_intent_id IS NULL');

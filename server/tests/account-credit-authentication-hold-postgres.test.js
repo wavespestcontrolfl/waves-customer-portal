@@ -479,6 +479,107 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
     });
   });
 
+  test('the ledger primitive preserves every reservation except the exact attempt being settled', async () => {
+    const customerId = randomUUID();
+    const invoiceA = randomUUID();
+    const invoiceB = randomUUID();
+    const attemptA = randomUUID();
+    const attemptB = randomUUID();
+    await app('customers').insert({
+      id: customerId,
+      account_credits: 50,
+      auto_apply_account_credit: true,
+    });
+    await app('invoices').insert([
+      {
+        id: invoiceA,
+        customer_id: customerId,
+        status: 'sent',
+        total: 75,
+        credit_applied: 0,
+        amount_paid: 0,
+      },
+      {
+        id: invoiceB,
+        customer_id: customerId,
+        status: 'sent',
+        total: 75,
+        credit_applied: 0,
+        amount_paid: 0,
+      },
+    ]);
+    await app('stripe_invoice_charge_attempts').insert([
+      {
+        id: attemptA,
+        invoice_id: invoiceA,
+        payment_method_id: randomUUID(),
+        status: 'claimed',
+        credit_applied_delta: 25,
+        credit_applied_total: 25,
+        submitted_at: new Date(),
+        created_at: new Date(),
+      },
+      {
+        id: attemptB,
+        invoice_id: invoiceB,
+        payment_method_id: randomUUID(),
+        status: 'ambiguous',
+        credit_applied_delta: 15,
+        credit_applied_total: 15,
+        submitted_at: new Date(),
+        created_at: new Date(),
+      },
+    ]);
+    const post = (movement) => app.transaction(
+      (trx) => CustomerCredit.postCreditMovement(movement, trx),
+    );
+
+    // Positive corrections remain available and a generic debit may spend
+    // only the balance above both reservations.
+    await expect(post({
+      customerId,
+      delta: 5,
+      source: 'adjustment',
+      createdBy: 'system:test',
+    })).resolves.toMatchObject({ balanceAfter: 55 });
+    await expect(post({
+      customerId,
+      delta: -15,
+      source: 'adjustment',
+      createdBy: 'system:test',
+    })).resolves.toMatchObject({ balanceAfter: 40 });
+    await expect(post({
+      customerId,
+      delta: -1,
+      source: 'adjustment',
+      createdBy: 'system:test',
+    })).rejects.toMatchObject({ code: 'INSUFFICIENT_CREDIT', statusCode: 400 });
+
+    // Naming a real sibling attempt does not release it. The supplied
+    // attempt and invoice must be the same reservation.
+    await expect(post({
+      customerId,
+      delta: -25,
+      source: 'adjustment',
+      invoiceId: invoiceA,
+      currentChargeAttemptId: attemptB,
+      createdBy: 'system:test',
+    })).rejects.toMatchObject({ code: 'INSUFFICIENT_CREDIT' });
+    await expect(post({
+      customerId,
+      delta: -25,
+      source: 'adjustment',
+      invoiceId: invoiceA,
+      currentChargeAttemptId: attemptA,
+      createdBy: 'system:test',
+    })).resolves.toMatchObject({ balanceAfter: 15 });
+
+    expect(await app('customers').where({ id: customerId }).first('account_credits'))
+      .toMatchObject({ account_credits: '15.00' });
+    expect(await app('customer_credit_ledger').where({ customer_id: customerId }))
+      .toHaveLength(3);
+  });
+
   test('checkout snapshot sees one side of a concurrent sibling settlement, never a doubled credit', async () => {
     const customerId = randomUUID();
     const heldInvoiceId = randomUUID();

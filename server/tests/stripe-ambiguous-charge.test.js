@@ -872,11 +872,22 @@ describe('saved-card invoice parking', () => {
 });
 
 function creditPersistenceDb({ creditApplied = 10, accountCredits = 25, unresolvedAttempt = true, invoiceCustomerId = 'cust-1' } = {}) {
-  const state = { creditApplied, accountCredits, ledger: [] };
+  const state = {
+    creditApplied,
+    accountCredits,
+    ledger: [],
+    reservationReads: 0,
+  };
   const trx = jest.fn((table) => {
     const query = {};
-    ['where', 'whereIn', 'whereNull', 'forUpdate'].forEach((method) => {
-      query[method] = jest.fn(() => query);
+    [
+      'join', 'where', 'whereIn', 'whereNull', 'whereNot', 'whereNotNull', 'whereRaw',
+      'orWhere', 'orWhereNot', 'orWhereNull', 'orWhereColumn', 'forUpdate',
+    ].forEach((method) => {
+      query[method] = jest.fn((arg) => {
+        if (['where', 'orWhere'].includes(method) && typeof arg === 'function') arg.call(query);
+        return query;
+      });
     });
     query.first = jest.fn(async () => {
       if (table === 'invoices') return { id: 'inv-1', customer_id: invoiceCustomerId, credit_applied: state.creditApplied };
@@ -894,6 +905,13 @@ function creditPersistenceDb({ creditApplied = 10, accountCredits = 25, unresolv
       return query;
     });
     query.returning = jest.fn(async () => [state.ledger.at(-1)]);
+    query.select = jest.fn(async () => {
+      if (table === 'stripe_invoice_charge_attempts as attempt') {
+        state.reservationReads += 1;
+        return [];
+      }
+      return [];
+    });
     return query;
   });
   trx.fn = { now: jest.fn(() => 'now') };
@@ -924,6 +942,7 @@ describe('saved-card ambiguity credit persistence', () => {
     const args = {
       invoiceId: 'inv-1',
       customerId: 'cust-1',
+      attemptId: 'attempt-1',
       originalCreditApplied: 10,
       creditDelta: 15,
       reference: 'attempt attempt-1',
@@ -936,6 +955,7 @@ describe('saved-card ambiguity credit persistence', () => {
     expect(state.creditApplied).toBe(25);
     expect(state.accountCredits).toBe(10);
     expect(state.ledger).toHaveLength(1);
+    expect(state.reservationReads).toBe(1);
     expect(state.ledger[0]).toEqual(expect.objectContaining({
       customer_id: 'cust-1',
       delta: -15,

@@ -74,6 +74,7 @@ const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('.
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice, remainingVisitPrepaidCents } = require('../services/billing-lane');
+const { invoiceAmountDue, invoiceWithdrawnFromCustomer, isCollectionPendingFenceError, isInvoiceCollectibleStatus, lockVisitForSettlement } = require('../services/invoice-helpers');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
@@ -12320,104 +12321,168 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // it directly.
       if (invoiceRow.payer_id) return invoiceRow;
 
-      // PI safety: a pre-minted / sent invoice can carry a live PaymentIntent.
-      // Crediting the prepayment (marking it paid) without neutralizing the PI
-      // lets a stale client secret still charge the card. Cancel a cancelable PI;
-      // if money is in flight or the PI can't be verified, skip applying (leave it
-      // to settle) and alert for manual reconciliation. Shared guard with the
-      // mark-prepaid receipt path (services/prepaid-pi-guard).
-      let prepaidPiId = invoiceRow.stripe_payment_intent_id || null;
-      if (prepaidPiId) {
-        const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
-        const guard = await guardOpenPaymentIntentForPrepaid(invoiceRow);
-        if (!guard.ok) {
-          logger.error(`[dispatch] Prepaid credit NOT applied to invoice ${invoiceRow.invoice_number} for service ${svc.id}: open PaymentIntent (${guard.reason}) — a card/ACH payment may still settle; manual reconciliation needed`);
-          return invoiceRow;
-        }
-        prepaidPiId = guard.piId;
-      }
-
       let flippedPaidByPrepayment = false;
-      const creditedResult = await db.transaction(async (trx) => {
-        const lockedInvoice = await trx('invoices')
-          .where({ id: invoiceRow.id })
-          .forUpdate()
-          .first();
-        if (!lockedInvoice) return invoiceRow;
-        if (['paid', 'prepaid'].includes(lockedInvoice.status)) return lockedInvoice;
-        // PI re-check under lock: a new /pay session could have minted a different
-        // PI since the triage above; refuse and leave the prepayment for a later
-        // pass rather than mark paid alongside a live session.
-        if ((lockedInvoice.stripe_payment_intent_id || null) !== (prepaidPiId || null)) {
-          logger.error(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: PaymentIntent changed under lock — manual reconciliation needed`);
-          return lockedInvoice;
-        }
-        const invoiceTotalCents = toCents(lockedInvoice.total);
-        if (!(invoiceTotalCents > 0)) return lockedInvoice;
-        // A part payment is already on this invoice: this application reduces total and would paid-flip it with the part still in
-        // amount_paid. The office settles it from the Invoices page.
-        if (toCents(lockedInvoice.amount_paid) > 0) {
-          logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: a part payment is on it — the office records the rest`);
-          return lockedInvoice;
-        }
-        // The visit marker is cumulative. Charge Now may already have
-        // allocated an earlier $60, then staff can raise the marker to $100
-        // without requesting a receipt. Apply only the newly available $40;
-        // the existence of the first ledger row does not mean the current
-        // marker is fully allocated.
-        const prepaidCents = await remainingVisitPrepaidCents(trx, svc, lockedInvoice.id);
-        if (!(prepaidCents > 0)) return lockedInvoice;
+      let creditedResult;
+      try {
+        creditedResult = await db.transaction(async (trx) => {
+          // Reserve the stable customer before locking the target and every
+          // collectible sibling sharing its checkout. This is the same order as
+          // Schedule's direct receipt writer, and keeps a cancellation from
+          // racing combined checkout allocation.
+          const PayCombined = require('../services/pay-combined');
+          await PayCombined.lockCombinedCustomerStable(trx, invoiceRow.id, invoiceRow.customer_id);
+          const reservedInvoice = await trx('invoices')
+            .where({ id: invoiceRow.id })
+            .first('id', 'customer_id', 'stripe_payment_intent_id');
+          if (!reservedInvoice
+            || String(reservedInvoice.customer_id || '') !== String(invoiceRow.customer_id || '')) {
+            return invoiceRow;
+          }
+          const reservedPiId = reservedInvoice.stripe_payment_intent_id || null;
+          const { lockInvoicePaymentIntentAllocation } = require('../services/invoice-payment-intent-allocation');
+          const lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {
+            id: invoiceRow.id,
+            piId: reservedPiId,
+            customerId: invoiceRow.customer_id,
+            combinedCustomerLocked: true,
+            targetForUpdate: true,
+          });
+          if (!lockedInvoice) return invoiceRow;
+          if (String(lockedInvoice.customer_id || '') !== String(invoiceRow.customer_id || '')
+            || String(lockedInvoice.customer_id || '') !== String(svc.customer_id || '')
+            || (lockedInvoice.stripe_payment_intent_id || null) !== reservedPiId) {
+            return invoiceRow;
+          }
+          if (lockedInvoice.payer_id || lockedInvoice.payer_statement_id
+            || invoiceWithdrawnFromCustomer(lockedInvoice)) return lockedInvoice;
+          if (!isInvoiceCollectibleStatus(lockedInvoice.status)) return lockedInvoice;
 
-        const creditCents = Math.min(prepaidCents, invoiceTotalCents);
-        const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
-        const prepaidCredit = centsToDollars(creditCents);
-        const remainingTotal = centsToDollars(remainingCents);
-        const stamp = etDateString();
-        const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
-        const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
-        const paidByPrepayment = remainingCents <= 0;
-        flippedPaidByPrepayment = paidByPrepayment;
-        const [updatedInvoice] = await trx('invoices')
-          .where({ id: lockedInvoice.id })
-          .update({
+          // Checkout-mode saved-card fence under the invoice lock. An earlier
+          // off-session card attempt can still be awaiting authentication even
+          // when the invoice has no PI pointer; never post the visit cash beside
+          // money that may still settle. Expected holds return without writes so
+          // a stale claim promoted to ambiguous on this transaction can commit.
+          try {
+            await StripeService.assertNoInvoiceChargeReconciliationPending(
+              lockedInvoice.id,
+              trx,
+              { checkout: true },
+            );
+          } catch (err) {
+            if (!isCollectionPendingFenceError(err)) throw err;
+            logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: saved-card payment is in progress or awaiting reconciliation`);
+            return lockedInvoice;
+          }
+
+          // The visit marker is mutable after completion starts. Lock and reread
+          // it before calculating or recording cash, and verify it still belongs
+          // to the invoice owner. The customer KEY SHARE keeps the lock order in
+          // line with the other Schedule settlement writers.
+          await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [lockedInvoice.customer_id]);
+          const paymentVisit = await lockVisitForSettlement(trx, svc.id, [
+            'id', 'customer_id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at',
+          ]);
+          if (!paymentVisit
+            || String(paymentVisit.customer_id || '') !== String(lockedInvoice.customer_id || '')
+            || String(paymentVisit.customer_id || '') !== String(svc.customer_id || '')
+            || !(Number(paymentVisit.prepaid_amount) > 0)
+            || paymentVisit.prepaid_method === AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD) {
+            return lockedInvoice;
+          }
+
+          const invoiceTotalCents = toCents(lockedInvoice.total);
+          const dueCents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
+          if (!(invoiceTotalCents > 0) || !(dueCents > 0)) return lockedInvoice;
+          // A part payment is already on this invoice: this application reduces total and would paid-flip it with the part still in
+          // amount_paid. The office settles it from the Invoices page.
+          if (toCents(lockedInvoice.amount_paid) > 0) {
+            logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: a part payment is on it — the office records the rest`);
+            return lockedInvoice;
+          }
+          // The visit marker is cumulative. Charge Now may already have
+          // allocated an earlier $60, then staff can raise the marker to $100
+          // without requesting a receipt. Apply only the newly available $40;
+          // the existence of the first ledger row does not mean the current
+          // marker is fully allocated.
+          const prepaidCents = await remainingVisitPrepaidCents(trx, paymentVisit, lockedInvoice.id);
+          if (!(prepaidCents > 0)) return lockedInvoice;
+
+          // Completion can still apply a partial recorded prepayment when there
+          // is no browser checkout. With a live checkout, leave both untouched
+          // unless the current unallocated cash covers the full balance. Canceling
+          // an $80 checkout to post $40 would strand the remaining $40 and make a
+          // retried completion consume the same session without settling it.
+          if (lockedInvoice.stripe_payment_intent_id && prepaidCents < dueCents) {
+            logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: recorded cash does not cover the open checkout balance`);
+            return lockedInvoice;
+          }
+
+          // Every no-write check above has passed under the canonical checkout
+          // allocation locks. It is now safe to cancel a cancelable session and
+          // clear its sibling stamps before recording the visit cash.
+          const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
+          const piGuard = await guardOpenPaymentIntentForPrepaid(lockedInvoice, { database: trx });
+          if (!piGuard.ok) {
+            logger.error(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number} for service ${svc.id}: open PaymentIntent (${piGuard.reason}) — a card/ACH payment may still settle; manual reconciliation needed`);
+            return lockedInvoice;
+          }
+
+          const creditCents = Math.min(prepaidCents, dueCents);
+          const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
+          const prepaidCredit = centsToDollars(creditCents);
+          const remainingTotal = centsToDollars(remainingCents);
+          const stamp = etDateString();
+          const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
+          const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
+          const paidByPrepayment = dueCents - creditCents <= 0;
+          flippedPaidByPrepayment = paidByPrepayment;
+          const [updatedInvoice] = await trx('invoices')
+            .where({ id: lockedInvoice.id })
+            .update({
+              total: remainingTotal,
+              status: paidByPrepayment ? 'paid' : lockedInvoice.status,
+              paid_at: paidByPrepayment ? trx.fn.now() : lockedInvoice.paid_at,
+              ...(piGuard.piId ? { stripe_payment_intent_id: null, processor: null } : {}),
+              notes: nextNotes,
+              payment_method: paymentVisit.prepaid_method || lockedInvoice.payment_method || null,
+              payment_reference: paymentVisit.prepaid_note || lockedInvoice.payment_reference || null,
+              payment_recorded_at: paymentVisit.prepaid_at || trx.fn.now(),
+              updated_at: trx.fn.now(),
+            })
+            .returning('*');
+          const creditedInvoice = updatedInvoice || {
+            ...lockedInvoice,
             total: remainingTotal,
             status: paidByPrepayment ? 'paid' : lockedInvoice.status,
-            paid_at: paidByPrepayment ? trx.fn.now() : lockedInvoice.paid_at,
             notes: nextNotes,
-            payment_method: svc.prepaid_method || lockedInvoice.payment_method || null,
-            payment_reference: svc.prepaid_note || lockedInvoice.payment_reference || null,
-            payment_recorded_at: svc.prepaid_at || trx.fn.now(),
-            updated_at: trx.fn.now(),
-          })
-          .returning('*');
-        const creditedInvoice = updatedInvoice || {
-          ...lockedInvoice,
-          total: remainingTotal,
-          status: paidByPrepayment ? 'paid' : lockedInvoice.status,
-          notes: nextNotes,
-        };
-        await trx('payments').insert({
-          customer_id: svc.customer_id,
-          amount: prepaidCredit,
-          status: 'paid',
-          description: `Prepaid credit applied to invoice ${creditedInvoice.invoice_number}`,
-          payment_date: etDateString(),
-          metadata: JSON.stringify({
-            invoice_id: lockedInvoice.id,
-            scheduled_service_id: svc.id,
-            source: 'scheduled_service_prepaid',
-            method: svc.prepaid_method || null,
-            note: svc.prepaid_note || null,
-          }),
+          };
+          await trx('payments').insert({
+            customer_id: paymentVisit.customer_id,
+            amount: prepaidCredit,
+            status: 'paid',
+            description: `Prepaid credit applied to invoice ${creditedInvoice.invoice_number}`,
+            payment_date: etDateString(),
+            metadata: JSON.stringify({
+              invoice_id: lockedInvoice.id,
+              scheduled_service_id: paymentVisit.id,
+              source: 'scheduled_service_prepaid',
+              method: paymentVisit.prepaid_method || null,
+              note: paymentVisit.prepaid_note || null,
+            }),
+          });
+          if (paidByPrepayment) {
+            // The recorded prepayment fully settled the invoice — complete any
+            // active payment plan on the SAME trx (codex r5 P1; mirrors the
+            // admin-schedule prepaid-at-visit path).
+            await require('../services/payment-plans').completeActivePlansForInvoice(lockedInvoice.id, trx);
+          }
+          return creditedInvoice;
         });
-        if (paidByPrepayment) {
-          // The recorded prepayment fully settled the invoice — complete any
-          // active payment plan on the SAME trx (codex r5 P1; mirrors the
-          // admin-schedule prepaid-at-visit path).
-          await require('../services/payment-plans').completeActivePlansForInvoice(lockedInvoice.id, trx);
-        }
-        return creditedInvoice;
-      });
+      } catch (err) {
+        if (err?.code !== 'visit_busy') throw err;
+        logger.info(`[dispatch] Prepaid credit deferred for service ${svc.id}: ${err.message}`);
+        return invoiceRow;
+      }
       // A cash/Zelle prepayment that fully covers the invoice flips it paid
       // with NO Stripe webhook behind it, so the annual-prepay payment sync
       // (pending-term activation + the pending-window slice resolution the

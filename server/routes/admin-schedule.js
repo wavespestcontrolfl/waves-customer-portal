@@ -35,7 +35,7 @@ const {
   parseHHMM, minutesToHHMM, occupancyBlockFor, seriesCandidateDateClashRows,
 } = require('../services/scheduling/window-rules');
 const planTakenHour = require('../services/scheduling/plan-taken-hour');
-const { invoiceAmountDue, isInvoiceCollectibleStatus, isCollectionPendingFenceError } = require('../services/invoice-helpers');
+const { invoiceAmountDue, isInvoiceCollectibleStatus, isCollectionPendingFenceError, lockVisitForSettlement } = require('../services/invoice-helpers');
 const { openInvoiceFacts } = require('../services/visit-context/balance');
 const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
@@ -19121,8 +19121,10 @@ const { invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
 // amount and the ledger for this invoice, serialized by the same row locks.
 async function lockPrepaidVisit(trx, visitId, ownerId) {
   await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [ownerId]);
-  return trx('scheduled_services').where({ id: visitId, customer_id: ownerId })
-    .forUpdate().noWait().first('id', 'customer_id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at');
+  const visit = await lockVisitForSettlement(trx, visitId, [
+    'id', 'customer_id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at',
+  ]);
+  return String(visit?.customer_id || '') === String(ownerId || '') ? visit : null;
 }
 
 // Shared pre-completion mint moved to services/scheduled-invoice-mint (the
@@ -19564,6 +19566,16 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
       return { invoice: paidInvoice, newlyPaid: true };
     });
   } catch (e) {
+    if (e?.code === 'visit_busy') {
+      logger.info(`[schedule] prepaid-receipt retry requested for service ${svc.id}: ${e.message}`);
+      return {
+        sent: false,
+        reason: 'visit_busy',
+        retryable: true,
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoice_number,
+      };
+    }
     logger.error(`[schedule] prepaid-receipt finalize failed for service ${svc.id}: ${e.message}`);
     return { sent: false, reason: 'error', invoiceId: invoice.id, invoiceNumber: invoice.invoice_number };
   }
@@ -20342,7 +20354,10 @@ router.post('/:id/invoice', async (req, res, next) => {
       alreadyPaid: mintAlreadyPaid,
     });
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (err.status || err.statusCode) return res.status(err.status || err.statusCode).json({
+      error: err.message,
+      ...(err.code ? { code: err.code } : {}),
+    });
     next(err);
   }
 });
@@ -30470,6 +30485,7 @@ router._test = {
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,
   resolveScheduledServiceCharge,
+  lockPrepaidVisit,
   schedulePrepaidAmountRefusal,
   schedulePrepaidCollectionFence,
   siblingCoverageRecheckInTrx,
