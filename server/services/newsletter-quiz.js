@@ -126,6 +126,55 @@ const QUIZZES = {
   },
 };
 
+// Waves Newsletter polls: the list the owner approved on 2026-11-20 (NL1-NL10
+// on the Pest Insider look page; "other than that looks good"), in his order.
+// Just for fun: no interest tags, no visit promise, and landingCtaSuppressed
+// keeps the thank-you page from pitching a booking. A vote takes the same two
+// taps as every quiz (the answer, then Confirm). The autopilot adds one poll
+// to at most every 3rd issue (chooseNewsletterPoll); nothing else adds one.
+const NEWSLETTER_POLL_PREFIX = 'nl-poll-';
+const NEWSLETTER_POLLS = [
+  ['nl-poll-weekend-v1', 'Poll: weekend plans', 'Where will you be this weekend?',
+    [['beach', 'Beach'], ['park', 'Park'], ['home', 'Home'], ['out-to-eat', 'Out to eat']]],
+  ['nl-poll-drive-v1', 'Poll: drive for an event', 'How far will you drive for a good event?',
+    [['15-minutes', '15 minutes'], ['half-hour', 'Half an hour'], ['hour', 'An hour'], ['road-trip', 'Road trip!']]],
+  ['nl-poll-sunset-spot-v1', 'Poll: sunset spot', 'Your Gulf sunset spot?',
+    [['siesta-key', 'Siesta Key'], ['anna-maria', 'Anna Maria'], ['st-pete-beach', 'St. Pete Beach'], ['somewhere-else', 'Somewhere else']]],
+  ['nl-poll-classic-v1', 'Poll: Florida classic', 'Pick one Florida classic',
+    [['grouper-sandwich', 'Grouper sandwich'], ['cuban-sandwich', 'Cuban sandwich'], ['stone-crab', 'Stone crab'], ['key-lime-pie', 'Key lime pie']]],
+  ['nl-poll-rainy-v1', 'Poll: rainy afternoon', 'Rainy afternoon plan?',
+    [['museum', 'Museum'], ['movie', 'Movie'], ['mall', 'Mall'], ['nap', 'Nap']]],
+  ['nl-poll-whats-on-v1', "Poll: finding what's on", "How do you find out what's on?",
+    [['waves-newsletter', 'Waves Newsletter'], ['friends', 'Friends'], ['social-media', 'Social media'], ['wing-it', 'I wing it']]],
+  ['nl-poll-dogs-v1', 'Poll: dogs at events', 'Dogs at events: more, please?',
+    [['more', 'More, please'], ['fine', "They're fine"], ['fewer', 'Fewer, please'], ['no-opinion', 'No opinion']]],
+  ['nl-poll-sunrise-v1', 'Poll: sunrise or sunset', 'Sunrise or sunset?',
+    [['sunrise', 'Sunrise'], ['sunset', 'Sunset'], ['both', 'Both'], ['asleep', "I'm asleep"]]],
+  ['nl-poll-season-v1', 'Poll: best season', 'Best Florida season?',
+    [['winter', 'Winter'], ['spring', 'Spring'], ['summer', 'Summer'], ['fall', 'Fall (what fall?)']]],
+  ['nl-poll-music-v1', 'Poll: live music', "Live music: what's your speed?",
+    [['rock', 'Rock'], ['country', 'Country'], ['jazz-blues', 'Jazz or blues'], ['anything-live', 'Anything live']]],
+];
+for (const [id, label, question, answers] of NEWSLETTER_POLLS) {
+  QUIZZES[id] = {
+    label,
+    question,
+    emailCta: 'Tap one, then confirm. Just for fun.',
+    landingLine: 'Your vote is in. See you in the next Waves Newsletter.',
+    // The archive and the owner's Monday copy show the poll with no links.
+    neutralLine: 'Readers vote right in the email. Just for fun.',
+    landingCtaSuppressed: true,
+    poll: true,
+    bookLabel: 'Book a visit',
+    bookService: 'pest_control',
+    answers: answers.map(([key, text]) => ({ key, label: text, tags: [] })),
+  };
+}
+/** The polls in the owner's order: the autopilot uses each once, then stops. */
+const NEWSLETTER_POLL_IDS = Object.freeze(NEWSLETTER_POLLS.map(([id]) => id));
+/** Sent issues between two polls: a poll shows in at most every 3rd issue, never two in a row. */
+const POLL_ISSUE_GAP = 2;
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Brand palette resolved from the active email theme (glass) so quiz blocks
@@ -307,7 +356,7 @@ function renderQuizNeutralHtml({ quizId = DEFAULT_QUIZ_ID } = {}) {
   return `<div class="dm-box" style="margin:24px 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;text-align:center;">
 <p style="margin:0 0 12px 0;font-size:18px;font-weight:700;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(quiz.question)}</p>
 <div>${chips}</div>
-<p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};font-family:Inter,Arial,sans-serif;">Subscribers tap an answer right in the email to get a free check.</p>
+<p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};font-family:Inter,Arial,sans-serif;">${esc(quiz.neutralLine || 'Subscribers tap an answer right in the email to get a free check.')}</p>
 </div>`;
 }
 
@@ -410,7 +459,53 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
   }
 }
 
+const isNewsletterPoll = (quizId) => NEWSLETTER_POLL_IDS.includes(quizId);
+
+// The first Waves Newsletter poll a body carries, or null.
+function pollInBody(content) {
+  const found = parseQuizTokens(content).find((t) => isNewsletterPoll(t.quizId));
+  return found ? found.quizId : null;
+}
+
+/**
+ * The poll for the next Waves Newsletter issue, or null. `recent` lists the
+ * newest POLL_ISSUE_GAP sent issues (newest first), each as the poll its body
+ * carried or null; `used` lists every poll a sent issue has carried. No poll
+ * when one of the recent issues had one, so a poll shows in at most every 3rd
+ * issue and never in two in a row. Otherwise the first poll in the owner's
+ * order that no sent issue used; none once the list is used up.
+ */
+function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
+  if (recent.slice(0, POLL_ISSUE_GAP).some(Boolean)) return null;
+  const taken = new Set(used);
+  return NEWSLETTER_POLL_IDS.find((id) => !taken.has(id)) || null;
+}
+
+/**
+ * Reads what chooseNewsletterPoll needs from the sent issues of one newsletter
+ * type: the polls of the newest POLL_ISSUE_GAP sent issues, and every poll a
+ * sent issue carried. Sent bodies keep their quiz tokens (the per-reader
+ * buttons are SendGrid substitutions), so the token in html_body is the record.
+ */
+async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
+  const sent = () => knex('newsletter_sends')
+    .where({ newsletter_type: newsletterType, status: 'sent' })
+    .whereNotNull('sent_at');
+  const newest = await sent().orderBy('sent_at', 'desc').limit(POLL_ISSUE_GAP).select('html_body');
+  const withPoll = await sent().where('html_body', 'like', `%{{quiz:${NEWSLETTER_POLL_PREFIX}%`).select('html_body');
+  return {
+    recent: newest.map((row) => pollInBody(row.html_body)),
+    used: withPoll.map((row) => pollInBody(row.html_body)).filter(Boolean),
+  };
+}
+
 module.exports = {
+  NEWSLETTER_POLL_IDS,
+  POLL_ISSUE_GAP,
+  isNewsletterPoll,
+  pollInBody,
+  chooseNewsletterPoll,
+  newsletterIssuePolls,
   QUIZ_HTML_TOKEN,
   QUIZ_TEXT_TOKEN,
   QUIZ_TOKEN_PATTERN,
