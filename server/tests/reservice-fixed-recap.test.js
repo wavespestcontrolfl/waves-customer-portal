@@ -235,7 +235,7 @@ describe('complete-scheduled-service wiring', () => {
     // One decision, made once beside the fixed-mode handling ...
     expect(src).toMatch(/const reviewAskAllowed = ReserviceFixedRecap\.reviewAskAllowed\(\{\s*fixedRequested: reserviceFixedRecapRequested,\s*fixedHonored: reserviceFixedRecap,\s*\}\);/);
     // ... and it ends the effective ask; the stored intent drops only a marked, refused ask.
-    expect(src).toMatch(/&& !suppressTypedCustomerComms\s*(?:\/\/[^\n]*\n\s*)+&& reviewAskAllowed;/);
+    expect(src).toMatch(/&& \(!suppressTypedCustomerComms \|\| lateCloseReviewKept\)\s*(?:\/\/[^\n]*\n\s*)+&& reviewAskAllowed;/);
     expect(src).toContain(': requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),');
     // ... and it is never bundled into the fixed text: it follows as its own message (enrollPostService).
     expect(src).toMatch(/!serviceReportV1Delivery &&\s*(?:\/\/[^\n]*\n\s*)+!reserviceFixedRecap &&/);

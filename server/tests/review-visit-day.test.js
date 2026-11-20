@@ -1,7 +1,7 @@
 // The day a drafted review text speaks about (owner 2026-10-27, "FIX"): the day the
 // technician was at the visit, not the close day a late completion stamps on the record.
 jest.mock('../models/db', () => jest.fn());
-const { draftServiceDate, draftVisitDate, visitWorkedOn } = require('../services/review-visit-day');
+const { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay } = require('../services/review-visit-day');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const DAY = 86400000;
@@ -108,5 +108,42 @@ describe('draftServiceDate: record first, then the cadence\'s visit', () => {
     expect(await draftServiceDate({ recordDate, scheduledServiceId: 'ss-gone' }, fakeDb({ scheduled_services: [] }))).toBe(recordDate);
     const failing = fakeDb({ service_records: [{ id: 'sr-4', scheduled_service_id: 'ss-4' }] }, { throwOn: 'scheduled_services' });
     expect(await draftServiceDate({ recordDate, serviceRecordId: 'sr-4' }, failing)).toBe(recordDate);
+  });
+});
+
+// Late backdated closeouts keep the review ask (owner 2026-11-20, D6 R3): the 3-ET-day window.
+describe('closedWithinDaysOfWorkedDay: the 3-day late-close window', () => {
+  const closedAt = new Date('2026-11-20T15:00:00Z'); // Nov 20, 10 AM ET
+  const within = (scheduledDate, extra = {}) => closedWithinDaysOfWorkedDay({ scheduledDate, closedAt, ...extra });
+
+  test('the same day and 3 days back are inside the window', () => {
+    expect(within('2026-11-20')).toBe(true);
+    expect(within('2026-11-17')).toBe(true);
+  });
+
+  test('4 days back is outside the window', () => {
+    expect(within('2026-11-16')).toBe(false);
+  });
+
+  test('a late-evening ET arrival counts by its ET day, not its UTC day', () => {
+    // Nov 16 9 PM ET = Nov 17 02:00 UTC. ET day gap 4 (out); a UTC-cut day would read 3 (in).
+    expect(closedWithinDaysOfWorkedDay({ arrivedAt: '2026-11-17T02:00:00Z', scheduledDate: '2026-11-16', closedAt })).toBe(false);
+    // Nov 17 9 PM ET = Nov 18 02:00 UTC. ET day gap 3 (in).
+    expect(closedWithinDaysOfWorkedDay({ arrivedAt: '2026-11-18T02:00:00Z', scheduledDate: '2026-11-17', closedAt })).toBe(true);
+  });
+
+  test('a stale arrival before the scheduled day falls back to the scheduled day', () => {
+    expect(closedWithinDaysOfWorkedDay({ arrivedAt: '2026-11-01T14:00:00Z', scheduledDate: '2026-11-19', closedAt })).toBe(true);
+  });
+
+  test('an unreadable worked day, or an unreadable close, is outside the window', () => {
+    expect(closedWithinDaysOfWorkedDay({ closedAt })).toBe(false);
+    expect(closedWithinDaysOfWorkedDay({ scheduledDate: 'not a day', closedAt })).toBe(false);
+    expect(closedWithinDaysOfWorkedDay({ scheduledDate: '2026-11-19' })).toBe(false);
+    expect(closedWithinDaysOfWorkedDay({ scheduledDate: '2026-11-19', closedAt: 'garbage' })).toBe(false);
+  });
+
+  test('a worked day after the close is outside the window', () => {
+    expect(within('2026-11-22')).toBe(false);
   });
 });

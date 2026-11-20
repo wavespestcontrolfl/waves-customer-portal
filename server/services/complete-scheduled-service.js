@@ -726,6 +726,28 @@ function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(
   return { active: true, serviceDate };
 }
 
+// Late backdated closeout keeps its review ask (owner 2026-11-20, Tech Rewards Plan D6 R3 "late closes still ask",
+// GATE_REVIEW_LATE_CLOSE_ASK). Only an admin backfill whose worked day is within 3 ET calendar days of the close keeps
+// the ask; the system quiet closeout, the invoice-issued closeout and any visit that is not a performed, customer-facing
+// completion never do. The caller decides once at the commit and freezes the answer in structured_notes.requestReview.
+// Pure but for the gate read, which comes last. Exported for testability.
+function lateCloseReviewAskKept({
+  isBackfillCompletion = false,
+  systemQuietCloseout = false,
+  issuedInvoiceCloseout = null,
+  visitOutcome = null,
+  isInternalOnlyCompletion = false,
+  svc = null,
+  closedAt = null,
+} = {}) {
+  if (!isBackfillCompletion || systemQuietCloseout || issuedInvoiceCloseout) return false;
+  if (visitOutcome !== 'completed' || isInternalOnlyCompletion) return false;
+  if (!require('../config/feature-gates').reviewLateCloseAskLive()) return false;
+  return require('./review-visit-day').closedWithinDaysOfWorkedDay({
+    arrivedAt: svc?.arrived_at, scheduledDate: svc?.scheduled_date, closedAt,
+  });
+}
+
 // Backfill duration policy (Codex P1, fix round): a stale row's lifecycle
 // timestamps are artifacts of the forgotten closeout — a check-in from
 // days/weeks ago against an office checkout stamped today — so the shared
@@ -1307,6 +1329,8 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
     backfillMintAmount,
     backfillMintTaxRate,
     backfillMintPayerId,
+    // A backdated record that froze requestReview true is a kept late-close ask (a backfill otherwise freezes it false).
+    lateCloseReviewKept: isBackfillCompletion && frozen.requestReview === true,
     bodyDisagreed: Boolean(requestBackfill) !== isBackfillCompletion,
   };
 }
@@ -3798,6 +3822,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       return ({ status: backfillPlan.status || 400, body: backfillPlan.error });
     }
     let isBackfillCompletion = backfillPlan.active;
+    // Whether this backdated closeout keeps the normal review ask (lateCloseReviewAskKept): decided once, at the commit
+    // below, and restored from the committed record on a resume.
+    let lateCloseReviewKept = false;
     // Invoice-issued closeout: the invoice it names must still be THIS
     // visit's live invoice, or nothing is written (pre-push P0) — a voided
     // or re-pointed invoice means the office changed its mind, and a
@@ -7313,6 +7340,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
               treatmentEvidence: !isIncompleteVisit
                 || (Array.isArray(products) && products.some((product) => product && product.productId)),
             });
+          lateCloseReviewKept = lateCloseReviewAskKept({
+            isBackfillCompletion, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, isInternalOnlyCompletion,
+            svc: { ...svc, ...(lockedSvcRow || {}) }, closedAt: completionEndedAt,
+          });
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
             // Frozen with the record itself, so no reader (recap-delivery's
@@ -7342,7 +7373,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Backfill completions freeze it off for the same reason: a
             // review ask days after the visit (or from the later payment)
             // must never fire from a quiet backlog closeout.
-            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
+            // A late backdated closeout inside the 3-day window (GATE_REVIEW_LATE_CLOSE_ASK) is decided once here and
+            // keeps the normal decision: requestReview true beside backfill true IS the frozen "kept" (resume reads it).
+            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || (isBackfillCompletion && !lateCloseReviewKept)) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             // First review ask audit: a never-asked customer's "no ask" was kept on (forcedOn) or
@@ -7357,7 +7390,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // carried through the paid-invoice deferral (enrollForPaidInvoice).
             // Frozen off with requestReview: an incomplete / internal-only /
             // backfill completion never carries a customer request either.
-            customerRequestedReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion)
+            customerRequestedReview: (isIncompleteVisit || isInternalOnlyCompletion || (isBackfillCompletion && !lateCloseReviewKept))
               ? null : (customerRequestedReview || null),
             incompleteReason,
             customerConcernText: concernText || null,
@@ -9431,6 +9464,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       backfillFrozenMintAmount = frozenResume.backfillMintAmount;
       backfillFrozenMintTaxRate = frozenResume.backfillMintTaxRate;
       backfillFrozenMintPayerId = frozenResume.backfillMintPayerId;
+      // The committed record's frozen ask decides, never a fresh derivation (gate, window and toggles may have moved since).
+      lateCloseReviewKept = frozenResume.lateCloseReviewKept;
+      if (lateCloseReviewKept) requestReview = true;
       isBackfillCompletion = frozenResume.isBackfillCompletion;
       effectiveTimeOnSite = frozenResume.effectiveTimeOnSite;
     }
@@ -14036,7 +14072,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // shouldBundleReview keeps refusing an unpaid invoice.
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview
-      && !suppressTypedCustomerComms
+      // A backfill silences every customer text; only a kept late-close ask (frozen at the commit) is let through.
+      && (!suppressTypedCustomerComms || lateCloseReviewKept)
       // The fixed re-service text is the ONE text: no review ask rides it or
       // follows it (scope: "leave it off on re-services"). A re-service asks for
       // a review by default (owner 2026-10-10, "show on"): the sheet's Wrap-up sends requestReview and
@@ -16538,6 +16575,7 @@ module.exports = {
   invoiceDueBaseDay,
   lateFormArrivalDay,
   backfillCompletionPlan,
+  lateCloseReviewAskKept,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   backfillTimeOnSiteMinutes,
   BACKFILL_INFERRED_START_FIELDS,

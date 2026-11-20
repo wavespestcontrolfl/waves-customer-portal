@@ -94,4 +94,23 @@ async function draftServiceDate({ recordDate = null, serviceRecordId = null, sch
   }
 }
 
-module.exports = { draftServiceDate, draftVisitDate, visitWorkedOn };
+// Whole ET calendar days from one "YYYY-MM-DD" to a later one.
+function etDaysBetween(fromDay, toDay) {
+  return Math.round((Date.parse(`${toDay}T00:00:00Z`) - Date.parse(`${fromDay}T00:00:00Z`)) / 86400000);
+}
+
+/**
+ * A late closeout inside the window (owner 2026-11-20, D6 R3): the visit was worked no more than `maxDays` ET
+ * calendar days before it was closed. The worked day is the one the drafter uses (visitWorkedOn). A worked day that
+ * cannot be read, or that falls after the close, is outside the window: fewer texts.
+ */
+function closedWithinDaysOfWorkedDay({ arrivedAt = null, scheduledDate = null, closedAt = null, maxDays = 3 } = {}) {
+  const closeInstant = instantOf(closedAt);
+  if (!closeInstant) return false;
+  const workedDay = workedOnDay(visitWorkedOn({ arrivedAt, scheduledDate, completedAt: closeInstant }));
+  if (!workedDay) return false;
+  const gap = etDaysBetween(workedDay, etDateString(new Date(closeInstant)));
+  return gap >= 0 && gap <= maxDays;
+}
+
+module.exports = { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay };

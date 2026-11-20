@@ -76,7 +76,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
+const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseReviewAskKept, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
@@ -977,6 +977,75 @@ describe('frozenResumeCompletionState — resume derives mode AND duration from 
     expect(frozenResumeCompletionState({ backfillMintRequired: true }, {}).backfillMintRequired).toBe(true);
     expect(frozenResumeCompletionState({ backfillMintRequired: true }, {}).isBackfillCompletion).toBe(false);
     expect(frozenResumeCompletionState(null, {}).backfillMintRequired).toBe(false);
+  });
+});
+
+describe('lateCloseReviewAskKept — late backdated closeouts keep the review ask (owner 2026-11-20, D6 R3, GATE_REVIEW_LATE_CLOSE_ASK)', () => {
+  const closedAt = new Date('2026-11-20T15:00:00Z');
+  const workedTwoDaysAgo = { scheduled_date: '2026-11-18', arrived_at: null };
+  const base = { isBackfillCompletion: true, visitOutcome: 'completed', svc: workedTwoDaysAgo, closedAt };
+  let saved;
+  beforeEach(() => { saved = process.env.GATE_REVIEW_LATE_CLOSE_ASK; process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'true'; });
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_REVIEW_LATE_CLOSE_ASK; else process.env.GATE_REVIEW_LATE_CLOSE_ASK = saved; });
+
+  test('gate on + worked 2 days ago keeps the ask', () => {
+    expect(lateCloseReviewAskKept(base)).toBe(true);
+  });
+
+  test('gate off keeps today\'s quiet closeout', () => {
+    delete process.env.GATE_REVIEW_LATE_CLOSE_ASK;
+    expect(lateCloseReviewAskKept(base)).toBe(false);
+    process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'yes';
+    expect(lateCloseReviewAskKept(base)).toBe(false);
+  });
+
+  test('gate on + worked 5 days ago does not keep it', () => {
+    expect(lateCloseReviewAskKept({ ...base, svc: { scheduled_date: '2026-11-15' } })).toBe(false);
+  });
+
+  test('only an admin backfill: a live completion, the system quiet closeout and the invoice-issued closeout never do', () => {
+    expect(lateCloseReviewAskKept({ ...base, isBackfillCompletion: false })).toBe(false);
+    expect(lateCloseReviewAskKept({ ...base, systemQuietCloseout: true })).toBe(false);
+    expect(lateCloseReviewAskKept({ ...base, issuedInvoiceCloseout: { invoiceId: 'inv-1', trigger: 'sent' } })).toBe(false);
+  });
+
+  test('an incomplete, declined or internal-only visit never keeps it', () => {
+    expect(lateCloseReviewAskKept({ ...base, visitOutcome: 'incomplete' })).toBe(false);
+    expect(lateCloseReviewAskKept({ ...base, visitOutcome: 'customer_declined' })).toBe(false);
+    expect(lateCloseReviewAskKept({ ...base, isInternalOnlyCompletion: true })).toBe(false);
+  });
+
+  test('an unreadable worked day does not keep it', () => {
+    expect(lateCloseReviewAskKept({ ...base, svc: {} })).toBe(false);
+  });
+
+  test('the frozen record is the resume answer: requestReview true beside backfill true restores kept; the usual false stays quiet', () => {
+    expect(frozenResumeCompletionState({ backfill: true, requestReview: true }).lateCloseReviewKept).toBe(true);
+    expect(frozenResumeCompletionState({ backfill: true, requestReview: false }).lateCloseReviewKept).toBe(false);
+    expect(frozenResumeCompletionState({ backfill: true }).lateCloseReviewKept).toBe(false);
+    // A normal completion's requestReview true is not a backfill ask.
+    expect(frozenResumeCompletionState({ requestReview: true }).lateCloseReviewKept).toBe(false);
+  });
+
+  describe('route wiring (source contract)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+
+    test('the decision is made once at the commit, from the locked row, and frozen with the normal expression', () => {
+      expect((src.match(/lateCloseReviewKept = lateCloseReviewAskKept\(/g) || []).length).toBe(1);
+      expect(src).toMatch(/svc: \{ \.\.\.svc, \.\.\.\(lockedSvcRow \|\| \{\}\) \}, closedAt: completionEndedAt/);
+      expect(src).toMatch(/customerRequestedReview: \(isIncompleteVisit \|\| isInternalOnlyCompletion \|\| \(isBackfillCompletion && !lateCloseReviewKept\)\)/);
+    });
+
+    test('a kept ask is let through the backfill comms silence, and ONLY the ask (the completion text stays forced off)', () => {
+      expect(src).toMatch(/&& \(!suppressTypedCustomerComms \|\| lateCloseReviewKept\)/);
+      const forced = src.match(/if \(isBackfillCompletion\) \{\s*\n\s*suppressTypedCustomerComms = true;\s*\n\s*effectiveSendCompletionSms = false;\s*\n\s*\}/g) || [];
+      expect(forced.length).toBe(2);
+    });
+
+    test('a resume restores the frozen decision before any ask is read', () => {
+      expect(src).toMatch(/lateCloseReviewKept = frozenResume\.lateCloseReviewKept;\s*\n\s*if \(lateCloseReviewKept\) requestReview = true;/);
+      expect(src.indexOf('lateCloseReviewKept = frozenResume.lateCloseReviewKept')).toBeLessThan(src.indexOf('const effectiveRequestReview = '));
+    });
   });
 });
 
@@ -2371,7 +2440,7 @@ describe('completion route wiring (source contracts)', () => {
   });
 
   test('backfill freezes review-request OFF and its own flag in structured_notes', () => {
-    expect(source).toMatch(/requestReview: \(isIncompleteVisit \|\| isInternalOnlyCompletion \|\| isBackfillCompletion\) \? false : requestReview !== false/);
+    expect(source).toMatch(/requestReview: \(isIncompleteVisit \|\| isInternalOnlyCompletion \|\| \(isBackfillCompletion && !lateCloseReviewKept\)\) \? false : requestReview !== false/);
     expect(source).toMatch(/\.\.\.\(isBackfillCompletion \? \{ backfill: true \} : \{\}\)/);
     // And the resume path recovers the frozen flag — through the shared
     // helper (behavioral coverage above), gated to the resume claim, with
