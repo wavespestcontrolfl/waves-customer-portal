@@ -68,17 +68,27 @@ describe('plainPage', () => {
     for (const name of names) expect(plainPage(`<table><tr><${name}><td>35A-02-8</${name}></table>`, all)).toBeNull();
   });
 
-  test('a start tag that can hide its element gives null: the hidden attribute, or a style attribute that can hide', () => {
-    const hiding = ['<td hidden>Callback</td>', '<td HIDDEN="">x', '<td style="display:none">x',
+  test('a start tag that can hide its element gives null: the hidden or popover attribute, or a style attribute that can hide', () => {
+    const hiding = ['<td hidden>Callback</td>', '<td HIDDEN="">x', '<td popover>x', '<td style="display:none">x',
       '<td style="color:red; DISPLAY : none">x', '<td style="display:/**/none">x', '<td style="display&#58;none">x',
       "<td style='visibility: hidden'>x", '<td style=visibility:collapse>x', '<td style="content-visibility: hidden">x',
-      // A CSS escape can spell any style: "\6e one" is "none".
-      '<td style="display:\\6e one">x'];
+      // A CSS escape can spell any style ("\6e one" is "none"), and a function can stand for any value.
+      '<td style="display:\\6e one">x', '<td style="--state:none; display:var(--state)">x', '<td style="content-visibility: var(--v)">x',
+      // An unquoted url() keeps a "/*" as part of its address, and a quoted one is a string: neither opens a comment.
+      '<td style="background:url(/icons/*/dot.png); display:none">x', "<td style='background: url(\"a)b\"); display: none'>x"];
     for (const cell of hiding) expect(plain(`<table><tr><td>Routine</td>${cell}</table>`)).toBeNull();
     // Other styles read as before; a string or a comment is not a declaration, and a comment parts two words; an end
     // tag's attributes do nothing.
     expect(plain('<td style="font-size: 13px; overflow: hidden; list-style-type: none; content: \'display: none\'">A</td hidden>'
-      + '<td style="dis/**/play: none /* display: none */">B')).toBe('<td>A</td><td>B');
+      + '<td style="dis/**/play: none /* display: none */">B'
+      // "-url(" is a function, not a url(): its "/*" opens a comment. A line break does not end a declaration.
+      + '<td style="x: -url(/*); display: none; y: */; display: block">C<td style="color: red\n display: none">D'))
+      .toBe('<td>A</td><td>B<td>C<td>D');
+    // Each declaration is read once: a long style with no ";" reads quickly.
+    const started = Date.now();
+    expect(plain(`<td style="${'display:'.repeat(40000)}">E`)).toBe('<td>E');
+    expect(plain(`<style>td { ${'display:'.repeat(40000)} }</style><td>F`)).toBe('<td>F');
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   test('a style sheet gives null when a rule in it can hide an element of the page', () => {
@@ -89,6 +99,8 @@ describe('plainPage', () => {
       '<style>.x:not(.y) { display: none }</style><td>x', '<style>* { visibility: hidden }</style><td>x',
       // A declaration with no rule, or one after a nested rule, has no selector to read.
       '<style>display: none</style><td>x', '<style>.a { .b { color: red } display: none }</style><td>x',
+      // A function can stand for any value, and an unquoted url() keeps its "/*" as part of the address.
+      '<style>td { --d: none; display: var(--d) }</style><td>x', '<style>td { background: url(/i/*/d.png); display: none }</style><td>x',
       // A CSS escape can spell any style, and an import loads a sheet this cannot read.
       '<style>td { display: \\6e one }</style><td>x', '<style>@import "a.css";</style><td>x',
       // Read left to right, as CSS reads it: a "/*" in a string opens no comment, and a quote in a comment opens no string.

@@ -15,11 +15,12 @@
  * - a tag whose name (a letter, then letters or digits: h1 too) is not in `tags`;
  * - an element that changes how a browser reads what follows it, or whose content a browser does not show
  *   (REFUSED_ELEMENTS: a template, a textarea, an svg, a select, a closed details), even when `tags` allows it;
- * - a start tag with the hidden attribute or a style attribute that can hide it (display: none, visibility: hidden
- *   or collapse, content-visibility: hidden), or a style sheet with such a declaration in a rule whose selector can
- *   match an element of the page (canMatch). A CSS escape or an import, which can spell or load any style, counts as
- *   one. Other ways a style can hide text (a size, a colour, a position) are not read, and neither is what a script
- *   does when it runs: the source's own styles and scripts must not hide or add what its reader needs;
+ * - a start tag with the hidden or popover attribute, or a style attribute that can hide it (a display, visibility or
+ *   content-visibility declaration whose value is none, hidden, collapse or a function such as var()), or a style
+ *   sheet with such a declaration in a rule whose selector can match an element of the page (canMatch). A CSS escape
+ *   or an import, which can spell or load any style, counts as one. Other ways a style can hide text (a size, a
+ *   colour, a position, an opacity) are not read, and neither is what a script does when it runs: the source's own
+ *   styles and scripts must not hide or add what its reader needs;
  * - a script that holds "<script": after "<!--" in a script, that makes the script run past its first end tag;
  * - a page that ends inside a tag, a comment, a doctype, a script, a style or the title.
  *
@@ -85,19 +86,20 @@ function readAttributes(html, i) {
   }
 }
 
-// A style's text read left to right, as CSS reads it: a comment becomes a space and a string is emptied, so neither
-// can hide a declaration from a test or add one to it; the "<!--" and "-->" a style sheet may wrap itself in are out.
-// A CSS escape ("\6e one" spells "none") can spell any style, so a style that holds a backslash is not read this way:
-// it counts as one that can hide.
-const CSS_SKIP_RE = /\/\*[\s\S]*?(?:\*\/|$)|"[^"\n\r\f]*"?|'[^'\n\r\f]*'?/g;
+// A style's text read left to right, as CSS reads it: a comment becomes a space, and a string or an unquoted url()
+// (whose "/*" or quote is part of the address) is emptied, so none of them can hide a declaration from a test or add
+// one to it; the "<!--" and "-->" a style sheet may wrap itself in are out. A CSS escape ("\6e one" spells "none")
+// can spell any style, so a style that holds a backslash is not read this way: it counts as one that can hide.
+const CSS_SKIP_RE = /\/\*[\s\S]*?(?:\*\/|$)|"[^"\n\r\f]*"?|'[^'\n\r\f]*'?|(?<![-\w\u0080-\uffff])url\(\s*(?=[^\s"'])[^)]*(?:\)|$)/gi;
 const flatCss = (css) => css.replace(CSS_SKIP_RE, (skipped) => (skipped[0] === '/' ? ' ' : '""')).replace(/<!--|-->/g, ' ');
-// A declaration that hides its element: display: none, or visibility: hidden or collapse (the test finds
-// content-visibility: hidden too).
-const HIDING_RE = /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)/i;
-const hidingStyle = (css) => css.includes('\\') || HIDING_RE.test(flatCss(css));
-// Whether a start tag's attributes hide its element: hidden (the HTML standard's own), or a style attribute that can
-// (hidingStyle), read with its character references decoded.
-const hides = (attributes) => attributes.some(({ name, value }) => name === 'hidden'
+// Whether one declaration (a run of a style's flat text between ";", "{" and "}") can hide its element: a property
+// whose name ends in display or visibility (content-visibility too) with a value of none, hidden or collapse, or with
+// a function (var(), attr()), which can stand for any value. Each run is read once, so no style can make it slow.
+const HIDING_RE = /^\s*[-\w]*(?:display|visibility)\s*:[\s\S]*(?:none|hidden|collapse|\()/i;
+const hidingStyle = (css) => css.includes('\\') || flatCss(css).split(/[;{}]/).some((run) => HIDING_RE.test(run));
+// Whether a start tag's attributes hide its element: hidden or popover (shown only once a script opens it), or a
+// style attribute that can (hidingStyle), read with its character references decoded.
+const hides = (attributes) => attributes.some(({ name, value }) => name === 'hidden' || name === 'popover'
   || (name === 'style' && hidingStyle(decodeHTML(value))));
 // The class and id names of a start tag: ".name" for each class and "#name" for its id, in lower case (a page in
 // quirks mode matches them in any case).
@@ -113,16 +115,19 @@ const canMatch = (selector, names) => selector.split(',').some((part) => !/^[-\w
   || (part.match(/[.#][-\w]+/g) || []).every((name) => names.has(name.toLowerCase())));
 // Whether a style sheet can hide an element of a page whose elements have the class and id names `names`: it holds a
 // backslash, or an import (a sheet this cannot read); or it holds a hiding declaration whose rule this cannot tell
-// (one with no rule, or one after a nested rule), or whose rule's selector can match an element.
+// (one with no rule, or one after a nested rule), or whose rule's selector can match an element. The sheet is read
+// once, run by run: a "{" opens a block whose selector is the run before it, and a "}" ends one.
 function sheetCanHide(css, names) {
   if (css.includes('\\')) return true;
   const flat = flatCss(css);
   if (/@import/i.test(flat)) return true;
-  for (const declaration of flat.matchAll(new RegExp(HIDING_RE, 'gi'))) {
-    const open = flat.lastIndexOf('{', declaration.index);
-    if (open < 0 || flat.lastIndexOf('}', declaration.index) > open) return true;
-    const from = Math.max(flat.lastIndexOf('{', open - 1), flat.lastIndexOf('}', open - 1), flat.lastIndexOf(';', open - 1));
-    if (canMatch(flat.slice(from + 1, open), names)) return true;
+  let selector = null;
+  let before = '';
+  for (const [, mark, run] of flat.matchAll(/([;{}]?)([^;{}]*)/g)) {
+    if (mark === '{') selector = before;
+    else if (mark === '}') selector = null;
+    if (HIDING_RE.test(run) && (selector === null || canMatch(selector, names))) return true;
+    before = run;
   }
   return false;
 }
