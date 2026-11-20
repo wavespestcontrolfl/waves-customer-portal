@@ -800,6 +800,73 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(second).toMatchObject({ expected_offers: 'b'.repeat(32), notify: { sms: false, email: true } });
   });
 
+  const interviewPreview = (offers) => ({
+    status: 'interview', templated: true, sending_enabled: true,
+    channels: { sms: { available: true, to: '(941) ***-1234', reason: null }, email: { available: true, to: 'j***@example.com', reason: null } },
+    sms_body: 'Hi Jordan, pick a time: [interview link]', email_subject: 'Your interview', email_body: 'Pick a time: [interview link]',
+    offers,
+  });
+
+  it('after the offers changed, a failed preview read offers Try again, which reads the move again and keeps the note and the edited message', async () => {
+    let preview = interviewPreview({ held: false, draft: true, owner_only: false, stamp: 'a'.repeat(32) });
+    let failPreview = false;
+    let patches = 0;
+    const { calls } = setupFetch(
+      {
+        'GET /admin/careers/app-1/stage-preview?status=interview': () => (failPreview ? res(500, { error: 'The preview could not be loaded.' }) : res(200, preview)),
+        'PATCH /admin/careers/app-1/status': () => {
+          patches += 1;
+          if (patches > 1) return res(200, { application: detailFixture({ status: 'interview' }), sent: null });
+          // Another session sent the draft, and the preview read after the refusal fails.
+          preview = { ...preview, offers: { held: true, draft: false, owner_only: false, stamp: 'b'.repeat(32) } };
+          failPreview = true;
+          return res(409, { error: 'The job offer changed since this opened. Nothing was changed. Check the move again.', code: 'OFFERS_CHANGED', application: detailFixture({ status: 'offer' }) });
+        },
+      },
+      { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    await screen.findByTestId('offer-card');
+    fireEvent.click(screen.getByRole('button', { name: 'Interview' }));
+    const stage = (await screen.findByRole('heading', { name: 'Move to Interview' })).closest('[role="dialog"]');
+    fireEvent.change(await within(stage).findByLabelText('Note'), { target: { value: 'Call before noon.' } });
+    fireEvent.change(within(stage).getByLabelText('Text message'), { target: { value: 'Hi Jordan, call me first: [interview link]' } });
+    fireEvent.click(within(stage).getByRole('button', { name: 'Confirm' }));
+    expect(await within(stage).findByText('The preview could not be loaded.')).toBeInTheDocument();
+    expect(within(stage).getByRole('button', { name: 'Confirm' })).toBeDisabled();
+    failPreview = false;
+    fireEvent.click(within(stage).getByRole('button', { name: 'Try again' }));
+    expect(await within(stage).findByText(/withdraws the offer you sent to Jordan/)).toBeInTheDocument();
+    expect(within(stage).getByLabelText('Note')).toHaveValue('Call before noon.');
+    expect(within(stage).getByLabelText('Text message')).toHaveValue('Hi Jordan, call me first: [interview link]');
+    fireEvent.click(within(stage).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(patches).toBe(2));
+    const second = calls.filter((c) => c.method === 'PATCH')[1].body;
+    expect(second).toMatchObject({ expected_offers: 'b'.repeat(32), note: 'Call before noon.', notify: { sms: true, sms_body: 'Hi Jordan, call me first: [interview link]' } });
+  });
+
+  it('a failed first preview read offers Try again, which loads the move and its message', async () => {
+    let failPreview = true;
+    setupFetch(
+      {
+        'GET /admin/careers/app-1/stage-preview?status=interview': () => (failPreview
+          ? res(500, { error: 'The preview could not be loaded.' })
+          : res(200, interviewPreview({ held: false, draft: false, owner_only: false, stamp: 'c'.repeat(32) }))),
+      },
+      { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    await screen.findByTestId('offer-card');
+    fireEvent.click(screen.getByRole('button', { name: 'Interview' }));
+    const stage = (await screen.findByRole('heading', { name: 'Move to Interview' })).closest('[role="dialog"]');
+    expect(await within(stage).findByText('The preview could not be loaded.')).toBeInTheDocument();
+    failPreview = false;
+    fireEvent.click(within(stage).getByRole('button', { name: 'Try again' }));
+    expect(await within(stage).findByLabelText('Text message')).toHaveValue('Hi Jordan, pick a time: [interview link]');
+    expect(within(stage).getByLabelText('Subject')).toHaveValue('Your interview');
+    expect(within(stage).getByRole('button', { name: 'Confirm' })).toBeEnabled();
+  });
+
   it('re-reads the application after an offer action with ?peek=1, so no reply is marked read behind a dialog', async () => {
     const { calls } = setupFetch(
       { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => res(200, { offer: { ...sent, status: 'withdrawn' } }) },

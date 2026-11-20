@@ -620,7 +620,7 @@ async function saveDraft(applicationId, input, actor, now = new Date()) {
     const reportTo = ownerReportTo(await actorName(trx, actor));
     const columns = columnsOf(value, reportTo);
     if (draft) {
-      const [row] = await trx('job_offers').where({ id: draft.id }).update({ ...columns, updated_at: new Date() }).returning('*');
+      const [row] = await trx('job_offers').where({ id: draft.id }).update({ ...columns, updated_at: nextVersion(draft) }).returning('*');
       return presentDraft(trx, row, await actorName(trx, actor), now);
     }
     const [row] = await trx('job_offers').insert({ application_id: applicationId, status: 'draft', created_by: actor.id, ...columns }).returning('*');
@@ -769,12 +769,21 @@ function liveOffersOf(knex, applicationId, { lock = false } = {}) {
 }
 
 // One stamp for the offers a stage move withdraws, from their ids, statuses and versions (updated_at, which every offer
-// write sets, so a draft edited in place changes it too). A move that keeps the offers withdraws none: the empty list
-// has a stamp of its own. The stage preview returns it and the move names the offers again under its lock, so a move
-// never withdraws an offer, or a version of one, that its dialog did not show.
+// write sets). A write that changes the status changes the stamp by its status; a write that keeps it (a draft edited
+// in place, a second date request, a text-consent choice) takes nextVersion, so even two such writes in one
+// millisecond give two stamps. A move that keeps the offers withdraws none: the empty list has a stamp of its own. The
+// stage preview returns it and the move names the offers again under its lock, so a move never withdraws an offer, or
+// a version of one, that its dialog did not show. The Send's outStamp is the same stamp of the offers out.
 function offerStampOf(rows) {
   const parts = rows.map((o) => `${o.id}:${o.status}:${iso(o.updated_at)}`).sort();
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 32);
+}
+
+// The version (updated_at) for a write that keeps an offer's status, on a row this transaction holds locked: strictly
+// later than the version it replaces, so two writes in one millisecond still get two versions (offerStampOf, and the
+// applicant page's `version` in changedSince, compare it).
+function nextVersion(row) {
+  return new Date(Math.max(Date.now(), new Date(row.updated_at).getTime() + 1));
 }
 
 /** What such a move would withdraw, for the stage dialog's preview: a plain read (the move re-checks under its lock). */
@@ -1074,8 +1083,7 @@ async function setTextConsent(token, consent, version) {
     const current = iso(found.offer.updated_at);
     if (Boolean(found.offer.text_consent_at) === consent) return { body: { textConsent: consent, version: current } };
     if (changedSince(found.offer, version)) return CHANGED;
-    // Strictly later than the version it replaces, so two changes in one millisecond still get two versions.
-    const updatedAt = new Date(Math.max(Date.now(), new Date(found.offer.updated_at).getTime() + 1));
+    const updatedAt = nextVersion(found.offer);
     await trx('job_offers').where({ id: found.offer.id }).update({ text_consent_at: consent ? found.now : null, updated_at: updatedAt });
     return { body: { textConsent: consent, version: iso(updatedAt) } };
   });
@@ -1155,7 +1163,7 @@ async function requestDate(token, { requestedStartDate, note, version }) {
     const cleanNote = note ? cleanText(note) : null;
     await trx('job_offers').where({ id: found.offer.id }).update({
       status: 'date_requested', date_requested_at: found.now, requested_start_date: requestedStartDate,
-      date_request_note: cleanNote || null, updated_at: new Date(),
+      date_request_note: cleanNote || null, updated_at: nextVersion(found.offer),
     });
     return { body: { state: 'date_requested' }, forBell: found.offer };
   });

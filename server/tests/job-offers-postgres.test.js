@@ -532,6 +532,25 @@ jest.setTimeout(120000);
       expect((await sendAsPage(app.id, draft.id, edited.draftHash)).offer.status).toBe('sent');
     });
 
+    // The stage move's stamp versions each offer by updated_at. Two saves of one draft in the same millisecond (the
+    // clock frozen) still give two stamps, so a move confirmed on the first preview never discards the second save.
+    test('two saves of one draft in the same millisecond give the stage move two stamps', async () => {
+      const app = await newApplication();
+      const draft = await JobOffers.saveDraft(app.id, {}, actor());
+      const ALL_BUT_DATE = ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate',
+        'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'];
+      jest.useFakeTimers({ now: new Date(), doNotFake: ALL_BUT_DATE });
+      try {
+        const first = await JobOffers.saveDraft(app.id, { hourlyRate: 24, draftId: draft.id, draftHash: draft.draftHash }, actor());
+        const seen = (await JobOffers.liveOfferStake(root, app.id)).stamp;
+        const second = await JobOffers.saveDraft(app.id, { hourlyRate: 23.5, draftId: first.id, draftHash: first.draftHash }, actor());
+        expect(second.hourlyRate).toBe(23.5);
+        expect((await JobOffers.liveOfferStake(root, app.id)).stamp).not.toBe(seen);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     test('a save over an open draft must name that draft and its hash, or it is refused and writes nothing', async () => {
       const app = await newApplication();
       const draft = await JobOffers.saveDraft(app.id, { draftHash: 'ignored' }, actor()); // no draft yet, no draftId: creates

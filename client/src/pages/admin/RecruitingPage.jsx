@@ -446,6 +446,7 @@ function StageChangeDialog({
   preview,
   previewLoading,
   previewError,
+  onRetryPreview,
   note,
   onNoteChange,
   smsChecked,
@@ -485,8 +486,9 @@ function StageChangeDialog({
         {previewLoading && (
           <div className="text-14 text-zinc-500 py-4 text-center">Loading preview…</div>
         )}
+        {/* Try again reads the same move's preview again; the note, the channels and any edited message stay. */}
         {previewError && (
-          <ActionFeedback error className="mb-3">
+          <ActionFeedback error className="mb-3" onRetry={onRetryPreview}>
             {previewError}
           </ActionFeedback>
         )}
@@ -583,6 +585,16 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
   // stage) must not let a slow response land on the wrong stage.
   const previewSeq = useRef(0);
   const submitSeq = useRef(0);
+  // The message copy comes from the first preview this dialog loads. A later read (Try again, or the re-read after a
+  // move the server refused because the job offers changed) keeps what the owner typed and chose.
+  const copyFilled = useRef(false);
+  const fillCopy = useCallback((data) => {
+    if (!data || copyFilled.current) return;
+    copyFilled.current = true;
+    setSmsBody(data.sms_body || "");
+    setEmailSubject(data.email_subject || "");
+    setEmailBody(data.email_body || "");
+  }, []);
 
   // Reads the move's preview into the dialog, superseding any read before it: when
   // the dialog opens, and again when a move was refused because the job offers changed
@@ -632,14 +644,17 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
       setMoveWithoutNotifying(false);
       setSmsChecked(true);
       setEmailChecked(true);
-      const data = await readPreview(status);
-      if (!data) return;
-      setSmsBody(data.sms_body || "");
-      setEmailSubject(data.email_subject || "");
-      setEmailBody(data.email_body || "");
+      copyFilled.current = false;
+      fillCopy(await readPreview(status));
     },
-    [detail, readPreview],
+    [detail, readPreview, fillCopy],
   );
+
+  // Try again after a failed preview read, for the same move. A read that a close or a newer read replaced answers
+  // null and fills nothing.
+  const retryPreview = async () => {
+    if (stageDialog) fillCopy(await readPreview(stageDialog.status));
+  };
 
   const closeStageDialog = useCallback(() => {
     previewSeq.current += 1; // invalidate any in-flight preview fetch
@@ -717,6 +732,7 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
   const resetForNewApplicant = useCallback(() => {
     previewSeq.current += 1;
     submitSeq.current += 1; // any in-flight stage PATCH now belongs to the previous applicant
+    copyFilled.current = false;
     setBusy(false);
     setStageDialog(null);
     setPreview(null);
@@ -767,6 +783,7 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
     error: stageError,
     openStageDialog,
     closeStageDialog,
+    retryPreview,
     confirmStage,
     resetForNewApplicant,
   };
@@ -1335,6 +1352,7 @@ export default function RecruitingPage() {
         preview={stageWorkflow.preview}
         previewLoading={stageWorkflow.previewLoading}
         previewError={stageWorkflow.previewError}
+        onRetryPreview={stageWorkflow.retryPreview}
         note={stageWorkflow.note}
         onNoteChange={stageWorkflow.setNote}
         smsChecked={stageWorkflow.smsChecked}
