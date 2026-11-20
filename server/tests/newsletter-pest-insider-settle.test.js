@@ -39,10 +39,12 @@ const AUTO_QUEUED = {
 };
 
 // An in-memory stand-in for the tables. `counts`: the delivery ledger's readers who got it (got),
-// readers a Resume would still mail (left: outstandingEligibleDeliveries, the joined query), readers
-// whose mail servers refused it for good (refused: a hard bounce, which keeps its sent_at), its
-// recipients (every row but a skipped one) and its last accepted batch (lastSentAt), and for a
-// planned issue the rows that query lists (rows: the subscriber, its address and customers).
+// readers a Resume would still mail (left: outstandingEligibleDeliveries, the joined query), its
+// retryable rows (retryable, by default left), readers it reached no inbox of for good (refused: a
+// hard bounce or a message SendGrid dropped, which keep their sent_at), its recipients (every row
+// but a skipped one) and its last accepted batch (lastSentAt), and for a planned issue the rows that
+// query lists (rows: the subscriber, its address and customers). A where-group (a callback) records
+// what it calls on its query (calls, and nested with the arguments).
 const CHAIN = ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereExists', 'whereNotExists', 'withMaterialized', 'join', 'joinRaw', 'select', 'forUpdate'];
 // `bells`: admin notification rows by their dedupeKey (the alert a worker wrote).
 function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, left: 0 }, bells = [] } = {}) {
@@ -53,10 +55,19 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
   const matches = (row, conds) => conds.every((cond) => Object.entries(cond).every(([k, v]) => row[k] === v));
   const told = (row) => Boolean(row.diagnostics && row.diagnostics.outcomeToldAt);
   db.mockImplementation((table) => {
-    const q = { conds: [], raws: [], rawBindings: [], calls: new Set() };
+    const q = { conds: [], raws: [], rawBindings: [], calls: new Set(), nested: [] };
+    const group = new Proxy({}, {
+      get: (_, name) => (...args) => {
+        q.calls.add(String(name));
+        q.nested.push([String(name), ...args]);
+        if (typeof args[0] === 'function') args[0].call(group, group);
+        return group;
+      },
+    });
     CHAIN.forEach((m) => {
       q[m] = jest.fn((...args) => {
         q.calls.add(m);
+        if (m === 'where' && typeof args[0] === 'function') args[0].call(group, group);
         if (m === 'where' && args[0] && typeof args[0] === 'object') q.conds.push(args[0]);
         if (m === 'whereIn') q.statusIn = args[1];
         if (m === 'whereRaw') { q.raws.push(String(args[0])); q.rawBindings.push(...(args[1] || [])); }
@@ -69,13 +80,15 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
       reads.push({ table, locked: q.calls.has('forUpdate') });
       if (table === 'newsletter_send_deliveries') {
         // The Resume predicate joins the subscribers; the last batch is a max; the recipients leave
-        // out skipped rows; a hard bounce has bounced_at; "not yet" is the no-success filter; else
-        // the total, hard bounces included (they keep their sent_at).
+        // out skipped rows; a refusal has bounced_at or a dropped status; "not yet" is the no-success
+        // filter; the retryable rows are the retryable statuses; else the total, refusals included
+        // (they keep their sent_at).
         if (q.calls.has('join')) return { c: counts.left };
         if (q.calls.has('max')) return { at: counts.lastSentAt ?? null };
         if (q.calls.has('whereNot')) return { c: counts.recipients ?? counts.got + counts.left + (counts.refused || 0) };
         if (q.calls.has('whereNotNull')) return { c: counts.refused || 0 };
         if (q.calls.has('whereNotIn')) return { c: counts.left };
+        if (q.calls.has('whereIn')) return { c: counts.retryable ?? counts.left };
         return { c: counts.got + counts.left + (counts.refused || 0) };
       }
       if (table === 'notifications') return bells.find((bell) => q.rawBindings.includes(bell.dedupeKey));
@@ -106,10 +119,11 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
 }
 
 // The told mark: written after the alert reached someone, while the row still holds that outcome.
-const toldMark = (id, status, at = IN_WINDOW) => ({
+// A 'blocked' alert has its own (blockedToldAt).
+const toldMark = (id, status, at = IN_WINDOW, mark = 'outcomeToldAt') => ({
   table: 'pest_insider_issues',
   conds: [{ id, status }],
-  patch: expect.objectContaining({ diagnostics: { sql: "coalesce(diagnostics, '{}'::jsonb) || ?::jsonb", bindings: [JSON.stringify({ outcomeToldAt: at.toISOString() })] } }),
+  patch: expect.objectContaining({ diagnostics: { sql: "coalesce(diagnostics, '{}'::jsonb) || ?::jsonb", bindings: [JSON.stringify({ [mark]: at.toISOString() })] } }),
 });
 
 beforeEach(() => {
@@ -253,7 +267,7 @@ test('a sent issue some of whose readers hard-bounced stays sent, with no alert'
 });
 
 test('the archived-link repair runs in the settle transaction before it counts the readers a Resume would mail', async () => {
-  fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sent' }] });
+  fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 3 } });
 
   await settlePlannedIssues(IN_WINDOW);
   expect(relink).toHaveBeenCalledTimes(1);
@@ -263,7 +277,7 @@ test('the archived-link repair runs in the settle transaction before it counts t
 });
 
 test('a failed archived-link repair leaves the issue to the next minute: nothing is written or told', async () => {
-  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sent' }] });
+  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 3 } });
   relink.mockRejectedValueOnce(new Error('canceling statement due to lock timeout'));
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 0 });
@@ -271,7 +285,9 @@ test('a failed archived-link repair leaves the issue to the next minute: nothing
   expect(mockTrigger).not.toHaveBeenCalled();
 });
 
-test("a sent issue whose readers' mail servers blocked it after SendGrid accepted it gets one alert; the row stays sent", async () => {
+const BLOCKED_REASON = "went out to 85 readers, but 3 readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them";
+
+test("a sent issue whose readers' mail servers blocked it after SendGrid accepted it gets one alert, with its own key and told mark; the row stays sent", async () => {
   const sent = { ...ISSUE, status: 'sent' };
   const { writes } = fakeDb({ issues: [sent], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 3 } });
 
@@ -280,10 +296,48 @@ test("a sent issue whose readers' mail servers blocked it after SendGrid accepte
     errors: ["Went out to 85 readers, but 3 readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them"],
     outcome: true,
   });
+  expect(mockTrigger.mock.calls[0][2]).toEqual({ dedupeKey: 'pest-insider-blocked:issue-1' });
   expect(writes).toEqual([
-    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: expect.stringMatching(/^went out to 85 readers/) }) },
-    toldMark('issue-1', 'sent'),
+    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: BLOCKED_REASON }) },
+    toldMark('issue-1', 'sent', IN_WINDOW, 'blockedToldAt'),
   ]);
+});
+
+// Told its readers were blocked: still untold, so it is still read each minute, within the lookback.
+const TOLD_BLOCKED = { ...ISSUE, status: 'sent', reason: BLOCKED_REASON, diagnostics: { blockedToldAt: '2026-12-03T12:30:00.000Z' } };
+
+test.each([
+  ['still blocked: nothing more to tell', { got: 85, left: 3 }, 0, [], null],
+  ['a Resume left nobody: its reason clears, quietly', { got: 88, left: 0 }, 1,
+    [{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: null }) }], null],
+  ['every reader it reached bounced later: no reader got it after all, so it fails, with its own alert', { got: 0, left: 3, refused: 85 }, 1, [
+    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it' }) },
+    toldMark('issue-1', 'failed'),
+  ], 'pest-insider-outcome:issue-1'],
+])('a sent issue told its readers were blocked is still read: %s', async (_label, counts, settled, expected, alertKey) => {
+  const { writes } = fakeDb({ issues: [TOLD_BLOCKED], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled });
+  expect(writes).toEqual(expected);
+  if (alertKey) expect(mockTrigger.mock.calls.map((call) => call[2])).toEqual([{ dedupeKey: alertKey }]);
+  else expect(mockTrigger).not.toHaveBeenCalled();
+});
+
+test('a message SendGrid dropped (an address on its unsubscribe or spam-report list) is refused, never reached; a later unsubscribe or spam report of a delivered one is not', async () => {
+  const queries = [];
+  fakeDb({ issues: [{ ...ISSUE, status: 'sent' }], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 0, left: 0, refused: 85 } });
+  const real = db.getMockImplementation();
+  db.mockImplementation((table) => { const q = real(table); if (table === 'newsletter_send_deliveries') queries.push(q); return q; });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Did not go out: its send ended, and no reader got it']);
+  // The refusals: a hard bounce, or a dropped status with no delivery, open or click (a reader's own
+  // unsubscribe after delivery keeps its status; a spam report after delivery has its delivery).
+  const refused = queries.find((q) => q.nested.some(([m, column]) => m === 'whereNotNull' && column === 'bounced_at'));
+  expect(refused.nested).toEqual(expect.arrayContaining([
+    ['whereIn', 'status', ['unsubscribed', 'complained']],
+    ['whereNull', 'delivered_at'], ['whereNull', 'opened_at'], ['whereNull', 'clicked_at'],
+  ]));
 });
 
 test('a failed issue whose send became sent (a Resume that finished, or delivery confirmations that came late) becomes sent, with one correction for the alert it had', async () => {
@@ -363,12 +417,14 @@ test("a sent issue whose send a person resumed is left to that send: no alert wh
   expect(mockTrigger).not.toHaveBeenCalled();
 });
 
-test('a sent issue with no reader left to resume needs nothing', async () => {
+test('a sent issue with no reader left to resume needs nothing: with no retryable row, the archived-link repair and the Resume count do not run', async () => {
   const { writes } = fakeDb({ issues: [{ ...ISSUE, status: 'sent' }], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 0 });
   expect(writes).toEqual([]);
   expect(mockTrigger).not.toHaveBeenCalled();
+  expect(relink).not.toHaveBeenCalled();
+  expect(db.mock.results.some(({ value }) => value && value.calls && value.calls.has('join'))).toBe(false);
 });
 
 // A planned issue's audience, as the planner fixes it: readers 1 and 2, each at the address it qualified on.
