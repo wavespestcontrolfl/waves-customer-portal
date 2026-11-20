@@ -18,7 +18,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/google-business', () => mockGbp);
 jest.mock('../services/social-content-studio', () => ({ publishWithReviewLivenessLock: (...a) => mockLock(...a) }));
 const mockNotify = jest.fn(async () => ({}));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a), safeErrorSummary: (e) => (e && (e.code || e.name)) || 'error' }));
 const mockAccountFacts = jest.fn(async () => null);
 jest.mock('../services/review-reply/grounding', () => ({
   loadAccountFacts: (...a) => mockAccountFacts(...a),
@@ -59,7 +59,7 @@ jest.mock('../models/db', () => {
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       async first() { return state.rows.filter((r) => filters.every((f) => f(r)))[0] || null; },
       async update(patch) {
-        if (state.failNextUpdate) { state.failNextUpdate = false; throw new Error('connection reset'); }
+        if (state.failNextUpdate) { state.failNextUpdate = false; throw Object.assign(new Error(`update "google_reviews" set "review_reply" = 'Hi Dana W.' - connection reset`), { code: 'ECONNRESET' }); }
         const hits = state.rows.filter((r) => filters.every((f) => f(r)));
         hits.forEach((r) => Object.assign(r, patch));
         return hits.length;
@@ -481,7 +481,10 @@ describe('publishReviewReply', () => {
     state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: draft };
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: draft }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     state.failNextUpdate = true;
-    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.RECONCILE_FAILED, status: 503 });
+    const err = await publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: CODES.RECONCILE_FAILED, status: 503, message: 'Google shows an owner reply but recording it failed: ECONNRESET' });
+    // The database error quoted the reply and the reviewer's name: only its code reaches the bell, the row and the log.
+    expect(err.message).not.toMatch(/Dana|update/);
     // The reconciliation park is intact for the next attempt.
     expect(state.rows[0]).toMatchObject({ review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
@@ -679,6 +682,19 @@ describe('publishReviewReply', () => {
     mockGbp.getAllLocationReviews.mockResolvedValueOnce([]);
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
       .rejects.toMatchObject({ code: CODES.NO_RESOURCE });
+  });
+
+  test('a failed read of Google\'s review list is a Google failure with its cause, not NO_RESOURCE: the runner retries it on the long ladder', async () => {
+    state.rows[0].gbp_review_name = null;
+    // Google's response text can quote a reviewer: the message keeps the status only.
+    mockGbp.getAllLocationReviews.mockRejectedValueOnce(Object.assign(new Error('GBP getAllLocationReviews 503: {"reviews":[{"reviewer":{"displayName":"Dana W."},"comment":"Great"}]}'), { googleStatus: 503 }));
+    const err = await publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: CODES.GOOGLE_FAILED, status: 502, identityLookup: true });
+    expect(err.message).toBe("Could not read Google's review list to find this review (HTTP 503)");
+    expect(err.message).not.toMatch(/Dana|Great|displayName/);
+    expect(err.cause).toMatchObject({ googleStatus: 503 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBeNull();
   });
 
   test('location without credentials → NOT_CONFIGURED', async () => {

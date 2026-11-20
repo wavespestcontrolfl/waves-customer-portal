@@ -2318,10 +2318,7 @@ function isSandboxCall(req) {
 // socket, whose database has no sandbox row for it (codex r14 P1). The
 // request's Host is Twilio-signature-covered, so it is trustworthy here.
 function sandboxRelayHost(req) {
-  return process.env.SERVER_DOMAIN
-    || process.env.RAILWAY_PUBLIC_DOMAIN
-    || (req && req.headers && String(req.headers.host || '').replace(/:\d+$/, ''))
-    || 'portal.wavespestcontrol.com';
+  return require('../services/voice-agent/relay-protocol').publicWsHost(req && req.headers && req.headers.host);
 }
 function sandboxRelayXml({ callSid, cell, req = null }) {
   const { buildRelayTwiML, RELAY_WS_PATH, spanishWelcomeGreeting } = require('../services/voice-agent/relay-protocol');
@@ -2591,6 +2588,166 @@ router.post('/relay-sandbox', async (req, res) => {
   }
 });
 
+// =========================================================================
+// GPT-Live trial (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19, spend cap $5).
+// Cell codes 71 / 72 on the sandbox number connect the call to OpenAI's
+// GPT-Live model through Twilio Media Streams (services/voice-agent/
+// live-bridge.js) instead of ConversationRelay, so the owner can compare the
+// two by ear. Twilio does not allow a query string on a <Stream> url, so the
+// CallSid and the per-call token ride as path segments of /ws/voice-live/.
+// =========================================================================
+const GPT_LIVE_COMPLETE_ACTION = '/api/webhooks/twilio/relay-sandbox/live-complete';
+const GPT_LIVE_CELLS = new Map([['71', 'marin'], ['72', 'delta']]);
+const GPT_LIVE_TIME_LIMIT_S = 600;
+const GPT_LIVE_DEFAULT_MAX_USD = 5; // the owner's spend yes, 2026-11-19: $5 of OpenAI charges in all
+const GPT_LIVE_BUDGET_LOCK = 'voice_gpt_live_budget';
+// The spend ledger is its own table (migration 20261120020000), never call_log:
+// call_log rows can be deleted (spam disposition, orphan cleanup), and a
+// deleted row must not give back billed spend. A row counts its settled cost,
+// else its reservation: a call whose summary never landed keeps it for good.
+const GPT_LIVE_LEDGER = 'voice_gpt_live_ledger';
+const GPT_LIVE_SPENT_SQL = 'COALESCE(SUM(COALESCE(cost_usd, reserved_usd)), 0) AS usd';
+// A reservation whose stream never opened within the stream token's life (the
+// caller hung up during the disclosure) used nothing: the next reservation
+// releases it at $0. The upgrade admits only an unreleased row, so a late
+// stream cannot reopen it.
+const GPT_LIVE_ADMIT_WINDOW_S = 6 * 60; // CALL_TOKEN_TTL_MS (5 min) + 1 min
+const GPT_LIVE_UNCLAIMED_SQL = "(metadata->'gpt_live') IS NULL";
+
+function gptLiveCellFor(digits) {
+  if (!GPT_LIVE_CELLS.has(digits)) return null;
+  if (!require('../config/feature-gates').voiceGptLiveTestLive()) return null;
+  return { cell: digits, voice: GPT_LIVE_CELLS.get(digits) };
+}
+
+// The default applies only when the variable is absent. A set value that is
+// not a plain, finite non-negative number with at most 4 decimals (the
+// ledger's $0.0001 scale): "", "$1", "-1", "five", "0.52499", or 400 digits
+// that overflow to Infinity, is a mistake: null, and the reservation refuses
+// the call rather than guess a cap.
+function gptLiveMaxUsd() {
+  const raw = process.env.VOICE_GPT_LIVE_TEST_MAX_USD;
+  if (raw === undefined) return GPT_LIVE_DEFAULT_MAX_USD;
+  const text = String(raw).trim();
+  const value = Number(text);
+  return /^\d+(\.\d{1,4})?$/.test(text) && Number.isFinite(value) ? value : null;
+}
+
+// Reserve one call's worst-case OpenAI cost (live-bridge PER_CALL_RESERVE_USD:
+// the 10 minute cap plus the backend cap) BEFORE a stream token exists, and
+// stamp the call_log row the WS upgrade requires. One transaction-scoped lock
+// makes the ledger read, the ledger claim and the stamp one step, so two calls
+// cannot both spend the same balance. The claim is single-use per CallSid (the
+// ledger's primary key, and a stamp only on a row with no gpt_live yet), so a
+// repeated cell request never mints a second token. Twilio retries a voice
+// webhook only when its connection fails (default retry policy `ct`; this
+// route sets no connection override), so a retry never follows a committed
+// reservation. Returns false when the
+// reservation does not fit under the cap; a database error, or a call already
+// claimed, throws and the caller refuses the call (fail closed).
+async function reserveGptLiveCall(callSid, { cell, voice, token }) {
+  const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
+  const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
+  return db.transaction(async (trx) => {
+    const maxUsd = gptLiveMaxUsd();
+    if (maxUsd === null) throw new Error('VOICE_GPT_LIVE_TEST_MAX_USD is not a plain non-negative number');
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [GPT_LIVE_BUDGET_LOCK]);
+    await trx(GPT_LIVE_LEDGER)
+      .whereNull('admitted_at')
+      .whereNull('cost_usd')
+      .whereRaw("created_at < now() - (? * interval '1 second')", [GPT_LIVE_ADMIT_WINDOW_S])
+      .update({ cost_usd: 0, settled_at: trx.fn.now() });
+    const row = await trx(GPT_LIVE_LEDGER).first(trx.raw(GPT_LIVE_SPENT_SQL));
+    // Whole ten-thousandths of a dollar (the ledger's numeric(10,4) scale), so
+    // the comparison is exact: 0.0450 + 0.525 must fit a 0.57 cap.
+    const units = (usd) => Math.round(Number(usd) * 10000);
+    if (units(row && row.usd) + units(PER_CALL_RESERVE_USD) > units(maxUsd)) return false;
+    const claimed = await trx(GPT_LIVE_LEDGER)
+      .insert({ call_sid: callSid, reserved_usd: PER_CALL_RESERVE_USD })
+      .onConflict('call_sid').ignore()
+      .returning('call_sid');
+    if (!claimed || !claimed.length) throw new Error('call already claimed a GPT-Live reservation');
+    // stream_token_sha256 binds the reservation to the one token issued here.
+    const stamp = { gpt_live: { cell, voice, started_at: new Date().toISOString(), reserved_usd: PER_CALL_RESERVE_USD, stream_token_sha256: callTokenDigest(token) } };
+    const updated = await trx('call_log')
+      .where({ twilio_call_sid: callSid })
+      .whereRaw(GPT_LIVE_UNCLAIMED_SQL)
+      .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stamp)]) });
+    if (!updated) throw new Error('no unstamped call_log row for this call');
+    return true;
+  });
+}
+
+// Twilio's own stop at 10 minutes, in case the bridge never closes. Fail-soft:
+// the bridge's own cap ends the session at the same mark.
+function capGptLiveCall(callSid) {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return;
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  void client.calls(callSid).update({ timeLimit: GPT_LIVE_TIME_LIMIT_S })
+    .catch((err) => logger.warn(`[gpt-live] time limit not set for ${maskSid(callSid)} (${String(err?.code || err?.status || 'error')})`));
+}
+
+// The live cell spends money (a ledger reservation and a Twilio REST update),
+// so it needs a verified Twilio signature itself: the shared middleware lets an
+// unsigned request through in its `log` and `disabled` modes. No auth token,
+// no header or a bad one: refused before any write.
+function gptLiveRequestSigned(req) {
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const signature = typeof req.get === 'function' ? req.get('X-Twilio-Signature') : undefined;
+  if (!authToken || typeof signature !== 'string' || !signature) return false;
+  const { reconstructUrl } = require('../middleware/twilio-signature');
+  return twilio.validateRequest(authToken, signature, reconstructUrl(req), req.body || {});
+}
+
+function gptLiveSayAndHangup(res, text) {
+  const twiml = new VoiceResponse();
+  twiml.say({ voice: SAY_VOICE }, text);
+  twiml.hangup();
+  return res.type('text/xml').send(twiml.toString());
+}
+
+// The disclosure replay the cell handler always plays (a digit cut the
+// answer-time copy short), then the media stream.
+function gptLiveStreamXml(req, callSid, token) {
+  const twiml = new VoiceResponse();
+  twiml.play(wavesGreetingUrl());
+  const connect = twiml.connect({ action: GPT_LIVE_COMPLETE_ACTION });
+  connect.stream({ url: require('../services/voice-agent/relay-protocol').liveStreamUrl(sandboxRelayHost(req), callSid, token) });
+  return twiml.toString();
+}
+
+async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
+  if (!isRelayAttached()) {
+    logger.warn(`[gpt-live] relay not attached — hanging up ${maskSid(callSid)}`);
+    return gptLiveSayAndHangup(res, 'The voice relay is not attached on this deploy. Goodbye.');
+  }
+  try {
+    // Signed for /ws/voice-live/ only: the relay socket refuses it.
+    const { mintCallToken, LIVE_TOKEN_AUDIENCE } = require('../services/voice-agent/relay-protocol');
+    const token = mintCallToken(callSid, { audience: LIVE_TOKEN_AUDIENCE });
+    if (!token) throw new Error('no call token (VOICE_RELAY_WS_SECRET unset)');
+    if (!(await reserveGptLiveCall(callSid, { cell, voice, token }))) {
+      logger.warn(`[gpt-live] budget used up — refused ${maskSid(callSid)} cell ${cell}`);
+      return gptLiveSayAndHangup(res, 'The GPT-Live test budget is used up. Goodbye.');
+    }
+    capGptLiveCall(callSid);
+    logger.info(`[gpt-live] cell ${cell} voice ${voice} ${maskSid(callSid)}`);
+    return res.type('text/xml').send(gptLiveStreamXml(req, callSid, token));
+  } catch (err) {
+    logger.error(`[gpt-live] refused ${maskSid(callSid)} (fail closed): ${err.message}`);
+    return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
+  }
+}
+
+// The <Connect action> of a GPT-Live call: the stream ended (caller hung up,
+// the 10 minute cap, or the bridge closed). Nothing follows it: hang up.
+router.post('/relay-sandbox/live-complete', (req, res) => {
+  if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
+  const twiml = new VoiceResponse();
+  twiml.hangup();
+  return res.type('text/xml').send(twiml.toString());
+});
+
 router.post('/relay-sandbox/cell', async (req, res) => {
   try {
     if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
@@ -2600,6 +2757,14 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     // over a row that is not sandbox-sourced.
     if (!(await sandboxRowOwned(CallSid))) return refuseSandbox(req, res, 'call_log row is not sandbox-sourced');
     const digits = String(req.body?.Digits || '').trim();
+    // GATE_VOICE_GPT_LIVE_TEST: 71 / 72 hand the call to the GPT-Live bridge.
+    // Gate off (or any other digits) ⇒ the production code path below.
+    const liveCell = gptLiveCellFor(digits);
+    if (liveCell && !gptLiveRequestSigned(req)) {
+      logger.warn(`[gpt-live] unsigned or invalid Twilio signature — refused ${maskSid(CallSid)}`);
+      return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
+    }
+    if (liveCell) return await respondGptLiveCell(req, res, CallSid, liveCell);
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const cell = resolveSandboxCell(digits);
     logger.info(`[relay-sandbox] cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(CallSid)}`);
