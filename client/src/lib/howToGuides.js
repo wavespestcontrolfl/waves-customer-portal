@@ -105,6 +105,9 @@ const GUIDES = [
     title: "How to make Waves alerts show on your iPhone",
     keywords: "alerts notifications push banner pop up sound iphone ios apple not getting missing silent focus sleep do not disturb lock screen",
     path: "/?tab=visits",
+    // The composers send plain text, so the picture of the settings screen
+    // lives on a static page (client/public/help/iphone-alerts.html).
+    pictures: "https://portal.wavespestcontrol.com/help/iphone-alerts.html",
     steps: [
       "Open Settings, tap Notifications, then tap Waves.",
       "Turn on Allow Notifications. Under Alerts, check Lock Screen, Notification Center and Banners. Turn on Sounds.",
@@ -219,6 +222,8 @@ export const HOW_TO_GUIDE_LINKS = GUIDES.map(({ path, ...guide }) => ({
 // composer adds https://).
 export function howToGuideText(link) {
   const lines = [`${link.title}:`];
+  // A full https address, so mail apps make it a link.
+  if (link.pictures) lines.push(`Pictures of each step: ${link.pictures}`);
   link.steps.forEach((step, index) => lines.push(`${index + 1}. ${step}`));
   if (link.after) lines.push(link.after);
   lines.push(HELP_LINE);
