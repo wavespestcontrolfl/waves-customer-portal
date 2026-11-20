@@ -30,7 +30,7 @@ jest.mock('../services/review-reply/drafter', () => ({
 }));
 jest.mock('../services/review-reply/publisher', () => {
   class ReviewReplyError extends Error {
-    constructor(code, message, { status = 500 } = {}) { super(message); this.code = code; this.status = status; }
+    constructor(code, message, { status = 500, cause = null } = {}) { super(message); this.code = code; this.status = status; if (cause) this.cause = cause; }
   }
   return {
     publishReviewReply: (...a) => mockPublish(...a),
@@ -91,10 +91,13 @@ jest.mock('../models/db', () => {
       count(expr) { agg = { kind: 'count', as: (/as (\w+)/.exec(String(expr)) || [])[1] || 'n' }; return api; },
       min(expr) { const [col, as] = String(expr).split(/ as /); agg = { kind: 'min', col, as: as || col }; return api; },
       async first(...cols) { return agg ? aggregate(hits()) : hits()[0] || null; },
-      async update(patch) {
+      update(patch) {
         const hits = state.rows.filter((r) => filters.every((f) => f(r)));
         hits.forEach((r) => Object.assign(r, patch));
-        return hits.length;
+        // knex: await -> the count; .returning(cols) -> the updated rows.
+        const result = Promise.resolve(hits.length);
+        result.returning = () => Promise.resolve(hits.map((r) => ({ ...r })));
+        return result;
       },
       then(res) {
         if (agg && groupCol) {
@@ -144,6 +147,12 @@ function row(over = {}) {
   };
 }
 const GOOD_DRAFT = { ok: true, text: 'Hi Dana,\n\nThanks.\n\nThe 🌊 Waves Pest Control Sarasota Team', mode: 'service_quality', version: 'reply-v1', attempts: 1, rejections: [] };
+
+// The publisher wraps the GBP error as `cause`; readJsonOrThrow puts the HTTP status on it as googleStatus.
+function googleFailure(googleStatus, causeExtra = {}) {
+  const { ReviewReplyError } = require('../services/review-reply/publisher');
+  return new ReviewReplyError('google_failed', `GBP ${googleStatus ?? 'error'}`, { status: 502, cause: Object.assign(new Error('gbp'), { googleStatus, ...causeExtra }) });
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -598,7 +607,8 @@ describe('processDueAutoReplies — state machine', () => {
     const stale = new Date(Date.now() - 49 * 3600000).toISOString();
     state.rows = [
       row({ id: 'old-q', review_created_at: stale }),
-      row({ id: 'old-f', review_created_at: stale, auto_reply_status: 'failed', auto_reply_attempts: 1 }),
+      row({ id: 'old-f', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_error: 'GBP 404', auto_reply_due_at: '2026-08-27T16:00:00Z' }),
+      row({ id: 'old-f-held', review_created_at: stale, auto_reply_status: 'failed', auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
       row({ id: 'old-held', review_created_at: stale, auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
       row({ id: 'old-parked', review_created_at: stale, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' }),
       row({ id: 'fresh' }),
@@ -607,8 +617,15 @@ describe('processDueAutoReplies — state machine', () => {
     expect(stats).toMatchObject({ claimed: 1, posted: 1 });
     expect(mockPublish).toHaveBeenCalledTimes(1);
     expect(mockPublish.mock.calls[0][0].reviewId).toBe('fresh');
-    for (const id of ['old-q', 'old-f']) expect(state.rows.find((r) => r.id === id)).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null });
+    // Never tried: leaves the lane silently. A pending retry (failed) parks for a person, keeps its draft and error, and rings once.
+    expect(state.rows.find((r) => r.id === 'old-q')).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null });
+    expect(state.rows.find((r) => r.id === 'old-f')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_draft: GOOD_DRAFT.text, auto_reply_error: 'GBP 404' });
+    const expiredBells = mockNotify.mock.calls.filter((c) => c[3]?.metadata?.reason === 'retry_expired');
+    expect(expiredBells).toHaveLength(1);
+    expect(expiredBells[0][3].metadata).toMatchObject({ reviewId: 'old-f', needsAction: true });
+    expect(expiredBells[0][2]).toContain('ran out of time to post it. The draft is saved on the review.');
     // A live claim and a park are someone else's / a person's: untouched.
+    expect(state.rows.find((r) => r.id === 'old-f-held')).toMatchObject({ auto_reply_status: 'failed', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
     expect(state.rows.find((r) => r.id === 'old-held')).toMatchObject({ auto_reply_status: 'queued', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
     expect(state.rows.find((r) => r.id === 'old-parked')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
     // Post now (force) still reaches an expired row — it is an admin action.
@@ -690,8 +707,7 @@ describe('processDueAutoReplies — state machine', () => {
 
   test('Google failure → retries on the 10/30/60/180/360/720 min ladder (draft kept) for about a day, then parks with a bell', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    const { ReviewReplyError } = require('../services/review-reply/publisher');
-    mockPublish.mockRejectedValue(new ReviewReplyError('google_failed', 'GBP 404', { status: 502 }));
+    mockPublish.mockRejectedValue(googleFailure(404));
     state.rows = [row()];
     const ladder = [10, 30, 60, 180, 360, 720];
     for (let n = 1; n <= ladder.length; n++) {
@@ -713,13 +729,42 @@ describe('processDueAutoReplies — state machine', () => {
 
   test('a Google retry the cron could no longer claim (past the queue-age window) parks now with a bell', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    const { ReviewReplyError } = require('../services/review-reply/publisher');
-    mockPublish.mockRejectedValue(new ReviewReplyError('google_failed', 'GBP 404', { status: 502 }));
+    mockPublish.mockRejectedValue(googleFailure(404));
     // 48h window default; a 10 min retry from here lands after it closes.
     state.rows = [row({ review_created_at: new Date(Date.now() - 47.9 * 3600000).toISOString() })];
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_failed', auto_reply_attempts: 1 });
     expect(mockNotify.mock.calls.at(-1)[3].metadata.needsAction).toBe(true);
+  });
+
+  test('a Google refusal that may still turn into a yes takes the long ladder; a permanent one keeps the 10/20 min retry and parks on attempt 3', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const dueInMin = () => (new Date(state.rows[0].auto_reply_due_at).getTime() - Date.now()) / 60000;
+    // Attempt 4 is the 180 min step: a timeout, a 429 and a 5xx get it.
+    for (const cause of [[undefined, { timedOut: true }], [429], [503]]) {
+      mockPublish.mockRejectedValue(googleFailure(...cause));
+      state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 3, auto_reply_due_at: '2026-08-27T14:00:00Z' })];
+      await Runner.processDueAutoReplies();
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_attempts: 4 });
+      expect(dueInMin()).toBeGreaterThan(179);
+    }
+    // 403 (and 400, no status at all): the 10 then 20 min backoff, then a park with the bell.
+    for (const status of [403, 400, undefined]) {
+      mockNotify.mockClear();
+      mockPublish.mockRejectedValue(googleFailure(status));
+      state.rows = [row()];
+      await Runner.processDueAutoReplies();
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_attempts: 1 });
+      expect(dueInMin()).toBeLessThanOrEqual(10);
+      state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
+      await Runner.processDueAutoReplies();
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_attempts: 2 });
+      expect(dueInMin()).toBeGreaterThan(19);
+      state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
+      await Runner.processDueAutoReplies();
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_failed', auto_reply_attempts: 3 });
+      expect(mockNotify.mock.calls.at(-1)[3].metadata.needsAction).toBe(true);
+    }
   });
 
   test('lock contention shares the retry ceiling and parks after MAX_ATTEMPTS', async () => {
@@ -1349,8 +1394,7 @@ describe('processDueAutoReplies — state machine', () => {
 
   test('terminal parks record the final attempt count (codex r29)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    const { ReviewReplyError } = require('../services/review-reply/publisher');
-    mockPublish.mockImplementationOnce(async () => { throw new ReviewReplyError('google_failed', 'GBP 503', { status: 502 }); });
+    mockPublish.mockImplementationOnce(async () => { throw googleFailure(503); });
     state.rows = [row({ auto_reply_attempts: 6, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_due_at: '2026-08-27T14:00:00Z' })];
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_failed', auto_reply_attempts: 7 });

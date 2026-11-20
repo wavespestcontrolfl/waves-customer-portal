@@ -56,6 +56,12 @@ const RETRY_BACKOFF_MIN = 10;
 // 2026-09/11 posted fine by hand once Google recovered. Retry it for about a
 // day (6 retries, 7 attempts) on a widening ladder before a person is rung.
 const GOOGLE_RETRY_DELAYS_MIN = [10, 30, 60, 180, 360, 720];
+// Statuses where Google may still say yes later. 404 counts: a new review's single-review read answered
+// 404 for a while (2026-09, 2026-11) while the list endpoint already returned it. A permanent refusal
+// (400, 401, 403, other 4xx) and a failure with no status (a network error, missing credentials) keep
+// the short MAX_ATTEMPTS retry, as before.
+const GOOGLE_TEMPORARY_STATUSES = new Set([404, 408, 429]);
+const googleMayAcceptLater = (cause) => cause?.timedOut === true || GOOGLE_TEMPORARY_STATUSES.has(cause?.googleStatus) || cause?.googleStatus >= 500;
 const PUBLISH_RETRYABLE_CODES = new Set([CODES.LOCK_BUSY, CODES.GOOGLE_FAILED, CODES.NO_RESOURCE, CODES.RECONCILE_FAILED, 'account_read_failed', 'unexpected']);
 const IDENTITY_BACKOFF_MIN = 60;
 // Deploy-forward is a property of the REVIEW: nothing older than this at
@@ -304,19 +310,31 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
 // Deploy-forward also bounds how long a row may WAIT in the lane (codex r74):
 // rows queued before a pause (gate off, location removed from scope) must
 // not auto-publish when automation resumes weeks later — a review of that
-// age first seen now would never enter the lane. Over-age pending rows leave
-// the lane the same way (auto state cleared, reason stamped): Post now still
-// works on them, the catch-up enqueue will not re-queue them (same cutoff),
-// and a person sees them in the needs-reply queue.
+// age first seen now would never enter the lane. An over-age QUEUED row
+// leaves the lane silently (auto state cleared, reason stamped): nothing was
+// ever tried, Post now still works on it, and the catch-up enqueue will not
+// re-queue it (same cutoff). An over-age FAILED row had a retry pending and a
+// draft the agent could not post, so it PARKS (retry_expired) and rings the
+// same "needs you" bell as any other park, instead of vanishing from the
+// lane. This is the backstop for the runner's early park, which already
+// parks a retry that would fall due past the window.
+// Returns how many rows left the lane (expired + parked).
 async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
   const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
-  const n = await db('google_reviews')
-    .whereIn('auto_reply_status', [STATUS.QUEUED, STATUS.FAILED])
+  const overAge = (statuses) => db('google_reviews')
+    .whereIn('auto_reply_status', statuses)
     .where('review_created_at', '<', cutoff)
-    .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()])
+    .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()]);
+  const n = await overAge([STATUS.QUEUED])
     .update({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: null });
-  const count = Array.isArray(n) ? n.length : (n || 0);
-  if (count) logger.info(`[review-auto-reply] ${count} queued review(s) older than ${cfg.maxQueueAgeHours}h left the lane unposted (queue_expired)`);
+  const parked = await overAge([STATUS.FAILED])
+    .update({ auto_reply_status: STATUS.PARKED, auto_reply_reason: 'retry_expired', auto_reply_due_at: null, auto_reply_claimed_until: null })
+    .returning(['id', 'location_id', 'star_rating', 'reviewer_name', 'auto_reply_draft']);
+  for (const r of parked) {
+    await bell(r, { title: 'Review reply needs you', body: `${summarize(r)} — the reply agent ran out of time to post it.${r.auto_reply_draft ? ' The draft is saved on the review.' : ''}`, reason: 'retry_expired', action: true });
+  }
+  const count = (Array.isArray(n) ? n.length : (n || 0)) + parked.length;
+  if (count) logger.info(`[review-auto-reply] ${count} pending review(s) older than ${cfg.maxQueueAgeHours}h left the lane unposted (${parked.length} parked as retry_expired)`);
   return count;
 }
 
@@ -939,16 +957,18 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     if (transientStale) code = 'account_read_failed';
     const attempts = (merged.auto_reply_attempts || 0) + 1;
     // Every transient class (lock contention, unexpected) shares ONE retry
-    // ceiling (MAX_ATTEMPTS); a Google failure follows its own longer ladder.
-    // After the ceiling the row parks for a person.
+    // ceiling (MAX_ATTEMPTS); a Google failure that Google may still accept
+    // later follows its own longer ladder. After the ceiling the row parks
+    // for a person.
     // NO_RESOURCE is usually a Places-fallback row whose GBP identity the
     // next healthy sync will attach — retry on a longer backoff (and the
     // sync re-queues a parked row the moment it attaches the name).
     const backoffMin = code === CODES.NO_RESOURCE ? IDENTITY_BACKOFF_MIN : RETRY_BACKOFF_MIN;
     // No delay left (undefined → NaN) parks. A retry the cron could no longer
-    // claim (past the queue-age window, where expireOverAgeQueued would drop
-    // it silently) parks now too, so a person is rung instead.
-    const delayMin = code === CODES.GOOGLE_FAILED ? GOOGLE_RETRY_DELAYS_MIN[attempts - 1] : (attempts < MAX_ATTEMPTS ? backoffMin * attempts : undefined);
+    // claim (past the queue-age window) parks now too, hours before
+    // expireOverAgeQueued would park it as the backstop, so a person is rung
+    // sooner.
+    const delayMin = code === CODES.GOOGLE_FAILED && googleMayAcceptLater(err.cause) ? GOOGLE_RETRY_DELAYS_MIN[attempts - 1] : (attempts < MAX_ATTEMPTS ? backoffMin * attempts : undefined);
     const dueMs = Date.now() + delayMin * 60000;
     const claimableUntilMs = new Date(merged.review_created_at).getTime() + cfg.maxQueueAgeHours * 3600000;
     // RECONCILE_FAILED (codex r74): Google shows an owner reply but the

@@ -148,6 +148,16 @@ describe('last week, zero weeks, and the same day', () => {
     expect(logger.warn.mock.calls[0][0]).not.toContain('connection reset by peer');
   });
 
+  test('an unreadable parked-reviews list is not a zero: with every other list empty nothing is raised and nothing is closed', async () => {
+    episodes.openAdminAlertKeys.mockResolvedValue(['monday-review:2026-11-02']);
+    const out = await review.runMondayReview({
+      now: MONDAY, loaders: { ...ZERO, parked: async () => { throw new Error('connection reset'); } },
+    });
+    expect(out).toEqual({ count: 0, outcome: 'unknown' });
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('every count zero: nothing raised, older rows closed as "Nothing to review"', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue(['monday-review:2026-10-26', TODAY_KEY]);
     episodes.closeAdminAlertKeys.mockResolvedValue(2);

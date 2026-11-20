@@ -353,7 +353,7 @@ describe('Google Business review sync', () => {
 
     test('403 throws immediately after one fetch', async () => {
       global.fetch = jest.fn(async () => failRes(403));
-      await expect(service.getReviews(loc, 'bradenton')).rejects.toThrow(/^GBP getReviews 403: /);
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toMatchObject({ message: expect.stringMatching(/^GBP getReviews 403: /), googleStatus: 403 });
       expect(global.fetch).toHaveBeenCalledTimes(1);
     });
 

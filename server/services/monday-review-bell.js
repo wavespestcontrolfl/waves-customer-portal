@@ -387,7 +387,7 @@ async function loadFirstList(ctx) {
     return await require('./monday-review-fell-off').loadFellOffAlerts(ctx);
   } catch (err) {
     logger.warn(`[monday-review] fell-off list not read; this week goes out without it: ${require('./notification-service').safeErrorSummary(err)}`);
-    return { kind: 'fell-off', count: 0, capped: false, unchecked: true, entries: [] };
+    return { kind: 'fell-off', count: 0, capped: false, unchecked: true, unread: true, entries: [] };
   }
 }
 
@@ -400,7 +400,9 @@ const defaultLoaders = {
 };
 
 /**
- * Monday cron entry point. Returns { count, outcome }: raised | unchanged | suppressed | closed | clear.
+ * Monday cron entry point. Returns { count, outcome }: raised | unchanged | suppressed | closed | clear | unknown.
+ * `unknown`: no list has work, but one could not be read (the fell-off or parked-reviews list failed open), so
+ * its count is not zero, it is unknown: nothing is raised and nothing is closed.
  * A read failure throws (runExclusive records it in job_health) and closes
  * nothing. `loaders` replaces the five list readers (tests). The parked-reviews list fails
  * open like the fell-off list: an unreadable list goes out without it.
@@ -417,6 +419,7 @@ async function runMondayReview({ now = new Date(), database = db, loaders = {} }
   });
   const lists = buildLists({ alerts, promises, drafts, visits, parked });
   const dedupeKey = `${KEY_PREFIX}${etDateString(now)}`;
+  if (!lists.length && (parked === null || alerts?.unread)) return { count: 0, outcome: 'unknown' };
   if (!lists.length) {
     const closed = await closeReviewRows({ database, now, resolution: NOTHING, reason: 'count_zero' });
     return { count: 0, outcome: closed ? 'closed' : 'clear' };
