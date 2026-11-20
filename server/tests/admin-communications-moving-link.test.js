@@ -1,6 +1,6 @@
 /**
  * POST /admin/communications/moving-link: the SMS composer's "Moving link"
- * helper (GATE_MOVING_FLOW). With a selected customer the full 10-digit phone
+ * helper. With a selected customer the full 10-digit phone
  * must match it (as /reservice-link); with none (a new text opened from
  * Customer 360 by phone) the number must belong to exactly one customer. It
  * opens (or reuses) the customer's move and answers the link; it never sends
@@ -60,12 +60,10 @@ jest.mock('../services/sms-suggest-mode', () => ({
 jest.mock('../services/sms-auto-send', () => ({
   hasActiveAutoSendClaim: jest.fn(async () => false),
 }));
-let mockMovingOn = true;
 jest.mock('../config/feature-gates', () => ({
   isEnabled: () => true,
   gates: {},
   logGateStatus: jest.fn(),
-  movingFlowLive: () => mockMovingOn,
 }));
 jest.mock('../services/customer-moves', () => ({
   openMoveForCustomer: jest.fn(async () => ({ id: 'move-1', status: 'open' })),
@@ -134,18 +132,6 @@ describe('POST /admin/communications/moving-link', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.mockReset();
-    mockMovingOn = true;
-  });
-
-  test('404 while GATE_MOVING_FLOW is dark, before any lookup', async () => {
-    mockMovingOn = false;
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
-      expect(res.status).toBe(404);
-      expect((await res.json()).error).toMatch(/not enabled/);
-      expect(db).not.toHaveBeenCalled();
-      expect(Moves.openMoveForCustomer).not.toHaveBeenCalled();
-    });
   });
 
   test('technicians are refused', async () => {

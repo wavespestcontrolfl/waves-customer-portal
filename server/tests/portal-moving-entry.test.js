@@ -1,6 +1,6 @@
 /**
  * GET / POST /api/property/moving — the customer app's "Take WaveGuard with
- * you" (moving PR 2a, GATE_MOVING_PORTAL, needs GATE_MOVING_FLOW).
+ * you" (moving PR 2a, GATE_MOVING_PORTAL).
  *
  *  - Dark: GET answers { enabled: false } and POST answers 404 without opening
  *    a move.
@@ -39,27 +39,20 @@ async function invoke(method, { customerId = 'cust-1', body = {} } = {}) {
 }
 
 const OLD = {};
-beforeAll(() => { for (const k of ['GATE_MOVING_FLOW', 'GATE_MOVING_PORTAL']) OLD[k] = process.env[k]; });
+beforeAll(() => { for (const k of ['GATE_MOVING_PORTAL']) OLD[k] = process.env[k]; });
 afterEach(() => {
   for (const [k, v] of Object.entries(OLD)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   jest.clearAllMocks();
 });
 
 test('dark: the app shows no button and the open route is a 404', async () => {
-  process.env.GATE_MOVING_FLOW = 'true';
   delete process.env.GATE_MOVING_PORTAL;
   expect(await invoke('get')).toEqual({ statusCode: 200, body: { enabled: false } });
   expect(await invoke('post')).toEqual({ statusCode: 404, body: { error: 'Not found' } });
-  // GATE_MOVING_PORTAL alone is not enough: the moving flow itself must be on.
-  process.env.GATE_MOVING_PORTAL = 'true';
-  delete process.env.GATE_MOVING_FLOW;
-  expect((await invoke('get')).body).toEqual({ enabled: false });
-  expect((await invoke('post')).statusCode).toBe(404);
   expect(Moves.openMoveForCustomer).not.toHaveBeenCalled();
 });
 
 test('on: the button opens the signed-in customer\'s own moving page', async () => {
-  process.env.GATE_MOVING_FLOW = 'true';
   process.env.GATE_MOVING_PORTAL = 'true';
   expect((await invoke('get')).body).toEqual({ enabled: true });
   // A body naming another customer is ignored: the move is always the signed-in customer's.
@@ -69,7 +62,6 @@ test('on: the button opens the signed-in customer\'s own moving page', async () 
 });
 
 test('a failure answers a plain 500 and logs the error code only', async () => {
-  process.env.GATE_MOVING_FLOW = 'true';
   process.env.GATE_MOVING_PORTAL = 'true';
   Moves.openMoveForCustomer.mockRejectedValueOnce(Object.assign(new Error('insert into customer_moves ... 12 Secret Street'), { code: '23503' }));
   const res = await invoke('post');

@@ -1226,7 +1226,7 @@ describe('admin communications SMS route', () => {
     // A prepared (composer-inserted) contract link in the body: activated
     // BEFORE the provider call, restored on every no-send exit, recorded
     // after a real send (GH Codex #3844 r3 P1).
-    // A composer-carried moving link (GATE_MOVING_FLOW): a REAL provider send
+    // A composer-carried moving link: a REAL provider send
     // is its delivery, stamped for the Customer 360 Moving card; a blocked
     // send stamps nothing; an accepted-then-thrown send still stamps.
     describe('moving link in the body', () => {

@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
-// Customer 360 Moving card (GATE_MOVING_FLOW): hidden while the server says
-// enabled:false, one plain status line for the newest move, and each button
+// Customer 360 Moving card: hidden until the moves read succeeds, one plain status line for the newest move, and each button
 // posts its own route on the staff click. Nothing sends on load.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
@@ -8,7 +7,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = {
-  list: { enabled: true, moves: [], text: { phone: '+19415550100', hasTexts: true } },
+  list: { moves: [], text: { phone: '+19415550100', hasTexts: true } },
   email: { ok: true, sent: true, reason: null },
   preview: null,
   apply: { ok: true, body: {} },
@@ -30,7 +29,7 @@ const CUSTOMER = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
 
 afterEach(() => cleanup());
 beforeEach(() => {
-  state.list = { enabled: true, moves: [], text: { phone: '+19415550100', hasTexts: true } };
+  state.list = { moves: [], text: { phone: '+19415550100', hasTexts: true } };
   state.email = { ok: true, sent: true, reason: null };
   state.preview = null;
   state.apply = { ok: true, body: {} };
@@ -143,8 +142,8 @@ describe('textHref', () => {
 });
 
 describe('CustomerMovingCardV2', () => {
-  it('renders nothing while the server says enabled:false', async () => {
-    state.list = { enabled: false, moves: [] };
+  it('renders nothing when the moves read fails', async () => {
+    adminFetch.mockImplementationOnce(async () => ({ ok: false, status: 500, json: async () => ({}) }));
     const { container } = render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(1));
     expect(container).toBeEmptyDOMElement();
@@ -152,13 +151,12 @@ describe('CustomerMovingCardV2', () => {
 
   it('shows the pause line under the status only when there is one', async () => {
     state.list = {
-      enabled: true,
       moves: [{ id: 'm1', status: 'submitted', submitted_at: '2026-11-03T15:00:00Z', typed_address: null, move_out_date: '2026-11-15', pause_state: 'paused', pause_ends_on: '2027-01-14' }],
     };
     render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     expect(await screen.findByTestId('moving-pause')).toHaveTextContent('Visits paused after Nov 15, held until Jan 14');
     cleanup();
-    state.list = { enabled: true, moves: [{ id: 'm1', status: 'submitted', submitted_at: '2026-11-03T15:00:00Z', typed_address: null, move_out_date: '2026-11-15' }] };
+    state.list = { moves: [{ id: 'm1', status: 'submitted', submitted_at: '2026-11-03T15:00:00Z', typed_address: null, move_out_date: '2026-11-15' }] };
     render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     await screen.findByTestId('moving-status');
     expect(screen.queryByTestId('moving-pause')).toBeNull();
@@ -173,11 +171,11 @@ describe('CustomerMovingCardV2', () => {
   });
 
   it('a customer with no texts gets a new text to their phone; no phone disables the button', async () => {
-    state.list = { enabled: true, moves: [], text: { phone: '+19415550100', hasTexts: false } };
+    state.list = { moves: [], text: { phone: '+19415550100', hasTexts: false } };
     const { unmount } = render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     expect(await screen.findByRole('link', { name: 'Text moving link' })).toHaveAttribute('href', '/admin/communications?phone=%2B19415550100&action=sms#tab=sms');
     unmount();
-    state.list = { enabled: true, moves: [], text: { phone: null, hasTexts: false } };
+    state.list = { moves: [], text: { phone: null, hasTexts: false } };
     render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     expect(await screen.findByRole('button', { name: 'Text moving link' })).toBeDisabled();
   });
@@ -185,7 +183,6 @@ describe('CustomerMovingCardV2', () => {
   it('new-home estimate: start, open and blocked each show their own control', async () => {
     const submitted = { status: 'submitted', typed_address: '12 Example Way', move_out_date: '2026-11-15', move_in_date: '2026-11-20', submitted_at: '2026-11-03T15:00:00Z' };
     state.list = {
-      enabled: true,
       estimateEnabled: true,
       text: null,
       moves: [
@@ -214,7 +211,6 @@ describe('CustomerMovingCardV2', () => {
 
   it('shows nothing new when estimateEnabled is false', async () => {
     state.list = {
-      enabled: true,
       estimateEnabled: false,
       text: null,
       moves: [{ id: 'move-start', status: 'submitted', new_home: { action: 'start', estimateId: null, reason: null } }],
@@ -250,7 +246,7 @@ describe('CustomerMovingCardV2', () => {
   const applyMove = { id: 'move-apply', status: 'submitted', typed_address: '40 Sample Road', move_out_date: '2026-11-20', submitted_at: '2026-11-03T15:00:00Z' };
 
   it('Apply move: the preview comes first, and only the confirm posts the preview version', async () => {
-    state.list = { enabled: true, applyEnabled: true, text: null, moves: [{ ...applyMove, apply: { action: 'review', reason: null } }] };
+    state.list = { text: null, moves: [{ ...applyMove, apply: { action: 'review', reason: null } }] };
     state.preview = PREVIEW;
     state.apply = { ok: true, body: { applied: true, summary: 'New home is primary: 40 Sample Road, Venice, FL 34285.' } };
     render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
@@ -261,7 +257,7 @@ describe('CustomerMovingCardV2', () => {
     expect(adminFetch).toHaveBeenCalledWith(`/admin/customers/${CUSTOMER}/moves/move-apply/apply-preview`);
     expect(adminFetch.mock.calls.some(([url]) => url.endsWith('/apply'))).toBe(false);
     // After the apply the server lists the move as applied: the control goes away, the message stays on the card.
-    state.list = { enabled: true, applyEnabled: true, text: null, moves: [{ ...applyMove, status: 'closed', closed_reason: 'applied', applied_at: '2026-11-21T15:00:00Z', apply: { action: 'applied', reason: null } }] };
+    state.list = { text: null, moves: [{ ...applyMove, status: 'closed', closed_reason: 'applied', applied_at: '2026-11-21T15:00:00Z', apply: { action: 'applied', reason: null } }] };
     fireEvent.click(screen.getByRole('button', { name: 'Confirm Apply move' }));
     expect(await screen.findByText(/^Move applied\. New home is primary/)).toBeInTheDocument();
     expect(adminFetch).toHaveBeenCalledWith(`/admin/customers/${CUSTOMER}/moves/move-apply/apply`, { method: 'POST', body: JSON.stringify({ version: 'v-1' }) });
@@ -273,7 +269,7 @@ describe('CustomerMovingCardV2', () => {
   });
 
   it('Apply move: Cancel closes the preview without posting; a refusal says why and reloads after partial progress', async () => {
-    state.list = { enabled: true, applyEnabled: true, text: null, moves: [{ ...applyMove, apply: { action: 'review', reason: null } }] };
+    state.list = { text: null, moves: [{ ...applyMove, apply: { action: 'review', reason: null } }] };
     state.preview = PREVIEW;
     render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Apply move' }));
@@ -288,17 +284,12 @@ describe('CustomerMovingCardV2', () => {
     await waitFor(() => expect(adminFetch.mock.calls.filter(([url]) => url === `/admin/customers/${CUSTOMER}/moves`)).toHaveLength(2));
   });
 
-  it('Apply move: a blocked move shows its reason; nothing shows while applyEnabled is false', async () => {
-    state.list = { enabled: true, applyEnabled: true, text: null, moves: [{ ...applyMove, apply: { action: 'blocked', reason: 'The customer has not given a move-out date.' } }] };
-    const { unmount } = render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
+  it('Apply move: a blocked move shows its reason', async () => {
+    state.list = { text: null, moves: [{ ...applyMove, apply: { action: 'blocked', reason: 'The customer has not given a move-out date.' } }] };
+    render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
     expect(await screen.findByTestId('apply-move-action')).toHaveTextContent('The customer has not given a move-out date.');
     // A refusal with no steps shows no list.
     expect(screen.queryByTestId('apply-move-action-steps')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Apply move' })).toBeNull();
-    unmount();
-    state.list = { enabled: true, applyEnabled: false, text: null, moves: [{ ...applyMove, apply: { action: 'review', reason: null } }] };
-    render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
-    expect(await screen.findByTestId('moving-status')).toBeInTheDocument();
-    expect(screen.queryByTestId('apply-move-action')).toBeNull();
   });
 });
