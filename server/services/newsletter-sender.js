@@ -1531,10 +1531,12 @@ async function sendCampaign(sendId, opts = {}) {
     // The same for a planned Waves Pest Insider issue, also when a person
     // sent it by hand after a hold, once no reader is left to resume: a send
     // some readers did not get leaves its row (settlePlannedIssues tells the
-    // owner about an auto-sent one), and the resume that finishes marks it.
+    // owner about an auto-sent one). A 'failed' row is settlePlannedIssues'
+    // too: the Resume that finishes its send moves it to 'sent' there, with
+    // one correction if the owner was told it failed.
     if (send.newsletter_type === PEST_INSIDER_TYPE && Number(retryableRemaining?.c || 0) === 0) {
       try {
-        await moveIssueForSend(send.id, ['drafted', 'scheduled', 'held', 'failed'], 'sent');
+        await moveIssueForSend(send.id, ['drafted', 'scheduled', 'held'], 'sent');
       } catch (err) {
         logger.warn(`[newsletter] Pest Insider issue status update failed for send ${send.id}: ${err.message}`);
       }
@@ -2091,7 +2093,8 @@ function issueDiagnostics(issue) {
 
 /**
  * A send's delivery ledger: how many readers got it (any success signal, as
- * hasDeliverySuccessSignal reads one) and how many a Resume would still mail:
+ * hasDeliverySuccessSignal reads one, but no hard bounce), how many their mail
+ * servers refused for good (refused: a hard bounce), and how many a Resume would still mail:
  * outstandingEligibleDeliveries (the resume precheck's own predicate), and for
  * a planned issue only the readers its plan still holds, as each batch
  * re-checks them (narrowToPlannedAudience, then plannedEligibleRows on the
@@ -2101,12 +2104,18 @@ async function ledgerProgress(trx, send) {
   const ledger = () => trx('newsletter_send_deliveries').where({ send_id: send.id });
   const total = await ledger().count('* as c').first();
   const notYet = await applyDeliveryNoSuccessFilter(ledger()).whereNotIn('status', TERMINAL_SUCCESS_STATUSES).count('* as c').first();
+  // A hard bounce keeps the sent_at SendGrid's acceptance wrote (bounced_at marks it), but that reader
+  // never got it, and no Resume can reach them: refused, never counted as reached.
+  const refused = await ledger().whereNotNull('bounced_at')
+    .where((q) => q.whereNotNull('sent_at').orWhereNotNull('delivered_at').orWhereNotNull('opened_at').orWhereNotNull('clicked_at'))
+    .count('* as c').first();
   const outstanding = outstandingEligibleDeliveries(send.id, { database: trx });
   const plan = sendHoldout(send.segment_filter);
   const left = plan
     ? plannedEligibleRows(plan, send.segment_filter, await withMailboxCustomers(narrowToPlannedAudience(outstanding, send.segment_filter))).length
     : Number((await outstanding.count('newsletter_send_deliveries.id as c').first())?.c) || 0;
-  return { got: (Number(total?.c) || 0) - (Number(notYet?.c) || 0), left };
+  const refusedCount = Number(refused?.c) || 0;
+  return { got: (Number(total?.c) || 0) - (Number(notYet?.c) || 0) - refusedCount, left, refused: refusedCount };
 }
 
 /**
@@ -2123,11 +2132,14 @@ async function plannedSendOutcome(issue, send, now, trx) {
     // The delivery ledger decides, never the send's recipient_count: a worker that stopped after
     // SendGrid took a batch leaves that count at 0, and the delivery webhooks can still move the
     // send to 'sent' (reconcileNewsletterSendStatus).
-    const { got, left } = await ledgerProgress(trx, send);
-    if (send.status === 'sent' && left === 0) {
-      // No reader got it: every planned reader failed the send-time re-check ('skipped'), or the plan held none.
-      return got > 0 ? { status: 'sent' } : notOut('no planned reader was still eligible when it sent');
-    }
+    const { got, left, refused } = await ledgerProgress(trx, send);
+    // Every planned reader it can still reach got it: 'sent', with nothing to resume, whatever the
+    // send's own status says. A failure after its last batch leaves the send 'failed' until the
+    // webhooks' reconcileNewsletterSendStatus moves it to 'sent'; a stale claim after its last batch
+    // is released as 'sent' (settlePlannedIssue), the same write.
+    if (left === 0 && got > 0) return { status: 'sent', revokeClaim: stale };
+    // No reader got it and none is left: every planned reader failed the send-time re-check ('skipped'), or the plan held none.
+    if (send.status === 'sent' && left === 0 && refused === 0) return notOut('no planned reader was still eligible when it sent');
     const how = { sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' }[send.status];
     return got > 0
       ? notOut(`${how} after ${got} of ${got + left} readers got it; Resume in Newsletter → History sends it to the rest`, { revokeClaim: stale })
@@ -2163,7 +2175,7 @@ async function settledOutcome(issue, send, trx) {
       if (!failureToldAt) return { status: 'sent', reason: null };
       return {
         status: 'sent',
-        reason: `went out after all: all ${got} readers got it, but their delivery confirmations came after the alert that said it did not go out; there is nothing to resume`,
+        reason: `went out after all: all ${got} readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume`,
         alert: 'recovered',
         // The failure was told; this correction is not yet.
         failureToldAt,
@@ -2177,7 +2189,7 @@ async function settledOutcome(issue, send, trx) {
   if (diagnostics.failureToldAt) return { status: 'sent', reason: issue.reason, alert: 'recovered' };
   const { got, left } = await ledgerProgress(trx, send);
   return left > 0
-    ? { status: 'sent', reason: `went out to ${got} readers, but ${left} readers' mail servers refused it after SendGrid accepted it; Resume in Newsletter → History sends it to them`, alert: 'outcome' }
+    ? { status: 'sent', reason: `went out to ${got} readers, but ${left} readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them`, alert: 'outcome' }
     : null;
 }
 
@@ -2215,9 +2227,12 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
       });
       await trx('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
     }
-    // The stale claim's release, as the resume path releases one: its worker's next heartbeat finds no claim.
+    // The stale claim's release, as the resume path releases one: its worker's next heartbeat finds no
+    // claim. A send whose every planned reader got it is released as 'sent' (main's
+    // reconcileNewsletterSendStatus writes the same), any other as 'failed'.
     if (outcome.revokeClaim) {
-      await trx('newsletter_sends').where({ id: send.id, status: 'sending' }).update({ status: 'failed', sending_claim_token: null, updated_at: new Date() });
+      await trx('newsletter_sends').where({ id: send.id, status: 'sending' })
+        .update({ status: outcome.status === 'sent' ? 'sent' : 'failed', sending_claim_token: null, updated_at: new Date() });
     }
     // The row always records the outcome.
     const reason = 'reason' in outcome ? (outcome.reason && outcome.reason.slice(0, 500)) : issue.reason;
@@ -2254,6 +2269,7 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
 }
 
 const SETTLE_LOOKBACK_SQL = "issue_date >= (now() at time zone 'America/New_York')::date - ?::int";
+const RECOVERED_SEND_LOOKBACK_SQL = "newsletter_sends.updated_at >= now() - ?::int * interval '1 day'";
 
 /**
  * The one place that tells the owner a planned Waves Pest Insider issue did not go out as its
@@ -2268,9 +2284,14 @@ const SETTLE_LOOKBACK_SQL = "issue_date >= (now() at time zone 'America/New_York
  *   finish, and a send a person scheduled by hand to go at its time. A send the switch still has
  *   queued goes back to a draft, so it never goes out late;
  * - every 'failed' issue, also one a send-time stop failed, gets one alert that says why, and so
- *   does a 'sent' one whose readers' mail servers refused it after SendGrid accepted it;
- * - a 'failed' issue whose send has since recovered to 'sent' becomes 'sent', with one
- *   correction if the owner was told it failed.
+ *   does a 'sent' one whose readers' mail servers blocked it after SendGrid accepted it (a provider
+ *   block, which leaves the reader to a Resume);
+ * - a 'failed' issue whose send has since become 'sent' with every planned reader done (a Resume
+ *   that finished, or late delivery confirmations) becomes 'sent', with one correction if the
+ *   owner was told it failed. This step owns that change: the send's finalize leaves a 'failed'
+ *   row alone.
+ * A hard bounce is final: no Resume can reach that reader, it never counts as reached, and it
+ * raises no alert of its own.
  */
 async function settlePlannedIssues(now = new Date()) {
   const scheduled = await db('pest_insider_issues').where({ status: 'scheduled' }).select('id', 'send_id');
@@ -2278,18 +2299,20 @@ async function settlePlannedIssues(now = new Date()) {
     .whereRaw("diagnostics->>'outcomeToldAt' is null")
     .whereRaw(SETTLE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
     .select('id', 'send_id');
-  // A failed issue the owner was told about, whose send has since recovered to 'sent'.
+  // A failed issue, told or not, whose send has since become 'sent' (a Resume that finished, or late
+  // delivery confirmations): by the send's own last change, so a Resume long after the issue counts.
   const recovered = await db('pest_insider_issues').where({ status: 'failed' })
-    .whereRaw("diagnostics->>'outcomeToldAt' is not null")
-    .whereRaw(SETTLE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
     .whereExists(function recoveredSend() {
       this.select(db.raw('1')).from('newsletter_sends')
         .whereRaw('newsletter_sends.id = pest_insider_issues.send_id')
-        .where('newsletter_sends.status', 'sent');
+        .where('newsletter_sends.status', 'sent')
+        .whereRaw(RECOVERED_SEND_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS]);
     })
     .select('id', 'send_id');
+  // One settle per issue a minute, also when it is on two lists.
+  const rows = new Map([...scheduled, ...untold, ...recovered].map((row) => [row.id, row]));
   let settled = 0;
-  for (const row of [...scheduled, ...untold, ...recovered]) {
+  for (const row of rows.values()) {
     try {
       if (await settlePlannedIssue(row, now)) settled += 1;
     } catch (err) {

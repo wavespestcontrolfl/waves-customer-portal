@@ -32,8 +32,12 @@ const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
 
 /** The last six issues' picks keep a fact or species from repeating (plan.js RECENT_WINDOW). */
 const HISTORY_SIZE = 6;
-/** Rows that count as "an issue was built or sent" when looking back. */
-const USED_STATUSES = Object.freeze(['shadow', 'drafted', 'scheduled', 'sent']);
+/**
+ * Rows that count as "an issue was built or sent" when looking back. A 'failed' issue counts: its
+ * send may have reached some readers before it failed (Resume sends it to the rest), and its picks
+ * must not reach them again inside the window. A 'held' or 'skipped' one never went out.
+ */
+const USED_STATUSES = Object.freeze(['shadow', 'drafted', 'scheduled', 'sent', 'failed']);
 /** etParts().dayOfWeek numbering: Sunday = 0. */
 const THURSDAY = 4;
 /** At most this many failed post probes are kept in a row's diagnostics. */

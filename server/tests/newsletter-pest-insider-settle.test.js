@@ -32,7 +32,8 @@ const AUTO_QUEUED = {
 };
 
 // An in-memory stand-in for the tables. `counts`: the delivery ledger's readers who got it (got),
-// readers a Resume would still mail (left: outstandingEligibleDeliveries, the joined query), and
+// readers a Resume would still mail (left: outstandingEligibleDeliveries, the joined query), readers
+// whose mail servers refused it for good (refused: a hard bounce, which keeps its sent_at), and
 // for a planned issue the rows that query lists (rows: the subscriber, its address and customers).
 const CHAIN = ['where', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereExists', 'whereNotExists', 'withMaterialized', 'join', 'joinRaw', 'select', 'forUpdate'];
 // `bells`: admin notification rows by their dedupeKey (the alert a worker wrote).
@@ -58,10 +59,12 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
     q.first = jest.fn(async () => {
       reads.push({ table, locked: q.calls.has('forUpdate') });
       if (table === 'newsletter_send_deliveries') {
-        // The Resume predicate joins the subscribers; "not yet" is the no-success filter; else the total.
+        // The Resume predicate joins the subscribers; a hard bounce has bounced_at; "not yet" is the
+        // no-success filter; else the total, hard bounces included (they keep their sent_at).
         if (q.calls.has('join')) return { c: counts.left };
+        if (q.calls.has('whereNotNull')) return { c: counts.refused || 0 };
         if (q.calls.has('whereNotIn')) return { c: counts.left };
-        return { c: counts.got + counts.left };
+        return { c: counts.got + counts.left + (counts.refused || 0) };
       }
       if (table === 'notifications') return bells.find((bell) => q.rawBindings.includes(bell.dedupeKey));
       const rows = table === 'newsletter_sends' ? sends : issues;
@@ -159,13 +162,46 @@ test('a claim that went stale part way is revoked with the outcome, so its pause
   expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Did not go out: its send stopped part way after 10 of 85 readers got it; Resume in Newsletter → History sends it to the rest']);
 });
 
-test("a sent issue whose readers' mail servers refused it after SendGrid accepted it gets one alert; the row stays sent", async () => {
+test('a claim that went stale after its last batch, with every planned reader done, is released as sent, and the issue is sent, with no alert', async () => {
+  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sending', updated_at: new Date('2026-12-03T13:00:00Z') }], counts: { got: 85, left: 0 } });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(writes.map(({ table, conds, patch }) => [table, conds[0], patch.status])).toEqual([
+    ['newsletter_sends', { id: 'send-1', status: 'sending' }, 'sent'],
+    ['pest_insider_issues', { id: 'issue-1' }, 'sent'],
+  ]);
+  expect(writes[0].patch).toMatchObject({ sending_claim_token: null });
+  expect(mockTrigger).not.toHaveBeenCalled();
+});
+
+test('a send that failed after its last batch, with every planned reader done, leaves nothing to resume: the issue is sent, with no alert', async () => {
+  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'failed' }], counts: { got: 85, left: 0 } });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(writes).toEqual([{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent' }) }]);
+  expect(mockTrigger).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['some readers hard-bounced: the rest got it, and a bounce raises no alert of its own', { got: 80, left: 0, refused: 5 }, null],
+  ['every reader hard-bounced: no reader got it', { got: 0, left: 0, refused: 85 }, 'Did not go out: its send ended, and no reader got it'],
+  ['readers a Resume would still mail: a hard bounce is not counted as reached', { got: 70, left: 10, refused: 5 }, 'Did not go out: its send ended after 70 of 80 readers got it; Resume in Newsletter → History sends it to the rest'],
+])('a hard bounce keeps its sent_at but never counts as reached: %s', async (_label, counts, text) => {
+  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(writes[0].patch).toEqual(expect.objectContaining({ status: text ? 'failed' : 'sent' }));
+  if (text) expect(mockTrigger.mock.calls[0][1].errors).toEqual([text]);
+  else expect(mockTrigger).not.toHaveBeenCalled();
+});
+
+test("a sent issue whose readers' mail servers blocked it after SendGrid accepted it gets one alert; the row stays sent", async () => {
   const sent = { ...ISSUE, status: 'sent' };
   const { writes } = fakeDb({ issues: [sent], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 3 } });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger.mock.calls[0][1]).toMatchObject({
-    errors: ["Went out to 85 readers, but 3 readers' mail servers refused it after SendGrid accepted it; Resume in Newsletter → History sends it to them"],
+    errors: ["Went out to 85 readers, but 3 readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them"],
     outcome: true,
   });
   expect(writes).toEqual([
@@ -174,10 +210,10 @@ test("a sent issue whose readers' mail servers refused it after SendGrid accepte
   ]);
 });
 
-test('a failed issue whose send recovered to sent (its delivery confirmations came late) becomes sent, with one correction for the alert it had', async () => {
+test('a failed issue whose send became sent (a Resume that finished, or delivery confirmations that came late) becomes sent, with one correction for the alert it had', async () => {
   const failed = { ...ISSUE, status: 'failed', reason: 'did not go out: its send failed after 40 of 85 readers got it; Resume in Newsletter → History sends it to the rest', diagnostics: { outcomeToldAt: '2026-12-03T12:30:00.000Z' } };
   const { writes } = fakeDb({ issues: [failed], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
-  const correction = 'went out after all: all 85 readers got it, but their delivery confirmations came after the alert that said it did not go out; there is nothing to resume';
+  const correction = 'went out after all: all 85 readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume';
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
@@ -397,8 +433,24 @@ test('a failed row past the lookback is no longer listed', async () => {
   await settlePlannedIssues(IN_WINDOW);
 
   expect(lists[1].whereRaw).toHaveBeenCalledWith("issue_date >= (now() at time zone 'America/New_York')::date - ?::int", [14]);
-  // The recovered list too.
-  expect(lists[2].whereRaw).toHaveBeenCalledWith("issue_date >= (now() at time zone 'America/New_York')::date - ?::int", [14]);
+  // The recovered list reads the send's own last change instead, so a Resume long after the issue counts.
+  expect(lists[2].whereRaw).not.toHaveBeenCalledWith("issue_date >= (now() at time zone 'America/New_York')::date - ?::int", [14]);
+  const sendQuery = { select: jest.fn(() => sendQuery), from: jest.fn(() => sendQuery), where: jest.fn(() => sendQuery), whereRaw: jest.fn(() => sendQuery) };
+  lists[2].whereExists.mock.calls[0][0].call(sendQuery);
+  expect(sendQuery.where).toHaveBeenCalledWith('newsletter_sends.status', 'sent');
+  expect(sendQuery.whereRaw).toHaveBeenCalledWith("newsletter_sends.updated_at >= now() - ?::int * interval '1 day'", [14]);
+});
+
+test('a failed issue, told or not, whose send became sent is settled once, also when it is on two lists', async () => {
+  const failed = { ...ISSUE, status: 'failed', reason: 'did not go out: its send failed after 40 of 85 readers got it; Resume in Newsletter → History sends it to the rest' };
+  fakeDb({ issues: [failed], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
+  const lists = [];
+  const real = db.getMockImplementation();
+  db.mockImplementation((table) => { const q = real(table); lists.push(q); return q; });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  // The recovered list no longer asks whether the owner was told.
+  expect(lists[2].whereRaw).not.toHaveBeenCalledWith("diagnostics->>'outcomeToldAt' is not null");
 });
 
 test('an issue whose send link changed since the list was read is left for the next minute', async () => {

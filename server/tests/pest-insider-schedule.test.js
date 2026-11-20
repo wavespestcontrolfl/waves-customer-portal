@@ -163,6 +163,8 @@ describe('recentHistory', () => {
     expect(database.calls.history.vals).toEqual(USED_STATUSES);
     expect(USED_STATUSES).not.toContain('skipped');
     expect(USED_STATUSES).not.toContain('held');
+    // A failed issue's send may have reached some readers first: its picks stay out of the next issues.
+    expect(USED_STATUSES).toContain('failed');
     expect(database.calls.limit).toBe(6);
   });
 

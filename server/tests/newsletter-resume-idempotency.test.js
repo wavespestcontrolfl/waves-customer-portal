@@ -98,7 +98,7 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
 
 // `mailboxCustomers`: subscriber id -> the customers behind its mailbox, as the
 // planned audience's own query reads them (withMailboxCustomers).
-function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, skipUpdated = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false, mailboxCustomers = {}, retryableLeft = 0, onIssueUpdate, deadlineReached = false, onFinalUpdate } = {}) {
+function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, skipUpdated = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false, mailboxCustomers = {}, retryableLeft = 0, onIssueUpdate, onIssueWhereIn, deadlineReached = false, onFinalUpdate } = {}) {
   const heartbeat = chain({ updated: deadlineReached ? 0 : heartbeatUpdated }); // pre-batch heartbeat (0 = claim lost to a reclaim, or a passed deadline)
   const queues = {
     newsletter_sends: [
@@ -146,7 +146,7 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
       chain({ count: retryableLeft }),                      // final retryable ledger count
     ],
     // A planned Waves Pest Insider issue's row (moveIssueForSend).
-    pest_insider_issues: [chain({ updated: 1, onUpdate: onIssueUpdate })],
+    pest_insider_issues: [chain({ updated: 1, onUpdate: onIssueUpdate, onWhereIn: onIssueWhereIn })],
     // Calendar lifecycle: sendCampaign advances the linked calendar row to
     // 'sent' on a successful send. (markEventsFeatured only touches events_raw
     // when send.event_ids is non-empty — the fixtures leave it empty, so no
@@ -398,6 +398,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     ['ended with a reader still to resume (a batch SendGrid refused): its row is left to settlePlannedIssues, which tells the owner', 1, null],
   ])('a planned issue whose send %s', async (_label, retryableLeft, expected) => {
     let issueUpdate = null;
+    let issueFrom = null;
     buildDb({
       send: {
         id: 'send-1', status: 'draft', newsletter_type: 'pest-insider-monthly', html_body: '<p>Body</p>', text_body: 'Body',
@@ -414,12 +415,15 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
       ],
       retryableLeft,
       onIssueUpdate: (payload) => { issueUpdate = payload; },
+      onIssueWhereIn: (column, values) => { if (column === 'status') issueFrom = values; },
     });
 
     await sendCampaign('send-1');
 
     expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
     expect(issueUpdate).toEqual(expected);
+    // A 'failed' row is settlePlannedIssues': the Resume that finishes its send moves it there, with one correction if told.
+    if (expected) expect(issueFrom).toEqual(['drafted', 'scheduled', 'held']);
   });
 
   test('a planned issue whose every batch SendGrid refused ends failed; its planned issue row is left to settlePlannedIssues', async () => {
