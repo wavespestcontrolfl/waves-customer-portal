@@ -1117,17 +1117,21 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   // through the post and another timeout (owner 2026-11-19, app name).
   const restoredAgentDraft = !!humanDraft && row.auto_reply_version === 'agent_ops';
   const manualVersion = restoredAgentDraft ? 'agent_ops' : 'human';
+  // Any manual attempt (editor or Intelligence Bar, version human or
+  // agent_ops) that the sync restored as a [DRAFT]: its row carries the
+  // grounding that attempt recorded.
+  const restoredDraft = !!humanDraft && MANUAL_VERSIONS.has(row.auto_reply_version || '');
   // The grounding that describes the text Post now would publish: a stored
-  // draft's snapshot, or the one a restored attempt recorded. A person's own
-  // [DRAFT] has none.
-  const textGrounding = !humanDraft || restoredAgentDraft ? storedGrounding : null;
+  // draft's snapshot, or the one a restored attempt recorded. Any other
+  // [DRAFT] a person left has none.
+  const textGrounding = !humanDraft || restoredDraft ? storedGrounding : null;
   if (humanDraft && row.auto_reply_reason === HUMAN_DRAFT_STALE) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.STALE, 'This draft was written before the review changed — read the current review and edit the draft first.', { status: 409 });
   }
-  // A restored machine-authored attempt is published as written only while
-  // the review and the account facts its grounding records still hold.
-  const restoredMoved = restoredAgentDraft ? await restoredAgentDraftMoved(row, accountFpNow) : null;
+  // A restored attempt is published as written only while the review and
+  // the account facts its grounding records still hold.
+  const restoredMoved = restoredDraft ? await restoredDraftMoved(row, accountFpNow) : null;
   if (restoredMoved) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.STALE, `This draft cannot be posted as written: ${restoredMoved}.`, { status: 409 });
@@ -1185,7 +1189,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
           // version / mode / grounding snapshot (codex r40). A restored
           // attempt keeps the grounding its attempt recorded.
           ...(humanDraft
-            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: restoredAgentDraft ? JSON.stringify(textGrounding || null) : null, auto_reply_drafted_at: publishedAt }
+            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: restoredDraft ? JSON.stringify(textGrounding || null) : null, auto_reply_drafted_at: publishedAt }
             : { auto_reply_drafted_at: row.auto_reply_drafted_at || publishedAt, auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
           auto_reply_published_at: publishedAt,
           auto_reply_error: null,
@@ -1226,7 +1230,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         await db('google_reviews').where({ id: reviewId }).update({
           auto_reply_draft: existing,
           ...(humanDraft
-            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: restoredAgentDraft ? JSON.stringify(textGrounding || null) : null, auto_reply_drafted_at: new Date().toISOString() }
+            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: restoredDraft ? JSON.stringify(textGrounding || null) : null, auto_reply_drafted_at: new Date().toISOString() }
             : { auto_reply_version: row.auto_reply_version || null, auto_reply_mode: row.auto_reply_mode || null, auto_reply_drafted_at: row.auto_reply_drafted_at || new Date().toISOString(), auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
         }).catch(() => {});
         throw err;
@@ -1575,16 +1579,17 @@ function dismissCancelFields(conn = db) {
 }
 
 /**
- * Why a machine-authored attempt that the sync restored as a [DRAFT]
- * (version agent_ops) may not be published as written: the review or the
- * account facts moved since the grounding on its row (an Intelligence Bar
- * post that timed out records its own). The sync keeps a google_uncertain
- * park through a review edit (KEEP_ON_EDIT_REASONS), so the restored draft
- * is never marked stale for one. Null when it may be published: no
- * grounding recorded, or both fingerprints still match. Pass accountFpNow
- * when the caller already read the account facts.
+ * Why a manual attempt that the sync restored as a [DRAFT] (version human
+ * or agent_ops) may not be published as written: the review or the account
+ * facts moved since the grounding on its row (the publisher records the
+ * attempt's own when its PUT times out; a person's own words carry no
+ * account facts). The sync keeps a google_uncertain park through a review
+ * edit (KEEP_ON_EDIT_REASONS), so the restored draft is never marked stale
+ * for one. Null when it may be published: no grounding recorded, or both
+ * fingerprints still match. Pass accountFpNow when the caller already read
+ * the account facts.
  */
-async function restoredAgentDraftMoved(row, accountFpNow) {
+async function restoredDraftMoved(row, accountFpNow) {
   const g = row.auto_reply_grounding;
   const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
   if (snap?.fingerprint && snap.fingerprint !== reviewFingerprint(row)) return 'the review or its customer link changed since this draft was written — read the current review and edit the draft first';
@@ -1639,11 +1644,11 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
     if (human && submitted === human && fresh.auto_reply_reason === HUMAN_DRAFT_STALE) {
       return 'this draft was written before the review changed — read the current review and edit the draft first';
     }
-    // A restored machine-authored attempt submitted verbatim (Use Draft):
-    // the grounding rule Post now applies. Edited text is the admin's own;
-    // a grounding token binds a freshly drafted text to its own facts below.
-    if (!gReview && human && submitted === human && fresh.auto_reply_version === 'agent_ops') {
-      const moved = await restoredAgentDraftMoved(fresh);
+    // A restored manual attempt submitted verbatim (Use Draft): the
+    // grounding rule Post now applies. Edited text is the admin's own; a
+    // grounding token binds a freshly drafted text to its own facts below.
+    if (!gReview && human && submitted === human && MANUAL_VERSIONS.has(fresh.auto_reply_version || '')) {
+      const moved = await restoredDraftMoved(fresh);
       if (moved) return moved;
     }
     if (gReview) {

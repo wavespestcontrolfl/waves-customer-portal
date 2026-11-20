@@ -582,6 +582,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // this park, or as the [DRAFT] the sync restores). Never an earlier
       // draft's snapshot.
       uncertain.auto_reply_grounding = JSON.stringify({ fingerprint: prePutFingerprint, accountFingerprint: expectedAccountFingerprint || null });
+      // This text is not known to be published: an earlier reply's time (a
+      // retracted one, an overwritten one) never dates it. The sync stamps
+      // Google's time when it finds the reply landed.
+      uncertain.auto_reply_published_at = null;
       // The attempted text replaces a [DRAFT] in the slot this write compares
       // against (the pipeline's, an Agent Ops draft, a restored one), as a
       // landed reply and the sync's restore both do. Until that sync the card

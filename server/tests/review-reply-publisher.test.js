@@ -715,6 +715,13 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops' });
   });
 
+  test('an Intelligence Bar timeout on a retracted review records the attempt without the retracted reply\'s publication time', async () => {
+    Object.assign(state.rows[0], { auto_reply_status: 'retracted', auto_reply_reason: 'retracted_by_admin', auto_reply_published_at: '2026-11-01T15:00:00.000Z' });
+    await ibTimeout();
+    // A landed reply is then dated by Google's time, never the old reply's.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_published_at: null });
+  });
+
   test('an Intelligence Bar timeout over the pipeline\'s [DRAFT] clears it: until the next sync the row shows the attempt, never the old draft as a person\'s', async () => {
     Object.assign(state.rows[0], { auto_reply_status: 'drafted', auto_reply_reason: null, auto_reply_draft: 'Hi Dana, pipeline words.', review_reply: '[DRAFT] Hi Dana, pipeline words.', reply_updated_at: null });
     await ibTimeout();

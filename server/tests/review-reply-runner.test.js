@@ -1867,14 +1867,34 @@ describe('admin actions', () => {
     expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, expectedAccountFingerprint: 'fp:Venice|new', autoFields: { auto_reply_version: 'agent_ops', auto_reply_grounding: JSON.stringify(grounding) } });
   });
 
-  test('pipelineDraftGuard (Use Draft): a restored agent draft posted verbatim meets the grounding its attempt recorded; edited text and a person\'s restored draft take the human path', async () => {
+  test('postNow holds a restored editor attempt in a person\'s own words (version human) to the review it was written for', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Thanks Dana, we will be back Tuesday for the garage.';
+    const base = row({ id: 'rh', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'human', auto_reply_mode: null });
+    const grounding = { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: null };
+    state.rows = [{ ...base, auto_reply_grounding: grounding, review_text: 'Edited: they missed the garage' }];
+    await expect(Runner.postNow('rh', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/review or its customer link changed/) });
+    expect(mockPublish).not.toHaveBeenCalled();
+    state.rows = [{ ...base, auto_reply_grounding: grounding }];
+    expect((await Runner.postNow('rh', { type: 'admin' }, { expectedDraft: text })).outcome).toBe('posted');
+    // A person's own words: no account facts to re-check after the PUT; the
+    // posted row keeps the review the text was written for.
+    expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, fromDraft: false, autoFields: { auto_reply_version: 'human', auto_reply_grounding: JSON.stringify(grounding) } });
+    expect(mockPublish.mock.calls[0][0].expectedAccountFingerprint).toBeUndefined();
+  });
+
+  test('pipelineDraftGuard (Use Draft): a restored manual attempt posted verbatim meets the grounding its attempt recorded; edited text takes the human path', async () => {
     const text = 'Thanks Dana. Glad the Waves app helps.';
     const base = row({ id: 'ug', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops' });
     const fresh = { ...base, auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: 'fp:Venice|new' } };
     mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
     expect(await Runner.pipelineDraftGuard(text)(fresh)).toBeNull();
     expect(await Runner.pipelineDraftGuard(text)({ ...fresh, review_text: 'Edited: they missed the garage' })).toMatch(/review or its customer link changed/);
-    expect(await Runner.pipelineDraftGuard(text)({ ...fresh, auto_reply_version: 'human', review_text: 'Edited: they missed the garage' })).toBeNull();
+    // A person's own words, restored (version human): the review half only.
+    const own = { ...fresh, auto_reply_version: 'human', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: null } };
+    expect(await Runner.pipelineDraftGuard(text)(own)).toBeNull();
+    expect(await Runner.pipelineDraftGuard(text)({ ...own, review_text: 'Edited: they missed the garage' })).toMatch(/review or its customer link changed/);
+    expect(await Runner.pipelineDraftGuard(text + ' We fixed the garage too.')({ ...own, review_text: 'Edited: they missed the garage' })).toBeNull();
     mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
     expect(await Runner.pipelineDraftGuard(text)(fresh)).toMatch(/customer facts changed/);
     expect(await Runner.pipelineDraftGuard(text + ' We fixed the garage too.')(fresh)).toBeNull();
