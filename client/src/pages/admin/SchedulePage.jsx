@@ -18766,7 +18766,9 @@ export function CompletionPanel({
       // r15 P2); only a bucket change needs the operator's confirmation.
       if (fresh) setReviewSendPreview(fresh);
       // The fresh answer also refreshes the late-close verdict the box shows (a visit can cross its 3rd day before submit).
+      // A failed request is the same as an unknown answer: clear the verdict (fewer texts); the next submit goes suppressed.
       if (fresh) setReviewLateCloseAskKept(lateCloseAskKeptFrom(fresh));
+      else if (lateCloseShown) setReviewLateCloseAskKept(false);
       const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, lateCloseShown: lateCloseShown ? true : null, failureNoticed: previewFailureNoticedRef.current, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone: service?.customerPhone }) });
       if (verdict) {
         if (verdict.noticed) previewFailureNoticedRef.current = true;

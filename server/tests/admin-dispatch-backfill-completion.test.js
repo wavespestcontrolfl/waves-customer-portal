@@ -1062,7 +1062,9 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
       // The same verdict immediate enrollment reads: a blocking client suppression or a refused re-service ask freezes false.
       expect(src).toMatch(/lateCloseReviewKept = lateCloseEligible === true && requestReview === true && reviewAskAllowed === true\s*\n\s*&& !\(reviewSuppression && reviewSuppression !== 'invoice_created'\);/);
       // The verdict gets the locked row, the pre-lock row (drift), the transaction (strict profile read) and the recap mode.
-      expect(src).toMatch(/visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: completionEndedAt,/);
+      expect(src).toMatch(/visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: new Date\(\),/);
+      // No caller anchors the window to completionEndedAt (a packet's can be a member's historical end).
+      expect(src).not.toMatch(/closedAt: completionEndedAt/);
       expect(src).toMatch(/issuedInvoiceCloseout, visitOutcome, recapReviewOnly,/);
       expect(src).toMatch(/if \(isBackfillCompletion && !lateCloseEligible\) reviewFirstAskLock = null;/);
       expect(src).toMatch(/customerRequestedReview: \(isIncompleteVisit \|\| isInternalOnlyCompletion \|\| \(isBackfillCompletion && !lateCloseReviewKept\)\)/);

@@ -323,6 +323,14 @@ describe('lateCloseAskVerdict', () => {
     expect(await lateCloseAskVerdict(base)).toBe(false);
   });
 
+  test('the window is anchored to the wall-clock close: a combined-visit packet whose historical end is inside the window but whose submission is outside is not kept', async () => {
+    const old = { ...ident, arrived_at: null, scheduled_date: '2026-11-15' };
+    const historicalEnd = new Date('2026-11-17T20:00:00Z'); // 2 ET days after the visit
+    const submittedAt = new Date('2026-11-20T15:00:00Z');   // 5 ET days after the visit
+    expect(await lateCloseAskVerdict({ ...base, visit: old, preLockVisit: { ...old }, closedAt: historicalEnd })).toBe(true);
+    expect(await lateCloseAskVerdict({ ...base, visit: old, preLockVisit: { ...old }, closedAt: submittedAt })).toBe(false);
+  });
+
   test('drift between the pre-lock row and the locked row on ANY identity column the resolver keys on is not kept', async () => {
     for (const [col, value] of [['service_id', 'sv-2'], ['service_type', 'WDO Inspection'], ['service_key_snapshot', 'wdo_inspection'], ['is_recurring', false], ['id', 'v2']]) {
       expect(await lateCloseAskVerdict({ ...base, preLockVisit: { ...visit, [col]: value } })).toBe(false);

@@ -470,6 +470,22 @@ export function claimPreviewRecheck(ref) {
 // Shown when the submit-time re-check could not read the visit (`lateCloseAskKept: null`): not the same as "past 3 days".
 export const LATE_CLOSE_UNAVAILABLE_MESSAGE = "The review check is unavailable right now. If you submit again, this closeout is saved with the review request off.";
 
+// The late-close part of the submit verdict (GATE_REVIEW_LATE_CLOSE_ASK). `lateCloseShown` is the verdict the box shows
+// (true/false), or null when this is not a backdated closeout. A backdated closeout whose verdict changed since the box was shown
+// changes the displayed review choice: the operator sees it and submits again. A failed re-check (no answer) and an unknown answer
+// (null) are the same: the review check is unavailable, the page clears the verdict, and the next submit goes suppressed.
+function lateCloseSubmitNotice({ fresh, shown, lateCloseShown }) {
+  if (lateCloseShown === true && (!fresh || fresh.lateCloseAskKept === null)) {
+    return { message: LATE_CLOSE_UNAVAILABLE_MESSAGE, ...(!fresh ? { noticed: true, dropShown: !!shown } : {}) };
+  }
+  if (fresh && typeof lateCloseShown === "boolean" && lateCloseAskKeptFrom(fresh) !== lateCloseShown) {
+    return { message: lateCloseShown
+      ? "This closeout is now past the 3 days after the visit, so no review request will be sent. Submit again to confirm."
+      : LATE_CLOSE_NOW_KEPT_MESSAGE };
+  }
+  return null;
+}
+
 // What to do with the fresh send-time preview read at submit, against the one the screen shows
 // (`shown`): null to go on, else { message, noticed, dropShown }. A bucket change of an Automatic
 // time needs the operator's second look; a failed re-check stops ONCE (`failureNoticed`), after
@@ -477,14 +493,8 @@ export const LATE_CLOSE_UNAVAILABLE_MESSAGE = "The review check is unavailable r
 // `reportTextExpected` false (texting off, no phone): no report text anchors the ask, so the
 // server uses the smart window even when the preview offered the after-report time.
 export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed, reportTextExpected = true, lateCloseShown = null }) {
-  // A backdated closeout whose late-close verdict changed since the box was shown changes the displayed review choice:
-  // the operator sees it and submits again (GATE_REVIEW_LATE_CLOSE_ASK). `lateCloseShown` is the shown verdict, or null when not a backdated closeout.
-  if (lateCloseShown === true && fresh && fresh.lateCloseAskKept === null) return { message: LATE_CLOSE_UNAVAILABLE_MESSAGE };
-  if (fresh && typeof lateCloseShown === "boolean" && lateCloseAskKeptFrom(fresh) !== lateCloseShown) {
-    return { message: lateCloseShown
-      ? "This closeout is now past the 3 days after the visit, so no review request will be sent. Submit again to confirm."
-      : LATE_CLOSE_NOW_KEPT_MESSAGE };
-  }
+  const lateClose = lateCloseSubmitNotice({ fresh, shown, lateCloseShown });
+  if (lateClose) return lateClose;
   if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
     return { message: `The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.` };
   }

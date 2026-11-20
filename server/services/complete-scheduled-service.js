@@ -7359,7 +7359,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const lateCloseEligible = !firstAskCustomerMoved(firstAskLockCustomerId, lockedSvcRow) && await require('./review-visit-day').lateCloseAskVerdict({
             isBackfill: isBackfillCompletion, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, recapReviewOnly,
             isInternalOnlyCompletion, deliverySuppressed: deliveryPosture.suppressCustomerComms,
-            visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: completionEndedAt,
+            // The wall-clock closeout time, never completionEndedAt: a combined-visit packet's end can be a member's historical end.
+            visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: new Date(),
           });
           // The review choice resolved once, as the initial enrollment reads it (an omitted requestReview is no ask): the one
           // boolean frozen below and restored on a resume. A backdated closeout the commit finds ineligible drops the

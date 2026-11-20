@@ -399,6 +399,15 @@ describe('reviewPreviewSubmitVerdict with the late-close verdict (GATE_REVIEW_LA
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: true }, shown: same, failureNoticed: false, lateCloseShown: false }).message).toMatch(/now keeps its review request/);
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: null }, shown: same, failureNoticed: false, lateCloseShown: true }).message).toMatch(/review check is unavailable/);
   });
+  test('a failed re-check request is handled like an unknown answer; two failed submits in a row: unavailable once, then it goes on suppressed', () => {
+    const base = { reviewTiming: 'auto', shown: same, fresh: null };
+    // Submit 1: the box showed the ask. The notice says the check is unavailable; the page clears the verdict.
+    const first = reviewPreviewSubmitVerdict({ ...base, failureNoticed: false, lateCloseShown: true });
+    expect(first.message).toBe(LATE_CLOSE_UNAVAILABLE_MESSAGE);
+    expect(first.noticed).toBe(true);
+    // Submit 2: the verdict is cleared (lateCloseShown null) and the failure was already noticed: it goes on, suppressed.
+    expect(reviewPreviewSubmitVerdict({ ...base, failureNoticed: true, lateCloseShown: null })).toBeNull();
+  });
   test('an unchanged verdict, or not a backdated closeout (lateCloseShown null), goes on as before', () => {
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: true }, shown: same, failureNoticed: false, lateCloseShown: true })).toBeNull();
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: same, shown: same, failureNoticed: false })).toBeNull();
