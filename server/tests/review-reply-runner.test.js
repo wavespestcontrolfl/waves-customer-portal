@@ -123,7 +123,8 @@ jest.mock('../models/db', () => {
     const hits = state.rows.filter((r) => r.reviewer_name !== '_stats' && r.missing_since == null && !r.dismissed
       && (!locs || locs.includes(String(r.location_id).toLowerCase()))
       && (force ? (r.id === rest[0] && !['skipped', 'retracted'].includes(r.auto_reply_status)) : (['queued', 'failed'].includes(r.auto_reply_status) && new Date(r.auto_reply_due_at) <= now && r.review_created_at >= cutoff))
-      && (r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < now)).slice(0, limit);
+      && (r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < now)
+      && (!/publish_claimed_until IS NULL OR publish_claimed_until </.test(sql) || r.publish_claimed_until == null || new Date(r.publish_claimed_until) < now)).slice(0, limit);
     hits.forEach((r) => { r.auto_reply_claimed_until = token; });
     return { rows: hits.map((r) => ({ ...r })) };
   };
@@ -597,6 +598,33 @@ describe('processDueAutoReplies — state machine', () => {
     Runner.whereNotAutoPosted(qb);
     // codex r77: a reply parked by the reviewer's edit is still live on Google — not dismissible either.
     expect(qb.whereRaw).toHaveBeenCalledWith("NOT ((COALESCE(auto_reply_status, '') = 'parked' AND COALESCE(auto_reply_reason, '') = 'review_edited_after_post') OR (COALESCE(auto_reply_status, '') = 'posted' AND COALESCE(auto_reply_version, '') IN ('human','agent_ops') IS NOT TRUE))");
+  });
+
+  test('a review with a publish in flight stays out of every automatic write: the cron claim, Post now, queue expiry, the catch-up enqueue (codex r3 on #8127)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const live = '2099-01-01T00:00:00Z';
+    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
+    // A person's post is in flight on each row: the publisher cleared the runner's claim before its PUT.
+    state.rows = [row({ id: 'due', publish_claimed_until: live }), row({ id: 'old', review_created_at: stale, publish_claimed_until: live })];
+    expect(await Runner.processDueAutoReplies()).toMatchObject({ claimed: 0 });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows.find((r) => r.id === 'due')).toMatchObject({ auto_reply_status: 'queued', auto_reply_claimed_until: null });
+    expect(state.rows.find((r) => r.id === 'old')).toMatchObject({ auto_reply_status: 'queued', auto_reply_claimed_until: null });
+    // Post now gets the publisher's own answer under that claim, before any drafting.
+    await expect(Runner.postNow('due', { type: 'admin' })).rejects.toMatchObject({ code: 'lock_busy', status: 409 });
+    expect(state.rows.find((r) => r.id === 'due').auto_reply_claimed_until).toBeNull();
+    // Once the publish ends (its claim expired), the same rows move again.
+    state.rows.forEach((r) => { r.publish_claimed_until = '2000-01-01T00:00:00Z'; });
+    expect(await Runner.processDueAutoReplies()).toMatchObject({ claimed: 1 });
+    expect(state.rows.find((r) => r.id === 'old')).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired' });
+    // The catch-up enqueue leaves a never-queued review alone while a post on it is in flight.
+    const rollout = new Date(Date.now() - 86400000).toISOString();
+    state.rows = [row({ id: 'never', auto_reply_status: null, auto_reply_due_at: null, created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString(), publish_claimed_until: live })];
+    expect(await Runner.enqueueMissedReviews({ rollout })).toBe(0);
+    expect(state.rows[0].auto_reply_status).toBeNull();
+    state.rows[0].publish_claimed_until = null;
+    expect(await Runner.enqueueMissedReviews({ rollout })).toBe(1);
+    expect(state.rows[0].auto_reply_status).toBe('queued');
   });
 
   test('queued rows older than maxQueueAgeHours leave the lane before a claim instead of auto-posting after a pause (codex r74)', async () => {
@@ -1915,6 +1943,17 @@ describe('admin actions', () => {
     mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
     state.rows = [{ ...ib }];
     await expect(Runner.postNow('rp', { type: 'admin' }, { expectedDraft: ib.auto_reply_draft })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/customer facts changed/) });
+  });
+
+  test('postNow never re-attempts a parked attempt with no recorded review as written: the park stays for the sync or the editor', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Thanks Dana. Glad the Waves app helps.';
+    // Parked before the publisher recorded the review it was written for (an older editor timeout).
+    state.rows = [row({ id: 'rn', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', review_reply: null, auto_reply_draft: text, auto_reply_version: 'agent_ops', auto_reply_mode: null, auto_reply_grounding: null })];
+    await expect(Runner.postNow('rn', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/no record of the review/) });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(mockVerify).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: text, auto_reply_claimed_until: null });
   });
 
   test('pipelineDraftGuard (Use Draft): a restored manual attempt posted verbatim meets the grounding its attempt recorded; edited text takes the human path', async () => {

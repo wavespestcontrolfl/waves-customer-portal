@@ -531,8 +531,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         // the automatic runner BEFORE the PUT, as a compare-and-set on the
         // status and reply slot the claim read: a runner that claimed it
         // mid-draft can no longer store over the row while Google's PUT is
-        // in flight, so a timed-out attempt's record still finds the row it
-        // read. A row that changed since the checks refuses here, before
+        // in flight, and no new runner claim, queue expiry or catch-up
+        // enqueue lands under the live publish claim (runner.js
+        // claimDueRows), so a timed-out attempt's record still finds the row
+        // it read. A row that changed since the checks refuses here, before
         // anything reaches Google.
         const fence = db('google_reviews').where({ id: reviewId });
         if (prePutState.status == null) fence.whereNull('auto_reply_status'); else fence.where('auto_reply_status', prePutState.status);

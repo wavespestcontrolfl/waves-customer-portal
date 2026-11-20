@@ -296,7 +296,10 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
   for (const c of (candidates || [])) {
     const fields = autoReplyInsertFields({ ...c, owner_reply: c.review_reply }, { now, cfg });
     if (!Object.keys(fields).length) continue;
-    const updated = await db('google_reviews').where({ id: c.id }).whereNull('auto_reply_status').update(fields);
+    const updated = await db('google_reviews').where({ id: c.id }).whereNull('auto_reply_status')
+      // Never under an in-flight publish (see claimDueRows).
+      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [now.toISOString()])
+      .update(fields);
     n += Array.isArray(updated) ? updated.length : (updated || 0);
   }
   if (n) logger.info(`[review-auto-reply] catch-up queued ${n} review(s) synced while the pipeline was off / out of scope`);
@@ -321,6 +324,8 @@ async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
     .whereIn('auto_reply_status', [STATUS.QUEUED, STATUS.FAILED])
     .where('review_created_at', '<', cutoff)
     .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()])
+    // Never under an in-flight publish (see claimDueRows).
+    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [now.toISOString()])
     .update({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: null });
   const count = Array.isArray(n) ? n.length : (n || 0);
   if (count) logger.info(`[review-auto-reply] ${count} queued review(s) older than ${cfg.maxQueueAgeHours}h left the lane unposted (queue_expired)`);
@@ -340,7 +345,14 @@ async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = n
   // narrowing REVIEW_AUTO_REPLY_LOCATIONS immediately stops already-queued
   // rows outside it. Post-now (force) is an explicit admin action and ignores it.
   const locClause = !force && cfg.locations.length ? 'AND lower(location_id) = ANY(?)' : '';
-  const params = force ? [token, force, nowIso, limit] : [token, nowIso, cutoff, ...(locClause ? [cfg.locations] : []), nowIso, limit];
+  // A live publish claim means a publish of this review is in flight (a
+  // person's post, Post now, a testimonial). A claim taken now could store a
+  // draft or a retry under that PUT, and a timed-out manual post's record
+  // would then miss the row it read (codex r3 on #8127). The publisher
+  // clears the runner's claim before a manual PUT; this keeps a new one off
+  // until the publish ends. Post now gets the publisher's own answer
+  // (LOCK_BUSY), before any drafting.
+  const params = force ? [token, force, nowIso, nowIso, limit] : [token, nowIso, cutoff, ...(locClause ? [cfg.locations] : []), nowIso, nowIso, limit];
   const res = await db.raw(
     `UPDATE google_reviews SET auto_reply_claimed_until = ?
      WHERE id IN (
@@ -351,6 +363,7 @@ async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = n
          ${forceClause}
          ${locClause}
          AND (auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)
+         AND (publish_claimed_until IS NULL OR publish_claimed_until < ?)
        ORDER BY auto_reply_due_at ASC NULLS LAST
        LIMIT ?
        FOR UPDATE SKIP LOCKED
@@ -1138,7 +1151,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   }
   // A manual attempt is published as written only while the review and the
   // account facts its grounding records still hold.
-  const restoredMoved = restoredDraft || parkedAttempt ? await manualAttemptMoved(row, accountFpNow) : null;
+  const restoredMoved = restoredDraft || parkedAttempt ? await manualAttemptMoved(row, accountFpNow, { requireReview: !!parkedAttempt }) : null;
   if (restoredMoved) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.STALE, `This draft cannot be posted as written: ${restoredMoved}.`, { status: 409 });
@@ -1603,10 +1616,15 @@ function dismissCancelFields(conn = db) {
  * such a draft is never marked stale for one. Null when it may be
  * published: no grounding recorded, or both fingerprints still match. Pass
  * accountFpNow when the caller already read the account facts.
+ * requireReview (Post now's re-attempt of a still-parked attempt): an
+ * attempt with no recorded review (parked before the publisher recorded
+ * one) is never re-attempted as written; the park stays for the sync's
+ * restore or a person's reply from the editor.
  */
-async function manualAttemptMoved(row, accountFpNow) {
+async function manualAttemptMoved(row, accountFpNow, { requireReview = false } = {}) {
   const g = row.auto_reply_grounding;
   const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
+  if (requireReview && !snap?.fingerprint) return 'this earlier attempt has no record of the review it was written for — wait for the next review sync, or reply from the editor';
   if (snap?.fingerprint && snap.fingerprint !== reviewFingerprint(row)) return 'the review or its customer link changed since this draft was written — read the current review and edit the draft first';
   if (!snap?.accountFingerprint) return null;
   let current = accountFpNow;
