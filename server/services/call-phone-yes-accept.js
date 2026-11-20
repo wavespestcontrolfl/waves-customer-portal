@@ -759,7 +759,8 @@ const TAP_UNAVAILABLE = {
   card_out_of_date: "The card's details changed since it was last updated. An open card updates within 10 minutes, then reload. A claimed card does not update: accept it from the estimate.",
   card_changed: 'The card changed or was closed since it loaded. Reload and look again.',
   word_changed: "The caller's word changed since the card loaded. Reload and look again.",
-  word_not_current: "The caller's words on the card are not the latest word about this estimate. An open card updates within 10 minutes, then reload. A claimed card does not update: accept it from the estimate.",
+  // No reload hint: the sweep keeps a yes given before the open estimate was sent, so the card may never change.
+  word_not_current: "The caller's words on the card are not the latest word about the estimate the tap would accept. Look at that estimate and accept it from there.",
   catalog_busy: 'The service catalog is being updated. Try again in a minute.',
   plan_not_shown: "The plan's visits or per-visit price would not be the ones the card showed. Accept it from the estimate instead.",
   customer_busy: 'Another change to this customer is being saved. Try again in a minute.',
@@ -776,8 +777,9 @@ function tapRefusal(reason) {
 }
 const stop = (reason) => Object.assign(new Error(reason), { phoneYesRefusal: reason });
 
-// What the card showed, as one opaque token: the estimate and its row version, and the booked visit as read. The card
-// reads it (tapStateOf, GET /:id/call-phone-yes) and the tap sends it back, so an edit or a reschedule since asks for a fresh look.
+// What the card showed, as one opaque token: the estimate and its row version, the booked visit as read, the caller's
+// word, the plan and its price, and the two notes beside them. The card reads it (tapStateOf, GET /:id/call-phone-yes)
+// and the tap sends it back, so an edit or a reschedule since, or a note the office has not seen, asks for a fresh look.
 function tapPreviewTokenOf(evaluation, terms) {
   const Manual = require('./estimate-manual-acceptance');
   const facts = [
@@ -786,6 +788,8 @@ function tapPreviewTokenOf(evaluation, terms) {
     // The caller's word with its time: a yes that moved (a recording recovery) can change the terms warning.
     tapWordOf(evaluation).key,
     terms ? [terms.cadence, cents(terms.perVisit)] : null,
+    // The terms warning and the fee note as tapStateOf shows them: a delivery snapshot can change with no row version.
+    termsMayDiffer(evaluation.estimate, evaluation.yes?.at ?? null), feeNoteOf(evaluation.estimate),
   ];
   return require('crypto').createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 32);
 }

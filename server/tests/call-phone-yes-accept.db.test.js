@@ -1300,12 +1300,20 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       expect((await listed(card.id)).call_phone_yes).toMatchObject({ can_accept: true });
     });
 
-    test('the terms warning is read live: an estimate re-priced after its last delivery shows it before the tap (the shadow line is from filing)', async () => {
-      const { est, card } = await filed();
-      expect((await listed(card.id)).call_phone_yes).toMatchObject({ can_accept: true, terms_note: null });
+    test('the terms warning is read live: an estimate re-priced after its last delivery shows it before the tap (the shadow line is from filing), and a token read before it no longer accepts', async () => {
+      const ctx = await filed();
+      const { est, card } = ctx;
+      const before = (await listed(card.id)).call_phone_yes;
+      expect(before).toMatchObject({ can_accept: true, terms_note: null });
       const data = typeof est.estimate_data === 'string' ? JSON.parse(est.estimate_data) : est.estimate_data;
       await trx('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ ...data, sendSnapshot: { priced: { repriced: true } } }) });
-      expect((await listed(card.id)).call_phone_yes).toMatchObject({ can_accept: true, terms_note: REASONS.terms_may_differ });
+      const after = (await listed(card.id)).call_phone_yes;
+      expect(after).toMatchObject({ can_accept: true, terms_note: REASONS.terms_may_differ });
+      // The office has not seen the warning: the token it read before refuses, and nothing is accepted.
+      expect(after.preview_token).not.toBe(before.preview_token);
+      const out = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at, preview_token: before.preview_token });
+      expect(out).toMatchObject({ status: 409, body: { code: 'changed_since_check', error: TAP_REFUSALS.changed_since_check } });
+      await unchanged(ctx);
     });
 
     test('an estimate the card does not name is never the one the tap accepts', async () => {
