@@ -38,14 +38,12 @@
  * (technician_absences) is skipped, and members of one visit group count as
  * one stop.
  *
- * Owner banner (owner 2026-11-04, "banner"): GATE_OWNER_NUDGE_BANNER, strict
- * 'true', read at call time and only for the owner's nudge. On, the owner gets
- * the same words as a Waves Admin phone banner (the open_visits_nudge trigger,
- * pushOnly to his own admin user, a tap opens /tech) instead of the text. The
- * banner counts only when a device accepted it (push sent > 0); otherwise the
- * same text goes out as today, so the nudge is never lost. Never both. The day's
- * claim is the same single claim: the SMS fallback releases it only when nothing
- * went out. Off, the owner still gets the text, unchanged.
+ * Owner banner (owner 2026-11-04, "banner"): the owner gets the same words as a
+ * Waves Admin phone banner (the open_visits_nudge trigger, pushOnly to his own
+ * admin user, a tap opens /tech) instead of the text. The banner counts only
+ * when a device accepted it (push sent > 0); otherwise the same text goes out,
+ * so the nudge is never lost. Never both. The day's claim is the same single
+ * claim: the SMS fallback releases it only when nothing went out.
  *
  * Carry-over (owner 2026-11-02): the same text also names every re-service
  * (callback or pest/lawn re-service) still open from the last 30 days before
@@ -61,7 +59,6 @@ const { etDateString, etParts } = require('../utils/datetime-et');
 const { publicPortalUrl } = require('../utils/portal-url');
 
 const GATE = 'GATE_TECH_OPEN_VISIT_NUDGE';
-const OWNER_BANNER_GATE = 'GATE_OWNER_NUDGE_BANNER';
 const CARRYOVER_DAYS = 30;
 const RESERVICE_KEYS = ['pest_re_service', 'lawn_re_service'];
 // Same allowlist the stale-visit sweep rings the admin about — every status
@@ -80,11 +77,6 @@ function enabled() {
   // this gate texts a tech's personal phone, so it ships dark until the
   // owner sets the literal string 'true'.
   return process.env[GATE] === 'true';
-}
-
-// GATE_OWNER_NUDGE_BANNER (feature-gates.js ownerNudgeBannerLive reads the same literal for the bell policy).
-function ownerBannerEnabled() {
-  return process.env[OWNER_BANNER_GATE] === 'true';
 }
 
 const VISIT_COLUMNS = [
@@ -372,7 +364,7 @@ async function releaseClaim(technicianId, etDate) {
   }
 }
 
-// The owner's banner (GATE_OWNER_NUDGE_BANNER): the same words as the text, minus the link (a tap opens /tech). pushOnly
+// The owner's banner: the same words as the text, minus the link (a tap opens /tech). pushOnly
 // to the owner's own admin user (technicians.id is the admin user id, as cardNudge's push relies on), so no bell row and
 // no other admin's phone. True only when a device accepted it (push sent > 0): a Push Settings switch off, no device, a
 // policy silence or any error is false, and the caller falls back to the text. Never throws.
@@ -505,8 +497,8 @@ async function deliverNudge(techId, etDate, now) {
   }
   const cell = ownerCell(live.tech);
   if (!cell) return cardNudge(live.tech, live.visits, etDate, live.carryovers);
-  // Gate on: the banner first; the text only when no device took it. Never both.
-  if (ownerBannerEnabled() && await bannerNudge(live.tech, live.visits, live.carryovers || [], etDate)) return true;
+  // The banner first; the text only when no device took it. Never both.
+  if (await bannerNudge(live.tech, live.visits, live.carryovers || [], etDate)) return true;
   return smsNudge(live.tech, cell, buildMessage(live.visits, live.carryovers), etDate);
 }
 
@@ -591,7 +583,6 @@ module.exports = {
     smsNudge,
     bannerNudge,
     headlineText,
-    ownerBannerEnabled,
     deliverNudge,
   },
 };

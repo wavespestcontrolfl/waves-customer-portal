@@ -113,11 +113,13 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
   const cleanTitle = (value) => stripEmoji(String(value || 'Notification')) || String(value || 'Notification');
   const cleanBody = (value) => (value === null || value === undefined ? value : stripEmoji(value));
   if (trigger.allowContactDetails) {
-    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body) };
+    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body),
+      ...(built.pushTitle ? { pushTitle: cleanTitle(built.pushTitle) } : {}) };
   }
   return {
     ...built,
     title: cleanTitle(redactSensitiveText(built.title || 'Notification')),
+    ...(built.pushTitle ? { pushTitle: cleanTitle(redactSensitiveText(built.pushTitle)) } : {}),
     body: built.body === null || built.body === undefined ? built.body : cleanBody(redactSensitiveText(built.body)),
     ...(built.detail ? { detail: cleanBody(redactSensitiveText(built.detail)) } : {}),
   };
@@ -503,7 +505,7 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=messenger',
     }),
   },
-  // The phone banner for a new-lead email (GATE_RING_NEW_CONTACTS, bell-banners.js kind new_lead_email, owner 2026-11-04
+  // The phone banner for a new-lead email (bell-banners.js kind new_lead_email, owner 2026-11-04
   // "ring new"). The bell row is the plain 'new_lead' category row email-actions.js already writes, which carries no
   // triggerKey of its own (the writer names this kind with notifyAdmin's bannerKind), so no sweep closes it and its
   // rule is the retention expiry. `build` takes the written row's own words as alertTitle/alertBody/alertLink.
@@ -680,9 +682,12 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
-      // GATE_MISSED_CALL_ALERT_DETAIL: the producer adds line / duration /
-      // next visit to the payload only with the gate on; without them this is
-      // the original sentence, character for character.
+      // A quiet call's bell row is titled likely robocall; its push goes only
+      // when no bell row was written, and keeps the ordinary caller title
+      // (missed-call-bell.js pushName; pre-push audit r23).
+      ...(p.pushName ? { pushTitle: `Missed call — ${p.pushName}` } : {}),
+      // The producer adds line / duration / next visit to the payload; without
+      // them this is the original sentence.
       body: require('./missed-call-alert-detail').formatMissedCallBody(p),
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
@@ -1340,7 +1345,7 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
-  // The owner's 7 PM open-visit nudge as a phone banner (GATE_OWNER_NUDGE_BANNER, owner 2026-11-04 "banner"): the same words
+  // The owner's 7 PM open-visit nudge as a phone banner (owner 2026-11-04 "banner"): the same words
   // the text carries, a tap opens the tech close-out page. services/tech-open-visit-nudge.js sends it pushOnly to the owner's
   // own admin user, so it writes no bell row (rule: fyi) and the owner can switch it off in Push Settings. p = { headline,
   // lines: [visit line], day }; the nudge module builds the words (customer first name + last initial only).
@@ -1866,7 +1871,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             // A technician recipient gets its own copy when the trigger names techOmit keys.
             const shown = techCopy && !adminRoleIds.has(adminUserId) ? techCopy : built;
             return {
-              title: shown.title,
+              // pushTitle: a push-only title (customer_missed_call); the bell row keeps title.
+              title: shown.pushTitle || shown.title,
               body: shown.body,
               url: built.link || '/admin',
               // promise_chaser: the push tag IS the bell's own dedupeKey

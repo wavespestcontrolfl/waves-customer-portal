@@ -134,7 +134,10 @@ function publicEnrichedProfile(enriched) {
   // lead snapshot, and a story count the permit filled (storiesSource
   // 'permit') goes back to the default so no permit-derived figure reaches
   // the public payload.
-  const { subdivisionMedian, permitBuildingFacts, addressVerdict, suiteSize: _suiteSize, suiteBuildingTotalSqFt: _suiteBuildingTotalSqFt, unitScopedLookup: _unitScopedLookup, ...rest } = enriched;
+  // countyRoofRaw / roofStyleHint / roofTileStyle (the county's own roof
+  // words and the barrel-vs-flat tile reads, owner 2026-11-19) are staff
+  // evidence for a later price: stripped like permitBuildingFacts.
+  const { subdivisionMedian, permitBuildingFacts, addressVerdict, suiteSize: _suiteSize, suiteBuildingTotalSqFt: _suiteBuildingTotalSqFt, unitScopedLookup: _unitScopedLookup, countyRoofRaw: _countyRoofRaw, roofStyleHint: _roofStyleHint, roofTileStyle: _roofTileStyle, ...rest } = enriched;
   const permitStories = rest.storiesSource === 'permit';
   if (permitStories) { rest.stories = 1; rest.storiesSource = 'default'; }
   if ((!subdivisionMedian && !permitBuildingFacts) || !Array.isArray(rest.fieldVerifyFlags)) return rest;

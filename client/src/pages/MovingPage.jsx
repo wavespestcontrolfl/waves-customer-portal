@@ -1,4 +1,4 @@
-// Customer moving page (owner 2026-11-02, dark behind GATE_MOVING_FLOW): the
+// Customer moving page (owner 2026-11-02): the
 // link the office sends a customer who is moving. The customer types a new
 // address, checks it, gives move-out and move-in dates, and sees a fixed
 // receipt. Nothing here shows a price. Every sentence comes from this file or

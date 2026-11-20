@@ -1,6 +1,6 @@
 'use strict';
 
-// GATE_CLAUDE_INPUT_GUARD: a purchase-receipt inventory bell quotes the marketplace seller's listing title and the inventory
+// A purchase-receipt inventory bell quotes the marketplace seller's listing title and the inventory
 // model's reason, so Send to Claude does not offer it. Bells whose words our code writes stay sendable.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() }));
@@ -59,17 +59,9 @@ const stockBell = () => ({
   detail: null, link: '/admin/inventory', metadata: { dedupeKey: 'stock-shortfall:p1' }, done_at: null, version: 'b'.repeat(32),
 });
 
-beforeEach(() => { delete process.env.GATE_CLAUDE_INPUT_GUARD; jest.clearAllMocks(); });
-afterAll(() => { delete process.env.GATE_CLAUDE_INPUT_GUARD; });
+beforeEach(() => { jest.clearAllMocks(); });
 
-test('guard off: the receipt bell is offered, as before', async () => {
-  const row = await receiptBell();
-  expect(sendRefusal(row)).toBeNull();
-  expect(withSendToClaudeFields([row], { role: 'admin', fullAccess: true })[0].sendToClaude).toBe(true);
-});
-
-test('guard on: the receipt bell that quotes a listing title is not offered and the send answers a refusal', async () => {
-  process.env.GATE_CLAUDE_INPUT_GUARD = 'true';
+test('the receipt bell that quotes a listing title is not offered and the send answers a refusal', async () => {
   const row = await receiptBell();
   expect(sendRefusal(row)).toBe('not_system_written');
   expect(withSendToClaudeFields([row], { role: 'admin', fullAccess: true })[0].sendToClaude).not.toBe(true);
@@ -79,13 +71,11 @@ test('guard on: the receipt bell that quotes a listing title is not offered and 
   expect(NotificationService.markAdminSentToClaude).not.toHaveBeenCalled();
 });
 
-test('guard on: the undelivered-shipment bell and a stamped receipt row are refused too', () => {
-  process.env.GATE_CLAUDE_INPUT_GUARD = 'true';
+test('the undelivered-shipment bell and a stamped receipt row are refused too', () => {
   expect(sendRefusal({ ...stockBell(), metadata: { dedupeKey: 'purchase-receipt-undelivered:s1' } })).toBe('not_system_written');
   expect(sendRefusal({ ...stockBell(), metadata: { dedupeKey: 'purchase-receipt:l1', who: 'claude' } })).toBe('not_system_written');
 });
 
-test('guard on: other inventory bells (code-written words) stay sendable', () => {
-  process.env.GATE_CLAUDE_INPUT_GUARD = 'true';
+test('other inventory bells (code-written words) stay sendable', () => {
   expect(sendRefusal(stockBell())).toBeNull();
 });

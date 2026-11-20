@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-// Help pill: the one floating pill on the customer portal. With Messages and
-// Photo ID both offered it opens a menu (Chat with Waves, Photo ID); with one
-// of them it opens that one directly; with neither, or for a cancelled or
-// contact session, there is no pill. An unread answer shows on the pill.
+// Waves Chat pill: the one floating pill on the customer portal. With
+// Messages offered it opens the Waves Chat sheet, the customer's thread with
+// the office, with the message box ready; with Messages off, or for a
+// cancelled or contact session, there is no pill. Photo ID is not behind it.
+// An unread answer shows on the pill.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { BrowserRouter } from 'react-router-dom';
@@ -27,10 +28,10 @@ vi.mock('../utils/api', () => {
   return { default: proxy };
 });
 
-const auth = vi.hoisted(() => ({ customer: null }));
+const auth = vi.hoisted(() => ({ customer: null, epoch: 0 }));
 vi.mock('../hooks/useAuth', () => ({
   useAuth: () => ({
-    sessionEpoch: 0,
+    sessionEpoch: auth.epoch,
     customer: auth.customer,
     logout: vi.fn(),
     properties: [],
@@ -62,6 +63,7 @@ beforeEach(() => {
   window.history.replaceState({}, '', '/');
   window.innerWidth = 360; // useIsMobile reads innerWidth on mount
   auth.customer = holder;
+  auth.epoch = 0;
   api.getSchedule.mockResolvedValue({ upcoming: [] });
   api.getNotificationPrefs.mockResolvedValue({});
   api.getAutopay.mockResolvedValue({ state: 'disabled' });
@@ -89,99 +91,95 @@ async function renderHome() {
   render(<BrowserRouter><PortalPage /></BrowserRouter>);
   await screen.findByText(/hello pat/i);
 }
-// The pill once both probes have answered "on": it then opens the menu.
-async function openHelpMenu() {
+async function openChat() {
   await renderHome();
-  await waitFor(() => expect(api.getPhotoIds).toHaveBeenCalled());
-  const pill = await screen.findByRole('button', { name: /^Help/ });
-  await waitFor(() => {
-    pill.focus(); // a real tap or key press focuses the pill first
-    fireEvent.click(pill);
-    expect(screen.getByRole('dialog', { name: 'Help' })).toBeInTheDocument();
-  });
-  return { pill, sheet: screen.getByRole('dialog', { name: 'Help' }) };
+  const pill = await screen.findByRole('button', { name: /^Waves Chat/ });
+  pill.focus(); // a real tap or key press focuses the pill first
+  fireEvent.click(pill);
+  return { pill, sheet: await screen.findByRole('dialog', { name: 'Waves Chat' }) };
 }
 
-describe('Help pill with Messages and Photo ID both offered', () => {
+describe('Waves Chat pill with Messages offered', () => {
   beforeEach(() => { messagesOn(); photoIdOn(); });
 
-  it('opens a menu with Chat with Waves and Photo ID', async () => {
-    const { pill, sheet } = await openHelpMenu();
-    expect(within(sheet).getByText('How can we help?')).toBeInTheDocument();
-    expect(within(sheet).getByRole('button', { name: /Chat with Waves/ })).toHaveTextContent('We answer between 8 AM and 8 PM');
-    expect(within(sheet).getByRole('button', { name: /Photo ID/ })).toBeInTheDocument();
-    // No pill named for Photo ID alone is left on the page.
-    expect(screen.queryByRole('button', { name: /^Photo ID/ })).toBe(within(sheet).getByRole('button', { name: /Photo ID/ }));
+  it('opens the thread in a sheet with no menu, and closing returns focus to the pill', async () => {
+    const { pill, sheet } = await openChat();
+    expect(await within(sheet).findByText('Your visit is set for Thursday.')).toBeInTheDocument();
+    expect(within(sheet).getByRole('heading', { name: 'Waves Chat' })).toBeInTheDocument();
+    expect(within(sheet).getByRole('textbox', { name: 'Message Waves' })).toBeInTheDocument();
+    // Photo ID is not offered from the pill, and the page behind stays where it was.
+    expect(within(sheet).queryByText(/Photo ID/)).toBeNull();
+    expect(window.location.search).toBe('');
 
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Close help menu' }));
-    expect(screen.queryByRole('dialog', { name: 'Help' })).toBeNull();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Close chat' }));
+    expect(screen.queryByRole('dialog', { name: 'Waves Chat' })).toBeNull();
     expect(pill).toHaveFocus();
   });
 
-  it('Chat with Waves opens the Messages page, where the pill stays hidden', async () => {
-    const { pill, sheet } = await openHelpMenu();
-    fireEvent.click(within(sheet).getByRole('button', { name: /Chat with Waves/ }));
-    expect(await screen.findByText('Your visit is set for Thursday.')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Messages' })).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: 'Help' })).toBeNull();
-    expect(window.location.search).toBe('?tab=messages');
-    expect(pill).toHaveAttribute('hidden');
-    // The hidden pill cannot hold keyboard focus: it lands on the page content.
-    expect(document.getElementById('portal-main')).toHaveFocus();
+  it('sends what the customer types and shows it in the thread', async () => {
+    api.sendPortalMessage.mockResolvedValue({
+      message: { id: 'y1', from: 'you', body: 'Can you come Friday?', createdAt: '2026-11-03T16:10:00.000Z' },
+    });
+    const { sheet } = await openChat();
+    const box = await within(sheet).findByRole('textbox', { name: 'Message Waves' });
+    const send = within(sheet).getByRole('button', { name: 'Send message' });
+    expect(send).toBeDisabled();
+    fireEvent.change(box, { target: { value: 'Can you come Friday?' } });
+    fireEvent.click(send);
+    expect(await within(sheet).findByText('Can you come Friday?')).toBeInTheDocument();
+    expect(api.sendPortalMessage).toHaveBeenCalledWith('Can you come Friday?', expect.any(String), []);
+    await waitFor(() => expect(box).toHaveValue(''));
   });
 
-  it('Photo ID opens the Photo ID sheet, and closing it returns focus to the pill', async () => {
-    const { pill, sheet } = await openHelpMenu();
-    const row = within(sheet).getByRole('button', { name: /Photo ID/ });
-    row.focus();
-    fireEvent.click(row);
-    const photoId = await screen.findByRole('dialog', { name: 'Photo ID' });
-    expect(screen.queryByRole('dialog', { name: 'Help' })).toBeNull();
-    expect(pill).toHaveAttribute('hidden');
-
-    fireEvent.click(within(photoId).getByRole('button', { name: 'Close Photo ID' }));
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Photo ID' })).toBeNull());
-    expect(pill).not.toHaveAttribute('hidden');
-    expect(pill).toHaveFocus();
+  it('a new chat offers starters that fill the message box without sending', async () => {
+    api.getPortalMessages.mockResolvedValue({ messages: [], hasMore: false, unread: 0 });
+    const { sheet } = await openChat();
+    expect(await within(sheet).findByText('Hi Pat, what can we help with?')).toBeInTheDocument();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Pest, lawn or plant problem' }));
+    const box = within(sheet).getByRole('textbox', { name: 'Message Waves' });
+    expect(box).toHaveValue('I have a pest, lawn or plant problem: ');
+    expect(box).toHaveFocus();
+    expect(api.sendPortalMessage).not.toHaveBeenCalled();
   });
 
-  it('shows an unread answer on the pill and on the Chat row', async () => {
+  it('a session switch while the sheet is open reloads the thread and drops the draft', async () => {
+    const view = render(<BrowserRouter><PortalPage /></BrowserRouter>);
+    await screen.findByText(/hello pat/i);
+    fireEvent.click(await screen.findByRole('button', { name: /^Waves Chat/ }));
+    const before = await screen.findByRole('dialog', { name: 'Waves Chat' });
+    await within(before).findByText('Your visit is set for Thursday.');
+    fireEvent.change(within(before).getByRole('textbox', { name: 'Message Waves' }), { target: { value: 'For the first account' } });
+
+    api.getPortalMessages.mockResolvedValue({
+      messages: [{ id: 'w9', from: 'waves', body: 'Second account thread.', createdAt: '2026-11-03T17:00:00.000Z' }],
+      hasMore: false,
+      unread: 0,
+    });
+    auth.epoch = 1;
+    view.rerender(<BrowserRouter><PortalPage /></BrowserRouter>);
+    const after = await screen.findByRole('dialog', { name: 'Waves Chat' });
+    expect(await within(after).findByText('Second account thread.')).toBeInTheDocument();
+    expect(within(after).queryByText('Your visit is set for Thursday.')).toBeNull();
+    expect(within(after).getByRole('textbox', { name: 'Message Waves' })).toHaveValue('');
+  });
+
+  it('shows an unread answer on the pill and clears it once the sheet has shown it', async () => {
     messagesOn(2);
     await renderHome();
-    const pill = await screen.findByRole('button', { name: 'Help, 2 unread messages' });
-    await waitFor(() => {
-      fireEvent.click(pill);
-      expect(screen.getByRole('dialog', { name: 'Help' })).toBeInTheDocument();
-    });
-    const chat = within(screen.getByRole('dialog', { name: 'Help' })).getByRole('button', { name: /Chat with Waves/ });
-    expect(within(chat).getByLabelText('2 unread messages')).toHaveTextContent('2');
+    const pill = await screen.findByRole('button', { name: 'Waves Chat, 2 unread messages' });
+    fireEvent.click(pill);
+    await waitFor(() => expect(api.markPortalMessagesRead).toHaveBeenCalledWith('w1'));
+    await waitFor(() => expect(pill).toHaveAccessibleName('Waves Chat'));
   });
 });
 
-describe('Help pill with one feature, or none', () => {
-  it('opens Photo ID directly when Messages is off', async () => {
+describe('Waves Chat pill without Messages', () => {
+  it('is not on the page when Messages is off, even with Photo ID offered', async () => {
     messagesOff(); photoIdOn();
     await renderHome();
     await waitFor(() => expect(api.getPortalMessagesUnread).toHaveBeenCalled());
-    fireEvent.click(await screen.findByRole('button', { name: 'Help' }));
-    expect(await screen.findByRole('dialog', { name: 'Photo ID' })).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: 'Help' })).toBeNull();
-  });
-
-  it('opens Messages directly when Photo ID is off', async () => {
-    messagesOn(); photoIdOff();
-    await renderHome();
     await waitFor(() => expect(api.getPhotoIds).toHaveBeenCalled());
-    fireEvent.click(await screen.findByRole('button', { name: 'Help' }));
-    expect(await screen.findByRole('heading', { name: 'Messages' })).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: 'Help' })).toBeNull();
-  });
-
-  it('is not on the page when neither is offered', async () => {
-    messagesOff(); photoIdOff();
-    await renderHome();
-    await waitFor(() => expect(api.getPortalMessagesUnread).toHaveBeenCalled());
-    await waitFor(() => expect(api.getPhotoIds).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /^Waves Chat/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Help/ })).toBeNull();
   });
 
@@ -190,13 +188,13 @@ describe('Help pill with one feature, or none', () => {
     auth.customer = { ...holder, cancelled: true, cancelledAt: '2026-08-22' };
     const first = render(<BrowserRouter><PortalPage /></BrowserRouter>);
     await screen.findByRole('button', { name: /^More$/ });
-    expect(screen.queryByRole('button', { name: /^Help/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Waves Chat/ })).toBeNull();
     first.unmount();
 
     auth.customer = { ...holder, actor: { kind: 'contact', slot: 1, name: 'Sam', phone: '+19415550202' } };
     render(<BrowserRouter><PortalPage /></BrowserRouter>);
     await screen.findByRole('button', { name: /^More$/ });
-    expect(screen.queryByRole('button', { name: /^Help/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Waves Chat/ })).toBeNull();
     expect(api.getPortalMessagesUnread).not.toHaveBeenCalled();
     expect(api.getPhotoIds).not.toHaveBeenCalled();
   });

@@ -555,9 +555,9 @@
     {
       "router": "server/routes/moving-public.js",
       "mount": "/api/public/moving",
-      "reason": "Tokenized moving page (GATE_MOVING_FLOW, dark): the link the office sends a customer who is moving; the USE entries are the router's 404-when-dark gate (always next() or 404) and its rate limiter",
+      "reason": "Tokenized moving page: the link the office sends a customer who is moving; the USE entries are the router's privacy-header middleware (always next()) and its rate limiter",
       "routes": [
-        "USE /api/public/moving (inline function#42a28bfa)",
+        "USE /api/public/moving (inline function#d9c5db2c)",
         "GET /api/public/moving/:token",
         "POST /api/public/moving/:token/check",
         "POST /api/public/moving/:token/submit"
