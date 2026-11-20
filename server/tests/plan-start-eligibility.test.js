@@ -32,6 +32,7 @@ function fakeDb(tables = {}, { scheduledColumns = {}, tableProbe = null } = {}) 
       orWhereNull: filter('orWhereNull'),
       // The annual-prepay coverage read (coveredTermsAsOf) filters with raw SQL; this fake answers by table.
       whereRaw: filter('whereRaw'),
+      join() { return q; },
       leftJoin() { return q; },
       orderBy() { return q; },
       limit() { return q; },
@@ -595,6 +596,37 @@ describe('planStartBlocker', () => {
       expect(await blocker(world({ tables: { 'scheduled_services as record': [{ ...kind, serviceKey: 'pest_quarterly' }] } }))).toBeNull();
     });
 
+    // An add-on is a second service on a visit, with an identity of its own: its saved name, the catalog key it
+    // was booked under, and its catalog row. The read returns them in fields the service-row rule reads.
+    describe('an add-on of a visit of the account', () => {
+      const HOME_ADDON = { service_name: 'Mosquito Add-On', serviceKey: 'mosquito_monthly', service_key: 'mosquito_monthly', name: 'Monthly Mosquito' };
+      const withAddons = (addons, given = {}) => world({ ...given, tables: { 'scheduled_service_addons as addon': addons } });
+
+      test.each([
+        ["a commercial service in the add-on's saved name", { service_name: 'Commercial Mosquito Service', serviceKey: null, service_key: null, name: null }],
+        ['a commercial key the add-on was booked under, with no catalog row', { service_name: 'Mosquito Add-On', serviceKey: 'commercial_mosquito', service_key: null, name: null }],
+        ['a commercial catalog key behind a generic name', { service_name: 'Mosquito Add-On', serviceKey: null, service_key: 'commercial_mosquito_monthly', name: 'Monthly Mosquito' }],
+        ['a commercial catalog name behind a generic name', { service_name: 'Mosquito Add-On', serviceKey: null, service_key: 'mosquito_monthly_b', name: 'Commercial Monthly Mosquito' }],
+      ])('%s: commercial, and no plan record is read', async (_label, addon) => {
+        const reads = [];
+        const db = withAddons([HOME_ADDON, addon, HOME_ADDON], { ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      test('home add-ons only are not commercial', async () => {
+        expect(await blocker(withAddons([HOME_ADDON, { service_name: 'Fire Ant Treatment', serviceKey: null, service_key: null, name: null }]))).toBeNull();
+      });
+
+      // The fake applies no filter and no join, so this pins the filter: every add-on of a visit of this
+      // customer, whatever the visit's status. PostgreSQL proves the join and another customer's add-on.
+      test("the read asks for the add-ons of this customer's visits", async () => {
+        const reads = [];
+        await blocker(withAddons((calls) => { reads.push(calls.map((call) => [...call])); return []; }));
+        expect(reads).toEqual([[['where', { 'visit.customer_id': 'cust-1' }]]]);
+      });
+    });
+
     // The app knows the commercial agreement by its template key. A contract from it counts at any status.
     describe('a contract of the account', () => {
       const withContracts = (templates, given = {}) => world({ ...given, tables: { customer_contracts: templates.map((key) => ({ document_template_key: key })) } });
@@ -634,6 +666,7 @@ describe('planStartBlocker', () => {
       const HOME_EXTRACTION = {
         property: { property_type: 'single_family', commercial_subtype: null, service_address_occupancy: 'owner_occupied', hoa_common_area_service: false },
         caller: { relationship_to_property: 'owner' },
+        service_request: { primary_service_category: 'pest_general', specific_service_name: 'Quarterly Pest Control' },
         commercial_signals: null,
         call_summary: 'Asked about ants in the kitchen.',
         triage_flags: ['quote_promised'],
@@ -676,6 +709,12 @@ describe('planStartBlocker', () => {
         // The first format of the extraction: the service the caller asked for.
         ['a commercial service in the first format', CALL({ ai_extraction: JSON.stringify({ requested_service: 'Commercial pest control' }) })],
         ["a commercial service inside the first format's object", CALL({ ai_extraction: JSON.stringify({ requested_service: { primary: 'Pest control', also: ['Monthly COMMERCIAL kitchen service'] } }) })],
+        // The extraction names the service in its own field. A first format built from an extraction keeps the
+        // service category in requested_service, so the name is in the extraction only.
+        ['a commercial service name in the extraction, behind a generic first format', CALL({
+          ai_extraction: JSON.stringify({ requested_service: 'pest_general' }),
+          ...extraction({ service_request: { primary_service_category: 'pest_general', specific_service_name: 'Commercial Pest Control' } }),
+        })],
         // The address check: Google reads the service address as a business and not as a home.
         ['an address the check reads as a business and not as a home', CALL(addressUse({ business: true, residential: false, poBox: false }))],
         ['an address check saved as JSON text', CALL({ ai_address_validation: JSON.stringify({ status: 'corrected', addressUse: { business: true, residential: false } }) })],
@@ -696,6 +735,11 @@ describe('planStartBlocker', () => {
         ['a call with no extraction and no validation', CALL({ ai_extraction: null, ai_extraction_enriched: null, ai_validation: null })],
         ['a blank first format', CALL({ ai_extraction: '  ' })],
         ['a first format with no requested service', CALL({ ai_extraction: JSON.stringify({ call_summary: 'Voicemail, no request.' }) })],
+        ['an extraction with no service name', CALL(extraction({ service_request: { primary_service_category: 'other', specific_service_name: null } }))],
+        // Only the service name counts in the service request: a price quote is the words of the call.
+        ['the word in another field of the service request', CALL(extraction({
+          service_request: { specific_service_name: 'Pest control', price: { evidence_quote: 'The commercial rate is higher than the home rate.' } },
+        }))],
         ['other flags', CALL({ ai_validation: { routing: { flags: ['quote_promised', 'out_of_service_area'], appointment_blocking_flags: ['caller_not_authorized'] } } })],
         // Both halves of the address use must be affirmative.
         ['an address the check reads as a business and as a home', CALL(addressUse({ business: true, residential: true }))],
@@ -814,6 +858,7 @@ describe('planStartBlocker', () => {
         customer: { building_use: 'residential' },
         tables: {
           estimates: record('estimates'), leads: record('leads'), 'scheduled_services as record': record('visits'),
+          'scheduled_service_addons as addon': record('add-ons'),
           'service_records as record': record('reports'), customer_contracts: record('contracts'),
           call_log: record('calls'), day_agreement_decisions: record('day agreements'),
         },
@@ -1031,6 +1076,7 @@ describe('planStartBlocker', () => {
       ['the estimate read', { tables: { estimates: failing('estimate read down') } }, 'estimate read down'],
       ['the lead read', { tables: { leads: failing('lead read down') } }, 'lead read down'],
       ['the read of the visit services', { tables: { 'scheduled_services as record': failing('visit service read down') } }, 'visit service read down'],
+      ['the read of the visit add-ons', { tables: { 'scheduled_service_addons as addon': failing('add-on read down') } }, 'add-on read down'],
       ['the read of the service report services', { tables: { 'service_records as record': failing('report service read down') } }, 'report service read down'],
       ['the read of the contracts', { tables: { customer_contracts: failing('contract read down') } }, 'contract read down'],
       ['the read of the calls', { tables: { call_log: failing('call read down') } }, 'call read down'],

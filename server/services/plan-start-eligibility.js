@@ -5,17 +5,18 @@
 // it reads stands against it, or the first reason that does:
 //   'not_live'    no such customer, an inactive account, or a deleted one
 //   'commercial'  a record of the account says commercial: the account row,
-//                 a saved property, an estimate, a lead, a visit, a service
-//                 report, a contract, a call or a day-agreement decision
-//                 (never a residential plan)
+//                 a saved property, an estimate, a lead, a visit or one of
+//                 its add-ons, a service report, a contract, a call or a
+//                 day-agreement decision (never a residential plan)
 //   'has_plan'    the customer already holds a plan (customerHoldsPlan below)
 // A failed read THROWS. An outage is never "nothing stands against it": the
 // caller is a job that tries again, or a pricer that must return no price.
 //
 // What it reads: the customers row, and the records that carry the id of that
 // ONE account. For the commercial rule: its saved properties, its estimates,
-// its leads, its visits, its service reports, its contracts, its calls and
-// its day-agreement decisions (hasCommercialRecord below). For the plan rule:
+// its leads, its visits and their add-ons, its service reports, its
+// contracts, its calls and its day-agreement decisions (hasCommercialRecord
+// below). For the plan rule:
 // its plan records (customerHoldsPlan below lists them).
 // What it does not read:
 // - another account of the same person or home (a duplicate profile, a payer,
@@ -173,8 +174,9 @@ async function customerHoldsPlan(database, customer) {
 // proposal writes a building use only when it carries one (and the column
 // came with no backfill for the wins before it). So the rule also reads the
 // records of the account that the app itself sorts as commercial: its saved
-// properties, its estimates, its leads, its visits, its service reports, its
-// contracts, its calls and its day-agreement decisions (hasCommercialRecord).
+// properties, its estimates, its leads, its visits and their add-ons, its
+// service reports, its contracts, its calls and its day-agreement decisions
+// (hasCommercialRecord).
 // Each kind is read by the rules the app applies to a SAVED record of that
 // kind. ONE mark is enough, whatever its age or status: an old estimate, a
 // cancelled visit, a deleted lead, a removed address, a call of last year.
@@ -458,6 +460,23 @@ async function hasCommercialServiceIn(database, table, customerId) {
   return kinds.some((kind) => isCommercialServiceRow(kind));
 }
 
+// An add-on of a visit of the account with a commercial service, by the same
+// rule. An add-on is a second service on the visit with an identity of its
+// own, and the app reads that identity from four fields
+// (tree-shrub-fast-context.js): the name the add-on was saved under, the
+// catalog key it was booked under (service_key_snapshot), and the key and the
+// name of its catalog row, where its link to the catalog still stands. Every
+// add-on of every visit of the account counts, whatever the visit's status.
+async function hasCommercialAddon(database, customerId) {
+  const { isCommercialServiceRow } = require('./self-booking-plan-sync');
+  const kinds = await database('scheduled_service_addons as addon')
+    .join('scheduled_services as visit', 'addon.scheduled_service_id', 'visit.id')
+    .leftJoin('services as svc', 'addon.service_id', 'svc.id')
+    .where({ 'visit.customer_id': customerId })
+    .distinct('addon.service_name', 'addon.service_key_snapshot as serviceKey', 'svc.service_key', 'svc.name as name');
+  return kinds.some((kind) => isCommercialServiceRow(kind));
+}
+
 // A contract of the account made from a commercial agreement template, at any
 // status (a draft, one sent, one signed, one voided). The app knows the
 // commercial agreement by its template key (TEMPLATE_KEY in
@@ -494,9 +513,13 @@ async function hasCommercialContract(database, customerId) {
 //   (computeDeterministicTriageFlags in call-triage-flags.js), anywhere in
 //   either verdict: the model's own flags, the routing flags, the flags that
 //   hold a booking, or a list a later gate moved the flag to.
-// - The service the caller asked for as the first format kept it
-//   (requested_service, a text or an object of texts): the word in it, as in
-//   the service label of a lead.
+// - The service the caller asked for, by name, in either format: the first
+//   format's requested_service (a text or an object of texts) and the
+//   extraction's service_request.specific_service_name. The word in it
+//   counts, as in the service label of a lead. A first format built from an
+//   extraction keeps the service CATEGORY there (extraction-compat.js), and
+//   that vocabulary has no commercial word, so each format is read by its
+//   own field.
 // - The address check of the call's service address: Google reads it as a
 //   business and not as a home (addressUse). Both halves must be
 //   affirmative, as in the app's own rule for a business building
@@ -526,7 +549,7 @@ function isCommercialCallRow(call) {
     || someObject(extraction, describesCommercialProperty) || someObject(firstFormat, describesCommercialProperty)
     || hasSetValue(extraction.commercial_signals)
     || someText(extraction, isCommercialCallFlag) || someText(validation, isCommercialCallFlag)
-    || someText(firstFormat.requested_service, carriesCommercialWord)
+    || someText([firstFormat.requested_service, asObject(extraction.service_request).specific_service_name], carriesCommercialWord)
     || isBusinessAddress(addressCheck);
 }
 
@@ -561,6 +584,7 @@ async function hasCommercialRecord(database, customerId) {
     || (await hasCommercialEstimate(database, customerId))
     || (await hasCommercialLead(database, customerId))
     || (await hasCommercialServiceIn(database, 'scheduled_services', customerId))
+    || (await hasCommercialAddon(database, customerId))
     || (await hasCommercialServiceIn(database, 'service_records', customerId))
     || (await hasCommercialContract(database, customerId))
     || (await hasCommercialCall(database, customerId))

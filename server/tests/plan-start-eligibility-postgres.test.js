@@ -147,6 +147,7 @@ postgres('planStartBlocker (live Postgres)', () => {
     ai_extraction_enriched: {
       property: { property_type: 'single_family', commercial_subtype: null, service_address_occupancy: 'owner_occupied', hoa_common_area_service: false },
       caller: { relationship_to_property: 'owner' },
+      service_request: { primary_service_category: 'pest_general', specific_service_name: 'Quarterly Pest Control' },
       commercial_signals: null,
       triage_flags: ['quote_promised'],
     },
@@ -172,6 +173,12 @@ postgres('planStartBlocker (live Postgres)', () => {
       customer_id: customer ? customer.id : null, source_kind: 'call', source_key: `synthetic-${hex(8)}`, verdict: 'would_book',
       judged: judged === null ? null : JSON.stringify(judged), ...change,
     }).returning('*');
+    return row;
+  }
+
+  // An add-on of a visit: a second service on it. By default a home service with no catalog link.
+  async function seedAddon(visit, change = {}) {
+    const [row] = await trx('scheduled_service_addons').insert({ scheduled_service_id: visit.id, service_name: 'Mosquito Add-On', ...change }).returning('*');
     return row;
   }
 
@@ -596,6 +603,10 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['the commercial flag among the routing flags', { ai_validation: { routing: { flags: ['commercial_requires_quote'], appointment_blocking_flags: [] } } }],
       ['the HOA flag among the flags that hold a booking', { ai_validation: { routing: { flags: [], appointment_blocking_flags: ['hoa_common_area_requires_approval'] } } }],
       ['a commercial service in the first format, with no other verdict', { ai_extraction: { requested_service: 'Commercial pest control' }, ai_extraction_enriched: null, ai_validation: null }],
+      ['a commercial service name in the extraction, behind a generic first format', {
+        ai_extraction: { requested_service: 'pest_general' },
+        ...enriched({ service_request: { primary_service_category: 'pest_general', specific_service_name: 'Commercial Pest Control' } }),
+      }],
       ['an address the check reads as a business and not as a home', { ai_address_validation: { status: 'validated_accept', addressUse: { business: true, residential: false, poBox: false } } }],
     ])('%s, beside a call about a home: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
@@ -612,6 +623,7 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['the tenant of an apartment', enriched({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'tenant' } })],
       ['a commercial-signals block with nothing set', enriched({ commercial_signals: { business_name: null, decision_authority_confirmed: false, insurance_or_compliance_requirements: [] } })],
       ['the word in the summary of the call', { ai_extraction: { requested_service: 'Pest control at home', call_summary: 'Works at a commercial bakery. Wants service at home.' } }],
+      ['the word in a price quote of the service request', enriched({ service_request: { specific_service_name: 'Pest control', price: { evidence_quote: 'The commercial rate is higher.' } } })],
     ])('%s: not commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedCall(customer);
@@ -715,6 +727,56 @@ postgres('planStartBlocker (live Postgres)', () => {
       const other = await seedCustomer();
       await seedVisit(customer, { service_key_snapshot: 'pest_quarterly' });
       await seedVisit(other, { service_type: 'Pest Control', service_key_snapshot: 'commercial_pest' });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+      expect(await planStartBlocker(trx, other.id)).toBe('commercial');
+    });
+  });
+
+  // An add-on is a second service on a visit, with an identity of its own: the name it was saved under, the
+  // catalog key it was booked under, and its catalog row.
+  describe('an add-on of a visit of the account', () => {
+    test.each([
+      ['its saved name', { service_name: 'Commercial Mosquito Service' }],
+      ['the catalog key it was booked under, with no catalog link', { service_key_snapshot: 'commercial_mosquito' }],
+    ])('a commercial add-on by %s, on a done visit with a home service: commercial', async (_label, change) => {
+      expect(await blockerFor(async (customer) => {
+        const visit = await seedVisit(customer);
+        await seedAddon(visit, { service_key_snapshot: 'mosquito_monthly' });
+        const addon = await seedAddon(visit, change);
+        expect(addon.service_id).toBeNull();
+      })).toBe('commercial');
+    });
+
+    test.each([
+      ['key', { service_key: `commercial_synthetic_${hex(6)}` }],
+      ['name', { name: 'Synthetic Commercial Service' }],
+    ])('a commercial catalog %s behind a generic add-on name: commercial', async (_label, catalog) => {
+      const service = await seedCatalogService(catalog);
+      expect(await blockerFor(async (customer) => seedAddon(await seedVisit(customer), { service_id: service.id }))).toBe('commercial');
+    });
+
+    test.each([
+      ['a cancelled visit', { status: 'cancelled' }],
+      ['a visit still to come', { status: 'confirmed', scheduled_date: day(10) }],
+    ])('a commercial add-on of %s: commercial', async (_label, change) => {
+      expect(await blockerFor(async (customer) => seedAddon(await seedVisit(customer, change), { service_name: 'Commercial Mosquito Service' }))).toBe('commercial');
+    });
+
+    test('home add-ons only, one of them linked to a home catalog service, are not commercial', async () => {
+      const service = await seedCatalogService();
+      expect(await blockerFor(async (customer) => {
+        const visit = await seedVisit(customer);
+        await seedAddon(visit);
+        await seedAddon(visit, { service_id: service.id, service_key_snapshot: 'mosquito_monthly' });
+        await seedAddon(await seedVisit(customer, { status: 'cancelled' }), { service_name: 'Fire Ant Treatment' });
+      })).toBeNull();
+    });
+
+    test("another customer's commercial add-on says nothing about this customer", async () => {
+      const customer = await seedCustomer();
+      const other = await seedCustomer();
+      await seedAddon(await seedVisit(customer));
+      await seedAddon(await seedVisit(other), { service_key_snapshot: 'commercial_mosquito' });
       expect(await planStartBlocker(trx, customer.id)).toBeNull();
       expect(await planStartBlocker(trx, other.id)).toBe('commercial');
     });
