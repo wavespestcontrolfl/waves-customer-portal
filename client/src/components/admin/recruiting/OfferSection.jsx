@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { ActionFeedback, Button } from "../../ui";
 import { fetchSignedCopy } from "./offerApi";
 import OfferTimeline, { History, SignedCopyView } from "./OfferTimeline";
-import { offerErrorMessage, shownOffer } from "./offerLogic";
+import { firstNameOf, offerErrorMessage, shownOffer } from "./offerLogic";
 
 // The offer part of the application detail. Renders nothing while the flow is
 // off (today's status-only behavior); a failed read shows an error with Retry
@@ -27,13 +27,16 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
     );
   }
   if (!enabled || !data) return null;
-  const firstName = String(detail.contact_snapshot?.name || "the applicant").trim().split(/\s+/)[0];
+  const firstName = firstNameOf(detail.contact_snapshot?.name);
   const history = Array.isArray(data.history) ? data.history : [];
   // A new offer is allowed while the application is in Offer and nothing is out
   // or in draft: no offer yet, or the last one was withdrawn, closed unsigned,
   // declined, or signed before the application was moved back to Offer.
   const current = shownOffer(data.current);
-  const stillInOffer = detail.status === "offer";
+  // The offer read returns the stage it read with the offers (applicationStatus). The application is read on its own,
+  // so a signature between the two reads shows the card ahead of the stage: the page re-reads the application then,
+  // and until both reads agree, a new offer waits.
+  const stillInOffer = detail.status === "offer" && (data.applicationStatus ?? detail.status) === detail.status;
   // The page's last read of the offer, or of the application (detailStale: its stage
   // may be out of date), failed: every owner action waits for a read that works.
   const readFailed = Boolean(refreshError) || detailStale;

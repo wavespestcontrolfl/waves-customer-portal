@@ -611,6 +611,11 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
           `/admin/careers/${detail.id}/stage-preview?status=${encodeURIComponent(status)}`,
         );
         if (seq !== previewSeq.current) return null;
+        // Confirm sends back the stamp of the job offers this preview showed, and the server checks a move against
+        // them only when it has one. A preview without a valid stamp is refused like a failed read (Try again).
+        if (!/^[0-9a-f]{32}$/.test(data?.offers?.stamp ?? "")) {
+          throw new Error("The preview did not say what this move does to the job offers. Nothing was changed. Try again.");
+        }
         setPreview(data);
         // A channel this preview cannot reach is never selected. The dialog opens with
         // every channel on, so this leaves on the ones it can reach; a re-read turns off
@@ -1164,6 +1169,18 @@ export default function RecruitingPage() {
       else setError(err.message);
     }
   }, [stageWorkflow, reloadOfferFor]);
+
+  // The offer read returns the stage it read with the offers (applicationStatus). The application is read on its own,
+  // and a first open reads it before the offer, so an answer between the two reads leaves the stage behind the offer
+  // card: re-read the application in place, once for each offer read that disagrees with it. Until the two agree, a
+  // new offer waits (OfferSection).
+  const offerRead = offerFlow.data;
+  const checkedOfferRead = useRef(null);
+  useEffect(() => {
+    if (!offerRead || checkedOfferRead.current === offerRead) return;
+    checkedOfferRead.current = offerRead;
+    if (detail && offerRead.applicationStatus && offerRead.applicationStatus !== detail.status) openDetail(detail.id, { refresh: true });
+  }, [offerRead, detail, openDetail]);
 
   const closeDetail = useCallback(() => {
     detailSeq.current += 1; // invalidate any in-flight open

@@ -115,7 +115,10 @@ function setupFetch(routes, { offer = offerPayload(), detail = detailFixture() }
     }
     if (key === 'GET /admin/careers/app-1') return Promise.resolve(res(200, { application: detail }));
     if (path.includes('/stage-preview')) {
-      return Promise.resolve(res(200, { status: 'offer', templated: false, channels: {}, sending_enabled: false }));
+      return Promise.resolve(res(200, {
+        status: 'offer', templated: false, channels: {}, sending_enabled: false,
+        offers: { held: false, draft: false, owner_only: false, stamp: '0'.repeat(32) },
+      }));
     }
     return Promise.resolve(res(200, {}));
   });
@@ -583,6 +586,42 @@ describe('RecruitingPage offer flow: read failures, re-offers and drafts', () =>
     expect(detailReads).toBe(2);
   });
 
+  // A first open reads the application, then the offer. The applicant signs between the two reads: the offer read
+  // returns the stage it read with the offers (Hired), so the page re-reads the application, and Make an offer waits.
+  it('a first open whose offer read shows a later stage re-reads the application, and Make an offer waits for it', async () => {
+    let detailReads = 0;
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const signed = offerRecord({ status: 'accepted', timeline: [] });
+    const { calls } = setupFetch(
+      {
+        'GET /admin/careers/app-1': () => (detailReads++ === 0
+          ? res(200, { application: detailFixture({ status: 'offer' }) })
+          : held.then(() => res(200, { application: detailFixture({ status: 'hired' }) }))),
+      },
+      { offer: offerPayload({ current: signed, applicationStatus: 'hired' }) },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    await waitFor(() => expect(calls.filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1?peek=1')).toHaveLength(1));
+    // The re-read is still out: the detail reads Offer, and no new offer is offered next to the signed one.
+    expect(screen.queryByRole('button', { name: 'Offer' })).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'Make an offer' })).toBeNull();
+    await act(async () => { release(); });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Hired' })).toBeNull()); // the detail reads Hired
+    expect(detailReads).toBe(2);
+  });
+
+  it('a first open whose offer read shows the same stage reads the application once', async () => {
+    const { calls } = setupFetch({}, {
+      offer: offerPayload({ current: offerRecord({ status: 'sent', timeline: [] }), applicationStatus: 'offer' }),
+      detail: detailFixture({ status: 'offer' }),
+    });
+    await openDetail();
+    await screen.findByTestId('offer-card');
+    expect(calls.filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1?peek=1')).toHaveLength(0);
+  });
+
   it('a 404 without enabled:false is a failure, not the gate-off answer', async () => {
     setupFetch({}, { offer: () => res(404, { error: 'Not found' }) });
     await openDetail();
@@ -708,7 +747,7 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
 
   // The stage dialog words what the server's stage preview says the move does to the job offers: the same rule and owner
   // check as the move itself, with the offer gate on or off.
-  const stagePreview = (offers) => () => res(200, { status: 'reviewed', templated: false, channels: {}, sending_enabled: false, offers });
+  const stagePreview = (offers) => () => res(200, { status: 'reviewed', templated: false, channels: {}, sending_enabled: false, offers: { stamp: 'd'.repeat(32), ...offers } });
   const openMove = async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }));
     return (await screen.findByRole('heading', { name: 'Move to Reviewed' })).closest('[role="dialog"]');
@@ -750,6 +789,30 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     const stage = await openMove();
     expect(await within(stage).findByText('This move also withdraws the offer you sent to Jordan, so their link stops working, and discards the unsent draft.')).toBeInTheDocument();
     expect(screen.queryByTestId('offer-card')).toBeNull();
+  });
+
+  // The server checks a move against the offers its dialog showed only when the move carries their stamp: a preview
+  // without one would let Confirm withdraw an offer the dialog never named.
+  it('refuses a stage preview without the job offers stamp like a failed read, and Try again loads one that has it', async () => {
+    let stamped = false;
+    setupFetch(
+      {
+        'GET /admin/careers/app-1/stage-preview?status=reviewed': () => res(200, {
+          status: 'reviewed', templated: false, channels: {}, sending_enabled: false,
+          offers: { held: true, draft: false, owner_only: false, ...(stamped ? { stamp: 'e'.repeat(32) } : {}) },
+        }),
+      },
+      { offer: offerPayload({ current: { ...sent, status: 'sent' } }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    await screen.findByTestId('offer-card');
+    const stage = await openMove();
+    expect(await within(stage).findByText('The preview did not say what this move does to the job offers. Nothing was changed. Try again.')).toBeInTheDocument();
+    expect(within(stage).getByRole('button', { name: 'Confirm' })).toBeDisabled();
+    stamped = true;
+    fireEvent.click(within(stage).getByRole('button', { name: 'Try again' }));
+    expect(await within(stage).findByText('This move also withdraws the offer you sent to Jordan, so their link stops working.')).toBeInTheDocument();
+    expect(within(stage).getByRole('button', { name: 'Confirm' })).toBeEnabled();
   });
 
   it('reads the preview again when the job offers changed since it, and sends the offers it showed', async () => {

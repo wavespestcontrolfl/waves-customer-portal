@@ -24,6 +24,7 @@ import {
   APPLICATION_CLOSED_TEXT,
   describeSend,
   expiryLabel,
+  firstNameOf,
   formatIssued,
   isGateOffAnswer,
   isLostAnswer,
@@ -186,10 +187,13 @@ function offerIdsOf(data) {
 // The status a send's result shows for its offer: from the newer of the send's answer and the latest read, by the
 // offer's version (updatedAt, which every write moves forward). A read can be newer (another session withdrew or
 // replaced the offer, or the applicant answered, while the result is open) or older (a read that started during the
-// send and landed after its answer). Without both versions, the send's answer.
+// send and landed after its answer). A read of the same version is the same row read later: it can add only the
+// server's expiry, which closes a sent offer by the clock without a write. The page's clock applies the same expiry to
+// a result left open (shownOffer). Without both versions, the send's answer.
 function sentStatus(result, data) {
   const now = offerIn(data, result.offer.id);
-  return now && Date.parse(now.updatedAt) > Date.parse(result.offer.updatedAt) ? now.status : result.offer.status;
+  const newest = now && Date.parse(now.updatedAt) >= Date.parse(result.offer.updatedAt) ? now : result.offer;
+  return shownOffer(newest).status;
 }
 
 function initialDraftId(draft, data) {
@@ -293,7 +297,7 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
   return {
     base,
     fields,
-    firstName: String(contact?.name || "the applicant").trim().split(/\s+/)[0],
+    firstName: firstNameOf(contact?.name),
     sendTo: [phone && `Text ${phone}`, email && `Email ${email}`].filter(Boolean).join(" · "),
     startError,
     rateErrors,

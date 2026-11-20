@@ -270,6 +270,9 @@ export function describeSend(comms, firstName, offerStatus) {
   if (ANSWERED.includes(offerStatus)) {
     return { headline: `Offer sent to ${firstName}.`, lines: [`${firstName} has already answered it. The offer card shows the answer.`] };
   }
+  if (offerStatus === "expired") {
+    return { headline: "This offer is no longer open.", lines: [...lines, `It passed its expiry before ${firstName} signed it. The offer card shows it as ${STATUS_LABEL.expired}.`] };
+  }
   if (offerStatus !== "sent") {
     return { headline: "This offer is no longer open.", lines: [...lines, "It was withdrawn or replaced after you pressed Send. The offer card shows where it stands."] };
   }
@@ -280,24 +283,28 @@ export function describeSend(comms, firstName, offerStatus) {
   return { headline: "The offer is open.", lines };
 }
 
-// A 'sent' offer past its expiresAt reads as closed unsigned even before the
-// server's own status says so.
 // The stage dialog's line about the application's job offers, or null. The server's stage preview says what the move
 // would withdraw, by the rule the move applies, with the offer gate on or off (admin-careers.js stageOfferEffect); this
 // only words it. owner_only: the move withdraws an offer the applicant holds, which only the owner account may do, so
-// the dialog keeps Confirm off. No `offers` (a server from before it) says nothing.
+// the dialog keeps Confirm off. A preview without `offers` never reaches the dialog: its read is refused (Try again).
 export const OWNER_ONLY_MOVE_TEXT = "This application has a job offer out. Only the owner account can move it out of Offer.";
 
+// The applicant's first name on the owner's screens: the first word of the name on file, or "the applicant".
+export function firstNameOf(name) {
+  return String(name || "the applicant").trim().split(/\s+/)[0];
+}
+
 export function stageMoveOfferNote(offers, name) {
-  if (!offers) return null;
   if (offers.owner_only) return OWNER_ONLY_MOVE_TEXT;
-  const firstName = String(name || "the applicant").trim().split(/\s+/)[0];
+  const firstName = firstNameOf(name);
   if (offers.held) {
     return `This move also withdraws the offer you sent to ${firstName}, so their link stops working${offers.draft ? ", and discards the unsent draft" : ""}.`;
   }
   return offers.draft ? "This move also discards the unsent offer draft." : null;
 }
 
+// A 'sent' offer past its expiresAt reads as closed unsigned even before the
+// server's own status says so.
 export function shownOffer(offer, now = new Date()) {
   const lapsed = offer?.status === "sent" && offer.expiresAt && new Date(offer.expiresAt) < now;
   return lapsed ? { ...offer, status: "expired" } : offer;

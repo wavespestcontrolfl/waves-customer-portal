@@ -213,6 +213,43 @@ describe("OfferDialog", () => {
     expect(screen.queryByText(/Offer sent to/)).toBeNull();
   });
 
+  // The server closes a sent offer past its expiry by the clock, without a write: a later read of the same version says
+  // expired. The result says so in its own words (not "withdrawn or replaced") and gives no Revise advice.
+  it("a send result shows an offer the server closed at its expiry as closed unsigned, from a read of the same version", async () => {
+    const sentRow = draftRow({ status: "sent", updatedAt: "2026-12-12T13:15:00.000Z", expiresAt: "2026-12-19T13:15:00.000Z" });
+    sendOffer.mockResolvedValueOnce({ offer: sentRow, comms: { sms: { outcome: "failed" }, email: { outcome: "failed" } } });
+    const outside = {};
+    const afterSend = { ...panel(draftRow()), current: sentRow };
+    render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} onSent={async () => { outside.read(afterSend); return afterSend; }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    const ask = await screen.findByRole("dialog", { name: "Send offer" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
+    expect(await screen.findByText("The offer is open.")).toBeInTheDocument();
+    act(() => outside.read({ ...panel(draftRow()), current: { ...sentRow, status: "expired" } }));
+    expect(await screen.findByText("This offer is no longer open.")).toBeInTheDocument();
+    expect(screen.getByText("It passed its expiry before Jordan signed it. The offer card shows it as Closed unsigned.")).toBeInTheDocument();
+    expect(screen.queryByText(/withdrawn or replaced/)).toBeNull();
+    expect(screen.queryByText(/use Revise/)).toBeNull();
+  });
+
+  // A result left open past the expiry: the page's clock closes the offer even while a read (from a server clock a
+  // minute behind) still says sent.
+  it("a send result left open past the offer's expiry reads as closed unsigned by the page's clock", async () => {
+    const sentRow = draftRow({ status: "sent", updatedAt: "2026-12-12T13:15:00.000Z", expiresAt: "2026-11-26T15:00:00.000Z" });
+    sendOffer.mockResolvedValueOnce({ offer: sentRow, comms: { sms: { outcome: "sent" }, email: { outcome: "sent" } } });
+    const outside = {};
+    const afterSend = { ...panel(draftRow()), current: sentRow };
+    render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} onSent={async () => { outside.read(afterSend); return afterSend; }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    const ask = await screen.findByRole("dialog", { name: "Send offer" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
+    expect(await screen.findByText("Offer sent to Jordan.")).toBeInTheDocument();
+    vi.setSystemTime(new Date("2026-11-26T15:01:00Z"));
+    act(() => outside.read({ ...panel(draftRow()), current: { ...sentRow } }));
+    expect(await screen.findByText("This offer is no longer open.")).toBeInTheDocument();
+    expect(screen.getByText("It passed its expiry before Jordan signed it. The offer card shows it as Closed unsigned.")).toBeInTheDocument();
+  });
+
   // A send refused for a reason the form does not show (the Terms lost their issued status, say): nothing was sent. The
   // question closes, the form re-reads the offer and the application, and Send follows that read; while the read fails,
   // Send stays off and Try again reads.

@@ -536,9 +536,17 @@ function panelOffers(rows, now) {
   return { draft, out, current, revision };
 }
 
+// The panel reads the application and its offers in one snapshot. A signature or a decline moves both in one
+// transaction, so the stage the panel returns (applicationStatus) is the one its offers were read with, and the page
+// can tell when its own, separate read of the application is behind the offer card.
+const PANEL_SNAPSHOT = Object.freeze({ isolationLevel: 'repeatable read', readOnly: true });
+
 async function adminPanel(applicationId, actor, now = new Date()) {
-  const application = await loadApplication(db, applicationId);
-  const rows = await db('job_offers').where({ application_id: applicationId }).orderBy('created_at', 'desc');
+  const { application, rows } = await db.transaction(async (trx) => {
+    const app = await loadApplication(trx, applicationId);
+    const offers = await trx('job_offers').where({ application_id: applicationId }).orderBy('created_at', 'desc');
+    return { application: app, rows: offers };
+  }, PANEL_SNAPSHOT);
   const names = await sentByNames(db, rows);
   const { terms, payDayLine, blockers } = await loadIssuedTerms(db, now);
   const hashCtx = { terms, payDayLine, ownerName: actor.name, now };
@@ -566,6 +574,8 @@ async function adminPanel(applicationId, actor, now = new Date()) {
     });
   return {
     enabled: true,
+    // The application's stage as this read saw it with the offers below.
+    applicationStatus: application.status,
     termsIssued: !blockers.length,
     terms: terms ? { templateId: terms.templateId, versionId: terms.versionId, title: terms.title, issuedAt: terms.issuedAt } : null,
     termsBlockers: blockers,

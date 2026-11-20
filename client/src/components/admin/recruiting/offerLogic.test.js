@@ -136,6 +136,11 @@ describe('offer helpers', () => {
         lines: ['The text did not go out.', 'The email did not go out.', 'It was withdrawn or replaced after you pressed Send. The offer card shows where it stands.'],
       });
     }
+    // Closed by its expiry, not by anyone: its own words, and no Revise advice.
+    expect(describeSend(failed, 'Jordan', 'expired')).toEqual({
+      headline: 'This offer is no longer open.',
+      lines: ['The text did not go out.', 'The email did not go out.', 'It passed its expiry before Jordan signed it. The offer card shows it as Closed unsigned.'],
+    });
     expect(describeSend({ sms: { outcome: 'sent' } }, 'Jordan', 'accepted')).toEqual({
       headline: 'Offer sent to Jordan.',
       lines: ['Jordan has already answered it. The offer card shows the answer.'],
@@ -163,7 +168,6 @@ describe('stageMoveOfferNote', () => {
     expect(stageMoveOfferNote({ held: true, draft: true, owner_only: true }, name))
       .toBe('This application has a job offer out. Only the owner account can move it out of Offer.');
     expect(stageMoveOfferNote({ held: false, draft: false, owner_only: false }, name)).toBeNull();
-    expect(stageMoveOfferNote(undefined, name)).toBeNull(); // a server from before the field says nothing
   });
 });
 

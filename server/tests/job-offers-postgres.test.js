@@ -277,6 +277,26 @@ jest.setTimeout(120000);
       expect((await JobOffers.adminPanel(app.id, actor(), later)).sendReplacesId).toBeNull();
     });
 
+    // The page reads the application and the offers separately; the panel's own stage lets it see when its application
+    // read is behind the offer card. Both come from one read-only snapshot (here a savepoint inside the suite's
+    // transaction, which takes no isolation level: the options are checked as passed, on the db module the service reads).
+    test('the offer read returns the stage it read with the offers, from one read-only snapshot', async () => {
+      const app = await newApplication();
+      const spy = jest.spyOn(require('../models/db'), 'transaction');
+      try {
+        expect((await JobOffers.adminPanel(app.id, actor())).applicationStatus).toBe('reviewed');
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'repeatable read', readOnly: true });
+      } finally {
+        spy.mockRestore();
+      }
+      const sent = await sendNew(app);
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      expect((await JobOffers.adminPanel(app.id, actor())).applicationStatus).toBe('offer');
+      await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version: await shownVersion(token) });
+      expect(await JobOffers.adminPanel(app.id, actor())).toMatchObject({ applicationStatus: 'hired', current: { id: sent.offer.id, status: 'accepted' } });
+    });
+
     test('a revision Send is refused when the offer out changed after the read, and nothing is replaced or sent', async () => {
       const app = await newApplication();
       const sent = await sendNew(app);
@@ -348,6 +368,7 @@ jest.setTimeout(120000);
       expect(out.refused).toBeUndefined();
       const panel = await JobOffers.adminPanel(app.id, actor());
       expect(panel.current).toMatchObject({ id: sent.offer.id, status: answer === 'signs' ? 'accepted' : 'declined' });
+      expect(panel.applicationStatus).toBe(answer === 'signs' ? 'hired' : 'withdrawn');
       expect(panel.draft).toBeNull();
       expect(panel.history.map((o) => [o.id, o.status])).toEqual([[revised.id, 'withdrawn']]);
     });
