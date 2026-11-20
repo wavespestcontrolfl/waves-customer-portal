@@ -16,7 +16,7 @@ const entries = Object.entries(TRIGGER_REGISTRY);
 
 // The 7 types that were `informational: true` before the rule existed (a fact, not work), plus waiting_summary
 // (owner 2026-11-03): the 8 AM count banner, push only, no bell row, so it is a note, not work,
-// plus open_visits_nudge (GATE_OWNER_NUDGE_BANNER, owner 2026-11-04): the owner's open-visit nudge banner, same reason,
+// plus open_visits_nudge (owner 2026-11-04): the owner's open-visit nudge banner, same reason,
 // plus estimate_call_today (owner 2026-11-19): the 9 AM Call today count banner, push only, same reason.
 const FYI_KEYS = [
   'job_application_withdrawn', 'job_interview_booked', 'job_complete', 'newsletter_proof_approved',

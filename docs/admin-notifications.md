@@ -254,9 +254,8 @@ customer's message by this rule.
    masked like every bell body, then the masked number; with a name on file for the number
    (`nameOnFileForPhone`), the name leads the title and the why ends "via <the line>".
    Its link and Call follow the latest text.
-   `GATE_RING_NEW_CONTACTS` (owner 2026-11-04, "ring new", dark) gives a number with no
-   customer record texting a location line or a Google Business Profile line the same row
-   (`ringUnknownOfficeText`, source "the Parrish (Pest) line"), and the quiet `inbound-text`
+   A number with no customer record (owner 2026-11-04, "ring new") texting a location line
+   or a Google Business Profile line rings the same row (`ringUnknownOfficeText`, source "the Parrish (Pest) line"), and the quiet `inbound-text`
    Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
    staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
    closes these rows once a person answers, like a tracking-line row.
@@ -280,7 +279,7 @@ customer's message by this rule.
    lock for the customer's key before it reads or locks the row. An email follow-up keeps one row
    per promise (`email-commitment:<promise id>`).
    A customer's number that keeps failing texts is one subject too (owner 2026-11-04, "fix check",
-   `GATE_DEAD_NUMBER_ALERT`, `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
+   `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
    30005; no delivered text in between, ordered by send time) to the same number in 180 days raises ONE row,
    "Customers — Jane D.'s phone can't get texts" (`dedupeKey` `dead-number:<customerId>:<last10>`, open-only,
    done-when `phone_replaced`). It closes at the customer's next delivered text when that text went to the dead
@@ -587,11 +586,11 @@ nothing; a write inside a nested transaction waits for the outermost commit). It
 `pushOnly`, to admin-role phones, with the row's own title, body and link and a tag per row. A new kind of this sort is one
 line in `BELL_BANNER_KINDS`, one registry entry whose `build` takes `alertTitle` / `alertBody` / `alertLink`, and a sound line.
 
-New-lead email banner (owner 2026-11-04, "ring new"; gate `GATE_RING_NEW_CONTACTS`, dark): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
+New-lead email banner (owner 2026-11-04, "ring new"): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
 banner on the owner's phone at any hour (kind `new_lead_email`, the New lead sound). The writer (`email-actions.js`) keys the
 existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id>`) and names the kind with
 `notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
-second banner, and no second bell row is written. Gate off: the unkeyed row and no banner, as before.
+second banner, and no second bell row is written.
 
 Lead call-back reminder banner (owner 2026-11-05, "remind"): two kinds of lead
 bell reach only the portal bell. A "Missed call request" bell (`lead-call-reply-missed:<callLogId>`, a press-1 ring nobody
@@ -647,7 +646,7 @@ device send began may have reached a phone, so its claim is kept. Both are failu
 throws inside the cron's `runExclusive` callback, so job health records the run as failed; a skip stays a success. The cron is `0 9 * * *` in `America/New_York` (`scheduler.js`). Each admin turns it off in Push Settings
 (Alerts group, "Morning list: estimates to call today"). It sends nothing to a customer.
 
-The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BANNER`, dark): the 7 PM open-visit nudge
+The owner's open-visit banner (owner 2026-11-04, "banner"): the 7 PM open-visit nudge
 (`server/services/tech-open-visit-nudge.js`) reaches the owner as a Waves Admin banner instead of a text. It is the
 `open_visits_nudge` trigger, sent `pushOnly` to his own admin user only (`onlyUserIds`): no bell row, one banner per ET day
 (the nudge's own per-technician claim), same words as the text, a tap opens `/tech`. It counts as delivered only when a phone
