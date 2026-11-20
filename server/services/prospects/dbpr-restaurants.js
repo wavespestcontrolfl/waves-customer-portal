@@ -285,21 +285,21 @@ function htmlText(html) {
 
 // A follow-up report lists each violation of the inspection with every visit's note, labelled, oldest first:
 // "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
-const VISIT_NOTE_RE = /-\s*From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
+const VISIT_NOTE_RE = /(?:-\s*)?From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
+// Any mention of a visit label, read by VISIT_NOTE_RE or not.
+const VISIT_LABEL_RE = /\bfrom\s+(?:initial|follow[\s-]?up|call[\s-]?back|re-?)\s*inspection/gi;
 
-// The text before the first label and each labelled note (date null for the initial visit), or null for a text
-// without labels: a routine report, all of it the read visit's own.
+// How a row's text names its visits: { routine: true } without labels (all of it the read visit's own), { label,
+// notes } with labels (a note's date is null for the initial visit), or { unreadable: true } when a label does not
+// read (another date form, other case): such a row cannot be tied to a visit.
 function visitNotes(text) {
   const marks = [...text.matchAll(VISIT_NOTE_RE)];
-  if (!marks.length) return null;
-  const notes = marks.map((mark, i) => {
-    const end = i + 1 < marks.length ? marks[i + 1].index : text.length;
-    return {
-      date: mark[1] || null,
-      text: text.slice(mark.index, end).replace(/^-\s*/, '').trim(),
-      body: text.slice(mark.index + mark[0].length, end),
-    };
-  });
+  if ((text.match(VISIT_LABEL_RE) || []).length !== marks.length) return { unreadable: true };
+  if (!marks.length) return { routine: true };
+  const notes = marks.map((mark, i) => ({
+    date: mark[1] || null,
+    text: text.slice(mark.index, i + 1 < marks.length ? marks[i + 1].index : undefined).replace(/^-\s*/, '').trim(),
+  }));
   return { label: text.slice(0, marks[0].index).trim(), notes };
 }
 
@@ -307,40 +307,15 @@ function visitNotes(text) {
 // Without the visit number only a dated note can match.
 const isVisitNote = (note, visit) => (visit.number === 1 ? note.date === null : note.date !== null && note.date === visit.date);
 
-// A word that clears or denies a sighting: "No live flies observed", "corrected", "wasn't seen".
-const CLEARED_RE = /\b(?:no|not|none|never|nothing|without|absent|absence|corrected|complied|compliance|cleared|eliminated|resolved)\b|n['’]t\b/i;
-
-// A note that records a sighting: more than a status such as **Time Extended** or the priority label, and no word
-// that clears or denies it. Anything else is inconclusive. Status markers are left out of the word test.
-function recordsSighting(body) {
-  const words = body.replace(/\*\*[^*]*\*\*/g, ' ').replace(/^[\s-]*(?:High Priority|Intermediate|Basic)\b/i, ' ');
-  return /[a-z0-9]/i.test(words) && !CLEARED_RE.test(words);
-}
-
-// Whether a row is the read visit's: every row of a routine report is; on a follow-up report, a row with a note of
-// that visit (a status alone counts here: the violation was still open at the visit).
-function ofReadVisit(text, visit) {
-  const parsed = visitNotes(text);
-  return !parsed || parsed.notes.some((note) => isVisitNote(note, visit));
-}
-
-// Pests seen at the read visit: on a routine report any 35A row; on a follow-up report only a 35A row whose note of
-// that visit records a sighting. An earlier visit's citation, a status alone or a cleared note says nothing here.
-function seenAtVisit(text, visit) {
-  const parsed = visitNotes(text);
-  return !parsed || parsed.notes.some((note) => isVisitNote(note, visit) && recordsSighting(note.body));
-}
-
 // The read visit's note first, then the others newest first (the initial note last), each with its label, so the
-// cap never drops the visit the page is read for. Text with fewer than two notes is unchanged.
-function visitNoteFirst(text, visit) {
-  const parsed = visitNotes(text);
-  if (!parsed || parsed.notes.length < 2) return text;
+// cap never drops the visit the page is read for. A routine row, or one with a single note, is unchanged.
+function visitNoteFirst(row, visit) {
+  if (row.notes.routine || row.notes.notes.length < 2) return row.text;
   const rank = (note) => (isVisitNote(note, visit) ? 0 : 1);
   const day = (note) => note.date || '';
   // A stable sort keeps the page order within a rank and a day.
-  const notes = [...parsed.notes].sort((a, b) => rank(a) - rank(b) || (day(a) === day(b) ? 0 : day(a) > day(b) ? -1 : 1));
-  return [parsed.label, notes.map((note) => note.text).join(' - ')].filter(Boolean).join(' ');
+  const notes = [...row.notes.notes].sort((a, b) => rank(a) - rank(b) || (day(a) === day(b) ? 0 : day(a) > day(b) ? -1 : 1));
+  return [row.notes.label, notes.map((note) => note.text).join(' - ')].filter(Boolean).join(' ');
 }
 
 // At most FINDING_TEXT_MAX characters, cut between characters (code points): half an emoji is not valid text, and
@@ -356,12 +331,14 @@ const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
  *   observation), so a code quoted in a note, a comment or a script never starts an entry. A row whose Violation cell
  *   is not a code alone (blank, or 35A-02-8*), or a code cell outside that table (another table, the footer), means
  *   the page is not laid out as expected;
- * - it lists at least as many 35A or 35B rows of the read visit (visitDate, visitNumber) as the file counted for it
- *   (cited35): the missing one could be 35A. A follow-up report also lists earlier visits' rows; only a row with a
- *   note of the read visit is its own. Without the count only a 35A row answers;
- * - its 35A rows were seen at the read visit: on a follow-up report only the visit's own note counts, if it records
- *   a sighting (not a status alone, nothing that clears it). 35A rows with none seen at the visit give no answer.
- * findings holds the 35A rows seen at the visit, each with that visit's note first, cut at FINDING_TEXT_MAX.
+ * - every visit label on its 35 rows reads, and it lists at least as many 35A or 35B rows of the read visit
+ *   (visitDate, visitNumber) as the file counted for it (cited35): the missing one could be 35A. A follow-up report
+ *   also lists earlier visits' rows; only a row with a note of the read visit is its own. Without the count only a
+ *   35A row answers;
+ * - its 35A rows were cited at the read visit: every 35A row of a routine report; on a follow-up report, for the
+ *   first visit, a row with the initial note (the citation itself). A later visit's note is free text that may clear
+ *   the sighting ("No flies observed"), so a follow-up visit's 35A rows give no answer.
+ * findings holds the 35A rows cited at the visit, each with that visit's note first, cut at FINDING_TEXT_MAX.
  */
 function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNumber = null } = {}) {
   const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
@@ -399,17 +376,25 @@ function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNu
   }
   endRow();
   const visit = { date: visitDate, number: visitNumber };
-  const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => ({ code: entry.code, text: entry.parts.join(' ') }));
-  const ofVisit = rows35.filter((row) => ofReadVisit(row.text, visit));
-  if (unreadable || !ofVisit.length) return null;
+  const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => {
+    const text = entry.parts.join(' ');
+    return { code: entry.code, text, notes: visitNotes(text) };
+  });
+  if (unreadable || rows35.some((row) => row.notes.unreadable)) return null;
+  // The read visit's own 35 rows: every row of a routine report; on a follow-up report a row with a note of that
+  // visit (a status alone counts: the violation was still open at the visit).
+  const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => isVisitNote(note, visit)));
+  if (!ofVisit.length) return null;
   const rows35A = rows35.filter((row) => /^35A-/.test(row.code));
   // Fewer of the visit's 35 rows than the file counted: the missing one could be 35A. Without the count (a row stored
   // before it was kept), only a 35A row answers: "no pests" needs the count.
   if (Number.isInteger(cited35) ? ofVisit.length < cited35 : !rows35A.length) return null;
-  // 35A rows but none seen at the read visit (an earlier visit's citation, a status alone, a cleared note): no answer.
-  const seen = rows35A.filter((row) => seenAtVisit(row.text, visit));
-  if (rows35A.length && !seen.length) return null;
-  const findings = seen.map((row) => ({ code: row.code, text: capText(visitNoteFirst(row.text, visit)) }));
+  // 35A rows cited at the read visit: every one of a routine report; on a follow-up report only the first visit's,
+  // by the initial note. 35A rows but none cited at the visit (a follow-up visit, an earlier citation): no answer.
+  const cited = rows35A.filter((row) => row.notes.routine
+    || (visit.number === 1 && row.notes.notes.some((note) => note.date === null)));
+  if (rows35A.length && !cited.length) return null;
+  const findings = cited.map((row) => ({ code: row.code, text: capText(visitNoteFirst(row, visit)) }));
   return { pestEvidence: findings.length > 0, findings };
 }
 

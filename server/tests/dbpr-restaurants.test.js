@@ -340,25 +340,21 @@ describe('parseInspectionReport', () => {
 
   test('a follow-up report puts the read visit\'s note first, so the cap never drops it', () => {
     const page = (note) => reportPage(`<tr><td>35A-02-8</td><td>${note}</td></tr>`);
-    const initial = `Live, small flying insects found. ${'Observed flies at the bar. '.repeat(20)}`;
-    const note = `High Priority - - From initial inspection : High Priority - ${initial}`
-      + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
+    const note = 'High Priority - - From initial inspection : High Priority - Live, small flying insects found. '
+      + `- From follow-up inspection 2026-09-01: ${'Observed 2 live flies at the bar. '.repeat(15)}**Admin Complaint** `
       + '- From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage.';
-    const { text } = svc.parseInspectionReport(page(note), { visitDate: '2026-09-03', visitNumber: 3 }).findings[0];
+    // Read for the first visit (the citation): its note first, then the others newest first.
+    const { text } = svc.parseInspectionReport(page(note), { visitDate: '2026-08-28', visitNumber: 1 }).findings[0];
     expect(text).toHaveLength(400);
-    expect(text.startsWith('High Priority - From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage. '
-      + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
-      + '- From initial inspection : High Priority - Live, small flying insects found.')).toBe(true);
-    // Read for the second visit, its note comes first, then the others newest first.
-    const second = svc.parseInspectionReport(page(note), { visitDate: '2026-09-01', visitNumber: 2 }).findings[0].text;
-    expect(second.startsWith('High Priority - From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
-      + '- From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage. - From initial inspection :')).toBe(true);
+    expect(text.startsWith('High Priority - From initial inspection : High Priority - Live, small flying insects found. '
+      + '- From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage. '
+      + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar.')).toBe(true);
     // One note (a routine report, or a first citation) is unchanged.
     const one = 'High Priority - - From initial inspection : High Priority - Rodent droppings in dry storage.';
     expect(svc.parseInspectionReport(page(one), { visitDate: '2026-09-01', visitNumber: 1 }).findings[0].text).toBe(one);
   });
 
-  test('on a follow-up report a 35A row counts only when its note of the read visit records something seen', () => {
+  test('on a follow-up report a 35A row is pests only for the first visit, as its citation; a later note never is', () => {
     // The real layout: each row lists every visit's note, labelled, oldest first.
     const flies = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : High Priority - Live flies at the bar. '
       + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
@@ -366,30 +362,26 @@ describe('parseInspectionReport', () => {
     const door = '<tr><td>35B-01-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Gap under the back door. '
       + '- From follow-up inspection 2026-09-03: **Time Extended**</td></tr>';
     const page = reportPage(`${flies}\n${door}`);
-    const read = (visitDate, visitNumber) => svc.parseInspectionReport(page, { cited35: 1, visitDate, visitNumber });
-    // Seen at the first visit and at the second, each with its own note first.
+    const read = (visitDate, visitNumber, html = page) => svc.parseInspectionReport(html, { cited35: 1, visitDate, visitNumber });
+    // The first visit cited it: pests, its own note first.
     expect(read('2026-08-28', 1)).toMatchObject({ pestEvidence: true, findings: [{ code: '35A-02-8' }] });
     expect(read('2026-08-28', 1).findings[0].text).toMatch(/^High Priority - From initial inspection : High Priority - Live flies at the bar\. /);
-    expect(read('2026-09-01', 2).findings[0].text).toMatch(/^High Priority - From follow-up inspection 2026-09-01: Observed 2 live flies/);
-    // At the third visit the 35A note is a status alone; a later visit has no note at all: no answer either way.
-    expect(read('2026-09-03', 3)).toBeNull();
-    expect(read('2026-09-05', 4)).toBeNull();
-    // Without the visit number only a dated note can match: the first visit cannot be told apart.
-    expect(read('2026-08-28', null)).toBeNull();
-    expect(read('2026-09-01', null)).toMatchObject({ pestEvidence: true });
-    // A 35A row seen at the visit answers; another one from an earlier visit only stays out of the findings.
-    const roach = '<tr><td>35A-09-4</td><td>&nbsp;</td><td>High Priority - - From initial inspection : High Priority - One insect on a box. '
-      + '- From follow-up inspection 2026-09-03: Observed 2 dead roaches in dry storage.</td></tr>';
-    const mixed = svc.parseInspectionReport(reportPage(`${flies}\n${roach}\n${door}`), { cited35: 1, visitDate: '2026-09-03', visitNumber: 3 });
-    expect(mixed.findings.map((f) => f.code)).toEqual(['35A-09-4']);
-    // A note of the visit that clears or denies is inconclusive; a status marker after a sighting is not.
-    const note = (text) => reportPage('<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : '
-      + `High Priority - Live flies at the bar. - From follow-up inspection 2026-09-03: ${text}</td></tr>`);
-    for (const cleared of ['No live flies observed.', 'Flies were not present.', 'Flies wasn\'t seen today.', 'Corrected.']) {
-      expect(svc.parseInspectionReport(note(cleared), { cited35: 1, visitDate: '2026-09-03', visitNumber: 3 })).toBeNull();
+    // A later visit's note is free text that may clear it ("No flies observed"): no answer, even when it reads as a
+    // sighting, and none with no note at all or without the visit number.
+    for (const [visitDate, visitNumber] of [['2026-09-01', 2], ['2026-09-03', 3], ['2026-09-05', 4], ['2026-08-28', null], ['2026-09-01', null]]) {
+      expect(read(visitDate, visitNumber)).toBeNull();
     }
-    expect(svc.parseInspectionReport(note('Observed 3 live flies at the bar. **Corrected On-Site**'), { cited35: 1, visitDate: '2026-09-03', visitNumber: 3 }))
-      .toMatchObject({ pestEvidence: true });
+    // For the first visit only the rows it cited count: one first cited at a follow-up stays out of the findings.
+    const later = '<tr><td>35A-09-4</td><td>&nbsp;</td><td>High Priority - From follow-up inspection 2026-09-03: Dead roaches in dry storage.</td></tr>';
+    expect(read('2026-08-28', 1, reportPage(`${flies}\n${later}\n${door}`)).findings.map((f) => f.code)).toEqual(['35A-02-8']);
+    // A label without its leading hyphen is still a label; one that does not read leaves the page with no answer.
+    const bare = reportPage('<tr><td>35A-02-8</td><td>&nbsp;</td><td>From initial inspection: Flies at the bar.</td></tr>');
+    expect(read('2026-08-28', 1, bare)).toMatchObject({ pestEvidence: true });
+    expect(read('2026-09-01', 2, bare)).toBeNull();
+    for (const label of ['From follow-up inspection 09/03/2026:', 'From Follow-Up Inspection 2026-09-03:', 'From follow up inspection 2026-09-03:']) {
+      const odd = reportPage(`<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : Flies. - ${label} Flies.</td></tr>`);
+      expect(read('2026-08-28', 1, odd)).toBeNull();
+    }
     // A routine report (no visit labels) is the read visit's own, as before.
     expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: 1, visitDate: '2026-11-16', visitNumber: 2 }))
       .toMatchObject({ pestEvidence: true });
@@ -502,7 +494,7 @@ describe('syncRestaurantProspects', () => {
     expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 1 });
   });
 
-  test('each report read is checked against its own visit: a follow-up report answers only for a visit that saw pests', async () => {
+  test('each report read is checked against its own visit: a follow-up report gives pests only for the first visit', async () => {
     const followUp = reportPage('<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : High Priority - Live flies. '
       + '- From follow-up inspection 2026-11-10: **Time Extended**</td></tr>');
     store = makeStore([
