@@ -128,6 +128,9 @@ describe('taking new art', () => {
 
       fs.writeFileSync(path.join(dir, 't02.png'), 'not a picture');
       expect(run(dir, '--execute').status).toBe(1);
+      // "--only" with no fact ids never means "all"
+      expect(run(dir, '--execute', '--only').status).toBe(2);
+      expect(run(dir, '--execute', '--only', ',').status).toBe(2);
       expect(snapshot()).toEqual(before);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -138,15 +141,17 @@ describe('taking new art', () => {
     const sharp = require('sharp');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-art-'));
     const lock = path.join(ROOT, 'server/data/pest-insider-heroes-v1.json.lock');
+    let held = false;
     try {
       fs.writeFileSync(path.join(dir, 't03.png'), await sharp(path.join(ROOT, ART_DIR, HEROES.T03.artFile)).flop().png().toBuffer());
-      fs.writeFileSync(lock, '1\n', { flag: 'wx' });
+      fs.writeFileSync(lock, '1\n', { flag: 'wx' }); // throws while a real import runs: then this test fails, and leaves its lock alone
+      held = true;
       const before = snapshot();
-      const held = run(dir, '--execute');
-      expect([held.status, held.stderr]).toEqual([1, expect.stringContaining('Another import holds server/data/pest-insider-heroes-v1.json.lock')]);
+      const stopped = run(dir, '--execute');
+      expect([stopped.status, stopped.stderr]).toEqual([1, expect.stringContaining('Another import holds server/data/pest-insider-heroes-v1.json.lock')]);
       expect(snapshot()).toEqual(before);
     } finally {
-      fs.rmSync(lock, { force: true });
+      if (held) fs.rmSync(lock, { force: true });
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 60000);

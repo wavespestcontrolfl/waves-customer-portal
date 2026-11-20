@@ -46,9 +46,21 @@ const sharp = require('sharp');
 const { WAVES_COLORS: C } = require('../../server/services/pest-insider/cards');
 
 const args = process.argv.slice(2);
-const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
+// A flag's value. A flag with no value stops the run, so "--only" alone
+// never means "all".
+function opt(name) {
+  const i = args.indexOf(name);
+  if (i < 0) return null;
+  const value = args[i + 1];
+  if (typeof value !== 'string' || value.startsWith('--') || !value.trim()) {
+    console.error(`${name} needs a value`);
+    process.exit(2);
+  }
+  return value;
+}
 const repoRoot = path.resolve(__dirname, '../..');
-const only = opt('--only') ? new Set(opt('--only').split(',').map((s) => s.trim())) : null;
+const only = opt('--only') === null ? null : new Set(opt('--only').split(',').map((s) => s.trim()).filter(Boolean));
+if (only && !only.size) { console.error('--only needs fact ids, such as --only T03,R01'); process.exit(2); }
 const execute = args.includes('--execute');
 
 const sha16 = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16);

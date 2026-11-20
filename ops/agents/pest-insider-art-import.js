@@ -50,12 +50,24 @@ const sharp = require('sharp');
 const { HERO_WIDTH, HERO_HEIGHT, ART_DIR, validateHeroes } = require('../../server/services/pest-insider/heroes');
 
 const args = process.argv.slice(2);
-const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
+// A flag's value. A flag with no value stops the run, so "--only" alone
+// never means "all".
+function opt(name) {
+  const i = args.indexOf(name);
+  if (i < 0) return null;
+  const value = args[i + 1];
+  if (typeof value !== 'string' || value.startsWith('--') || !value.trim()) {
+    console.error(`${name} needs a value`);
+    process.exit(2);
+  }
+  return value;
+}
 const repoRoot = path.resolve(__dirname, '../..');
 const HEROES_FILE = path.join(repoRoot, 'server/data/pest-insider-heroes-v1.json');
 const dir = args[0] && !args[0].startsWith('--') ? path.resolve(args[0]) : null;
 const execute = args.includes('--execute');
-const only = opt('--only') ? new Set(opt('--only').split(',').map((s) => s.trim())) : null;
+const only = opt('--only') === null ? null : new Set(opt('--only').split(',').map((s) => s.trim()).filter(Boolean));
+if (only && !only.size) { console.error('--only needs fact ids, such as --only T03,R01'); process.exit(2); }
 
 const sha16 = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16);
 

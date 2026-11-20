@@ -4,11 +4,13 @@
  * ... draw attention, use text in some of them, or facts, numbers").
  *
  * Loaded from server/data/pest-insider-cards-v1.json. A card states nothing
- * new: its words are one whole clause of a reviewed sentence, copied exactly
+ * new: its words are a reviewed sentence, copied exactly
  * (the fact's title or one of its lead sentences), cut into a small line
- * before, the big words, and a small line after. It may leave out a source's
- * name or a lead-in clause, never a word that turns it around or limits it
- * (isClauseOf). A "versus" card has two such
+ * before, the big words, and a small line after. Any words it leaves out
+ * (a source's name such as "UF/IFAS says", a lead-in clause) are written in
+ * the card file as left_out_before / left_out_after, so a reviewer reads
+ * each one, and never a word that turns it around or limits it
+ * (isWholeSentence). A "versus" card has two such
  * pieces. Besides those, a card shows only fixed parts: a topic tag from a
  * fixed list, the month strip's letters, the fact's source names (the same
  * line the email prints) and the "Waves Pest Insider" name. A "months" card
@@ -95,27 +97,18 @@ function monthsNamed(text) {
   return found;
 }
 
-// Where a piece may start: the sentence start, after clause punctuation
-// (and a joining word: "so", "but"), or after a source's verb ("UF/IFAS
-// says"). A full stop is not one: "St. Augustine" is one name.
-const CLAUSE_START = /(?:^|[,;:–—]\s+(?:(?:so|and|but|yet|or|then|because|while)\s+)?|\b(?:says|said|adds|added|reports|reported|notes|noted|finds|found|saw|shows|showed)\s+(?:that\s+)?)$/;
-// Where a piece may end: the sentence end or clause punctuation, never a
-// mark inside a number ("3.5", "8,000") or a word ("can't").
-const CLAUSE_END = /^(?:$|[.!?](?![a-z0-9])|[,;:)–—](?!\d))/;
-// Words that turn a statement around or limit it.
+// Words that turn a statement around or limit it. A piece may not leave
+// one out.
 const TURNS = /\b(?:never|not|no|nor|none|neither|nobody|nothing|nowhere|without|cannot|avoid\w*|stop\w*|if|unless|except|only|\w+n't)\b/;
 
-// The piece is a whole clause of the sentence, so a card never says what
-// the sentence did not: no cut inside a word or a number ("5 to 4 inches"
-// never passes for "3.5 to 4 inches"), no clause cut short, and the words
-// left out before it hold nothing that turns it around or limits it
-// ("Sweep rodent droppings" never passes for "Never sweep rodent droppings").
-function isClauseOf(sentence, piece) {
-  for (let i = sentence.indexOf(piece); i >= 0; i = sentence.indexOf(piece, i + 1)) {
-    const left = sentence.slice(0, i);
-    if (CLAUSE_START.test(left) && !TURNS.test(left) && CLAUSE_END.test(sentence.slice(i + piece.length))) return true;
-  }
-  return false;
+// The piece, with the words the card file names as left out before and
+// after it, is the whole sentence, exactly (its last stop aside). So every
+// word a card drops is written in the card file for review: "Sweep rodent
+// droppings" never passes for "Never sweep rodent droppings", and "5 to 4
+// inches" never passes for "3.5 to 4 inches".
+function isWholeSentence(sentence, piece) {
+  const whole = pieceText({ before: piece.left_out_before, big: pieceText(piece), after: piece.left_out_after });
+  return normalize(sentence).replace(/[.!?]$/, '') === normalize(whole);
 }
 
 const isText = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max && !/[\r\n<>]/.test(v);
@@ -131,8 +124,14 @@ function piecesProblem(card, fact) {
     if (!piece || !isText(piece.big, 40) || !isOptional(piece.before, 90) || !isOptional(piece.after, 90)) {
       return 'each piece needs big words (up to 40 characters) and optional before / after lines (up to 90)';
     }
-    if (!reviewed.some((sentence) => isClauseOf(sentence, normalize(pieceText(piece))))) {
-      return `"${pieceText(piece)}" is not copied exactly, as a whole clause, from the fact's title or a lead sentence`;
+    if (!isOptional(piece.left_out_before, 160) || !isOptional(piece.left_out_after, 160)) {
+      return 'left_out_before / left_out_after must be text (up to 160 characters)';
+    }
+    if (TURNS.test(normalize(`${piece.left_out_before || ''} ${piece.left_out_after || ''}`))) {
+      return `"${pieceText(piece)}" leaves out a word that turns it around or limits it (never, not, no, if, only)`;
+    }
+    if (!reviewed.some((sentence) => isWholeSentence(sentence, piece))) {
+      return `"${pieceText(piece)}" is not copied exactly: with the words it names as left out, it must be the fact's title or a lead sentence, whole`;
     }
   }
   return null;
