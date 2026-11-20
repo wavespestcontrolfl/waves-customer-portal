@@ -2746,9 +2746,11 @@ async function createSelfBooking(payload = {}) {
     // callbackVisit.slotGuard(trx, { zone }) (the lead assessment link): the
     // caller's own re-check of this slot on the booking transaction, under the
     // date lock, given the zone this booking stamps on its visit; false
-    // refuses it as a taken slot. callbackVisit.zoneAddress ({ address, city },
-    // the lead assessment link): the booking address the caller's list resolved
-    // its zone from; this booking's zone is that address's zone, resolved the
+    // refuses it as a taken slot. callbackVisit.zoneAddress(customer) (the lead
+    // assessment link): given this booking's own customer row, the booking
+    // address the caller's list resolved its zone from ({ address, city }, or
+    // null): a typed address, or that row's own address when the booking uses
+    // the profile's; this booking's zone is that address's zone, resolved the
     // same way, else the zone of this booking's customer's city on file
     // (slot-zone.js leadBookingZone), so the list, the slot guard and the
     // stamp agree.
@@ -3544,18 +3546,18 @@ async function createSelfBooking(payload = {}) {
     const confCode = generateConfirmationCode();
 
     // Resolve zone from city (best-effort, for reporting). A caller that names
-    // the booking address its list resolved a zone from (callbackVisit.zoneAddress)
-    // gets that zone: a city no zone lists ('North Venice') takes the zone whose
-    // city its name contains, as its list did. Only with the far-south funnel on
-    // (GATE_SOUTH_ZONE_DAY_FUNNEL): off, no list resolved a zone, and the
-    // customer's city decides as before. The customer's city also decides when
-    // that address resolves to no zone (slot-zone.js leadBookingZone): a visit
-    // with no zone stamp is read later by its customer's city, so the far-south
-    // check and the stamp read that city, from this booking's own customer row,
-    // which the fence's fingerprint re-checks (owner rule B, pre-push P1s on
-    // 3e6fd14320 and 3b494d3581).
+    // the booking address its list resolved a zone from (callbackVisit.zoneAddress,
+    // given this booking's own customer row) gets that zone: a city no zone lists
+    // ('North Venice') takes the zone whose city its name contains, as its list
+    // did. Only with the far-south funnel on (GATE_SOUTH_ZONE_DAY_FUNNEL): off, no
+    // list resolved a zone, and the customer's city decides as before. The
+    // customer's city also decides when that address resolves to no zone
+    // (slot-zone.js leadBookingZone): a visit with no zone stamp is read later by
+    // its customer's city. Every customer field the zone reads comes from this
+    // booking's own row, which the fence below re-checks (owner rule B, pre-push
+    // P1s on 3e6fd14320, 3b494d3581 and 5fc5e4d648).
     const zone = callbackVisit?.zoneAddress && funnelOn()
-      ? (await leadBookingZone(db, callbackVisit.zoneAddress, customer.city)).zone
+      ? (await leadBookingZone(db, callbackVisit.zoneAddress(customer), customer.city)).zone
       : (await db('service_zones').select('*')).find(z => (z.cities || []).some(c =>
         c.toLowerCase() === (customer.city || '').toLowerCase()
       )) || null;
@@ -3994,12 +3996,13 @@ async function createSelfBooking(payload = {}) {
         const freshBookingCustomer = await trx('customers')
           .where({ id: custId }).forShare()
           .first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude');
-        // The zone (the far-south truck check below and the visit's stamp) read the customer's city before the
-        // pre-fence snapshot, and the fingerprint cannot see an edit between those two reads. With the funnel on
-        // (GATE_SOUTH_ZONE_DAY_FUNNEL) the locked row's city must be the city the zone read (owner rule B, pre-push
-        // P1 on 7cdf34198a); with it off the zone is only the stamp it always was.
+        // The zone (the far-south truck check below and the visit's stamp) read this booking's customer row before
+        // the pre-fence snapshot: its city, and for the lead link its whole address. The fingerprint cannot see an
+        // edit between those two reads, so with the funnel on (GATE_SOUTH_ZONE_DAY_FUNNEL) the locked row's address
+        // must be the address the zone read (owner rule B, pre-push P1s on 7cdf34198a and 5fc5e4d648); with it off
+        // the zone is only the stamp it always was.
         if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)
-          || (funnelOn() && freshBookingCustomer.city !== customer.city)) {
+          || (funnelOn() && JSON.stringify(bookingAddressStamp(freshBookingCustomer)) !== JSON.stringify(bookingAddressStamp(customer)))) {
           throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
             statusCode: 409,
             isOperational: true,

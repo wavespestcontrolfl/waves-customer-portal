@@ -7672,10 +7672,12 @@ own city (the zone that lists it, else the zone whose city its name contains;
 the address text only when there is no city), and with the far-south funnel on
 the booking resolves its zone from the same address the same way
 (`callbackVisit.zoneAddress`; off, from the customer's city as before), so its
-stamp and its check match the list. An address that resolves to no zone takes
+stamp and its check match the list. A booking at the profile's own address
+reads that address from the booking's own customer row, not from a copy the
+commit read earlier. An address that resolves to no zone takes
 the customer's city on file, as a visit with no zone stamp is read later by its
 customer's city. With the funnel on, the booking transaction also refuses with
-`CUSTOMER_CHANGED_RETRY` when that city changed after its zone read it, and the
+`CUSTOMER_CHANGED_RETRY` when the customer's address changed after its zone read it, and the
 page gets the answer an account change under the booking fence already gets:
 `SLOT_TAKEN` with `address_changed: true`, the address on file and no times, or
 `422 address_unresolved` when the token no longer reaches that customer. Every list that knows the trusted customer (GET,
@@ -7684,7 +7686,8 @@ times and a refused booking's list) reads the same fallback, so a list never
 offers an hour that zone refuses. A matched profile at another stored location books with its
 own address (the slot is checked again with it); at the same pin the booking
 keeps the typed address, as the list read it. When the customer's city decides
-the zone, the slot is checked again per truck (both far-south gates on). A
+a far-south zone (one the funnel covers), the slot is checked again per truck
+(both far-south gates on). A
 refused booking's `SLOT_TAKEN` answer, with the funnel on, carries fresh times
 only when the page's next commit reads this one's inputs: an address typed (the
 page sends it again) at the same pin. They are built there with the booking's zone address. Any other

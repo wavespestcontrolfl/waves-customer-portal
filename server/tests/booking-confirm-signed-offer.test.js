@@ -827,11 +827,12 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(slotGuard).not.toHaveBeenCalled();
     });
 
-    // callbackVisit.zoneAddress (the lead link), with the far-south funnel on (GATE_SOUTH_ZONE_DAY_FUNNEL): the zone
-    // resolves from the booking address as the link's list resolved it: its city alone decides (the zone that lists it,
-    // else the zone whose city its name contains), so the guard checks, and the visit is stamped with, the zone the list
-    // offered under. An address that resolves to no zone takes the customer's city, as a visit with no zone stamp is
-    // read later (pre-push P1s on 3e6fd14320 and 3b494d3581); this customer's city is Sarasota's.
+    // callbackVisit.zoneAddress(customer) (the lead link), with the far-south funnel on (GATE_SOUTH_ZONE_DAY_FUNNEL):
+    // the zone resolves from the booking address as the link's list resolved it: its city alone decides (the zone that
+    // lists it, else the zone whose city its name contains), so the guard checks, and the visit is stamped with, the
+    // zone the list offered under. An address that resolves to no zone takes the customer's city, as a visit with no
+    // zone stamp is read later (pre-push P1s on 3e6fd14320 and 3b494d3581); this customer's city is Sarasota's. The
+    // link's function is given this booking's own customer row (pre-push P1 on 5fc5e4d648).
     const { gates } = require('../config/feature-gates');
     async function bookWithZoneAddress(zoneAddress, funnel) {
       const VENICE_ZONE = { id: 'zone-2', zone_name: 'Venice / North Port', cities: ['Venice', 'North Port'] };
@@ -839,7 +840,8 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       db.mockImplementation((table) => (table === 'service_zones' ? { select: () => Promise.resolve([CITY_ZONE, VENICE_ZONE]) } : tables(table)));
       const slotGuard = jest.fn().mockResolvedValue(true);
       const payload = assessment(slotGuard);
-      payload.callbackVisit.zoneAddress = zoneAddress;
+      const zoneAddressFor = jest.fn(typeof zoneAddress === 'function' ? zoneAddress : () => zoneAddress);
+      payload.callbackVisit.zoneAddress = zoneAddressFor;
       const funnelGate = gates.southZoneDayFunnel;
       gates.southZoneDayFunnel = funnel;
       try {
@@ -847,7 +849,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       } finally {
         gates.southZoneDayFunnel = funnelGate;
       }
-      return { slotGuard, VENICE_ZONE };
+      return { slotGuard, VENICE_ZONE, zoneAddressFor };
     }
     const NORTH_VENICE = { address: '9 Osprey Way, North Venice, FL, 34275', city: 'North Venice' };
 
@@ -856,29 +858,45 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       ['a listed city decides over the text', { address: '100 Venice Ave, Osprey, FL, 34229', city: 'Osprey' }, 'sarasota'],
       ['a city no zone lists on a street named for one: the customer\'s city decides', { address: '100 Venice Ave, Wimauma, FL, 33598', city: 'Wimauma' }, 'sarasota'],
     ])('zoneAddress, %s', async (_label, zoneAddress, stamped) => {
-      const { slotGuard, VENICE_ZONE } = await bookWithZoneAddress(zoneAddress, true);
+      const { slotGuard, VENICE_ZONE, zoneAddressFor } = await bookWithZoneAddress(zoneAddress, true);
       const zone = { venice: VENICE_ZONE, sarasota: CITY_ZONE }[stamped] || null;
       expect(slotGuard.mock.calls[0][1]).toEqual({ zone });
       expect(capturedScheduledInsert).toMatchObject({ zone: stamped });
+      expect(zoneAddressFor).toHaveBeenCalledWith(expect.objectContaining({ id: CUST.id, city: CUST.city }));
+    });
+
+    // The profile's own address (the link's function reads the row it is given): the booking's own customer row,
+    // which its lock fences, decides, never a copy the link read before (pre-push P1 on 5fc5e4d648).
+    test('zoneAddress from the booking\'s own row: that row\'s city decides', async () => {
+      loadedCustomer = { ...CUST, city: 'North Venice' };
+      fencedCustomer = { ...loadedCustomer };
+      const fromRow = (cust) => ({ address: `${cust.address_line1}, ${cust.city}, FL, ${cust.zip}`, city: cust.city });
+      const { slotGuard, VENICE_ZONE } = await bookWithZoneAddress(fromRow, true);
+      expect(slotGuard.mock.calls[0][1]).toEqual({ zone: VENICE_ZONE });
+      expect(capturedScheduledInsert).toMatchObject({ zone: 'venice' });
     });
 
     // Pre-push P1 on da74da7dc7: with the funnel off no list resolved a zone, so the booking keeps today's zone (the
     // customer's city), and turning the funnel off restores the whole far-south change.
     test('zoneAddress with the funnel off: not read, the customer\'s city decides the zone as before', async () => {
-      const { slotGuard } = await bookWithZoneAddress(NORTH_VENICE, false);
+      const { slotGuard, zoneAddressFor } = await bookWithZoneAddress(NORTH_VENICE, false);
       expect(slotGuard.mock.calls[0][1]).toEqual({ zone: CITY_ZONE });
       expect(capturedScheduledInsert).toMatchObject({ zone: 'sarasota' });
+      expect(zoneAddressFor).not.toHaveBeenCalled();
     });
 
-    // Pre-push P1 on 7cdf34198a: the zone reads the customer's city before the fence's snapshot, so a city edit
-    // between the two reads leaves the snapshot and the locked row agreeing, and the fingerprint passes. With the
-    // funnel on the locked row's city must be the one the zone read: the booking refuses as a changed account before
-    // the guard and the insert. With the funnel off the zone is only its stamp, and the booking goes on as before.
+    // Pre-push P1s on 7cdf34198a and 5fc5e4d648: the zone reads the customer's row (its city; for the lead link its
+    // whole address) before the fence's snapshot, so an edit between the two reads leaves the snapshot and the locked
+    // row agreeing, and the fingerprint passes. With the funnel on the locked row's address must be the one the zone
+    // read: the booking refuses as a changed account before the guard and the insert. With the funnel off the zone is
+    // only its stamp, and the booking goes on as before.
+    const REFUSED = expect.objectContaining({ ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY' });
     test.each([
-      ['the funnel on: refused as a changed account', true, expect.objectContaining({ ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY' }), 0, undefined],
-      ['the funnel off: booked as before', false, SENTINEL, 1, 'sarasota'],
-    ])('a city edit after the zone read (%s)', async (_label, funnel, outcome, guardCalls, stamped) => {
-      const EDITED = { ...CUST, city: 'Venice' };
+      ['a city edit, the funnel on: refused as a changed account', { city: 'Venice' }, true, REFUSED, 0, undefined],
+      ['a street edit, the funnel on: refused as a changed account', { address_line1: '9 Osprey Way' }, true, REFUSED, 0, undefined],
+      ['a city edit, the funnel off: booked as before', { city: 'Venice' }, false, SENTINEL, 1, 'sarasota'],
+    ])('an address edit after the zone read (%s)', async (_label, edit, funnel, outcome, guardCalls, stamped) => {
+      const EDITED = { ...CUST, ...edit };
       fencedCustomer = EDITED;
       const tables = db.getMockImplementation();
       db.mockImplementation((table) => {

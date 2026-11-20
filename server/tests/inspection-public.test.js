@@ -70,6 +70,9 @@ jest.mock('../services/scheduling/zone-day-funnel', () => ({
   truckMayTakeDate: (...args) => mockTruckMayTakeDate(...args),
   perTruckLive: () => mockFarSouthGates.perTruck,
   funnelOn: () => mockFarSouthGates.funnel,
+  // The funnel's own zone check through the gate above: the default funneled zones (Venice, Port Charlotte).
+  isFunnelZone: (zone) => mockFarSouthGates.funnel
+    && ['venice', 'port charlotte'].includes(jest.requireActual('../services/slot-zone').zoneSlugOf(zone)),
 }));
 
 const mockBookingConfig = jest.fn(async () => ({}));
@@ -519,7 +522,11 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
     expect(mockBuildAvailability).toHaveBeenCalledWith(expect.objectContaining({
       rangeFrom: FUTURE_DATE, rangeTo: FUTURE_DATE, zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton',
     }));
-    expect(callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Bradenton, FL, 34209', city: 'Bradenton' });
+    // The booking uses the profile's own address, so createSelfBooking resolves it from its own customer row, which
+    // its lock fences (pre-push P1 on 5fc5e4d648): the row it is given decides, never a copy read here.
+    const row = { address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209' };
+    expect(callbackVisit.zoneAddress(row)).toEqual({ address: '123 Palm Ave, Bradenton, FL, 34209', city: 'Bradenton' });
+    expect(callbackVisit.zoneAddress({ ...row, city: 'Venice' })).toEqual({ address: '123 Palm Ave, Venice, FL, 34209', city: 'Venice' });
   });
 
   test('bookAssessmentVisit hands an estimate page\'s guard to the booking transaction unchanged', async () => {
@@ -1975,7 +1982,9 @@ describe('POST /:token commit', () => {
       expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject({
         zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton',
       });
-      expect(bookingArgs.callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
+      expect(bookingArgs.callbackVisit.zoneAddress(existingCustomer)).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
+      // The booking's own row decides, never phase one's copy of it (pre-push P1 on 5fc5e4d648).
+      expect(bookingArgs.callbackVisit.zoneAddress({ ...existingCustomer, city: 'Venice' })).toEqual({ address: '123 Palm Ave, Venice, FL, 34209', city: 'Venice' });
     });
 
     // Owner rule B per truck (pre-push P1s on e81d7ed7c0, 3e6fd14320 and 3b494d3581): at the SAME pin, a matched
@@ -2006,7 +2015,8 @@ describe('POST /:token commit', () => {
       expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(['Bradenton', 'Bradenton']);
       expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(typed);
       expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe('tech-1');
-      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: typed.zoneFunnelAddress, city: 'Bradenton' });
+      // A typed address: the booking's own row does not change it.
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'West Bradenton' })).toEqual({ address: typed.zoneFunnelAddress, city: 'Bradenton' });
     });
 
     // Owner rule B per truck (pre-push P1 on 46fd83d04f): the typed city is in no zone while the matched profile's city
@@ -2015,9 +2025,12 @@ describe('POST /:token commit', () => {
     // the profile's own address: the re-check books the truck that zone allows, and a refreshed time is one the next
     // commit books. The booking's own zone address stays the typed one; it falls back itself, on its own customer row.
     // With the funnel off nothing is looked up and the fresh times keep the typed address, as before; a failed lookup
-    // keeps it too (logged), and the booking still runs (pre-push P1 on 84c9b2d840).
+    // keeps it too (logged), and the booking still runs (pre-push P1 on 84c9b2d840). A profile city whose zone the
+    // funnel does not cover has no truck rule to apply, so there is no re-check either: it would only repeat the first
+    // build and its travel lookups (pre-push P1 on 5fc5e4d648).
     test.each([
       ['per truck', { perTruck: true, funnel: true }, 'read', ['Laurel', 'Nokomis', 'Nokomis'], 'tech-2'],
+      ['per truck, a zone the funnel does not cover', { perTruck: true, funnel: true }, 'unfunneled', ['Laurel', 'Nokomis'], 'tech-1'],
       ['one truck', { perTruck: false, funnel: true }, 'read', ['Laurel', 'Nokomis'], 'tech-1'],
       ['the funnel off: no lookup', { perTruck: true, funnel: false }, 'none', ['Laurel', 'Laurel'], 'tech-1'],
       ['a failed lookup', { perTruck: true, funnel: true }, 'fails', ['Laurel', 'Laurel'], 'tech-1'],
@@ -2025,7 +2038,7 @@ describe('POST /:token commit', () => {
       Object.assign(mockFarSouthGates, gates);
       const zoneReads = jest.fn(() => {
         if (zoneLookup === 'fails') throw new Error('zones unreadable');
-        return [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis'] }];
+        return [{ id: 'zone-v', zone_name: zoneLookup === 'unfunneled' ? 'Sarasota / Central' : 'Venice / North Port', cities: ['Nokomis'] }];
       });
       listResults.service_zones = zoneReads;
       firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
@@ -2052,7 +2065,7 @@ describe('POST /:token commit', () => {
       expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject({ zoneFunnelAddress: `123 Palm Ave, ${refreshCity}, FL, 34209`, zoneFunnelCity: refreshCity });
       expect(zoneReads.mock.calls.length > 0).toBe(zoneLookup !== 'none');
       expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe(bookedTech);
-      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'Nokomis' })).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
     });
 
     // Pre-push P1 on aa30bd86f1: the page's list for a typed address read its zone from that address alone, while
@@ -2135,7 +2148,7 @@ describe('POST /:token commit', () => {
       expect(first.body).not.toHaveProperty('address_changed'); // the page holds no typed address to drop
       // The commit's own build reads the lead's address, as its list did; no fresh times are built.
       expect(builds()).toEqual([[27.4, 'Sarasota']]);
-      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Sarasota, FL, 34209', city: 'Sarasota' });
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'Nokomis' })).toEqual({ address: '123 Palm Ave, Sarasota, FL, 34209', city: 'Sarasota' });
 
       // The page's reload: phase 1 linked the lead to that profile, whose city on file it passes too.
       mockBuildAvailability.mockClear();
@@ -2149,7 +2162,8 @@ describe('POST /:token commit', () => {
 
       expect(second.statusCode).toBe(200);
       expect(builds()).toEqual([[27.4, 'Nokomis']]);
-      expect(mockCreateSelfBooking.mock.calls[1][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Nokomis, FL, 34209', city: 'Nokomis' });
+      const retry = mockCreateSelfBooking.mock.calls[1][0];
+      expect(retry.callbackVisit.zoneAddress(retry.authedCustomer)).toEqual({ address: '123 Palm Ave, Nokomis, FL, 34209', city: 'Nokomis' });
     });
 
     // Pre-push P1s on 903ecc5ff0, 910b741125 and 0cdae8374e: with an address typed, a booking that moved to a matched
@@ -2199,9 +2213,9 @@ describe('POST /:token commit', () => {
 
       expect(second.statusCode).toBe(200);
       expect(builds()).toEqual([[27.1, 'West Bradenton']]);
-      expect(mockCreateSelfBooking.mock.calls[1][0]).toMatchObject({
-        slot_start: '10:00', callbackVisit: { zoneAddress: { address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' } },
-      });
+      const retry = mockCreateSelfBooking.mock.calls[1][0];
+      expect(retry.slot_start).toBe('10:00');
+      expect(retry.callbackVisit.zoneAddress(retry.authedCustomer)).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
     });
 
     // A moved booking keeps the typed address when the next commit's trusted customer is another profile: without
