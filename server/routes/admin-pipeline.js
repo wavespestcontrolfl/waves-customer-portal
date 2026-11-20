@@ -1145,8 +1145,9 @@ async function fetchEstimates({ search, source, ownerId }) {
     .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
     .select('estimates.*', 'technicians.name as created_by_name')
     .whereNull('estimates.archived_at')
-    // Customer self-serve mints — plan_restart, and plan_start
-    // (GATE_PORTAL_PLAN_START) under the same contract — are not sales
+    // Customer self-serve mints — plan_restart, plan_start
+    // (GATE_PORTAL_PLAN_START) and the report card's service_report_cta, under
+    // the same contract (SELF_SERVE_ESTIMATE_SOURCES) — are not sales
     // opportunities (codex GH r19 P1 on #3671): their synthetic sent/viewed
     // state would derive "Follow up" next-actions despite the mint's
     // zero-delivery / no-follow-up contract, prompting an operator to

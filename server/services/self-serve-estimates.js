@@ -1,9 +1,11 @@
 /**
- * Self-serve estimates: plan restart (cancellation restart, GATE_CANCEL_FLOW_V2)
- * and plan start (the portal pricing card's first-plan quote,
- * GATE_PORTAL_PLAN_START) publish an estimate as 'sent' when the customer taps,
- * with nothing delivered. Their sent_at is a mint stamp, not a send, and the
- * mint promises no follow-up (the zero-follow-up contract, codex GH #3671).
+ * Self-serve estimates: plan restart (cancellation restart, GATE_CANCEL_FLOW_V2),
+ * plan start (the portal pricing card's first-plan quote, GATE_PORTAL_PLAN_START)
+ * and the service report's priced cross-sell tap (service_report_cta,
+ * GATE_REPORT_CLICK_TO_ESTIMATE) publish an estimate as 'sent' when the customer
+ * taps, with nothing delivered. Their sent_at is a mint stamp, not a send, and
+ * the mint promises no follow-up (the zero-follow-up contract, codex GH #3671;
+ * AGENTS.md gives the report-card and restart mints the same bounds).
  *
  * A staff-facing reader that reads sent_at or a sent status as "we sent this"
  * (a send count or funnel, a staff follow-up prompt) leaves such a row out,
@@ -14,7 +16,7 @@
  *
  * A leaf module (no requires), so any reader can load it with no cycle.
  */
-const SELF_SERVE_ESTIMATE_SOURCES = Object.freeze(['plan_restart', 'plan_start']);
+const SELF_SERVE_ESTIMATE_SOURCES = Object.freeze(['plan_restart', 'plan_start', 'service_report_cta']);
 
 // One test for "staff delivered it", in JavaScript and in SQL alike (codex
 // pre-push P1: the list and the 9 AM push must agree): firstDeliveredAt is
@@ -78,12 +80,18 @@ function sentAtSql(alias) {
 // The instant a row counts as viewed. A self-serve quote is opened in the
 // portal before any send, so a later staff send must not turn that look into
 // a viewed send (codex pre-push r15): only a view at or after its first
-// delivery counts, and the first such view is the earlier of viewed_at and
-// last_viewed_at, as estimate-winloss.js reads it.
+// delivery counts. The first such view comes from the per-open log
+// (estimate_views), so a later open never moves it to a later period (codex
+// pre-push P1). A row with no logged open since then (legacy rows predate
+// the log) falls back to the earlier of viewed_at and last_viewed_at at or
+// after the delivery, as estimate-winloss.js reads them.
 function countableViewAtSql(alias) {
   const delivered = firstDeliveredAtSql(alias);
+  const firstLoggedOpen = `(SELECT MIN(ev.viewed_at) FROM estimate_views ev WHERE ev.estimate_id = ${alias}.id AND ev.viewed_at >= ${delivered})`;
   const fromDelivery = (column) => `CASE WHEN ${alias}.${column} >= ${delivered} THEN ${alias}.${column} END`;
-  return selfServeOr(alias, `LEAST(${fromDelivery('viewed_at')}, ${fromDelivery('last_viewed_at')})`, `${alias}.viewed_at`);
+  return selfServeOr(alias,
+    `COALESCE(${firstLoggedOpen}, LEAST(${fromDelivery('viewed_at')}, ${fromDelivery('last_viewed_at')}))`,
+    `${alias}.viewed_at`);
 }
 
 module.exports = {

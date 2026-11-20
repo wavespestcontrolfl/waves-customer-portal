@@ -49,7 +49,7 @@ test('estimates_sent keeps source-NULL rows and DELIVERED self-serve quotes; dro
   expect(estimateCalls.length).toBeGreaterThan(0);
   const nullArms = estimateCalls.filter((r) => r.method === 'whereNull' && r.args[0] === 'e.source');
   const notRestartArms = estimateCalls.filter((r) => r.method === 'orWhereNotIn' && r.args[0] === 'e.source'
-    && JSON.stringify(r.args[1]) === JSON.stringify(['plan_restart', 'plan_start']));
+    && JSON.stringify(r.args[1]) === JSON.stringify(['plan_restart', 'plan_start', 'service_report_cta']));
   const deliveredArms = estimateCalls.filter((r) => r.method === 'orWhereRaw'
     && String(r.args[0]).includes("e.estimate_data #>> '{deliveryState,firstDeliveredAt}'") && String(r.args[0]).includes('IS NOT NULL'));
   // One grouped predicate per period, all three arms OR'd together.
@@ -73,7 +73,7 @@ test('every get_estimate_funnel query leaves out undelivered self-serve quotes, 
   for (const calls of chains.values()) {
     expect(calls.some((c) => c.method === 'whereNull' && c.args[0] === 'e.source')).toBe(true);
     expect(calls.some((c) => c.method === 'orWhereNotIn' && c.args[0] === 'e.source'
-      && JSON.stringify(c.args[1]) === JSON.stringify(['plan_restart', 'plan_start']))).toBe(true);
+      && JSON.stringify(c.args[1]) === JSON.stringify(['plan_restart', 'plan_start', 'service_report_cta']))).toBe(true);
     expect(calls.some((c) => c.method === 'orWhereRaw'
       && String(c.args[0]).includes("e.estimate_data #>> '{deliveryState,firstDeliveredAt}'") && String(c.args[0]).includes('IS NOT NULL'))).toBe(true);
   }
