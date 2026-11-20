@@ -106,7 +106,9 @@ const GUIDES = [
     keywords: "alerts notifications push banner pop up sound iphone ios apple not getting missing silent focus sleep do not disturb lock screen",
     path: "/?tab=visits",
     // The composers send plain text, so the picture of the settings screen
-    // lives on a static page (client/public/help/iphone-alerts.html).
+    // lives on a static page (client/public/help/iphone-alerts.html). /help
+    // is a browser-only root (email-link-policy.js), so iOS opens it in Safari,
+    // not inside the Waves app the customer is about to check.
     pictures: "https://portal.wavespestcontrol.com/help/iphone-alerts.html",
     steps: [
       "Open Settings, tap Notifications, then tap Waves.",
@@ -223,7 +225,7 @@ export const HOW_TO_GUIDE_LINKS = GUIDES.map(({ path, ...guide }) => ({
 export function howToGuideText(link) {
   const lines = [`${link.title}:`];
   // A full https address, so mail apps make it a link.
-  if (link.pictures) lines.push(`Pictures of each step: ${link.pictures}`);
+  if (link.pictures) lines.push(`See these steps with a picture: ${link.pictures}`);
   link.steps.forEach((step, index) => lines.push(`${index + 1}. ${step}`));
   if (link.after) lines.push(link.after);
   lines.push(HELP_LINE);

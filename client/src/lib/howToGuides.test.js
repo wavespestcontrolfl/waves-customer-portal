@@ -50,7 +50,7 @@ describe("how-to guide rows", () => {
 
   it("links the iPhone alert guide to its picture page, which repeats the guide's steps", () => {
     const iphone = guide("alerts_iphone");
-    expect(howToGuideText(iphone).split("\n")[1]).toBe("Pictures of each step: https://portal.wavespestcontrol.com/help/iphone-alerts.html");
+    expect(howToGuideText(iphone).split("\n")[1]).toBe("See these steps with a picture: https://portal.wavespestcontrol.com/help/iphone-alerts.html");
     expect(HOW_TO_GUIDE_LINKS.filter((link) => link.pictures).map((link) => link.key)).toEqual(["howto:alerts_iphone"]);
 
     // Served as a plain file from client/public at the same path.
