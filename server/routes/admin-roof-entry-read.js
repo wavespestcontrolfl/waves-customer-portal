@@ -6,6 +6,7 @@
  *         -> { status: 'ok' | 'in_progress' | 'no_image' | 'model_failed', cached, read }; read is null unless status is 'ok'.
  *         200 for every status except 202 'in_progress': another request holds this roof's claim, no image fetch or
  *         model call was made, ask again shortly. estimate_id / customer_id are stored and compared lower-case.
+ *         400 { error: 'reference_mismatch' } when both ids are given and the estimate belongs to a different customer.
  *   PATCH /api/admin/roof-entry-read/:id/tech-count the technician's final count and flags, to compare with the AI later
  *         body { count?: int >= 0, flags?: { <entry type>: 'yes' | 'no' | 'unsure' } } -> { read }
  *
@@ -71,6 +72,8 @@ router.post('/', async (req, res, next) => {
     logger.info(`[admin-roof-entry-read] status=${result.status} cached=${result.cached} county=${countyKey(input.county) || 'unsupported'}`);
     return res.status(result.status === 'in_progress' ? 202 : 200).json(result);
   } catch (err) {
+    // An estimate that belongs to another customer is refused before any claim, row, fetch or call.
+    if (err.code === 'reference_mismatch') return res.status(400).json({ error: 'reference_mismatch' });
     // A missing estimate or customer is refused before any spend; the foreign key still catches one deleted mid-read.
     if (err.code === 'unknown_reference' || err.code === '23503') return res.status(400).json({ error: 'Unknown estimate_id or customer_id' });
     logger.error(`[admin-roof-entry-read] run failed: ${err.message}`);

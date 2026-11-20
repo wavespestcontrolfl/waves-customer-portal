@@ -17,10 +17,9 @@
  *   - a failure that may have been billed (timeout, 5xx, body error, unknown) is kept as a 'failed' row at the 5-cent
  *     ceiling (spend unknown); only a confirmed pre-billing failure releases the claim. A failed row is never reused.
  * Migrations (all pushed, none editable): 20261119140000 roof_entry_reads, 20261119150000 claims (status, claimed_at,
- * source_id, pending and copy indexes), 20261119160000 context_key (replaces the copy index). Rolling back the third
- * restores the old copy index, which can fail if an estimate with copies was deleted since (SET NULL made two old-style
- * keys equal). The table is dark behind GATE_ROOF_ENTRY_READ (no rows until the owner turns it on); recovery is to
- * delete the colliding cost-0 copy rows (source_id not null) before the rollback.
+ * source_id, pending and copy indexes), 20261119160000 context_key (replaces the copy index), 20261119170000 rollback
+ * guard (a no-op up; its down detaches colliding copies, deleting nothing, so the 160000 down can recreate the old copy
+ * index after an estimate with copies was deleted and SET NULL made two old-style keys equal).
  * The model gives yes / no / unsure per entry type and up to 6 pins as 0-1 image fractions. It is never asked to
  * count: vision models count poorly, and the technician's own count (saveTechCount) is the ground truth.
  */
@@ -151,6 +150,9 @@ const countyKey = (county) => {
 
 // A square ground crop centred on the home, as a Web Mercator box: a metre on the ground spans 1/cos(lat) mercator
 // units, so the half-width is stretched by that factor to keep the crop square on the ground.
+/** The crop centre, rounded ONCE to 5 decimals (~1 m): the cache key and the image request both use this value. */
+const roundCentre = (n) => Number(n.toFixed(5));
+
 function cropBounds(lat, lng) {
   const R = 6378137;
   const x = (lng * Math.PI * R) / 180;
@@ -159,7 +161,10 @@ function cropBounds(lat, lng) {
   return [x - half, y - half, x + half, y + half];
 }
 
-function exportRequestUrl(src, lat, lng) {
+function exportRequestUrl(src, rawLat, rawLng) {
+  // Same rounded centre as lookupKey: a cached read's pins describe exactly the crop that was requested for its key.
+  const lat = roundCentre(rawLat);
+  const lng = roundCentre(rawLng);
   const px = Math.min(1024, Math.ceil(CROP_METERS / src.resolutionM));
   const params = new URLSearchParams({
     bbox: cropBounds(lat, lng).map((n) => n.toFixed(2)).join(','),
@@ -264,7 +269,7 @@ function estimateCostCents({ provider, model, usage }, prices) {
 
 /** sha256 of the imagery source and the crop centre rounded to 5 decimals (~1 m): the same roof in the same photo. */
 function lookupKey({ source, lat, lng }) {
-  return crypto.createHash('sha256').update(`${source}|${lat.toFixed(5)},${lng.toFixed(5)}`).digest('hex');
+  return crypto.createHash('sha256').update(`${source}|${roundCentre(lat).toFixed(5)},${roundCentre(lng).toFixed(5)}`).digest('hex');
 }
 
 const parseJson = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
@@ -342,15 +347,19 @@ async function answerFor(source, ctx) {
   return publicRead(row);
 }
 
-/** Throws code 'unknown_reference' before any spend when a supplied estimate or customer does not exist. */
+/**
+ * Before any claim, copy, image fetch or model call: a supplied estimate and customer must exist (code
+ * 'unknown_reference'), and when both are given and the estimate belongs to a customer, that customer must be the
+ * one supplied (code 'reference_mismatch', compared case-insensitively). One estimate's read can never be filed under
+ * another customer.
+ */
 async function assertReferencesExist({ estimateId, customerId }) {
-  const checks = [['estimates', estimateId], ['customers', customerId]];
-  for (const [table, id] of checks) {
-    if (id && !(await db(table).where({ id }).first('id'))) {
-      const err = new Error(`unknown ${table} reference`);
-      err.code = 'unknown_reference';
-      throw err;
-    }
+  const missing = (table) => Object.assign(new Error(`unknown ${table} reference`), { code: 'unknown_reference' });
+  const estimate = estimateId ? await db('estimates').where({ id: estimateId }).first('id', 'customer_id') : null;
+  if (estimateId && !estimate) throw missing('estimates');
+  if (customerId && !(await db('customers').where({ id: customerId }).first('id'))) throw missing('customers');
+  if (estimate && customerId && estimate.customer_id && String(estimate.customer_id).toLowerCase() !== customerId) {
+    throw Object.assign(new Error('the estimate belongs to another customer'), { code: 'reference_mismatch' });
   }
 }
 

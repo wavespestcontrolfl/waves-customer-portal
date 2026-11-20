@@ -951,6 +951,62 @@ describe('one row per estimate or customer context', () => {
   });
 });
 
+describe('crop centre', () => {
+  it('rounds the centre once: inputs within the same rounded centre give the same cache key AND the same export URL', async () => {
+    const src = svc.IMAGE_SOURCES.manatee;
+    const a = { lat: 27.460001, lng: -82.570002 };
+    const b = { lat: 27.460004, lng: -82.569996 };
+    expect(svc.exportRequestUrl(src, a.lat, a.lng)).toBe(svc.exportRequestUrl(src, b.lat, b.lng));
+    expect(svc.lookupKey({ source: src.source, ...a })).toBe(svc.lookupKey({ source: src.source, ...b }));
+    // A centre that rounds differently is a different crop and a different key.
+    expect(svc.exportRequestUrl(src, 27.46001, -82.57)).not.toBe(svc.exportRequestUrl(src, a.lat, a.lng));
+    expect(svc.lookupKey({ source: src.source, lat: 27.46001, lng: -82.57 })).not.toBe(svc.lookupKey({ source: src.source, ...a }));
+  });
+
+  it('asks the county for the same crop whichever of the two nearby inputs came first (two real fetches)', async () => {
+    // A tier-unknown answer is never reused, so the second request fetches again.
+    mockDispatch.mockResolvedValue({ ok: true, provider: 'gemini', model: 'test-vision', json: goodJson({ tier: 'unknown' }), usage: {} });
+    await post(home({ lat: 27.460001, lng: -82.570002 }));
+    await post(home({ lat: 27.460004, lng: -82.569996 }));
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy.mock.calls[0][0]).toBe(fetchSpy.mock.calls[1][0]);
+    expect(new Set(mockRows.map((r) => r.lookup_key)).size).toBe(1);
+  });
+});
+
+describe('estimate and customer must belong together', () => {
+  const OTHER_CUST = '66666666-6666-4666-8666-666666666666';
+
+  it('refuses an estimate that belongs to another customer with 400 reference_mismatch: no claim, fetch or call', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: OTHER_CUST }];
+    mockRefs.customers = [{ id: CUST }, { id: OTHER_CUST }];
+    const res = await post(home({ estimate_id: EST, customer_id: CUST }));
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'reference_mismatch' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockRows).toHaveLength(0);
+    expect(mockEvents).not.toContain('claim');
+  });
+
+  it('compares the two ids case-insensitively, and never blocks an estimate with no customer or a lone id', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: CUST.toUpperCase() }, { id: EST2, customer_id: null }];
+    expect((await post(home({ estimate_id: EST.toUpperCase(), customer_id: CUST }))).status).toBe(200);
+    expect((await post(home({ estimate_id: EST2, customer_id: CUST }))).status).toBe(200);
+    expect((await post(home({ estimate_id: EST }))).status).toBe(200);
+    expect((await post(home({ customer_id: CUST }))).status).toBe(200);
+  });
+
+  it('checks the pair before a cached read is copied', async () => {
+    await post(home());
+    mockRefs.estimates = [{ id: EST, customer_id: MISSING }];
+    mockRefs.customers = [{ id: CUST }, { id: MISSING }];
+    const rowsBefore = mockRows.length;
+    expect((await post(home({ estimate_id: EST, customer_id: CUST }))).status).toBe(400);
+    expect(mockRows).toHaveLength(rowsBefore);
+  });
+});
+
 describe('county imagery requests', () => {
   it.each([
     ['Manatee', 'www.mymanatee.org', '/gisimg/rest/services/2025/AERIAL_2025_RGB/ImageServer/exportImage'],
