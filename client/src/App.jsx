@@ -82,8 +82,7 @@ function CustomerFailureScreen({ title, message, onRetry }) {
 export class PageErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null, missingStaffCode: false }; }
   // On a staff tab, a plain React.lazy whose code the live build no longer
-  // serves throws here when the stale-chunk reload did not run at once: open
-  // or held work kept the tab, or its one reload already ran
+  // serves throws here: the stale-chunk handler leaves its import to fail
   // (lib/staleChunkReload.js). It gets the recovery lazyWithRetry gives a
   // page (MissingPageCode).
   static getDerivedStateFromError(error) {
@@ -379,15 +378,15 @@ function RouteFallback({ label = 'Loading...' }) {
   );
 }
 
-// A staff page whose code the live build no longer serves, when the
-// stale-chunk reload did not run at once (lib/staleChunkReload.js): it waits
-// for open work, as a page move does, then reloads once. When work still
-// holds the tab, the tab was used on this page meanwhile, or the one reload
-// for a missing chunk already ran, it shows the retry screen. It says the
-// portal has a new version only when the server names a newer build
-// (missingCodeIsNewVersion): after the one reload, offline, or with no newer
-// build named, the code may be out of reach rather than replaced, so the
-// screen asks to check the connection.
+// A staff page whose code the live build no longer serves: the stale-chunk
+// handler leaves its import to fail (lib/staleChunkReload.js), so this page
+// decides while it is mounted. It waits for open work, as a page move does,
+// then reloads once. When work still holds the tab, the tab was used on this
+// page meanwhile, or the one reload for a missing chunk already ran, it
+// shows the retry screen. It says the portal has a new version only when
+// the server names a newer build (missingCodeIsNewVersion): after the one
+// reload, offline, or with no newer build named, the code may be out of
+// reach rather than replaced, so the screen asks to check the connection.
 function MissingPageCode() {
   const [blocker, setBlocker] = useState(null);
   const newVersion = missingCodeIsNewVersion(useNewerBuild(), useBrowserOffline());

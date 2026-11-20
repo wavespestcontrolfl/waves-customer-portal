@@ -328,11 +328,59 @@ describe('on a staff page', () => {
   });
   afterEach(() => { vi.unstubAllGlobals(); });
 
-  test('with nothing open, a stale-chunk preload error reloads at once, as on every page', () => {
+  // The handler cannot tell which import failed, so on a staff page it never
+  // reloads: the page whose code is missing decides, while it is mounted.
+  test('with nothing open, the preload error leaves the import to fail, and the page whose code is missing reloads once', async () => {
     const stale = preloadErrorEvent();
     handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(true);
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    renderInBoundary(lazyWithRetry(missingChunk));
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
+  });
+
+  // Back to the page in view while the next page's code loads: React drops
+  // that move, and its import can fail later, with the page Back returned to
+  // in view. A reload then would spend the one reload on that page.
+  test('the import of a move that Back dropped fails after Back: the page in view stays, with no reload, and the one-shot flag stays clear', async () => {
+    let navigate;
+    function Navigator() {
+      navigate = useNavigate();
+      return null;
+    }
+    let failBlog;
+    const Blog = lazyWithRetry(() => new Promise((_, reject) => { failBlog = reject; }));
+    render(
+      <MemoryRouter initialEntries={['/admin/dashboard']} future={{ v7_startTransition: true }}>
+        <PortalUpdateGate fallback={<div>Gate placeholder</div>}>
+          <Navigator />
+          <PageErrorBoundary>
+            <Suspense fallback={<div>Loading the page</div>}>
+              <Routes>
+                <Route path="/admin/dashboard" element={<div>Dashboard page</div>} />
+                <Route path="/admin/blog" element={<Blog />} />
+              </Routes>
+            </Suspense>
+          </PageErrorBoundary>
+        </PortalUpdateGate>
+      </MemoryRouter>,
+    );
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
+    act(() => { navigate('/admin/blog'); });
+    expect(screen.getByText('Dashboard page')).toBeInTheDocument();
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/dashboard', reload });
+    act(() => { navigate(-1); });
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    await act(async () => { failBlog(new TypeError('Failed to fetch dynamically imported module: /assets/Blog-old.js')); });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    expect(screen.getByText('Dashboard page')).toBeInTheDocument();
+    expect(screen.queryByText('Check your connection and try again.')).not.toBeInTheDocument();
   });
 
   test('held work keeps the tab: the preload error neither reloads nor swallows the import, and leaves the one-shot flag', () => {
@@ -488,16 +536,14 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a page that loads on another path ends that count, so a later missing chunk reloads at once again', async () => {
+  test('a page that loads on another path ends that count, so a later missing page reloads once again', async () => {
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
     resetStaleChunkReloadForTests(); // the page load the one reload opened
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/schedule', reload });
     renderInBoundary(lazyWithRetry(() => Promise.resolve({ default: () => <div>Schedule page</div> })));
     expect(await screen.findByText('Schedule page')).toBeInTheDocument();
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/dashboard', reload });
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(true);
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBeNull();
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
@@ -563,32 +609,26 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a move between other staff pages, with nothing open, still reloads at once', () => {
+  test('a move between other staff pages, with nothing open, still lets a page whose code is missing reload at once', async () => {
     const move = renderGate(['/admin/schedule']);
     move('/admin/dashboard');
     expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(true);
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBeNull();
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  test('a move ends the use of the page it leaves: Back to a page used before the move, with no use since, reloads at once', () => {
+  test('a move ends the use of the page it leaves: Back to a page used before the move, with no use since, reloads at once', async () => {
     const stop = watchPageUse(document);
     try {
       const move = renderGate(['/admin/dashboard']);
       fireEvent.input(document.body);
-      const used = preloadErrorEvent();
-      handleVitePreloadError(used, reload);
-      expect(used.defaultPrevented).toBe(false);
+      await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('page-use');
       vi.stubGlobal('location', { ...window.location, pathname: '/admin/reviews', reload });
       move('/admin/reviews');
       vi.stubGlobal('location', { ...window.location, pathname: '/admin/dashboard', reload });
       move(-1);
       expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
-      const stale = preloadErrorEvent();
-      handleVitePreloadError(stale, reload);
-      expect(stale.defaultPrevented).toBe(true);
+      await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBeNull();
       expect(reload).toHaveBeenCalledTimes(1);
     } finally {
       stop();
@@ -743,33 +783,27 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a page used since it opened keeps the tab, so a missing part asks first; after a move, a missing page reloads at once', () => {
+  test('a page used since it opened keeps the tab, so its missing code asks first; at the next page, a page whose code is missing reloads at once', async () => {
     const stop = watchPageUse(document);
     try {
       fireEvent.input(document.body);
-      const stale = preloadErrorEvent();
-      handleVitePreloadError(stale, reload);
-      expect(stale.defaultPrevented).toBe(false);
+      await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('page-use');
       expect(reload).not.toHaveBeenCalled();
       vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
-      const next = preloadErrorEvent();
-      handleVitePreloadError(next, reload);
-      expect(next.defaultPrevented).toBe(true);
+      await expect(reloadForMissingCode({ pathname: '/admin/blog', reload })).resolves.toBeNull();
       expect(reload).toHaveBeenCalledTimes(1);
     } finally {
       stop();
     }
   });
 
-  test('a tap on a Reload control is no use of the page, so a missing chunk still reloads at once', () => {
+  test('a tap on a Reload control is no use of the page, so a page whose code is missing still reloads at once', async () => {
     const stop = watchPageUse(document);
     const control = document.body.appendChild(document.createElement('button'));
     control.setAttribute('data-portal-reload-prompt', '');
     try {
       fireEvent.pointerDown(control);
-      const stale = preloadErrorEvent();
-      handleVitePreloadError(stale, reload);
-      expect(stale.defaultPrevented).toBe(true);
+      await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBeNull();
       expect(reload).toHaveBeenCalledTimes(1);
     } finally {
       stop();
@@ -866,39 +900,32 @@ describe('on a staff page', () => {
   // the count of the one reload on the path it reopened (noteChunkLoaded). A
   // move in view away from that path ends it, or a later deploy's missing
   // chunk there would never reload.
-  test('a move in view away from the path the one reload reopened ends that reload\'s count: back on that path, a later missing chunk reloads once more', () => {
+  test('a move in view away from the path the one reload reopened ends that reload\'s count: back on that path, a later missing page reloads once more', async () => {
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
     resetStaleChunkReloadForTests(); // the page load the one reload opened
     notePageInView(null, '/admin/dashboard');
     noteChunkLoaded(); // its page loads
-    // A part still missing under it: no second reload.
-    const part = preloadErrorEvent();
-    handleVitePreloadError(part, reload);
-    expect(part.defaultPrevented).toBe(false);
+    // A page still missing under it: no second reload.
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('reloaded');
     // To the More page, in the entry bundle, then Back: no page loads.
     notePageInView('/admin/dashboard', '/admin/more');
     notePageInView('/admin/more', '/admin/dashboard');
-    const later = preloadErrorEvent();
-    handleVitePreloadError(later, reload);
-    expect(later.defaultPrevented).toBe(true);
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBeNull();
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  test('when the page the one reload reopened still fails, a move in view away from it ends that reload\'s count, flag included: a missing chunk on another page reloads once more', () => {
+  test('when the page the one reload reopened still fails, a move in view away from it ends that reload\'s count, flag included: a missing page elsewhere reloads once more', async () => {
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
     resetStaleChunkReloadForTests(); // the page load the one reload opened
     notePageInView(null, '/admin/dashboard');
     // Its page still fails: no page loads, so nothing clears the flag.
-    const again = preloadErrorEvent();
-    handleVitePreloadError(again, reload);
-    expect(again.defaultPrevented).toBe(false);
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('reloaded');
     // To the More page, in the entry bundle: no page loads there either.
     notePageInView('/admin/dashboard', '/admin/more');
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
-    const other = preloadErrorEvent();
-    handleVitePreloadError(other, reload);
-    expect(other.defaultPrevented).toBe(true);
+    notePageInView('/admin/more', '/admin/customers');
+    await expect(reloadForMissingCode({ pathname: '/admin/customers', reload })).resolves.toBeNull();
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
@@ -910,15 +937,13 @@ describe('on a staff page', () => {
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
   });
 
-  test('a move in view to the path the one reload reopened, written another way, keeps that reload\'s count', () => {
+  test('a move in view to the path the one reload reopened, written another way, keeps that reload\'s count', async () => {
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog/caf%C3%A9', reload });
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
     resetStaleChunkReloadForTests(); // the page load the one reload opened
     noteChunkLoaded();
     notePageInView(null, '/admin/blog/café');
-    const part = preloadErrorEvent();
-    handleVitePreloadError(part, reload);
-    expect(part.defaultPrevented).toBe(false);
+    await expect(reloadForMissingCode({ pathname: '/admin/blog/café', reload })).resolves.toBe('reloaded');
     expect(reload).not.toHaveBeenCalled();
   });
 

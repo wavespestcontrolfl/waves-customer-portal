@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 // A part of a staff page whose code the live build no longer serves shows a
-// Reload prompt in its place, while open or held work keeps the tab; the rest
-// of the page and the staff layout stay. The prompt reloads like the Reload
-// bar: it names what holds the tab and asks once about the page first.
+// Reload prompt in its place and never reloads by itself; the rest of the
+// page and the staff layout stay. The prompt reloads like the Reload bar: it
+// names what holds the tab and asks once about the page first.
 import React, { Suspense } from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -12,7 +12,8 @@ import { lazyPanel } from './LazyPanel';
 import { registerReloadHold } from '../lib/reloadHolds';
 import { noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
 import {
-  CHUNK_RELOAD_FLAG, handleVitePreloadError, notePageInView, resetStaleChunkReloadForTests,
+  CHUNK_RELOAD_FLAG, handleVitePreloadError, markPageNavigating, notePageInView, reloadForMissingCode,
+  resetStaleChunkReloadForTests,
 } from '../lib/staleChunkReload';
 
 let holding = false;
@@ -165,15 +166,35 @@ test('a use of the page after the prompt named its work clears the names, so the
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
-test('while the stale-chunk reload is under way, a part whose import it swallowed shows the loading line, not a crash; it says new version once an answer names one', async () => {
+// An app link opens its page with location.assign (native/nativeLinks.js):
+// meanwhile the handler holds each chunk that fails, and the import resolves
+// undefined. The handler checks that window before the staff rules.
+test('while an app link opens a page, a part whose import the handler held shows the loading line, not a crash; it says new version once an answer names one', async () => {
   vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
-  handleVitePreloadError(new Event('vite:preloadError', { cancelable: true }), reload);
-  expect(reload).toHaveBeenCalledTimes(1);
+  markPageNavigating(reload);
+  const held = new Event('vite:preloadError', { cancelable: true });
+  handleVitePreloadError(held, reload);
+  expect(held.defaultPrevented).toBe(true);
+  expect(reload).not.toHaveBeenCalled();
   renderPage(lazyPanel(() => Promise.resolve(undefined)));
   expect(await screen.findByText('Loading...')).toBeInTheDocument();
   expect(screen.queryByText(/Route tree crashed/)).not.toBeInTheDocument();
   nameNewerBuild();
   expect(screen.getByText('Loading the new version...')).toBeInTheDocument();
+});
+
+// A page whose code is missing reloads by itself when nothing holds the tab
+// (reloadForMissingCode, App.jsx). The reload is then under way, so a part
+// whose code fails meanwhile waits for it instead of asking.
+test('while the reload for a page whose code is missing is under way, a part whose code fails shows the loading line, not its prompt', async () => {
+  vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
+  await expect(reloadForMissingCode({ pathname: '/admin/customers', reload })).resolves.toBeNull();
+  expect(reload).toHaveBeenCalledTimes(1);
+  renderPage(lazyPanel(missingChunk));
+  expect(await screen.findByText('Loading...')).toBeInTheDocument();
+  expect(screen.queryByText(CONNECTION)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Route tree crashed/)).not.toBeInTheDocument();
+  expect(reload).toHaveBeenCalledTimes(1);
 });
 
 test('a part that loads renders as usual', async () => {

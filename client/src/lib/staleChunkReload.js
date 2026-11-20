@@ -21,13 +21,17 @@
 // lazyWithRetry hold later failures too; if this page is still here when the
 // window ends, the navigation never committed and the page reloads.
 //
-// On a staff page, the reload obeys the holds of an out-of-date tab
+// On a staff page, the handler never reloads: it leaves the import to fail,
+// and the page or part that asked for the code decides, while it is still
+// mounted. The handler cannot tell which import failed. After Back, the
+// import of a page whose move React dropped can fail while the page Back
+// returned to is in view, and a reload would spend the one reload there. A
+// page whose code is missing obeys the holds of an out-of-date tab
 // (lib/portalReload.js): open requests and device writes, held work, and a
-// browser offline. While any of them holds the tab, the handler leaves the
-// import to fail. A page whose code is missing then waits for open work, as
-// a page move does, and reloads once or shows its retry screen
-// (reloadForMissingCode, App.jsx). A part of a page shows a Reload prompt in
-// its place (components/LazyPanel.jsx).
+// browser offline. It waits for open work, as a page move does, and reloads
+// once or shows its retry screen (reloadForMissingCode, App.jsx). A part of
+// a page shows a Reload prompt in its place (components/LazyPanel.jsx), and
+// any other import() fails to its caller.
 //
 // A reload closes the page in view and opens the address. While a move is
 // not yet in view the two differ: the address changes first, and Back
@@ -37,21 +41,19 @@
 // or at the address. A page whose code is missing reloads only while the
 // address names its route: after Back, its reload would open the next page.
 //
-// A part opens in place, so the page around it can hold unsaved work in
-// component state that no hold names. So a staff tab used on the page in
-// view since it came into view (watchPageUse) keeps the tab too: a part asks
-// before it reloads, and any other import() fails to its caller. A use
-// counts for the page in view, not for the address, which names the next
-// page while a move is not yet in view. A page move ends that use once it is
-// in view (notePageInView), so a page whose code is missing still reloads at
-// once when nothing holds the tab.
+// A page can hold unsaved work in component state that no hold names. So a
+// staff tab used on the page in view since it came into view (watchPageUse)
+// keeps the tab too: a page whose code is missing shows its retry screen,
+// which asks first. A use counts for the page in view, not for the address,
+// which names the next page while a move is not yet in view. A page move
+// ends that use once it is in view (notePageInView), so a page whose code is
+// missing still reloads at once when nothing holds the tab.
 //
 // Waves Admin and the field pages never reload by themselves, as at a page
 // move (selfReloadBarred, lib/portalReload.js): a reload with no signal opens
 // an offline screen. Nor does the page a move from a field page opens, as
 // PortalUpdateGate judges that move (notePageMove): field work can still be
-// on its way. There a missing chunk always leaves the import to fail, so the
-// page or the part asks.
+// on its way. There a page whose code is missing shows its retry screen.
 //
 // The one reload for a missing chunk counts until the tab leaves the path it
 // reopened (chunkReloadAttempted): a route can load in parts, and the part
@@ -267,10 +269,9 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
     event.preventDefault();
     return;
   }
-  // A staff tab with open or held work, used on the page in view since the
-  // last page move, or on a page that never reloads by itself: the import
-  // fails as it would with no handler (see the top of this file).
-  if (staffBlocker() || usedOnThisStaffPage() || staffSelfReloadBarred()) return;
+  // A staff tab: the import fails as it would with no handler, and the page
+  // or part that asked for it decides (see the top of this file).
+  if (staffTab()) return;
   if (!takeChunkReload()) return;
   markStaleChunkReloadPending();
   event.preventDefault();
@@ -282,12 +283,12 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
 // missing chunk (a real outage then gets the retry screen, not a reload
 // loop), 'storage' when session storage is blocked (no one-shot guard),
 // 'page-use' when the tab was used on this page (its retry screen asks
-// first, as the preload error would), 'manual' on a page that never reloads
-// by itself, or what else holds the tab: a registered hold's name, or
-// 'offline' while the browser reports itself offline (blockersBesideWork in
-// lib/portalReload.js). The wait for open work ends none of them, so the page
-// does not wait while one stands, as a page move does not, and its wait ends
-// once one comes up. Null when it can.
+// first), 'manual' on a page that never reloads by itself, or what else
+// holds the tab: a registered hold's name, or 'offline' while the browser
+// reports itself offline (blockersBesideWork in lib/portalReload.js). The
+// wait for open work ends none of them, so the page does not wait while one
+// stands, as a page move does not, and its wait ends once one comes up. Null
+// when it can.
 function selfReloadRuledOut() {
   try {
     if (chunkReloadAttempted()) return 'reloaded';

@@ -5,10 +5,12 @@ import { Button, Dialog, DialogBody, DialogFooter } from './ui';
 
 // React.lazy for a part of a staff page: a tab, a panel, a sheet. A route's
 // page uses App.jsx's lazyWithRetry. When the live build no longer serves the
-// part's code and open or held work kept the tab (lib/staleChunkReload.js),
-// the part shows a Reload prompt in its place. The rest of the page and the
-// staff layout stay, the Ask Waves draft included: a plain React.lazy would
-// throw to the boundary around the whole route tree.
+// part's code on a staff tab, the stale-chunk handler leaves its import to
+// fail (lib/staleChunkReload.js), and the part shows a Reload prompt in its
+// place. It never reloads by itself: the page around it can hold unsaved
+// work. The rest of the page and the staff layout stay, the Ask Waves draft
+// included: a plain React.lazy would throw to the boundary around the whole
+// route tree.
 // `dialog`: the name of the dialog that a part draws itself, such as Today's
 // job card. Its prompt then shows in a dialog of that name. In the part's
 // place, the prompt would sit where the part is in the page, out of view and
@@ -19,10 +21,13 @@ export function lazyPanel(factory, { dialog } = {}) {
   return lazy(async () => {
     try {
       const mod = await factory();
-      // The stale-chunk reload swallowed the import and is under way.
+      // The stale-chunk handler swallowed the import: its reload is under
+      // way, or an app link is opening the next page (markPageNavigating).
       if (!mod && isStaleChunkReloadPending()) return { default: PanelPending };
       return mod;
     } catch (err) {
+      // A reload is under way, such as the one a page whose code is missing
+      // started (App.jsx): the part shows the loading line until it lands.
       if (isStaleChunkReloadPending()) return { default: PanelPending };
       if (isChunkError(err) && staffTab()) return { default: Missing };
       throw err;
