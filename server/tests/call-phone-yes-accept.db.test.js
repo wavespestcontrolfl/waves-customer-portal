@@ -1345,7 +1345,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
 
     // The two steps inside the accept read every fact again under their locks (a change between the list and the
     // accept's locks). Driven directly here, each inside its own savepoint.
-    test('the link step locks the card, then reads the call, the caller\'s word, the visit, the estimate links, the other open estimates and the plan again, then links', async () => {
+    test('the link step locks the card, then reads the call, the visit, the estimate links, the other open estimates, the plan and the word window again, then links (the last step reads the word)', async () => {
       const { customerId, est, bookingCallId, visitId, card } = await filed();
       const ev = await evaluatePhoneYes({ callLogId: bookingCallId, customerId });
       expect(ev).toMatchObject({ card: true, acceptProblem: null });
@@ -1372,8 +1372,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'card_changed' });
       await trx('triage_items').where({ id: card.id }).update({ status: 'open' });
       await expect(run({}, { ...est, id: randomUUID() })).rejects.toMatchObject({ phoneYesRefusal: 'estimate_not_on_card' });
-      // The caller's word, read again under the lock: the booking call now says annual prepay (the prepay card's), a
-      // later call takes the yes back, or a call is still being read.
+      // The booking call, read again under the lock: it now says annual prepay (the prepay card's)…
       await trx('call_log').where({ id: bookingCallId })
         .update({ ai_extraction_enriched: JSON.stringify(extractionWith('annual_prepay')), transcription: transcriptWith('annual_prepay') });
       await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'chose_annual_prepay' });
@@ -1383,12 +1382,16 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       await trx('call_log').where({ id: laterCancel }).del();
       await trx('call_log').where({ id: bookingCallId })
         .update({ ai_extraction_enriched: JSON.stringify(extractionWith(null)), transcription: transcriptWith(null) });
+      // The caller's word is read again once, by the accept's last step (wordStillStep, its calls locked to the commit):
+      // a later call takes the yes back, or a call is still being read.
+      const wordStill = () => trx.transaction((t) => PhoneYesPrivate.wordStillStepForTest({ customerId, word: PhoneYesPrivate.tapWordOfForTest(ev) })(t));
       const cancelCall = await call(customerId, null, { created_at: new Date() }, 'cancellation_request');
-      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'word_changed' });
+      await expect(wordStill()).rejects.toMatchObject({ phoneYesRefusal: 'word_changed' });
       await trx('call_log').where({ id: cancelCall }).del();
       const unreadCall = await call(customerId, null, { created_at: new Date(Date.now() - 3600000), processing_status: 'processing' });
-      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'call_still_processing' });
+      await expect(wordStill()).rejects.toMatchObject({ phoneYesRefusal: 'call_still_processing' });
       await trx('call_log').where({ id: unreadCall }).del();
+      await expect(wordStill()).resolves.toBeUndefined();
       // A send that started since the check (a draft now 'sending').
       const draft = await estimate(customerId, { status: 'sending', sent_at: null, updated_at: new Date() });
       await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'estimate_being_sent' });

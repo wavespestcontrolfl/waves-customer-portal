@@ -298,19 +298,24 @@ async function visitProblem(conn, visit, estimate, now) {
   if (visit.estimated_price != null || require('./completion-pricing').visitPriceDecisionRecorded(visit)) return 'visit_priced';
   // An invoice completion would reuse (a pre-minted one) or park the visit on: the bill would not be the plan price.
   if ((await require('./completion-invoice-candidate').completionInvoicesOnVisits(conn, [visit.id])).length) return 'visit_invoiced';
-  // A billing party set on this visit alone (a third-party payer, or a self-pay override): the converter's next visits
-  // do not carry it, so the plan's first visit and the rest would bill different parties.
-  if (visit.payer_id != null || visit.self_pay_override === true) return 'visit_payer';
+  // A billing party set on this visit alone: the converter's next visits do not carry it, so the plan's first visit and
+  // the rest would bill different parties.
+  if (ownBillingParty(visit)) return 'visit_payer';
   // A street-level address hold: the office still confirms the address, and the plan's next visits would not wait.
   if (await require('./street-level-hold').isStreetLevelHoldVisit(visit.id, conn)) return 'visit_address_hold';
   const { estimateFamilyKeysForAdoption, appointmentMatchesEstimateFamily } = require('../routes/estimate-public');
   const families = estimateFamilyKeysForAdoption(estimate, parseJson(estimate.estimate_data), { serviceMode: 'recurring' });
   if (!families.size || !appointmentMatchesEstimateFamily(withRow, families)) return 'service_mismatch';
-  if (!require('./completion-pricing').propertyMatches(visit, estimate)) return 'property_mismatch';
-  if (Number(visit.pending_setup_fee) > 0) return 'setup_fee_stamped';
-  if (Number(visit.prepaid_amount) > 0 || visit.prepaid_method || visit.annual_prepay_term_id) return 'visit_prepaid';
+  // The prepay card's own row rules, in its order: the property, a payment recorded on the visit, a stamped setup fee.
+  const broken = require('./call-prepay-choice').BOOKED_ROW_RULES.find(([, breaks]) => breaks(visit, estimate));
+  if (broken) return broken[0];
   if (await require('./estimate-manual-acceptance').bookedVisitsHaveAddons(conn, [visit.id])) return 'has_addons';
   return null;
+}
+
+// A billing party on this visit row alone: a third-party payer, or a self-pay override.
+function ownBillingParty(row) {
+  return row.payer_id != null || row.self_pay_override === true;
 }
 
 // The customer already holds a plan: a WaveGuard membership (tier or legacy monthly rate; strict, so a failed read
@@ -789,6 +794,14 @@ function tapWordOf(evaluation) {
   return { since: evaluation.wordSince, until: evaluation.wordUntil, key: wordKeyOf(heardFields(evaluation.yes, { noYes: evaluation.noYes })) };
 }
 
+// The booking call as the tap reads it, before and under its lock: still this customer's call, and its own billing
+// choice, read from that call alone (annual prepay leaves it to the prepay card, also when a later call, a cancel or a
+// one-time ask, is the customer's latest word). A reason, or null.
+function bookingCallProblem(booking) {
+  if (!booking) return 'customer_changed';
+  return Word.choseAnnualPrepay(booking) ? 'chose_annual_prepay' : null;
+}
+
 // What the card's read (tapStateOf) and the tap both check first. { ok: true, evaluation, customerId }, or { ok: false, reason, note }
 // (note: the card's text before any tap). No tap has run yet, so a note never says "Nothing was accepted" (the office
 // may have accepted the estimate by hand).
@@ -811,11 +824,9 @@ async function tapCheck(shown, { now }) {
   if (!cardEstimateIds(card).includes(String(evaluation.estimate.id))) {
     return { ok: false, reason: 'estimate_not_on_card', note: note(TAP_UNAVAILABLE.estimate_not_on_card) };
   }
-  // The booking call's own billing choice, read from that call alone: annual prepay leaves it to the prepay card, also
-  // when a later call (a cancel, a one-time ask) is the customer's latest word.
   const booking = await db('call_log').where({ id: card.call_log_id, customer_id: customerId }).first(Word.CALL_COLUMNS);
-  if (!booking) return { ok: false, reason: 'customer_changed', note: note(whyNot('customer_changed')) };
-  if (Word.choseAnnualPrepay(booking)) return { ok: false, reason: 'chose_annual_prepay', note: note(whyNot('chose_annual_prepay')) };
+  const bookingWhy = bookingCallProblem(booking);
+  if (bookingWhy) return { ok: false, reason: bookingWhy, note: note(whyNot(bookingWhy)) };
   // The words the card shows must be the latest word about THIS estimate (read in its window): a card that names a
   // lapsed estimate too can show a yes given before this estimate was sent.
   if (wordKeyOf(parseJson(card.payload)) !== tapWordOf(evaluation).key) {
@@ -893,13 +904,11 @@ async function tapStateOf(card, { now = new Date() } = {}) {
   };
 }
 
-// Step 1, inside the accept's transaction before the conversion: lock and read again every fact the tap read outside it
-// (the card, the call and the caller's word, the booked visit and the call's other visits, the estimate's links, the
-// customer's other open estimates and plan), then link the visit to the estimate.
-// The customer's estimates, locked FOR SHARE to the commit: a send claim (an UPDATE of a row to `sending`) either landed
-// before, and the reads after this see it, or waits for this accept's commit. A claim in flight right now refuses at
-// once (NOWAIT): the step never waits on an estimate row while it holds the accept's locks. The accepted estimate is
-// this transaction's own lock already.
+// The customer's estimates, locked FOR SHARE to the commit, and no send in flight. A send claim (an UPDATE of a row to
+// `sending`) either landed before, and the read after the lock sees it and refuses (which estimates are open is known
+// only once it settles), or waits for this accept's commit. A claim in flight right now refuses at once (NOWAIT): the
+// step never waits on an estimate row while it holds the accept's locks. The accepted estimate is this transaction's
+// own lock already.
 async function lockCustomerEstimates(trx, customerId) {
   try {
     await trx('estimates').where({ customer_id: customerId }).whereNull('archived_at').orderBy('id').forShare().noWait().select('id');
@@ -907,8 +916,13 @@ async function lockCustomerEstimates(trx, customerId) {
     if (err.code === '55P03') throw stop('estimate_being_sent');
     throw err;
   }
+  if (await estimateBeingSent(trx, customerId, new Date())) throw stop('estimate_being_sent');
 }
 
+// Step 1, inside the accept's transaction before the conversion: lock and read again every fact the tap read outside it
+// (the card, the booking call and the word's window, the booked visit and the call's other visits, the estimate's
+// links, the customer's other open estimates and plan), then link the visit to the estimate. The caller's word itself
+// is read again once, last (wordStillStep), with its calls locked to the commit.
 function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdatedAt, word }) {
   const Manual = require('./estimate-manual-acceptance');
   const pin = Manual.bookedVisitsPinOf([visit]);
@@ -922,34 +936,33 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     // property-role change takes property-preferences first and then waits for customer-comms
     // (property-role-proposals.js), so a wait here could deadlock. A held lock refuses (customer_busy); the other change
     // finishes, and the office taps again. Taken, it is this transaction's: the converter's own take later is immediate.
+    // One row, always: a SELECT of one function.
     const pp = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS ok', ['property-preferences', String(customerId)]);
-    if (pp.rows?.[0]?.ok !== true) throw stop('customer_busy');
+    if (pp.rows[0].ok !== true) throw stop('customer_busy');
     await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
     await lockTriageCall(trx, bookingCallId);
     // FOR UPDATE, as the sweep's filing takes it: no read of the call changes until the commit, and the card's Resolve
     // (transitionCore, same transaction) needs no lock upgrade.
     const booking = await trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().first(Word.CALL_COLUMNS);
-    if (!booking) throw stop('customer_changed');
-    if (Word.choseAnnualPrepay(booking)) throw stop('chose_annual_prepay');
-    // The card, locked: still open, the version the office saw, and naming this estimate.
-    const card = await trx('triage_items').where({ id: cardId }).forUpdate().first('status', 'updated_at', 'related_estimate_id', 'payload');
-    if (!card || !['open', 'in_progress'].includes(card.status) || !expectedUpdatedAt
-      || new Date(card.updated_at).getTime() !== new Date(expectedUpdatedAt).getTime()) throw stop('card_changed');
+    const bookingWhy = bookingCallProblem(booking);
+    if (bookingWhy) throw stop(bookingWhy);
+    // The card, locked: still open, the version the office saw (a missing version never matches a card's time), and
+    // naming this estimate.
+    const card = await trx('triage_items').where({ id: cardId }).whereIn('status', ['open', 'in_progress']).forUpdate()
+      .first('updated_at', 'related_estimate_id', 'payload');
+    if (!card || new Date(card.updated_at).getTime() !== new Date(expectedUpdatedAt).getTime()) throw stop('card_changed');
     if (!cardEstimateIds(card).includes(String(estimate.id))) throw stop('estimate_not_on_card');
     // The words the locked card shows are still the ones checked (the latest word about this estimate).
     if (wordKeyOf(parseJson(card.payload)) !== word.key) throw stop('word_changed');
-    // A send that started since the check: which estimates are open is known only once it settles. The customer's
-    // estimates are locked first, so a send claim cannot land between this read and the commit.
+    // A send that started since the check refuses; one that starts now waits for the commit.
     await lockCustomerEstimates(trx, customerId);
-    if (await estimateBeingSent(trx, customerId, new Date())) throw stop('estimate_being_sent');
     // The catalog SHARE lock before any scheduled_services row lock (scheduling/catalog-lock.js): the converter takes
     // it for a capacity-certified conversion after this step, and catalog migrations lock services first and then
     // update visits, so taking the visit row first is an ABBA cycle. Bounded wait; a busy catalog refuses.
     try {
       await require('./scheduling/catalog-lock').lockCatalogIdentity(trx);
-    } catch (err) {
-      if (err.phoneYesRefusal) throw err;
+    } catch {
       throw stop('catalog_busy');
     }
     // The locked visit passes the evaluation's own visit checks again (family, property, price and discounts, invoice,
@@ -967,17 +980,14 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     // The word's window, derived again from the locked call and the locked estimates, as evaluatePhoneYes derives it
     // (this estimate is the only one the call could answer): the estimate was sent before the booking call began (a
     // recording recovery can move the call's derived start), and the first newer send bounds it. A moved window refuses,
-    // also with no yes heard, where the word itself reads the same.
+    // also with no yes heard, where the word itself reads the same. The row is the accept's own locked estimate, and
+    // newerEstimateSentAt gives the same text (or null) the check read.
     const sent = await trx('estimates').where({ id: estimate.id }).first('sent_at', 'created_at', trx.raw(`${handoffSql()} AS handoff_at`));
-    const since = sentAnchorOf(sent || {});
+    const since = sentAnchorOf(sent);
     const until = await newerEstimateSentAt(trx, { customerId, cardIds: [estimate.id], bookingCallId });
-    if (!(since <= callStartedAt(booking)) || since.getTime() !== new Date(word.since).getTime()
-      || String(until ?? '') !== String(word.until ?? '')) throw stop('changed_since_check');
-    // The caller's word, read again in that window: a call still being read, or any change since the check (a later
-    // cancel, a re-read) refuses.
-    if (await Word.unreadCallSince(trx, { customerId, since })) throw stop('call_still_processing');
-    const heard = await Word.callerWord(trx, { customerId, since, until });
-    if (wordKeyOf(heardFields(heard.yes, { noYes: heard.noYes })) !== word.key) throw stop('word_changed');
+    if (!(since <= callStartedAt(booking)) || since.getTime() !== new Date(word.since).getTime() || until !== word.until) {
+      throw stop('changed_since_check');
+    }
     const n = await trx('scheduled_services').where({ id: visit.id }).whereNull('source_estimate_id')
       .update({ source_estimate_id: estimate.id, updated_at: new Date() });
     if (Number(n) !== 1) throw stop('changed_since_check');
@@ -995,7 +1005,7 @@ function priceSeriesStep({ customerId, visit, seen, shown }) {
     const customer = await trx('customers').where({ id: customerId, billing_mode: 'per_application' }).first('per_application_fee');
     if (!(amount > 0) || cents(customer?.per_application_fee) !== cents(amount)) throw stop('price_unresolved');
     // The price the card showed before the tap (planTermsOf), and no other.
-    if (cents(amount) !== cents(shown?.perVisit)) throw stop('plan_not_shown');
+    if (cents(amount) !== cents(shown.perVisit)) throw stop('plan_not_shown');
     // The series: the visit as a recurring parent linked to the estimate on a pest cadence catalog row, its next visits
     // on the same row, and no other visit linked to the estimate.
     const { PEST_CADENCE_CATALOG_KEYS } = require('./estimate-converter');
@@ -1010,7 +1020,7 @@ function priceSeriesStep({ customerId, visit, seen, shown }) {
     // service when the cadence's row is missing, so a quarterly series could carry a monthly identity.
     if (!parent || PEST_CADENCE_CATALOG_KEYS[parent.recurring_pattern] !== parent.service_key) throw stop('series_not_booked');
     // The cadence the card showed, and no other.
-    if (parent.recurring_pattern !== shown?.cadence) throw stop('plan_not_shown');
+    if (parent.recurring_pattern !== shown.cadence) throw stop('plan_not_shown');
     const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id })
       .select('id', 'service_id', 'payer_id', 'self_pay_override', ...MONEY_FIELDS);
     const series = [parent, ...children];
@@ -1024,7 +1034,7 @@ function priceSeriesStep({ customerId, visit, seen, shown }) {
       throw stop('visit_priced');
     }
     // Every visit of the plan bills the account's own party: none carries a payer or a self-pay override of its own.
-    if (series.some((r) => r.payer_id != null || r.self_pay_override === true)) throw stop('visit_payer');
+    if (series.some(ownBillingParty)) throw stop('visit_payer');
     await trx('scheduled_services').whereIn('id', [...seriesIds]).update({ estimated_price: amount, updated_at: new Date() });
     Object.assign(seen, { seriesIds: [...seriesIds], amount });
   };

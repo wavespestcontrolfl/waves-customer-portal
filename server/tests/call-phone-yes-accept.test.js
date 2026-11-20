@@ -64,20 +64,26 @@ describe('wiring', () => {
     }
   });
 
-  test('the tap\'s link step takes its locks in order: property-preferences, the customers row, the triage lock, the estimates (before the send check), the catalog, then the visit', () => {
+  test('the tap\'s link step takes its locks in order: property-preferences, the customers row, the triage lock, the estimates (then the send check), the catalog, then the visit', () => {
     const service = read('../services/call-phone-yes-accept.js');
-    const step = service.slice(service.indexOf('function linkVisitStep('), service.indexOf('function priceSeriesStep('));
-    const order = [
+    const inOrder = (text, needles) => {
+      const order = needles.map((needle) => text.indexOf(needle));
+      expect(order.every((at) => at > 0)).toBe(true);
+      expect([...order].sort((a, b) => a - b)).toEqual(order);
+    };
+    inOrder(service.slice(service.indexOf('function linkVisitStep('), service.indexOf('function priceSeriesStep(')), [
       "['property-preferences', String(customerId)]",
       "trx('customers').where({ id: customerId }).forUpdate()",
       'await lockTriageCall(trx, bookingCallId);',
       'await lockCustomerEstimates(trx, customerId);',
-      'estimateBeingSent(trx, customerId, new Date())',
       "require('./scheduling/catalog-lock').lockCatalogIdentity(trx)",
       "trx('scheduled_services').where({ id: visit.id }).forUpdate()",
-    ].map((needle) => step.indexOf(needle));
-    expect(order.every((at) => at > 0)).toBe(true);
-    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    ]);
+    // The send check reads after the estimates' lock, so a claim cannot land between the read and the commit.
+    inOrder(service.slice(service.indexOf('async function lockCustomerEstimates('), service.indexOf('function linkVisitStep(')), [
+      '.forShare().noWait()',
+      'estimateBeingSent(trx, customerId, new Date())',
+    ]);
   });
 
   test("the caller's word comes from one module: the cards keep no copy of its rules", () => {
