@@ -59,6 +59,13 @@ const { getServices } = require('../services/service-library');
 const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
 const { loadReminderOffIds } = require('../services/auto-dispatch/reminder-off');
 const { fillList, MAX_PER_BLOCK, MOVE_UP_DAYS, _internals } = require('../services/day-replan/fill-list');
+const { ZONE_COORDS } = require('../services/scheduling/forecast-zones');
+
+const { rainArea, rainVerdict } = _internals;
+// An NWS hourly answer for `day`: every hour at 10%, `all` sets every hour, and an hour key sets that hour (null = no
+// reading).
+const rainHours = (day, { all = 10, ...byHour } = {}) => Array.from({ length: 24 }, (_, h) => ({
+  startTime: `${day}T${String(h).padStart(2, '0')}:00:00-04:00`, rainChance: h in byHour ? byHour[h] : all }));
 
 const NOW = new Date('2040-09-09T12:00:00Z');
 const DAY = '2040-09-10';
@@ -98,6 +105,8 @@ const BOOKED_OR_LIVE_HOLD = (() => {
   return recorded;
 })();
 const ZERO_VISITS = { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 };
+// No rain note given: the rain rule does not run.
+const NO_RAIN = { checked: false, leftOut: 0 };
 
 // A fake knex: each table's chain records its calls; a where(fn) runs fn on a recorder of its own. `inactive` maps a
 // capability category to the technicians set to off for it; `scheduleBlocks` are the tech_schedule_blocks rows; `leads`
@@ -257,7 +266,7 @@ describe('open estimates', () => {
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate down unread (lookup timeout)'));
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate refusal-down unread (park lookup failed)'));
       // The notice's count: the estimates were checked, and could not be read.
-      expect(await fillList(conn, [], NOW)).toEqual({ checked: 3, fitted: 0, noLocation: 0, unread: 2, leads: ZERO_LEADS, visits: ZERO_VISITS, byBlock: [] });
+      expect(await fillList(conn, [], NOW)).toEqual({ checked: 3, fitted: 0, noLocation: 0, unread: 2, leads: ZERO_LEADS, visits: ZERO_VISITS, rain: NO_RAIN, byBlock: [] });
     } finally {
       page.slotBrowseRefusal.mockImplementation(async () => null);
       page.pageSlotPicker.mockImplementation(async () => PICKER);
@@ -269,7 +278,7 @@ describe('open estimates', () => {
     expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [], unread: 0 });
     expect(calls.some(([table]) => table === 'scheduled_services')).toBe(false);
     const open = fakeConn({ estimates: [estimate('e1')] });
-    expect(await fillList(open.conn, [], NOW)).toEqual({ checked: 1, fitted: 0, noLocation: 0, unread: 0, leads: ZERO_LEADS, visits: ZERO_VISITS, byBlock: [] });
+    expect(await fillList(open.conn, [], NOW)).toEqual({ checked: 1, fitted: 0, noLocation: 0, unread: 0, leads: ZERO_LEADS, visits: ZERO_VISITS, rain: NO_RAIN, byBlock: [] });
     expect(slots.resolveEstimateCoords).not.toHaveBeenCalled();
     expect(dayStopsQuery).not.toHaveBeenCalled();
     // With no block, no lead and no plan visit is read either.
@@ -893,6 +902,86 @@ describe('fillList', () => {
       expect(line.startMin).toBeGreaterThanOrEqual(9 * 60);
       expect(line.endMin).toBeLessThanOrEqual(13 * 60);
     }
+  });
+
+  test('rain: an outdoor job is left out of an opening it would run in during rain, and counted; a rain-safe job stays, marked', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const row = planVisit('v1', '2040-09-12', { window_start: '14:00:00' });
+    loadGapCandidate.mockResolvedValue(loaded(row, { lat: HQ.lat + 0.05 }));
+    // The open estimate (pest control) and the plan visit are outdoor work; the lead's Waves Assessment is rain-safe.
+    const run = (outlooks) => fillList(fakeConn({ estimates: [estimate('near')], leads: [lead('l1', { latitude: HQ.lat + 0.03 })], plan: [row] }).conn,
+      [morning], NOW, outlooks === undefined ? undefined : { outlooks });
+    const area = rainArea({ lat: HQ.lat + 0.03, lng: HQ.lng });
+    const listed = (out) => out.byBlock[0].map((l) => [l.kind, l.id, !!l.inRain]);
+    let out = await run({ [area]: rainHours(DAY, { all: 70 }) });
+    expect(listed(out)).toEqual([['lead', 'l1', true]]);
+    expect(out.rain).toEqual({ checked: true, leftOut: 2 });
+    expect([out.fitted, out.leads.fitted, out.visits.fitted]).toEqual([0, 1, 0]);
+    // The job's own hours count, through 2 hours after its end: rain at 9 AM leaves the morning jobs out; rain at
+    // 4 PM, past every job's end and its 2 dry hours, keeps them.
+    out = await run({ [area]: rainHours(DAY, { 9: 80 }) });
+    expect(listed(out)).toEqual([['lead', 'l1', true]]);
+    out = await run({ [area]: rainHours(DAY, { 16: 80 }) });
+    expect(listed(out)).toEqual([['estimate', 'near', false], ['lead', 'l1', false], ['visit', 'v1', false]]);
+    expect(out.rain).toEqual({ checked: true, leftOut: 0 });
+    // Unknown is kept: rain in another area only, or a dry day with an hour that has no reading (a wet hour still
+    // counts as rain, as the booking rule reads it).
+    const other = Object.keys(ZONE_COORDS).find((zone) => zone !== area);
+    for (const outlooks of [{ [other]: rainHours(DAY, { all: 90 }) }, { [area]: rainHours(DAY, { 10: null }) }]) {
+      out = await run(outlooks);
+      expect(listed(out)).toEqual([['estimate', 'near', false], ['lead', 'l1', false], ['visit', 'v1', false]]);
+    }
+    // No rain note: the rule does not run.
+    expect((await run()).rain).toEqual(NO_RAIN);
+  });
+
+  test('rain: every service a job performs counts; one outdoor service makes it outdoor work (a combined estimate, an add-on)', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const wet = { [rainArea({ lat: HQ.lat + 0.01, lng: HQ.lng })]: rainHours(DAY, { all: 70 }) };
+    const assessment = { service: 'waves_assessment', label: 'Waves Assessment' };
+    // An estimate's visit: the assessment alone is rain-safe; with pest control on the same visit it is outdoor work.
+    slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, serviceLabel: 'Waves Assessment', services: [assessment] });
+    let out = await fillList(fakeConn({ estimates: [estimate('near')] }).conn, [morning], NOW, { outlooks: wet });
+    expect(out.byBlock[0].map((l) => [l.id, l.inRain])).toEqual([['near', true]]);
+    slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, serviceLabel: 'Waves Assessment + Pest Control',
+      services: [assessment, { service: 'pest_control', label: 'Pest Control' }] });
+    out = await fillList(fakeConn({ estimates: [estimate('near')] }).conn, [morning], NOW, { outlooks: wet });
+    expect([out.byBlock[0], out.rain]).toEqual([[], { checked: true, leftOut: 1 }]);
+    // A plan visit by its catalog key (a bait station check is rain-safe, whatever its name says); an outdoor add-on
+    // makes it outdoor work.
+    const row = planVisit('v1', '2040-09-12', { service_type: 'Rodent Bait Station Service' });
+    loadGapCandidate.mockResolvedValue(loaded(row, { lat: HQ.lat + 0.01, service_key_snapshot: 'rodent_bait_quarterly' }));
+    out = await fillList(fakeConn({ plan: [row] }).conn, [morning], NOW, { outlooks: wet });
+    expect(out.byBlock[0].map((l) => [l.id, l.inRain])).toEqual([['v1', true]]);
+    const pestAddOn = { scheduled_service_id: 'v1', service_id: null, service_name: 'Pest Control Service', service_key_snapshot: 'pest_control' };
+    out = await fillList(fakeConn({ plan: [row], addOns: [pestAddOn] }).conn, [morning], NOW, { outlooks: wet });
+    expect([out.byBlock[0], out.rain]).toEqual([[], { checked: true, leftOut: 1 }]);
+  });
+
+  test('rain: the area is the forecast point nearest the job; a job\'s services decide whether it is rain-safe', () => {
+    for (const [zone, point] of Object.entries(ZONE_COORDS)) {
+      expect(rainArea({ lat: point.lat + 0.01, lng: point.lng - 0.01 })).toBe(zone);
+    }
+    expect(rainArea({ lat: null, lng: -82.5 })).toBeNull();
+    expect(rainArea({})).toBeNull();
+    const fit = { startMin: 9 * 60, endMin: 10 * 60 };
+    const wet = rainHours(DAY, { all: 70 });
+    expect(rainVerdict({ fit: 'avoid', hours: wet }, DAY, fit, '2040-09-09')).toBe('out');
+    expect(rainVerdict({ fit: 'prefer', hours: wet }, DAY, fit, '2040-09-09')).toBe('in');
+    expect(rainVerdict({ fit: 'neutral', hours: wet }, DAY, fit, '2040-09-09')).toBeNull();
+    expect(rainVerdict({ fit: 'avoid', hours: null }, DAY, fit, '2040-09-09')).toBeNull();
+    expect(rainVerdict(undefined, DAY, fit, '2040-09-09')).toBeNull();
+    // Past the horizon (3 days from today): unknown.
+    expect(rainVerdict({ fit: 'avoid', hours: wet }, DAY, fit, '2040-09-01')).toBeNull();
+    // The job's own hours, from its start through 2 hours after its end: a 9 AM to noon job meets 1 PM rain; a 10 AM
+    // job never meets 8 AM rain; a job that ends at 10:30 meets rain in the noon hour.
+    const only = (h) => ({ fit: 'avoid', hours: rainHours(DAY, { [h]: 80 }) });
+    expect(rainVerdict(only(13), DAY, { startMin: 540, endMin: 720 }, '2040-09-09')).toBe('out');
+    expect(rainVerdict(only(8), DAY, { startMin: 600, endMin: 660 }, '2040-09-09')).toBeNull();
+    expect(rainVerdict(only(12), DAY, { startMin: 540, endMin: 630 }, '2040-09-09')).toBe('out');
+    expect(rainVerdict(only(13), DAY, { startMin: 540, endMin: 630 }, '2040-09-09')).toBeNull();
   });
 
   test('a lead\'s look is sized by the catalog (1 hour when it names none) and needs the technician\'s capability for it', async () => {

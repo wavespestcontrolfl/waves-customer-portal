@@ -234,7 +234,7 @@ const leavesText = (f) => (f.from ? `; leaves ${dayLabel(f.from.day)}${f.from.st
  */
 function fillLines(fill, i) {
   if (!fill || fill.error) return [];
-  return fill.byBlock[i].map((f) => `  - ${LINE_HEADS[f.kind]}, ${f.name || 'no name on file'} (${f.label}, ${visitText(f)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}${leavesText(f)}`);
+  return fill.byBlock[i].map((f) => `  - ${LINE_HEADS[f.kind]}, ${f.name || 'no name on file'} (${f.label}, ${visitText(f)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}${leavesText(f)}${f.inRain ? '; runs in rain hours (rain-safe work)' : ''}`);
 }
 
 const leftOut = (items) => items.filter(Boolean).join(', ');
@@ -262,6 +262,7 @@ function fillSummary(fill, blocks = []) {
     + ' Each fit is the staff finder\'s check of a new visit on the day as booked.'
     + (shortFit ? ` A block short of ${SLOT_MIN} minutes can still hold a job when the stops around it have room for the drive.` : '')
     + ` A plan visit moves up at most ${MOVE_UP_DAYS} days, and its customer was told a day: call before moving it.`
+    + (fill.rain?.leftOut ? ` Rain: ${count(fill.rain.leftOut, 'outdoor job', 'outdoor jobs')} left out of an opening in rain hours (the rain rules: only rain-safe work runs in rain).` : '')
     + ' Nothing is held, booked or moved; staff decide whether to call.';
 }
 
@@ -349,10 +350,11 @@ function rainMetadata(rain) {
   return rain.error ? { error: rain.error } : { days: rain.days, unread: rain.unread };
 }
 
-async function fillFor(conn, blocks, now, rulesRead) {
+// The rain note's NWS hours give the fill list its rain rule; a note that was not read gives none.
+async function fillFor(conn, blocks, now, rulesRead, rain) {
   if (!rulesRead) return { error: 'the day rules were unread' };
   try {
-    return await require('./fill-list').fillList(conn, blocks, now);
+    return await require('./fill-list').fillList(conn, blocks, now, { outlooks: rain && !rain.error ? rain.outlooks : null });
   } catch (err) {
     logger.warn(`[open-blocks] fill list not built (${err.message})`);
     return { error: 'a read failed' };
@@ -369,10 +371,11 @@ function fillMetadata(fill, blocks) {
   // fromDay and fromStart: where a plan visit is booked now.
   const lines = fill.byBlock.flatMap((list, i) => list.map((f) => ({ kind: f.kind, [ID_KEYS[f.kind]]: f.id, day: blocks[i].day,
     techId: blocks[i].techId, window: f.windowStart, start: f.startMin, addedDriveMin: f.addedDriveMin,
-    ...(f.from ? { fromDay: f.from.day, fromStart: f.from.start } : {}) })));
+    ...(f.from ? { fromDay: f.from.day, fromStart: f.from.start } : {}), ...(f.inRain ? { inRain: true } : {}) })));
   const { leads, visits } = fill;
   return { checked: fill.checked, fitted: fill.fitted, leads: { checked: leads.checked, fitted: leads.fitted },
-    visits: { checked: visits.checked, fitted: visits.fitted, remindersOff: visits.remindersOff, sharedDay: visits.sharedDay }, lines };
+    visits: { checked: visits.checked, fitted: visits.fitted, remindersOff: visits.remindersOff, sharedDay: visits.sharedDay },
+    ...(fill.rain ? { rain: { checked: fill.rain.checked, leftOut: fill.rain.leftOut } } : {}), lines };
 }
 
 async function closeEarlier(conn, keepKey) {
@@ -410,7 +413,7 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
   }
   const listed = sum.blocks.slice(0, MAX_DETAIL_BLOCKS);
   const rain = await rainFor(now);
-  const fill = await fillFor(conn, listed, now, rulesRead);
+  const fill = await fillFor(conn, listed, now, rulesRead, rain);
   const detail = detailText(sum, fill, rain);
   const posted = await raiseAdminAlert('schedule', alertSpec(sum, fill), {
     bell: true,

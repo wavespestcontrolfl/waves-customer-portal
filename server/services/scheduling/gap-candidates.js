@@ -54,7 +54,8 @@ async function loadGapCandidate(serviceId, conn) {
  * visit (`prospective`, analyzeGapCandidate): at every place in the route, as the staff finder checks a new customer.
  * `dayOpen(date)` holds the visit's own day rules beyond analyzeGapCandidate's: the booking page's first-visit dates
  * (a seasonal mosquito program starts in season; a new-home estimate not before the move-in date) and the mowing-day
- * rule over every service the visit performs (a pest-first visit with lawn care too). `{ unavailable:
+ * rule over every service the visit performs (a pest-first visit with lawn care too). `performs` lists those services
+ * (`service_type`, `service_key_snapshot`), for the fill list's rain rule. `{ unavailable:
  * 'no_stored_location' }` when no stored location can stand in. A failed read throws.
  */
 async function estimateGapCandidate(estimate, conn, picker = {}) {
@@ -92,7 +93,8 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   // The line names the services this visit performs, in the page's words: plan-only mode keeps a companion program that
   // books its own visits in the profile's label.
   return { service, preferences, holds: [], siblingDates: [], deactivated,
-    label: slots.formatServiceProfileLabel(performed) || profile.serviceLabel, prospective: true, dayOpen };
+    label: slots.formatServiceProfileLabel(performed) || profile.serviceLabel, prospective: true, dayOpen,
+    performs: performs.length ? performs : [primary] };
 }
 
 /**
@@ -101,8 +103,8 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
  * which the Leads screen's Schedule button books (admin-leads.js schedule-appointment: the catalog default, else 60
  * minutes). It stands at the lead's customer's stored location (`lead.latitude`/`lead.longitude`, the customer row the
  * booking routes by), never geocoded. A new stop, checked as an estimate's first visit is (`prospective`). The
- * customer's day and time rules and the capability rule apply as for estimateGapCandidate. `{ unavailable:
- * 'no_stored_location' }` when the customer has none. A failed read throws.
+ * customer's day and time rules and the capability rule apply as for estimateGapCandidate; `performs` is the one
+ * visit. `{ unavailable: 'no_stored_location' }` when the customer has none. A failed read throws.
  */
 async function leadGapCandidate(lead, visit, conn) {
   const lat = Number(lead.latitude);
@@ -119,7 +121,8 @@ async function leadGapCandidate(lead, visit, conn) {
   const preferences = await getCustomerSchedulingPreferences(lead.customer_id, service.service_type, conn,
     { serviceId: visit.id, serviceKey: service.service_key_snapshot });
   const deactivated = await deactivatedFor(conn, [service]);
-  return { service, preferences, holds: [], siblingDates: [], deactivated, label: visit.name, prospective: true, dayOpen: () => true };
+  return { service, preferences, holds: [], siblingDates: [], deactivated, label: visit.name, prospective: true, dayOpen: () => true,
+    performs: [service] };
 }
 
 /**

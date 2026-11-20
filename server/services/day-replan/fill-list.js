@@ -37,6 +37,15 @@
  * of a plan visit does (rebooker.js movesAsSeries, GATE_ADMIN_COLLECTIVE_MOVE; a lawn round one-off moves alone), and
  * the move screen says so before the move commits (SeriesMoveNotice.jsx). The list only suggests the move.
  *
+ * Rain (owner 2026-11-19 D3: "the rain rules decide which jobs qualify"): with the rain note's NWS hours (`outlooks`,
+ * rain-note.js; the 07:05 notice passes them), a job whose services are not all rain-safe (rain-fit.js rainFitFor
+ * 'avoid': spray, lawn, exclusion and other outside work) is left out of an opening it would run in during rain, and
+ * counted. Rain is the booking rain rule (isWetWindow): a chance of RAIN_PCT or more in any hour from the visit's start
+ * to RAIN_AFTER_HOURS after its end, at the forecast point nearest the job's stored location (rainArea). Unknown is
+ * kept: no forecast for the area, no wet hour but an hour without a reading, or a day past the horizon. A rain-safe
+ * job (every service on RAIN_OK_KEYS: assessments, inspections, rodent checks) stays and its line says it runs in rain
+ * hours.
+ *
  * Nothing here is paid: no geocoding and no road times.
  */
 const db = require('../../models/db');
@@ -58,6 +67,8 @@ const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { shiftDateStr } = require('../auto-dispatch/dates');
 const { isUnplacedDueDate } = require('../auto-dispatch/move-rules');
 const mowingDays = require('../auto-dispatch/mowing-days');
+const { rainFitFor, isWetWindow } = require('../scheduling/rain-fit');
+const { ZONE_COORDS } = require('../scheduling/forecast-zones');
 const { loadReminderOffIds } = require('../auto-dispatch/reminder-off');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { DISPATCH_DAY_END } = require('./route-check');
@@ -230,6 +241,7 @@ async function planVisitCandidate(conn, row, day, addOns) {
   const pattern = loaded.service.recurring_pattern;
   const oneOff = pattern === LAWN_ROUNDS_9 ? (date) => roundsRowMoveIsOneOff(loaded.service, date) : () => true;
   return { ...loaded, deactivated, holds, prospective: true, label: loaded.service.service_type || row.service_type,
+    performs: [loaded.service, ...extra],
     dayOpen: (date) => date >= earliest && date < day && oneOff(date) && clampDateToSeason(pattern, date) === date
       && !mowingDays.blocksLive(date, mowing) };
 }
@@ -310,6 +322,40 @@ function fitInside(block, routeFits) {
   return null;
 }
 
+/**
+ * The rain note's forecast area nearest a job's stored location (forecast-zones.js ZONE_COORDS, the day board's points),
+ * or null without a location. Straight-line nearness on the map; no road times.
+ */
+function rainArea(service) {
+  const lat = Number(service?.lat);
+  const lng = Number(service?.lng);
+  if (service?.lat == null || service?.lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const across = Math.cos((lat * Math.PI) / 180);
+  let nearest = null;
+  let best = Infinity;
+  for (const [zone, point] of Object.entries(ZONE_COORDS)) {
+    const d = (point.lat - lat) ** 2 + ((point.lng - lng) * across) ** 2;
+    if (d < best) {
+      nearest = zone;
+      best = d;
+    }
+  }
+  return nearest;
+}
+
+const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+
+/**
+ * A job's rain rule for one fit: 'out' when it is not rain-safe and would run in rain, 'in' when it is rain-safe and
+ * would run in rain, null otherwise (dry, unknown, or no forecast).
+ */
+function rainVerdict(rain, day, fit, today) {
+  if (!rain || !rain.hours || rain.fit === 'neutral') return null;
+  const wet = isWetWindow(rain.hours, { date: day, start_time: hhmm(fit.startMin), end_time: hhmm(fit.endMin) }, today);
+  if (wet !== true) return null;
+  return rain.fit === 'avoid' ? 'out' : 'in';
+}
+
 const KINDS = ['estimate', 'lead', 'visit'];
 const byFit = (a, b) => a.addedDriveMin - b.addedDriveMin || a.startMin - b.startMin || a.id.localeCompare(b.id);
 
@@ -388,17 +434,20 @@ async function readCandidates(conn, blocks, now, estimates, result) {
 /**
  * The fill list for the listed blocks ({ day, techId, start, min }): byBlock[i] is block i's lines, best first, and
  * the counts the notice states: `checked`, `fitted`, `noLocation`, `unread` for the open estimates, `leads` and
- * `visits` for the others. Throws when the estimates, the leads, the plan visits or their reminders, a day's stops, the
+ * `visits` for the others, and `rain` (`checked`: the rain rule ran; `leftOut`: the jobs left out of an opening in
+ * rain). `outlooks`: the rain note's NWS hours by area, or null (no rain rule). A line in rain hours carries `inRain`.
+ * Throws when the estimates, the leads, the plan visits or their reminders, a day's stops, the
  * start points or the departure time cannot be read. Built on the module database only: the page's checks and the
  * catalog read it (estimate-slots-public.js, service-library.js), and the 07:05 job passes it (scheduler.js
  * runOpenBlocksAlert()), so every read sees the same rows; another connection (a transaction) throws.
  */
-async function fillList(conn, blocks, now) {
+async function fillList(conn, blocks, now, { outlooks = null } = {}) {
   if (conn !== db) throw new Error('the fill list reads the main database only');
   const { estimates, unread } = await openEstimates(conn, now);
   const result = { checked: estimates.length + unread, fitted: 0, noLocation: 0, unread,
     leads: { checked: 0, fitted: 0, noLocation: 0, unread: 0 },
     visits: { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 },
+    rain: { checked: !!outlooks, leftOut: 0 },
     byBlock: blocks.map(() => []) };
   if (!blocks.length) return result;
   const candidates = await readCandidates(conn, blocks, now, estimates, result);
@@ -414,6 +463,13 @@ async function fillList(conn, blocks, now) {
     techDays.set(key, [...(techDays.get(key) || []), i]);
   });
   const fitted = { estimate: new Set(), lead: new Set(), visit: new Set() };
+  // Each job's rain rule, read once: its services' rain class and its area's NWS hours.
+  const rainOf = new Map(outlooks ? candidates.map(({ candidate }) => [candidate, {
+    fit: rainFitFor((candidate.performs || [candidate.service])
+      .map((svc) => ({ name: svc.service_type, serviceKey: svc.service_key_snapshot || null }))),
+    hours: outlooks[rainArea(candidate.service)] || null,
+  }]) : []);
+  const rainLeftOut = new Set();
   for (const indexes of techDays.values()) {
     const { day, techId } = blocks[indexes[0]];
     const { stops, scheduleBlocks } = days.get(day);
@@ -428,8 +484,14 @@ async function fillList(conn, blocks, now) {
       for (const i of indexes) {
         const fit = fitInside(blocks[i], routeFits);
         if (!fit) continue;
+        const rain = rainVerdict(rainOf.get(candidate), day, fit, today);
+        if (rain === 'out') {
+          rainLeftOut.add(`${kind}:${id}`);
+          continue;
+        }
         fitted[kind].add(id);
-        result.byBlock[i].push({ kind, id, name, label: candidate.label, ...fit, ...(from ? { from } : {}) });
+        result.byBlock[i].push({ kind, id, name, label: candidate.label, ...fit, ...(from ? { from } : {}),
+          ...(rain === 'in' ? { inRain: true } : {}) });
       }
     }
   }
@@ -437,10 +499,11 @@ async function fillList(conn, blocks, now) {
   result.fitted = fitted.estimate.size;
   result.leads.fitted = fitted.lead.size;
   result.visits.fitted = fitted.visit.size;
+  result.rain.leftOut = rainLeftOut.size;
   return result;
 }
 
 module.exports = {
   fillList, MAX_PER_BLOCK, MOVE_UP_DAYS,
-  _internals: { openEstimates, openLeads, leadVisit, movableVisits, fitInside, pickLines, MAX_ESTIMATES, MAX_LEADS, MAX_VISITS, LEAD_DAYS },
+  _internals: { openEstimates, openLeads, leadVisit, movableVisits, fitInside, pickLines, rainArea, rainVerdict, MAX_ESTIMATES, MAX_LEADS, MAX_VISITS, LEAD_DAYS },
 };
