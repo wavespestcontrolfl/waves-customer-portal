@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from '
 import { reportError } from './lib/reportError';
 import {
   CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
-  noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, usedOnThisStaffPage,
+  noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, trackStaffImport, usedOnThisStaffPage,
 } from './lib/staleChunkReload';
 import { PortalUpdateBar, PortalUpdateGate, useBrowserOffline, useHoldAwareReload, useNewerBuild, usePageUsed } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -406,8 +406,11 @@ function MissingPageCode() {
 
 export function lazyWithRetry(factory) {
   return lazy(async () => {
+    // A page asked for on a staff tab keeps the staff rules, even when its
+    // code fails after Back opened a customer page (lib/staleChunkReload.js).
+    const staff = staffTab();
     try {
-      const mod = await factory();
+      const mod = await (staff ? trackStaffImport(factory) : factory());
       // main.jsx's vite:preloadError handler swallowed a stale chunk: the
       // import resolved undefined and a reload is in flight. Hold the loading
       // placeholder and keep the one-shot flag; clearing it here would let a
@@ -421,8 +424,9 @@ export function lazyWithRetry(factory) {
       if (isStaleChunkReloadPending()) return { default: RouteFallback };
       if (isChunkError(err)) {
         // A staff tab obeys the holds of an out-of-date tab, while a staff
-        // page is in view or at the address (lib/staleChunkReload.js).
-        if (staffTab()) return { default: MissingPageCode };
+        // page is in view or at the address, or when one asked for this
+        // page (lib/staleChunkReload.js).
+        if (staff || staffTab()) return { default: MissingPageCode };
         if (takeChunkReload()) {
           markStaleChunkReloadPending();
           showReloadToast();

@@ -31,7 +31,11 @@
 // browser offline. It waits for open work, as a page move does, and reloads
 // once or shows its retry screen (reloadForMissingCode, App.jsx). A part of
 // a page shows a Reload prompt in its place (components/LazyPanel.jsx), and
-// any other import() fails to its caller.
+// any other import() fails to its caller. Back can also open a customer page
+// while code a staff tab asked for is on its way. So while any is
+// (trackStaffImport), the handler leaves every import to fail, and each
+// consumer decides by the tab it was asked on: a staff page or part that
+// is no longer mounted then reloads nothing.
 //
 // A reload closes the page in view and opens the address. While a move is
 // not yet in view the two differ: the address changes first, and Back
@@ -87,6 +91,7 @@ let usedPath = null;
 let renderedMove = NO_MOVE;
 let shownMove = NO_MOVE;
 let reloadedPath = pathOpenedByChunkReload();
+const staffImports = new Set();
 
 // PortalUpdateGate (components/PortalUpdate.jsx) notes each page move: `to`
 // the page it opens, `from` the page it leaves as #8121's rule judges it (a
@@ -105,8 +110,7 @@ export function notePageMove(from, to) {
 // from that use, and Back to that page opens it unused. A move React dropped
 // leaves the page and its use. A move in view away from the path the one
 // reload reopened also ends that reload's count, path and flag
-// (chunkReloadAttempted), as a page that loads on another path does
-// (noteChunkLoaded). A move can load nothing: React.lazy keeps a page it
+// (chunkReloadAttempted); nothing else does. A move can load nothing: React.lazy keeps a page it
 // loaded, the More page is in the entry bundle, and the reopened page may
 // still fail. While a reload is under way, the flag must reach the page load
 // it opens. During an outage a page the tab then opens can take one more
@@ -138,6 +142,20 @@ function pageInView() {
 // too, for a page or a part whose code is missing.
 export function staffTab() {
   return isAdminPath(pageInView()) || isAdminPath(window.location.pathname);
+}
+
+// Runs `load`, an import asked for on a staff tab: a page's code
+// (lazyWithRetry), a part's (lazyPanel) or a legacy panel's
+// (CustomersPageV2.jsx). It counts as on its way until it settles, so the
+// handler leaves every import to fail meanwhile (see the top of this file).
+export async function trackStaffImport(load) {
+  const entry = {};
+  staffImports.add(entry);
+  try {
+    return await load();
+  } finally {
+    staffImports.delete(entry);
+  }
 }
 
 // What holds a staff tab (lib/portalReload.js), or null. Customer pages are
@@ -183,10 +201,11 @@ function pathOpenedByChunkReload() {
 // loads clears the flag (noteChunkLoaded), and a route can load in parts: a
 // page, then a part that opens with it, such as a panel its URL names. So the
 // path that reload reopened counts too, or a part still missing under a page
-// that loaded would reload the tab at every load. That path counts until the
-// tab leaves it: a page loads on another path, or a move to another page
-// comes into view, which clears the flag too (notePageInView). Throws when
-// storage is blocked.
+// that loaded would reload the tab at every load. That path counts until a
+// move to another page comes into view, which clears the flag too
+// (notePageInView). A page that loads on another path does not end it: Back
+// can still undo the move that page belongs to. Throws when storage is
+// blocked.
 function chunkReloadAttempted() {
   return window.location.pathname === reloadedPath || Boolean(sessionStorage.getItem(CHUNK_RELOAD_FLAG));
 }
@@ -206,14 +225,14 @@ export function takeChunkReload() {
 
 // A page loaded (App.jsx lazyWithRetry): the live build serves its code, so a
 // later deploy may reload the tab again. The path the one reload reopened
-// counts until the tab leaves it (chunkReloadAttempted). Best effort:
-// blocked storage must not fail a page whose code loaded. While a reload for
-// a missing chunk is under way, a load does not count: the flag must reach
-// the page load that reload opens. Vite still imports a page whose
-// stylesheet is missing, and that script can load before the reload lands.
+// still counts until a move away from it is in view (chunkReloadAttempted).
+// Best effort: blocked storage must not fail a page whose code loaded. While
+// a reload for a missing chunk is under way, a load does not count: the flag
+// must reach the page load that reload opens. Vite still imports a page
+// whose stylesheet is missing, and that script can load before the reload
+// lands.
 export function noteChunkLoaded() {
   if (reloadPending) return;
-  if (window.location.pathname !== reloadedPath) reloadedPath = null;
   clearChunkReloadFlag();
 }
 
@@ -269,9 +288,10 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
     event.preventDefault();
     return;
   }
-  // A staff tab: the import fails as it would with no handler, and the page
-  // or part that asked for it decides (see the top of this file).
-  if (staffTab()) return;
+  // A staff tab, or code a staff tab asked for still on its way: the import
+  // fails as it would with no handler, and the page or part that asked for
+  // it decides (see the top of this file).
+  if (staffTab() || staffImports.size > 0) return;
   if (!takeChunkReload()) return;
   markStaleChunkReloadPending();
   event.preventDefault();
@@ -373,4 +393,5 @@ export function resetStaleChunkReloadForTests() {
   renderedMove = NO_MOVE;
   shownMove = NO_MOVE;
   reloadedPath = pathOpenedByChunkReload();
+  staffImports.clear();
 }

@@ -39,7 +39,7 @@ import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { useAdminTableViews } from "../../hooks/useAdminTableViews";
 import { useAdminTableScroll } from "../../hooks/useAdminTableScroll";
 import { MissingPanelCode } from "../../components/LazyPanel";
-import { isChunkError } from "../../lib/staleChunkReload";
+import { isChunkError, trackStaffImport } from "../../lib/staleChunkReload";
 import {
   Filter,
   MapPinned,
@@ -190,7 +190,9 @@ function LegacyCustomersPanel({ exportName, props = {} }) {
 
   useEffect(() => {
     let cancelled = false;
-    import("./CustomersPage")
+    // Counted while on its way: Back can open a customer page meanwhile
+    // (lib/staleChunkReload.js).
+    trackStaffImport(() => import("./CustomersPage"))
       .then((mod) => {
         if (!cancelled) setComponent(() => mod[exportName] || null);
       })

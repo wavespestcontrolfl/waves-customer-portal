@@ -1,5 +1,7 @@
 import { lazy } from 'react';
-import { isChunkError, isStaleChunkReloadPending, missingCodeIsNewVersion, staffTab } from '../lib/staleChunkReload';
+import {
+  isChunkError, isStaleChunkReloadPending, missingCodeIsNewVersion, staffTab, trackStaffImport,
+} from '../lib/staleChunkReload';
 import { PortalReloadPrompt, useBrowserOffline, useNewerBuild } from './PortalUpdate';
 import { Button, Dialog, DialogBody, DialogFooter } from './ui';
 
@@ -19,8 +21,11 @@ import { Button, Dialog, DialogBody, DialogFooter } from './ui';
 export function lazyPanel(factory, { dialog } = {}) {
   const Missing = dialog ? missingPanelDialog(dialog) : MissingPanelCode;
   return lazy(async () => {
+    // A part asked for on a staff tab keeps the staff rules, even when its
+    // code fails after Back opened a customer page (lib/staleChunkReload.js).
+    const staff = staffTab();
     try {
-      const mod = await factory();
+      const mod = await (staff ? trackStaffImport(factory) : factory());
       // The stale-chunk handler swallowed the import: its reload is under
       // way, or an app link is opening the next page (markPageNavigating).
       if (!mod && isStaleChunkReloadPending()) return { default: PanelPending };
@@ -29,7 +34,7 @@ export function lazyPanel(factory, { dialog } = {}) {
       // A reload is under way, such as the one a page whose code is missing
       // started (App.jsx): the part shows the loading line until it lands.
       if (isStaleChunkReloadPending()) return { default: PanelPending };
-      if (isChunkError(err) && staffTab()) return { default: Missing };
+      if (isChunkError(err) && (staff || staffTab())) return { default: Missing };
       throw err;
     }
   });

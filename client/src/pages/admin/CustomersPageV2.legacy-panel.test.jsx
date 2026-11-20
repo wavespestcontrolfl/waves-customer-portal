@@ -6,10 +6,11 @@
 import React from 'react';
 import { IDBFactory } from 'fake-indexeddb';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
+import { handleVitePreloadError, notePageInView, resetStaleChunkReloadForTests } from '../../lib/staleChunkReload';
 
 // Stands for V1 code the live build no longer serves: each import() of it
 // rejects with the browser's error. Vitest wraps an error that a mock factory
@@ -58,4 +59,31 @@ test('any other load error still shows the error', async () => {
   openMap();
   expect(await screen.findByText('Could not load this panel: map bug')).toBeInTheDocument();
   expect(screen.queryByText(/This part of the page did not load/)).not.toBeInTheDocument();
+});
+
+// Back can open a customer page while the view's code is on its way: the
+// stale-chunk handler then leaves every import to fail, and the view decides
+// (lib/staleChunkReload.js).
+test('while the view\'s code is on its way, a preload error at a customer page reloads nothing', async () => {
+  let rejectLegacy;
+  legacy.module.then = (resolve, reject) => { rejectLegacy = reject; };
+  const reload = vi.fn();
+  try {
+    openMap();
+    await waitFor(() => expect(rejectLegacy).toBeTypeOf('function'));
+    vi.stubGlobal('location', { ...window.location, pathname: '/', reload });
+    notePageInView('/admin/customers', '/');
+    const stale = new Event('vite:preloadError', { cancelable: true });
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  } finally {
+    // Settle the import: one left on its way holds every later import() of
+    // the view, in this file's other tests too.
+    rejectLegacy?.(new TypeError('Failed to fetch dynamically imported module: /assets/CustomersPage-old.js'));
+    legacy.module.then = (resolve, reject) => reject(legacy.error);
+    resetStaleChunkReloadForTests();
+  }
+  // The view, which asked for the code, decides: its Reload prompt.
+  expect(await screen.findByText(/^This part of the page did not load/)).toBeInTheDocument();
 });

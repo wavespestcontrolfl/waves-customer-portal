@@ -197,6 +197,26 @@ test('while the reload for a page whose code is missing is under way, a part who
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
+// Back can open a customer page while a part's code is on its way. The
+// handler cannot tell that import from the customer page's own, so it leaves
+// every import to fail meanwhile, and the part, asked for on a staff page,
+// decides.
+test('a part whose code fails after Back opened a customer page reloads nothing, and the one-shot flag stays clear', async () => {
+  let failPart;
+  renderPage(lazyPanel(() => new Promise((_, reject) => { failPart = reject; })));
+  expect(screen.getByText('Opening...')).toBeInTheDocument();
+  vi.stubGlobal('location', { ...window.location, pathname: '/', reload });
+  notePageInView('/admin/customers', '/');
+  const stale = new Event('vite:preloadError', { cancelable: true });
+  handleVitePreloadError(stale, reload);
+  expect(stale.defaultPrevented).toBe(false);
+  await act(async () => { failPart(new TypeError('Failed to fetch dynamically imported module: /assets/Panel-old.js')); });
+  expect(await screen.findByText(CONNECTION)).toBeInTheDocument();
+  expect(screen.queryByText(/Route tree crashed/)).not.toBeInTheDocument();
+  expect(reload).not.toHaveBeenCalled();
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+});
+
 test('a part that loads renders as usual', async () => {
   renderPage(lazyPanel(() => Promise.resolve({ default: () => <p>Revenue panel</p> })));
   expect(await screen.findByText('Revenue panel')).toBeInTheDocument();

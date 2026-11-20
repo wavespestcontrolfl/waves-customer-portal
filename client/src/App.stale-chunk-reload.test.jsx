@@ -307,6 +307,17 @@ test('on a customer page with session storage blocked, a missing chunk gets the 
   }
 });
 
+// Only code a staff tab asked for stops the handler: a customer page's own
+// import on its way gets the reload at once, as on main.
+test('a customer page\'s own import on its way does not stop the stale-chunk reload', () => {
+  renderInBoundary(lazyWithRetry(() => new Promise(() => {})));
+  const reload = vi.fn();
+  const stale = preloadErrorEvent();
+  handleVitePreloadError(stale, reload);
+  expect(stale.defaultPrevented).toBe(true);
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
 test('a customer page keeps its stale-chunk reload while a staff tab hold is open, and after a use of the page', () => {
   holding = true;
   const stop = watchPageUse(document);
@@ -384,6 +395,57 @@ describe('on a staff page', () => {
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
     expect(screen.getByText('Dashboard page')).toBeInTheDocument();
     expect(screen.queryByText('Check your connection and try again.')).not.toBeInTheDocument();
+  });
+
+  // Back can open a customer page while a staff page's code is on its way.
+  // The handler cannot tell which import failed, so while code a staff tab
+  // asked for is on its way it leaves every import to fail, and that page,
+  // no longer mounted, reloads nothing.
+  test('a staff page\'s import that fails after Back opened a customer page reloads nothing: the customer page stays, with no toast, and the one-shot flag stays clear', async () => {
+    let failBlog;
+    const move = renderGate(['/'], {
+      transitions: true,
+      pages: { '/admin/blog': lazyWithRetry(() => new Promise((_, reject) => { failBlog = reject; })) },
+    });
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
+    move('/admin/blog');
+    vi.stubGlobal('location', { ...window.location, pathname: '/', reload });
+    move(-1);
+    expect(screen.getByText('/')).toBeInTheDocument();
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    await act(async () => { failBlog(new TypeError('Failed to fetch dynamically imported module: /assets/Blog-old.js')); });
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    expect(document.getElementById('chunk-reload-toast')).toBeNull();
+    expect(screen.getByText('/')).toBeInTheDocument();
+    // That import settled: the customer page's own missing chunk reloads at
+    // once again, as on main.
+    const own = preloadErrorEvent();
+    handleVitePreloadError(own, reload);
+    expect(own.defaultPrevented).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  // The handler then leaves the customer page's own import to fail too: the
+  // page that asked for it, a customer page, still reloads, as on main.
+  test('while a staff page\'s code is on its way, a customer page whose own code fails still reloads once, through that page: the toast, then the reload', async () => {
+    renderInBoundary(lazyWithRetry(() => new Promise(() => {}))); // asked for on this staff page
+    vi.stubGlobal('location', { ...window.location, pathname: '/', reload });
+    notePageInView('/admin/dashboard', '/');
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    try {
+      renderInBoundary(lazyWithRetry(missingChunk));
+      await waitFor(() => expect(document.getElementById('chunk-reload-toast')).not.toBeNull());
+      expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
+      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1), { timeout: 2500 });
+    } finally {
+      document.getElementById('chunk-reload-toast')?.remove();
+    }
   });
 
   test('held work keeps the tab: a page whose code is missing does not reload, and leaves the one-shot flag', async () => {
@@ -532,15 +594,19 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a page that loads on another path ends that count, so a later missing page reloads once again', async () => {
+  // A move changes the address before its page is in view, and Back can
+  // still undo it. A page that loads meanwhile does not end the count.
+  test('a page that loads on another path while its move is not yet in view keeps that count: Back to the reopened page gets no second reload', async () => {
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
     resetStaleChunkReloadForTests(); // the page load the one reload opened
+    notePageInView(null, '/admin/dashboard');
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/schedule', reload });
     renderInBoundary(lazyWithRetry(() => Promise.resolve({ default: () => <div>Schedule page</div> })));
     expect(await screen.findByText('Schedule page')).toBeInTheDocument();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/dashboard', reload });
-    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBeNull();
-    expect(reload).toHaveBeenCalledTimes(1);
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('reloaded');
+    expect(reload).not.toHaveBeenCalled();
   });
 
   // Waves Admin and the field pages never reload by themselves, as at a page
