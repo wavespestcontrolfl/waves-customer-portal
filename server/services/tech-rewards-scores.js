@@ -21,19 +21,22 @@
  *                completionSmsStatus is 'sent'), and the combined-visit summary send
  *                (visit_effects completion_sms / completion_email, as closeout-status.js reads
  *                it; the send record counts even if the summary link is revoked later).
- *                No send on record counts as not on time. A record whose only evidence is a
- *                malformed text timestamp is unknown: the whole part is null (missing data),
- *                never late. Records that expect no customer report are left out: a quiet
- *                backdated closeout (structured_notes.backfill = true) and an internal-only
- *                completion (internalOnlyCompletion = true, or typedReportDelivery 'disabled'
- *                with no frozen flag, as visit-completion-packets.js reads it).
+ *                No send on record counts as not on time. An on-time send on any channel credits
+ *                the record. A record with a malformed text timestamp and no on-time send is
+ *                unknown (it may have gone out on time): the whole part is null (missing
+ *                data), never late. Records that expect no customer report are left out, by the
+ *                customer summary's own rule (publishableSummaryItems in
+ *                visit-completion-summary.js: no backfill, only an auto_send or absent
+ *                typedReportDelivery, so 'internal_only' and 'disabled' are out) and by the
+ *                frozen internalOnlyCompletion flag.
  *                bi-tech-scorecard.js carries no on-time rule; the 24 hours is this module's
  *                own, in one constant.
  *   audit        Share of the technician's tech_protocol_audits rows with result 'match',
  *                for audit months in the window.
  *   callbacks    callbacksPer100 = callbacks credited to the technician (the source-visit
  *                credit bi-tech-scorecard.js uses: callbackCreditByTechnician) per 100
- *                completed non-callback visits in the window. Score = 100 for 0 callbacks,
+ *                completed non-callback visits in the window (a customer_declined visit performed no service, so it is
+ *                not counted; a legacy row with no visitOutcome is). Score = 100 for 0 callbacks,
  *                falling in a straight line to 0 at CALLBACK_RATE_AT_ZERO (10) callbacks
  *                per 100 visits, never below 0. No completed visit = null.
  *   truck        Share of the technician's truck checks (equipment_checks, truck-kit.js) in
@@ -44,6 +47,7 @@ const db = require('../models/db');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const calc = require('./tech-rewards-calc');
 const { callbackCreditByTechnician } = require('./callback-credit');
+const { publishableSummaryItems } = require('./visit-completion-summary');
 
 const { DEFAULT_WEIGHTS, DEFAULT_CUT_LINES, seasonWindow, weightedScore, scoreBand } = calc;
 
@@ -211,11 +215,6 @@ const ON_TIME_SQL = `
        AND status = 'completed'
        AND service_date >= ?::date AND service_date <= ?::date
        AND report_template_version = 'service_report_v1'
-       -- no customer report expected: a quiet backdated closeout, an internal-only completion
-       -- (a consultation), or the legacy shape of one (typedReportDelivery 'disabled' with no frozen flag)
-       AND COALESCE(structured_notes->>'backfill', '') <> 'true'
-       AND COALESCE(structured_notes->>'internalOnlyCompletion', '') <> 'true'
-       AND NOT (structured_notes->>'internalOnlyCompletion' IS NULL AND COALESCE(structured_notes->>'typedReportDelivery', '') = 'disabled')
   ),
   sends AS (
     SELECT service_record_id, MIN(sent_at) AS first_sent_at
@@ -241,7 +240,7 @@ const ON_TIME_SQL = `
       ) snd
      GROUP BY service_record_id
   )
-  SELECT c.id, c.created_at, s.first_sent_at,
+  SELECT c.id, c.created_at, c.structured_notes, s.first_sent_at,
          CASE WHEN c.structured_notes->>'completionSmsStatus' = 'sent'
               THEN COALESCE(c.structured_notes->>'completionSmsDeferredDeliveredAt', c.structured_notes->>'sentSmsAt') END AS text_sent_at
     FROM cohort c LEFT JOIN sends s ON s.service_record_id = c.id`;
@@ -271,18 +270,24 @@ async function readOnTime(rawTechnicianId, window, conn = db) {
   const { rows } = await conn.raw(ON_TIME_SQL, [technicianId, from, to]);
   if (!rows.length) return null;
   const limitMs = REPORT_ON_TIME_HOURS * 3600000;
+  // Records that expect no customer report are left out. One definition, the customer summary's own
+  // (visit-completion-summary.js): never a backfill, only an auto_send (or absent) report posture;
+  // plus the frozen internal-only flag.
+  const owed = rows.filter((row) => publishableSummaryItems([row]).length > 0 && row.structured_notes?.internalOnlyCompletion !== true);
+  if (!owed.length) return null;
   let onTime = 0;
-  for (const row of rows) {
+  for (const row of owed) {
     const textMs = firstTextSend(row.text_sent_at);
     const tableMs = row.first_sent_at ? new Date(row.first_sent_at).getTime() : null;
     const first = [tableMs, textMs].filter((ms) => ms !== null).sort((a, b) => a - b)[0];
-    if (first === undefined) {
-      if (row.text_sent_at != null) return null; // only a malformed text timestamp: unknown, not late
-      continue;
+    const deadline = new Date(row.created_at).getTime() + limitMs;
+    if (first !== undefined && first <= deadline) {
+      onTime += 1; // an on-time send on any channel credits the record
+    } else if (row.text_sent_at != null && textMs === null) {
+      return null; // the unreadable text may have gone out on time: unknown, not late
     }
-    if (first <= new Date(row.created_at).getTime() + limitMs) onTime += 1;
   }
-  return percent(onTime, rows.length);
+  return percent(onTime, owed.length);
 }
 
 async function readAudit(rawTechnicianId, window, conn = db) {
@@ -304,6 +309,7 @@ async function readCallbacks(rawTechnicianId, window, conn = db) {
   const visitRow = (await conn.raw(
     `SELECT COUNT(*) AS visits FROM service_records
       WHERE technician_id = ? AND status = 'completed' AND is_callback IS NOT TRUE
+        AND COALESCE(structured_notes->>'visitOutcome', '') <> 'customer_declined'
         AND service_date >= ?::date AND service_date <= ?::date`,
     [technicianId, from, to],
   )).rows[0];

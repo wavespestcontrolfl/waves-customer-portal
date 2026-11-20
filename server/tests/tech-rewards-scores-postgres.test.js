@@ -290,8 +290,11 @@ describe('tech rewards scores input checks', () => {
       // no customer report expected: never counted, with or without a send
       await visit(tech, { structured_notes: { internalOnlyCompletion: true, typedReportDelivery: 'disabled' } });
       await visit(tech, { structured_notes: { typedReportDelivery: 'disabled' } }); // legacy shape, no frozen flag
-      // a routine completion that merely records a disabled typed report is still owed one (flag frozen false)
+      // a frozen delivery mode that suppresses the customer's copy is out even when the internal-only flag is false
       await visit(tech, { structured_notes: { internalOnlyCompletion: false, typedReportDelivery: 'disabled' } });
+      await visit(tech, { structured_notes: { internalOnlyCompletion: false, typedReportDelivery: 'internal_only' } });
+      // an auto_send report with no send at all is owed and late
+      await visit(tech, { structured_notes: { typedReportDelivery: 'auto_send' } });
       // owed: 2 on time via the summary, 1 late summary, 1 owed with no send = 2 of 4
       expect(await scores.readOnTime(tech, WINDOW)).toBe(50);
       // the link revoked the day after an on-time delivery keeps the credit
@@ -313,6 +316,15 @@ describe('tech rewards scores input checks', () => {
         await db('service_records').where({ id: record.id }).del();
         await db('email_messages').del();
       }
+    });
+
+    test('onTime: an unreadable text timestamp beside a late email is unknown; beside an on-time email it is credited', async () => {
+      const record = await visit(tech, { structured_notes: { completionSmsStatus: 'sent', sentSmsAt: '2026-02-30T12:00:00Z' } });
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-12T16:00:00Z') }); // 49 h: late
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull();
+      await db('email_messages').del();
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-10T16:00:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
     });
 
     test('audit: match share of audited visits in the window months', async () => {
@@ -356,6 +368,20 @@ describe('tech rewards scores input checks', () => {
       })), 500);
       expect(await scores.readCallbacks(tech, WINDOW)).toBe(60.63);
       expect(await scores.readCallbacks(tech.toUpperCase(), WINDOW)).toBe(60.63);
+    });
+
+    test('callbacks: a customer_declined visit performed no service and is not a visit; a legacy row without an outcome is', async () => {
+      await visit(tech, { structured_notes: { visitOutcome: 'customer_declined' } });
+      expect(await scores.readCallbacks(tech, WINDOW)).toBeNull(); // only declined visits: no data, not a perfect 100
+      await visit(tech, { structured_notes: { visitOutcome: 'completed' } });
+      await visit(tech); // legacy row: no outcome
+      await visit(tech, { structured_notes: {} });
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(100);
+      const customer = randomUUID();
+      await visit(tech, { customer_id: customer, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') });
+      await visit(other, { customer_id: customer, service_date: '2026-04-20', is_callback: true });
+      // 1 callback over 4 counted visits (the declined one is out) = 25 per 100: clamped to 0 at 10 per 100
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0);
     });
 
     test('every read takes an uppercase technician id like the lowercase one', async () => {
