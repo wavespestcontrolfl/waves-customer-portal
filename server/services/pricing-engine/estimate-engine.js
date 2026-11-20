@@ -2315,9 +2315,11 @@ function generateEstimate(input) {
     // floor + inspection fee as a firm line (pre-audit of the codex #3594 r4
     // pattern). Unscoped → manual quote.
     // A whole-home seal (gate on) is priced from the HOME's size, which a commercial
-    // property has no minimum table for: it never counts as a scoped one-time.
+    // property has no minimum table for: it never counts as a scoped one-time. Neither does a
+    // roof-style pick (tile multiplier, barrel closure): commercial stays a manual quote.
     scopedOneTime: services.exclusion.pricingVersion === 'v2'
       && !wholeHomeSeal
+      && !roofStyle
       && ['standardWireMeshPoints', 'advancedWireMeshPoints', 'standardBirdBoxes', 'tileHighBirdBoxes',
         'customBirdBoxes', 'meshSoftLF', 'meshConcreteLF']
         .some((k) => Number(services.exclusion[k]) > 0),

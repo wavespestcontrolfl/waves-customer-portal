@@ -89,6 +89,21 @@ describe('priceRodentExclusionV2 roof style', () => {
     expect(at(40).lineItems.reduce((sum, li) => sum + li.price, 0)).toBe(at(40).price);
   });
 
+  test('the closure row is exact; the rounding remainder goes to a non-closure row and rows sum to the price', () => {
+    for (const points of [1, 3, 5]) {
+      const result = priceRodentExclusionV2({ advancedWireMeshPoints: points, roofStyle: 'barrel_tile', barrelEaveFt: 40, waiveInspection: true });
+      expect(component(result, 'barrel_eave_closure').price).toBe(480);
+      expect(result.lineItems.reduce((sum, li) => sum + li.price, 0)).toBe(result.price);
+    }
+    const odd = priceRodentExclusionV2({ advancedWireMeshPoints: 1, roofStyle: 'barrel_tile', barrelEaveFt: 40, waiveInspection: true });
+    expect(odd.price).toBe(668);
+    expect(component(odd, 'wire_mesh_points').price).toBe(188);
+    // Closure only, and a fractional measurement: a whole-dollar closure, nothing to reconcile.
+    const only = priceRodentExclusionV2({ roofStyle: 'barrel_tile', barrelEaveFt: 33.3, waiveInspection: true });
+    expect(component(only, 'barrel_eave_closure').price).toBe(400);
+    expect(only.lineItems.reduce((sum, li) => sum + li.price, 0)).toBe(only.price);
+  });
+
   test('zero, empty or bad feet add no closure line and say it needs a measurement', () => {
     for (const barrelEaveFt of [0, '', undefined, null, -5, 'abc']) {
       const result = priceRodentExclusionV2({ ...POINTS, roofStyle: 'barrel_tile', barrelEaveFt });
@@ -153,21 +168,30 @@ describe('estimate engine with a roof style', () => {
     });
   });
 
-  test('commercial property stays a manual quote', () => {
-    gateOn(() => {
-      // A measured barrel closure with no counted points never becomes a firm price.
-      const closureOnly = generateEstimate(baseInput({
-        propertyType: 'commercial',
-        services: { exclusion: { pricingVersion: 'v2', roofStyle: 'barrel_tile', barrelEaveFt: 80, waiveInspection: true } },
-      }));
-      expect(closureOnly.lineItems.some((li) => li.service === 'rodent_exclusion' && li.price > 0)).toBe(false);
-      // With no pick the same commercial request resolves exactly as it does with a pick and no points.
-      const noPick = generateEstimate(baseInput({
-        propertyType: 'commercial',
-        services: { exclusion: { pricingVersion: 'v2', waiveInspection: true } },
-      }));
-      expect(noPick.lineItems.some((li) => li.service === 'rodent_exclusion' && li.price > 0)).toBe(false);
-    });
+  test('commercial property stays a manual quote, even with the commercial scoped one-time gate on and counted points', () => {
+    const priorScoped = process.env.GATE_COMMERCIAL_ONETIME_SCOPED;
+    process.env.GATE_COMMERCIAL_ONETIME_SCOPED = 'true';
+    try {
+      gateOn(() => {
+        const commercial = (extra) => generateEstimate(baseInput({
+          propertyType: 'commercial',
+          services: { exclusion: { pricingVersion: 'v2', waiveInspection: true, ...extra } },
+        }));
+        const firm = (estimate) => estimate.lineItems.some((li) => li.service === 'rodent_exclusion' && li.price > 0);
+        // Control: with the scoped gate on, counted points and no pick still auto-price (today's behavior).
+        expect(firm(commercial({ advancedWireMeshPoints: 1 }))).toBe(true);
+        // Any pick, with or without points or feet, goes to the manual quote.
+        for (const extra of [
+          { roofStyle: 'barrel_tile', barrelEaveFt: 80 },
+          { roofStyle: 'barrel_tile', barrelEaveFt: 40, advancedWireMeshPoints: 1 },
+          { roofStyle: 'flat_tile', advancedWireMeshPoints: 3, standardBirdBoxes: 1 },
+          { roofStyle: 'shingle', advancedWireMeshPoints: 1 },
+        ]) expect([extra, firm(commercial(extra))]).toEqual([extra, false]);
+      });
+    } finally {
+      if (priorScoped === undefined) delete process.env.GATE_COMMERCIAL_ONETIME_SCOPED;
+      else process.env.GATE_COMMERCIAL_ONETIME_SCOPED = priorScoped;
+    }
   });
 
   test('whole-home seal and roof style combine: the home minimum is the floor of the same rows', () => {
@@ -206,11 +230,23 @@ describe('the estimator route translation of the roof style pick', () => {
     expect(plain.services.exclusion.roofStyle).toBeUndefined();
   });
 
-  test('a measured barrel closure selects the V2 shape; a pick alone does not', () => {
-    expect(translate({ exclAdvancedWireMesh: 0, exclRoofStyle: 'barrel_tile', exclBarrelEaveFt: 30 }).services.exclusion.pricingVersion).toBe('v2');
-    const alone = translate({ exclAdvancedWireMesh: 0, exclRoofStyle: 'flat_tile' }).services.exclusion;
-    expect(alone.pricingVersion).toBeUndefined();
-    expect(alone.roofStyle).toBeUndefined();
+  test('any pick routes to the V2 shape (zero points, no feet too), so the engine prices it or refuses it', () => {
+    for (const exclRoofStyle of ['shingle', 'flat_tile', 'barrel_tile', 'metal', 'other']) {
+      const spot = translate({ exclAdvancedWireMesh: 0, exclRoofStyle }).services.exclusion;
+      expect(spot).toMatchObject({ pricingVersion: 'v2', roofStyle: exclRoofStyle });
+      withGate(undefined, () => expect(() => generateEstimate(translate({ exclAdvancedWireMesh: 0, exclRoofStyle }))).toThrow(/Clear the roof style/));
+      gateOn(() => expect(() => generateEstimate(translate({ exclAdvancedWireMesh: 0, exclRoofStyle }))).not.toThrow());
+    }
+  });
+
+  test('gate off with NO pick: a zero-point request keeps the legacy shape, byte-identical to one that never mentions the field', () => {
+    withGate(undefined, () => {
+      const plain = translate({ exclAdvancedWireMesh: 0 });
+      expect(plain.services.exclusion.pricingVersion).toBeUndefined();
+      expect(translate({ exclAdvancedWireMesh: 0, exclRoofStyle: '', exclBarrelEaveFt: 40 })).toEqual(plain);
+      expect(translate({ exclAdvancedWireMesh: 0, exclRoofStyle: null })).toEqual(plain);
+      expect(() => generateEstimate(plain)).not.toThrow();
+    });
   });
 });
 

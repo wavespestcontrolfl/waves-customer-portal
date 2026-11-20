@@ -6046,11 +6046,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // Whole-home seal (GATE_EXCLUSION_WHOLE_HOME, dark): an all-zero count still prices the home-size
     // minimum, so the pick alone selects the V2 shape. Gate off = the field is never read.
     const wholeHomeSeal = wholeHomeSealFields(o, { homeSqFt, stories, roofType: p.roofType });
-    // Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, dark): a measured barrel closure is V2 work; a pick alone is not.
+    // Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, dark): any pick selects the V2 shape, so the engine prices it or
+    // refuses it (gated, incompatible); the legacy branch would drop it silently. No pick = the field is never read.
     const roofStyle = roofStyleFields(o);
     const hasV2Fields = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
       o.exclStandardBirdBox || o.exclTileHighBirdBox || o.exclCustomBirdBox ||
-      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope || roofStyle.barrelEaveFt > 0);
+      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope || roofStyle.roofStyle);
     if (hasV2Fields) {
       services.exclusion = {
         pricingVersion: 'v2',

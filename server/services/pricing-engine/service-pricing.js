@@ -9869,7 +9869,7 @@ function priceRodentExclusionV2(options = {}) {
 
   // Barrel tile eave closure: per measured foot with a minimum for the line; no feet, no line.
   const barrelClosureSubtotal = roof && roof.eaveFt > 0
-    ? Math.max(roof.minimum, Math.round(roof.eaveFt * roof.perFt * 100) / 100)
+    ? Math.max(roof.minimum, Math.round(roof.eaveFt * roof.perFt))
     : 0;
 
   const rawInstall =
@@ -10000,8 +10000,9 @@ function priceRodentExclusionV2(options = {}) {
       const minimumRow = exclusionMinimumRowText(wholeHome, floor);
       pushComponent(minimumRow.component, minimumRow.label, floorDelta, minimumRow.detail);
     } else if (roundingDelta !== 0) {
-      const last = componentLineItems[componentLineItems.length - 1];
-      last.price = cents(last.price + roundingDelta);
+      // The barrel closure row is exactly max(minimum, feet x rate), whole dollars: never the rounding target.
+      const last = [...componentLineItems].reverse().find((row) => row.component !== 'barrel_eave_closure');
+      if (last) last.price = cents(last.price + roundingDelta);
     }
     if (urgencyDelta > 0) {
       pushComponent('urgency_surcharge', 'Rodent Exclusion — Urgency Surcharge', urgencyDelta,
