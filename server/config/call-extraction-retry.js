@@ -30,6 +30,15 @@ function sweepLengthSql() {
   return `(${floor} OR (${RECORDING_SECONDS_SQL} > 0 AND created_at > NOW() - INTERVAL '${SHORT_RECORDING_SWEEP_HOURS} hours'))`;
 }
 
+// The same rule with no age limit: over 10 s, or, gate on, any recording over
+// 0 s. Only for a reader that REPORTS a failure the sweep already had its
+// chance at, so a short call's failure stays in a 7-day report after its
+// 24-hour sweep window closes. Never for "will the sweep retry it" (that is
+// sweepLengthSql). Gate off = the old floor, byte for byte.
+function sweepLengthAnyAgeSql() {
+  return `${RECORDING_SECONDS_SQL} > ${shortRecordingSweepLive() ? 0 : SWEEP_MIN_SECONDS}`;
+}
+
 // The same rule for one call_log row. COALESCE semantics: a recorded 0 is
 // authoritative and never borrows the longer call duration.
 function sweepLengthOk(row, now = Date.now()) {
@@ -46,5 +55,6 @@ module.exports = {
   SWEEP_MIN_SECONDS,
   SHORT_RECORDING_SWEEP_HOURS,
   sweepLengthSql,
+  sweepLengthAnyAgeSql,
   sweepLengthOk,
 };

@@ -19,7 +19,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
 const { computeStalledCalls } = require('./call-processing-stall-watchdog');
-const { sweepLengthSql } = require('../config/call-extraction-retry');
+const { sweepLengthSql, sweepLengthAnyAgeSql, sweepLengthOk, SHORT_RECORDING_SWEEP_HOURS } = require('../config/call-extraction-retry');
 const { EXECUTING_RECOVERY_MINUTES } = require('./content/email-approvals');
 const { STALE_CLAIM_MS: DELIVERY_STALE_CLAIM_MS } = require('./service-report/delivery-queue');
 const { STALE_CLAIM_MS: PDF_STALE_CLAIM_MS } = require('./service-report/pdf-queue');
@@ -111,6 +111,53 @@ async function laneScheduledJobs() {
   return finish(items);
 }
 
+// processAllPending takes the row again: the sweep's own length rule now (a
+// short call only inside its 24-hour window, GATE_SHORT_CALL_RECORDING_SWEEP
+// on), or a PAN-quarantined masked transcript (the scans' own exemption:
+// pan_detected AND a transcript).
+function sweepTakesAgain(r, now) {
+  if (sweepLengthOk(r, now)) return true;
+  if (r.transcription == null) return false;
+  try {
+    const meta = typeof r.transcription_metadata === 'string' ? JSON.parse(r.transcription_metadata) : r.transcription_metadata;
+    return String(meta?.pan_detected) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+// A no_transcription / extraction_failed row is a scheduled retry only while
+// it is under the processor's attempt cap, inside extraction_failed's
+// creation fence (no_transcription has none), and taken again by the sweep
+// (10-min spacing). Anything else is a failure, with the reason.
+function callFailureState(r, now) {
+  const max = CALL_EXTRACTION_MAX_ATTEMPTS;
+  const attempts = Number(r.extraction_attempts) || 0;
+  const noTranscript = r.processing_status === 'no_transcription';
+  if (attempts >= max) {
+    return {
+      status: 'failed',
+      detail: noTranscript
+        ? `no transcript after ${attempts} attempts — no automatic retry`
+        : `extraction failed after ${attempts} attempts — triage filed`,
+    };
+  }
+  if (!noTranscript && !(new Date(r.created_at) > since(RECENT_DAYS))) {
+    // Outside the sweep's creation fence: nothing will retry it automatically
+    // (a force-reprocess that failed again lands here).
+    return { status: 'failed', detail: `extraction failed (${attempts}/${max}) — call older than the ${RECENT_DAYS}-day retry window, no automatic retry` };
+  }
+  if (!sweepTakesAgain(r, now)) {
+    return { status: 'failed', detail: `${noTranscript ? 'no transcript' : 'extraction failed'} (${attempts}/${max}) — a short call past its ${SHORT_RECORDING_SWEEP_HOURS}-hour sweep window, no automatic retry` };
+  }
+  return {
+    status: 'pending',
+    detail: noTranscript
+      ? `no transcript yet — retry scheduled (${attempts}/${max})`
+      : `extraction failed, retry scheduled (${attempts}/${max})`,
+  };
+}
+
 async function laneCallProcessing() {
   // Open rows (null / pending / processing) carry NO date window — an
   // indefinitely stalled call is exactly what this lane must surface.
@@ -124,10 +171,14 @@ async function laneCallProcessing() {
   // Eligibility applies to every retryable state — null / pending /
   // processing AND no_transcription (the processor cannot reclaim an
   // ineligible no_transcription row either; it would sit "pending" forever).
-  const eligible = (b) => b
+  // `lengthSql` picks the length rule: the sweep's own (the default) for a row
+  // the sweep may still take, or the any-age rule for a failure being
+  // REPORTED, so a short call's failure (gate on) stays listed for the 7-day
+  // window after its 24-hour sweep window closes.
+  const eligible = (b, lengthSql = sweepLengthSql()) => b
           .whereNotNull('twilio_call_sid')
           .where(function longEnoughToProcess() {
-            this.whereRaw(sweepLengthSql())
+            this.whereRaw(lengthSql)
               .orWhere(function panQuarantined() {
                 this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
               });
@@ -154,13 +205,14 @@ async function laneCallProcessing() {
   // no_transcription (no creation fence, never a stall candidate) scanned
   // SEPARATELY: a backlog of old retry rows must never fill the live page
   // ahead of the stalled calls it monitors. Under the processor's attempt cap
-  // it is a scheduled retry; at the cap it is terminal (no sweep revisits it),
-  // windowed by the failure event like extraction_failed.
-  const retryRows = await eligible(db('call_log').where('processing_status', 'no_transcription')
+  // AND inside the sweep's length rule it is a scheduled retry; otherwise it
+  // is terminal (no sweep revisits it), windowed by the failure event like
+  // extraction_failed and judged by the any-age length rule.
+  const retryRows = await db('call_log').where('processing_status', 'no_transcription')
     .where(function retryOrRecentFailure() {
-      this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
-        .orWhere('updated_at', '>', since(RECENT_DAYS));
-    }))
+      this.where((q) => eligible(q.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])))
+        .orWhere((q) => eligible(q.where('updated_at', '>', since(RECENT_DAYS)), sweepLengthAnyAgeSql()));
+    })
     .orderBy('updated_at', 'desc')
     .limit(SCAN_LIMIT)
     .select(columns);
@@ -172,12 +224,13 @@ async function laneCallProcessing() {
   // windowed by the FAILURE event (updated_at), not creation: an admin
   // force-reprocess of an old call that fails again is a fresh failure that
   // needs attention, and a creation window would hide it.
-  // Same eligibility as the live set: an under-cap retry the processor could
-  // never pick up is not "retry scheduled", and at-cap rows are terminal
-  // either way.
+  // Same eligibility as the live set, by the any-age length rule (a failure
+  // being reported); the display below decides "retry scheduled" by the
+  // sweep's own rule, so an under-cap row the processor will never pick up
+  // again is a failure, and at-cap rows are terminal either way.
   const failedRows = await eligible(db('call_log')
     .where('processing_status', 'extraction_failed')
-    .where('updated_at', '>', since(RECENT_DAYS)))
+    .where('updated_at', '>', since(RECENT_DAYS)), sweepLengthAnyAgeSql())
     .orderBy('updated_at', 'desc')
     .limit(SCAN_LIMIT)
     .select(columns);
@@ -185,27 +238,13 @@ async function laneCallProcessing() {
   // One stall definition, the watchdog's (grace window, live-claim heartbeat,
   // alert ceiling, eligibility) — the tab must never disagree with the bell.
   const stalledIds = new Set(computeStalledCalls(rows).map((r) => r.id));
+  const now = new Date();
   const items = rows.map((r) => {
     const ps = r.processing_status || 'pending';
     let status = 'pending';
     let detail = ps === 'processing' ? 'transcribing / extracting' : 'waiting for the processor';
-    const attempts = Number(r.extraction_attempts) || 0;
-    if (ps === 'no_transcription' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS) {
-      // Known-failed retry: processAllPending re-runs it (10-min spacing).
-      detail = `no transcript yet — retry scheduled (${attempts}/${CALL_EXTRACTION_MAX_ATTEMPTS})`;
-    } else if (ps === 'no_transcription') {
-      status = 'failed';
-      detail = `no transcript after ${attempts} attempts — no automatic retry`;
-    } else if (ps === 'extraction_failed' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS && new Date(r.created_at) > since(RECENT_DAYS)) {
-      detail = `extraction failed, retry scheduled (${attempts}/${CALL_EXTRACTION_MAX_ATTEMPTS})`;
-    } else if (ps === 'extraction_failed' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS) {
-      // Under the cap but outside the sweep's creation fence: nothing will
-      // retry it automatically (a force-reprocess that failed again lands here).
-      status = 'failed';
-      detail = `extraction failed (${attempts}/${CALL_EXTRACTION_MAX_ATTEMPTS}) — call older than the ${RECENT_DAYS}-day retry window, no automatic retry`;
-    } else if (ps === 'extraction_failed') {
-      status = 'failed';
-      detail = `extraction failed after ${attempts} attempts — triage filed`;
+    if (ps === 'no_transcription' || ps === 'extraction_failed') {
+      ({ status, detail } = callFailureState(r, now));
     } else if (stalledIds.has(r.id)) {
       status = 'parked';
       detail = `stalled in ${ps} — the watchdog's stall rule`;

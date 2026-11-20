@@ -74,6 +74,17 @@ describe('the sweep length rule', () => {
       expect(sweepLengthOk({ recording_duration_seconds: 8 }, NOW)).toBe(false);
     });
   });
+
+  test('the any-age rule, for a reader that reports a past failure: the old floor gate off, any recording gate on', async () => {
+    const { sweepLengthAnyAgeSql } = require('../config/call-extraction-retry');
+    for (const value of [undefined, 'false', '1', 'TRUE']) {
+      await withGate(value, () => expect(sweepLengthAnyAgeSql()).toBe(OLD_FLOOR_SQL));
+    }
+    await withGate('true', () => {
+      expect(sweepLengthAnyAgeSql()).toBe('COALESCE(recording_duration_seconds, duration_seconds, 0) > 0');
+      expect(sweepLengthAnyAgeSql()).not.toContain('INTERVAL');
+    });
+  });
 });
 
 describe('the sweep query text', () => {

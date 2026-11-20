@@ -51,6 +51,9 @@ const { getOpsQueue, LANES } = require('../services/ops-queue');
 
 const NOW = Date.now();
 const ago = (min) => new Date(NOW - min * 60000).toISOString();
+// A retry row the scans admit carries a recording over the sweep's length
+// floor (the SQL prefilter this fake skips); the display re-checks the rule.
+const LONG = { recording_url: 'https://api.twilio.com/rec', recording_duration_seconds: 45 };
 
 describe('getOpsQueue', () => {
   beforeEach(() => {
@@ -72,14 +75,14 @@ describe('getOpsQueue', () => {
       // A live heartbeat beats an old start: still pending, not stalled.
       { id: 'c5', from_phone: '+15550000105', direction: 'inbound', processing_status: 'processing', processing_started_at: ago(45), processing_heartbeat_at: ago(1), created_at: ago(50) },
       { id: 'c2', from_phone: '+15550000101', direction: 'inbound', processing_status: null, updated_at: ago(1), created_at: ago(1) },
-      { id: 'c3', from_phone: '+15550009999', to_phone: '+15550000102', direction: 'outbound', processing_status: 'extraction_failed', extraction_attempts: 3, created_at: ago(90) },
+      { id: 'c3', from_phone: '+15550009999', to_phone: '+15550000102', direction: 'outbound', processing_status: 'extraction_failed', extraction_attempts: 3, created_at: ago(90), ...LONG },
       // no_transcription is retried promptly by the processor — pending.
-      { id: 'c7', from_phone: '+15550000107', direction: 'inbound', processing_status: 'no_transcription', created_at: ago(400) },
+      { id: 'c7', from_phone: '+15550000107', direction: 'inbound', processing_status: 'no_transcription', created_at: ago(400), ...LONG },
       // Under the retry cap: the processor re-runs it — pending, not failed.
-      { id: 'c6', from_phone: '+15550000106', direction: 'inbound', processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(30) },
+      { id: 'c6', from_phone: '+15550000106', direction: 'inbound', processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(30), ...LONG },
       // Under the cap but created outside the sweep's 7-day fence (a force-reprocess
       // of an old call that failed again): nothing retries it — failed, dated by the failure.
-      { id: 'c8', from_phone: '+15550000108', direction: 'inbound', processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(20000), updated_at: ago(15) },
+      { id: 'c8', from_phone: '+15550000108', direction: 'inbound', processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(20000), updated_at: ago(15), ...LONG },
     ];
     fixtures.content_email_approvals = [
       { id: 'ea-1', token: 'EA-1a2b3c4d', kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: ago(10), created_at: ago(10) },
@@ -221,7 +224,7 @@ describe('getOpsQueue scan cap', () => {
     // half at the cap (terminal) — one scan, two statuses.
     fixtures.call_log = Array.from({ length: 200 }, (_, i) => ({
       id: `cf-${i}`, from_phone: '+15550001000', direction: 'inbound', processing_status: 'extraction_failed',
-      extraction_attempts: i % 2 ? 1 : 3, created_at: ago(30 + i), updated_at: ago(i),
+      extraction_attempts: i % 2 ? 1 : 3, created_at: ago(30 + i), updated_at: ago(i), ...LONG,
     }));
     const q = await getOpsQueue();
     const calls = q.lanes.find((l) => l.key === 'calls');
@@ -229,6 +232,94 @@ describe('getOpsQueue scan cap', () => {
     expect(calls.truncatedStatuses).toEqual(expect.arrayContaining(['failed', 'pending']));
     expect(calls.pending).toBeGreaterThan(0);
     expect(calls.failed).toBeGreaterThan(0);
+  });
+});
+
+// GATE_SHORT_CALL_RECORDING_SWEEP (owner 2026-11-19 "FIX"): the sweep takes a
+// short recording only while its call is under 24 hours old. "Retry scheduled"
+// follows that window; a short call's failure stays listed after it closes.
+describe('call lane with GATE_SHORT_CALL_RECORDING_SWEEP on', () => {
+  const GATE = 'GATE_SHORT_CALL_RECORDING_SWEEP';
+  const callsLane = () => LANES.find((l) => l.key === 'calls').run();
+  let gateBefore;
+  beforeEach(() => {
+    gateBefore = process.env[GATE];
+    process.env[GATE] = 'true';
+  });
+  afterEach(() => {
+    if (gateBefore === undefined) delete process.env[GATE];
+    else process.env[GATE] = gateBefore;
+  });
+
+  test('a short call retries only inside its 24-hour window; past it, or at the cap, it is a failure', async () => {
+    const SHORT = { recording_url: 'https://api.twilio.com/rec', recording_duration_seconds: 8, duration_seconds: 29 };
+    const call = (id, over) => ({ id, from_phone: '+15550000200', direction: 'inbound', ...SHORT, ...over });
+    fixtures.call_log = [
+      call('s1', { processing_status: 'no_transcription', extraction_attempts: 1, created_at: ago(60), updated_at: ago(20) }),
+      call('s2', { processing_status: 'no_transcription', extraction_attempts: 1, created_at: ago(25 * 60), updated_at: ago(30) }),
+      call('s3', { processing_status: 'no_transcription', extraction_attempts: 3, created_at: ago(30 * 60), updated_at: ago(40) }),
+      call('s4', { processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(26 * 60), updated_at: ago(50) }),
+      call('s5', { processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(90), updated_at: ago(55) }),
+      // A PAN-quarantined masked transcript is taken again whatever its length.
+      call('s6', { processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(26 * 60), updated_at: ago(58), recording_url: null, recording_duration_seconds: 4, transcription: '[masked]', transcription_metadata: JSON.stringify({ pan_detected: true }) }),
+    ];
+    const lane = await callsLane();
+    const item = (id) => lane.items.find((i) => i.id === id);
+    expect(item('s1')).toMatchObject({ status: 'pending', detail: 'no transcript yet — retry scheduled (1/3)' });
+    expect(item('s2')).toMatchObject({ status: 'failed', detail: 'no transcript (1/3) — a short call past its 24-hour sweep window, no automatic retry', at: ago(30) });
+    expect(item('s3')).toMatchObject({ status: 'failed', detail: 'no transcript after 3 attempts — no automatic retry' });
+    expect(item('s4')).toMatchObject({ status: 'failed', detail: 'extraction failed (1/3) — a short call past its 24-hour sweep window, no automatic retry' });
+    expect(item('s5')).toMatchObject({ status: 'pending', detail: 'extraction failed, retry scheduled (1/3)' });
+    expect(item('s6')).toMatchObject({ status: 'pending', detail: 'extraction failed, retry scheduled (1/3)' });
+  });
+
+  test('the scans: the 24-hour window decides a retry; a reported failure is judged with no age limit', async () => {
+    // A real knex builder with no connection: awaiting a call_log scan records its SQL.
+    const kx = require('knex')({ client: 'pg' });
+    const db = require('../models/db');
+    const fallback = db.getMockImplementation();
+    const sent = [];
+    db.mockImplementation((table) => {
+      if (table !== 'call_log') return fallback(table);
+      const qb = kx(table);
+      qb.then = (resolve, reject) => { sent.push(qb.toString()); return Promise.resolve([]).then(resolve, reject); };
+      return qb;
+    });
+    const FLOOR = 'COALESCE(recording_duration_seconds, duration_seconds, 0) > 10';
+    const ANY_AGE = 'COALESCE(recording_duration_seconds, duration_seconds, 0) > 0 or';
+    const WINDOW = "INTERVAL '24 hours'";
+    const scans = async () => {
+      sent.length = 0;
+      await callsLane();
+      return {
+        live: sent.find((s) => s.includes("in ('pending', 'processing')")),
+        retry: sent.find((s) => s.includes("'no_transcription'")),
+        failed: sent.find((s) => s.includes("'extraction_failed'")),
+      };
+    };
+    try {
+      const on = await scans();
+      expect(on.live).toContain(WINDOW);
+      // The under-cap branch (a retry) carries the window; the recent-failure branch after it does not.
+      const [retryBranch, failureBranch] = on.retry.split('"updated_at" >');
+      expect(retryBranch).toContain('COALESCE(extraction_attempts, 0) < 3');
+      expect(retryBranch).toContain(WINDOW);
+      expect(failureBranch).toContain(ANY_AGE);
+      expect(failureBranch).not.toContain(WINDOW);
+      expect(on.failed).toContain(ANY_AGE);
+      expect(on.failed).not.toContain(WINDOW);
+
+      delete process.env[GATE];
+      const off = await scans();
+      for (const s of [off.live, off.retry, off.failed]) {
+        expect(s).toContain(FLOOR);
+        expect(s).not.toContain(ANY_AGE);
+        expect(s).not.toContain(WINDOW);
+      }
+    } finally {
+      db.mockImplementation(fallback);
+      await kx.destroy();
+    }
   });
 });
 
