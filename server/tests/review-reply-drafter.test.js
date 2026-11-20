@@ -928,16 +928,19 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(Drafter.offAppName('Glad it helps. The Waves app is new, and the Waves app is free.')).toBeNull();
     expect(Drafter.offAppName('Thanks for using The Waves app.')).toBe('The Waves app');
     expect(Drafter.offAppName('Glad it helps. the Waves app is new.')).toBe('the Waves app');
-    // "apps", "apply" and "application" are other words; "the app stores" is the app.
-    expect(Drafter.offAppName('Happy to apply the apps and our application.')).toBeNull();
+    // "apply" and "application" are other words; "the app stores" and the possessive are the app.
+    expect(Drafter.offAppName('Happy to apply our application.')).toBeNull();
+    expect(Drafter.offAppName('Glad the Waves app’s alerts help.')).toBeNull();
     expect(Drafter.offAppName('Good news: the app stores your service notes.')).toBe('the app');
-    // No exceptions: "app-based" and every "App Store" are rejected too, so the model writes the reply without them.
+    // No exceptions: every form of the word is rejected too ("apps", "app-based", every "App Store"), so the model writes the reply without it.
+    expect(Drafter.offAppName('Thanks for trying our apps.')).toBe('our apps');
+    expect(Drafter.offAppName('Thanks for trying the Waves apps.')).toBe('the Waves apps');
     expect(Drafter.offAppName('Thanks for letting our app store your service notes.')).toBe('our app');
     expect(Drafter.offAppName('Find the Waves app in the app store.')).toBe('the app');
     expect(Drafter.offAppName('Find the Waves app in the App Store.')).toBe('the App');
     expect(Drafter.offAppName('Find us in the Waves Pest Control App Store.')).toBe('the Waves Pest Control App');
-    expect(Drafter.offAppName('Thanks for trying the app-based reminders.')).toBe('the app');
-    expect(Drafter.offAppName('Thanks for trying the Waves app-based reminders.')).toBeNull();
+    expect(Drafter.offAppName('Thanks for trying the app-based reminders.')).toBe('the app-based');
+    expect(Drafter.offAppName('Thanks for trying the Waves app-based reminders.')).toBe('the Waves app-based');
   });
   test('a draft that says "the app" is stored as "the Waves app" on the first attempt', async () => {
     const g = grounding({ text: appReview });

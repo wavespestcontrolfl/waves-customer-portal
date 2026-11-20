@@ -565,18 +565,19 @@ function classifyReplyMode(grounding) {
 //   "our customer app", "an app"). The verifier rejects it (app_name) and the
 //   model writes the reply again: the right words cannot be guessed from the
 //   words around "app", and in a reply to a Waves review an app is the Waves
-//   app. No exceptions: "app-based" and "App Store" are rejected too, and the
-//   model writes the reply without them. Only other words pass ("apps",
-//   "apply", "application").
-const APP_MENTION_RE = /\b(?:(?:the|our|your)\s+)?(?:waves\s+(?:pest\s+control\s+)?)?(?:mobile\s+)?app\b/gi;
+//   app. No exceptions: every form of the word ("apps", "app-based", "App
+//   Store") is rejected too, and the model writes the reply without it. Only
+//   other words pass ("apply", "application").
+const APP_MENTION_RE = /\b(?:(?:the|our|your)\s+)?(?:waves\s+(?:pest\s+control\s+)?)?(?:mobile\s+)?apps?\b(?:-[\w-]*)?/gi;
 const OWN_APP_RE = /^(?:the|our|your)\s/i;
 const SENTENCE_START_RE = /(?:^|[.!?]["')\]\u2019\u201d]*\s+|\n\s*)$/;
-// The rewrite leaves what it cannot read to the verifier: "app-based", and
-// "app store" (the App Store, or the verb in "let our app store your notes").
-const REWRITE_SKIP_NEXT_RE = /^(?:-|\s+store\b)/i;
+// The rewrite touches only a bare "app" and leaves what it cannot read to the
+// verifier: "apps", "app-based", and "app store" (the App Store, or the verb
+// in "let our app store your notes").
+const STORE_NEXT_RE = /^\s+store\b/i;
 function wavesApp(text) {
   return String(text || '').replace(APP_MENTION_RE, (m, at, s) => {
-    if (!OWN_APP_RE.test(m) || REWRITE_SKIP_NEXT_RE.test(s.slice(at + m.length))) return m;
+    if (!OWN_APP_RE.test(m) || !/app$/i.test(m) || STORE_NEXT_RE.test(s.slice(at + m.length))) return m;
     return SENTENCE_START_RE.test(s.slice(0, at)) ? 'The Waves app' : 'the Waves app';
   });
 }
