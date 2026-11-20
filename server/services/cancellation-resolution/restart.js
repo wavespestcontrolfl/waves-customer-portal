@@ -951,7 +951,16 @@ async function mintPricedEstimate({
   // drift, corrected measurements, a changed scope — retires the lineage
   // and mints fresh (owner ruling: restart ALWAYS reprices at the
   // current price; idempotent button, one honorable price at a time).
-  const live = liveRestartEstimate(priorRows, nowDate);
+  // The checks read the lineage again, under its row locks (codex pre-push
+  // P1): the read above took no lock, and a tier the customer picks in
+  // another tab while today's price is computed can drop the frozen
+  // snapshot they check. Locked, the rows hold still until this transaction
+  // commits, so the checks read the row the link opens.
+  const lockedPriorRows = await trx('estimates')
+    .whereIn('id', priorRows.map((row) => row.id))
+    .orderBy('created_at', 'desc')
+    .forUpdate();
+  const live = liveRestartEstimate(lockedPriorRows, nowDate);
   if (live) {
     const liveData = parseJson(live.estimate_data, {});
     const cents = (v) => Math.round(Number(v || 0) * 100);

@@ -196,6 +196,22 @@ describe("estimate filter request recovery", () => {
   });
 });
 
+it("offers no Schedule, Mark Won or Annual Prepay on an open plan-start quote, which only the customer accepts (codex pre-push P1)", async () => {
+  const planStart = { ...active, id: "qa-plan-start", customerName: "Synthetic Plan Start", source: "plan_start", status: "viewed" };
+  loadActive.mockImplementation(async () => response({ estimates: [active, planStart] }));
+  mount(1440);
+  const card = async (name) => (await screen.findByText(name)).closest("[data-estimate-id]");
+  const open = await card("Synthetic Plan Start");
+  for (const name of ["Schedule", "Mark Won", "Annual Prepay"]) {
+    expect(within(open).queryByRole("button", { name, exact: true })).not.toBeInTheDocument();
+  }
+  // A staff quote in the same state still offers all three.
+  const staff = await card("Synthetic Active");
+  for (const name of ["Schedule", "Mark Won", "Annual Prepay"]) {
+    expect(within(staff).getByRole("button", { name, exact: true })).toBeInTheDocument();
+  }
+});
+
 it("keeps a reopened estimate booking draft while a cancelled booking refreshes", async () => {
   const refresh = deferred();
   mount(1440);

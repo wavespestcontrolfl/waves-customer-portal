@@ -411,6 +411,25 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
   });
 
+  test('the reuse checks read the live quote again under its row lock: a tier picked while today\'s price was computed re-mints it (codex pre-push P1)', async () => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(first.estimateId).toBe('estimates-1');
+    // The customer's tier pick in another tab commits during the recompute,
+    // after the first lineage read: a new row version, as Postgres returns
+    // one, without the frozen snapshot (the page's tier handlers drop it).
+    const priced = recompute.getMockImplementation();
+    recompute.mockImplementationOnce(async (...args) => {
+      const stored = JSON.parse(tables.estimates[0].estimate_data);
+      delete stored.sendSnapshot.pricingBundle;
+      tables.estimates[0] = { ...tables.estimates[0], estimate_data: JSON.stringify(stored) };
+      return priced(...args);
+    });
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('bbcdef0123456789') });
+    expect(again.reused).toBe(false);
+    expect(again.estimateId).not.toBe(first.estimateId);
+    expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
+  });
+
   test.each([
     // The page's tier handlers delete sendSnapshot.pricingBundle and leave inputs, result and totals.
     ['the page dropped its frozen snapshot', (stored) => { delete stored.sendSnapshot.pricingBundle; }, {}],

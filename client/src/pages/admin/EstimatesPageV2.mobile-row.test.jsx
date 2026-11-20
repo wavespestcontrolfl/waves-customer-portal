@@ -243,6 +243,18 @@ describe("MobileEstimateRow send and booking-link actions", () => {
     expect(screen.getByRole("button", { name: "Retry sending estimate" })).toBeEnabled();
   });
 
+  it("offers no staff accept on an open plan-start quote: only the customer accepts it (codex pre-push P1)", () => {
+    renderRow({ estimate: { ...ESTIMATE, source: "plan_start" } });
+    openActions();
+    expect(screen.queryByRole("button", { name: "Mark won (verbal yes)" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark annual prepay" })).not.toBeInTheDocument();
+    cleanup();
+    renderRow();
+    openActions();
+    expect(screen.getByRole("button", { name: "Mark won (verbal yes)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mark annual prepay" })).toBeInTheDocument();
+  });
+
   it("offers Send booking link only on a row the server marks eligible", () => {
     renderRow({ estimate: { ...ESTIMATE, bookingLinkEligible: false } });
     openActions();
