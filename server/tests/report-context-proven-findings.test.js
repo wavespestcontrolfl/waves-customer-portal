@@ -30,6 +30,9 @@ const PRIOR_DETAILED = row('p-detail', 'Roach activity in the garage', { service
 const PRIOR_OWN_LABEL = row('p-own', 'Fire ant mounds', { service_record_id: PRIOR_ID, severity: 'critical' });
 const PRIOR_OTHER_LABEL = row('p-other', 'Paper wasp nest', { service_record_id: PRIOR_ID, severity: 'medium' });
 const BARE_TEXT = /4471|side door|2210|Lockbox|Paper wasp/;
+// The technician's own note (report-note-render.test.js): its record's form
+// labels pass the customer-copy screen before they prove a row.
+const NOTE_RECORD = { reportNote: { v: 1, text: 'I treated the perimeter and swept the webs.', source: 'cleaned' } };
 
 const visit = (id, date, pressure, notes) => ({
   id, customer_id: 'cust-proven', service_line: 'pest', service_type: 'Quarterly Pest Control Service', status: 'completed',
@@ -87,6 +90,13 @@ describe('provenFindingRows', () => {
     expect(provenFindingRows(rows, null).map((r) => r.id)).toEqual(['f-detail', 'f-rec']);
     expect(provenFindingRows(null, {})).toEqual([]);
   });
+
+  test("on a record that carries the technician's own note, a label proves a row only when it passes the customer-copy screen", () => {
+    const formObservations = ['Yellowjacket', RAW.title];
+    expect(provenFindingRows([RAW, FORM_LABEL], { formObservations }).map((r) => r.id)).toEqual(['f-raw', 'f-form']);
+    expect(provenFindingRows([RAW, FORM_LABEL], { ...NOTE_RECORD, formObservations }).map((r) => r.id)).toEqual(['f-form']);
+    expect(provenFindingRows([RAW, FORM_LABEL], JSON.stringify({ ...NOTE_RECORD, formObservations })).map((r) => r.id)).toEqual(['f-form']);
+  });
 });
 
 describe('customer readers of a visit\'s findings', () => {
@@ -98,6 +108,17 @@ describe('customer readers of a visit\'s findings', () => {
     expect(JSON.stringify(context.premiumExperience)).toContain('Ant trail at the slab');
     const priorPoint = context.pressureTrend.points.find((point) => point.serviceRecordId === PRIOR_ID);
     expect(priorPoint).toMatchObject({ mainDriver: 'Fire ant mounds', findingsCount: 2 });
+    expect(context.sinceLastVisit.activityLine).toContain('Ant trail at the slab');
+    expect(JSON.stringify(context)).not.toMatch(BARE_TEXT);
+  });
+
+  test("on a note record, a form label the customer-copy screen refuses never prints", async () => {
+    // The form snapshot lists the access code too; the record's report lists
+    // drop it (report-data buildProtocolPayload), and so does every reader here.
+    const notes = JSON.stringify({ ...NOTE_RECORD, formObservations: ['Yellowjacket', RAW.title] });
+    const tables = { ...TABLES, service_records: [{ ...TABLES.service_records[0], structured_notes: notes }, TABLES.service_records[1]] };
+    const context = await buildServiceReportDynamicContext({ recordId: RECORD_ID, omitPestPressureContext: false, knex: fakeKnex(tables) });
+    expect(JSON.stringify(context.aiSummary)).toContain('Yellowjacket');
     expect(context.sinceLastVisit.activityLine).toContain('Ant trail at the slab');
     expect(JSON.stringify(context)).not.toMatch(BARE_TEXT);
   });

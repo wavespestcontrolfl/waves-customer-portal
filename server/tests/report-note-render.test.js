@@ -97,6 +97,8 @@ describe('the report payload', () => {
     const data = await build();
     expect(data.summary).toBe(`${NOTE} — Jordan`);
     expect(data.summarySource).toBe('technician_report');
+    // The page and the PDF print it as stored (printedVisitSummary).
+    expect(data.summaryIsOwnNote).toBe(true);
     expect(data.reportSections).toBeUndefined();
     // The raw note stays internal.
     expect(JSON.stringify(data)).not.toContain('4471');
@@ -108,6 +110,17 @@ describe('the report payload', () => {
     const data = await build({ structured_notes: JSON.stringify(stored({ text: fixed, source: 'fixed' })) });
     expect(data.summary).toBe(fixed);
     expect(data.summarySource).toBe('technician_report');
+    expect(data.summaryIsOwnNote).toBe(true);
+  });
+
+  test("only the note is marked as the technician's own words: a titled report or a recap is not", async () => {
+    const titled = await build({ technician_notes: TITLED, structured_notes: '{}' });
+    expect(titled.summarySource).toBe('technician_report');
+    expect(titled).not.toHaveProperty('summaryIsOwnNote');
+    const recap = await build({ technician_notes: 'treated perimeter', structured_notes: JSON.stringify({ customerRecap: 'We treated the perimeter today.' }) });
+    expect(recap).not.toHaveProperty('summaryIsOwnNote');
+    const refused = await build({ structured_notes: JSON.stringify({ ...stored({ text: UNSAFE }), customerRecap: UNSAFE }) });
+    expect(refused).not.toHaveProperty('summaryIsOwnNote');
   });
 
   test('a note with no technician name on the record is not signed', async () => {
@@ -199,10 +212,14 @@ describe('the report payload', () => {
     // the record proves; a finding with its own detail.
     // A row whose detail and recommendation are only spaces is bare too.
     const spaces = { ...row('Gate code 4471 at the side gate', '   '), recommendation: ' \n ' };
-    const findings = [row('Dog loose in the side yard'), row('Light ant activity'), row('Mulch against the slab', 'Mulch touches the slab by the lanai.'), spaces];
-    const structured = JSON.stringify({ ...stored(), formObservations: ['Light ant activity'] });
+    // A form label the record proves, saved with a detail of only spaces,
+    // takes the form detail like a bare one.
+    const spacedLabel = row('Wasp nest under the eave', '  ');
+    const findings = [row('Dog loose in the side yard'), row('Light ant activity'), row('Mulch against the slab', 'Mulch touches the slab by the lanai.'), spaces, spacedLabel];
+    const structured = JSON.stringify({ ...stored(), formObservations: ['Light ant activity', 'Wasp nest under the eave'] });
     const data = await build({ structured_notes: structured }, { service_findings: findings });
-    expect(data.findings.map((f) => f.title)).toEqual(['Light ant activity', 'Mulch against the slab']);
+    expect(data.findings.map((f) => f.title)).toEqual(['Light ant activity', 'Mulch against the slab', 'Wasp nest under the eave']);
+    expect(data.findings[2].detail.trim()).not.toBe('');
     expect(JSON.stringify(data)).not.toContain('side yard');
     expect(JSON.stringify(data)).not.toContain('4471');
     // Only the bare row: nothing is left, and no "no activity" row is added.
@@ -271,6 +288,7 @@ describe('a typed visit never takes the note', () => {
     const serviceData = JSON.stringify({ typedReportSnapshot: typedCard({ body: NOTE, bodySource: 'technician_report', reconcileConfirmed: true }) });
     const data = await build({ service_data: serviceData });
     expect(data.summarySource).not.toBe('technician_report');
+    expect(data).not.toHaveProperty('summaryIsOwnNote');
     expect(data.typedReport.todaysResult).toEqual({ headline: 'Service completed.' });
     expect(JSON.stringify(data)).not.toContain('fire ant hill');
   });

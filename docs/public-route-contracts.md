@@ -505,7 +505,9 @@ snapshot: a row with a detail or a recommendation, or one whose title the
 completion form's `structured_notes.formObservations` lists. A bare title (the
 form's free-text observations, a `[Found]` line of the raw technician note
 among them) never prints, as in the report document, the texting prompt and
-the voice relay.
+the voice relay. On a record that carries the technician's own note
+(`carriesReportNote`), a label proves a row only when it passes
+`customerCopyViolations`, as that record's report lists do.
 
 Pest rain outlook (owner 2026-10-24; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
@@ -3056,8 +3058,8 @@ render reads it from the record whatever a gate says, so a report already sent
 keeps its text. On such a record `technician_notes` holds the technician's raw
 note, and no reader below shows a line of it. (The lawn and tree & shrub
 technician paragraphs, each under its own gate, still take that note as their
-input, as they do on any visit today.) The payload changes only existing
-fields, never its shape: `summary` is the note when the summary rule accepts it
+input, as they do on any visit today.) The payload changes existing fields
+and adds the one key below: `summary` is the note when the summary rule accepts it
 (only on a visit with no frozen typed card, primary or companion), a `cleaned`
 note signed ` — <first name>` (the identity snapshot's name, never a generic
 label). Otherwise it is what the report builds with no free text (the lawn visit
@@ -3083,8 +3085,13 @@ queue and the lawn write gate) passes the stored record's note state. The PDF
 key hashes the summary as it prints, and on such a record it always carries
 `-rn` (just before any `-fson`/`-fsoff` part), summary or not. The visit notes on the
 other surfaces (`customerSafeVisitNotes`) run the same rule. The payload adds
-no key and no query parameter. A record whose stored notes are an object
-without `reportNote` renders exactly as before.
+one key and no query parameter: `summaryIsOwnNote: true`, present only when
+`summary` is the note (on such a record a `technician_report` summary is always
+the note). The page's Visit Summary and the PDF print that summary as stored
+(`printedVisitSummary`), never through `cleanVisitSummary`'s fixes for the
+stored legacy recap. A record whose stored notes are an object without
+`reportNote` renders exactly as before, and its payload has no
+`summaryIsOwnNote` key.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the

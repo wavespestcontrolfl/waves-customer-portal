@@ -1193,6 +1193,23 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('Thanks for having us out today.');
   });
 
+  it("prints the technician's own note as stored, with or without a reconciled lawn result", () => {
+    // Their signed words (summaryIsOwnNote): no legacy recap fix applies.
+    const note = 'Thanks for having us out today. I treated the front beds for fire ants, and you should see activity ease over the next 1-2 weeks. — Dana';
+    const data = { ...BASE_DATA, typedReport: null, summary: note, summarySource: 'technician_report', summaryIsOwnNote: true };
+    const plain = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(plain.container.textContent).toContain(note);
+    const reconciled = {
+      ...data,
+      reportV2: { todaysResult: 'I treated the front beds for fire ants, and you should see activity ease over the next 1-2 weeks.', insights: [{ headline: 'Thin turf', whatWeSaw: 'Shade thinning.' }] },
+    };
+    const lawn = render(<ServiceReportDocument data={reconciled} token="tok123" />);
+    expect(lawn.container.textContent).toContain(note);
+    // A technician report that is not the note is still cleaned.
+    const titled = render(<ServiceReportDocument data={{ ...reconciled, summaryIsOwnNote: undefined }} token="tok123" />);
+    expect(titled.container.textContent).not.toContain('Thanks for having us out today.');
+  });
+
   it("prints the whole reconciled technician's report ahead of a typed report's frozen body", () => {
     // The typed snapshot froze the report at completion with an old rain
     // figure; the reconciliation corrected data.summary. The PDF prints the

@@ -157,6 +157,25 @@ describe('ReportViewPage — recap SMS anchor (#visit-recap)', () => {
   });
 });
 
+describe("ReportViewPage — the technician's own note", () => {
+  // Their signed words (summaryIsOwnNote): the page never applies the legacy
+  // recap fixes to them (printedVisitSummary).
+  const NOTE = 'Thanks for having us out today. I treated the front beds, and you should see activity ease over the next 1-2 weeks. — Dana';
+
+  it('prints the note in the Visit Summary as stored', async () => {
+    const { container } = renderReport({ ...legacyLawnReport, summary: NOTE, summarySource: 'technician_report', summaryIsOwnNote: true });
+    await screen.findByText('Visit Summary');
+    expect(container.textContent).toContain(NOTE);
+  });
+
+  it('still cleans a technician report that is not the note', async () => {
+    const { container } = renderReport({ ...legacyLawnReport, summary: NOTE, summarySource: 'technician_report' });
+    await screen.findByText('Visit Summary');
+    expect(container.textContent).not.toContain('Thanks for having us out today.');
+    expect(container.textContent).toContain('I treated the front beds');
+  });
+});
+
 describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
   it('renders the V2 dashboard and not the legacy assessment layout', async () => {
     const { container } = renderReport(lawnReportV2);

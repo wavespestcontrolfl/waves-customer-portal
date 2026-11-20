@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
-import { cleanVisitSummary, hidesTreatedAreas, reserviceCardView, reserviceAsksView } from './ReportViewPage';
+import { cleanVisitSummary, printedVisitSummary, hidesTreatedAreas, reserviceCardView, reserviceAsksView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
@@ -386,7 +386,7 @@ function Bullet({ children }) {
 // of the two returned texts is non-empty.
 function lawnReconciledSummary(data) {
   const reconciled = typeof data.reportV2?.todaysResult === 'string' ? data.reportV2.todaysResult.trim() : '';
-  const technicianSummary = reconciled && data.summarySource === 'technician_report' ? cleanVisitSummary(data.summary) : '';
+  const technicianSummary = reconciled && data.summarySource === 'technician_report' ? printedVisitSummary(data) : '';
   return { technicianSummary, reconciledResult: technicianSummary ? '' : reconciled };
 }
 
@@ -680,13 +680,14 @@ export default function ServiceReportDocument({ data, token }) {
   const { technicianSummary, reconciledResult } = lawnReconciledSummary(data);
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
-  // exists to strip — printing data.summary raw reintroduced both.
+  // exists to strip — printing data.summary raw reintroduced both. The
+  // technician's own note is the exception: it prints as stored (printedVisitSummary).
   // The lawn Visit Summary (summarySource 'lawn_visit_summary') is fixed sentences written by
   // code, vetted as a whole and never contradicting the watch items, so the PDF prints ALL of
   // it. The reconciled todaysResult is only its first sentence and must not replace it.
   const frozenVisitSummary = data.summarySource === 'lawn_visit_summary' && typeof data.summary === 'string' ? data.summary.trim() : '';
   const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (frozenVisitSummary || technicianSummary
-    || reconciledResult || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
+    || reconciledResult || result?.body || printedVisitSummary(data) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
   // The four-section report carries its own "What to expect": the separate
   // block below would print the same thing twice (as the live pest

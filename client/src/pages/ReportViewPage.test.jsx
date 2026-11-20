@@ -5,6 +5,7 @@ import {
   applicationPurposeCopy,
   applicationTechnicalExplanation,
   cleanVisitSummary,
+  printedVisitSummary,
   customerInteractionCopy,
   customerActionItems,
   formatDate,
@@ -82,6 +83,15 @@ describe('ReportViewPage summary copy cleanup', () => {
     expect(cleanVisitSummary(
       'Thanks for having us out today. We focused on the perimeter. You should see activity ease over the next 1-2 weeks, and - Waves',
     )).toBe('Your routine service is complete. We focused on the perimeter. You may see activity ease over the next 1-2 weeks.');
+  });
+
+  it("prints the technician's own note as stored, and cleans every other summary", () => {
+    const note = 'Thanks for having us out today. I treated the perimeter, and you should see activity ease over the next 1-2 weeks. — Dana';
+    expect(printedVisitSummary({ summary: ` ${note} `, summarySource: 'technician_report', summaryIsOwnNote: true })).toBe(note);
+    expect(printedVisitSummary({ summary: note, summarySource: 'technician_report' })).toBe(cleanVisitSummary(note));
+    expect(cleanVisitSummary(note)).not.toContain('Thanks for having us out today.');
+    expect(printedVisitSummary({ summary: note, summaryIsOwnNote: 'true' })).toBe(cleanVisitSummary(note));
+    expect(printedVisitSummary({})).toBe('');
   });
 });
 

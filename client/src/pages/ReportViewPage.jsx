@@ -557,12 +557,21 @@ export function cleanVisitSummary(value) {
   return text;
 }
 
+// The summary as the page and the PDF print it. The technician's own note
+// (summaryIsOwnNote, owner 2026-11-19) prints as the server sends it: it is
+// their signed words, and cleanVisitSummary's fixes ("Thanks for having us
+// out today." and the rest) are for the stored legacy recap.
+export function printedVisitSummary(data = {}) {
+  if (data?.summaryIsOwnNote === true) return String(data.summary || '').trim();
+  return cleanVisitSummary(data?.summary);
+}
+
 function visitSummaryCopy(data = {}, { skipPromotedBody = false } = {}) {
   // When the Today's Result card above already renders the promoted
   // technician-report prose (bodySource stamped on a rendered snapshot),
   // the legacy section keeps its deterministic framing line instead of
   // repeating the paragraph (codex r69 #3420).
-  const cleaned = skipPromotedBody ? '' : cleanVisitSummary(data.summary);
+  const cleaned = skipPromotedBody ? '' : printedVisitSummary(data);
   if (cleaned) return cleaned;
   // V2 reports carry full diagnostics below — the summary line should frame
   // the professional record, not shrug (owner 2026-07-21). Treatment wording

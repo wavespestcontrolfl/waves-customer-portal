@@ -4682,7 +4682,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // snapshot proves its provenance, upgrade that row for customer egress.
       // Unmatched bare rows stay bare so the document's raw-note guard keeps
       // filtering them.
-      if (!persistedFinding.detail && !persistedFinding.recommendation) {
+      // A detail or recommendation of only spaces is none (findingHasOwnText).
+      if (!findingHasOwnText(persistedFinding)) {
         persistedFinding.detail = STRUCTURED_OBSERVATION_FINDING_DETAIL;
       }
       continue;
@@ -7708,6 +7709,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // leave it out, since their status line, rows and next-step section
     // already print each of its facts (owner 2026-10-22: say a thing once).
     summaryIsTemplate: visitSummarySource === 'typed_narrative' && typedNarrativeIsFallback,
+    // Present (true) only when the summary is the technician's own note: on a
+    // note record a technician_report summary is always the note
+    // (visitReportCustomerCopy). The page and the PDF print it as stored,
+    // never through cleanVisitSummary's recap fixes: it is their signed words.
+    ...(ownNote && visitSummarySource === 'technician_report' ? { summaryIsOwnNote: true } : {}),
     // Present only for the four-section report (see reportSections above).
     ...(reportSections && visitSummarySource === 'technician_report' ? { reportSections } : {}),
     // Customer concern captured at completion — feeds the pest V2 "what you
