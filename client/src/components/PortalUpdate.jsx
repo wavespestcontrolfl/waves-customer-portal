@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Button } from './ui';
 import { isAdminPath } from '../lib/adminBookmarkMeta';
@@ -65,13 +65,17 @@ const HOLD_TEXT = {
 // when work holds it, a click names every held work instead of reloading, and
 // the button becomes "Reload anyway". Each click asks again, so "Reload
 // anyway" reloads only when nothing holds that the button has not named. A
-// new resetKey clears the named work. pageUsed (below) adds a use of the page
-// in view.
-function useHoldAwareReload(resetKey, pageUsed) {
+// new resetKey clears the named work, and so does any use of the page after
+// the naming (clearNamed): that use can start new work under a name already
+// shown, such as more typing after "Anything not saved on this page will be
+// lost.", so the next Reload asks again. `pageUsed`: a use of the page in view
+// since it opened (below).
+function useHoldAwareReload(resetKey) {
   const [held, setHeld] = useState([]);
   useEffect(() => { setHeld((named) => (named.length ? [] : named)); }, [resetKey]);
-  const tryReload = () => {
-    const blockers = [...reloadBlockers(), ...(pageUsed?.() ? ['page-use'] : [])];
+  const clearNamed = useCallback(() => setHeld((named) => (named.length ? [] : named)), []);
+  const tryReload = (pageUsed) => {
+    const blockers = [...reloadBlockers(), ...(pageUsed ? ['page-use'] : [])];
     if (blockers.some((name) => !held.includes(name))) {
       setHeld(blockers);
       return;
@@ -79,7 +83,7 @@ function useHoldAwareReload(resetKey, pageUsed) {
     window.location.reload();
   };
   const heldText = [...new Set(held.map((name) => HOLD_TEXT[name] || 'Something in this tab is still open.'))].join(' ');
-  return { named: held.length > 0, heldText, tryReload };
+  return { named: held.length > 0, heldText, tryReload, clearNamed };
 }
 
 // A use of the page in view since it opened: a tap, a click, a key or a
@@ -88,18 +92,20 @@ function useHoldAwareReload(resetKey, pageUsed) {
 // picked slot, a signature on a canvas, a shape drawn on a map. No list of
 // controls names them all, so after any use the bar asks once first. A page
 // move ends the use: the move closes the page and its work. The automatic
-// reload waits for a move, so it never needs this.
-function usePageUsed(pathname) {
+// reload waits for a move, so it never needs this. Each use also calls onUse.
+function usePageUsed(pathname, onUse) {
   const used = useRef(false);
   useEffect(() => { used.current = false; }, [pathname]);
   useEffect(() => {
     const noteUse = (event) => {
-      if (event.target instanceof Element && !event.target.closest('[data-portal-update-bar]')) used.current = true;
+      if (!(event.target instanceof Element) || event.target.closest('[data-portal-update-bar]')) return;
+      used.current = true;
+      onUse();
     };
     const types = ['pointerdown', 'click', 'keydown', 'input', 'change'];
     types.forEach((type) => document.addEventListener(type, noteUse, true));
     return () => types.forEach((type) => document.removeEventListener(type, noteUse, true));
-  }, []);
+  }, [onUse]);
   return () => used.current;
 }
 
@@ -108,15 +114,15 @@ function usePageUsed(pathname) {
 export function PortalUpdateBar() {
   const { pathname } = useLocation();
   const build = useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
-  const pageUsed = usePageUsed(pathname);
-  const { named, heldText, tryReload } = useHoldAwareReload(`${build} ${pathname}`, pageUsed);
+  const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(`${build} ${pathname}`);
+  const pageUsed = usePageUsed(pathname, clearNamed);
   if (!build || !isAdminPath(pathname)) return null;
 
   return (
     <div role="status" data-portal-update-bar="" style={{ bottom: 'calc(80px + env(safe-area-inset-bottom, 0px))' }}
       className="fixed left-1/2 z-[10990] box-border flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-sm border-hairline border-zinc-300 bg-white px-4 py-2 font-sans text-sm text-zinc-900 shadow-lg">
       <span>{named ? heldText : 'A new version of the portal is ready.'}</span>
-      <Button className="min-h-11 shrink-0 text-sm" onClick={tryReload}>
+      <Button className="min-h-11 shrink-0 text-sm" onClick={() => tryReload(pageUsed())}>
         {named ? 'Reload anyway' : 'Reload'}
       </Button>
     </div>

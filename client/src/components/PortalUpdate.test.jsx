@@ -308,6 +308,22 @@ describe('PortalUpdateBar', () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  test('a use of the page after the bar named its work clears the names, so the next Reload asks again', () => {
+    renderAt('/admin/today/truck-check');
+    goLive('bbb222bbb222');
+    fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(screen.getByText('Anything not saved on this page will be lost.')).toBeTruthy();
+    // Back to the page: more typing is new work under a name already shown.
+    fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose, left side' } });
+    expect(screen.getByText('A new version of the portal is ready.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(reload).not.toHaveBeenCalled();
+    expect(screen.getByText('Anything not saved on this page will be lost.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
   test('a page not used since it opened reloads at once, and a page move ends a use', () => {
     renderAt('/admin/today/truck-check');
     goLive('bbb222bbb222');

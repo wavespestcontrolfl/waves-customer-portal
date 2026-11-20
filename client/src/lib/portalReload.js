@@ -61,7 +61,8 @@ export function reloadDueAtMove(pathname, now = Date.now(), from = null) {
     && !isFieldPath(pathname) && !isFieldPath(from) && !isWavesAdminApp()
     && hasSignal(now)
     && reloadTries(build) < RELOAD_TRIES
-    && !reloadHoldName();
+    && !reloadHoldName()
+    && !stalledWork();
 }
 
 // Saves still open: API writes on their way, and writes to the device's own
@@ -100,6 +101,23 @@ export function reloadBlocker() {
 
 const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
+// Work that outlasted a full wait, such as a device write that never settles,
+// would make every later move wait 10 s again. So until all work settles, a
+// move opens its page at once and the bar stays; after that, moves are due as
+// before.
+let workStalled = false;
+
+function stalledWork() {
+  if (workStalled && workInFlight() === 0) workStalled = false;
+  return workStalled;
+}
+
+async function waitOutStalledWork() {
+  workStalled = true;
+  while (workInFlight() > 0) await pause(200);
+  workStalled = false;
+}
+
 // Waits up to 10 s for open requests and device writes to settle (a closing
 // page can start one), then reloads once for the live build. Resolves the
 // blocker's name when it does not reload; `current()` turns false when the
@@ -111,6 +129,7 @@ export async function reloadForNewBuild({
 } = {}) {
   const until = now() + WRITE_WAIT_MS;
   while (workInFlight() > 0 && now() < until) await pause(200);
+  if (workInFlight() > 0 && !workStalled) void waitOutStalledWork();
   const blocker = current() ? reloadBlocker() : 'moved';
   if (blocker) return blocker;
   const build = newerBuild();

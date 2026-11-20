@@ -280,6 +280,27 @@ describe('reloadForNewBuild', () => {
       await expect(done).resolves.toBe('saving');
       expect(reload).not.toHaveBeenCalled();
       finishSave();
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    test('work that outlasts a full wait makes no later move wait again, until all work settles', async () => {
+      expect(reloadDueAtMove('/admin/pipeline', Date.now())).toBe(true);
+      const reload = vi.fn();
+      const done = reloadForNewBuild({ reload });
+      await vi.advanceTimersByTimeAsync(WRITE_WAIT_MS + 400);
+      await expect(done).resolves.toBe('saving');
+      // The same save is still open: the next move opens its page at once,
+      // with no second 10 s wait.
+      expect(reloadDueAtMove('/admin/dashboard', Date.now())).toBe(false);
+      finishSave();
+      await vi.advanceTimersByTimeAsync(400);
+      // Once it settles, a move is due again, also while new work is open.
+      let finishWrite;
+      countDeviceWrite(new Promise((resolve) => { finishWrite = resolve; }));
+      expect(reloadDueAtMove('/admin/dashboard', Date.now())).toBe(true);
+      finishWrite();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reload).not.toHaveBeenCalled();
     });
   });
 });
