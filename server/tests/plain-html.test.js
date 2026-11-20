@@ -60,12 +60,18 @@ describe('plainPage', () => {
     for (const html of ['<span>x</span>', '<p>x</p>', '<td="x">', '<td\u00c1>x', '</title>']) expect(plain(html)).toBeNull();
   });
 
-  test('an element that changes how a browser reads what follows it, whose content it does not show, or that sets the direction of its text gives null', () => {
+  test('a tag of an element that is not plain text in the flow of the page gives null, even when the list allows it', () => {
     const names = ['textarea', 'template', 'svg', 'math', 'select', 'xmp', 'noscript', 'iframe', 'noembed', 'noframes',
-      'plaintext', 'frameset', 'details', 'dialog', 'datalist', 'rp', 'audio', 'canvas', 'object', 'video', 'bdi', 'bdo'];
-    // Even when the list allows it: a browser reads the <td> in each as text, by other rules, or not at all.
+      'plaintext', 'frameset', 'details', 'dialog', 'datalist', 'rp', 'audio', 'canvas', 'object', 'video', 'meter',
+      'progress', 'input', 'button', 'ol', 'q', 'bdi', 'bdo', 'link', 'meta', 'ruby', 'marquee', 'image'];
+    // A browser reads the <td> in each as text, by other rules, not at all, or with text that is not in the page.
     const all = new Set([...TAGS, ...names]);
     for (const name of names) expect(plainPage(`<table><tr><${name}><td>35A-02-8</${name}></table>`, all)).toBeNull();
+    expect(plainPage('<td><input type=submit value=Callback>', all)).toBeNull();
+    // An option outside a select shows its content (the state's pages hold an empty one), unless it has a label.
+    const withOption = new Set([...TAGS, 'option']);
+    expect(plainPage('<td><option>&nbsp;</option>Met', withOption)).toBe('<td><option>\u00a0</option>Met');
+    expect(plainPage('<td><option label=Callback>x</option>', withOption)).toBeNull();
   });
 
   test('a start tag that can hide its element or reorder its text gives null: hidden, popover, a dir other than ltr, or such a style', () => {
@@ -93,14 +99,15 @@ describe('plainPage', () => {
       // Left to right is the order a browser shows by default, and a custom property sets nothing by itself.
       + '<td dir=LTR style="direction: ltr; unicode-bidi: normal; --display: none; --visibility: hidden">H'))
       .toBe('<td>A</td><td>B<td>C<td>D<td>G<td>H');
-    // Each declaration is read once: a long style with no ";" reads quickly.
+    // Each declaration is read once, and each rule's selector is judged once: a long style reads quickly.
     const started = Date.now();
     expect(plain(`<td style="${'display:'.repeat(40000)}">E`)).toBe('<td>E');
     expect(plain(`<style>td { ${'display:'.repeat(40000)} }</style><td>F`)).toBe('<td>F');
+    expect(plain(`<style>${'.a, '.repeat(20000)}.z { ${'display: none; '.repeat(20000)}}</style><td>G`)).toBe('<td>G');
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
-  test('a style sheet gives null when a rule in it can hide an element of the page or reorder its text, and so does a link to one', () => {
+  test('a style sheet gives null when a rule in it can hide an element of the page or reorder its text', () => {
     const hiding = ['<style>td.c { display: none }</style><td class="a c">x', '<style>.Banner{visibility:hidden}</style><td class=BANNER>x',
       '<style>#Main { display: none }</style><td id=main>x', '<style>.banner { display: none }</style><td class="b&#97;nner">x',
       // A selector of a type name only, a list part, a pseudo-class or "*" may match any element.
@@ -124,10 +131,6 @@ describe('plainPage', () => {
     expect(plain('<style type="text/css"><!-- .leftNav {display:none;} @media print { .banner {display:none;} -->\r\n'
       + 'td { font-size: 13px; content: "display: none"; --display: none; unicode-bidi: normal } /* td { display: none } */'
       + '</style><td class="list" id=x>A')).toBe('<td>A');
-    // A link can load a style sheet this cannot read; a link to an icon loads none.
-    const withLink = new Set([...TAGS, 'link']);
-    expect(plainPage('<link rel="Alternate StyleSheet" href="a.css"><table><tr><td>x</table>', withLink)).toBeNull();
-    expect(plainPage('<link rel=icon href=i.png><td>A', withLink)).toBe('<link><td>A');
   });
 
   test('a run of text that holds a right-to-left letter or a direction control gives null: a browser can show it in another order', () => {
@@ -165,10 +168,9 @@ describe('htmlText', () => {
   test('joins the text around an inline tag, as a browser shows it, and parts it at any other tag', () => {
     expect(text('<td>35A-<B class=x>02</B>-8<br>Live ro<wbr>aches<td>Callba<u>ck</u></td>')).toBe('35A-02-8 Live roaches Callback');
     expect(text('&l<b></b>t; &<!-- -->lt; <<!-- -->td>')).toBe('&lt; &lt; <td>');
-    // An insertion, a deletion and a label are inline too; a q adds quotation marks, so it parts the text.
-    const inline = new Set([...TAGS, 'ins', 'del', 'label', 'q']);
-    expect(htmlText(plainPage('<td>Call<ins>ba</ins><del>c</del>k <label>Fol</label>low-up <q>x</q>y', inline)))
-      .toBe('Callback Follow-up x y');
+    // An insertion, a deletion and a label are inline too.
+    const inline = new Set([...TAGS, 'ins', 'del', 'label']);
+    expect(htmlText(plainPage('<td>Call<ins>ba</ins><del>c</del>k <label>Fol</label>low-up', inline))).toBe('Callback Follow-up');
   });
 
   test('decodes references, takes out invisible characters and NUL characters, and makes white space one space', () => {

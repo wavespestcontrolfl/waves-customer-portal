@@ -12,29 +12,36 @@
  * value, a "<td>" inside a comment or a script, or a script closed by "</script >" cannot add, end or hide a cell. How
  * a browser then builds its tree from the tokens (an end tag it implies, text it moves out of a table) is the
  * reader's to check. plainPage returns null when it cannot rebuild the page that way, or when the page can hide
- * content or show text in another order than it is written:
+ * content or reverse its text in one of these ways:
  * - a tag whose name (a letter, then letters or digits: h1 too) is not in `tags`;
- * - an element that changes how a browser reads what follows it, whose content a browser does not show, or that sets
- *   the direction of its text (REFUSED_ELEMENTS: a template, a textarea, an svg, a select, a closed details, a bdo),
- *   even when `tags` allows it;
- * - a start tag with the hidden or popover attribute, a dir other than ltr, or a style attribute that can hide it or
- *   reorder its text (a display, visibility or content-visibility declaration whose value is none, hidden, collapse
- *   or a function such as var(); a direction other than ltr; a unicode-bidi other than normal); a style sheet with
- *   such a declaration in a rule whose selector can match an element of the page (canMatch); or a link to a style
- *   sheet. A CSS escape or an import, which can spell or load any style, counts as such a declaration. Other ways a
- *   style can hide or change text (a size, a colour, a position, an opacity, a transform, a font, letter case,
- *   generated content such as a list's numbers or a q's quotation marks, a display other than none) are not read,
- *   and neither is what a script does when it runs: the source's own styles and scripts must not hide or add what
- *   its reader needs;
+ * - a tag of an element that is not plain text in the page's flow (PLAIN_ELEMENTS lists those that are), even when
+ *   `tags` allows it: one whose content a browser reads by other rules (a textarea, a template, an svg, a select),
+ *   does not show (a details, a media fallback, a meter), shows from its attributes (an input), adds text to (an ol's
+ *   numbers, a q's quotation marks) or shows in another direction (a bdo), or one that loads a style sheet (a link);
+ * - a start tag with the hidden or popover attribute, a dir other than ltr, a label on an option (which a browser
+ *   can show in place of its content), or a style attribute that can hide it or reorder its text (a display,
+ *   visibility or content-visibility declaration whose value is none, hidden, collapse or a function such as var();
+ *   a direction other than ltr; a unicode-bidi other than normal); or a style sheet with such a declaration in a
+ *   rule whose selector can match an element of the page (canMatch). A CSS escape or an import, which can spell or
+ *   load any style, counts as such a declaration;
  * - a run of text that holds a right-to-left letter (Hebrew, Arabic and the like) or a direction control other than
- *   the left-to-right mark (RIGHT_TO_LEFT_RE). Without them, and without the dir, direction, unicode-bidi and bdo
- *   above, a browser shows text in the order it is written;
+ *   the left-to-right mark (RIGHT_TO_LEFT_RE). Without them, and without the dir, direction and unicode-bidi above, a
+ *   browser shows each line's text in the order it is written;
  * - a script that holds "<script": after "<!--" in a script, that makes the script run past its first end tag;
  * - a page that ends inside a tag, a comment, a doctype, a script, a style or the title.
  *
- * htmlText(html) is the text a browser shows for a part of a page plainPage rebuilt, when no style changes a tag's
- * display (a span shown as a block, a div shown inline). Such a style can make a browser part or join words
- * elsewhere, so a reader that must not depend on where words part compares text with its spaces taken out.
+ * plainPage does not lay the page out. Where a browser shows a box (a float, a position, a table's caption and its
+ * head and foot rows, which a browser shows above or below its other rows), its size, colour, opacity, transform
+ * and font, letter case, what a style or the browser adds around it (generated content such as a list marker), a
+ * display other than none, an image's alt text (shown only when the image cannot load) and what a script does when
+ * it runs are not read. A reader can rely on the text the page holds and the order in which it is written, not on
+ * where or how a browser shows it: the source's own styles, images and scripts must not hide or add what its
+ * reader needs.
+ *
+ * htmlText(html) is the text of a part of a page plainPage rebuilt, as a browser shows it by default: an inline tag
+ * (INLINE_TAGS) joins the text on both sides, and any other tag parts it with a space. A browser can part or join
+ * words elsewhere (a style that changes a tag's display, such as a span shown as a block; an image it shows as
+ * nothing), so a reader that must not depend on where words part compares text with its spaces taken out.
  */
 
 const { decodeHTML } = require('entities');
@@ -58,15 +65,21 @@ function skip(html, i, keep) {
 
 // Elements whose content is text up to their own end tag: script and style, and the title. Each is dropped whole.
 const TEXT_ELEMENTS = new Set(['script', 'style', 'title']);
-// Elements of which a tag gives null, whatever `tags` allows. Some change how a browser reads what follows them: their
-// content is text (textarea, xmp, iframe, noembed, noframes, noscript, plaintext), a template's, or another
-// language's (svg, math), or read by other rules (select, frameset). Some hold content a browser does not show: a
-// closed details (all but its summary), a closed dialog, a datalist, a ruby fallback (rp), and the fallback content
-// of audio, canvas, object and video. A bdi or a bdo sets the direction of its text.
-const REFUSED_ELEMENTS = new Set(['frameset', 'iframe', 'math', 'noembed', 'noframes', 'noscript', 'plaintext',
-  'select', 'svg', 'template', 'textarea', 'xmp',
-  'audio', 'canvas', 'datalist', 'details', 'dialog', 'object', 'rp', 'video',
-  'bdi', 'bdo']);
+// The elements a browser shows inline by default with nothing of their own between the text on both sides (HTML's
+// rendering rules): it shows that text as one run, so "35A-<b>02</b>-8" reads "35A-02-8".
+const INLINE_TAGS = new Set(['a', 'abbr', 'acronym', 'b', 'big', 'cite', 'code', 'data', 'del', 'dfn', 'em', 'font', 'i',
+  'ins', 'kbd', 'label', 'mark', 'nobr', 's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time', 'tt',
+  'u', 'var', 'wbr']);
+// The elements whose content a browser shows as plain text in the page's flow: the inline ones, and blocks, table
+// parts, line breaks and images, each of which parts the text around it. A tag of any other element gives null,
+// whatever `tags` allows: its content is read by other rules (textarea, xmp, iframe, noscript, plaintext, template,
+// svg, math, select, frameset), is not shown (details, dialog, datalist, rp, the fallback of audio, canvas, meter,
+// object, progress and video), comes from its attributes (input) or from the browser (ol's numbers, q's quotation
+// marks), or runs in another direction (bdi, bdo); or the element loads a style sheet (link) or another page (meta).
+const PLAIN_ELEMENTS = new Set([...INLINE_TAGS, 'address', 'article', 'aside', 'blockquote', 'body', 'br', 'caption',
+  'center', 'col', 'colgroup', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3',
+  'h4', 'h5', 'h6', 'head', 'header', 'hgroup', 'hr', 'html', 'img', 'li', 'main', 'nav', 'option', 'p', 'pre',
+  'section', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul']);
 
 // The attributes of a tag whose attributes start at `i`, and the index just past the ">" that ends it, or null when
 // the page ends first. Each attribute is a name (its first character may be "=", and a quote or a "<" in it is part
@@ -118,13 +131,13 @@ const hidingStyle = (css) => css.includes('\\') || flatCss(css).split(/[;{}]/).s
 const decodeAttribute = (value) => decodeHTML(value.replace(/&([A-Za-z0-9]+)(?=([;=]?))/g, (reference, name, next) => (
   (next === ';' && Object.hasOwn(REFERENCE_NAMES, name)) || (next === '' && Object.hasOwn(LEGACY_REFERENCE_NAMES, name))
     ? reference : `&amp;${name}`)));
-// Whether a start tag of `element` can hide its element or reorder its text: hidden or popover (shown only once a
-// script opens it), a dir other than ltr, a style attribute that can (hidingStyle), or, on a link, a rel that loads a
-// style sheet (one this cannot read). Each value is read with its character references decoded (decodeAttribute).
+// Whether a start tag of `element` can hide its content or reorder its text: hidden or popover (shown only once a
+// script opens it), a dir other than ltr, a label on an option (a browser can show it in place of the content), or a
+// style attribute that can (hidingStyle), read with its character references decoded (decodeAttribute).
 const hides = (element, attributes) => attributes.some(({ name, value }) => name === 'hidden' || name === 'popover'
   || (name === 'dir' && decodeAttribute(value).toLowerCase() !== 'ltr')
-  || (name === 'style' && hidingStyle(decodeAttribute(value)))
-  || (element === 'link' && name === 'rel' && decodeAttribute(value).toLowerCase().split(/[\t\n\f\r ]+/).includes('stylesheet')));
+  || (element === 'option' && name === 'label')
+  || (name === 'style' && hidingStyle(decodeAttribute(value))));
 // The class and id names of a start tag: ".name" for each class and "#name" for its id, in lower case (a page in
 // quirks mode matches them in any case).
 const namesOf = (attributes) => attributes.flatMap(({ name, value }) => {
@@ -140,17 +153,18 @@ const canMatch = (selector, names) => selector.split(',').some((part) => !/^[-\w
 // Whether a style sheet can hide an element of a page whose elements have the class and id names `names`: it holds a
 // backslash, or an import (a sheet this cannot read); or it holds a hiding declaration whose rule this cannot tell
 // (one with no rule, or one after a nested rule), or whose rule's selector can match an element. The sheet is read
-// once, run by run: a "{" opens a block whose selector is the run before it, and a "}" ends one.
+// once, run by run: a "{" opens a block, whose selector (the run before it) is judged once, and a "}" ends one.
 function sheetCanHide(css, names) {
   if (css.includes('\\')) return true;
   const flat = flatCss(css);
   if (/@import/i.test(flat)) return true;
-  let selector = null;
+  // Whether the block the walk is in can match an element: true where this cannot tell.
+  let matches = true;
   let before = '';
   for (const [, mark, run] of flat.matchAll(/([;{}]?)([^;{}]*)/g)) {
-    if (mark === '{') selector = before;
-    else if (mark === '}') selector = null;
-    if (HIDING_RE.test(run) && (selector === null || canMatch(selector, names))) return true;
+    if (mark === '{') matches = canMatch(before, names);
+    else if (mark === '}') matches = true;
+    if (matches && HIDING_RE.test(run)) return true;
     before = run;
   }
   return false;
@@ -198,7 +212,7 @@ function readTag(html, i, page) {
     return close && { text: '', end: close.end };
   }
   // A browser ignores an end tag's attributes.
-  if (REFUSED_ELEMENTS.has(known) || !page.tags.has(known) || (!endTag && hides(known, read.attributes))) return null;
+  if (!PLAIN_ELEMENTS.has(known) || !page.tags.has(known) || (!endTag && hides(known, read.attributes))) return null;
   return { text: endTag ? `</${known}>` : `<${known}>`, end: read.end };
 }
 
@@ -220,7 +234,8 @@ function readToken(html, i, page) {
 
 // A right-to-left letter (Hebrew, Arabic and every other such script, with their digits: Unicode's right-to-left
 // blocks) or a direction control other than the left-to-right mark. Text that holds one can be shown in another order
-// than it is written; text that holds none, on a page with no dir, direction, unicode-bidi or bdo, cannot.
+// than it is written; text that holds none cannot, on a page with no dir, direction or unicode-bidi (a bdi and a bdo
+// are not plain elements).
 const RIGHT_TO_LEFT_RE = /[\u0590-\u08ff\u200f\u202a-\u202e\u2066-\u2069\ufb1d-\ufdff\ufe70-\ufefe\u{10800}-\u{10fff}\u{1e800}-\u{1efff}]/u;
 
 // A run of text between tokens, its character references decoded as a browser decodes them (a reference never runs
@@ -248,21 +263,14 @@ function plainPage(html, tags) {
   return rest === null ? null : out + rest;
 }
 
-// The elements a browser shows inline by default with nothing of their own between the text on both sides (HTML's
-// rendering rules): it shows that text as one run, so "35A-<b>02</b>-8" reads "35A-02-8". Any other tag (a cell, a
-// row, a paragraph, a line break, an image, a q with its quotation marks) parts the text around it.
-const INLINE_TAGS = new Set(['a', 'abbr', 'acronym', 'b', 'big', 'blink', 'cite', 'code', 'data', 'del', 'dfn', 'em',
-  'font', 'i', 'ins', 'kbd', 'label', 'map', 'mark', 'nobr', 'output', 's', 'samp', 'slot', 'small', 'span', 'strike',
-  'strong', 'sub', 'sup', 'time', 'tt', 'u', 'var', 'wbr']);
-
 // Characters a browser draws as nothing that join or shape no glyph: the soft hyphen, the zero-width space, the
 // left-to-right mark (plainPage refuses the other direction controls), the word joiner and the invisible operators,
 // and the byte-order mark. The joiners (U+200C, U+200D) are not among them: they shape what a browser shows, such as
 // an emoji sequence.
 const INVISIBLE_RE = /[\u00ad\u200b\u200e\u2060-\u2064\ufeff]/g;
 
-// The text a browser shows for a part of a page plainPage rebuilt: an inline tag out with nothing in its place, any
-// other tag a space, the references decoded, the INVISIBLE_RE characters and NUL characters taken out (so
+// The text a browser shows for a part of a page plainPage rebuilt: an inline tag (INLINE_TAGS) out with nothing in
+// its place, any other tag (a cell, a row, a paragraph, a line break, an image) a space, the references decoded, the INVISIBLE_RE characters and NUL characters taken out (so
 // "Callba&shy;ck" reads "Callback"; a browser drops a NUL in text), and runs of white space made one space.
 function htmlText(html) {
   return decodeHTML(String(html || '').replace(/<\/?([a-z][a-z0-9]*)>/g, (tag, name) => (INLINE_TAGS.has(name) ? '' : ' ')))
