@@ -1,7 +1,7 @@
 /**
  * restaurant_prospects: the weekly restaurant prospect list built from Florida's public restaurant files
  * (services/prospects/dbpr-restaurants.js; owner approval 2026-11-19). Three kinds of row:
- *   new_license   a new food license in Manatee, Sarasota or Charlotte (source_key = Application Number)
+ *   new_license   a new food license in Manatee, Sarasota or Charlotte, Punta Gorda left out (source_key = Application Number)
  *   owner_change  an ownership change in the same counties (source_key = Application Number)
  *   inspection    an inspection that cited violation 35 (source_key = Inspection Visit ID)
  * (kind, source_key) is the identity: a re-read of the same file refreshes last_seen_at and nothing else.
