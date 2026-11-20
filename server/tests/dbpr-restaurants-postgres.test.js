@@ -56,17 +56,22 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
       const other = await db.transaction();
       try {
         await other.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
+        const { pid } = (await other.raw('SELECT pg_backend_pid() AS pid')).rows[0];
         const waiting = svc.settleRead(kind, read(6100), now);
         let judged = false;
         waiting.then(() => { judged = true; }, () => { judged = true; });
-        // The other run saves only once this one waits on the lock (or, with no lock, has judged already). It asks on
-        // its own connection: the pool may hold only these two.
-        const blocked = async () => (await other.raw(
-          "SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'",
+        // The other run saves only once a session waits on its lock. Without the lock settleRead judges at once and
+        // never waits, so the test fails here. It asks on its own connection (the pool may hold only these two), and
+        // reads pg_locks, which is live: pg_stat_activity keeps its first snapshot for the whole transaction.
+        const blockedByOther = async () => (await other.raw(
+          'SELECT 1 FROM pg_locks WHERE NOT granted AND ? = ANY(pg_blocking_pids(pid))', [pid],
         )).rows.length > 0;
-        for (let tries = 0; tries < 300 && !judged && !(await blocked()); tries += 1) {
-          await new Promise((resolve) => { setTimeout(resolve, 10); });
+        let waited = false;
+        for (let tries = 0; tries < 500 && !judged && !waited; tries += 1) {
+          waited = await blockedByOther();
+          if (!waited) await new Promise((resolve) => { setTimeout(resolve, 10); });
         }
+        expect(waited).toBe(true);
         await other('system_settings').where({ key }).update({ value: JSON.stringify({ fiscalYear: '2026-07-01', rows: 6800 }) });
         await other.commit();
         expect(await waiting).toEqual(expect.objectContaining({ flag: 'short' }));
