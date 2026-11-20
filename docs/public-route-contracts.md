@@ -7630,7 +7630,9 @@ whichever address is on file); with none resolvable, `availability: null`
 and `needs_address: true` — the page asks for an address via `POST
 /:token/availability { address }` (not persisted by the availability
 call; the commit persists the validated, in-area address onto the customer
-in its phase 1 and KEEPS it even if the booking attempt then fails — owner
+in its phase 1, keeping the profile's city name when the address matches the
+profile (same street and unit, and ZIP or pin; far-south zones read the city
+name), and KEEPS it even if the booking attempt then fails — owner
 ruling 2026-09-24, since undoing it raced concurrent bookings that had
 already adopted it; a retry with a different address writes that one)
 before showing times. GET is routed through the SAME
@@ -7676,9 +7678,12 @@ stamp and its check match the list. A booking at the profile's own address
 reads that address from the booking's own customer row, not from a copy the
 commit read earlier. An address that resolves to no zone takes
 the customer's city on file, as a visit with no zone stamp is read later by its
-customer's city. A typed address on the profile the commit's first check read
-keeps the city that check read: phase one may write the typed city onto that
-profile, and the booking still checks and stamps the zone its list offered. With the funnel on, the booking transaction also refuses with
+customer's city. Phase one keeps the profile's city when a typed address
+matches the profile, so a refusal's fresh times and the retry read the zone
+this commit read. When phase one corrects the profile in place to another typed
+address, the booking still checks and stamps the zone of the city its first
+check read; its refusal's fresh times and the retry read the corrected
+profile's city, the same one. With the funnel on, the booking transaction also refuses with
 `CUSTOMER_CHANGED_RETRY` when the customer's address changed after its zone read it, and the
 page gets the answer an account change under the booking fence already gets:
 `SLOT_TAKEN` with `address_changed: true`, the address on file and no times, or

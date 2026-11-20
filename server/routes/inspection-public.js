@@ -2075,8 +2075,9 @@ async function provisionLinkedCustomer(trx, {
   // never geocoded (no coordinates: nothing validated to lose).
   // A lead-address fallback is held to the same rule as a typed one
   // (Codex #4737 r11 pre-push P1): neither overwrites an established
-  // property.
-  const anotherProperty = (resolved.source === 'supplied' || resolved.source === 'lead')
+  // property. Phase 1 runs only on a resolved location, so any source but
+  // this row's own address is one of those two.
+  const anotherProperty = resolved.source !== 'customer'
     && Boolean(freshCustRow.address_line1)
     && !profileMatchesAddress(freshCustRow, resolved.address, resolved.location)
     && !(await correctableInPlace(trx, freshLead, freshCustRow));
@@ -2097,10 +2098,11 @@ async function provisionLinkedCustomer(trx, {
     && freshCustRow.latitude != null && freshCustRow.longitude != null
     ? { lat: Number(freshCustRow.latitude), lng: Number(freshCustRow.longitude) }
     : null;
+  const matchesStoredAddress = profileMatchesAddress(storedCustRow, resolved.address, resolved.location);
   const retainReviewedLocation = [
     Boolean(reviewedLocation),
     Boolean(storedCustRow.address_line1),
-    profileMatchesAddress(storedCustRow, resolved.address, resolved.location),
+    matchesStoredAddress,
   ].every(Boolean);
   if (resolved.source !== 'customer' && !retainReviewedLocation) {
     // The pre-lock resolution did NOT come from this row's own
@@ -2108,22 +2110,24 @@ async function provisionLinkedCustomer(trx, {
     // geocode and a lead/supplied fallback won) — write the
     // validated resolution back so a missing/bad address isn't
     // asked for again (this file's own contract — see the header).
+    // An address that matches this row (same street and unit, and ZIP or
+    // pin) keeps the row's city on file: the two names are one place, and
+    // the far-south funnel reads the city name, so a typed name no zone lists
+    // would take the property out of the zone its list read, for this commit,
+    // its refusal's times and every retry (owner rule B, pre-push P1 on
+    // 7a682696f6).
+    const city = storedCustRow.city && matchesStoredAddress ? storedCustRow.city : resolved.address.city;
     const after = {
       address_line1: resolved.address.line1,
       address_line2: resolved.address.line2,
-      city: resolved.address.city,
+      city,
       state: resolved.address.state,
       zip: resolved.address.zip,
       latitude: resolved.location.lat,
       longitude: resolved.location.lng,
     };
     await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
-    provisioned = {
-      ...freshCustRow,
-      address_line1: resolved.address.line1, address_line2: resolved.address.line2,
-      city: resolved.address.city, state: resolved.address.state, zip: resolved.address.zip,
-      latitude: resolved.location.lat, longitude: resolved.location.lng,
-    };
+    provisioned = { ...freshCustRow, ...after };
   }
   // else resolved.source === 'customer': the pre-lock resolution WAS
   // this row's own stored address. Its text needs no write-back, but
@@ -2758,9 +2762,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // (slot-zone.js; owner rule B, pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f). The address is the typed
     // (or the lead's) one, or the row's own when the booking uses the profile's, which the booking's lock fences
     // (pre-push P1 on 5fc5e4d648: a copy read here could be stale by then). The city is the row's own, but a typed
-    // address on the profile the first build read keeps that build's city, the zone its list offered: phase 1 can write
-    // the typed city onto that profile, and a city in no zone would leave the visit unchecked and unstamped (pre-push
-    // P1 on 850a6a79f0).
+    // address on the profile the first build read keeps that build's city, the zone its list offered: phase 1 can
+    // correct that profile in place to the typed address, and a city in no zone would leave the visit unchecked and
+    // unstamped (pre-push P1 on 850a6a79f0). A typed address that matches the profile keeps its city there.
     const zoneAddress = (cust) => (locationMoved || resolved.source === 'customer'
       ? [zoneFunnelInputs(customerAddressFields(cust)), cust.city]
       : [zoneFunnelInputs(bookingAddress), checkedCustomer && cust.id === checkedCustomer.id ? checkedCustomer.city : cust.city]);
