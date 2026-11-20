@@ -68,7 +68,7 @@ describeDb('lead funnel breakdown keys', () => {
     // a self-booking (no lead) uses the page captured on the booking itself
     expect((await keysFor({ channel: null, booking: { landing_url: 'https://www.wavespestcontrol.com/book/?gclid=x' }, landing: 'https://wavespestcontrol.com/old' })).page)
       .toBe('wavespestcontrol.com/book');
-    expect(await keysFor({})).toEqual({ page: '(unknown)', service: '(unknown)', city: '(unknown)', heard: '(unknown)' });
+    expect(await keysFor({})).toEqual({ page: '(unknown)', service: '(unknown)', city: '(unknown)', heard: '(unknown)', quiz: '(unknown)' });
   });
 
   test('city, service and heard-about keys', async () => {
