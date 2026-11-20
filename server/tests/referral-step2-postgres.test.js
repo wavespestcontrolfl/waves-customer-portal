@@ -646,6 +646,21 @@ const DAY = 86400000;
       expect(await firstService(friend, visit)).toMatchObject({ referrerDollars: 25, refereeDollars: 25 });
     });
 
+    test('conversion needs the live row too: with none it stages and pays nothing, milestone bonus included', async () => {
+      const member = await customer();
+      const friend = await planFriend();
+      await recurringVisit(friend.id);
+      const ref = await referral(member, friend, { ageDays: 1 });
+      await db('referral_promoters').where({ id: ref.promoter_id }).update({ total_referrals_converted: 2 }); // this would be the 3rd
+      const saved = await db('referral_program_settings').where({ id: 1 }).first();
+      await db('referral_program_settings').del();
+      await expect(convert(ref, friend)).rejects.toMatchObject({ code: 'SETTINGS_UNAVAILABLE' });
+      expect(await row(ref.id)).toMatchObject({ status: 'contacted', converted_at: null });
+      expect(await db('referral_promoters').where({ id: ref.promoter_id }).first())
+        .toMatchObject({ total_referrals_converted: 2, pending_earnings_cents: 0, available_balance_cents: 0, milestone_level: 'none' });
+      await db('referral_program_settings').insert(saved);
+    });
+
     test('the cap and amounts come from the live row read in the transaction', async () => {
       await db('referral_program_settings').where({ id: 1 }).update({ step2_annual_credit_cap: 5, referee_discount_cents: 3000 });
       const member = await customer();

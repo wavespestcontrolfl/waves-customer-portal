@@ -772,7 +772,9 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue, trx
   // GATE_REFERRAL_STEP2: Step 2 governs the member's reward, so conversion is deferred to the friend's first paid
   // service whatever require_service_completion says. The immediate promoter-balance payout would skip the near
   // rate and the yearly cap (creditReferralOnFirstService never selects an already-earned referral).
-  const settings = withStep2Deferral(await getSettings());
+  // Under the gate the live row is required before anything is staged or paid (milestone bonuses included): getSettings()
+  // would stand in defaults for a failed read. Gate off: getSettings(), as before.
+  const settings = withStep2Deferral(isEnabled('referralStep2') ? await liveSettingsOrThrow(db) : await getSettings());
 
   // Calculate reward (base + tier bonus)
   // GATE_REFERRAL_STEP2: the amount staged on the promoter's pending earnings is the Step 2 standard member credit
