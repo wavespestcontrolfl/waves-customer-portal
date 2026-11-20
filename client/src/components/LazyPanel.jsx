@@ -28,8 +28,9 @@ function PanelPending() {
   return <div role="status" className="p-4 font-sans text-sm text-zinc-600">Loading the new version...</div>;
 }
 
-// Offline, the part's code may be fine and only out of reach.
-function MissingPanelCode() {
+// Offline, the part's code may be fine and only out of reach. A part that
+// loads its code with its own import() shows it too (CustomersPageV2.jsx).
+export function MissingPanelCode() {
   const reason = navigator.onLine === false ? 'this device is offline' : 'the portal has a new version';
   return (
     <PortalReloadPrompt

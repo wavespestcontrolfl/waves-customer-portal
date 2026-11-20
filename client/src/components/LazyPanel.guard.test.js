@@ -35,3 +35,8 @@ test('App.jsx calls React.lazy only inside lazyWithRetry', () => {
   expect(calls).toHaveLength(1);
   expect(app).toMatch(/export function lazyWithRetry\(factory\) \{\n {2}return lazy\(/);
 });
+
+test('main.jsx installs the page-use watcher next to the preload handler', () => {
+  const main = fs.readFileSync(path.join(SRC, 'main.jsx'), 'utf8');
+  expect(main).toMatch(/window\.addEventListener\('vite:preloadError'[^\n]*\n(?:\/\/[^\n]*\n)*watchPageUse\(\);/);
+});

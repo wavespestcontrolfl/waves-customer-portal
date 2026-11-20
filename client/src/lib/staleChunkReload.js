@@ -28,8 +28,16 @@
 // a page move does, and reloads once or shows its retry screen
 // (reloadForMissingCode, App.jsx). A part of a page shows a Reload prompt in
 // its place (components/LazyPanel.jsx).
+//
+// A part opens in place, so the page around it can hold unsaved work in
+// component state that no hold names. So a staff tab whose last use was on
+// its current path (watchPageUse) keeps the tab too: a part asks before it
+// reloads, and any other import() fails to its caller. A page move opens a
+// new path, so a page whose code is missing still reloads at once when
+// nothing holds the tab.
 
-import { staffBlockerAfterWork, staffReloadBlocker } from './portalReload';
+import { isAdminPath } from './adminBookmarkMeta';
+import { isPageUse, PAGE_USE_EVENTS, staffBlockerAfterWork, staffReloadBlocker } from './portalReload';
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 
@@ -48,6 +56,15 @@ const NAVIGATION_WINDOW_MS = 30000;
 let reloadPending = false;
 let navigatingUntil = 0;
 let chunkHeld = false;
+let usedPath = null;
+
+// Notes the path of each use of a page, as the Reload bar counts a use
+// (isPageUse, lib/portalReload.js). Installed once, by main.jsx.
+export function watchPageUse(target = document) {
+  const noteUse = (event) => { if (isPageUse(event)) usedPath = window.location.pathname; };
+  PAGE_USE_EVENTS.forEach((type) => target.addEventListener(type, noteUse, true));
+  return () => PAGE_USE_EVENTS.forEach((type) => target.removeEventListener(type, noteUse, true));
+}
 
 function pageNavigating() {
   return Date.now() < navigatingUntil;
@@ -97,9 +114,10 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
     event.preventDefault();
     return;
   }
-  // A staff tab with open or held work: the import fails as it would with
-  // no handler (see the top of this file).
-  if (staffReloadBlocker()) return;
+  // A staff tab with open or held work, or last used on this path: the
+  // import fails as it would with no handler (see the top of this file).
+  const { pathname } = window.location;
+  if (staffReloadBlocker() || (isAdminPath(pathname) && usedPath === pathname)) return;
   try {
     if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
@@ -141,4 +159,5 @@ export function resetStaleChunkReloadForTests() {
   reloadPending = false;
   navigatingUntil = 0;
   chunkHeld = false;
+  usedPath = null;
 }

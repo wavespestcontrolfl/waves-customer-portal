@@ -3,7 +3,7 @@ import { useLocation, useNavigationType } from 'react-router-dom';
 import { Button } from './ui';
 import { isAdminPath, isFieldPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
-import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
+import { isPageUse, PAGE_USE_EVENTS, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
 // (lib/portalReload.js) it shows `fallback` in place of the routes, so the old
@@ -106,19 +106,17 @@ export function useHoldAwareReload(resetKey, beforeReload) {
 // controls names them all, so after any use the bar asks once first. A page
 // move ends the use: the move closes the page and its work. The automatic
 // reload waits for a move, so it never needs this. Each use also calls onUse.
-function usePageUsed(pathname, onUse) {
+export function usePageUsed(pathname, onUse) {
   const used = useRef(false);
   useEffect(() => { used.current = false; }, [pathname]);
   useEffect(() => {
     const noteUse = (event) => {
-      // A Reload control itself (this bar, PortalReloadPrompt) is no use of the page.
-      if (!(event.target instanceof Element) || event.target.closest('[data-portal-update-bar], [data-portal-reload-prompt]')) return;
+      if (!isPageUse(event)) return;
       used.current = true;
       onUse();
     };
-    const types = ['pointerdown', 'click', 'keydown', 'input', 'change'];
-    types.forEach((type) => document.addEventListener(type, noteUse, true));
-    return () => types.forEach((type) => document.removeEventListener(type, noteUse, true));
+    PAGE_USE_EVENTS.forEach((type) => document.addEventListener(type, noteUse, true));
+    return () => PAGE_USE_EVENTS.forEach((type) => document.removeEventListener(type, noteUse, true));
   }, [onUse]);
   return () => used.current;
 }

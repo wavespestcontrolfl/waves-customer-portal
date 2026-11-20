@@ -23,6 +23,17 @@ export const WRITE_WAIT_MS = 10 * 1000;
 const RELOADED_FOR = 'portal-reloaded-for';
 export const RELOAD_TRIES = 3;
 
+// A use of a staff page: a tap, a key or an edit anywhere but on a Reload
+// control (the Reload bar, PortalReloadPrompt, the staff retry screen in
+// App.jsx). Unsaved work can follow a use, so a reload asks first: the
+// Reload bar (components/PortalUpdate.jsx) and the stale-chunk reload
+// (lib/staleChunkReload.js) count it the same way.
+export const PAGE_USE_EVENTS = ['pointerdown', 'click', 'keydown', 'input', 'change'];
+export function isPageUse(event) {
+  return event.target instanceof Element
+    && !event.target.closest('[data-portal-update-bar], [data-portal-reload-prompt]');
+}
+
 // The automatic reloads this tab made for this live build. A reload can come
 // back on the old page: when the network fails at that moment, the service
 // worker answers with its saved copy. So the tab may try again at a later

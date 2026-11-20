@@ -20,6 +20,7 @@ import {
   markPageNavigating,
   reloadForMissingCode,
   resetStaleChunkReloadForTests,
+  watchPageUse,
 } from './lib/staleChunkReload';
 import { registerReloadHold } from './lib/reloadHolds';
 import { installPortalVersionWatch, resetPortalVersionForTests } from './lib/portalVersion';
@@ -31,6 +32,12 @@ registerReloadHold('card-payment', () => holding);
 
 function missingChunk() {
   return Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/Page-old.js'));
+}
+
+// A tap as a browser sends it: pointerdown, then click.
+function tap(element) {
+  fireEvent.pointerDown(element);
+  fireEvent.click(element);
 }
 
 function preloadErrorEvent() {
@@ -182,13 +189,19 @@ test('the missing-code check knows the error of each browser and of a Vite style
   expect(isChunkError(null)).toBe(false);
 });
 
-test('a customer page keeps its stale-chunk reload while a staff tab hold is open', () => {
+test('a customer page keeps its stale-chunk reload while a staff tab hold is open, and after a use of the page', () => {
   holding = true;
-  const reload = vi.fn();
-  const stale = preloadErrorEvent();
-  handleVitePreloadError(stale, reload);
-  expect(stale.defaultPrevented).toBe(true);
-  expect(reload).toHaveBeenCalledTimes(1);
+  const stop = watchPageUse(document);
+  try {
+    fireEvent.pointerDown(document.body);
+    const reload = vi.fn();
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  } finally {
+    stop();
+  }
 });
 
 // A staff page obeys the holds of an out-of-date tab (lib/portalReload.js).
@@ -273,6 +286,64 @@ describe('on a staff page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(screen.getByText('This device is offline. A reload may show an error page.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Reload anyway' })).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a page used since it opened keeps the tab, so a missing part asks first; after a move, a missing page reloads at once', () => {
+    const stop = watchPageUse(document);
+    try {
+      fireEvent.input(document.body);
+      const stale = preloadErrorEvent();
+      handleVitePreloadError(stale, reload);
+      expect(stale.defaultPrevented).toBe(false);
+      expect(reload).not.toHaveBeenCalled();
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
+      const next = preloadErrorEvent();
+      handleVitePreloadError(next, reload);
+      expect(next.defaultPrevented).toBe(true);
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+    }
+  });
+
+  test('a tap on a Reload control is no use of the page, so a missing chunk still reloads at once', () => {
+    const stop = watchPageUse(document);
+    const control = document.body.appendChild(document.createElement('button'));
+    control.setAttribute('data-portal-reload-prompt', '');
+    try {
+      fireEvent.pointerDown(control);
+      const stale = preloadErrorEvent();
+      handleVitePreloadError(stale, reload);
+      expect(stale.defaultPrevented).toBe(true);
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+      control.remove();
+    }
+  });
+
+  test('a use of the page after the retry screen named the work clears it, so its Reload asks again', async () => {
+    holding = true;
+    renderInBoundary(lazyWithRetry(missingChunk));
+    tap(await screen.findByRole('button', { name: 'Reload' }));
+    expect(screen.getByText('A card payment is still going through.')).toBeInTheDocument();
+    fireEvent.input(document.body);
+    expect(screen.getByText('The portal has a new version.')).toBeInTheDocument();
+    tap(screen.getByRole('button', { name: 'Reload' }));
+    expect(reload).not.toHaveBeenCalled();
+    // A tap on the screen's own button is no use of the page.
+    tap(screen.getByRole('button', { name: 'Reload anyway' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('a mixed-case staff URL gets the staff retry screen, which asks before it reloads', async () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/ADMIN/Dashboard', reload });
+    holding = true;
+    renderInBoundary(lazyWithRetry(missingChunk));
+    expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
+    tap(screen.getByRole('button', { name: 'Reload' }));
+    expect(screen.getByText('A card payment is still going through.')).toBeInTheDocument();
     expect(reload).not.toHaveBeenCalled();
   });
 

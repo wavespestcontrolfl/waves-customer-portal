@@ -4,7 +4,7 @@ import { reportError } from './lib/reportError';
 import {
   CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, reloadForMissingCode,
 } from './lib/staleChunkReload';
-import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload } from './components/PortalUpdate';
+import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload, usePageUsed } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -307,8 +307,13 @@ function showReloadToast() {
 // work first, as the Reload bar does (components/PortalUpdate.jsx), and
 // becomes "Reload anyway".
 function ChunkLoadFallback({ newVersion = false }) {
-  const operatorPath = /^\/(admin|tech)(\/|$)/.test(window.location.pathname);
-  const { named, heldText, tryReload } = useHoldAwareReload(null, clearChunkReloadFlag);
+  // Case-insensitive, as the routes match: /ADMIN/... is a staff page too.
+  const operatorPath = /^\/(admin|tech)(\/|$)/i.test(window.location.pathname);
+  const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(null, clearChunkReloadFlag);
+  // The staff layout can stay around this screen, the Ask Waves draft
+  // included: a use of the page clears what the button named, so it asks
+  // again, as the Reload bar does.
+  usePageUsed(null, clearNamed);
   if (!operatorPath) {
     return (
       <CustomerFailureScreen
@@ -326,7 +331,7 @@ function ChunkLoadFallback({ newVersion = false }) {
       minHeight: '100vh', background: '#FAF8F3', display: 'flex', alignItems: 'center',
       justifyContent: 'center', padding: 24, fontFamily: FONTS.body, boxSizing: 'border-box',
     }}>
-      <div style={{
+      <div data-portal-reload-prompt="" style={{
         width: 'min(420px, 100%)', background: '#fff', border: '1px solid #E7E2D7',
         borderRadius: 8, padding: 24, textAlign: 'center', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
       }}>

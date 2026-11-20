@@ -8,7 +8,7 @@ import { initNativeLinks } from './native/nativeLinks';
 import { clearStaffDeviceData, getAdminAuthToken } from './lib/adminAuth';
 import { installStaffSessionGuard } from './lib/staffSessionGuard';
 import { installPortalVersionWatch } from './lib/portalVersion';
-import { handleVitePreloadError } from './lib/staleChunkReload';
+import { handleVitePreloadError, watchPageUse } from './lib/staleChunkReload';
 
 // Reads which client build the server runs from each staff API answer, so an
 // out-of-date staff tab can tell (lib/portalVersion.js). First, so later
@@ -31,6 +31,9 @@ installStaffSessionGuard({ getToken: getAdminAuthToken, onRejected: clearStaffDe
 // marks the reload pending so the import it swallows (it resolves undefined)
 // shows a loading placeholder, not the crash screen — see staleChunkReload.js.
 window.addEventListener('vite:preloadError', (event) => handleVitePreloadError(event));
+// A staff tab last used on its current path keeps the tab at a missing
+// chunk: a part of the page asks before it reloads.
+watchPageUse();
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
