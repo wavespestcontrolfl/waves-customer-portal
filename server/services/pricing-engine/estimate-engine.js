@@ -902,6 +902,20 @@ function wholeHomeSealInputs(exclusion, property, input) {
 // the shape: it prices only the V2 per-point model, and measured barrel feet on a request that is not V2-shaped are refused.
 const ROOF_STYLES = ['shingle', 'flat_tile', 'barrel_tile', 'metal', 'other'];
 
+// Is this exclusion V2-shaped AND carrying priced work: a whole-home seal, or at least one finite positive point, bird box
+// or mesh quantity? Read with the pricer's own coercion (Number(x) || 0, negatives clamp to 0), so a '0', negative or NaN
+// count never counts: the pricing version alone does not make a closure-only quote.
+const V2_QUANTITY_KEYS = ['standardWireMeshPoints', 'advancedWireMeshPoints', 'standardBirdBoxes', 'tileHighBirdBoxes',
+  'customBirdBoxes', 'meshSoftLF', 'meshConcreteLF'];
+function pricesV2Work(exclusion) {
+  if (exclusion.pricingVersion !== 'v2') return false;
+  if (exclusion.sealScope === 'whole_home') return true;
+  return V2_QUANTITY_KEYS.some((key) => {
+    const quantity = Number(exclusion[key]) || 0;
+    return Number.isFinite(quantity) && quantity > 0;
+  });
+}
+
 // THE one roof type for exclusion and rodent guarantee work: the technician's confirmed roof style when there is one
 // (tile = 'tile', the tier and multiplier key every pricer reads), else the lookup's roof type, untouched.
 function effectiveExclusionRoofType(lookupRoofType, roofStyle) {
@@ -918,7 +932,7 @@ function roofStyleInputs(exclusion, input) {
   if (!ROOF_STYLES.includes(style)) {
     throw wholeHomeInputError('The roof style must be shingle, flat tile, barrel tile, metal or other.', 'EXCLUSION_ROOF_STYLE_INVALID');
   }
-  if (exclusion.pricingVersion !== 'v2' && style === 'barrel_tile' && Number(exclusion.barrelEaveFt) > 0) {
+  if (style === 'barrel_tile' && Number(exclusion.barrelEaveFt) > 0 && !pricesV2Work(exclusion)) {
     throw wholeHomeInputError('Count the entry points, or choose Whole home, before adding the barrel eave closure.', 'EXCLUSION_ROOF_STYLE_NEEDS_COUNTS');
   }
   const frozen = replay ? input.roofStyleReplay : null;

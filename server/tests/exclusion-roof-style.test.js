@@ -184,9 +184,10 @@ describe('estimate engine with a roof style', () => {
         const firm = (estimate) => estimate.lineItems.some((li) => li.service === 'rodent_exclusion' && li.price > 0);
         // Control: with the scoped gate on, counted points and no pick still auto-price (today's behavior).
         expect(firm(commercial({ advancedWireMeshPoints: 1 }))).toBe(true);
-        // Any pick, with or without points or feet, goes to the manual quote.
+        // Feet with no counted points are refused outright (NEEDS_COUNTS), never a firm closure-only price.
+        expect(() => commercial({ roofStyle: 'barrel_tile', barrelEaveFt: 80 })).toThrow(/Count the entry points/);
+        // Any pick with counted points goes to the manual quote.
         for (const extra of [
-          { roofStyle: 'barrel_tile', barrelEaveFt: 80 },
           { roofStyle: 'barrel_tile', barrelEaveFt: 40, advancedWireMeshPoints: 1 },
           { roofStyle: 'flat_tile', advancedWireMeshPoints: 3, standardBirdBoxes: 1 },
           { roofStyle: 'shingle', advancedWireMeshPoints: 1 },
@@ -294,6 +295,22 @@ describe('the estimator route translation of the roof style pick', () => {
         expect(zero(feet, ['EXCLUSION', 'RODENT_WIRE_MESH']).services.exclusion.pricingVersion).toBeUndefined();
       });
       withGate(undefined, () => expect(() => generateEstimate(zero(feet))).toThrow(/Clear the roof style/));
+    });
+
+    test("the V2 shape alone is not priced work: '0', negative or NaN counts + feet are NEEDS_COUNTS; one real point + feet prices", () => {
+      gateOn(() => {
+        const withCounts = (counts) => generateEstimate(baseInput({
+          services: { exclusion: { pricingVersion: 'v2', waiveInspection: true, roofStyle: 'barrel_tile', barrelEaveFt: 20, ...counts } },
+        }));
+        const error = (fn) => { try { fn(); } catch (err) { return err; } return null; };
+        for (const counts of [{}, { standardWireMeshPoints: '0' }, { standardWireMeshPoints: -1 }, { advancedWireMeshPoints: NaN },
+          { standardBirdBoxes: 'abc', meshSoftLF: -4, meshConcreteLF: Infinity }]) {
+          expect([counts, error(() => withCounts(counts))]).toEqual([counts, expect.objectContaining({ code: 'EXCLUSION_ROOF_STYLE_NEEDS_COUNTS', statusCode: 400 })]);
+        }
+        const priced = withCounts({ standardWireMeshPoints: 1 });
+        expect(rowsOf(priced).some((li) => li.component === 'barrel_eave_closure' && li.price === 395)).toBe(true);
+        expect(total(withCounts({ standardWireMeshPoints: '2' }))).toBeGreaterThan(395);
+      });
     });
 
     test('whole home with zero counts + feet is V2 and never lower than without the feet; V2 counts + feet add the closure row', () => {

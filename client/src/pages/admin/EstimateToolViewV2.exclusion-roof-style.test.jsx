@@ -5,7 +5,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import EstimateToolViewV2, { roofStyleRegenerateBlock, roofStyleReset } from "./EstimateToolViewV2";
@@ -85,7 +85,8 @@ describe("Roof style choice", () => {
     await waitFor(() => expect(container.querySelector("#estimate-exclRoofStyle")).toBeTruthy());
     const select = container.querySelector("#estimate-exclRoofStyle");
     fireEvent.change(select, { target: { value: "flat_tile" } });
-    expect(await findByTestId("exclusion-tile-note")).toHaveTextContent("x1.25");
+    expect(await findByTestId("exclusion-tile-note")).toHaveTextContent("Settings tile rate");
+    expect(container.querySelector("[data-testid=\"exclusion-tile-note\"]").textContent).not.toMatch(/\d\.\d/);
     expect(container.querySelector("#estimate-exclBarrelEaveFt")).toBeNull();
     fireEvent.change(select, { target: { value: "barrel_tile" } });
     expect(container.querySelector("#estimate-exclBarrelEaveFt")).toBeTruthy();
@@ -134,4 +135,52 @@ describe("Saved roof style picks and new estimates", () => {
     expect(block).toContain("exclRoofStyle: form.exclRoofStyle");
     expect(block).toContain('form.exclRoofStyle === "barrel_tile" ? { exclBarrelEaveFt');
   });
+});
+
+describe("A different customer or lead link clears the roof style, even with the same or no address", () => {
+  const ADDRESS = "1 Synthetic Way";
+  const customer = { id: "synthetic-customer", firstName: "Jamie", lastName: "Fixture", address: ADDRESS };
+  const lead = { id: "synthetic-lead", first_name: "Dana", last_name: "Sample", phone: null, email: null, address: "", service_interest: "Pest Control", customer_id: null };
+
+  async function openWithPick(searchTerm) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url) => {
+        const path = String(url);
+        if (path.startsWith("/api/admin/customers?")) return jsonResponse({ customers: [customer] });
+        if (path.startsWith("/api/admin/leads?")) return jsonResponse({ leads: [lead] });
+        if (path.includes("/admin/pricing-config/rodent_waveguard")) return jsonResponse({ data: {}, exclusionRoofStyle: true });
+        if (path.includes("/admin/discounts")) return jsonResponse([]);
+        return jsonResponse({});
+      }),
+    );
+    const view = render(
+      <MemoryRouter>
+        <EstimateToolViewV2 />
+      </MemoryRouter>,
+    );
+    fireEvent.click(findCheckboxByLabel(view.container, /Rodent Exclusion Service/));
+    await waitFor(() => expect(view.container.querySelector("#estimate-exclRoofStyle")).toBeTruthy());
+    fireEvent.change(screen.getByRole("textbox", { name: "Service address" }), { target: { value: ADDRESS } });
+    await waitFor(() => expect(view.container.querySelector("#estimate-exclRoofStyle")).toBeTruthy());
+    fireEvent.change(view.container.querySelector("#estimate-exclRoofStyle"), { target: { value: "barrel_tile" } });
+    fireEvent.change(view.container.querySelector("#estimate-exclBarrelEaveFt"), { target: { value: "40" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /Search customers/ }), { target: { value: searchTerm } });
+    return view;
+  }
+
+  it("a new customer with the same address clears the pick and the feet", async () => {
+    const { container } = await openWithPick("Jamie");
+    fireEvent.click(await screen.findByRole("button", { name: /Jamie Fixture/ }));
+    await waitFor(() => expect(container.querySelector("#estimate-exclRoofStyle").value).toBe(""));
+    expect(container.querySelector("#estimate-exclBarrelEaveFt")).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Service address" })).toHaveValue(ADDRESS);
+  }, 30000);
+
+  it("a new lead with no address clears the pick and the feet", async () => {
+    const { container } = await openWithPick("Dana");
+    fireEvent.click(await screen.findByRole("button", { name: /Dana Sample.*Lead/ }));
+    await waitFor(() => expect(container.querySelector("#estimate-exclRoofStyle").value).toBe(""));
+    expect(screen.getByRole("textbox", { name: "Service address" })).toHaveValue(ADDRESS);
+  }, 30000);
 });

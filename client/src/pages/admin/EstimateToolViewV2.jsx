@@ -1308,7 +1308,7 @@ function ExclusionRoofStyle({ evidence = null, blockedReason = "" }) {
       {evidence && <div className="text-14 text-zinc-600" data-testid="exclusion-roof-suggestion">Suggestion only, not used for the price. {evidence}</div>}
       {blockedReason && <div className="text-14 text-zinc-600" data-testid="exclusion-roof-style-blocked">{blockedReason}</div>}
       {form.exclRoofStyle === "flat_tile" || barrel ? (
-        <div className="text-14 text-zinc-600" data-testid="exclusion-tile-note">Tile roof: roof/high points x1.25.</div>
+        <div className="text-14 text-zinc-600" data-testid="exclusion-tile-note">Tile roofs raise roof/high points by the Settings tile rate.</div>
       ) : null}
       {barrel && (
         <Field label="Eave to close — ft ($12/ft, $395 minimum)" id="estimate-exclBarrelEaveFt" className="mb-4">
@@ -3123,6 +3123,8 @@ export default function EstimateToolViewV2({
       ...(dropSearchLead && f.leadId === linkedLead.id ? { leadId: "", leadServiceInterest: "" } : {}),
       customerId: c.id || "",
       propertyId: "",
+      // A different link is a different home: the roof style and eave feet were confirmed for the old one, address or not.
+      ...roofStyleReset(),
       ...(adoptAddress
         ? { ...(c.address && c.address !== f.address ? clearedPropertyFields() : {}), address: c.address || f.address }
         : {}),
@@ -3167,6 +3169,7 @@ export default function EstimateToolViewV2({
       leadId: lead.id,
       customerId: "",
       propertyId: "",
+      ...roofStyleReset(),
       ...(leadAddress && leadAddress !== f.address ? clearedPropertyFields() : {}),
       address: leadAddress || f.address,
       customerName: name || f.customerName || "",
