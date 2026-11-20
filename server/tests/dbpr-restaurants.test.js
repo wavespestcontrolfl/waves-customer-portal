@@ -221,13 +221,12 @@ describe('syncRestaurantProspects', () => {
     reads = {};
     return {
       upsertRecords: jest.fn(async (records) => { upserts.push(...records); return records.length; }),
-      lastRead: jest.fn(async (kind) => reads[kind] || null),
-      // As the real store: only a newer fiscal year, or more rows in the same year, replaces the stored read.
-      saveRead: jest.fn(async (kind, read) => {
-        const stored = reads[kind];
-        if (!stored || read.fiscalYear > stored.fiscalYear || (read.fiscalYear === stored.fiscalYear && read.rows > stored.rows)) {
-          reads[kind] = read;
-        }
+      // As the real store, without the lock: the read is judged against the stored one and kept when it passes and
+      // is fuller (judgeRead).
+      settleRead: jest.fn(async (kind, read, now) => {
+        const { problem, save } = svc.judgeRead(reads[kind] || null, read, now);
+        if (save) reads[kind] = save;
+        return problem;
       }),
     };
   }
@@ -452,8 +451,8 @@ describe('syncRestaurantProspects', () => {
     const result = await sync({ fetchText, store });
     expect(result.files.inspection).toEqual({ failed: true });
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
-    expect(store.saveRead).not.toHaveBeenCalledWith('inspection', expect.anything());
-    expect(store.saveRead).toHaveBeenCalledWith('new_license', { fiscalYear: '2026-07-01', rows: 1 });
+    expect(store.settleRead).not.toHaveBeenCalledWith('inspection', expect.anything(), expect.anything());
+    expect(reads.new_license).toEqual({ fiscalYear: '2026-07-01', rows: 1 });
   });
 
   test('in July a header alone fails once a read of the new year held a row; an older year\'s copy is stale', async () => {
@@ -462,7 +461,10 @@ describe('syncRestaurantProspects', () => {
     reads.inspection = { fiscalYear: '2030-07-01', rows: 100 };
     fetchText = makeFetch({ ...licFiles('07/02/2030'), '7fdinspi.csv': () => inspCsv([]) });
     const now = new Date('2030-07-03T14:36:00Z');
-    expect((await sync({ fetchText, store, now })).files.inspection).toEqual({ failed: true });
+    const cutHeader = await sync({ fetchText, store, now });
+    expect(cutHeader.files.inspection).toEqual({ kept: 0, malformed: 0, upserted: 0, short: true });
+    expect(cutHeader.failures).toBe(1);
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is short: no rows, after a read of this fiscal year held 100');
     // Only last year's measure: the header is the new year starting.
     reads.inspection = { fiscalYear: '2029-07-01', rows: 6700 };
     expect((await sync({ fetchText, store, now })).failures).toBe(0);

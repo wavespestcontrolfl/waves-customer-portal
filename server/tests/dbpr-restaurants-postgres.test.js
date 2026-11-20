@@ -1,7 +1,8 @@
 /**
  * restaurant_prospects against live Postgres (services/prospects/dbpr-restaurants.js): the (kind, source_key) key,
  * the upsert that refreshes last_seen_at and nothing else and writes a repeated key once, the report read that never overwrites a pest_evidence
- * answer, and the pending query (NULL answer, under 3 attempts, inside the date window, newest first). It refuses
+ * answer, the pending query (NULL answer, under 3 attempts, inside the date window, newest first), and the read
+ * measure, judged and saved under a lock (settleRead). It refuses
  * any database but a private QA one or CI's, and its rows carry a per-run business marker so cleanup touches only them.
  */
 const { randomUUID } = require('crypto');
@@ -34,30 +35,53 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   });
   afterAll(async () => { if (db) await rows().del(); });
 
-  test('saveRead keeps one measure per file: a newer year or more rows replace it, never fewer, even from runs that overlap', async () => {
+  test('settleRead judges each read against the stored measure under a lock and keeps the fullest; a run that waits on the lock is judged against what the other saved', async () => {
     const kind = `t${RUN}`; // its own setting key, removed below
-    const settings = () => db('system_settings').where({ key: `restaurant_prospects_read_${kind}` });
+    const key = `restaurant_prospects_read_${kind}`;
+    const settings = () => db('system_settings').where({ key });
+    const stored = async () => JSON.parse((await settings().first('value')).value);
+    // Thursday Nov 19, 2026; the newest row is from the day before.
+    const now = new Date('2026-11-19T15:36:00Z');
+    const read = (rows) => ({ fiscalYear: '2026-07-01', rows, newest: '2026-11-18' });
     try {
-      expect(await svc.lastRead(kind)).toBeNull();
-      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 6700 });
-      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 6712 });
-      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 6712 });
-      expect(await settings()).toHaveLength(1);
-      // Fewer rows in the same year never lower it, one after another or from runs that overlap.
-      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 6600 });
-      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 6712 });
-      await Promise.all([6650, 6720, 6690].map((rows) => svc.saveRead(kind, { fiscalYear: '2026-07-01', rows })));
-      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 6720 });
+      expect(await svc.settleRead(kind, read(6700), now)).toBeNull();
+      expect(await svc.settleRead(kind, read(6712), now)).toBeNull();
+      expect(await stored()).toEqual({ fiscalYear: '2026-07-01', rows: 6712 });
+      // 90% passes without lowering it; under 90% is short and never saved.
+      expect(await svc.settleRead(kind, read(6600), now)).toBeNull();
+      expect(await svc.settleRead(kind, read(3000), now)).toEqual(expect.objectContaining({ flag: 'short' }));
+      expect(await stored()).toEqual({ fiscalYear: '2026-07-01', rows: 6712 });
+      // Another run holds the lock and saves 6800 rows. A read of 6100 waits, then is judged against 6800 (short),
+      // not against the 6712 stored when it started (it would pass).
+      const other = await db.transaction();
+      try {
+        await other.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
+        const waiting = svc.settleRead(kind, read(6100), now);
+        let judged = false;
+        waiting.then(() => { judged = true; }, () => { judged = true; });
+        // The other run saves only once this one waits on the lock (or, with no lock, has judged already). It asks on
+        // its own connection: the pool may hold only these two.
+        const blocked = async () => (await other.raw(
+          "SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'",
+        )).rows.length > 0;
+        for (let tries = 0; tries < 300 && !judged && !(await blocked()); tries += 1) {
+          await new Promise((resolve) => { setTimeout(resolve, 10); });
+        }
+        await other('system_settings').where({ key }).update({ value: JSON.stringify({ fiscalYear: '2026-07-01', rows: 6800 }) });
+        await other.commit();
+        expect(await waiting).toEqual(expect.objectContaining({ flag: 'short' }));
+      } finally {
+        if (!other.isCompleted()) await other.rollback();
+      }
+      expect(await stored()).toEqual({ fiscalYear: '2026-07-01', rows: 6800 });
       // A newer fiscal year replaces it, however few its rows.
-      await svc.saveRead(kind, { fiscalYear: '2027-07-01', rows: 12 });
-      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2027-07-01', rows: 12 });
-      // A value that is not a read is no measure, and the next read replaces it.
+      const july = { fiscalYear: '2027-07-01', rows: 12, newest: '2027-07-09' };
+      expect(await svc.settleRead(kind, july, new Date('2027-07-12T14:36:00Z'))).toBeNull();
+      expect(await stored()).toEqual({ fiscalYear: '2027-07-01', rows: 12 });
+      // A value that is not a read is no measure: the next read replaces it.
       await settings().update({ value: 'not json' });
-      expect(await svc.lastRead(kind)).toBeNull();
-      await settings().update({ value: JSON.stringify({ fiscalYear: 'later', rows: 5 }) });
-      expect(await svc.lastRead(kind)).toBeNull();
-      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 3 });
-      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 3 });
+      expect(await svc.settleRead(kind, read(3), now)).toBeNull();
+      expect(await stored()).toEqual({ fiscalYear: '2026-07-01', rows: 3 });
       expect(await settings()).toHaveLength(1);
     } finally {
       await settings().del();

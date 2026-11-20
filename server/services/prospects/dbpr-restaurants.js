@@ -272,10 +272,10 @@ async function bumpAttempts(id) {
 }
 
 // The fullest complete read of each file in its fiscal year, kept in system_settings: how many rows it held and the
-// fiscal year. The job saves it only after every row of a read is stored and only from a read that is not short, so
-// a read cut off by a failed write, a deploy or a short download never becomes the measure. saveRead keeps the
-// fullest: under a row lock, only a newer fiscal year or more rows in the same year replace the stored read, so two
-// runs that overlap never lower it.
+// fiscal year. settleRead judges a read against it and saves the read in one transaction, under a lock on the file's
+// key (judgeRead): two runs that overlap are judged one after the other, each against the measure the other left.
+// The job settles a read only after every row of it is stored, so a read cut off by a failed write or a deploy never
+// becomes the measure.
 const readSettingKey = (kind) => `restaurant_prospects_read_${kind}`;
 
 // A stored read, or null for anything else: a damaged year would make every later read look stale.
@@ -289,27 +289,25 @@ function parseRead(text) {
   }
 }
 
-async function lastRead(kind) {
-  const row = await db('system_settings').where({ key: readSettingKey(kind) }).first('value');
-  return parseRead(row && row.value);
-}
-
-async function saveRead(kind, read) {
+// Returns the read's problem (readProblem), or null.
+async function settleRead(kind, read, now) {
   const key = readSettingKey(kind);
-  const value = JSON.stringify({ fiscalYear: read.fiscalYear, rows: read.rows });
-  await db.transaction(async (trx) => {
-    await trx('system_settings').insert({ key, value, category: 'prospects' }).onConflict('key').ignore();
-    const row = await trx('system_settings').where({ key }).forUpdate().first('value');
-    const stored = parseRead(row && row.value);
-    const fuller = !stored || read.fiscalYear > stored.fiscalYear
-      || (read.fiscalYear === stored.fiscalYear && read.rows > stored.rows);
-    if (fuller) await trx('system_settings').where({ key }).update({ value, updated_at: db.fn.now() });
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
+    const row = await trx('system_settings').where({ key }).first('value');
+    const { problem, save } = judgeRead(parseRead(row && row.value), read, now);
+    if (save) {
+      const value = JSON.stringify(save);
+      await trx('system_settings').insert({ key, value, category: 'prospects' })
+        .onConflict('key').merge({ value, updated_at: db.fn.now() });
+    }
+    return problem;
   });
 }
 
 // ── Weekly job ──────────────────────────────────────────────────
 
-const defaultStore = { upsertRecords, lastRead, saveRead };
+const defaultStore = { upsertRecords, settleRead };
 
 // The row width each file has, as cells minus header names. The inspection file fills every header column. The
 // license files never fill their last two (Base Risk Level, Secondary Risk Level): every row of the 2026-11-20 files
@@ -325,7 +323,7 @@ const MALFORMED_SHARE = 0.1;
 // one fiscal year.
 const DATE_COLUMN = { inspection: 'Inspection Date', new_license: 'Application Approval Date', owner_change: 'Application Approval Date' };
 
-async function loadFile(kind, fetchText, now, last) {
+async function loadFile(kind, fetchText, now) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
   const counts = { malformed: 0, valid: 0 };
   const records = [];
@@ -356,13 +354,10 @@ async function loadFile(kind, fetchText, now, last) {
     throw new Error('unexpected file layout');
   }
   // A header with no rows is a download cut short, not a quiet week, so the file fails. The files start over on
-  // July 1, so in the first week of July (Eastern date; it spans the July 4 holiday) a header alone is a new year
-  // with nothing in it yet, until a read of the new year has held a row. A file whose rows all fall outside the area
-  // is fine.
-  if (!rowsRead) {
-    const newYearHasRows = Boolean(last && last.fiscalYear === fiscalYearOf(today) && last.rows > 0);
-    if (!/-07-0[1-7]$/.test(today) || newYearHasRows) throw new Error('empty file');
-  }
+  // July 1, so in the first week of July (Eastern date; it spans the July 4 holiday) a header alone may be a new year
+  // with nothing in it yet: it passes here, and readProblem fails it once a read of the new year has held a row. A
+  // file whose rows all fall outside the area is fine.
+  if (!rowsRead && !/-07-0[1-7]$/.test(today)) throw new Error('empty file');
   // Malformed rows over a tenth of the rows that count mean a changed format (a new date format, rows of a new
   // width), not a stray row: the file fails, even beside good rows. With no good row, one malformed row fails it. The
   // rows that count are the good and malformed ones: malformed counts rows in the area and rows that cannot be placed
@@ -390,8 +385,9 @@ function fiscalYearOf(day) {
 // a whole row passes every check in loadFile. So a complete read also fails when (readProblem):
 //   stale   its fiscal year is earlier than the measure's (an older copy, a cache say), or no row is from the last
 //           14 days (a frozen file: the state posts every day; this also ends a June file served on into July);
-//   short   it holds under 90% of the measure's rows (under 20 rows in the measure the check waits).
-// Its rows are still written (each one is whole and valid), the run fails in job_health, and the read never becomes
+//   short   it holds under 90% of the measure's rows (under 20 rows in the measure the check waits), or it is a
+//           header alone after a read of the same fiscal year held a row (loadFile passes one only in early July).
+// Its rows are still written (each one is whole and valid), the run counts a failure, and the read never becomes
 // the measure, so a download cut at the same place each week fails each week. Every row counts, kept or not. A read
 // belongs to the fiscal year of its rows, so a file the state starts over late is still last year's file. If the
 // state truly removed rows, check the file by hand, then delete the system_settings row
@@ -402,8 +398,13 @@ const FRESH_DAYS = 14;
 const READ_FLAGS = ['stale', 'short'];
 
 function readProblem(last, read, now) {
-  // A header alone in the first week of July (loadFile) has no year to measure.
-  if (!read.fiscalYear) return null;
+  // A header alone (loadFile passes one only in the first week of July) has no year or date to measure: it is the new
+  // year starting, until a read of the new year has held a row.
+  if (!read.fiscalYear) {
+    return last && last.fiscalYear === fiscalYearOf(etDateString(now)) && last.rows > 0
+      ? { flag: 'short', text: `is short: no rows, after a read of this fiscal year held ${last.rows}` }
+      : null;
+  }
   if (last && read.fiscalYear < last.fiscalYear) {
     return { flag: 'stale', text: `is stale: its rows are from the fiscal year that began ${read.fiscalYear}, after a read of ${last.fiscalYear}` };
   }
@@ -416,22 +417,28 @@ function readProblem(last, read, now) {
   return null;
 }
 
+// The verdict on a read against the stored measure (last), and the read to store in its place: one with no problem
+// that is fuller (a newer fiscal year, or more rows in the same year). A header alone is never stored.
+function judgeRead(last, read, now) {
+  const problem = readProblem(last, read, now);
+  const fuller = !last || read.fiscalYear > last.fiscalYear || (read.fiscalYear === last.fiscalYear && read.rows > last.rows);
+  const save = !problem && Boolean(read.fiscalYear) && fuller;
+  return { problem, save: save ? { fiscalYear: read.fiscalYear, rows: read.rows } : null };
+}
+
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
-      const last = await deps.store.lastRead(kind);
-      const { records, malformed, rowsRead, fiscalYear, newest } = await loadFile(kind, deps.fetchText, deps.now, last);
+      const { records, malformed, rowsRead, fiscalYear, newest } = await loadFile(kind, deps.fetchText, deps.now);
       const unique = dedupeByKey(records);
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
-      // The rows are whole and valid, so they are written even when the read fails.
-      const problem = readProblem(last, { fiscalYear, rows: rowsRead, newest }, deps.now);
+      // Judged only once every row of this read is stored (settleRead). The rows are whole and valid, so they stay
+      // written even when the read fails.
+      const problem = await deps.store.settleRead(kind, { fiscalYear, rows: rowsRead, newest }, deps.now);
       if (problem) {
         result.failures += 1;
         result.files[kind][problem.flag] = true;
         logger.warn(`[dbpr-prospects] ${kind} file ${problem.text}`);
-      } else if (fiscalYear) {
-        // Saved only once every row of this read is stored; saveRead keeps the fullest read of the year.
-        await deps.store.saveRead(kind, { fiscalYear, rows: rowsRead });
       }
     } catch (err) {
       result.failures += 1;
@@ -469,6 +476,6 @@ module.exports = {
   pendingInspections,
   saveReport,
   bumpAttempts,
-  lastRead,
-  saveRead,
+  settleRead,
+  judgeRead,
 };
