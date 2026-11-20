@@ -128,6 +128,13 @@ describe('the words, by card state', () => {
     expect(passesRules(text).headline.length).toBeLessThanOrEqual(60);
   });
 
+  test("the detail keeps the caller's whole turn, also a long one with a condition at its end", () => {
+    const long = `${'Yes, the quarterly plan is fine, and you can bill me each time you come out to the house. '.repeat(8)}But only if the price stays the same.`;
+    const { detail } = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: long }), visit: VISIT });
+    expect(long.length).toBeGreaterThan(700);
+    expect(detail).toContain(`“${long}”`);
+  });
+
   test("the detail is the card's summary, the caller's whole words and where the card is", () => {
     const { detail } = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: WORDS }), visit: VISIT });
     expect(detail).toBe(`The card says this. The caller's words: “${WORDS}”. Open Communications, then Triage, to see the card.`);

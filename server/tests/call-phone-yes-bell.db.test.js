@@ -58,10 +58,24 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
   const etDay = (n) => etDateString(new Date(Date.now() + n * DAY));
   const dayWords = (n) => formatETDayDate(parseETDateTime(`${etDay(n)}T15:00`));
 
+  // A visit the card's call booked: `days` from today at 3:00 PM Eastern, a pest visit unless `service_type` says else.
+  async function addVisit({ customerId, callLogId }, { days, service_type = 'General Pest Control' }) {
+    const id = randomUUID();
+    await trx('scheduled_services').insert({
+      id, customer_id: customerId, source_call_log_id: callLogId, scheduled_date: etDay(days), window_start: '15:00', window_end: '17:00',
+      service_type, status: 'confirmed', source_action: 'ai_call_pipeline', is_recurring: false,
+      service_address_line1: '100 Example Lane', service_address_city: 'Sampleton', service_address_state: 'FL', service_address_zip: '34200',
+    });
+    return id;
+  }
+
   // One open phone-yes card as the sweep files it: a customer, the estimates it names (each { hours } until it expires,
-  // and its status), the booking call and the pest visit it booked (`visitDays` from today, at 3:00 PM Eastern). One
-  // estimate is the card's own; two or more are a card that names several.
-  async function phoneYesCard({ estimates = [{ hours: 5 * 24 }], visitDays = 5, payload = { yes_heard: true, caller_words: WORDS }, status = 'open' } = {}) {
+  // and its status), the booking call and the pest visit it booked (`visitDays` from today). One estimate is the card's
+  // own; two or more are a card that names several. A call that booked several visits files its card with no visit of
+  // its own (`cardVisit` false); `moreVisits` are the call's other visits.
+  async function phoneYesCard({
+    estimates = [{ hours: 5 * 24 }], visitDays = 5, cardVisit = true, moreVisits = [], payload = { yes_heard: true, caller_words: WORDS }, status = 'open',
+  } = {}) {
     seq += 1;
     const customerId = randomUUID();
     await trx('customers').insert({
@@ -78,18 +92,15 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     }
     const callLogId = randomUUID();
     await trx('call_log').insert({ id: callLogId, customer_id: customerId, twilio_call_sid: `CA${callLogId.replace(/-/g, '')}`, from_phone: '+19415550101', direction: 'inbound' });
-    const visitId = randomUUID();
-    await trx('scheduled_services').insert({
-      id: visitId, customer_id: customerId, source_call_log_id: callLogId, scheduled_date: etDay(visitDays), window_start: '15:00', window_end: '17:00',
-      service_type: 'General Pest Control', status: 'confirmed', source_action: 'ai_call_pipeline', is_recurring: false,
-      service_address_line1: '100 Example Lane', service_address_city: 'Sampleton', service_address_state: 'FL', service_address_zip: '34200',
-    });
+    const visitId = await addVisit({ customerId, callLogId }, { days: visitDays });
+    for (const more of moreVisits) await addVisit({ customerId, callLogId }, more);
+    const cardVisitId = cardVisit ? visitId : null;
     const id = randomUUID();
     await trx('triage_items').insert({
       id, call_log_id: callLogId, category: 'billing_review', reason_code: 'call_phone_yes', severity: 'advisory', status,
       summary: 'Caller said yes to pay per application on the call. The estimate is not accepted yet.',
-      payload: JSON.stringify({ flag: 'call_phone_yes', estimate_ids: estimateIds, scheduled_service_id: visitId, ...payload }),
-      related_customer_id: customerId, related_estimate_id: estimateIds.length === 1 ? estimateIds[0] : null, related_scheduled_service_id: visitId,
+      payload: JSON.stringify({ flag: 'call_phone_yes', estimate_ids: estimateIds, scheduled_service_id: cardVisitId, ...payload }),
+      related_customer_id: customerId, related_estimate_id: estimateIds.length === 1 ? estimateIds[0] : null, related_scheduled_service_id: cardVisitId,
     });
     return { id, customerId, callLogId, visitId, estimateIds };
   }
@@ -234,6 +245,38 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(new Date(filed.read_at).getTime()).toBe(readAt.getTime());
     expect(filed.detail).not.toContain(WORDS);
     expect(bannersFor(card.id)).toBe(1);
+  });
+
+  test('a claimed card rings nothing more and its row is not rewritten; the row stays until the card closes', async () => {
+    const card = await phoneYesCard();
+    await pass();
+    // The sweep leaves a claimed card as it is, so the bell does too: time runs short and its words change, quietly.
+    await trx('triage_items').where({ id: card.id }).update({
+      status: 'in_progress', payload: JSON.stringify({ flag: 'call_phone_yes', estimate_ids: card.estimateIds, yes_heard: false }),
+    });
+    await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1) });
+    await pass();
+
+    const { filed, due, count } = await bellsOf(card.id);
+    expect(count).toBe(1);
+    expect(due).toBeUndefined();
+    expect(filed).toEqual(expect.objectContaining({ title: "Estimates — accept Pat Sampleton's estimate", done_at: null }));
+    expect(bannersFor(card.id)).toBe(1);
+  });
+
+  test('a call that booked several visits: the soonest pest visit to come gives the time, never a lawn visit', async () => {
+    const card = await phoneYesCard({ cardVisit: false, moreVisits: [{ days: 1, service_type: 'Lawn Care' }] });
+    await pass();
+    // The lawn visit tomorrow is no reason; the pest visit is in five days.
+    let bells = await bellsOf(card.id);
+    expect(bells).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
+    expect(bells.filed.body.endsWith(`” on a call, and the visit is ${dayWords(5)}.`)).toBe(true);
+
+    // The call's second pest visit, tomorrow: time runs short.
+    await addVisit(card, { days: 1 });
+    await pass();
+    bells = await bellsOf(card.id);
+    expect(bells.due.body).toBe(`The visit the call booked is ${dayWords(1)}, and its card in Triage is still open.`);
   });
 
   test('the filed row closes only once the time-short row exists, and every pass retries that close', async () => {

@@ -215,11 +215,16 @@ async function withCatalog(conn, visit) {
   return { ...visit, catalog_service_key: catalog.service_key, catalog_service_name: catalog.name };
 }
 
-// True when one of the call's booked visits is a pest visit (assessments never are).
-async function anyPestVisit(conn, visits) {
+// True when a booked visit is a pest visit (assessments never are).
+async function isPestVisit(conn, visit) {
   const { appointmentMatchesEstimateFamily } = require('../routes/estimate-public');
+  return appointmentMatchesEstimateFamily(await withCatalog(conn, visit), PEST_FAMILY);
+}
+
+// True when one of the call's booked visits is a pest visit.
+async function anyPestVisit(conn, visits) {
   for (const visit of visits) {
-    if (appointmentMatchesEstimateFamily(await withCatalog(conn, visit), PEST_FAMILY)) return true;
+    if (await isPestVisit(conn, visit)) return true;
   }
   return false;
 }
@@ -726,20 +731,15 @@ async function runCallPhoneYesSweep({ now = new Date(), pageSize = SCAN_LIMIT } 
 }
 
 // The bell pass (call-phone-yes-bell.js), after the filing and the moot close: each open card rings what it owes (once
-// when filed, once more when time runs short), then the rows of cards no longer open close. A card whose times cannot be
-// read is not rung this run, and still counts as open.
+// when filed, once more when time runs short), then the rows of cards no longer open close. Only a card with status
+// open rings or is rewritten: the sweep keeps only those current (applyCardState), so the bell never says more than the
+// card. A claimed card (in_progress) keeps its row until it closes, as does a card whose times cannot be read.
 async function ringOpenCards(now) {
   const Bell = require('./call-phone-yes-bell');
-  const cards = await db('triage_items as t')
-    .leftJoin('scheduled_services as s', function cardVisitOnCalendar() {
-      this.on('s.id', 't.related_scheduled_service_id').andOn('s.customer_id', 't.related_customer_id')
-        .andOnIn('s.status', CALENDAR_VISIT_STATUSES);
-    })
-    .where('t.reason_code', REASON_CODE).whereIn('t.status', Bell.OPEN_CARD_STATES)
-    .select('t.id', 't.call_log_id', 't.related_customer_id', 't.related_estimate_id', 't.payload', 't.summary',
-      's.scheduled_date', 's.window_start');
+  const cards = await db('triage_items').where({ reason_code: REASON_CODE }).whereIn('status', Bell.OPEN_CARD_STATES)
+    .select('id', 'status', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload', 'summary');
   const timed = [];
-  for (const card of cards) {
+  for (const card of cards.filter((c) => c.status === 'open')) {
     try {
       timed.push({ card, ...(await cardTimes(card, now)) });
     } catch (e) {
@@ -749,20 +749,26 @@ async function ringOpenCards(now) {
   return Bell.runBellPass({ timed, openCardIds: cards.map((card) => card.id), now });
 }
 
-// The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and its
-// visit while on the calendar. Both are read under the card's customer, as its moot check reads them.
+// The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and the
+// soonest visit to come among the ones that keep the card open (booked by the call, on the calendar, not linked to an
+// estimate, pest). Both are read under the card's customer, as its moot check reads them. A call that booked several
+// visits files its card with no visit of its own, so the call's visits are read, not the card's.
 async function cardTimes(card, now) {
+  const { visitStart } = require('./call-phone-yes-bell');
   const ids = cardEstimateIds(card);
   const soonest = ids.length
     ? await db('estimates').whereIn('id', ids).where({ customer_id: card.related_customer_id })
       .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').where('expires_at', '>', now)
       .orderBy('expires_at').first('expires_at')
     : null;
-  return {
-    expiresAt: soonest?.expires_at || null,
-    several: ids.length > 1,
-    visit: card.scheduled_date ? { scheduled_date: card.scheduled_date, window_start: card.window_start } : null,
-  };
+  const upcoming = (await callVisitsOnCalendar(db, card.call_log_id, card.related_customer_id))
+    .filter((v) => !v.source_estimate_id && visitStart(v) > now)
+    .sort((a, b) => visitStart(a) - visitStart(b));
+  let visit = null;
+  for (const candidate of upcoming) {
+    if (await isPestVisit(db, candidate)) { visit = candidate; break; }
+  }
+  return { expiresAt: soonest?.expires_at || null, several: ids.length > 1, visit };
 }
 
 // One call's card, filed when the call earns one. True when a card was filed.

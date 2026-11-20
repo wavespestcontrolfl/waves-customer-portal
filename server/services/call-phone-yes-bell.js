@@ -3,7 +3,8 @@
 /**
  * Phone-yes step 1, the office's phone alert (GATE_CALL_PHONE_YES_ACCEPT, owner 2026-11-18 "ok go", page v4). A card rings
  * the admin bell once when the sweep files it, and once more while it is still open and time runs short: an open estimate
- * on the card expires within 24 hours, or the card's visit starts within 48 hours. Each ring also sends a phone banner to
+ * on the card expires within 24 hours, or the soonest visit to come that keeps the card open starts within 48 hours. Only a
+ * card with status open rings or is rewritten (the sweep keeps only those current). Each ring also sends a phone banner to
  * the admins (bell-banners.js kind call_phone_yes, 7:00 AM to 9:00 PM Eastern; a ring at night stays in the bell, and the
  * 8 AM banner counts it). Nothing here texts, emails or calls a customer.
  *
@@ -38,7 +39,6 @@ const OPEN_CARD_STATES = ['open', 'in_progress'];
 const HOUR_MS = 3600000;
 const ESTIMATE_DUE_HOURS = 24;
 const VISIT_DUE_HOURS = 48;
-const DETAIL_QUOTE_CHARS = 600;
 
 const filedKey = (cardId) => `${FILED_PREFIX}${cardId}`;
 const dueKey = (cardId) => `${DUE_PREFIX}${cardId}`;
@@ -122,7 +122,8 @@ function textFor({ name, card, expiresAt = null, several = false, visit = null, 
     why: due ? DUE_WHY[due](facts) : STATE_TEXT[state].why(facts),
     detail: [
       card.summary,
-      words ? `The caller's words: “${compose.cutAtWord(words, DETAIL_QUOTE_CHARS)}”.` : null,
+      // The caller's whole turn: a condition or a take-back can sit at its end.
+      words ? `The caller's words: “${words}”.` : null,
       'Open Communications, then Triage, to see the card.',
     ].filter(Boolean).join(' '),
   };
@@ -138,8 +139,8 @@ function standingKey(cardId, written) {
 // back, an estimate accepted, the visit moved), quietly: no ring, no banner, the read state kept. Nothing when the card
 // has no open row. Returns { key, raised } (the key it raised and the raise's result), or null.
 // card: { id, call_log_id, related_customer_id, related_estimate_id, payload, summary }; expiresAt: the soonest an open
-// estimate on the card expires, after now; several: the card names more than one estimate; visit: the card's visit while
-// on the calendar ({ scheduled_date, window_start }) or null; written: as standingKey.
+// estimate on the card expires, after now; several: the card names more than one estimate; visit: the soonest visit to
+// come that keeps the card open ({ scheduled_date, window_start }) or null; written: as standingKey.
 async function ringCard({ card, expiresAt = null, several = false, visit = null, written, now = new Date() }) {
   const due = dueReason({ expiresAt, visit, now });
   const ringKey = keyToRing({ cardId: card.id, due, rung: written });
@@ -216,6 +217,6 @@ async function runBellPass({ timed, openCardIds, now = new Date() }) {
 }
 
 module.exports = {
-  runBellPass, OPEN_CARD_STATES, FILED_PREFIX, DUE_PREFIX, DONE_WHEN, LINK,
+  runBellPass, visitStart, OPEN_CARD_STATES, FILED_PREFIX, DUE_PREFIX, DONE_WHEN, LINK,
   _private: { dueReason, keyToRing, standingKey, textFor, visitStart, cardStateOf },
 };

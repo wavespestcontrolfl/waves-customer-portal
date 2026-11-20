@@ -687,7 +687,9 @@ logged with ids only and never fails the technician's create. It sends nothing t
 Phone-yes card bell (owner 2026-11-18 "ok go", phone-yes step 1, page v4; under `GATE_CALL_PHONE_YES_ACCEPT`, no gate of its own):
 `server/services/call-phone-yes-bell.js`, run by the phone-yes sweep (every 10 minutes while the gate is on, after its filing and its
 moot close), rings the bell once for each `call_phone_yes` card when it is filed, and once more while the card is open and time runs
-short: an open estimate on the card expires within 24 hours, or the card's visit starts within 48 hours. Category `estimate` with
+short: an open estimate on the card expires within 24 hours, or the soonest visit to come that keeps the card open (a pest visit the
+call booked, on the calendar and not linked to an estimate) starts within 48 hours. Only a card with status `open` rings or is
+rewritten, since the sweep keeps only those current; a claimed card (`in_progress`) keeps its row until it closes. Category `estimate` with
 `bell: true`, headline "Estimates — accept <who>'s estimate" for a card with the caller's yes ("check <who>'s estimate" when no yes
 was heard or the yes is being read again; "check <who>'s booked visit" once an estimate on the card was accepted and the visit is not
 linked), subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
