@@ -166,6 +166,28 @@ async function getPolicy(conn = db) {
   }
 }
 
+/**
+ * The policy for a payment decision. Unlike getPolicy it THROWS on a database error: a failed read
+ * must stop the payment, never read as "no cap". Only a confirmed missing setting row is the default.
+ */
+async function getPolicyStrict(conn = db) {
+  const row = await conn('system_settings').where({ key: POLICY_KEY }).first();
+  return parsePolicy(row?.value);
+}
+
+/**
+ * Takes the monthly-cap lock of each technician (a transaction advisory lock, held to commit), in id
+ * order. Every path that pays a review bonus takes it before ranking, so a manual mark-paid and a pay
+ * run serialize per technician (owner 2026-11-20 D4). Call it inside a transaction, after the payout
+ * rows are locked, so every caller locks rows first and the technician lock second.
+ */
+async function lockTechnicianCap(conn, technicianIds) {
+  const ids = [...new Set((technicianIds || []).filter(Boolean))].sort();
+  for (const id of ids) {
+    await conn.raw('select pg_advisory_xact_lock(hashtext(?))', [`review-bonus-cap:${id}`]);
+  }
+}
+
 async function savePolicy(policyPatch = {}, conn = db) {
   const current = await getPolicy(conn);
   const policy = parsePolicy({ ...current, ...policyPatch });
@@ -1741,29 +1763,33 @@ async function getDashboard(options = {}) {
 
 async function markPaid(ids = [], options = {}) {
   const conn = options.conn || db;
-  const cleanIds = ids.filter(Boolean);
+  const cleanIds = [...new Set(ids.filter(Boolean).map((id) => String(id).toLowerCase()))];
   if (!cleanIds.length) return { updated: 0, skippedOverCap: 0 };
-  const patch = {
-    status: 'paid',
-    paid_at: new Date(),
-    paid_by: options.paidBy || null,
-    updated_at: new Date(),
-  };
-  // Owner 2026-11-20 D4: a payout over its technician's monthly cap is never marked paid.
-  const { monthlyCapCount } = await getPolicy(conn);
-  const overCap = await overCapPayoutIds(conn, {
-    cap: monthlyCapCount,
-    technicianIds: conn('review_incentive_payouts').whereIn('id', cleanIds).select('technician_id'),
+  // One transaction (owner 2026-11-20 D4): lock the rows, then each technician's cap lock, rank, and
+  // update only the rows that rank inside the cap under the technician they were ranked under.
+  return conn.transaction(async (trx) => {
+    const rows = await trx('review_incentive_payouts')
+      .whereIn('id', cleanIds).where('source', 'google_review').whereNot('status', 'paid')
+      .orderBy('id').forUpdate().select('id', 'technician_id');
+    if (!rows.length) return { updated: 0, skippedOverCap: 0 };
+    const technicianIds = [...new Set(rows.map((row) => row.technician_id).filter(Boolean))];
+    await lockTechnicianCap(trx, technicianIds);
+    const { monthlyCapCount } = await getPolicyStrict(trx);
+    const overCap = await overCapPayoutIds(trx, { cap: monthlyCapCount, technicianIds });
+    const patch = {
+      status: 'paid', paid_at: new Date(), paid_by: options.paidBy || null, updated_at: new Date(),
+    };
+    const payableByTech = new Map();
+    for (const row of rows.filter((r) => !overCap.has(r.id))) {
+      payableByTech.set(row.technician_id, [...(payableByTech.get(row.technician_id) || []), row.id]);
+    }
+    let updated = 0;
+    for (const [technicianId, payable] of payableByTech) {
+      const query = trx('review_incentive_payouts').whereIn('id', payable).where('source', 'google_review').whereNot('status', 'paid');
+      updated += toInt(await (technicianId ? query.where('technician_id', technicianId) : query.whereNull('technician_id')).update(patch), 0);
+    }
+    return { updated, skippedOverCap: rows.filter((row) => overCap.has(row.id)).length };
   });
-  const payableIds = cleanIds.filter((id) => !overCap.has(id));
-  const skippedOverCap = cleanIds.length - payableIds.length;
-  if (!payableIds.length) return { updated: 0, skippedOverCap };
-  const updated = await conn('review_incentive_payouts')
-    .whereIn('id', payableIds)
-    .where('source', 'google_review')
-    .whereNot('status', 'paid')
-    .update(patch);
-  return { updated: toInt(updated, 0), skippedOverCap };
 }
 
 function toCsv(rows = []) {
@@ -1817,6 +1843,8 @@ module.exports = {
   getDashboard,
   markPaid,
   overCapPayoutIds,
+  getPolicyStrict,
+  lockTechnicianCap,
   toCsv,
   __private: {
     parsePolicy,

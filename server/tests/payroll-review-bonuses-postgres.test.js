@@ -418,6 +418,80 @@ postgres('payroll review bonus import', () => {
       expect(await markPaid([c], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
     });
 
+    it('markPaid compares ids in canonical form: an uppercase over-cap id is still skipped', async () => {
+      const id = await readyTech('Sample Alpha');
+      await setCap(1);
+      const a = await payout(id, '2026-09-15T15:00:00Z');
+      const b = await payout(id, '2026-09-16T15:00:00Z');
+      expect(await markPaid([b.toUpperCase()], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
+      expect((await payoutRow(b)).status).toBe('earned');
+      expect(await markPaid([a.toUpperCase()], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 1, skippedOverCap: 0 });
+    });
+
+    it('markPaid re-ranks under the technician lock: a payout re-attributed onto a full month is not paid', async () => {
+      const first = await readyTech('Sample Alpha');
+      const second = await readyTech('Sample Bravo');
+      await setCap(1);
+      await payout(first, '2026-09-15T15:00:00Z', { status: 'paid', paid_at: new Date() });
+      const moved = await payout(second, '2026-09-16T15:00:00Z');
+      await trx('review_incentive_payouts').where({ id: moved }).update({ technician_id: first });
+      expect(await markPaid([moved], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
+      expect((await payoutRow(moved)).status).toBe('earned');
+    });
+
+    it('markPaid stops when the policy cannot be read, and marks nothing', async () => {
+      const id = await readyTech('Sample Alpha');
+      const bonus = await payout(id, '2026-09-15T15:00:00Z');
+      // The rename is inside the test transaction and rolls back with it.
+      await trx.raw('alter table system_settings rename to system_settings_unreadable');
+      await expect(markPaid([bonus], { conn: trx, paidBy: ADMIN_ID })).rejects.toThrow(/system_settings/);
+      await trx.raw('alter table system_settings_unreadable rename to system_settings');
+      expect((await payoutRow(bonus)).status).toBe('earned');
+    });
+
+    it('a payout that lands mid-sync waits for the next sync; payroll never holds both winners', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await setCap(1);
+      const old = await payout(id, '2026-09-17T15:00:00Z');
+      const created = await draft(W1);
+      expect(await lineIds()).toEqual([old]);
+      // An earlier-dated review lands after the sync read its snapshot, as the ranking query starts.
+      let landed;
+      const hooked = new Proxy((...args) => trx(...args), {
+        get(_target, key) {
+          const value = trx[key];
+          if (key !== 'raw') return typeof value === 'function' ? value.bind(trx) : value;
+          return (sql, ...rest) => {
+            if (!landed && /row_number/.test(sql)) {
+              landed = payout(id, '2026-09-15T15:00:00Z');
+              landed.catch(() => {});
+            }
+            return trx.raw(sql, ...rest);
+          };
+        },
+      });
+      const { syncReviewBonusLines } = require('../services/payroll-review-bonuses');
+      await syncReviewBonusLines(hooked, { weekEnd: '2026-09-20', lock: true });
+      const early = await landed;
+      // The late row is not in the snapshot and takes the only slot: the old line is dropped, none added.
+      expect(await lineIds()).toEqual([]);
+      await syncReviewBonusLines(trx, { weekEnd: '2026-09-20', lock: true });
+      expect(await lineIds()).toEqual([early]);
+      expect(created.status).toBe(201);
+    });
+
+    it('a cap that cannot be read stops the pay run sync', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await payout(id, '2026-09-15T15:00:00Z');
+      await trx.raw('alter table system_settings rename to system_settings_unreadable');
+      await expect(trx.transaction((inner) => require('../services/payroll-review-bonuses')
+        .syncReviewBonusLines(inner, { weekEnd: '2026-09-20', lock: true }))).rejects.toThrow(/system_settings/);
+      await trx.raw('alter table system_settings_unreadable rename to system_settings');
+      expect(await importedLines()).toHaveLength(0);
+    });
+
     it('the dashboard marks over-cap rows, leaves them out of pending, and reports the cap', async () => {
       const id = await readyTech('Sample Alpha');
       // savePolicy stamps programStartsAt with today when none is set, which would hide September.

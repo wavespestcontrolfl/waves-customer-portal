@@ -400,5 +400,40 @@ describe("Reviews workspace foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
     fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
     expect(await screen.findByText("No monthly cap")).toBeInTheDocument();
+  }, 30000);
+
+  it("Mark Pending Paid sends only the pending ids the button was enabled from, never over-cap rows", async () => {
+    const posts = [];
+    const payout = (id, patch) => ({
+      id, technicianName: "Sample Alpha", source: "google_review", amountCents: 1500, status: "earned",
+      earnedAt: "2027-01-10T15:00:00Z", ...patch,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const path = String(url);
+      if (options.method === "POST") {
+        posts.push({ path, body: JSON.parse(options.body || "{}") });
+        return response({ success: true });
+      }
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) {
+        return response({
+          summary: { confirmedGoogleReviews: 1 },
+          payouts: [payout("p-ok"), payout("p-over", { overMonthlyCap: true }), payout("p-paid", { status: "paid" })],
+          leaderboard: [],
+          policy: { enabled: true, amountCents: 1500, monthlyCapCount: 1 },
+        });
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mark Pending Paid/ }));
+    await waitFor(() => expect(posts.map((p) => p.path)).toEqual(["/api/admin/reviews/incentives/mark-paid"]));
+    expect(posts[0].body).toEqual({ ids: ["p-ok"] });
   });
 });

@@ -1096,9 +1096,8 @@ function ReviewIncentivesPanel() {
     }
   };
   const markPendingPaid = async () => {
-    const ids = (data?.payouts || [])
-      .filter((p) => p.status !== "paid")
-      .map((p) => p.id);
+    // The same list that enabled the button: over-cap rows never go in (owner 2026-11-20 D4).
+    const ids = pendingIds;
     if (!ids.length) return;
     loadGen.current += 1;
     setLoading(false);
