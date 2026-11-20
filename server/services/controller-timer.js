@@ -3,8 +3,10 @@
  * (migration 20261119140000). The three columns are ONE record about one box on the wall of one home, so
  * nothing that moves a preferences row treats them one by one:
  *   - a move clears it (customer-address-fanout markSprinklerSettingsMoved);
- *   - a customer merge copies it whole or leaves it (customer-dedupe mergeSingletonPrefRow), and journals it
- *     on a row that moves whole (settleMovedPrefTimer) so an undo never hands it to another home.
+ *   - a customer merge never fills it column by column. Two rows that fold keep the kept customer's timer while
+ *     their home is unchanged, else take the other row's whole timer when it describes the home the merge leaves,
+ *     else clear it (customer-dedupe mergeSingletonPrefRow). A row that moves whole is journaled
+ *     (settleMovedPrefTimer) so an undo never hands it to another home.
  * It is not a watering input. Nothing here connects to, pauses or starts a timer.
  */
 const CONTROLLER_TIMER_FIELDS = Object.freeze(['irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app']);
@@ -23,12 +25,18 @@ function hasControllerTimer(row) {
   return CONTROLLER_TIMER_FIELDS.some((field) => row?.[field] != null);
 }
 
-// A customer merge: the surviving row takes the other row's whole timer only on a same-home merge (sameHome must
-// be exactly true) and only when it has none (not one field of its own). Whole or nothing. Returns the columns to
-// set ({} = leave the row alone). A row without the timer columns (another preferences table) has none to carry.
-function controllerTimerToCarry(winnerRow, loserRow, sameHome) {
-  if (sameHome !== true || hasControllerTimer(winnerRow) || !hasControllerTimer(loserRow)) return {};
-  return controllerTimerOf(loserRow);
+// Two preferences rows fold in a customer merge: the timer the kept row ends with, as the columns to set ({} = leave
+// the row as it is). Whole or nothing, never one field. `premise` is the merge's (customer-dedupe timerPremiseOf):
+//   - winnerStays: the kept customer's own home is unchanged. Their own timer (even one field of it) then stays.
+//     Only an exact false moves it, as an address edit would; an unknown premise keeps it.
+//   - loserFollows: the other customer's home is the one the merge leaves. Only an exact true carries their timer.
+// A kept timer that does not stay is replaced by the other row's whole timer when that one follows, else cleared.
+// A row without the timer columns (another preferences table) has none to carry or clear.
+function controllerTimerToCarry(winnerRow, loserRow, premise) {
+  const ownTimer = hasControllerTimer(winnerRow);
+  if (ownTimer && premise?.winnerStays !== false) return {};
+  if (premise?.loserFollows === true && hasControllerTimer(loserRow)) return controllerTimerOf(loserRow);
+  return ownTimer ? clearedControllerTimer() : {};
 }
 
 module.exports = { CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerOf, controllerTimerToCarry, hasControllerTimer };
