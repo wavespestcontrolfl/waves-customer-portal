@@ -38,13 +38,14 @@ const AUTO_QUEUED = {
   updated_at: new Date('2026-12-02T12:05:00Z'),
 };
 
-// An in-memory stand-in for the tables. `counts`: the delivery ledger's readers who got it (got),
-// readers a Resume would still mail (left: outstandingEligibleDeliveries, the joined query), its
-// retryable rows (retryable, by default left), readers it reached no inbox of for good (refused: a
-// hard bounce or a message SendGrid dropped, which keep their sent_at), its recipients (every row
-// but a skipped one) and its last accepted batch (lastSentAt), and for a planned issue the rows that
-// query lists (rows: the subscriber, its address and customers). A where-group (a callback) records
-// what it calls on its query (calls, and nested with the arguments).
+// An in-memory stand-in for the tables. `counts`: the delivery ledger's readers who got it (got: a
+// success signal and not refused, the query with a whereNot group), readers a Resume would still
+// mail (left: outstandingEligibleDeliveries, the joined query), its retryable rows (retryable, by
+// default left), readers it reached no inbox of for good (refused: a hard bounce or a message
+// SendGrid dropped), its recipients (every row but a skipped one) and its last accepted batch
+// (lastSentAt), and for a planned issue the rows that query lists (rows: the subscriber, its address
+// and customers). A where-group (a callback) records what it calls on its query (calls, and nested
+// with the arguments).
 const CHAIN = ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereExists', 'whereNotExists', 'withMaterialized', 'join', 'joinRaw', 'select', 'forUpdate'];
 // `bells`: admin notification rows by their dedupeKey (the alert a worker wrote).
 function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, left: 0 }, bells = [] } = {}) {
@@ -67,7 +68,10 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
     CHAIN.forEach((m) => {
       q[m] = jest.fn((...args) => {
         q.calls.add(m);
-        if (m === 'where' && typeof args[0] === 'function') args[0].call(group, group);
+        if ((m === 'where' || m === 'whereNot') && typeof args[0] === 'function') {
+          if (m === 'whereNot') q.notGroup = true;
+          args[0].call(group, group);
+        }
         if (m === 'where' && args[0] && typeof args[0] === 'object') q.conds.push(args[0]);
         if (m === 'whereIn') q.statusIn = args[1];
         if (m === 'whereRaw') { q.raws.push(String(args[0])); q.rawBindings.push(...(args[1] || [])); }
@@ -79,15 +83,14 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
     q.first = jest.fn(async () => {
       reads.push({ table, locked: q.calls.has('forUpdate') });
       if (table === 'newsletter_send_deliveries') {
-        // The Resume predicate joins the subscribers; the last batch is a max; the recipients leave
-        // out skipped rows; a refusal has bounced_at or a dropped status; "not yet" is the no-success
-        // filter; the retryable rows are the retryable statuses; else the total, refusals included
-        // (they keep their sent_at).
+        // The Resume predicate joins the subscribers; the last batch is a max; the readers who got it
+        // leave out a refusal (a whereNot group); the recipients leave out skipped rows; a refusal has
+        // bounced_at or a dropped status; the retryable rows are the retryable statuses; else the total.
         if (q.calls.has('join')) return { c: counts.left };
         if (q.calls.has('max')) return { at: counts.lastSentAt ?? null };
+        if (q.notGroup) return { c: counts.got };
         if (q.calls.has('whereNot')) return { c: counts.recipients ?? counts.got + counts.left + (counts.refused || 0) };
         if (q.calls.has('whereNotNull')) return { c: counts.refused || 0 };
-        if (q.calls.has('whereNotIn')) return { c: counts.left };
         if (q.calls.has('whereIn')) return { c: counts.retryable ?? counts.left };
         return { c: counts.got + counts.left + (counts.refused || 0) };
       }
@@ -305,17 +308,22 @@ test("a sent issue whose readers' mail servers blocked it after SendGrid accepte
 
 // Told its readers were blocked: still untold, so it is still read each minute, within the lookback.
 const TOLD_BLOCKED = { ...ISSUE, status: 'sent', reason: BLOCKED_REASON, diagnostics: { blockedToldAt: '2026-12-03T12:30:00.000Z' } };
+// Its blocked reason was recorded, but its alert reached no one yet.
+const UNTOLD_BLOCKED = { ...TOLD_BLOCKED, diagnostics: {} };
+const CLEARED = [{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: null }) }];
 
 test.each([
-  ['still blocked: nothing more to tell', { got: 85, left: 3 }, 0, [], null],
-  ['a Resume left nobody: its reason clears, quietly', { got: 88, left: 0 }, 1,
-    [{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: null }) }], null],
-  ['every reader it reached bounced later: no reader got it after all, so it fails, with its own alert', { got: 0, left: 3, refused: 85 }, 1, [
+  ['still blocked: nothing more to tell', TOLD_BLOCKED, { got: 85, left: 3 }, 0, [], null],
+  ['a Resume that reached some: its counts stay current, with no second alert', TOLD_BLOCKED, { got: 87, left: 1 }, 1,
+    [{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: expect.stringMatching(/^went out to 87 readers, but 1 readers'/) }) }], null],
+  ['a Resume left nobody: its reason clears, quietly', TOLD_BLOCKED, { got: 88, left: 0 }, 1, CLEARED, null],
+  ['its alert never reached anyone, and a Resume left nobody: its reason still clears, with no alert', UNTOLD_BLOCKED, { got: 88, left: 0 }, 1, CLEARED, null],
+  ['every reader it reached bounced later: no reader got it after all, so it fails, with its own alert', TOLD_BLOCKED, { got: 0, left: 3, refused: 85 }, 1, [
     { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it' }) },
     toldMark('issue-1', 'failed'),
   ], 'pest-insider-outcome:issue-1'],
-])('a sent issue told its readers were blocked is still read: %s', async (_label, counts, settled, expected, alertKey) => {
-  const { writes } = fakeDb({ issues: [TOLD_BLOCKED], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts });
+])('a sent issue whose readers were blocked is still read: %s', async (_label, issue, counts, settled, expected, alertKey) => {
+  const { writes } = fakeDb({ issues: [issue], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled });
   expect(writes).toEqual(expected);
@@ -323,7 +331,7 @@ test.each([
   else expect(mockTrigger).not.toHaveBeenCalled();
 });
 
-test('a message SendGrid dropped (an address on its unsubscribe or spam-report list) is refused, never reached; a later unsubscribe or spam report of a delivered one is not', async () => {
+test('a refusal is a hard bounce or a message SendGrid dropped for an address on its unsubscribe list, with or without an acceptance timestamp; a complaint stays reached', async () => {
   const queries = [];
   fakeDb({ issues: [{ ...ISSUE, status: 'sent' }], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 0, left: 0, refused: 85 } });
   const real = db.getMockImplementation();
@@ -331,13 +339,20 @@ test('a message SendGrid dropped (an address on its unsubscribe or spam-report l
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Did not go out: its send ended, and no reader got it']);
-  // The refusals: a hard bounce, or a dropped status with no delivery, open or click (a reader's own
-  // unsubscribe after delivery keeps its status; a spam report after delivery has its delivery).
-  const refused = queries.find((q) => q.nested.some(([m, column]) => m === 'whereNotNull' && column === 'bounced_at'));
+  // The refusals: a hard bounce, or the unsubscribe drop's status with no delivery, open or click (a
+  // reader's own unsubscribe after delivery writes only unsubscribed_at).
+  const refused = queries.find((q) => !q.notGroup && q.nested.some(([m, column]) => m === 'whereNotNull' && column === 'bounced_at'));
   expect(refused.nested).toEqual(expect.arrayContaining([
-    ['whereIn', 'status', ['unsubscribed', 'complained']],
+    ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed'],
     ['whereNull', 'delivered_at'], ['whereNull', 'opened_at'], ['whereNull', 'clicked_at'],
   ]));
+  // With or without an acceptance timestamp: a drop can land before the sender records one.
+  expect(refused.nested.map(([m]) => m)).not.toContain('orWhereNotNull');
+  // 'complained' is also a reader's own spam report after delivery, so it is never read as a drop.
+  expect(JSON.stringify(refused.nested)).not.toContain('complained');
+  // Reached: a success signal, and not that refusal.
+  const reached = queries.find((q) => q.notGroup);
+  expect(reached.nested).toEqual(expect.arrayContaining([['orWhereNotNull', 'sent_at'], ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed']]));
 });
 
 test('a failed issue whose send became sent (a Resume that finished, or delivery confirmations that came late) becomes sent, with one correction for the alert it had', async () => {

@@ -2091,17 +2091,24 @@ function issueDiagnostics(issue) {
   return diagnostics || {};
 }
 
-// A message SendGrid dropped, never delivering it, for an address on its unsubscribe or spam-report
-// list (routes/webhooks-sendgrid.js): 'unsubscribed', or 'complained' with no delivery, open or click.
-// A reader's own unsubscribe after delivery keeps the row's status, and a spam report after delivery
-// has its delivery: both stay reached.
-const DROPPED_DELIVERY_STATUSES = ['unsubscribed', 'complained'];
+/**
+ * Refused for good, and never mailed again by a Resume: a hard bounce (bounced_at; it keeps the sent_at
+ * SendGrid's acceptance wrote), or a message SendGrid dropped, never delivering it, for an address on
+ * its unsubscribe list (routes/webhooks-sendgrid.js writes status 'unsubscribed' only then; a reader's
+ * own unsubscribe after delivery writes only unsubscribed_at). Either, with or without an acceptance
+ * timestamp: a drop can land before the sender records one, or after it lost SendGrid's answer.
+ * SendGrid's drop for an address on its spam-report list writes 'complained', as a reader's spam
+ * report after delivery does, so the two cannot be told apart, and such a row counts as reached.
+ */
+function refusedDelivery(q) {
+  return q.whereNotNull('bounced_at').orWhere((dropped) => dropped.where('status', 'unsubscribed')
+    .whereNull('delivered_at').whereNull('opened_at').whereNull('clicked_at'));
+}
 
 /**
  * A send's delivery ledger: how many readers got it (any success signal, as
- * hasDeliverySuccessSignal reads one, but not refused), how many it reached no
- * inbox of for good (refused: a hard bounce, or a message SendGrid dropped),
- * and how many a Resume would still mail:
+ * hasDeliverySuccessSignal reads one, and not refused), how many it reached no
+ * inbox of for good (refusedDelivery), and how many a Resume would still mail:
  * outstandingEligibleDeliveries (the resume precheck's own predicate), and for
  * a planned issue only the readers its plan still holds, as each batch
  * re-checks them (narrowToPlannedAudience, then plannedEligibleRows on the
@@ -2109,19 +2116,14 @@ const DROPPED_DELIVERY_STATUSES = ['unsubscribed', 'complained'];
  */
 async function ledgerProgress(trx, send) {
   const ledger = () => trx('newsletter_send_deliveries').where({ send_id: send.id });
-  const total = await ledger().count('* as c').first();
-  const notYet = await applyDeliveryNoSuccessFilter(ledger()).whereNotIn('status', TERMINAL_SUCCESS_STATUSES).count('* as c').first();
-  // Refused for good, and never mailed again by a Resume: a hard bounce (bounced_at; it keeps the
-  // sent_at SendGrid's acceptance wrote), or a message SendGrid dropped (DROPPED_DELIVERY_STATUSES).
-  // These are rows the success signal above (hasDeliverySuccessSignal) would count as reached.
-  const refused = await ledger()
-    .where((q) => q.whereNotNull('bounced_at').orWhere((dropped) => dropped.whereIn('status', DROPPED_DELIVERY_STATUSES)
-      .whereNull('delivered_at').whereNull('opened_at').whereNull('clicked_at')))
+  const reached = await ledger()
     .where((q) => q.whereIn('status', TERMINAL_SUCCESS_STATUSES).orWhereNotNull('sent_at').orWhereNotNull('delivered_at')
       .orWhereNotNull('opened_at').orWhereNotNull('clicked_at'))
+    .whereNot(refusedDelivery)
     .count('* as c').first();
+  const refused = await ledger().where(refusedDelivery).count('* as c').first();
+  const got = Number(reached?.c) || 0;
   const refusedCount = Number(refused?.c) || 0;
-  const got = (Number(total?.c) || 0) - (Number(notYet?.c) || 0) - refusedCount;
   // Only a retryable row can be one a Resume would mail (outstandingEligibleDeliveries): with none,
   // nothing is left, and the archived-link repair below could change nothing, so it does not run.
   const retryable = await applyRetryableDeliveryFilter(ledger()).count('* as c').first();
@@ -2185,9 +2187,9 @@ async function plannedSendOutcome(issue, send, now, trx) {
  * 'failed' one (its reason), a 'sent' one whose finished send has readers a Resume would still
  * mail (a provider block after SendGrid accepted the batch resets a reader's delivery), which
  * stays 'sent' (alert 'blocked', told once by its own mark, blockedToldAt, so the issue is still
- * read: its reason clears, quietly, once nobody is left), or a 'sent' one no reader got after all
- * (every one bounced, was dropped or was blocked), which becomes 'failed', also after a 'blocked'
- * alert. Null when there is nothing to change or tell.
+ * read: its counts stay current, and its reason clears, quietly, once nobody is left, told or not),
+ * or a 'sent' one no reader got after all (every one bounced, was dropped or was blocked), which
+ * becomes 'failed', also after a 'blocked' alert. Null when there is nothing to change or tell.
  */
 async function settledOutcome(issue, send, trx) {
   const diagnostics = issueDiagnostics(issue);
@@ -2215,12 +2217,12 @@ async function settledOutcome(issue, send, trx) {
   // mail server bounced it or SendGrid dropped it (final), or it was blocked (a Resume retries those).
   // The outcome a scheduled issue whose send ended this way gets (plannedSendOutcome).
   if (got === 0 && (left > 0 || refused > 0)) return { status: 'failed', reason: 'did not go out: its send ended, and no reader got it', alert: 'outcome' };
-  // A 'blocked' alert was told: nothing more to tell, and its reason clears, quietly, once nobody is
-  // left to resume (no write when it is already clear).
-  if (diagnostics.blockedToldAt) return left === 0 ? { status: 'sent', reason: null } : null;
-  return left > 0
-    ? { status: 'sent', reason: `went out to ${got} readers, but ${left} readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them`, alert: 'blocked' }
-    : null;
+  // Nobody left to resume: a 'sent' issue carries no reason, so a blocked one, told or not, clears,
+  // quietly (no write when it is already clear).
+  if (left === 0) return { status: 'sent', reason: null };
+  const reason = `went out to ${got} readers, but ${left} readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them`;
+  // Told once: later minutes only keep the counts current.
+  return diagnostics.blockedToldAt ? { status: 'sent', reason } : { status: 'sent', reason, alert: 'blocked' };
 }
 
 /**
@@ -2336,16 +2338,16 @@ const ISSUE_CHANGE_LOOKBACK_SQL = "updated_at >= now() - ?::int * interval '1 da
  * - every 'failed' issue, also one a send-time stop failed, gets one alert that says why, and so
  *   does a 'sent' one whose readers' mail servers blocked it after SendGrid accepted it (a provider
  *   block, which leaves the reader to a Resume). That 'sent' one is still read each minute, within
- *   the lookback: its reason clears, quietly, once a Resume leaves nobody, and it still fails if no
- *   reader got it after all;
+ *   the lookback: its reason keeps the counts current and clears, quietly, once a Resume leaves
+ *   nobody, and it still fails if no reader got it after all;
  * - a 'failed' issue whose send has since become 'sent' with every planned reader done (a Resume
  *   that finished, or late delivery confirmations) becomes 'sent', with one correction if the
  *   owner was told it failed. This step owns that change: the send's finalize leaves a 'failed'
  *   row alone. A correction that reached no one is retried for the lookback from that change;
  * - a 'sent' issue no reader got after all (every reader's mail server bounced or blocked it, or
  *   SendGrid dropped it) becomes 'failed', with one alert.
- * A hard bounce, and a message SendGrid dropped for an address on its unsubscribe or spam-report
- * list, is final: no Resume can reach that reader, it never counts as reached, and it raises no
+ * A hard bounce, and a message SendGrid dropped for an address on its unsubscribe list, is final
+ * (refusedDelivery): no Resume can reach that reader, it never counts as reached, and it raises no
  * alert of its own. The readers a Resume would still mail are counted after the same archived-link
  * repair a Resume runs first, which runs only while a reader is still retryable.
  */

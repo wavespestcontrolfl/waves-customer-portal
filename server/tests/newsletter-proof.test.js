@@ -1126,6 +1126,16 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(mockTrigger).not.toHaveBeenCalled();
   });
 
+  test("a reply from the FYI copy's own sender, set as an approver, still holds the issue: only the copy itself is left out", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = `owner@example.com, ${PI_QUEUED.from_email}`;
+    const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
+    expect(await maybeHandleProofApproval({
+      ...HOLD, from_address: PI_QUEUED.from_email, label_ids: ['INBOX'],
+      authentication_results: 'mx.google.com; dkim=pass header.i=@wavespestcontrol.com header.s=s1 header.b=abc',
+    })).toBe(true);
+    expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
+  });
+
   test('a forward of its FYI copy holds nothing, even from a verified sender with a hold word in its note: the owner is told once that only a reply holds', async () => {
     const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
     expect(await maybeHandleProofApproval({ ...HOLD, subject: `Fwd: ${HOLD.subject.slice(4)}`, body_text: 'please hold this for review' })).toBe(true);
@@ -1246,15 +1256,23 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     expect(await holdReplyOnRecord(SEND)).toBe(false);
   });
 
+  const FYI_COPY_TEXT = 'To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.';
   test.each([
-    ['an approver', () => { process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com, Newsletter@news.wavespestcontrol.com'; }, null],
-    ['the proof address', () => { process.env.NEWSLETTER_PROOF_EMAIL = 'newsletter@news.wavespestcontrol.com'; }, null],
-    ['an address a copy of the FYI went to', () => {}, { diagnostics: { fyiTo: { 'newsletter@news.wavespestcontrol.com': true } } }],
-  ])("the FYI copy itself is not a HOLD, in either witness, also when its sender is set as %s: it carries the token and the HOLD line", async (_label, configure, issue) => {
+    ['its sender set as an approver', () => { process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com, Newsletter@news.wavespestcontrol.com'; }, null, 'newsletter@news.wavespestcontrol.com', 'news.wavespestcontrol.com'],
+    ['its sender set as the proof address', () => { process.env.NEWSLETTER_PROOF_EMAIL = 'newsletter@news.wavespestcontrol.com'; }, null, 'newsletter@news.wavespestcontrol.com', 'news.wavespestcontrol.com'],
+    ['its sender recorded as an address a copy went to', () => {}, { diagnostics: { fyiTo: { 'newsletter@news.wavespestcontrol.com': true } } }, 'newsletter@news.wavespestcontrol.com', 'news.wavespestcontrol.com'],
+    ['relayed by a group at the address it went to, under that address', () => {}, { diagnostics: { fyiTo: { 'proofs@wavespestcontrol.com': true } } }, 'proofs@wavespestcontrol.com', 'wavespestcontrol.com'],
+  ])("the FYI copy itself is not a HOLD, in either witness, also with %s: it carries the token and the HOLD line", async (_label, configure, issue, from, domain) => {
     configure();
-    const copy = received('newsletter@news.wavespestcontrol.com', signedBy('news.wavespestcontrol.com'), { subject: FYI_SUBJECT, body_text: 'To skip this issue, reply HOLD by 6:30 AM ET that day' });
+    const copy = received(from, signedBy(domain), { subject: FYI_SUBJECT, body_text: FYI_COPY_TEXT });
     wireMailbox({ stored: [copy], searched: [copy] });
     expect(await holdReplyOnRecord(SEND, issue)).toBe(false);
+  });
+
+  test("a reply from the FYI copy's own sender, set as an approver, still holds: only the copy itself is left out", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com, newsletter@news.wavespestcontrol.com';
+    wireMailbox({ searched: [received('newsletter@news.wavespestcontrol.com', signedBy('news.wavespestcontrol.com'), { body_text: `HOLD\n\n> ${FYI_COPY_TEXT}` })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
   });
 
   test('a reply to a forwarded copy of the FYI (Re: Fwd:) is a reply: its HOLD stops the issue', async () => {

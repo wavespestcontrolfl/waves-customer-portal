@@ -374,17 +374,9 @@ function recordFyiRecipient(sendId, to) {
   });
 }
 
-/**
- * Who may HOLD a planned issue, before the sender is verified: an approver, or an address its FYI copy
- * went to (the current proof address when none was recorded). Never the FYI copy's own sender (the
- * send's From, which sendNewsletterProof sends it from), also when that address is set as an approver
- * or a proof address: the copy itself carries the token and the HOLD line, so a copy that comes back
- * to this mailbox must never read as a reply to it.
- */
-function holdAddresses(fyiTos, send) {
-  const addresses = new Set([...approvalSenders(), ...(fyiTos.length ? fyiTos : [proofRecipient()])]);
-  addresses.delete(normalizeEmail(send?.from_email));
-  return addresses;
+/** Who may HOLD a planned issue, before the sender is verified: an approver, or an address its FYI copy went to (the current proof address when none was recorded). */
+function holdAddresses(fyiTos) {
+  return new Set([...approvalSenders(), ...(fyiTos.length ? fyiTos : [proofRecipient()])]);
 }
 
 /**
@@ -392,11 +384,11 @@ function holdAddresses(fyiTos, send) {
  * a sender types: this mailbox's own account (Gmail's SENT label, which no outside sender can set),
  * on mail addressed to this mailbox (a reply to the FYI copy goes to its Reply-To, this mailbox; a
  * forward to someone else does not count; INBOX is not needed, since Send & Archive removes it), or
- * one of `holders` (holdAddresses: an approver, or an address the issue's FYI copy went to) whose
- * message Gmail itself authenticated for its From domain (aligned DKIM or SPF pass in Google's own
+ * one of holdAddresses (an approver, or an address the issue's FYI copy went to) whose message
+ * Gmail itself authenticated for its From domain (aligned DKIM or SPF pass in Google's own
  * Authentication-Results, read strictly: inbox-hygiene.hasAlignedAuth). A draft never counts.
  */
-function verifiedHoldSender(email, holders) {
+function verifiedHoldSender(email, fyiTos) {
   const labels = labelList(email?.label_ids);
   if (labels.includes('DRAFT')) return false;
   if (labels.includes('SENT')) {
@@ -405,26 +397,41 @@ function verifiedHoldSender(email, holders) {
       .includes(syncedApprovalMailbox());
   }
   const from = normalizeEmail(email?.from_address);
-  if (!from || !holders.has(from)) return false;
+  if (!from || !holdAddresses(fyiTos).has(from)) return false;
   const { hasAlignedAuth } = require('./email/inbox-hygiene');
   const { domainFromAddress } = require('./email/spam-blocker');
   return hasAlignedAuth(email.authentication_results, domainFromAddress(from), { strict: true });
 }
 
+// A proof copy's own subject (sendNewsletterProof): its FYI: or ACT: prefix right before its token,
+// with no reply or forward prefix ahead of it.
+const PROOF_COPY_SUBJECT_RE = /^\s*(?:FYI|ACT)\s*:\s*\[PROOF-[0-9a-f]{8}\]/i;
+
+/**
+ * The FYI copy itself, wherever it lands (in this mailbox when the proof address is this mailbox, a
+ * group that relays it, or a rule that forwards it on): its subject is the copy's own. It carries the
+ * token and the HOLD line, so whoever it comes from, it is never an answer to itself. A reply to it
+ * carries a reply prefix ahead of that subject, also one from the address the copy came from.
+ */
+function isProofCopyItself(email) {
+  return PROOF_COPY_SUBJECT_RE.test(String(email?.subject || ''));
+}
+
 /**
  * A planned issue's HOLD, read one way by the reply handler and the send-time check: a reply to its
- * FYI copy, not a forward of it (email-strip.isForwardSubject: a forward passes the copy on, and its
- * note, such as "please hold this for review", is not an answer to it), whose own text asks to stop.
+ * FYI copy, not the copy itself (isProofCopyItself) and not a forward of it
+ * (email-strip.isForwardSubject: a forward passes the copy on, and its note, such as "please hold
+ * this for review", is not an answer to it), whose own text asks to stop.
  */
 function isPlannedHoldReply(email) {
   const { isForwardSubject } = require('./email/email-strip');
-  return !isForwardSubject(email?.subject)
+  return !isProofCopyItself(email) && !isForwardSubject(email?.subject)
     && isHoldReply(extractTopReplyText(email?.body_text || htmlReplyToText(email?.body_html)));
 }
 
 /** A HOLD reply to the FYI copy with this token (isPlannedHoldReply), from a verified sender. */
-function isVerifiedHold(email, token, holders) {
-  return parseProofToken(email?.subject) === token && isPlannedHoldReply(email) && verifiedHoldSender(email, holders);
+function isVerifiedHold(email, token, fyiTos) {
+  return parseProofToken(email?.subject) === token && isPlannedHoldReply(email) && verifiedHoldSender(email, fyiTos);
 }
 
 /** More messages than this carrying one FYI copy's token: the search did not read them all. */
@@ -446,21 +453,21 @@ async function holdReplyOnRecord(send, issue = null) {
   // Only this form can reach the Gmail query, and a reply names the issue by it.
   if (!isProofToken(send?.proof_token)) throw new Error('its FYI copy has no valid token');
   const token = send.proof_token.toLowerCase();
-  const holders = holdAddresses(issueFyiAddresses(issue), send);
+  const fyiTos = issueFyiAddresses(issue);
   // Every FYI copy of this draft carries its token (a retry keeps it), so the search starts at the
   // draft, not at the latest copy; an hour of margin covers clock differences.
   const since = send.created_at ? new Date(new Date(send.created_at).getTime() - 60 * 60 * 1000) : null;
   const stored = db('emails').where('subject', 'ilike', `%[PROOF-${token}]%`);
   if (since) stored.where('received_at', '>=', since);
   const rows = await stored.select('from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'label_ids', 'authentication_results');
-  if (rows.some((email) => isVerifiedHold(email, token, holders))) return true;
+  if (rows.some((email) => isVerifiedHold(email, token, fyiTos))) return true;
   const gmail = require('./email/gmail-client');
   const query = `subject:"PROOF-${token}"${since ? ` after:${Math.floor(since.getTime() / 1000)}` : ''}`;
   // Spam and Trash too: a HOLD the spam filter moved, or one deleted after it was sent, still holds.
   const { messages, truncated } = await gmail.listAllMessages(query, HOLD_SEARCH_CAP, { includeSpamTrash: true });
   if (truncated) throw new Error(`more than ${HOLD_SEARCH_CAP} messages carry its FYI copy's token`);
   const found = await Promise.all((messages || []).map(({ id }) => gmail.getMessage(id)));
-  return found.some((email) => isVerifiedHold(email, token, holders));
+  return found.some((email) => isVerifiedHold(email, token, fyiTos));
 }
 
 /**
@@ -1060,9 +1067,14 @@ async function maybeHandleProofApproval(email) {
   // type such an address into a From line), stops nothing, and the owner is told once.
   const planned = send ? await resolvePestInsiderIssueContext(send) : null;
   if (planned && isHoldReply(replyText)) {
-    const holders = holdAddresses(issueFyiAddresses(planned.issue), send);
-    const verified = verifiedHoldSender(email, holders);
-    if (!verified && !holders.has(from)) {
+    // The FYI copy itself, back in this mailbox (it quotes the HOLD line): not an answer, and no warning.
+    if (isProofCopyItself(email)) {
+      logger.info(`[newsletter-proof] ignoring the FYI copy of planned issue send ${send.id} itself`);
+      return false;
+    }
+    const fyiTos = issueFyiAddresses(planned.issue);
+    const verified = verifiedHoldSender(email, fyiTos);
+    if (!verified && !holdAddresses(fyiTos).has(from)) {
       logger.info(`[newsletter-proof] ignoring a HOLD for planned issue send ${send.id} from ${maskEmail(from)}, who may not hold it`);
       return false;
     }
