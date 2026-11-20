@@ -971,8 +971,11 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       logger.warn(`[review-auto-reply] publish deferred for ${merged.id}: ${code} (${err.message})`);
       return { outcome: 'retry', reason: code };
     }
+    // A failed read of Google's review list while matching the review
+    // (identityLookup) parks as an identity park too: the sync re-queues it
+    // once it attaches the review's GBP name (requeueFieldsOnIdentity).
     const parkReason = code === CODES.NOT_CONFIGURED ? 'gbp_not_configured'
-      : code === CODES.NO_RESOURCE ? 'no_gbp_resource'
+      : code === CODES.NO_RESOURCE || err?.identityLookup === true ? 'no_gbp_resource'
         : code === CODES.LOCK_BUSY ? 'lock_busy'
           : code === 'account_read_failed' ? 'account_read_failed'
             : 'google_failed';

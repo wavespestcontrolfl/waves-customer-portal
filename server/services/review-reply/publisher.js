@@ -92,7 +92,11 @@ function withDeadline(call, label, ms = GOOGLE_CALL_TIMEOUT_MS) {
  * review; that lenience is gone for every caller.) A failed read of Google's
  * list is not "no match": it throws GOOGLE_FAILED with the cause, so the
  * runner retries a temporary one (a timeout, 429, 5xx) on the same long
- * ladder as a failed getReview.
+ * ladder as a failed getReview. The error carries identityLookup, so the
+ * runner's final park is no_gbp_resource, which the sync re-queues once it
+ * attaches the review's GBP name (requeueFieldsOnIdentity). Its message names
+ * the HTTP status only: Google's response text can quote reviewer names and
+ * review text, and the runner copies the message into the log and the bell.
  */
 async function resolveGbpReviewName(review, { conn = db } = {}) {
   if (review.gbp_review_name) return review.gbp_review_name;
@@ -104,8 +108,14 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
     // GBP caps pageSize at 50; the helper pages until exhausted.
     gbpReviews = await withDeadline((signal) => gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50, { signal }), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
   } catch (lookupErr) {
-    logger.warn(`GBP resource name lookup failed: ${lookupErr.message}`);
-    throw new ReviewReplyError(CODES.GOOGLE_FAILED, `GBP resource name lookup failed: ${lookupErr.message}`, { status: 502, cause: lookupErr });
+    const why = lookupErr?.timedOut ? 'timed out'
+      : Number.isInteger(lookupErr?.googleStatus) ? `HTTP ${lookupErr.googleStatus}`
+        : require('../notification-service').safeErrorSummary(lookupErr);
+    logger.warn(`GBP resource name lookup failed for review ${review.id}: ${why}`);
+    throw Object.assign(
+      new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read Google's review list to find this review (${why})`, { status: 502, cause: lookupErr }),
+      { identityLookup: true },
+    );
   }
   const rName = (review.reviewer_name || '').toLowerCase();
   const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;

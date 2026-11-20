@@ -775,6 +775,24 @@ describe('processDueAutoReplies — state machine', () => {
     }
   });
 
+  test('a failed read of Google\'s review list while matching the review takes the long ladder, and its last park is no_gbp_resource, which the sync re-queues', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const lookupFailure = () => Object.assign(googleFailure(503), { identityLookup: true });
+    mockPublish.mockRejectedValue(lookupFailure());
+    state.rows = [row({ gbp_review_name: null, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 3, auto_reply_due_at: '2026-08-27T14:00:00Z' })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 4 });
+    expect((new Date(state.rows[0].auto_reply_due_at).getTime() - Date.now()) / 60000).toBeGreaterThan(179);
+    state.rows[0].auto_reply_attempts = 6;
+    state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
+    mockNotify.mockClear();
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'no_gbp_resource', auto_reply_attempts: 7 });
+    expect(mockNotify.mock.calls.at(-1)[3].metadata.needsAction).toBe(true);
+    expect(Runner.requeueFieldsOnIdentity(state.rows[0], { gbp_review_name: 'accounts/1/locations/2/reviews/9' }))
+      .toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'identity_attached', auto_reply_attempts: 0 });
+  });
+
   test('lock contention shares the retry ceiling and parks after MAX_ATTEMPTS', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
