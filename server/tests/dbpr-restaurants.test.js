@@ -126,7 +126,7 @@ describe('parseInspectionRows', () => {
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
       address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-11-16',
-      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2, violation35: 1 },
+      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2, violation35: 1, visitNumber: 1 },
     });
   });
 });
@@ -261,6 +261,10 @@ describe('parseInspectionReport', () => {
     const page = (note) => reportPage(`<tr><td>35A-02-8</td><td>${note}</td></tr>`);
     expect(svc.parseInspectionReport(page('x'.repeat(2000))).findings[0].text).toHaveLength(400);
     expect(svc.parseInspectionReport(page('ROACH\0ES')).findings[0].text).toBe('ROACH ES');
+    // The cap cuts between characters: an emoji across it is kept whole or left out, never cut in half.
+    const emoji = svc.parseInspectionReport(page(`${'x'.repeat(399)}\u{1FAB3}yy`)).findings[0].text;
+    expect(emoji).toBe(`${'x'.repeat(399)}\u{1FAB3}`);
+    expect(emoji.isWellFormed()).toBe(true);
   });
 
   test('a code counts only inside the violations table: a lone 35A code in another table or the footer is no answer, never pests', () => {
@@ -322,20 +326,53 @@ describe('parseInspectionReport', () => {
     expect(svc.parseInspectionReport(bare.replaceAll('<td>', '<th>')).findings).toHaveLength(1);
   });
 
-  test('a follow-up report puts the newest visit note first, so the cap never drops the visit the page reports', () => {
+  test('a follow-up report puts the read visit\'s note first, so the cap never drops it', () => {
     const page = (note) => reportPage(`<tr><td>35A-02-8</td><td>${note}</td></tr>`);
     const initial = `Live, small flying insects found. ${'Observed flies at the bar. '.repeat(20)}`;
     const note = `High Priority - - From initial inspection : High Priority - ${initial}`
       + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
       + '- From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage.';
-    const { text } = svc.parseInspectionReport(page(note)).findings[0];
+    const { text } = svc.parseInspectionReport(page(note), { visitDate: '2026-09-03', visitNumber: 3 }).findings[0];
     expect(text).toHaveLength(400);
     expect(text.startsWith('High Priority - From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage. '
       + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
       + '- From initial inspection : High Priority - Live, small flying insects found.')).toBe(true);
+    // Read for the second visit, its note comes first, then the others newest first.
+    const second = svc.parseInspectionReport(page(note), { visitDate: '2026-09-01', visitNumber: 2 }).findings[0].text;
+    expect(second.startsWith('High Priority - From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
+      + '- From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage. - From initial inspection :')).toBe(true);
     // One note (a routine report, or a first citation) is unchanged.
     const one = 'High Priority - - From initial inspection : High Priority - Rodent droppings in dry storage.';
-    expect(svc.parseInspectionReport(page(one)).findings[0].text).toBe(one);
+    expect(svc.parseInspectionReport(page(one), { visitDate: '2026-09-01', visitNumber: 1 }).findings[0].text).toBe(one);
+  });
+
+  test('on a follow-up report a 35A row counts only when its note of the read visit records something seen', () => {
+    // The real layout: each row lists every visit's note, labelled, oldest first.
+    const flies = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : High Priority - Live flies at the bar. '
+      + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
+      + '- From follow-up inspection 2026-09-03: **Time Extended**</td></tr>';
+    const door = '<tr><td>35B-01-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Gap under the back door. '
+      + '- From follow-up inspection 2026-09-03: **Time Extended**</td></tr>';
+    const page = reportPage(`${flies}\n${door}`);
+    const read = (visitDate, visitNumber) => svc.parseInspectionReport(page, { cited35: 1, visitDate, visitNumber });
+    // Seen at the first visit and at the second, each with its own note first.
+    expect(read('2026-08-28', 1)).toMatchObject({ pestEvidence: true, findings: [{ code: '35A-02-8' }] });
+    expect(read('2026-08-28', 1).findings[0].text).toMatch(/^High Priority - From initial inspection : High Priority - Live flies at the bar\. /);
+    expect(read('2026-09-01', 2).findings[0].text).toMatch(/^High Priority - From follow-up inspection 2026-09-01: Observed 2 live flies/);
+    // At the third visit the 35A note is a status alone; a later visit has no note at all: no answer either way.
+    expect(read('2026-09-03', 3)).toBeNull();
+    expect(read('2026-09-05', 4)).toBeNull();
+    // Without the visit number only a dated note can match: the first visit cannot be told apart.
+    expect(read('2026-08-28', null)).toBeNull();
+    expect(read('2026-09-01', null)).toMatchObject({ pestEvidence: true });
+    // A 35A row seen at the visit answers; another one from an earlier visit only stays out of the findings.
+    const roach = '<tr><td>35A-09-4</td><td>&nbsp;</td><td>High Priority - - From initial inspection : High Priority - One insect on a box. '
+      + '- From follow-up inspection 2026-09-03: Observed 2 dead roaches in dry storage.</td></tr>';
+    const mixed = svc.parseInspectionReport(reportPage(`${flies}\n${roach}\n${door}`), { cited35: 1, visitDate: '2026-09-03', visitNumber: 3 });
+    expect(mixed.findings.map((f) => f.code)).toEqual(['35A-09-4']);
+    // A routine report (no visit labels) is the read visit's own, as before.
+    expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: 1, visitDate: '2026-11-16', visitNumber: 2 }))
+      .toMatchObject({ pestEvidence: true });
   });
 });
 
@@ -442,6 +479,20 @@ describe('syncRestaurantProspects', () => {
     const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
     expect(store.bumpAttempts.mock.calls.map(([id]) => id)).toEqual(['a']);
     expect(store.saveReport.mock.calls.map(([id, r]) => [id, r.pestEvidence])).toEqual([['b', false]]);
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 1 });
+  });
+
+  test('each report read is checked against its own visit: a follow-up report answers only for a visit that saw pests', async () => {
+    const followUp = reportPage('<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : High Priority - Live flies. '
+      + '- From follow-up inspection 2026-11-10: **Time Extended**</td></tr>');
+    store = makeStore([
+      { id: 'a', source_key: '9000', license_id: '5001', violation35: 1, visitDate: '2026-11-10', visitNumber: 2 },
+      { id: 'b', source_key: '9001', license_id: '5001', violation35: 1, visitDate: '2026-11-03', visitNumber: 1 },
+    ]);
+    fetchText = jest.fn(async (url) => (url.includes('inspectionDetail.asp') ? followUp : files[url.split('/').pop()]()));
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(store.bumpAttempts.mock.calls.map(([id]) => id)).toEqual(['a']);
+    expect(store.saveReport.mock.calls.map(([id, r]) => [id, r.pestEvidence])).toEqual([['b', true]]);
     expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 1 });
   });
 

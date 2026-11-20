@@ -198,6 +198,8 @@ function parseInspectionRows(rows, counts = {}, today = null) {
         highPriority: wholeNumber(row['Number of High Priority Violations']),
         // The violation-35 citations the file counted: a report page that lists fewer cannot answer.
         violation35: cited,
+        // Which visit of the inspection this is: a follow-up report lists earlier visits' notes too.
+        visitNumber: wholeNumber(row['Visit Number']),
       },
     });
   }
@@ -281,40 +283,74 @@ function htmlText(html) {
     .trim();
 }
 
-// A follow-up report keeps the first visit's note first and adds each later visit's note after it:
+// A follow-up report lists each violation of the inspection with every visit's note, labelled, oldest first:
 // "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
 const VISIT_NOTE_RE = /-\s*From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
 
-// The visit notes newest first, each with its label, so the cap never drops the visit the page reports. Text with
-// fewer than two notes (a routine report) is unchanged.
-function newestNoteFirst(text) {
+// The text before the first label and each labelled note (date null for the initial visit), or null for a text
+// without labels: a routine report, all of it the read visit's own.
+function visitNotes(text) {
   const marks = [...text.matchAll(VISIT_NOTE_RE)];
-  if (marks.length < 2) return text;
-  const notes = marks.map((mark, i) => ({
-    date: mark[1] || '',
-    text: text.slice(mark.index, i + 1 < marks.length ? marks[i + 1].index : undefined).replace(/^-\s*/, '').trim(),
-  }));
-  // The initial note has no date, so it sorts last; a stable sort keeps the page order within a day.
-  notes.sort((a, b) => (a.date === b.date ? 0 : a.date > b.date ? -1 : 1));
-  const label = text.slice(0, marks[0].index).trim();
-  return [label, notes.map((note) => note.text).join(' - ')].filter(Boolean).join(' ');
+  if (!marks.length) return null;
+  const notes = marks.map((mark, i) => {
+    const end = i + 1 < marks.length ? marks[i + 1].index : text.length;
+    return {
+      date: mark[1] || null,
+      text: text.slice(mark.index, end).replace(/^-\s*/, '').trim(),
+      body: text.slice(mark.index + mark[0].length, end),
+    };
+  });
+  return { label: text.slice(0, marks[0].index).trim(), notes };
 }
 
+// Whether a note is the read visit's own: the first visit's is the initial note, a later visit's carries its date.
+// Without the visit number only a dated note can match.
+const isVisitNote = (note, visit) => (visit.number === 1 ? note.date === null : note.date !== null && note.date === visit.date);
+
+// A note that records something seen, not only a status such as **Time Extended** or the priority label.
+const recordsSomething = (body) => /[a-z0-9]/i.test(body.replace(/\*\*[^*]*\*\*/g, ' ')
+  .replace(/^[\s-]*(?:High Priority|Intermediate|Basic)\b/i, ' '));
+
+// Pests seen at the read visit: on a routine report any 35A row; on a follow-up report only a 35A row whose note of
+// that visit records something seen. An earlier visit's citation, or a status alone, says nothing about this visit.
+function seenAtVisit(text, visit) {
+  const parsed = visitNotes(text);
+  return !parsed || parsed.notes.some((note) => isVisitNote(note, visit) && recordsSomething(note.body));
+}
+
+// The read visit's note first, then the others newest first (the initial note last), each with its label, so the
+// cap never drops the visit the page is read for. Text with fewer than two notes is unchanged.
+function visitNoteFirst(text, visit) {
+  const parsed = visitNotes(text);
+  if (!parsed || parsed.notes.length < 2) return text;
+  const rank = (note) => (isVisitNote(note, visit) ? 0 : 1);
+  const day = (note) => note.date || '';
+  // A stable sort keeps the page order within a rank and a day.
+  const notes = [...parsed.notes].sort((a, b) => rank(a) - rank(b) || (day(a) === day(b) ? 0 : day(a) > day(b) ? -1 : 1));
+  return [parsed.label, notes.map((note) => note.text).join(' - ')].filter(Boolean).join(' ');
+}
+
+// At most FINDING_TEXT_MAX characters, cut between characters (code points): half an emoji is not valid text, and
+// PostgreSQL refuses it in a JSON column.
+const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
+
 /**
- * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. A page
- * answers only when it is whole (the state office footer closes it) and lists the violation 35 the file counted (a
- * 35A or 35B code), at least as many as the file counted (cited35: the missing one could be 35A; a follow-up report
- * may list more, from earlier visits). Without the count only a 35A row answers. An error page, a changed layout or
- * a page cut short
- * is a failed read, retried later, never
- * "no pests". The violations table is the rows after its "Violation" / "Observation" head, up to the next table
- * tag. Each of its rows is read whole, by cell position: the cell in the Violation column is the code and the cells
- * after it are the observation, so a code quoted in a note, a comment or a script never starts an entry. A row whose
- * Violation cell is not a code alone (blank, or 35A-02-8*), or a code cell outside that table (another table, the
- * footer), means the page is not laid out as expected: no answer, never a guess either way. findings holds the
- * 35A entries only, each note of a follow-up report newest first (newestNoteFirst).
+ * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. No answer is
+ * a failed read, retried later, never "no pests". The page answers only when:
+ * - it is whole (the state office footer closes it): an error page or a page cut short gives no answer;
+ * - its violations table reads cleanly: the rows after the "Violation" / "Observation" head, up to the next table
+ *   tag, each read whole by cell position (the cell in the Violation column is the code, the cells after it are the
+ *   observation), so a code quoted in a note, a comment or a script never starts an entry. A row whose Violation cell
+ *   is not a code alone (blank, or 35A-02-8*), or a code cell outside that table (another table, the footer), means
+ *   the page is not laid out as expected;
+ * - it lists at least as many 35A or 35B rows as the file counted for the visit (cited35): the missing one could be
+ *   35A. A follow-up report may list more, from earlier visits. Without the count only a 35A row answers;
+ * - its 35A rows were seen at the read visit (visitDate, visitNumber): a follow-up report also lists earlier visits'
+ *   citations, and only the read visit's own note counts, if it records something seen. 35A rows with none seen at
+ *   the visit give no answer.
+ * findings holds the 35A rows seen at the visit, each with that visit's note first, cut at FINDING_TEXT_MAX.
  */
-function parseInspectionReport(html, { cited35 = null } = {}) {
+function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNumber = null } = {}) {
   const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
   const whole = htmlText(page);
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
@@ -351,13 +387,15 @@ function parseInspectionReport(html, { cited35 = null } = {}) {
   endRow();
   const listed35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).length;
   if (unreadable || !listed35) return null;
-  const has35A = entries.some((entry) => /^35A-/.test(entry.code));
+  const visit = { date: visitDate, number: visitNumber };
+  const rows35A = entries.filter((entry) => /^35A-/.test(entry.code)).map((entry) => ({ code: entry.code, text: entry.parts.join(' ') }));
   // Fewer 35 rows than the file counted: the missing one could be 35A. Without the count (a row stored before it was
   // kept), only a 35A row answers: "no pests" needs the count.
-  if (Number.isInteger(cited35) ? listed35 < cited35 : !has35A) return null;
-  const findings = entries
-    .filter((entry) => /^35A-/.test(entry.code))
-    .map((entry) => ({ code: entry.code, text: newestNoteFirst(entry.parts.join(' ')).slice(0, FINDING_TEXT_MAX) }));
+  if (Number.isInteger(cited35) ? listed35 < cited35 : !rows35A.length) return null;
+  // 35A rows but none seen at the read visit (earlier visits' citations on a follow-up report): no answer.
+  const seen = rows35A.filter((row) => seenAtVisit(row.text, visit));
+  if (rows35A.length && !seen.length) return null;
+  const findings = seen.map((row) => ({ code: row.code, text: capText(visitNoteFirst(row.text, visit)) }));
   return { pestEvidence: findings.length > 0, findings };
 }
 
@@ -371,12 +409,19 @@ function dedupeByKey(records) {
 
 // A re-read of a known row refreshes last_seen_at only: a pest_evidence answer, the findings and the attempt count
 // are never overwritten by a later file. Returns the number of rows written.
+// A re-read refreshes last_seen_at. A row stored before the file's violation-35 count or visit number was kept takes
+// them from the file; nothing else in detail changes (the findings and the first read's values stay).
+const FILL_DETAIL_SQL = `COALESCE(restaurant_prospects.detail, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+  'violation35', CASE WHEN restaurant_prospects.detail->'violation35' IS NULL THEN excluded.detail->'violation35' END,
+  'visitNumber', CASE WHEN restaurant_prospects.detail->'visitNumber' IS NULL THEN excluded.detail->'visitNumber' END))`;
+
 async function upsertRecords(records) {
   const unique = dedupeByKey(records);
   let n = 0;
   for (let i = 0; i < unique.length; i += UPSERT_CHUNK) {
     const chunk = unique.slice(i, i + UPSERT_CHUNK).map((r) => ({ ...r, detail: JSON.stringify(r.detail) }));
-    await db('restaurant_prospects').insert(chunk).onConflict(['kind', 'source_key']).merge({ last_seen_at: db.fn.now() });
+    await db('restaurant_prospects').insert(chunk).onConflict(['kind', 'source_key'])
+      .merge({ last_seen_at: db.fn.now(), detail: db.raw(FILL_DETAIL_SQL) });
     n += chunk.length;
   }
   return n;
@@ -390,9 +435,14 @@ async function pendingInspections({ cutoff, limit }) {
     .where('event_date', '>=', cutoff)
     .orderBy('event_date', 'desc')
     .limit(limit)
-    .select('id', 'license_id', 'source_key', db.raw("detail->>'violation35' AS violation35"));
-  // violation35 is null for a row stored before the count was kept.
-  return rows.map((row) => ({ ...row, violation35: wholeNumber(row.violation35) }));
+    .select(
+      'id', 'license_id', 'source_key',
+      db.raw("detail->>'violation35' AS violation35"),
+      db.raw(`detail->>'visitNumber' AS "visitNumber"`),
+      db.raw(`to_char(event_date, 'YYYY-MM-DD') AS "visitDate"`),
+    );
+  // violation35 and visitNumber are null on a row stored before they were kept, until a re-read fills them.
+  return rows.map((row) => ({ ...row, violation35: wholeNumber(row.violation35), visitNumber: wholeNumber(row.visitNumber) }));
 }
 
 async function saveReport(id, report) {
@@ -609,7 +659,9 @@ async function readOneReport(row, deps) {
   const url = reportUrl(row.source_key, row.license_id);
   if (!url) return null;
   try {
-    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS), { cited35: row.violation35 });
+    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS), {
+      cited35: row.violation35, visitDate: row.visitDate, visitNumber: row.visitNumber,
+    });
   } catch {
     return null;
   }
