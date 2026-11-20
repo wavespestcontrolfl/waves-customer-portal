@@ -152,7 +152,7 @@ describe('CareersOfferPage — open state', () => {
   it('posts the text consent choice and puts the box back when saving fails', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
-      .mockResolvedValueOnce(jsonResponse({ textConsent: true }))
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' }))
       .mockResolvedValueOnce(jsonResponse({ error: 'Try later' }, 400));
     globalThis.fetch = fetchMock;
     renderPage();
@@ -229,7 +229,7 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockRejectedValueOnce(new Error('offline')) // POST consent true: reply lost
       .mockRejectedValueOnce(new Error('offline')) // the read fails
-      .mockResolvedValueOnce(jsonResponse({ textConsent: true })); // Try again: the same choice, saved
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' })); // Try again: the same choice, saved
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -248,7 +248,7 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
       .mockRejectedValueOnce(new Error('offline')) // POST consent false: reply lost
       .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true }))) // the read: the lost save has not landed yet
-      .mockResolvedValueOnce(jsonResponse({ textConsent: false })); // Try again: the same choice, saved
+      .mockResolvedValueOnce(jsonResponse({ textConsent: false, version: '2026-12-11T15:21:00.000Z' })); // Try again: the same choice, saved
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -285,6 +285,49 @@ describe('CareersOfferPage — open state', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(bodyOf(fetchMock, 1)).toEqual({ consent: true, version: VERSION });
     expect(bodyOf(fetchMock, 2)).toEqual({ consent: false, version: '2026-12-11T15:21:00.000Z' });
+  });
+
+  // A server from before the version answers a save with the choice only. The
+  // page must not lose its version (a signature without one skips the check),
+  // so it reads the offer and signs with the version that read carries.
+  it('reads the offer when a text choice is saved without a version, and signs with the version of that read', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true })) // saved, no version
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: '2026-12-11T15:25:00.000Z' })))
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' }));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(fetchMock.mock.calls[2][1]).toBeUndefined(); // a read, not a write
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText(/You signed this offer/)).toBeInTheDocument();
+    expect(bodyOf(fetchMock, 3)).toEqual({ signedName: 'Jordan Rivera', version: '2026-12-11T15:25:00.000Z' });
+  });
+
+  it('keeps signing locked when the read after a save without a version has no version either', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true })) // saved, no version
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: undefined })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('shows the load error, not the offer, when the open offer read has no version', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined })));
+    renderPage();
+    expect(await screen.findByText(/load that offer link/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
   });
 
   // An applicant who unticks the box must not sign believing texts are off
@@ -637,7 +680,7 @@ describe('CareersOfferPage — open state', () => {
       .mockRejectedValueOnce(new Error('offline')) // POST consent true: reply lost
       .mockRejectedValueOnce(new Error('offline')) // the read fails
       .mockResolvedValueOnce(jsonResponse({ error: 'Too many requests, please try again shortly.' }, 429)) // the resend is refused
-      .mockResolvedValueOnce(jsonResponse({ textConsent: true })); // the next resend is saved
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' })); // the next resend is saved
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -679,7 +722,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     await waitFor(() => expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled());
-    finish(jsonResponse({ textConsent: false }));
+    finish(jsonResponse({ textConsent: false, version: '2026-12-11T15:21:00.000Z' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
   });

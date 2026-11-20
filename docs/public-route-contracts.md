@@ -8657,9 +8657,14 @@ every character a reader does not see dropped, so a link or a copy split by mark
 breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
 every piece: the marker in the first unit, nothing in the rest, the tags kept. A copy is looked for at every stage of
 decoding, as typed and after each step of each pass, since a step can use up part of a token (a `%` before two of its
-hex digits) while the stored text still shows it whole. Decoding stops after four passes; a unit
+hex digits) while the stored text still shows it whole; each unit is also decoded with the characters a reader does not
+see dropped first, so an escape split by one of them (a space in a quoted value) decodes. The run-together text is also
+decoded as a whole, case kept (so `&ZeroWidthSpace;` decodes), so an escape split by a tag or a line break, in the
+route word or in the token, decodes as a reader who puts the pieces together decodes it; each decoded piece keeps the
+units it came from, and a token found there is hidden in each of them. Decoding stops after four passes; a unit
 that would still decode further may hide a route word, so it is hidden whole, and in such a text so is every unit that
-a run of 64 or more hex touches in the joined reading. Tags are found in one pass over the text, so malformed markup
+a run of 64 or more hex touches in the joined reading. Run-together text that would still decode further fails closed
+the same way: every unit holding part of an escape still undecoded is hidden, as is every unit such a hex run touches. Tags are found in one pass over the text, so malformed markup
 costs time in proportion to its length. Tokens are found, and put in source order, in one pass over each run of hex,
 so many links in one text, or in one unit, also cost time in proportion to its length. The
 service worker never handles an offer page, in any request mode (`client/public/sw.js` `isOfferLinkPath`: the path,
@@ -8694,7 +8699,9 @@ version}` (trimmed,
 (<= 500), version}` -> `{state:'declined'}`. Each answer carries the `version` the page shows, the text choice included,
 and a change since then (another tab's text choice) answers the same 409 `{state:'open'}` with no write, so a signature,
 a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is the
-contract before it and is answered as before, with no version check; the page always sends one. Each acts only from state `open`; any
+contract before it and is answered as before, with no version check; the page always sends one. The page never
+applies an open read or a text-choice save without a `version` (a server from before it): such a read counts as failed,
+and such a save is checked with a read, so signing stays locked until a read carries a version. Each acts only from state `open`; any
 other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter
 case, answers 200 with the stored signature and a replay mark, `{state:'signed', signedAt, signedName, replay: true}`:
 it signs nothing, so the page names the signer and never says "You signed"). The page tells an answer in the first

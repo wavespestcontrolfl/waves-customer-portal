@@ -38,7 +38,13 @@
  *   stay, so the bare marker never forms the hidden link the replay rebuilds.
  * - A copy is looked for at every stage of decoding, not only at its end: as typed, and after the character references
  *   and the percent escapes of each pass. A step can use up part of a token (a "%" or "&#" before some of its hex
- *   digits), while the stored text still shows it whole.
+ *   digits), while the stored text still shows it whole. Each unit is also decoded after the characters a reader does
+ *   not see are dropped, so an escape split by one of them (a space in a quoted value) decodes too.
+ * - The joined text is also decoded as a whole, with its case kept (so a named reference such as &ZeroWidthSpace;
+ *   decodes), as a reader who puts the pieces together decodes it: an escape split by a tag or a line break, in the
+ *   route word or in the token, decodes there. Each decoded piece keeps where it came from, so a token found there is
+ *   hidden in every unit it came from. Joined text still encoded after four passes fails closed: every unit that holds
+ *   part of an escape still undecoded is hidden, and so is every unit that a run of 64 or more hex touches.
  * - A unit still encoded after four decoding passes (it may hide a route word or a token): the text fails closed. That
  *   unit is replaced as a whole by the bare marker, and so is every unit that a run of 64 or more hex touches in the
  *   joined reading, split as above.
@@ -117,15 +123,22 @@ const DECODE_PASSES = 4;
 // decoded from a character reference, controls, format and other default-ignorable characters, the blank braille
 // pattern).
 const compact = (seen) => seen.replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '');
-// Text as a reader reads it: full-width forms folded, tabs, line breaks and format characters dropped, backslashes as
-// slashes, lowercase.
-const seenOf = (text) => text.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/').toLowerCase();
+// Text as a reader reads it, case kept: full-width forms folded, tabs, line breaks and format characters dropped,
+// backslashes as slashes. Case is kept until decoding is done, since a named character reference (&Tab;) needs it.
+const typedOf = (text) => text.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/');
+// Text as a reader reads it: as typedOf, lowercase.
+const seenOf = (text) => typedOf(text).toLowerCase();
+// What one decoding step replaces: a character reference, or a run of percent escapes.
+const REFERENCE_RE = /&(?:#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]*);?/gi;
+const ESCAPES_RE = /(?:%[0-9a-f]{2})+/gi;
 
 // The unit as a browser or a reader resolves it. Decoding repeats, so a double-encoded spelling resolves too, up to
 // DECODE_PASSES. `undecided`: the reading would still decode further, so it may hide a route word (see scan).
 // `stages`: every text a person can read on the way, run together: as typed, then after the character references and
 // after the percent escapes of each pass. A step can use up part of a token (a "%" before two of its hex digits), so
-// a copy is looked for at every stage, not only in the last one.
+// a copy is looked for at every stage, not only in the last one. The first `depth` stages are those of the unit as
+// typed; the rest decode it after the characters a reader does not see are dropped (an escape split by a space in a
+// quoted value, or by a blank braille pattern).
 function reading(unit) {
   const stages = [compact(seenOf(unit))];
   const add = (text) => {
@@ -141,8 +154,18 @@ function reading(unit) {
     if (next === out) break;
     out = next;
   }
+  const depth = stages.length;
+  let joined = decodable(stages[0]) ? compact(typedOf(unit)) : '';
+  for (let pass = 0; pass < DECODE_PASSES && decodable(joined); pass += 1) {
+    const html = compact(typedOf(decodeHTML(joined)));
+    add(html);
+    const next = compact(typedOf(html.replace(ESCAPES_RE, percentDecode)));
+    add(next);
+    if (next === joined) break;
+    joined = next;
+  }
   const seen = seenOf(out);
-  return { seen, stages, undecided: decodable(seen) && decodeOnce(seen) !== seen };
+  return { seen, stages, depth, undecided: decodable(seen) && decodeOnce(seen) !== seen };
 }
 const readable = (unit) => reading(unit).seen;
 
@@ -215,34 +238,133 @@ function unitsOf(text) {
   let t = 0;
   return [...text.matchAll(UNIT_RE)].map((m) => {
     while (t < tags.length && tags[t][1] <= m.index) t += 1;
-    const { seen, stages, undecided } = reading(m[0]);
-    return { text: m[0], at: m.index, seen, flat: compact(seen), stages, undecided, inTag: t < tags.length && tags[t][0] <= m.index };
+    const { seen, stages, depth, undecided } = reading(m[0]);
+    return { text: m[0], at: m.index, seen, flat: compact(seen), stages, depth, undecided, inTag: t < tags.length && tags[t][0] <= m.index };
   });
+}
+
+// Units run together; each span says where a unit's part starts and ends in the text.
+function viewOf(list, part) {
+  let text = '';
+  const spans = list.map((u) => {
+    const start = text.length;
+    text += part(u);
+    return { u, start, end: text.length };
+  });
+  return { text, spans };
+}
+
+const DECODE_STEPS = [[REFERENCE_RE, decodeHTML], [ESCAPES_RE, percentDecode]];
+
+// One decoding step over joined text that keeps where each piece of the result came from: a run kept as it was maps
+// character by character, a decoded run maps as a whole to the escape it came from. Each decoded run reads as a
+// reader reads it, case kept (typedOf, compact).
+function trackedStep(text, re, decode) {
+  const pieces = [];
+  let out = '';
+  let last = 0;
+  const keepTo = (end) => {
+    if (end <= last) return;
+    pieces.push({ at: out.length, len: end - last, from: last, to: end, kept: true });
+    out += text.slice(last, end);
+  };
+  for (const m of text.matchAll(re)) {
+    keepTo(m.index);
+    const decoded = compact(typedOf(decode(m[0])));
+    pieces.push({ at: out.length, len: decoded.length, from: m.index, to: m.index + m[0].length, kept: false });
+    out += decoded;
+    last = m.index + m[0].length;
+  }
+  keepTo(text.length);
+  return { text: out, pieces };
+}
+
+// The stretch of the text before a step that [start, end) of the text after it came from.
+function backThrough(pieces, [start, end]) {
+  let lo = 0;
+  let hi = pieces.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (pieces[mid].at + pieces[mid].len <= start) lo = mid + 1;
+    else hi = mid;
+  }
+  let from = Infinity;
+  let to = -Infinity;
+  for (let k = lo; k < pieces.length && pieces[k].at < end; k += 1) {
+    const p = pieces[k];
+    from = Math.min(from, p.kept ? p.from + Math.max(0, start - p.at) : p.from);
+    to = Math.max(to, p.kept ? p.from + Math.min(p.len, end - p.at) : p.to);
+  }
+  return from === Infinity ? [start, end] : [from, to];
+}
+
+// Lowercase for reading; only A to Z change, so each place in a view is the same place in the text it reads. A route
+// word and a token are ASCII.
+const lowerAscii = (text) => text.replace(/[A-Z]+/g, (run) => run.toLowerCase());
+
+// Joined text (case kept) decoded as a whole, as a reader who puts the pieces together decodes it, so an escape split
+// by a tag or a line break decodes too. Each step that changes the text gives a view whose `back` maps a stretch of
+// it to the stretch of the joined text it came from. `pending`: for each escape still undecoded after the budget, the
+// units it comes from.
+function decodedViews(raw) {
+  const views = [];
+  const steps = [];
+  const backOf = (chain) => (from, to) => chain.reduceRight((range, pieces) => backThrough(pieces, range), [from, to]);
+  let text = raw.text;
+  for (let pass = 0; pass < DECODE_PASSES && decodable(text); pass += 1) {
+    const before = text;
+    for (const [re, decode] of DECODE_STEPS) {
+      const step = trackedStep(text, re, decode);
+      if (step.text !== text) {
+        steps.push(step.pieces);
+        text = step.text;
+        views.push({ text: lowerAscii(text), spans: raw.spans, back: backOf(steps.slice()) });
+      }
+    }
+    if (text === before) break;
+  }
+  const pending = [];
+  if (decodable(text)) {
+    const back = backOf(steps);
+    for (const [re, decode] of DECODE_STEPS) {
+      for (const m of text.matchAll(re)) {
+        if (decode(m[0]) !== m[0]) pending.push(overlapping(raw.spans, ...back(m.index, m.index + m[0].length)));
+      }
+    }
+  }
+  return { views, pending };
 }
 
 // The units' compact reader text run together, with nothing between them, so a link or a token split by markup or by
 // anything invisible reads as one: once with every unit (plain text), once with the units outside tags only (an email
 // as it shows). Each is read at the end of decoding and at each stage on the way (a unit past its last stage stays
-// at it); a view the same as one before is read once. Each view keeps where each unit's text starts and ends in it.
+// at it; a view the same as one before is read once), and the joined text as typed is also decoded as a whole
+// (decodedViews). `undecided`: the joined text would still decode after the budget; `pending` says where.
 function joinedViews(units) {
-  const depth = units.reduce((most, u) => Math.max(most, u.stages.length), 1);
+  const depth = units.reduce((most, u) => Math.max(most, u.depth), 1);
   const views = [];
   const seenTexts = new Set();
+  const pending = [];
+  const typed = new Map();
+  const typedPart = (u) => {
+    if (!typed.has(u)) typed.set(u, compact(typedOf(u.text)));
+    return typed.get(u);
+  };
   for (const list of [units, units.filter((u) => !u.inTag)]) {
     for (let k = -1; k < depth; k += 1) {
-      let text = '';
-      const spans = list.map((u) => {
-        const start = text.length;
-        text += k < 0 ? u.flat : u.stages[Math.min(k, u.stages.length - 1)];
-        return { u, start, end: text.length };
-      });
-      if (!seenTexts.has(text)) {
-        seenTexts.add(text);
-        views.push({ text, spans });
+      const view = viewOf(list, (u) => (k < 0 ? u.flat : u.stages[Math.min(k, u.depth - 1)]));
+      if (!seenTexts.has(view.text)) {
+        seenTexts.add(view.text);
+        views.push(view);
       }
     }
+    if (list.some((u) => decodable(u.stages[0]))) {
+      const decoded = decodedViews(viewOf(list, typedPart));
+      for (const view of decoded.views) views.push(view);
+      for (const parts of decoded.pending) pending.push(parts);
+    }
   }
-  return views;
+  return { views, pending, undecided: pending.length > 0 };
 }
 
 function joinedTokens({ text }) {
@@ -284,14 +406,22 @@ function markParts(marks, parts) {
   });
 }
 
+// The units that a stretch of a view covers (a decoded view maps the stretch back to the joined text first).
+function unitsIn(view, from, to) {
+  const [start, end] = view.back ? view.back(from, to) : [from, to];
+  return overlapping(view.spans, start, end);
+}
+
 // Each found token split over several units of a view is marked. A token whole inside one unit is left to that unit's
-// own reading.
+// own reading, unless only the joined text decoded as a whole shows it there.
 function splitMarks(views, linked) {
   const marks = new Map();
-  for (const { text, spans } of views) {
-    for (const at of foundAt(text, linked)) {
-      const parts = overlapping(spans, at, at + 64);
-      if (parts.length > 1) markParts(marks, parts);
+  for (const view of views) {
+    for (const at of foundAt(view.text, linked)) {
+      const parts = unitsIn(view, at, at + 64);
+      const token = view.text.slice(at, at + 64);
+      const ownReading = parts.length === 1 && (!view.back || parts[0].u.stages.some((flat) => flat.includes(token)));
+      if (parts.length && !ownReading) markParts(marks, parts);
     }
   }
   return marks;
@@ -324,14 +454,14 @@ function storedUnit(u, mark, linked, tokens) {
 
 // What a text holds that makes copies hidden: the tokens on an offer path anywhere in it, unit by unit and in the
 // joined views, and whether any unit is past the decoding budget.
-function findingsOf(units, views) {
+function findingsOf(units, joined) {
   const linked = new Set();
   for (const u of units) {
     for (const match of u.text.matchAll(SENT_LINK_RE)) linked.add(match[2].toLowerCase());
     for (const token of offerTokensOf(u.text, u.seen)) linked.add(token);
   }
-  for (const view of views) for (const token of joinedTokens(view)) linked.add(token);
-  return { linked, undecided: units.some((u) => u.undecided) };
+  for (const view of joined.views) for (const token of joinedTokens(view)) linked.add(token);
+  return { linked, undecided: joined.undecided || units.some((u) => u.undecided) };
 }
 
 const NO_FINDINGS = { linked: new Set(), undecided: false };
@@ -340,18 +470,20 @@ const NO_FINDINGS = { linked: new Set(), undecided: false };
 // unit, so each hidden link and its token keep the same order for redaction and for pinning.
 function scan(text, shared = NO_FINDINGS) {
   const units = unitsOf(text);
-  const views = joinedViews(units);
-  const own = findingsOf(units, views);
+  const joined = joinedViews(units);
+  const own = findingsOf(units, joined);
   const linked = new Set([...own.linked, ...shared.linked]);
   const undecided = own.undecided || shared.undecided;
   if (!linked.size && !undecided) return { redacted: text, tokens: [] };
-  const marks = splitMarks(views, linked);
-  // A unit still encoded past the decoding budget may hide a route word, so such a text fails closed: that unit is
-  // hidden whole (storedUnit), and so is every unit that a run of 64 or more hex touches in either view.
+  const marks = splitMarks(joined.views, linked);
+  // A unit (or the joined text) still encoded past the decoding budget may hide a route word, so such a text fails
+  // closed: that unit is hidden whole (storedUnit), and so is every unit that a run of 64 or more hex touches in any
+  // view, and every unit that holds part of an escape the joined text still has after the budget.
   if (undecided) {
-    for (const { text: joined, spans } of views) {
-      for (const m of joined.matchAll(/[0-9a-f]{64,}/g)) markParts(marks, overlapping(spans, m.index, m.index + m[0].length));
+    for (const view of joined.views) {
+      for (const m of view.text.matchAll(/[0-9a-f]{64,}/g)) markParts(marks, unitsIn(view, m.index, m.index + m[0].length));
     }
+    for (const parts of joined.pending) markParts(marks, parts);
   }
   const tokens = [];
   let redacted = '';

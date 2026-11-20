@@ -393,8 +393,9 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
       await confirm();
       return;
     }
-    if (res.status >= 500) {
-      // A gateway error can arrive after the write committed: ask the server.
+    if (res.status >= 500 || (res.ok && !hasVersion(res.body))) {
+      // A gateway error can arrive after the write committed, and a save whose
+      // reply has no version leaves the page without one: ask the server.
       lostSave.current = true;
       await confirm();
       return;
@@ -775,6 +776,13 @@ const CLOSED_STATES = ['expired', 'withdrawn', 'superseded'];
 const isClosedAnswer = (body) => Boolean(body) && CLOSED_STATES.includes(body.state) && typeof body.message === 'string';
 const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 
+// Every applicant write carries the offer's version (server/services/job-offers.js
+// changedSince). An open offer read, or a text-choice save, that does not carry
+// one (a server from before the version) is never applied, so the page's
+// version is never lost: the read counts as failed, and the save is checked
+// with a read. Signing stays locked until a read carries a version.
+const hasVersion = (body) => typeof body?.version === 'string' && body.version.length > 0;
+
 async function readOffer(token) {
   const res = token ? await fetch(offerUrl(token)) : { status: 404 };
   if (res.status === 404) {
@@ -783,7 +791,9 @@ async function readOffer(token) {
     throw err;
   }
   if (!res.ok) throw new Error('temporary');
-  return res.json();
+  const body = await res.json();
+  if (body?.state === 'open' && !hasVersion(body)) throw new Error('temporary');
+  return body;
 }
 
 // Keyed by token so a pending write for one link can never land on another.

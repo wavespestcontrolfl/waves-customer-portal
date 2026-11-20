@@ -356,6 +356,60 @@ describe('a copy is looked for at every stage of decoding', () => {
   });
 });
 
+describe('the joined text is decoded as a whole', () => {
+  // An escape split by a tag or a line break decodes only once a reader puts the pieces together. Each case keeps the
+  // token on the round 29 code, which decoded each unit alone.
+  const token = createHash('sha256').update('joined escape').digest('hex');
+  const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+  const hiddenLink = portalUrl('/careers/offer/[link hidden]');
+  const escaped = `%${token.charCodeAt(20).toString(16)}`; // the token's 21st character as a percent escape
+  const head = `${token.slice(0, 20)}${escaped.slice(0, 2)}`;
+  const tail = `${escaped.slice(2)}${token.slice(21)}`;
+
+  test.each([
+    ['the route word split inside an escape by a tag', `<p>Open https://portal.wavespestcontrol.com/careers/off%6<wbr>5r/${token}</p>`,
+      '<p>Open https://portal.wavespestcontrol.com/careers/off%6<wbr>[link hidden]</p>'],
+    ['the route word split inside an escape by a line break', `Open https://portal.wavespestcontrol.com/careers/off%6\n5r/${token} today`,
+      'Open https://portal.wavespestcontrol.com/careers/off%6\n[link hidden] today'],
+    ['the route word split inside a named reference by a tag (decoded with its case kept)', `<p>/care&Zero<wbr>WidthSpace;ers/offer/${token}</p>`,
+      '<p>/care&Zero<wbr>[link hidden]</p>'],
+    ['the token split inside an escape by a tag', `<p>Code: /careers/offer/${head}<b></b>${tail}</p>`, '<p>Code: [link hidden]<b></b></p>'],
+  ])('%s: the token is hidden', (label, text, stored) => {
+    expect(redactOfferLinks(text)).toBe(stored);
+  });
+
+  test.each([
+    ['a line break', `${head}\n${tail}`, '[link hidden]\n'],
+    ['a blank braille pattern', `${head}⠀${tail}`, '[link hidden]'],
+  ])('a copy split inside an escape by %s is hidden, alone and in a record', (label, copy, hidden) => {
+    expect(redactOfferLinks(`Read ${link} or code ${copy}`)).toBe(`Read ${hiddenLink} or code ${hidden}`);
+    expect(redactOfferLinksTogether([`Your code ${copy}`, `<a href="${link}">Read</a>`])[0]).toBe(`Your code ${hidden}`);
+  });
+
+  test("a copy split inside an escape by a space in the link's own quoted value is hidden", () => {
+    expect(redactOfferLinks(`<a href="${link}?c=${head} ${tail}">Read</a>`)).toBe(`<a href="${hiddenLink}">Read</a>`);
+  });
+
+  test('joined text still encoded after four passes fails closed', () => {
+    // Every character of the path escaped, then each "%" escaped four more times (five levels), and each escape split
+    // by a tag after "%2", so no unit alone holds a whole escape.
+    let deep = [...`/careers/offer/${token}`].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+    for (let level = 0; level < 4; level += 1) deep = deep.replace(/%/g, '%25');
+    const stored = redactOfferLinks(`<p>Code ${deep.replace(/%2/g, '%2<wbr>')}</p>`);
+    let read = stored.replace(/<[^>]*>/g, '').replace(/\s/g, '');
+    for (let pass = 0; pass < 8; pass += 1) {
+      read = decodeHTML(read).replace(/(?:%[0-9a-f]{2})+/gi, (m) => { try { return decodeURIComponent(m); } catch { return m; } });
+    }
+    expect(read.toLowerCase()).not.toContain(token);
+    expect(stored.startsWith('<p>Code [link hidden]<wbr>')).toBe(true);
+  });
+
+  test('a text with split escapes and no offer link comes back unchanged', () => {
+    const text = '<p>Fees: 5%&nbsp;off &amp; more, %41 &Tab; x, a%2<wbr>Fb and /care&Zero<wbr>WidthSpace;ers/jobs</p>';
+    expect(redactOfferLinks(text)).toBe(text);
+  });
+});
+
 describe('malformed markup', () => {
   const token = createHash('sha256').update('malformed markup').digest('hex');
   test.each([
