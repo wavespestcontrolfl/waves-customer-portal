@@ -8736,8 +8736,9 @@ that gate is dark the confirmation is skipped entirely (byte-identical to
 before the lane); it is never a blocking part of the request either way.
 Treat the gate, the limiters, the no-customer/no-lead rule, and the
 fire-and-forget-only comms contract as security-critical.)
-`/api/public/careers/offer/:token` (GET; `/offer/:token/text-consent`, `/offer/:token/accept`,
-`/offer/:token/date-request` and `/offer/:token/decline`, all POST — the applicant's private job offer
+`/api/public/careers/offer/:token` (GET; `/offer/:token/v2/text-consent`, `/offer/:token/v2/accept`,
+`/offer/:token/v2/date-request` and `/offer/:token/v2/decline`, all POST, each also without `/v2` — the applicant's
+private job offer
 (`services/job-offers.js`), gated `GATE_JOB_OFFERS` ALONE: 404 `{error:'Not found'}` for the WHOLE `/offer/*`
 family before even the limiter runs, and `index.js` carves `/offer` out of the `jobApplications` intake gate so a
 sent offer keeps working if intake closes). The token is `job_offers.token`, 64 lowercase hex (32 random bytes set
@@ -8810,19 +8811,40 @@ GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` ->
 `version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with
 no write, and a change made from any other version answers 409 `{state:'open'}`, so a save that lands late (its reply
 was lost and the page saved the same choice again) cannot undo a later choice (on that 409 the page reads the offer,
-shows the stored choice and says "That did not go through. Please try again."; when that read fails, the page stays
-locked, and the read Try again makes says the same when the stored choice is not the refused one); `accept {signedName,
+shows the stored choice and says "That did not go through. Please try again." only when that read stores another
+choice: the 409 refuses this request, and an earlier save of the same choice whose reply was lost may have landed;
+when that read fails, the page locks every answer until Check again reads the offer, and that read decides the line); `accept {signedName,
 version}` (trimmed,
 3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
 'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500), version}` -> `{state:'date_requested'}`; `decline {reason?
 (<= 500), version}` -> `{state:'declined'}`. Each answer carries the `version` the page shows, the text choice included,
 and a change since then (another tab's text choice) answers the same 409 `{state:'open'}` with no write, so a signature,
-a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is the
-contract before it and is answered as before, with no version check; the page always sends one. The page never
-applies an open read or a text-choice save without a `version` (a server from before it): such a read counts as failed,
-and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
-controls only for a read whose state is explicitly `open` and that carries the text choice and non-empty Terms; a read
-with no known state, or an open read without those, also counts as failed, and an
+a date request or a decline never fixes a text choice the applicant did not see. A body without `version` writes
+nothing: an answer that would write is refused the same way (409 `{state:'open'}`), and the two answers that write
+nothing either way (a text choice equal to the stored one, an identical replay of a signature) answer as they do for
+any resend, so no write skips the check; the page always sends one. The page posts its answers under `/v2`: a server
+from before the version (#8012) has only the paths without `/v2`, whose handlers ignore it, so in a mixed deploy or a
+rollback a page that read a version never posts an answer to a handler that ignores it. That post answers 404 and
+writes nothing, and the page reads the offer before it calls the link dead: a 404 read shows the dead link, and an
+open read keeps the offer and marks the page out of date. So does a read from a server that does not match the page
+(an open offer without its version, or a state the page does not know), the first read included, and every later read
+whatever asked for it (the text choice's check after a lost reply too): reading again gets the same answer. Out of date, the page locks every answer and says "This page is out of date. Please reload it and try
+again." with a "Reload page" button, shown only while no send is in flight or lost (a reload would drop a send whose
+outcome is not known). When the read after a refusal fails, the page locks every answer, and its Check again reads with
+that refusal's status, so a 404 still counts. After a lost reply, a resend's 404 does not mark the page: that send may
+still land on a server that has the route, so its resend stays the only action, and its banner adds "If this keeps
+happening, call us at (941) 297-5749 and we will check it for you." The line stays until that send has a definite
+answer, through resends that fail again. An open read missing a term the page
+shows stays a failed read (the load error, or Check again). Here the paths without `/v2` run the same handlers with the same check,
+for a tab that opened the page from before `/v2` (#8091 posts there with its version). A signature is also refused
+the same way (409 `{state:'open'}`, no write, a warning logged) when the frozen offer lacks a term the page shows (the
+job, a real start date, an hourly rate of whole cents, the week, who they report to, pay day, the Terms, and a pay step
+only with both its rate and its date; no raise is both sent as null), so no client signs a gap. The page never
+applies an open read or a text-choice save without a `version` (a server from before it): such a read marks the page out
+of date (above), and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
+controls only for a read whose state is explicitly `open` and that carries the text choice, non-empty Terms and every
+term it shows, each as it shows it (rates in whole cents, no raise only as both step fields null); an open read without those,
+or a read that names no state, counts as failed (a state the page does not know marks the page out of date, above), and an
 action's 200 that does not name its answer (`signed`, `date_requested`, `declined`) is treated as a lost reply: the
 page reads the offer. Each acts only from state `open`; any
 other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter

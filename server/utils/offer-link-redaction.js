@@ -281,16 +281,39 @@ function escapeParts(run) {
   return parts;
 }
 
+// The most characters a named reference decodes from: "&CounterClockwiseContourIntegral;", the longest name.
+const LONGEST_REFERENCE = 33;
+
+// A character reference as the parts it decodes to. REFERENCE_RE takes every letter and digit after "&", but a named
+// reference decodes only as far as decodeHTML knows the name ("&ampabc" is "&amp", then "abc" as typed): that part maps
+// to the reference, and the rest of the match is kept (kept: true), so it maps back one character at a time. A named
+// reference decodes to one to four UTF-16 units, so it ends at one of four places, tried shortest first. A match that
+// decodes to itself is kept whole; a numeric reference takes every digit, so it is the whole match.
+function referenceParts(match) {
+  const decoded = decodeHTML(match);
+  if (decoded === match) return [{ from: 0, to: match.length, kept: true }];
+  const shrink = match.length - decoded.length;
+  const last = Math.min(match.length, shrink + 4, LONGEST_REFERENCE);
+  for (let k = Math.max(2, shrink + 1); match[1] !== '#' && k <= last; k += 1) {
+    const head = decodeHTML(match.slice(0, k));
+    if (head.length === k - shrink && head !== match.slice(0, k) && decoded.startsWith(head) && decoded.endsWith(match.slice(k))) {
+      return k < match.length ? [{ from: 0, to: k, text: head }, { from: k, to: match.length, kept: true }] : [{ from: 0, to: k, text: head }];
+    }
+  }
+  return [{ from: 0, to: match.length, text: decoded }];
+}
+
 // Each step: what it replaces, how a match decodes, and the parts it decodes to (see trackedStep).
 const DECODE_STEPS = [
-  { re: REFERENCE_RE, decode: decodeHTML, parts: (match) => [{ from: 0, to: match.length, text: decodeHTML(match) }] },
+  { re: REFERENCE_RE, decode: decodeHTML, parts: referenceParts },
   { re: ESCAPES_RE, decode: percentDecode, parts: escapeParts },
 ];
 
-// One decoding step over joined text that keeps where each piece of the result came from: a run kept as it was maps
-// character by character, and each decoded part (a character reference, or one character of a run of escapes) to the
-// escape it came from. Decoded parts that read as nothing in a row are one piece, so a long run of them costs one
-// step back. Each decoded part reads as a reader reads it, case kept (typedOf, compact).
+// One decoding step over joined text that keeps where each piece of the result came from: a run kept as it was (the
+// text between matches, or a kept part of a match) maps character by character, and each decoded part (a character
+// reference, or one character of a run of escapes) to the escape it came from. Decoded parts that read as nothing in a
+// row are one piece, so a long run of them costs one step back. Each decoded part reads as a reader reads it, case
+// kept (typedOf, compact).
 function trackedStep(text, { re, parts }) {
   const pieces = [];
   let out = '';
@@ -303,8 +326,13 @@ function trackedStep(text, { re, parts }) {
   for (const m of text.matchAll(re)) {
     keepTo(m.index);
     for (const part of parts(m[0])) {
-      const decoded = compact(typedOf(part.text));
       const from = m.index + part.from;
+      if (part.kept) {
+        last = from;
+        keepTo(m.index + part.to);
+        continue;
+      }
+      const decoded = compact(typedOf(part.text));
       const prev = pieces[pieces.length - 1];
       if (!decoded && prev && !prev.kept && !prev.len && prev.to === from) prev.to = m.index + part.to;
       else pieces.push({ at: out.length, len: decoded.length, from, to: m.index + part.to, kept: false });
@@ -363,9 +391,12 @@ function decodedViews(raw) {
   const pending = [];
   if (decodable(text)) {
     const back = backOf(steps);
-    for (const { re, decode } of DECODE_STEPS) {
+    for (const { re, decode, parts } of DECODE_STEPS) {
       for (const m of text.matchAll(re)) {
-        if (decode(m[0]) !== m[0]) pending.push(overlapping(raw.spans, ...back(m.index, m.index + m[0].length)));
+        if (decode(m[0]) === m[0]) continue;
+        // Only what is still encoded: a named reference's kept letters after it are plain text.
+        const coded = parts(m[0]).filter((part) => !part.kept);
+        pending.push(overlapping(raw.spans, ...back(m.index + coded[0].from, m.index + coded[coded.length - 1].to)));
       }
     }
   }
