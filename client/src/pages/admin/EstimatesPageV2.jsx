@@ -428,6 +428,8 @@ const PIPELINE_AND_RISK_FILTERS = [
   ...PIPELINE_FILTERS,
   ...PRICING_RISK_FILTERS,
 ];
+// The Sent tile's classes (PipelineAnalytics counts the tile the same way).
+const SENT_GROUP_CLASSES = new Set(["awaiting", "follow_up", "scheduled"]);
 function estimateMatchesFilter(e, filter) {
   // Archived-accepted rows ride along in the pipeline fetch for the Won
   // funnel/MRR stats; the Archived tab (its own fetch) is where archived
@@ -437,12 +439,10 @@ function estimateMatchesFilter(e, filter) {
     return e._class === "won" || (!!e.archivedAt && e.status === "accepted");
   if (filter === "drafts")
     return e._class === "needs_estimate" || e._class === "ready_to_send";
+  // The Sent tile's rows: never a self-serve quote nobody delivered, which
+  // is no send.
   if (filter === "sent_group")
-    return (
-      e._class === "awaiting" ||
-      e._class === "follow_up" ||
-      e._class === "scheduled"
-    );
+    return !e.undeliveredSelfServe && SENT_GROUP_CLASSES.has(e._class);
   if (filter === "follow_up_overdue") return isFollowUpOverdueEstimate(e);
   if (filter === "going_cold") return isGoingColdEstimate(e);
   if (Object.hasOwn(CALL_LIST_MATCHERS, filter)) return CALL_LIST_MATCHERS[filter](e);

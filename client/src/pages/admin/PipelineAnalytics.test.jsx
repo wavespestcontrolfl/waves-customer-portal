@@ -626,6 +626,31 @@ describe("PipelineAnalytics", () => {
     expect(onFilterChange).toHaveBeenNthCalledWith(2, "sent_group");
   });
 
+  // A self-serve quote nobody delivered waits under Awaiting Response but is no
+  // send: the Sent tile and its "awaiting" line leave it out (codex pre-push P1).
+  it.each([
+    ["staff quotes (control)", false, { sent: "3", sub: "2 awaiting · 1 viewed · 0 scheduled" }],
+    ["self-serve quotes nobody delivered", true, { sent: "1", sub: "1 awaiting · 0 viewed · 0 scheduled" }],
+  ])("counts %s in the Sent tile", (_label, flagged, expected) => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "staff" }),
+        estimate({ id: "portal-sent", source: "plan_start", undeliveredSelfServe: flagged }),
+        estimate({
+          id: "portal-viewed",
+          status: "viewed",
+          viewedAt: daysAgo(1),
+          source: "plan_restart",
+          undeliveredSelfServe: flagged,
+        }),
+      ],
+    });
+
+    const tile = screen.getByRole("button", { name: /Sent/i });
+    expect(tile).toHaveTextContent(expected.sub);
+    expect(tile.querySelector(".u-nums").textContent).toBe(expected.sent);
+  });
+
   it("clears the active analytics filter", () => {
     const { onFilterChange } = renderAnalytics({
       estimates: kpiFixture(),

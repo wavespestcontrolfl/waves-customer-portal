@@ -143,7 +143,8 @@ export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
 // offer crosses into follow-up-overdue too — so this is the complement slice,
 // disjoint from isFollowUpOverdueEstimate.
 export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== "viewed" || estimate.undeliveredSelfServe) return false;
+  if (estimate?.status !== "viewed" || estimate.undeliveredSelfServe)
+    return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;
   const age = nowMs - last;
@@ -559,7 +560,13 @@ export default function PipelineAnalytics({
     const readyToSend = classified.filter(
       (e) => e._class === "ready_to_send",
     ).length;
-    const awaiting = classified.filter((e) => e._class === "awaiting").length;
+    // The Sent tile counts estimates staff sent: a self-serve quote nobody
+    // delivered (undeliveredSelfServe) stays under Awaiting Response but is
+    // not a send (codex pre-push P1), so the tile, its "awaiting" line and the
+    // sent_group drilldown (EstimatesPageV2) all leave it out.
+    const awaiting = classified.filter(
+      (e) => e._class === "awaiting" && !e.undeliveredSelfServe,
+    ).length;
     const followUp = classified.filter((e) => e._class === "follow_up").length;
     const scheduled = classified.filter((e) => e._class === "scheduled").length;
     // Won = won forever: archiving an accepted estimate (housekeeping)

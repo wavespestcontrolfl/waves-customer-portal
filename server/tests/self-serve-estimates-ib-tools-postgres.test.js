@@ -89,6 +89,9 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
       row('plan_start', 'viewed', delivered(DELIVERED), LATER),
       // An unreadable delivery stamp: sent (dated by sent_at), no view counted, and no cast error.
       row('plan_start', 'viewed', delivered('not a date')),
+      // An empty or JSON-null stamp is no delivery, in SQL and in JavaScript alike (codex pre-push P1).
+      row('plan_start', 'viewed', delivered('')),
+      row('plan_restart', 'viewed', delivered(null)),
     ]);
   }
 
@@ -124,10 +127,11 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     await seed();
     const rows = await trx('estimates as e').where('e.service_interest', SERVICE)
       .select('e.source', 'e.estimate_data', trx.raw(`${undeliveredSelfServeSql('e')} AS flag`));
-    expect(rows).toHaveLength(10);
+    expect(rows).toHaveLength(12);
     for (const row of rows) expect(Boolean(row.flag)).toBe(isUndeliveredSelfServe(row.source, row.estimate_data));
-    // The three undelivered self-serve rows; a source-NULL row and an unreadable stamp are not among them.
-    expect(rows.filter((row) => row.flag)).toHaveLength(3);
+    // The five undelivered self-serve rows (two carry an empty or null stamp); a
+    // source-NULL row and an unreadable stamp are not among them.
+    expect(rows.filter((row) => row.flag)).toHaveLength(5);
   });
 
   test('a suppressed resend never moves a delivered self-serve quote across a reporting boundary (codex pre-push r16 P1)', async () => {
@@ -157,5 +161,34 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(aprilAfter.avg_response_hours).toBe('144.0');
     const sendsAfter = await sends();
     expect([sendsAfter[0] - sendsBefore[0], sendsAfter[1] - sendsBefore[1]]).toEqual([0, 1]);
+  });
+
+  test('a send on the last Eastern evening of a month counts in that month, in any session zone (codex pre-push P1)', async () => {
+    // A naive date string reads in the session's zone; UTC here, so only real Eastern bounds pass.
+    await trx.raw("SET LOCAL TIME ZONE 'UTC'");
+    // 2005-02-01T03:00Z is 10 PM on January 31, Eastern.
+    const LATE = '2005-02-01T03:00:00Z';
+    const funnel = (from, to) => executeDashboardTool('get_estimate_funnel', { date_from: from, date_to: to });
+    const compare = () => executeDashboardTool('compare_periods', {
+      period_a: '2005-02', period_b: '2005-01', metrics: ['estimates_sent', 'estimates_accepted'],
+    });
+    const stages = (out) => [out.funnel.sent, out.funnel.accepted];
+    const months = async () => ({
+      jan: stages(await funnel('2005-01-01', '2005-01-31')),
+      feb: stages(await funnel('2005-02-01', '2005-02-28')),
+      compare: await compare(),
+    });
+    const before = await months();
+    await trx('estimates').insert({
+      id: randomUUID(), customer_id: await insertCustomer(), source: null, status: 'accepted',
+      sent_at: LATE, accepted_at: LATE, service_interest: SERVICE, monthly_total: 50, onetime_total: 0,
+      estimate_data: {},
+    });
+    const after = await months();
+    expect([after.jan[0] - before.jan[0], after.jan[1] - before.jan[1]]).toEqual([1, 1]);
+    expect([after.feb[0] - before.feb[0], after.feb[1] - before.feb[1]]).toEqual([0, 0]);
+    const delta = (period, key) => after.compare[period].metrics[key] - before.compare[period].metrics[key];
+    expect([delta('period_b', 'estimates_sent'), delta('period_b', 'estimates_accepted')]).toEqual([1, 1]);
+    expect([delta('period_a', 'estimates_sent'), delta('period_a', 'estimates_accepted')]).toEqual([0, 0]);
   });
 });

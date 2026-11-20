@@ -83,24 +83,32 @@ test('the funnel\'s viewed stage counts a self-serve quote\'s view only from sta
   recorded.length = 0;
   await executeDashboardTool('get_estimate_funnel', { date_from: '2026-11-01', date_to: '2026-11-19' });
   const { sentAtSql, countableViewAtSql } = require('../services/self-serve-estimates');
-  const stages = recorded.filter((r) => r.method === 'whereRaw' && String(r.args[0]).endsWith(' BETWEEN ? AND ?'));
-  expect(stages.map((r) => r.args[0])).toEqual([
-    `${sentAtSql('e')} BETWEEN ? AND ?`,
-    `${countableViewAtSql('e')} BETWEEN ? AND ?`,
-    'e.accepted_at BETWEEN ? AND ?',
-    'e.declined_at BETWEEN ? AND ?',
+  const inWindow = (sql) => `${sql} >= ? AND ${sql} < ?`;
+  const windows = recorded.filter((r) => r.method === 'whereRaw' && String(r.args[0]).endsWith(' < ?'));
+  expect(windows.map((r) => r.args[0])).toEqual([
+    inWindow(sentAtSql('e')),
+    inWindow(countableViewAtSql('e')),
+    inWindow('e.accepted_at'),
+    inWindow('e.declined_at'),
+    // The response time and the accepted value, by acceptance.
+    inWindow('e.accepted_at'),
+    inWindow('e.accepted_at'),
     // The sent cohort by service, then open follow-ups: both dated by the send.
-    `${sentAtSql('e')} BETWEEN ? AND ?`,
-    `${sentAtSql('e')} BETWEEN ? AND ?`,
+    inWindow(sentAtSql('e')),
+    inWindow(sentAtSql('e')),
   ]);
-  for (const r of stages) expect(r.args[1]).toEqual(['2026-11-01T00:00:00', '2026-11-19T23:59:59']);
+  // Eastern calendar days, half-open (codex pre-push P1): Nov 1 opens at EDT
+  // midnight (DST ends that night) and the window closes at EST midnight Nov 20.
+  for (const r of windows) {
+    expect(r.args[1].map((d) => d.toISOString())).toEqual(['2026-11-01T04:00:00.000Z', '2026-11-20T05:00:00.000Z']);
+  }
   // The raw first-view stamp filters nothing on its own.
   expect(recorded.some((r) => r.method === 'whereBetween' && r.args[0] === 'e.viewed_at')).toBe(false);
 });
 
 test('every estimates query dated by the send reads sentAtSql, never the sent_at a suppressed resend rewrites (codex pre-push r16 P1)', async () => {
   const { sentAtSql } = require('../services/self-serve-estimates');
-  const sendDated = `${sentAtSql('e')} BETWEEN ? AND ?`;
+  const sendDated = `${sentAtSql('e')} >= ? AND ${sentAtSql('e')} < ?`;
   const rawSentAt = () => recorded.filter((r) => String(r.table).includes('estimates')
     && ['whereNotNull', 'whereBetween'].includes(r.method) && r.args[0] === 'e.sent_at');
 
@@ -116,4 +124,32 @@ test('every estimates query dated by the send reads sentAtSql, never the sent_at
   await executeDashboardTool('compare_periods', { period_a: 'this_month', period_b: 'last_month', metrics: ['estimates_sent'] });
   expect(rawSentAt()).toEqual([]);
   expect(recorded.filter((r) => r.method === 'whereRaw' && r.args[0] === sendDated).length).toBe(2);
+});
+
+test('compare_periods dates estimate events by Eastern calendar day and churn by its DATE; a day that does not exist is an error, not a query (codex pre-push P1)', async () => {
+  const { sentAtSql } = require('../services/self-serve-estimates');
+  recorded.length = 0;
+  const out = await executeDashboardTool('compare_periods', {
+    period_a: '2026-11', period_b: '2026-10', metrics: ['estimates_sent', 'estimates_accepted', 'churn'],
+  });
+  expect(out.error).toBeUndefined();
+  const windows = (sql) => recorded.filter((r) => r.method === 'whereRaw' && r.args[0] === `${sql} >= ? AND ${sql} < ?`)
+    .map((r) => r.args[1].map((d) => d.toISOString())).sort();
+  const OCT = ['2026-10-01T04:00:00.000Z', '2026-11-01T04:00:00.000Z'];
+  const NOV = ['2026-11-01T04:00:00.000Z', '2026-12-01T05:00:00.000Z'];
+  expect(windows(sentAtSql('e'))).toEqual([OCT, NOV]);
+  expect(windows('e.accepted_at')).toEqual([OCT, NOV]);
+  // churned_at is a DATE: its bounds stay the calendar strings.
+  const churn = recorded.filter((r) => r.method === 'whereRaw' && String(r.args[0]).startsWith('COALESCE(c.churned_at'))
+    .map((r) => r.args[1]).sort();
+  expect(churn).toEqual([['2026-10-01T00:00:00', '2026-10-31T23:59:59'], ['2026-11-01T00:00:00', '2026-11-30T23:59:59']]);
+
+  recorded.length = 0;
+  expect(await executeDashboardTool('compare_periods', { period_a: 'last_year', period_b: 'this_month' }))
+    .toEqual({ error: expect.stringContaining('Unknown period "last_year"') });
+  expect(await executeDashboardTool('get_estimate_funnel', { date_from: '2026-02-30', date_to: '2026-03-01' }))
+    .toEqual({ error: 'date_from and date_to must be real YYYY-MM-DD dates' });
+  expect(await executeDashboardTool('get_estimate_funnel', { date_from: '2026-03-02', date_to: '2026-03-01' }))
+    .toEqual({ error: 'date_from must be on or before date_to' });
+  expect(recorded).toEqual([]);
 });

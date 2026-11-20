@@ -361,6 +361,20 @@ it.each([
   expect(await screen.findByText(`Action Required (${counts.action})`)).toBeInTheDocument();
 });
 
+// The Sent tile and its rows agree (codex pre-push P1): a self-serve quote nobody delivered is no
+// send, so the tile's drilldown leaves it out. The same row unflagged is the control.
+it.each([
+  ["a staff quote (control)", false],
+  ["a self-serve quote nobody delivered", true],
+])("%s viewed 3 days ago: the Sent tile's rows", async (_label, flagged) => {
+  listRows = [...ROWS, viewed("ss-1", "Portal Quote", 3 * DAY, { source: "plan_start", undeliveredSelfServe: flagged })];
+  const { container } = renderPage();
+  await screen.findByText("Portal Quote");
+  fireEvent.click(screen.getByRole("button", { name: /^Sent/ }));
+  const sentRows = ["v-1h", "v-5h", "v-30h", "v-called", "v-cold", ...(flagged ? [] : ["ss-1"])];
+  await waitFor(() => expect([...rowIds(container)].sort()).toEqual([...sentRows].sort()));
+});
+
 // The click-to-call answers before the customer picks up, so the answered-call proof (lastCalledAt)
 // lands only after the call ends: after a call from Call today the page re-reads the list once a
 // minute until the offer leaves Call today, for at most 15 minutes.
