@@ -302,13 +302,15 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
 // ── The one "may this nudge still go out" predicate ─────────────────────────
 // Every last step before a follow-up reaches a customer asks THIS, so the rule
 // cannot drift per path: the email provider handoff (every stage, the engine
-// included) calls followupMayStillSend; the deferred-text replay calls
+// included) and the text's pre-dispatch check (sendCustomerMessage
+// preDispatchCheck) call followupMayStillSend; the deferred-text replay calls
 // followupFinalVerdict (below) and the same checkout lookup through safetyGate.
 // Stored-copy email retries are not a path: follow-up emails are excluded from
 // them (constants/email-replay-exclusions.js).
 const OPEN_STATUSES = new Set(["sent", "viewed"]);
 // The "sent, never opened" reminders: moot for good once the estimate is opened.
-const UNOPENED_STAGES = new Set(["unviewed", "engage_delivery_unopened_24h"]);
+// The engine's stage is `engage_${rule_key}`.
+const UNOPENED_STAGES = new Set(["unviewed", "engage_delivery_unopened_24h", "engage_expiring_never_viewed"]);
 // The stages whose copy quotes the estimate's deadline.
 function quotesDeadline(stage) {
   return stage === "expiring" || String(stage || "").startsWith("engage_expiring");
@@ -336,17 +338,25 @@ function followupFinalVerdict(est, { stage = null, quotedExpiresAt = null, nowMs
 
 // Re-reads the estimate at the moment of dispatch: { ok: true }, or { ok: false,
 // reason, final } where final=false is a wait (checkout active, retryAt set) and
-// final=true is a final no. A failed row read throws; the caller decides what
-// an unreadable state means (the email handoff makes it a retryable non-send).
-async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, conn = db, nowMs = Date.now() } = {}) {
-  const est = await conn("estimates").where({ id: estimateId }).first();
-  if (!est) return { ok: false, final: true, reason: "estimate-missing" };
-  const reason = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs });
-  if (reason) return { ok: false, final: true, reason };
-  if (await estimateMidCheckout(est.id, { conn, groupId: est.estimate_group_id })) {
-    return { ok: false, final: false, reason: "customer-mid-checkout", retryAt: new Date(nowMs + CHECKOUT_ACTIVE_MINUTES * 60000) };
-  }
-  return { ok: true };
+// final=true is a final no. The estimate row and the checkout evidence come from
+// ONE read-only REPEATABLE READ snapshot (the engine's FINAL_CHECK_SNAPSHOT):
+// an acceptance that commits between two separate reads could show an open
+// estimate AND its cleared visit-time hold, which would pass. In one snapshot
+// it shows either the hold (a wait) or the accepted row (a final no). A failed
+// read, the checkout lookup's included, throws; the caller decides what an
+// unreadable state means (both legs make it a retryable non-send).
+async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, nowMs = Date.now() } = {}) {
+  const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
+  return db.transaction(async (trx) => {
+    const est = await trx("estimates").where({ id: estimateId }).first();
+    if (!est) return { ok: false, final: true, reason: "estimate-missing" };
+    const reason = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs });
+    if (reason) return { ok: false, final: true, reason };
+    if (await estimateMidCheckout(est.id, { conn: trx, groupId: est.estimate_group_id, throwOnError: true })) {
+      return { ok: false, final: false, reason: "customer-mid-checkout", retryAt: new Date(nowMs + CHECKOUT_ACTIVE_MINUTES * 60000) };
+    }
+    return { ok: true };
+  }, FINAL_CHECK_SNAPSHOT);
 }
 
 // The two TEMPORARY holds in safetyGate are waits, not verdicts: the customer
@@ -810,6 +820,22 @@ async function sendDualChannel(est, { sms, email, stage = null }, outcome = null
             },
         entryPoint: "estimate_follow_up_cron",
         metadata: { original_message_type: "estimate_followup" },
+        // The same final-send predicate as the email handoff, as the last
+        // step before the provider: the customer can accept, open the
+        // estimate or start checkout while links mint and the copy renders.
+        // A no is a plain block (logged, not queued, not attempted), so the
+        // stage looks again on its next tick. An unreadable state throws,
+        // which the pipeline turns into a fail-closed block.
+        preDispatchCheck: async () => {
+          const verdict = await followupMayStillSend(est.id, { stage: followupStage, quotedExpiresAt });
+          if (verdict.ok) return { ok: true };
+          return {
+            ok: false,
+            code: verdict.final ? "ESTIMATE_NOT_SENDABLE" : "CUSTOMER_MID_CHECKOUT",
+            reason: verdict.reason,
+            ...(verdict.final ? {} : { retryable: true }),
+          };
+        },
       });
       if (result.blocked || result.sent === false) {
         logger.warn(

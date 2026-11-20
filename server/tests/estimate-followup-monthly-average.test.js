@@ -14,6 +14,8 @@ jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
+  // The final send check reads from one snapshot transaction.
+  mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
   return mockDb;
 });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));

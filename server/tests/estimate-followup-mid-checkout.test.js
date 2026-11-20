@@ -12,6 +12,8 @@
 jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
+  // The final-send check reads inside one snapshot transaction; the stub runs it on the same table stubs.
+  mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
   return mockDb;
 });
 jest.mock('../config/feature-gates', () => ({
@@ -402,6 +404,43 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
     await expect(check()).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
   });
 
+  test('a failed checkout lookup at the boundary is a retryable non-send, never a pass', async () => {
+    arrange({ est: OPEN });
+    const check = await installedCheck({});
+    arrange({ est: OPEN, hold: Object.assign(new Error('hold read failed'), { code: '57014' }) });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+  });
+
+  test('the estimate and the checkout evidence are read inside ONE read-only repeatable-read snapshot', async () => {
+    arrange({ est: OPEN });
+    const check = await installedCheck({});
+    // An acceptance that commits between two separate reads could show an open estimate AND its cleared hold.
+    let inside = false;
+    const seen = [];
+    const tables = db.getMockImplementation();
+    db.mockImplementation((table) => { seen.push([table, inside]); return tables(table); });
+    db.transaction.mockImplementationOnce(async (fn) => {
+      inside = true;
+      try { return await fn(db); } finally { inside = false; }
+    });
+    await expect(check()).resolves.toEqual({ ok: true });
+    expect(db.transaction.mock.calls.at(-1)[1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+    expect(seen.map(([table]) => table)).toEqual(expect.arrayContaining(['estimates', 'scheduled_services', 'estimate_checkout_events']));
+    expect(seen.every(([, within]) => within)).toBe(true);
+  });
+
+  test('the never-viewed expiry reminder is final once the estimate is opened', async () => {
+    arrange({ est: OPEN });
+    const outcome = {};
+    await _private.sendDualChannel(est, { email: { ...email, stage: 'engage_expiring_never_viewed' } }, outcome);
+    const handoff = EmailTemplateLibrary.sendTemplate.mock.calls.at(-1)[0].withProviderHandoff;
+    let check;
+    await handoff(async (_d, c) => { check = c; });
+    arrange({ est: { ...OPEN, viewed_at: new Date() } });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true });
+    expect(outcome.finalReason).toBe('estimate-viewed');
+  });
+
   test('every follow-up email is kept off the stored-copy retry and bounce-replay rails', async () => {
     const { staleStoredCopyReason, ESTIMATE_FOLLOWUP_CATEGORY } = require('../constants/email-replay-exclusions');
     await _private.sendDualChannel(est, { email });
@@ -413,5 +452,46 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
   test('a vetoed send returns false, so every stage caller releases its claim and counts nothing', async () => {
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, aborted: true, boundaryBlocked: true, reason: 'provider_boundary_blocked' });
     await expect(_private.sendDualChannel(est, { email })).resolves.toBe(false);
+  });
+});
+
+describe('the text leg asks the same final-send check as its last step before the provider', () => {
+  const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+  const est = { id: 'est-1', status: 'viewed', customer_id: 'cust-1', customer_phone: '+19415550100', customer_email: null, estimate_group_id: null, created_at: new Date() };
+  const OPEN = { id: 'est-1', status: 'viewed', archived_at: null, viewed_at: new Date(), estimate_group_id: null, expires_at: new Date(Date.now() + 5 * 86400000) };
+
+  // The preDispatchCheck the text was handed (sendCustomerMessage runs it after every validator).
+  async function installedTextCheck(stage = 'viewed') {
+    arrange({ est: OPEN });
+    await _private.sendDualChannel(est, { sms: 'Still deciding? Reply with any questions.', stage });
+    return sendCustomerMessage.mock.calls.at(-1)[0].preDispatchCheck;
+  }
+
+  test('an open estimate with no checkout lets the text go', async () => {
+    const check = await installedTextCheck();
+    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: true });
+  });
+
+  test('accepted while the text was prepared: a final block, not retryable', async () => {
+    const check = await installedTextCheck();
+    arrange({ est: { ...OPEN, status: 'accepted' } });
+    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'terminal-status:accepted' });
+  });
+
+  test('checkout started while the text was prepared: a retryable block', async () => {
+    const check = await installedTextCheck();
+    arrange({ est: OPEN, hold: { id: 'hold-1' } });
+    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: false, code: 'CUSTOMER_MID_CHECKOUT', reason: 'customer-mid-checkout', retryable: true });
+  });
+
+  test('an SMS-only unopened reminder is final once the estimate is opened', async () => {
+    const check = await installedTextCheck('unviewed');
+    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'estimate-viewed' });
+  });
+
+  test('an unreadable state throws, which the pipeline turns into a fail-closed block', async () => {
+    const check = await installedTextCheck();
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(check({ channel: 'sms' })).rejects.toThrow('db down');
   });
 });
