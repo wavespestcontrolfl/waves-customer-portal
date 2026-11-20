@@ -703,6 +703,12 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops' });
   });
 
+  test('an Intelligence Bar timeout over the pipeline\'s [DRAFT] clears it: until the next sync the row shows the attempt, never the old draft as a person\'s', async () => {
+    Object.assign(state.rows[0], { auto_reply_status: 'drafted', auto_reply_reason: null, auto_reply_draft: 'Hi Dana, pipeline words.', review_reply: '[DRAFT] Hi Dana, pipeline words.', reply_updated_at: null });
+    await ibTimeout();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', review_reply: null, reply_updated_at: null });
+  });
+
   test('an Intelligence Bar timeout records nothing when the row changed during the PUT (the change wins)', async () => {
     state.rows[0].auto_reply_status = null;
     await ibTimeout({ duringPut: () => Object.assign(state.rows[0], { auto_reply_status: 'skipped', auto_reply_reason: 'dismissed' }) });

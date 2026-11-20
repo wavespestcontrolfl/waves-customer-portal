@@ -576,11 +576,18 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     }
     if (ibAttempt) {
       // The grounding the sync checks before it marks a landed reply posted
-      // (syncReplyFields, validatePromotionAccountFacts) and Post now checks
-      // before it offers the text again: the review as the claim read it
-      // before the PUT, and the account facts the Intelligence Bar draft
-      // was written from. Never an earlier draft's snapshot.
+      // (syncReplyFields, validatePromotionAccountFacts), and Post now and
+      // Use Draft check before they publish the text again (in this park, or
+      // as the [DRAFT] the sync restores): the review as the claim read it
+      // before the PUT, and the account facts the Intelligence Bar draft was
+      // written from. Never an earlier draft's snapshot.
       uncertain.auto_reply_grounding = JSON.stringify({ fingerprint: prePutFingerprint, accountFingerprint: expectedAccountFingerprint || null });
+      // The attempted text replaces a [DRAFT] in the slot (the pipeline's,
+      // an Agent Ops draft, a restored one), as a reply that landed would and
+      // as the sync's restore will. Until that sync the card shows this
+      // attempt, and the older draft never reads as a person's own words
+      // that Post now publishes as written.
+      if (isDraftReply(prePutState.slot)) Object.assign(uncertain, { review_reply: null, reply_updated_at: null });
     }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {

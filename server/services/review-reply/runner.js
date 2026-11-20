@@ -1121,6 +1121,13 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.STALE, 'This draft was written before the review changed — read the current review and edit the draft first.', { status: 409 });
   }
+  // A restored machine-authored attempt is published as written only while
+  // the review and the account facts its grounding records still hold.
+  const restoredMoved = restoredAgentDraft ? await restoredAgentDraftMoved(row, accountFpNow) : null;
+  if (restoredMoved) {
+    await releaseClaim(row);
+    throw new ReviewReplyError(CODES.STALE, `This draft cannot be posted as written: ${restoredMoved}.`, { status: 409 });
+  }
   let existing = humanDraft
     || agentDraft
     || (row.auto_reply_draft
@@ -1563,6 +1570,28 @@ function dismissCancelFields(conn = db) {
 }
 
 /**
+ * Why a machine-authored attempt that the sync restored as a [DRAFT]
+ * (version agent_ops) may not be published as written: the review or the
+ * account facts moved since the grounding on its row (an Intelligence Bar
+ * post that timed out records its own). The sync keeps a google_uncertain
+ * park through a review edit (KEEP_ON_EDIT_REASONS), so the restored draft
+ * is never marked stale for one. Null when it may be published: no
+ * grounding recorded, or both fingerprints still match. Pass accountFpNow
+ * when the caller already read the account facts.
+ */
+async function restoredAgentDraftMoved(row, accountFpNow) {
+  const g = row.auto_reply_grounding;
+  const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
+  if (snap?.fingerprint && snap.fingerprint !== reviewFingerprint(row)) return 'the review or its customer link changed since this draft was written — read the current review and edit the draft first';
+  if (!snap?.accountFingerprint) return null;
+  let current = accountFpNow;
+  if (current === undefined) {
+    try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(row))); } catch { return 'account facts could not be re-read'; }
+  }
+  return current === snap.accountFingerprint ? null : 'the customer facts changed since this draft was written — read the current review and edit the draft first';
+}
+
+/**
  * Guard for the HUMAN reply route: when the text being posted is the
  * pipeline's own stored draft ("Use Draft" on the Reviews page), it was
  * written against a review + account-facts snapshot; a re-attribution, a
@@ -1604,6 +1633,13 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
     const human = humanDraftOn(fresh);
     if (human && submitted === human && fresh.auto_reply_reason === HUMAN_DRAFT_STALE) {
       return 'this draft was written before the review changed — read the current review and edit the draft first';
+    }
+    // A restored machine-authored attempt submitted verbatim (Use Draft):
+    // the grounding rule Post now applies. Edited text is the admin's own;
+    // a grounding token binds a freshly drafted text to its own facts below.
+    if (!gReview && human && submitted === human && fresh.auto_reply_version === 'agent_ops') {
+      const moved = await restoredAgentDraftMoved(fresh);
+      if (moved) return moved;
     }
     if (gReview) {
       if (gReview !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was generated — reload and draft again';
