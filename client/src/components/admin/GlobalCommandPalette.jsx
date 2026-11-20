@@ -453,8 +453,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const userId = user?.id;
   const [recents, setRecents] = useState(() => loadRecents(userId));
   const [attachments, setAttachments] = useState([]);
-  useAskDraftHold(prompt, attachments.length);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  useAskDraftHold(prompt, attachments.length, attachmentsLoading);
   // Why picked files did not attach (unreadable, or past the photo limit).
   const [attachmentNotice, setAttachmentNotice] = useState(null);
   const [dragY, setDragY] = useState(0);

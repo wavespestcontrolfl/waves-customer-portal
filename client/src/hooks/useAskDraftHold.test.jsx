@@ -8,9 +8,9 @@ afterEach(cleanup);
 
 const held = () => reloadHoldNames().includes('ask-draft');
 
-it('a question or a photo holds; blank text does not', () => {
-  const { rerender } = renderHook(({ prompt, photos }) => useAskDraftHold(prompt, photos), {
-    initialProps: { prompt: '', photos: 0 },
+it('a question, a photo or a photo still converting holds; blank text does not', () => {
+  const { rerender } = renderHook(({ prompt, photos, converting }) => useAskDraftHold(prompt, photos, converting), {
+    initialProps: { prompt: '', photos: 0, converting: false },
   });
   expect(held()).toBe(false);
   rerender({ prompt: '   ', photos: 0 });
@@ -19,7 +19,9 @@ it('a question or a photo holds; blank text does not', () => {
   expect(held()).toBe(true);
   rerender({ prompt: '', photos: 1 });
   expect(held()).toBe(true);
-  rerender({ prompt: '', photos: 0 });
+  rerender({ prompt: '', photos: 0, converting: true });
+  expect(held()).toBe(true);
+  rerender({ prompt: '', photos: 0, converting: false });
   expect(held()).toBe(false);
 });
 

@@ -69,8 +69,8 @@ export function useIntelligenceBar({
   const [favorites, setFavorites] = useState(() => getFavorites(context, userId));
   // Attached photos for the next query (vision). Each: {mediaType,data,name,previewUrl}.
   const [attachments, setAttachments] = useState([]);
-  useAskDraftHold(prompt, attachments.length);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  useAskDraftHold(prompt, attachments.length, attachmentsLoading);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
   const epochRef = useRef(0);
