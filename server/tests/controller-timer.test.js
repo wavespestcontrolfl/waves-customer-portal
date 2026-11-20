@@ -1,11 +1,12 @@
 // The sprinkler timer on file as one record (services/controller-timer.js): the helpers the two preference writers and
 // the row movers use. The writers' routes are tested in property-prefs-partial-validation.test.js (the customer's) and
 // admin-customers-property-preferences-route.test.js (staff), the move in lawn-sod-move.test.js, the merge in
-// customer-dedupe.test.js, the undo in customer-dedupe-undo.test.js.
+// customer-dedupe.test.js, the undo in customer-dedupe-undo.test.js. The staff count's tool wiring is in
+// intelligence-bar-action-registry.test.js; its rule is tested here.
 const { CONTROLLER_BRANDS, CONTROLLER_MODELS, controllerAsksAboutApp } = require('@waves/irrigation-runtime');
 const {
-  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerKey, controllerTimerOf, controllerTimerSeen,
-  hasControllerTimer, settleControllerTimer, settleKeptControllerTimer,
+  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerCounts, controllerTimerKey, controllerTimerOf,
+  controllerTimerSeen, hasControllerTimer, settleControllerTimer, settleKeptControllerTimer,
 } = require('../services/controller-timer');
 
 const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
@@ -154,4 +155,28 @@ test('a write rendered against a home the customer has left is rejected, a clear
     expect(rejected).toHaveLength(3);
     for (const r of rejected) expect(r.message).toBe('The home on this account changed. Reload, then set the sprinkler timer again.');
   }
+});
+
+// The staff count (get_sprinkler_timer_counts) checks the owner's field read that most timers run from the maker's
+// phone app, so an answer must count only where the card asks the question, and a timer never asked must not read as
+// "not on the app".
+test('the staff count totals the customers by timer and by phone-app answer, where the question is asked', () => {
+  const row = (brand, model, app, customers) => ({ brand, model, app, customers });
+  const counts = controllerTimerCounts([
+    row('hunter', 'x2', 'yes', '4'), row('hunter', 'x2', 'no', '2'), row('hunter', 'pro_c', 'unknown', '1'),
+    row('hunter', 'hydrawise', null, '3'), row('hunter', 'x_core', null, '5'), row('hunter', null, null, '1'),
+    row('rain_bird', null, 'yes', '2'), row('rain_bird', null, null, '1'), row('other', null, null, '6'),
+  ]);
+  expect(counts.customers_with_a_timer).toBe(25);
+  expect(counts.summary).toEqual({ on_phone_app: 6, not_on_phone_app: 2, not_sure: 1, not_answered: 5, no_app_question: 11 });
+  expect(counts.by_timer[0]).toEqual({ timer: 'Another brand', phone_app: 'no_app_question', customers: 6 });
+  expect(counts.by_timer).toEqual(expect.arrayContaining([
+    { timer: 'Hunter X2', phone_app: 'on_phone_app', customers: 4 },
+    { timer: 'Hunter Hydrawise touchscreen', phone_app: 'not_answered', customers: 3 },
+    { timer: 'Hunter (model not recorded)', phone_app: 'not_answered', customers: 1 },
+    { timer: 'Rain Bird', phone_app: 'on_phone_app', customers: 2 },
+  ]));
+  expect(controllerTimerCounts([])).toEqual({
+    customers_with_a_timer: 0, summary: { on_phone_app: 0, not_on_phone_app: 0, not_sure: 0, not_answered: 0, no_app_question: 0 }, by_timer: [],
+  });
 });

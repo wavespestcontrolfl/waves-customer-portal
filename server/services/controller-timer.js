@@ -10,9 +10,11 @@
  *     kept customer's own timer stays while the merge leaves their home unchanged, else it is cleared
  *     (settleKeptControllerTimer). The other customer's timer is cleared on a row that moves whole, or goes with a
  *     row that folds; both are journaled (customer-dedupe settleMovedPrefTimer, snapshotFoldedPrefTimers).
+ * The staff count (Intelligence Bar get_sprinkler_timer_counts) totals the record by timer and by the phone-app
+ * answer (controllerTimerCounts).
  * It is not a watering input. Nothing here connects to, pauses or starts a timer.
  */
-const { controllerAsksAboutApp } = require('@waves/irrigation-runtime');
+const { CONTROLLER_BRANDS, CONTROLLER_MODELS, controllerAsksAboutApp } = require('@waves/irrigation-runtime');
 
 const CONTROLLER_TIMER_FIELDS = Object.freeze(['irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app']);
 const [BRAND, MODEL, APP] = CONTROLLER_TIMER_FIELDS;
@@ -96,7 +98,30 @@ function settleKeptControllerTimer(winnerRow, premise) {
   return hasControllerTimer(winnerRow) && premise?.winnerStays === false ? clearedControllerTimer() : {};
 }
 
+// Where one recorded timer stands on the phone-app question. The answer counts only where the question exists
+// (controllerAsksAboutApp). A Hunter with no model on file was never asked: the model decides the question.
+const APP_STANDING = Object.freeze({ yes: 'on_phone_app', no: 'not_on_phone_app', unknown: 'not_sure' });
+function controllerAppStanding({ brand, model, app }) {
+  if (controllerAsksAboutApp(brand, model)) return APP_STANDING[app] || 'not_answered';
+  return brand === 'hunter' && model == null ? 'not_answered' : 'no_app_question';
+}
+
+// The staff count. rows: one per recorded (brand, model, app), with its number of customers. Totals only: the
+// answers are what the customer or staff recorded, and nothing checks or connects a timer.
+function controllerTimerCounts(rows) {
+  const summary = { on_phone_app: 0, not_on_phone_app: 0, not_sure: 0, not_answered: 0, no_app_question: 0 };
+  const byTimer = rows.map((row) => {
+    const customers = Number(row.customers) || 0;
+    const phoneApp = controllerAppStanding(row);
+    summary[phoneApp] += customers;
+    const model = row.brand === 'hunter' ? (CONTROLLER_MODELS[row.model] || '(model not recorded)') : '';
+    return { timer: `${CONTROLLER_BRANDS[row.brand] || row.brand} ${model}`.trim(), phone_app: phoneApp, customers };
+  }).sort((a, b) => b.customers - a.customers || a.timer.localeCompare(b.timer) || a.phone_app.localeCompare(b.phone_app));
+  const total = byTimer.reduce((sum, row) => sum + row.customers, 0);
+  return { customers_with_a_timer: total, summary, by_timer: byTimer };
+}
+
 module.exports = {
-  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerKey, controllerTimerOf, controllerTimerProblem,
-  controllerTimerSeen, hasControllerTimer, settleControllerTimer, settleKeptControllerTimer,
+  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerCounts, controllerTimerKey, controllerTimerOf,
+  controllerTimerProblem, controllerTimerSeen, hasControllerTimer, settleControllerTimer, settleKeptControllerTimer,
 };
