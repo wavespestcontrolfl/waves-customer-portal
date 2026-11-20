@@ -8655,7 +8655,9 @@ history, another offer's link in the offer text) is not queued, and the owner se
 units' reader text is also read run together (once with every unit, once with the units outside tags only) with
 every character a reader does not see dropped, so a link or a copy split by markup, white space (also `&nbsp;`), line
 breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
-every piece: the marker in the first unit, nothing in the rest, the tags kept. Decoding stops after four passes; a unit
+every piece: the marker in the first unit, nothing in the rest, the tags kept. A copy is looked for at every stage of
+decoding, as typed and after each step of each pass, since a step can use up part of a token (a `%` before two of its
+hex digits) while the stored text still shows it whole. Decoding stops after four passes; a unit
 that would still decode further may hide a route word, so it is hidden whole, and in such a text so is every unit that
 a run of 64 or more hex touches in the joined reading. Tags are found in one pass over the text, so malformed markup
 costs time in proportion to its length. Tokens are found, and put in source order, in one pass over each run of hex,

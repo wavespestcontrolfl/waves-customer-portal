@@ -333,6 +333,29 @@ describe('texts stored together are read as one record', () => {
   });
 });
 
+// Codex P0 (round 29): the copy check read only the end of decoding, but the stored text is the unit as typed. A "%"
+// right before a copy used up two of its hex digits in the decoded reading, so all 64 stayed in the stored text.
+describe('a copy is looked for at every stage of decoding', () => {
+  // Starts with a letter, so "%63" (a "c") cannot show it as typed in the middle case.
+  const token = `c${createHash('sha256').update('every stage').digest('hex').slice(1)}`;
+  const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+  const hiddenLink = portalUrl('/careers/offer/[link hidden]');
+
+  test.each([
+    ['as typed, with a "%" before the copy', `%${token}`],
+    ['as typed, with a "&#x" before the copy', `&#x${token}`],
+    ['only between two passes ("%25%63" turns into "%c", which the next pass uses up)', `%25%63${token.slice(1)}`],
+  ])('a copy readable %s is hidden, alone and in a record', (label, copy) => {
+    expect(redactOfferLinks(`Read ${link} or code ${copy}`)).toBe(`Read ${hiddenLink} or code [link hidden]`);
+    expect(redactOfferLinksTogether([`Your code ${copy}`, `<a href="${link}">Read</a>`])[0]).toBe('Your code [link hidden]');
+  });
+
+  test('a copy split by a tag after a "%" is hidden in every piece', () => {
+    expect(redactOfferLinks(`<p>Code %${token.slice(0, 30)}<wbr>${token.slice(30)}</p><a href="${link}">Read</a>`))
+      .toBe(`<p>Code [link hidden]<wbr></p><a href="${hiddenLink}">Read</a>`);
+  });
+});
+
 describe('malformed markup', () => {
   const token = createHash('sha256').update('malformed markup').digest('hex');
   test.each([

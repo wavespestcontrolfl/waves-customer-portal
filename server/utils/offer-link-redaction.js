@@ -36,6 +36,9 @@
  *   token split over several units is hidden in all of them: the bare marker in the first (or the standard hidden link
  *   for an offer-path token that unit holds whole, as above) and nothing in the rest. Tags and spaces between units
  *   stay, so the bare marker never forms the hidden link the replay rebuilds.
+ * - A copy is looked for at every stage of decoding, not only at its end: as typed, and after the character references
+ *   and the percent escapes of each pass. A step can use up part of a token (a "%" or "&#" before some of its hex
+ *   digits), while the stored text still shows it whole.
  * - A unit still encoded after four decoding passes (it may hide a route word or a token): the text fails closed. That
  *   unit is replaced as a whole by the bare marker, and so is every unit that a run of 64 or more hex touches in the
  *   joined reading, split as above.
@@ -110,24 +113,38 @@ const decodeOnce = (text) => decodeHTML(text).replace(/(?:%[0-9a-f]{2})+/gi, per
 const decodable = (text) => /[&%]/.test(text);
 const DECODE_PASSES = 4;
 
-// The unit as a browser or a reader resolves it. Decoding repeats, so a double-encoded spelling resolves too, up to
-// DECODE_PASSES. `undecided`: the reading would still decode further, so it may hide a route word (see scan).
-function reading(unit) {
-  let out = unit;
-  for (let pass = 0; pass < DECODE_PASSES && decodable(out); pass += 1) {
-    const next = decodeOnce(out);
-    if (next === out) break;
-    out = next;
-  }
-  const seen = out.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/').toLowerCase();
-  return { seen, undecided: decodable(seen) && decodeOnce(seen) !== seen };
-}
-const readable = (unit) => reading(unit).seen;
-
 // A reading as a reader sees it run together: every character with no mark of its own dropped (white space, raw or
 // decoded from a character reference, controls, format and other default-ignorable characters, the blank braille
 // pattern).
 const compact = (seen) => seen.replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '');
+// Text as a reader reads it: full-width forms folded, tabs, line breaks and format characters dropped, backslashes as
+// slashes, lowercase.
+const seenOf = (text) => text.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/').toLowerCase();
+
+// The unit as a browser or a reader resolves it. Decoding repeats, so a double-encoded spelling resolves too, up to
+// DECODE_PASSES. `undecided`: the reading would still decode further, so it may hide a route word (see scan).
+// `stages`: every text a person can read on the way, run together: as typed, then after the character references and
+// after the percent escapes of each pass. A step can use up part of a token (a "%" before two of its hex digits), so
+// a copy is looked for at every stage, not only in the last one.
+function reading(unit) {
+  const stages = [compact(seenOf(unit))];
+  const add = (text) => {
+    const flat = compact(seenOf(text));
+    if (!stages.includes(flat)) stages.push(flat);
+  };
+  let out = unit;
+  for (let pass = 0; pass < DECODE_PASSES && decodable(out); pass += 1) {
+    const html = decodeHTML(out);
+    add(html);
+    const next = html.replace(/(?:%[0-9a-f]{2})+/gi, percentDecode);
+    add(next);
+    if (next === out) break;
+    out = next;
+  }
+  const seen = seenOf(out);
+  return { seen, stages, undecided: decodable(seen) && decodeOnce(seen) !== seen };
+}
+const readable = (unit) => reading(unit).seen;
 
 // Walks path segments as a browser resolves them: a "." segment is skipped, ".." drops the segment before it (an empty
 // one too), and an empty segment is kept. A segment that opens with a 64-hex token right after "careers" and "offer"
@@ -198,24 +215,34 @@ function unitsOf(text) {
   let t = 0;
   return [...text.matchAll(UNIT_RE)].map((m) => {
     while (t < tags.length && tags[t][1] <= m.index) t += 1;
-    const { seen, undecided } = reading(m[0]);
-    return { text: m[0], at: m.index, seen, flat: compact(seen), undecided, inTag: t < tags.length && tags[t][0] <= m.index };
+    const { seen, stages, undecided } = reading(m[0]);
+    return { text: m[0], at: m.index, seen, flat: compact(seen), stages, undecided, inTag: t < tags.length && tags[t][0] <= m.index };
   });
 }
 
 // The units' compact reader text run together, with nothing between them, so a link or a token split by markup or by
 // anything invisible reads as one: once with every unit (plain text), once with the units outside tags only (an email
-// as it shows). Each view keeps where each unit's text starts and ends in it.
+// as it shows). Each is read at the end of decoding and at each stage on the way (a unit past its last stage stays
+// at it); a view the same as one before is read once. Each view keeps where each unit's text starts and ends in it.
 function joinedViews(units) {
-  return [units, units.filter((u) => !u.inTag)].map((list) => {
-    let text = '';
-    const spans = list.map((u) => {
-      const start = text.length;
-      text += u.flat;
-      return { u, start, end: text.length };
-    });
-    return { text, spans };
-  });
+  const depth = units.reduce((most, u) => Math.max(most, u.stages.length), 1);
+  const views = [];
+  const seenTexts = new Set();
+  for (const list of [units, units.filter((u) => !u.inTag)]) {
+    for (let k = -1; k < depth; k += 1) {
+      let text = '';
+      const spans = list.map((u) => {
+        const start = text.length;
+        text += k < 0 ? u.flat : u.stages[Math.min(k, u.stages.length - 1)];
+        return { u, start, end: text.length };
+      });
+      if (!seenTexts.has(text)) {
+        seenTexts.add(text);
+        views.push({ text, spans });
+      }
+    }
+  }
+  return views;
 }
 
 function joinedTokens({ text }) {
@@ -281,9 +308,8 @@ function storedUnit(u, mark, linked, tokens) {
       sent.push(token.toLowerCase());
       return `${path}${HIDDEN}`;
     });
-    const seen = kept === u.text ? u.seen : readable(kept);
-    const flat = kept === u.text ? u.flat : compact(seen);
-    if (!offerTokensOf(kept, seen).length && !holdsFound(flat, linked)) {
+    const { seen, stages } = kept === u.text ? u : reading(kept);
+    if (!offerTokensOf(kept, seen).length && !stages.some((flat) => holdsFound(flat, linked))) {
       tokens.push(...sent);
       return kept;
     }
