@@ -101,6 +101,12 @@ describe('mergeBuilders', () => {
   test('empty input gives an empty list and a zero week', () => {
     expect(mergeBuilders([], opts)).toEqual({ week: { permits: 0, builders: 0 }, builders: [] });
   });
+
+  test('the week counts its permits even when they are older than 12 months (a file that stopped updating)', () => {
+    const merged = mergeBuilders([row({ name: 'OLD POOLS', permits7: 3, permits365: 0 })], opts);
+    expect(merged.week).toEqual({ permits: 3, builders: 1 });
+    expect(merged.builders).toEqual([]);
+  });
 });
 
 describe('listBuilders', () => {
@@ -163,8 +169,9 @@ describe('listBuilders', () => {
     await expect(listBuilders({ kind: 'pool', now: new Date('2026-11-19T15:00:00Z') })).rejects.toThrow('boom');
   });
 
-  test('an unknown kind is refused before any query', async () => {
-    await expect(listBuilders({ kind: 'roof' })).rejects.toThrow(/unknown builder kind/);
+  test.each(['roof', 'constructor', 'toString', '__proto__'])('the kind %s is refused before any query', async (kind) => {
+    await expect(listBuilders({ kind })).rejects.toThrow(/unknown builder kind/);
+    await expect(builderPermits({ kind, key: 'A' })).rejects.toThrow(/unknown builder kind/);
     expect(mockRaw).not.toHaveBeenCalled();
   });
 });
@@ -176,8 +183,11 @@ describe('builderPermits', () => {
     mockRaw
       .mockResolvedValueOnce({ rows: [{ name: 'SAMPLE POOLS LLC' }, { name: 'SAMPLE POOLS, L.L.C.' }, { name: 'OTHER POOLS INC' }] })
       .mockResolvedValueOnce({ rows: [{ id: 'P-1', issued_date: new Date(Date.UTC(2026, 10, 16)), status: 'Permit Issued', address: '200 SAMPLE TRL', city: 'PARRISH', zip: '34219', type_of_work: null }] });
-    const permits = await builderPermits({ kind: 'pool', key: 'SAMPLE POOLS', limit: 10 });
-    expect(mockRaw.mock.calls[1][1]).toEqual(['SAMPLE POOLS LLC', 'SAMPLE POOLS, L.L.C.', 10]);
+    // 02:00 UTC on 20 Nov is still 19 Nov in Florida: both reads stop at today's Eastern date.
+    const permits = await builderPermits({ kind: 'pool', key: 'SAMPLE POOLS', limit: 10, now: new Date('2026-11-20T02:00:00Z') });
+    expect(mockRaw.mock.calls[0][1]).toEqual(['2026-11-19']);
+    expect(mockRaw.mock.calls[1][1]).toEqual(['2026-11-19', 'SAMPLE POOLS LLC', 'SAMPLE POOLS, L.L.C.', 10]);
+    for (const [sql] of mockRaw.mock.calls) expect(sql).toMatch(/issued_date <= \?::date/);
     expect(mockRaw.mock.calls[1][0]).toMatch(/ORDER BY issued_date DESC/);
     expect(permits).toEqual([{ id: 'P-1', issuedDate: '2026-11-16', status: 'Permit Issued', address: '200 SAMPLE TRL', city: 'PARRISH', zip: '34219', typeOfWork: null }]);
   });
@@ -188,9 +198,9 @@ describe('builderPermits', () => {
     expect(mockRaw).toHaveBeenCalledTimes(1);
   });
 
-  test('caps the limit at 100', async () => {
+  test.each([[5000, 100], [2.5, 2], [0.5, 25], ['x', 25], [-3, 1]])('a limit of %s reads %s rows (a whole number, 1 to 100)', async (limit, take) => {
     mockRaw.mockResolvedValueOnce({ rows: [{ name: 'A' }] }).mockResolvedValueOnce({ rows: [] });
-    await builderPermits({ kind: 'pool', key: 'A', limit: 5000 });
-    expect(mockRaw.mock.calls[1][1]).toEqual(['A', 100]);
+    await builderPermits({ kind: 'pool', key: 'A', limit, now: new Date('2026-11-19T15:00:00Z') });
+    expect(mockRaw.mock.calls[1][1]).toEqual(['2026-11-19', 'A', take]);
   });
 });

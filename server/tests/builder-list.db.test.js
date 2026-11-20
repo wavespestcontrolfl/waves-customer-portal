@@ -84,20 +84,24 @@ describeDb('Builders list (PostgreSQL)', () => {
     ]);
     const result = await listBuilders({ kind: 'home', now: NOW });
     expect(result.builders.map((builder) => [builder.key, builder.permits90])).toEqual([['SAMPLE HOMES', 2], ['SAMPLE VILLAS', 2]]);
-    const sites = await builderPermits({ kind: 'home', key: 'SAMPLE COMMERCIAL BUILDERS' });
+    const sites = await builderPermits({ kind: 'home', key: 'SAMPLE COMMERCIAL BUILDERS', now: NOW });
     expect(sites).toEqual([]);
   });
 
-  test('a permit dated after today counts nowhere: not in the windows, not as the first or newest permit', async () => {
+  test('a permit dated after today counts nowhere: not in the windows, not as the first or newest permit, not as a job site', async () => {
     await mockPg('pool_permit_records').insert([
-      pool({ issued_date: '2026-11-15' }),
-      pool({ issued_date: '2026-11-20' }), // tomorrow, Eastern time
-      pool({ contractor_name: 'FUTURE POOLS INC', contractor_license: 'CPC777', issued_date: '2026-11-21' }),
+      pool({ record_id: 'A-1', issued_date: '2026-11-15' }),
+      pool({ record_id: 'A-2', issued_date: '2026-11-20' }), // tomorrow, Eastern time
+      pool({ record_id: 'F-1', contractor_name: 'FUTURE POOLS INC', contractor_license: 'CPC777', issued_date: '2026-11-21' }),
     ]);
     const result = await listBuilders({ kind: 'pool', now: NOW });
     expect(result.dataThrough).toBe('2026-11-15');
     expect(result.builders).toEqual([expect.objectContaining({ key: 'SAMPLE POOLS', permits30: 1, permits365: 1, lastPermit: '2026-11-15' })]);
     expect(result.week).toEqual({ from: '2026-11-09', through: '2026-11-15', permits: 1, builders: 1 });
+    // The job sites agree with the list: the future permit never pushes a real one off the page.
+    const sites = await builderPermits({ kind: 'pool', key: 'SAMPLE POOLS', limit: 1, now: NOW });
+    expect(sites.map((site) => site.id)).toEqual(['A-1']);
+    expect(await builderPermits({ kind: 'pool', key: 'FUTURE POOLS', now: NOW })).toEqual([]);
   });
 
   test('a builder that matches an active payer or a live customer company is flagged; an inactive payer is not', async () => {
@@ -121,14 +125,14 @@ describeDb('Builders list (PostgreSQL)', () => {
       pool({ record_id: 'A-4', issued_date: '2026-11-15', record_status: 'Canceled' }),
       pool({ record_id: 'B-1', issued_date: '2026-11-16', contractor_name: 'FRESH POOLS INC', contractor_license: 'CPC444' }),
     ]);
-    const sites = await builderPermits({ kind: 'pool', key: 'SAMPLE POOLS', limit: 2 });
+    const sites = await builderPermits({ kind: 'pool', key: 'SAMPLE POOLS', limit: 2, now: NOW });
     expect(sites.map((site) => [site.id, site.issuedDate])).toEqual([['A-2', '2026-11-14'], ['A-3', '2026-11-08']]);
     expect(sites[0]).toEqual({ id: 'A-2', issuedDate: '2026-11-14', status: 'Permit Issued', address: '200 SAMPLE TRL', city: 'PARRISH', zip: '34219', typeOfWork: null });
   });
 
   test('home job sites carry the type of work and the one-line address', async () => {
     await mockPg('construction_permit_records').insert([home({ permit_no: 'H-1' })]);
-    const sites = await builderPermits({ kind: 'home', key: 'SAMPLE HOMES' });
+    const sites = await builderPermits({ kind: 'home', key: 'SAMPLE HOMES', now: NOW });
     expect(sites).toEqual([{ id: 'H-1', issuedDate: '2026-11-10', status: 'Permit Issued', address: '300 SAMPLE CT  PARRISH 34219', city: null, zip: '34219', typeOfWork: 'New Single Family' }]);
   });
 });
