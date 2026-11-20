@@ -166,6 +166,14 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(read('last_delivered')).toEqual([...iso, ...pgOnly].sort());
   });
 
+  test('the dashboard service-line card loads past an unreadable delivery stamp (codex pre-push P1)', async () => {
+    const { computeServiceLines } = require('../services/dashboard-service-lines');
+    await seed();
+    // March: the seeded February sends and views are outside it, so the stamp check runs on every seeded row.
+    const result = await computeServiceLines({ from: '2003-03-01', to: '2003-03-31' }, { now: new Date('2003-03-15T12:00:00Z') });
+    expect(result.caveats.join(' ')).not.toMatch(/Close rate and open estimates could not be loaded/);
+  });
+
   test('the Pipeline board lists a self-serve quote once staff deliver it, and never a plan restart quote (codex pre-push P1)', async () => {
     const { fetchEstimates } = require('../routes/admin-pipeline').__private;
     await seed();
