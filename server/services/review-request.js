@@ -128,9 +128,17 @@ const RESULTS_VISIT_UNPERFORMED = new Set(["inspection_only", "customer_declined
 // ALL qualifying service keys of one visit row, by catalog identity (service_type plus the joined
 // catalog key and name). A combined row names several; a commercial row names none.
 function resultsVisitKeys(row) {
-  const { qualifyingKeysForRow } = require("./waveguard-existing-services");
+  const { qualifyingKeysForRow, toQualifyingKeys } = require("./waveguard-existing-services");
   const { isCommercialServiceRow } = require("./self-booking-plan-sync");
-  return isCommercialServiceRow(row) ? [] : qualifyingKeysForRow(row);
+  if (isCommercialServiceRow(row)) return [];
+  const keys = qualifyingKeysForRow(row);
+  // An explicit combined label ("Lawn Care + Pest Control") keeps every line it names even when
+  // the catalog names one. Any other label that names pest beside a plant line ("Tree & Shrub
+  // Pest Control") is ONE plant treatment: its pest word is not a separate pest service.
+  if (require("./visit-prep-combo-types").isComboServiceType(row.service_type)) {
+    return [...new Set([...keys, ...toQualifyingKeys(row.service_type)])];
+  }
+  return keys.some((k) => RESULTS_VISIT_MIN[k]) ? keys.filter((k) => k !== "pest_control") : keys;
 }
 // Whether the visit's treatment was performed: no linked record, or any record not marked
 // incomplete, declined or inspection only.

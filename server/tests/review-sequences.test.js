@@ -8752,6 +8752,23 @@ describe('resolveSequencePlanForEnrollment results-visit rule (GATE_REVIEW_ASK_R
     expect((await resolve('lp', 'lp-1')).skip).toBeUndefined();
   });
 
+  test('"Tree & Shrub Pest Control" is one plant treatment (skips on visit 1); a genuine combo asks, even with a lawn-keyed catalog', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    const lawnCatalog = { service_key: 'lawn_care_monthly', service_name: 'Lawn Care Program' };
+    db.mockImplementation(makeMock({ scheduled_services: [visit('tp-1', 'tp', 'Tree & Shrub Pest Control', 0)] }));
+    expect((await resolve('tp', 'tp-1')).skip).toBe('results_not_yet');
+    db.mockImplementation(makeMock({ scheduled_services: [visit('tq-1', 'tq', 'Tree & Shrub Pest Control', 0, { service_key: 'tree_shrub_program', service_name: 'Tree & Shrub Program' })] }));
+    expect((await resolve('tq', 'tq-1')).skip).toBe('results_not_yet');
+    db.mockImplementation(makeMock({ scheduled_services: [visit('tr-1', 'tr', 'Lawn + Pest Control', 0)] }));
+    expect((await resolve('tr', 'tr-1')).skip).toBeUndefined();
+    // An explicit combined label keeps its pest line when the joined catalog names only lawn.
+    db.mockImplementation(makeMock({ scheduled_services: [visit('ts-9', 'ts9', 'Lawn Care + Pest Control', 0, lawnCatalog)] }));
+    expect((await resolve('ts9', 'ts-9')).skip).toBeUndefined();
+    // The same lawn-keyed catalog with a plain lawn label still skips.
+    db.mockImplementation(makeMock({ scheduled_services: [visit('tt-1', 'tt', 'Lawn Care Program', 0, lawnCatalog)] }));
+    expect((await resolve('tt', 'tt-1')).skip).toBe('results_not_yet');
+  });
+
   test('a failed packet, history or catalog read logs and asks; nothing is substituted', async () => {
     mockGates.reviewAskResultsVisit = true;
     const logger = require('../services/logger');
