@@ -330,7 +330,7 @@ describe('extendReservation: revival and the capped no-op', () => {
     expect(iProbe).toBeGreaterThan(-1);
     expect(iNoop).toBeGreaterThan(iProbe);
     // …and still before the write, so a capped hold never writes.
-    expect(fn.indexOf("update({ reservation_expires_at: newExpiry })")).toBeGreaterThan(iNoop);
+    expect(fn.indexOf("update({ reservation_expires_at: newExpiry, ...zoneStamp })")).toBeGreaterThan(iNoop);
   });
 });
 
