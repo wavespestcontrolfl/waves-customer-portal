@@ -90,23 +90,36 @@ function rowProblem(entry, index) {
   return word ? `name word "${word}" is not a generic word of its registry name` : null;
 }
 
-// Runs the list's own checks once: the entries that pass, and a line for
-// each item left out. A product listed twice is left out both times.
+// An item's fields, read once into a new object. The check and the tools
+// use only this copy, so a later change to the required JSON (one object in
+// Node's shared module cache) cannot reach copy that passed the check
+// (pre-push PR 3 r6).
+const snapshot = (entry) => (entry && typeof entry === 'object' ? {
+  product_id: entry.product_id,
+  name: entry.name,
+  lines: Array.isArray(entry.lines) ? [...entry.lines] : entry.lines,
+  services: Array.isArray(entry.services) ? [...entry.services] : entry.services,
+} : entry);
+
+// Runs the list's own checks once: frozen copies of the entries that pass,
+// and a line for each item left out. A product listed twice is left out
+// both times.
 function listCheck(raw) {
   if (!raw || !Array.isArray(raw.tools)) return { entries: [], problems: ['the file has no tools list'] };
+  const copies = raw.tools.map(snapshot);
   const counts = new Map();
-  for (const entry of raw.tools) {
+  for (const entry of copies) {
     const id = entry && entry.product_id;
     if (typeof id === 'string') counts.set(id, (counts.get(id) || 0) + 1);
   }
   const entries = [];
   const problems = [];
-  for (const entry of raw.tools) {
+  for (const entry of copies) {
     const problem = entryProblem(entry, counts);
     if (problem) problems.push(`${idOf(entry)}: ${problem}`);
-    else entries.push(entry);
+    else entries.push(Object.freeze({ ...entry, lines: Object.freeze(entry.lines), services: Object.freeze(entry.services) }));
   }
-  return { entries, problems };
+  return { entries: Object.freeze(entries), problems };
 }
 
 function withRegistry({ entries, problems }, index) {
@@ -120,8 +133,8 @@ function withRegistry({ entries, problems }, index) {
       tools.push(Object.freeze({
         productId: entry.product_id,
         name: entry.name,
-        lines: Object.freeze([...entry.lines]),
-        services: Object.freeze([...entry.services]),
+        lines: entry.lines,
+        services: entry.services,
         url: index.get(entry.product_id).row.approved_affiliate_url,
       }));
     }

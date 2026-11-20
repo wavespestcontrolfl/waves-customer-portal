@@ -19,6 +19,11 @@ const { tools: TOOLS, problems: TOOL_PROBLEMS } = loadTools();
 const index = registry.productIndex();
 const MESH = 'stuff-it-copper-mesh';
 const entry = (over = {}) => ({ product_id: MESH, name: 'Copper mesh', lines: ['Copper mesh fills small gaps.'], services: ['pest'], ...over });
+// A shared issue for withToolBlock to add a tool to.
+const SHARED = renderIssue({
+  subject: 's', preview: 'p', lead: { headline: 'h', sentences: [{ text: 'a' }], postUrl: POST_URLS[0] },
+  idItem: { text: 'x', species: { slug: 'aedes-mosquito', name: 'Aedes Mosquito' } },
+});
 // A registry index with one row changed, for the refusals.
 const indexWith = (id, change) => {
   const copy = new Map(index);
@@ -50,6 +55,25 @@ describe('the reviewed tool list', () => {
   test('the list cannot be changed by a caller', () => {
     expect(Object.isFrozen(TOOLS) && TOOLS.every((t) => Object.isFrozen(t) && Object.isFrozen(t.lines))).toBe(true);
     expect(() => TOOLS.push({ productId: 'x', url: 'https://www.amazon.com/dp/B000000000?tag=wavespestcont-20' })).toThrow(TypeError);
+  });
+
+  test('a change to the loaded list file after the check reaches no tool (pre-push PR 3 r6)', () => {
+    // tools.js and this test share one cached object for the JSON file.
+    const item = data.tools.find((t) => t.product_id === MESH);
+    const saved = JSON.parse(JSON.stringify(item));
+    try {
+      item.name = 'Buy to support us';
+      item.lines[0] = 'It is worth it to buy through our link and support us.';
+      item.services.push('pool');
+      expect(require('../data/pest-insider-tools-v1.json').tools.find((t) => t.product_id === MESH).name).toBe('Buy to support us');
+      const tool = toolById(MESH);
+      expect(tool).toMatchObject({ name: saved.name, lines: saved.lines, services: saved.services });
+      const copy = withToolBlock(SHARED, tool).text_body;
+      expect(copy).toContain(`${saved.lines[0]} ${saved.lines[1]}`);
+      expect(copy).not.toMatch(/buy through our link|Buy to support us/);
+    } finally {
+      Object.assign(item, saved);
+    }
   });
 
   test("Amazon's sentence is the exact required wording", () => {
@@ -139,10 +163,7 @@ describe('the registry as it is now (pre-push PR 3 r3)', () => {
     const plan = (liveToolUrls) => planIssue({ sendDate: FEB, livePostFactIds: FACTS.map((f) => f.id), liveToolUrls }).tool;
     const mesh = TOOLS.find((t) => t.productId === MESH);
     const gauge = TOOLS.find((t) => t.productId === 'acurite-glass-rain-gauge');
-    const shared = renderIssue({
-      subject: 's', preview: 'p', lead: { headline: 'h', sentences: [{ text: 'a' }], postUrl: POST_URLS[0] },
-      idItem: { text: 'x', species: { slug: 'aedes-mosquito', name: 'Aedes Mosquito' } },
-    });
+    const shared = SHARED;
     const before = process.env.AFFILIATE_REGISTRY_PATH;
     try {
       process.env.AFFILIATE_REGISTRY_PATH = file;
