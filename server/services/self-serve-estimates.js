@@ -69,28 +69,36 @@ function undeliveredSelfServeSql(alias) {
   return `(${alias}.source IN (${SELF_SERVE_SOURCES_SQL}) AND ${presentStampSql(alias)} IS NULL)`;
 }
 
-// The instant a row counts as sent. A self-serve row counts at its first real
-// delivery: its sent_at is the mint stamp, and the admin send path rewrites
-// sent_at on every later attempt, suppressed ones too (codex pre-push r16 P1),
-// while firstDeliveredAt never moves. An undelivered one is never sent (NULL).
-// A stamp present but unreadable keeps sent_at, so the rows dated here are
-// exactly the delivered ones whereNotUndeliveredSelfServe keeps.
-function sentAtSql(alias) {
+// A self-serve row's delivery instant: its first real delivery. Its sent_at is
+// the mint stamp, and the admin send path rewrites sent_at on every later
+// attempt, suppressed ones too (codex pre-push r16 P1), while firstDeliveredAt
+// never moves. An undelivered one has none (NULL). A stamp present but
+// unreadable still records a staff send, dated by sent_at, so the rows dated
+// here are exactly the delivered ones whereNotUndeliveredSelfServe keeps.
+// Win/loss reads the same anchor in JavaScript (estimate-winloss.js
+// sentAnchorMs).
+function deliveredAtSql(alias) {
   const unreadableStamp = `CASE WHEN ${presentStampSql(alias)} IS NOT NULL THEN ${alias}.sent_at END`;
-  return selfServeOr(alias, `COALESCE(${firstDeliveredAtSql(alias)}, ${unreadableStamp})`, `${alias}.sent_at`);
+  return `COALESCE(${firstDeliveredAtSql(alias)}, ${unreadableStamp})`;
+}
+
+// The instant a row counts as sent: a self-serve row's delivery instant, any
+// other row's sent_at.
+function sentAtSql(alias) {
+  return selfServeOr(alias, deliveredAtSql(alias), `${alias}.sent_at`);
 }
 
 // The instant a row counts as viewed. A self-serve quote is opened in the
 // portal before any send, so a later staff send must not turn that look into
-// a viewed send (codex pre-push r15): only a view at or after its first
-// delivery counts. The first such view is the earliest one known at or after
-// the delivery: the per-open log (estimate_views), viewed_at and
+// a viewed send (codex pre-push r15): only a view at or after its delivery
+// instant (deliveredAtSql, the same anchor its send is dated by) counts. The
+// first such view is the earliest one known at or after the delivery: the per-open log (estimate_views), viewed_at and
 // last_viewed_at (LEAST skips a NULL). A later open then never moves it to a
 // later period (codex pre-push P1), also when the view handler stamped
 // viewed_at but its log insert failed, and a legacy row the log predates
 // still counts.
 function countableViewAtSql(alias) {
-  const delivered = firstDeliveredAtSql(alias);
+  const delivered = deliveredAtSql(alias);
   const firstLoggedOpen = `(SELECT MIN(ev.viewed_at) FROM estimate_views ev WHERE ev.estimate_id = ${alias}.id AND ev.viewed_at >= ${delivered})`;
   const fromDelivery = (column) => `CASE WHEN ${alias}.${column} >= ${delivered} THEN ${alias}.${column} END`;
   return selfServeOr(alias,

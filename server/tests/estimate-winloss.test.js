@@ -416,6 +416,21 @@ describe('winLossSlices — audit slices', () => {
     expect(db.raw).toHaveBeenCalledWith(`${countableViewAtSql('estimates')} AS countable_view_at`);
   });
 
+  test('a self-serve quote anchors where the Intelligence Bar dates its send: an unreadable stamp on sent_at, none while undelivered (codex pre-push P1)', async () => {
+    const quote = (id, estimateData) => row({
+      id, status: 'sent', accepted_at: null, sent_at: daysAgo(3), source: 'plan_start',
+      viewed_at: null, last_viewed_at: null, view_count: 0, estimate_data: estimateData,
+    });
+    mockDbHandler = estimatesTable([], [
+      // A stamp there but unreadable still records a staff send (sentAtSql dates it by sent_at).
+      quote('start-unreadable', { deliveryState: { firstDeliveredAt: 'not a date' } }),
+      // An empty stamp is no delivery: the mint stamp is no send.
+      quote('start-undelivered', { deliveryState: { firstDeliveredAt: '' } }),
+    ]);
+    const { sentCohorts } = await winLossSlices({ days: 7 });
+    expect(sentCohorts).toMatchObject({ sentTotal: 1, viewedTotal: 0 });
+  });
+
   test('no sent rows → empty cohorts with null rates', async () => {
     mockDbHandler = estimatesTable([], []);
     const { sentCohorts } = await winLossSlices({ days: 7 });

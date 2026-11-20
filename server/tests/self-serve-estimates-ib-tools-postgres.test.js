@@ -89,7 +89,8 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
       row('plan_restart', 'viewed', delivered(DELIVERED)),
       // ... until a view after the send, which counts.
       row('plan_start', 'viewed', delivered(DELIVERED), LATER),
-      // An unreadable delivery stamp: sent (dated by sent_at), no view counted, and no cast error.
+      // An unreadable delivery stamp: a staff send dated by sent_at, its views counted from then
+      // (one anchor for both, as win/loss reads it; codex pre-push P1), and no cast error.
       row('plan_start', 'viewed', delivered('not a date')),
       // An empty or JSON-null stamp is no delivery, in SQL and in JavaScript alike (codex pre-push P1).
       row('plan_start', 'viewed', delivered('')),
@@ -104,7 +105,7 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     const after = await funnel();
     const delta = (key) => after.funnel[key] - before.funnel[key];
     expect(delta('sent')).toBe(7);
-    expect(delta('viewed')).toBe(4);
+    expect(delta('viewed')).toBe(5);
     expect(delta('accepted')).toBe(1);
     expect(delta('pending')).toBe(6);
     expect(after.total_accepted_value - before.total_accepted_value).toBe(50);
