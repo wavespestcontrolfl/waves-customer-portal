@@ -9772,6 +9772,39 @@ function wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLin
   };
 }
 
+// Roof style terms (GATE_EXCLUSION_ROOF_STYLE_PRICING, owner 2026-11-19 choice 2A). Null without a pick, so every
+// caller keeps the no-pick path byte for byte. The gate is decided once, in the estimate engine (roofStyleInputs); the
+// pricer only prices the pick. A saved estimate's quote-time rates (frozen*) beat the live constants, field by field.
+const TILE_ROOF_STYLES = ['flat_tile', 'barrel_tile'];
+function roofStyleTerms(options, cfg) {
+  const style = options.roofStyle;
+  if (!style) return null;
+  const positive = (value, fallback) => (Number(value) > 0 ? Number(value) : fallback);
+  const tile = TILE_ROOF_STYLES.includes(style);
+  const barrel = style === 'barrel_tile';
+  return {
+    style,
+    tile,
+    barrel,
+    // One tile multiplier source: the Settings-hydrated value the legacy pricer reads, the code constant only when it is missing.
+    multiplier: tile ? positive(options.frozenTileMultiplier, positive(SPECIALTY.exclusion.roofMultipliers?.tile, cfg.tileRoofMultiplier)) : 1,
+    eaveFt: barrel ? Math.max(0, Number(options.barrelEaveFt) || 0) : 0,
+    perFt: positive(options.frozenBarrelPerFt, cfg.barrelEaveClosure.perFt),
+    minimum: positive(options.frozenBarrelMinimum, cfg.barrelEaveClosure.minimum),
+  };
+}
+
+// The roof style keys of a priced result and each of its rows ({} without a pick). The quote-time multiplier and
+// per-foot terms ride the saved rows so a replay can restore them (estimate-roof-style-replay.js).
+function roofStyleFields(roof) {
+  if (!roof) return {};
+  return {
+    roofStyle: roof.style,
+    ...(roof.tile ? { tileRoofMultiplier: roof.multiplier } : {}),
+    ...(roof.barrel ? { barrelEavePerFt: roof.perFt, barrelEaveMinimum: roof.minimum } : {}),
+  };
+}
+
 // The minimum row's name for the floor that lifted the price.
 function exclusionMinimumRowText(wholeHome, floor) {
   if (!wholeHome) {
@@ -9809,6 +9842,7 @@ function priceRodentExclusionV2(options = {}) {
 
   const cfg = RODENT.exclusionV2;
   const wholeHome = wholeHomeSealTerms(options);
+  const roof = roofStyleTerms(options, cfg);
   const ins = RODENT.inspection || { fee: cfg.inspectionFee, waiveIfApprovedTotalOver: 995 };
 
   const stdPts = Math.max(0, Number(standardWireMeshPoints) || 0);
@@ -9821,7 +9855,7 @@ function priceRodentExclusionV2(options = {}) {
 
   const wireMeshPointSubtotal =
     stdPts * cfg.wireMeshPoints.standard +
-    advPts * cfg.wireMeshPoints.advancedRoofHigh;
+    advPts * cfg.wireMeshPoints.advancedRoofHigh * (roof ? roof.multiplier : 1);
 
   const birdBoxSubtotal =
     stdBoxes * cfg.birdBoxes.standard +
@@ -9834,10 +9868,16 @@ function priceRodentExclusionV2(options = {}) {
 
   const totalLinearMeshLF = softLF + hardLF;
 
+  // Barrel tile eave closure: per measured foot with a minimum for the line; no feet, no line.
+  const barrelClosureSubtotal = roof && roof.eaveFt > 0
+    ? Math.max(roof.minimum, Math.round(roof.eaveFt * roof.perFt * 100) / 100)
+    : 0;
+
   const rawInstall =
     wireMeshPointSubtotal +
     birdBoxSubtotal +
-    linearMeshSubtotal;
+    linearMeshSubtotal +
+    barrelClosureSubtotal;
 
   const floor = exclusionJobFloor(cfg, wholeHome, totalLinearMeshLF);
 
@@ -9863,7 +9903,10 @@ function priceRodentExclusionV2(options = {}) {
 
   const totalItems = stdPts + advPts + stdBoxes + tileBoxes + custBoxes;
 
-  const guaranteeFields = wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLinearMeshLF);
+  const guaranteeFields = {
+    ...wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLinearMeshLF),
+    ...roofStyleFields(roof),
+  };
 
   const parts = [];
   if (stdPts + advPts > 0)
@@ -9872,6 +9915,8 @@ function priceRodentExclusionV2(options = {}) {
     parts.push(`${stdBoxes + tileBoxes + custBoxes} bird-box exclusion${stdBoxes + tileBoxes + custBoxes !== 1 ? 's' : ''}`);
   if (totalLinearMeshLF > 0)
     parts.push(`${totalLinearMeshLF} LF mesh`);
+  if (barrelClosureSubtotal > 0)
+    parts.push(`${roof.eaveFt} ft barrel tile eave closure`);
   const inspectDetail = inspectionFee > 0
     ? ` + $${inspectionFee} inspect`
     : (inspectionWaived ? ' (inspect waived)' : '');
@@ -9900,7 +9945,7 @@ function priceRodentExclusionV2(options = {}) {
   // component row, so the rows never exceed the price the engine charges.
   const cents = (value) => Math.round(value * 100) / 100;
   const componentSubtotal = cents(
-    cents(wireMeshPointSubtotal) + cents(birdBoxSubtotal) + cents(linearMeshSubtotal)
+    cents(wireMeshPointSubtotal) + cents(birdBoxSubtotal) + cents(linearMeshSubtotal) + cents(barrelClosureSubtotal)
   );
   const minimumApplied = floor > Math.round(rawInstall);
   const reconcileDelta = cents(installPrice - componentSubtotal);
@@ -9926,7 +9971,9 @@ function priceRodentExclusionV2(options = {}) {
     pushComponent('wire_mesh_points', 'Rodent Exclusion — Wire Mesh Points', wireMeshPointSubtotal,
       unitParts([
         [stdPts, `standard @ $${cfg.wireMeshPoints.standard}/pt`],
-        [advPts, `roof/high @ $${cfg.wireMeshPoints.advancedRoofHigh}/pt`],
+        [advPts, roof && roof.tile
+          ? `roof/high tile @ $${(cfg.wireMeshPoints.advancedRoofHigh * roof.multiplier).toFixed(2)}/pt`
+          : `roof/high @ $${cfg.wireMeshPoints.advancedRoofHigh}/pt`],
       ]));
   }
   if (birdBoxSubtotal > 0) {
@@ -9944,14 +9991,28 @@ function priceRodentExclusionV2(options = {}) {
         [hardLF, `LF hard @ $${cfg.linearMesh.hardRatePerLF}/LF`],
       ]));
   }
+  if (barrelClosureSubtotal > 0) {
+    pushComponent('barrel_eave_closure', `Barrel tile eave closure (${roof.eaveFt} ft)`, barrelClosureSubtotal,
+      `${roof.eaveFt} ft of eave @ $${roof.perFt}/ft, $${roof.minimum} minimum for this line.`);
+  }
   // A whole-home seal with no counted points still quotes its home-size minimum as a row.
   if (componentLineItems.length > 0 || wholeHome) {
     if (floorDelta > 0) {
       const minimumRow = exclusionMinimumRowText(wholeHome, floor);
       pushComponent(minimumRow.component, minimumRow.label, floorDelta, minimumRow.detail);
     } else if (roundingDelta !== 0) {
-      const last = componentLineItems[componentLineItems.length - 1];
-      last.price = cents(last.price + roundingDelta);
+      // Round once: the install total takes the whole-dollar rounding; a barrel closure row keeps its exact cent amount
+      // (max(minimum, feet x rate)). The remainder (|r| <= $0.50) goes to the LARGEST non-closure row that stays >= 0 after
+      // the adjustment (ties: the later row); if none can absorb it, the closure row takes it (it is >= the minimum, so it
+      // always can). No row is ever negative, and the rows always sum to the price. Without a roof style pick the long-standing
+      // rule is kept byte for byte: the last row takes it, unless that would make it negative.
+      const absorbs = componentLineItems.filter((row) => row.component !== 'barrel_eave_closure' && row.price + roundingDelta >= 0);
+      const largest = absorbs.reduce((best, row) => (!best || row.price >= best.price ? row : best), null);
+      const lastRow = componentLineItems[componentLineItems.length - 1];
+      const target = (!roof && lastRow.price + roundingDelta >= 0 ? lastRow : largest)
+        || componentLineItems.find((row) => row.component === 'barrel_eave_closure')
+        || lastRow;
+      target.price = cents(target.price + roundingDelta);
     }
     if (urgencyDelta > 0) {
       pushComponent('urgency_surcharge', 'Rodent Exclusion — Urgency Surcharge', urgencyDelta,
@@ -10005,6 +10066,8 @@ function priceRodentExclusionV2(options = {}) {
     warrantyEligible: true,
     exclusionCompleted: total > 0,
     ...guaranteeFields,
+    // Barrel tile picked with no measured eave: no closure line, and the tool says it needs a measurement.
+    ...(roof && roof.barrel && roof.eaveFt <= 0 ? { barrelClosureNeedsMeasurement: true } : {}),
   };
 }
 
