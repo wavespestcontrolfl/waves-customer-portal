@@ -227,17 +227,22 @@ describe('extendReservation — a make-room hold nothing can prove again is supe
   });
 });
 
-// Owner rule B per truck (GATE_MULTI_TECH_CONFIRM), pre-push P1 on e81d7ed7c0: a lapsed hold the extend revives keeps
-// the zone its far-south check read. A hold has no customer city, so an UNSTAMPED hold (its zone did not resolve at
-// reserve) without the stamp is invisible to the next booking's stop read (zoneStopDays), and a second truck could take
-// the same south day. A stamped hold keeps its stamp; gate off reads nothing and writes the expiry alone.
-describe('extendReservation — a lapsed far-south hold per truck (owner rule B)', () => {
+// Owner rule B per truck (GATE_MULTI_TECH_CONFIRM), pre-push P1s on e81d7ed7c0 and e78306a32d: every extend checks the
+// hold's truck, lapsed or live (a hold can run out while the extend waits on the date lock), and keeps the zone its
+// far-south check read. A hold has no customer city, so an UNSTAMPED hold (its zone did not resolve at reserve) without
+// the stamp is invisible to the next booking's stop read (zoneStopDays), and a second truck could take the same south
+// day. A stamped hold keeps its stamp; gate off reads nothing and writes the expiry alone.
+describe('extendReservation — a far-south hold per truck (owner rule B)', () => {
   const funnel = require('../services/scheduling/zone-day-funnel');
+  const { gates } = require('../config/feature-gates');
   const VENICE = { id: 'zone-ven', zone_name: 'Venice / North Port', cities: ['Venice'] };
   const LAPSED = { ...HOLD, technician_id: 'tech-1', _already_lapsed: true };
   const VENICE_ESTIMATE = { address: '1 Test Way, Venice, FL 34285' };
   let spies = [];
+  let funnelGate;
   beforeEach(() => {
+    funnelGate = gates.southZoneDayFunnel;
+    gates.southZoneDayFunnel = true;
     jest.clearAllMocks();
     delete process.env.GATE_SCHEDULING_CAPACITY;
     jest.useFakeTimers();
@@ -245,17 +250,18 @@ describe('extendReservation — a lapsed far-south hold per truck (owner rule B)
     makeRoom.bookingMakeRoomMode.mockReturnValue('off');
     db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
   });
-  afterEach(() => { for (const spy of spies) spy.mockRestore(); spies = []; jest.useRealTimers(); });
+  afterEach(() => { for (const spy of spies) spy.mockRestore(); spies = []; jest.useRealTimers(); gates.southZoneDayFunnel = funnelGate; });
 
   const extend = () => slotReservation.extendReservation({ estimateId: EST, scheduledServiceId: 'hold-1' });
 
   test.each([
-    ['unstamped', null, { reservation_expires_at: '2027-05-20T13:40:00.000Z', zone: 'venice' }],
-    ['stamped', 'venice', { reservation_expires_at: '2027-05-20T13:40:00.000Z' }],
-  ])('an %s lapsed hold revives with the zone its check read on the row', async (_label, zone, written) => {
+    ['lapsed unstamped', null, true, { reservation_expires_at: '2027-05-20T13:40:00.000Z', zone: 'venice' }],
+    ['lapsed stamped', 'venice', true, { reservation_expires_at: '2027-05-20T13:40:00.000Z' }],
+    ['live unstamped', null, false, { reservation_expires_at: '2027-05-20T13:40:00.000Z', zone: 'venice' }],
+  ])('a %s hold is checked and keeps the zone its check read on the row', async (_label, zone, lapsed, written) => {
     const mayTake = jest.fn().mockResolvedValue(true);
     spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
-    const { update } = harness({ hold: { ...LAPSED, zone }, destinationProbe: false, estimate: VENICE_ESTIMATE, zones: [VENICE] });
+    const { update } = harness({ hold: { ...LAPSED, zone, _already_lapsed: lapsed }, destinationProbe: false, estimate: VENICE_ESTIMATE, zones: [VENICE] });
     await expect(extend()).resolves.toMatchObject({ scheduledServiceId: 'hold-1' });
     expect(mayTake).toHaveBeenCalledWith(expect.any(Function), { estimateZone: VENICE, date: DATE, technicianId: 'tech-1' });
     expect(update.update).toHaveBeenCalledWith(written);

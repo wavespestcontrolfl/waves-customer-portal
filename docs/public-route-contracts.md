@@ -1419,10 +1419,12 @@ zone-day technician or answers `SLOT_TAKEN`. Its booking transaction checks the
 technician again under the date lock (`truckMayTakeDate`), so two commits that
 rebuilt the same new day before either booked never send two technicians south:
 the second answers `SLOT_TAKEN`. The estimate page's holds check the same rule
-under their date lock where a hold starts to hold its day (a new hold, and a
-lapsed hold that an extend revives or an accept graduates, checked in the zone
-stamped on it; an unstamped one is stamped with the zone its check read, so the
-next booking sees it), with the existing `SLOT_UNAVAILABLE` answer. The assessment
+under their date lock at every hold write, live or lapsed (a new hold, a
+same-slot re-tap, an extend and an accept), in the zone stamped on the hold; an
+unstamped hold is stamped with the funneled zone its check read, so the next
+booking sees it. The answer is the existing `SLOT_UNAVAILABLE`. The stop read
+counts a hold by the real clock, so a hold that ran out while its writer waited
+on the date lock no longer holds the day. The assessment
 link's list and its booking resolve the zone from the one booking address the
 same way (its city decides, its text only without one; `callbackVisit.zoneAddress`), so a list
 never offers a time that check refuses. No field or status changes.

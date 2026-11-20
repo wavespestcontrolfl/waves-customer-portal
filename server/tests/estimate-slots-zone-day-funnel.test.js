@@ -738,6 +738,21 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
       expect(db).not.toHaveBeenCalled();
     });
 
+    // Pre-push P1 on e78306a32d: a writer reads the stops under its date lock, after waiting for it. NOW() is its
+    // transaction's start, so a hold that ran out meanwhile (the writer's own included) would still count as its
+    // truck's stop; the read counts a hold by the real clock.
+    test('the stop read counts a hold by the real clock, not the transaction\'s NOW()', async () => {
+      await withTruckGate('true', async () => {
+        const chain = scheduledServicesChain([]);
+        db.mockImplementation(() => chain);
+        expect(await take('tech-1')).toBe(true);
+        const q = { whereNull: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
+        chain.andWhere.mock.calls[0][0](q);
+        expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
+        expect(q.orWhereRaw).toHaveBeenCalledWith('scheduled_services.reservation_expires_at > clock_timestamp()');
+      });
+    });
+
     // Not fail-open like the offer: the booking transaction refuses rather than books past a read it could not do.
     test('a stop-read failure throws, so the booking transaction fails closed', async () => {
       await withTruckGate('true', async () => {

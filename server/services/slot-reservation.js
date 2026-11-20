@@ -854,23 +854,24 @@ function slotTaken(slotId) {
 
 // Owner rule B per truck (GATE_MULTI_TECH_CONFIRM, 2026-11-19, zone-day-funnel.js truckMayTakeDate): a far-south hold
 // never sends a second truck south on a day another truck already drives there. Read on the caller's transaction,
-// under the date lock it took first, where a hold starts to hold its day: a new hold (reserveSlot, `zone` = the zone
-// it stamps), and a lapsed hold that an extend revives or an accept graduates (a lapsed hold stopped counting, so
-// another truck may have taken the day). A lapsed hold keeps the zone stamped on it (`stamp`, the row's `zone`), so
-// that stamp decides; an unstamped hold resolves its zone from `estimate`, as reserveSlot did. Slot-taken when
-// refused. Returns the zone stamp an unstamped hold takes when it revives or graduates (`{ zone }`, the zone the
-// check read): a hold has no customer city, so without it the next booking's stop read (zoneStopDays) cannot see this
-// truck's day. `{}` for a stamped hold or no zone. Gate off or no technician: nothing is read, `{}`.
+// under the date lock it took first, at EVERY hold write: a new hold and a same-slot re-tap (reserveSlot; `zone` = the
+// zone a new hold stamps), an extend and an accept. Every one, not only a lapsed hold: a hold can run out while its
+// writer waits on the date lock, which the writer's NOW() (its transaction's start) does not show, and an unstamped
+// hold is not on the stop read at all (no zone, no customer city). The stop read uses the real clock (zoneStopDays),
+// so a live hold on its own truck's day passes on its own row. A hold's zone stamp (`stamp`, the row's `zone`) decides
+// its zone; an unstamped hold resolves it from `estimate`, as reserveSlot did. Slot-taken when refused. Returns the
+// stamp an unstamped hold takes (`{ zone }`, when the check read a funneled zone), so the next booking's stop read
+// sees this truck's day; else `{}`. Either gate off (GATE_MULTI_TECH_CONFIRM, GATE_SOUTH_ZONE_DAY_FUNNEL) or no
+// technician: nothing is read.
 async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = null, stamp = null, estimate = null }) {
   const funnel = require('./scheduling/zone-day-funnel');
-  if (techId == null || !funnel.perTruckLive()) return {};
+  if (techId == null || !funnel.perTruckLive() || !funnel.funnelOn()) return {};
   // An unstamped hold whose zone cannot be resolved skips the check, as reserveSlot's own zone checks do.
   const estimateZone = zone
     || (stamp ? await stampedZone(conn, stamp) : null)
     || (estimate ? await resolveEstimateZone(conn, estimate).catch(() => null) : null);
   if (!(await funnel.truckMayTakeDate(conn, { estimateZone, date, technicianId: techId }))) throw slotTaken(slotId);
-  const slug = stamp ? null : zoneSlugOf(estimateZone);
-  return slug ? { zone: slug } : {};
+  return !stamp && funnel.isFunnelZone(estimateZone) ? { zone: zoneSlugOf(estimateZone) } : {};
 }
 
 // A hold's zone stamp (zoneSlugOf of the zone reserveSlot resolved) back to its service_zones row, whose cities the
@@ -1750,6 +1751,10 @@ async function reserveSlot({
         // catalogLink/catalogServiceId/serviceType were resolved above from
         // the SAME serviceProfile the fresh-create path below stamps a new
         // row with — reused here, not re-queried.
+        // Owner rule B per truck, as on every hold write (refuseOtherTruckSouthDay): this re-tap keeps a hold that may
+        // have run out while the request waited on the date lock, or that has no zone stamp; an unstamped hold keeps the
+        // funneled zone the check read (`zoneStamp`).
+        const zoneStamp = await refuseOtherTruckSouthDay(trx, { stamp: sameSlotHold.zone, estimate, date, techId, slotId });
         requireMakeRoomStillOn(makeRoom, slotId);
         const [refreshed] = await trx('scheduled_services')
           .where({ id: sameSlotHold.id })
@@ -1763,6 +1768,7 @@ async function reserveSlot({
             service_type: serviceType,
             // A make-room hold's chain is the one just proven; a hold that no longer needs one drops it.
             ...(makeRoom || sameSlotHold.make_room_moves ? { make_room_moves: makeRoom ? makeRoom.payload : null } : {}),
+            ...zoneStamp,
           })
           .returning(['id', 'reservation_expires_at']);
         const refreshedExpiresAt = refreshed?.reservation_expires_at || null;
@@ -1814,8 +1820,8 @@ async function reserveSlot({
         throw err;
       }
 
-      // Owner rule B per truck: not on a day another truck already drives south (after the same-slot refresh above,
-      // which keeps the customer's own hold).
+      // Owner rule B per truck: not on a day another truck already drives south (the same-slot refresh above checks
+      // the hold it keeps).
       await refuseOtherTruckSouthDay(trx, { zone: reserveZone, date, techId, slotId });
 
       // Zone-capacity check: the tech-scoped conflict above misses
@@ -2255,17 +2261,14 @@ async function commitReservation({
         throw err;
       }
     }
-    // Owner rule B per truck: a lapsed hold stopped counting, so another truck may have taken its far-south day.
+    // Owner rule B per truck, on every accept (refuseOtherTruckSouthDay: not only a `_lapsed` hold, which reads this
+    // transaction's NOW()): another truck may have taken this hold's far-south day while it was lapsed or unstamped.
     // Same slot-unavailable recovery as the technician check below (the customer re-picks a time). An unstamped hold
-    // graduates with the zone the check read (`zoneStamp`, in `updates` below).
-    let zoneStamp = {};
-    if (row._lapsed) {
-      const heldDate = dateOnly(row.scheduled_date);
-      zoneStamp = await refuseOtherTruckSouthDay(client, {
-        stamp: row.zone, estimate, date: heldDate, techId: row.technician_id,
-        slotId: `${heldDate}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
-      });
-    }
+    // graduates with the funneled zone the check read (`zoneStamp`, in `updates` below).
+    const zoneStamp = await refuseOtherTruckSouthDay(client, {
+      stamp: row.zone, estimate, date: lockedDate, techId: row.technician_id,
+      slotId: `${lockedDate}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
+    });
 
     // Technician eligibility re-check at COMMIT (FOR SHARE on this txn): the
     // office may have offboarded or de-listed the held tech between the
@@ -3026,7 +3029,6 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // reserveSlot explicitly supersedes, and /data could then surface the
     // stale one instead of the customer's newer selection. The newer hold
     // wins: this one stays dead and the caller re-picks.
-    let zoneStamp = {};
     if (alreadyLapsed) {
       const rivalLiveHold = await trx('scheduled_services')
         .where({ source_estimate_id: estimateId })
@@ -3040,13 +3042,14 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         err.code = 'RESERVATION_NOT_FOUND';
         throw err;
       }
-      // Owner rule B per truck: while lapsed, another truck may have taken this hold's far-south day. An unstamped hold
-      // revives with the zone the check read (`zoneStamp`, in the expiry write below).
-      zoneStamp = await refuseOtherTruckSouthDay(trx, {
-        stamp: row.zone, estimate, date: scheduledDate, techId: row.technician_id,
-        slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
-      });
     }
+    // Owner rule B per truck, on every extend (refuseOtherTruckSouthDay: not only an `alreadyLapsed` hold, which reads
+    // this transaction's NOW()): another truck may have taken this hold's far-south day while it was lapsed or
+    // unstamped. An unstamped hold keeps the funneled zone the check read (`zoneStamp`, in the expiry write below).
+    const zoneStamp = await refuseOtherTruckSouthDay(trx, {
+      stamp: row.zone, estimate, date: scheduledDate, techId: row.technician_id,
+      slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
+    });
     // The SAME definitive validity checks commitReservation runs (codex r10
     // P2). Occupancy alone is not enough: if the office de-listed the held
     // technician or blacked the day out after the reserve, the commit refuses

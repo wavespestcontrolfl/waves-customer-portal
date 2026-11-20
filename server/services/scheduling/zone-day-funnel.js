@@ -66,10 +66,12 @@
  * before either is written, so each writer re-checks the truck under its date
  * lock (truckMayTakeDate) with the zone it stamps on its row: the assessment
  * link's booking transaction (createSelfBooking callbackVisit.slotGuard), and
- * the estimate page's holds where a hold starts to hold its day (a new hold,
- * and a lapsed hold that an extend revives or an accept graduates: a lapsed
- * hold stops counting, so another truck may have taken the day; it keeps its
- * own zone stamp, which decides). The assessment link's list and its booking
+ * the estimate page's holds at every hold write, live or lapsed (a new hold, a
+ * same-slot re-tap, an extend, an accept: a hold can run out while its writer
+ * waits on the date lock, and an unstamped hold is no zone stop at all). A
+ * hold's zone stamp decides its zone; an unstamped hold takes the funneled zone
+ * its check read. The stop read counts a hold by the real clock
+ * (clock_timestamp), not the writer's transaction start. The assessment link's list and its booking
  * resolve the zone from the one booking address the same way
  * (resolveEstimateZone: its city decides, its text only without one; createSelfBooking
  * callbackVisit.zoneAddress), so the offer never shows a time the check
@@ -114,8 +116,13 @@ function funnelZoneSlugs() {
   );
 }
 
+// The far-south funnel switch (GATE_SOUTH_ZONE_DAY_FUNNEL).
+function funnelOn() {
+  return isEnabled('southZoneDayFunnel');
+}
+
 function isFunnelZone(estimateZone) {
-  if (!isEnabled('southZoneDayFunnel')) return false;
+  if (!funnelOn()) return false;
   const slug = zoneSlugOf(estimateZone);
   return !!slug && funnelZoneSlugs().has(slug);
 }
@@ -208,7 +215,9 @@ async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo) {
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .andWhere((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      // The real clock, not NOW() (the transaction's start): a writer reads this under its date lock after waiting for
+      // it, and a hold that ran out meanwhile, the writer's own included, no longer holds the day (owner rule B).
+      q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > clock_timestamp()');
     })
     .select(
       'scheduled_services.scheduled_date',
@@ -382,6 +391,7 @@ module.exports = {
   rowInFunnelZones,
   onZoneDay,
   perTruckLive,
+  funnelOn,
   isFunnelZone,
   funnelZoneSlugs,
   fallbackCenterZoneName,
