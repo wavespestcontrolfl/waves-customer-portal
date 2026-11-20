@@ -4,7 +4,9 @@
  * Staff roof read (GATE_ROOF_ENTRY_READ, owner 2026-11-19). From a free county aerial photo of the home, ONE vision
  * call flags which rodent entry-point types the roof likely has, so the technician knows where to look and the
  * estimate is not short. Staff only; nothing here reaches a customer. Every read is a paid model call, so:
- *   - a stored read of the same crop (imagery source + centre rounded to 5 decimals) is reused for 90 days;
+ *   - a stored read of the same crop (imagery source + centre rounded to 5 decimals) is reused for 90 days from the
+ *     PAID call. Another estimate or customer reusing it gets its own row (a cost-0 copy), so technician feedback
+ *     stays with its own context;
  *   - an unknown county or a failed image fetch is { status: 'no_image' } and makes NO model call;
  *   - the model gets ONE provider call: the estimateVision policy is cut to its primary route, so a billed answer
  *     that fails to parse or validate is never retried on the second provider. It is stored with tier 'unknown' and
@@ -203,14 +205,21 @@ function validateRead(json) {
   return { flags: json.tier === TIER_UNKNOWN ? {} : flags, tier: json.tier };
 }
 
-/** Estimated spend of one billed leg, in cents: from llm_model_prices, else the ceiling. */
-async function estimateCostCents({ provider, model, usage }) {
+/** Prices read once, BEFORE the transaction opens (a second pool connection inside it could deadlock the pool); null if unreadable. */
+async function loadPriceMap() {
   try {
-    const { map } = await llmCost.loadPrices();
-    const usd = llmCost.costUsd(provider, usage || {}, llmCost.priceFor(map, model));
-    if (usd != null && Number.isFinite(usd)) return Math.max(1, Math.ceil(usd * 100));
+    return (await llmCost.loadPrices()).map;
   } catch (err) {
     logger.warn(`[roof-entry-read] price lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
+/** Estimated spend of one billed leg, in cents: from llm_model_prices, else the ceiling. Never queries. */
+function estimateCostCents({ provider, model, usage }, prices) {
+  if (prices) {
+    const usd = llmCost.costUsd(provider, usage || {}, llmCost.priceFor(prices, model));
+    if (usd != null && Number.isFinite(usd)) return Math.max(1, Math.ceil(usd * 100));
   }
   return FALLBACK_COST_CENTS;
 }
@@ -242,14 +251,46 @@ function publicRead(row) {
   };
 }
 
-// A read with tier 'unknown' (unreadable roof, or an answer that failed validation) is never reused.
-async function findReusable(key, conn = db) {
-  return conn(TABLE)
+const sameContext = (row, ctx) => (row.estimate_id || null) === ctx.estimateId && (row.customer_id || null) === ctx.customerId;
+const timeOf = (row) => new Date(row.created_at).getTime();
+
+/**
+ * The reusable reads of one crop, or null. The window is counted from the original PAID read: the anchor is the
+ * newest row with cost_estimate_cents > 0 (a paid call books at least 1 cent; a copy for another estimate books 0)
+ * that is not tier 'unknown' and is under 90 days old. Rows created at or after the anchor are its copies for other
+ * contexts, so a copy never carries a read past 90 days from the paid call and never starts a new window.
+ */
+async function reuseCandidates(key, conn = db) {
+  const rows = await conn(TABLE)
     .where({ lookup_key: key })
     .whereNot({ ai_tier: TIER_UNKNOWN })
     .whereRaw("created_at > now() - (? * interval '1 day')", [REUSE_DAYS])
-    .orderBy('created_at', 'desc')
-    .first();
+    .select('*');
+  const anchor = rows.filter((r) => r.cost_estimate_cents > 0).sort((a, b) => timeOf(b) - timeOf(a))[0];
+  if (!anchor) return null;
+  return { anchor, candidates: rows.filter((r) => timeOf(r) >= timeOf(anchor)) };
+}
+
+/**
+ * The row to hand this request: the source itself when it belongs to the same (estimate, customer) context, else a
+ * NEW row for this context that copies the paid AI result with cost 0 and empty technician fields. One row per
+ * context keeps the technician's count for estimate B from overwriting estimate A's.
+ */
+async function answerFor(source, ctx, trx) {
+  if (sameContext(source, ctx)) return publicRead(source);
+  const [row] = await trx(TABLE).insert({
+    estimate_id: ctx.estimateId,
+    customer_id: ctx.customerId,
+    lookup_key: source.lookup_key,
+    county: source.county,
+    image_source: source.image_source,
+    image_year: source.image_year,
+    model: source.model,
+    ai_flags: JSON.stringify(parseJson(source.ai_flags) || {}),
+    ai_tier: source.ai_tier,
+    cost_estimate_cents: 0,
+  }).returning('*');
+  return publicRead(row);
 }
 
 /** Throws code 'unknown_reference' before any spend when a supplied estimate or customer does not exist. */
@@ -288,13 +329,23 @@ function settleOutcome(outcome) {
   return leg ? { model: leg.model, checked: null, billed: leg } : null;
 }
 
-// The paid part, run under the property's advisory lock and one transaction: reuse check again, then image, model
-// call and insert. A second server instance waits on the lock and then finds this row instead of paying again.
-async function readUnderLock({ key, lat, lng, county, estimateId, customerId }) {
+// The paid part, run under the property's advisory lock and one transaction: look again, then image, model call and
+// insert. A second server instance waits on the lock and then finds this row instead of paying again. `seenIds` are
+// the rows of this crop that existed when the request began: a row that appeared after that (even a billed tier
+// 'unknown') was written by the holder we waited on, and is this request's answer. A LATER request, which did not wait
+// on that attempt, may retry an unknown.
+async function readUnderLock({ key, lat, lng, county, ctx, seenIds, prices }) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
-    const reusable = await findReusable(key, trx);
-    if (reusable) return { status: 'ok', cached: true, read: publicRead(reusable) };
+    const hit = await reuseCandidates(key, trx);
+    if (hit) {
+      const source = hit.candidates.find((r) => sameContext(r, ctx)) || hit.anchor;
+      return { status: 'ok', cached: true, read: await answerFor(source, ctx, trx) };
+    }
+    const appeared = (await trx(TABLE).where({ lookup_key: key }).select('*'))
+      .filter((r) => !seenIds.has(r.id))
+      .sort((a, b) => timeOf(b) - timeOf(a))[0];
+    if (appeared) return { status: 'ok', cached: true, read: await answerFor(appeared, ctx, trx) };
 
     const image = await fetchAerial(lat, lng, county);
     if (!image) return { status: 'no_image', cached: false, read: null };
@@ -305,8 +356,8 @@ async function readUnderLock({ key, lat, lng, county, estimateId, customerId }) 
       return { status: 'model_failed', cached: false, read: null };
     }
     const [row] = await trx(TABLE).insert({
-      estimate_id: estimateId || null,
-      customer_id: customerId || null,
+      estimate_id: ctx.estimateId,
+      customer_id: ctx.customerId,
       lookup_key: key,
       county: countyKey(county),
       image_source: image.source,
@@ -314,31 +365,39 @@ async function readUnderLock({ key, lat, lng, county, estimateId, customerId }) 
       model: settled.model,
       ai_flags: JSON.stringify(settled.checked ? settled.checked.flags : {}),
       ai_tier: settled.checked ? settled.checked.tier : TIER_UNKNOWN,
-      cost_estimate_cents: await estimateCostCents(settled.billed),
+      cost_estimate_cents: estimateCostCents(settled.billed, prices),
     }).returning('*');
     return { status: 'ok', cached: false, read: publicRead(row) };
   });
 }
 
-// Fast path only: one in-flight read per property in this process. The advisory lock is what holds across instances.
+// Fast path only: one in-flight read per crop and context in this process. The advisory lock is what holds across instances.
 const inFlight = new Map();
 
 /**
  * Run or reuse a roof read. Returns { status: 'ok' | 'no_image' | 'model_failed', cached, read }.
  * input: { lat, lng, county, estimateId?, customerId? }. Throws code 'unknown_reference' for a missing estimate or
- * customer. An unsupported county answers no_image before any database read.
+ * customer. An unsupported county answers no_image before any database read. A reuse for a different estimate or
+ * customer gets its own row (a copy of the paid result, cost 0), so each context keeps its own technician feedback.
  */
 async function runRoofEntryRead(input) {
   const county = countyKey(input.county);
   if (!county) return { status: 'no_image', cached: false, read: null };
   await assertReferencesExist(input);
-  const src = IMAGE_SOURCES[county];
-  const key = lookupKey({ source: src.source, lat: input.lat, lng: input.lng });
-  const reusable = await findReusable(key);
-  if (reusable) return { status: 'ok', cached: true, read: publicRead(reusable) };
-  if (inFlight.has(key)) return inFlight.get(key);
-  const pending = readUnderLock({ ...input, key }).finally(() => inFlight.delete(key));
-  inFlight.set(key, pending);
+  const ctx = { estimateId: input.estimateId || null, customerId: input.customerId || null };
+  const key = lookupKey({ source: IMAGE_SOURCES[county].source, lat: input.lat, lng: input.lng });
+  // The rows of this crop as of now: what "already there" means for this request once it queues on the lock.
+  const seenIds = new Set((await db(TABLE).where({ lookup_key: key }).select('id')).map((r) => r.id));
+  const hit = await reuseCandidates(key);
+  const same = hit && hit.candidates.find((r) => sameContext(r, ctx));
+  if (same) return { status: 'ok', cached: true, read: publicRead(same) };
+  const flightKey = `${key}|${ctx.estimateId}|${ctx.customerId}`;
+  if (inFlight.has(flightKey)) return inFlight.get(flightKey);
+  const pending = (async () => {
+    const prices = hit ? null : await loadPriceMap();
+    return readUnderLock({ ...input, key, ctx, seenIds, prices });
+  })().finally(() => inFlight.delete(flightKey));
+  inFlight.set(flightKey, pending);
   return pending;
 }
 

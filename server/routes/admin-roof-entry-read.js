@@ -7,9 +7,11 @@
  *   PATCH /api/admin/roof-entry-read/:id/tech-count the technician's final count and flags, to compare with the AI later
  *         body { count?: int >= 0, flags?: { <entry type>: 'yes' | 'no' | 'unsure' } } -> { read }
  *
- * Admin only, like the other admin estimate routes. The gate is checked FIRST, before the staff login reads the
- * technicians table: gate off = 404 { enabled: false } with no database read, image fetch or model call (a non-admin
- * sees the same 404 while it is off). Nothing here is customer-facing.
+ * Admin only, like the other admin estimate routes. The gate is this router's first middleware, ahead of the staff
+ * login that reads the technicians table: gate off = 404 { enabled: false } from the router, with no route-level
+ * database read, staff login, image fetch or model call (a non-admin sees the same 404 while it is off). The portal's
+ * global API middleware (rate limit, body parsing) runs before the router, so a limiter 429 or a malformed-body 400 can
+ * still come first. Nothing here is customer-facing.
  */
 const express = require('express');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');

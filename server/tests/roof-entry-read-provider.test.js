@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
       whereRaw() { return b; },
       orderBy() { return b; },
       async first() { return undefined; },
+      async select() { return []; },
       insert(record) {
         return { async returning() { const row = { id: 'read-1', created_at: 'T', ...record }; mockRows.push(row); return [row]; } };
       },

@@ -6,6 +6,7 @@ const READ_A = '11111111-1111-4111-8111-111111111111';
 const EST = '22222222-2222-4222-8222-222222222222';
 const MISSING = '33333333-3333-4333-8333-333333333333';
 const CUST = '44444444-4444-4444-8444-444444444444';
+const EST2 = '55555555-5555-4555-8555-555555555555';
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const logger = require('../services/logger');
@@ -35,11 +36,12 @@ jest.mock('../models/db', () => {
       whereRaw(_sql, [days]) { cutoff = Date.now() - days * 86400000; return b; },
       orderBy() { return b; },
       async first() { return match()[0]; },
+      async select() { return match(); },
       insert(record) {
         return {
           async returning() {
             mockEvents.push('insert');
-            const row = { id: `read-${mockRows.length + 1}`, tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(), ...record };
+            const row = { id: `${String(mockRows.length + 1).padStart(8, '0')}-0000-4000-8000-000000000000`, tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(), ...record };
             mockRows.push(row);
             return [row];
           },
@@ -69,7 +71,7 @@ jest.mock('../models/db', () => {
     return conn;
   };
   const db = makeDb();
-  db.transaction = jest.fn(async (fn) => { mockDbCalls.push('transaction'); return fn(makeDb()); });
+  db.transaction = jest.fn(async (fn) => { mockDbCalls.push('transaction'); mockEvents.push('tx'); return fn(makeDb()); });
   return db;
 });
 
@@ -130,7 +132,7 @@ const savedGate = process.env.GATE_ROOF_ENTRY_READ;
 beforeEach(() => {
   process.env.GATE_ROOF_ENTRY_READ = 'true';
   mockRows = [];
-  mockRefs = { estimates: [{ id: EST }], customers: [{ id: CUST }] };
+  mockRefs = { estimates: [{ id: EST }, { id: EST2 }], customers: [{ id: CUST }] };
   mockDbCalls = [];
   mockEvents = [];
   mockOnLock = null;
@@ -142,7 +144,7 @@ beforeEach(() => {
     mockEvents.push('model');
     return { ok: true, provider: 'gemini', model: 'test-vision', json: goodWithPins(), usage: { input_tokens: 1500, output_tokens: 600 } };
   });
-  mockLoadPrices.mockReset().mockResolvedValue({ map: new Map() });
+  mockLoadPrices.mockReset().mockImplementation(async () => { mockEvents.push('prices'); return { map: new Map() }; });
   mockCostUsd.mockReset().mockReturnValue(0.0123);
   fetchSpy = jest.fn().mockImplementation(async () => { mockEvents.push('image'); return jpeg(); });
   // The app under test is reached with the real fetch; only the county image calls are faked.
@@ -165,7 +167,7 @@ const post = (body, opts) => call('POST', '', { body, ...opts });
 const home = (over = {}) => ({ lat: 27.46, lng: -82.57, county: 'Manatee', ...over });
 
 describe('gate and auth', () => {
-  it('answers 404 {enabled:false} with the gate off, before any database read, image fetch or model call', async () => {
+  it('answers 404 {enabled:false} from the router with the gate off: no route-level database read, image fetch or model call (the portal\'s global middleware runs before it)', async () => {
     delete process.env.GATE_ROOF_ENTRY_READ;
     for (const res of [await post(home()), await call('PATCH', `/${READ_A}/tech-count`, { body: { count: 2 } })]) {
       expect(res.status).toBe(404);
@@ -401,7 +403,8 @@ describe('advisory lock', () => {
   it('takes the property lock first, then fetches, calls the model and inserts in that one transaction', async () => {
     await post(home());
     expect(mockLockKeys).toEqual([mockRows[0].lookup_key]);
-    expect(mockEvents).toEqual(['raw:lock', 'image', 'model', 'insert']);
+    // Prices are read BEFORE the transaction opens, so the pricing query never needs a second pool connection.
+    expect(mockEvents).toEqual(['prices', 'tx', 'raw:lock', 'image', 'model', 'insert']);
     expect(mockDbCalls).toContain('transaction');
   });
 
@@ -411,7 +414,7 @@ describe('advisory lock', () => {
     mockOnLock = () => {
       mockRows.push({
         id: 'read-other', lookup_key: key, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
-        ai_flags: JSON.stringify(goodJson().flags), ai_tier: 'high', tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(),
+        ai_flags: JSON.stringify(goodJson().flags), ai_tier: 'high', cost_estimate_cents: 3, tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(),
       });
     };
     const res = await post(home());
@@ -420,6 +423,84 @@ describe('advisory lock', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockRows).toHaveLength(1);
+  });
+});
+
+describe('a billed unknown under the lock', () => {
+  const unknownRow = (key) => ({
+    id: 'read-unknown', lookup_key: key, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
+    ai_flags: '{}', ai_tier: 'unknown', cost_estimate_cents: 4, tech_final_count: null, tech_final_flags: null, created_at: new Date().toISOString(),
+  });
+
+  it('answers a request that waited on the lock with the holder\'s billed unknown: no second paid call', async () => {
+    const key = svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
+    mockOnLock = () => { mockRows.push(unknownRow(key)); };
+    const res = await post(home());
+    expect(res.json).toEqual(expect.objectContaining({ status: 'ok', cached: true }));
+    expect(res.json.read).toEqual(expect.objectContaining({ id: 'read-unknown', tier: 'unknown' }));
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it('lets a LATER request, one that did not wait on that attempt, retry the unknown', async () => {
+    const key = svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
+    mockRows.push(unknownRow(key));
+    const res = await post(home());
+    expect(res.json.cached).toBe(false);
+    expect(res.json.read.tier).toBe('med');
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('one row per estimate or customer context', () => {
+  it('gives a second estimate on the same crop its own row, one paid call, and keeps technician feedback apart', async () => {
+    const a = await post(home({ estimate_id: EST }));
+    const b = await post(home({ estimate_id: EST2 }));
+    expect(b.json.cached).toBe(true);
+    expect(b.json.read.id).not.toBe(a.json.read.id);
+    expect(b.json.read).toEqual(expect.objectContaining({ estimate_id: EST2, tier: a.json.read.tier, flags: a.json.read.flags, model: a.json.read.model, tech_final_count: null }));
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(mockRows).toHaveLength(2);
+    expect(mockRows.map((r) => r.cost_estimate_cents)).toEqual([2, 0]);
+    expect(mockRows[0].lookup_key).toBe(mockRows[1].lookup_key);
+
+    // The same context asked again gets its own existing row, not a third one.
+    expect((await post(home({ estimate_id: EST2 }))).json.read.id).toBe(b.json.read.id);
+    expect((await post(home({ estimate_id: EST }))).json.read.id).toBe(a.json.read.id);
+    expect(mockRows).toHaveLength(2);
+
+    const patched = await call('PATCH', `/${a.json.read.id}/tech-count`, { body: { count: 5, flags: { gable_vents: 'yes' } } });
+    expect(patched.status).toBe(200);
+    expect(mockRows.find((r) => r.id === a.json.read.id).tech_final_count).toBe(5);
+    expect(mockRows.find((r) => r.id === b.json.read.id).tech_final_count).toBeNull();
+    expect(mockRows.find((r) => r.id === b.json.read.id).tech_final_flags).toBeNull();
+  });
+
+  it('answers a context-free ask with the original row and a customer context with a copy', async () => {
+    const first = await post(home());
+    const withCustomer = await post(home({ customer_id: CUST }));
+    expect(withCustomer.json.read.id).not.toBe(first.json.read.id);
+    expect(withCustomer.json.read.customer_id).toBe(CUST);
+    expect((await post(home())).json.read.id).toBe(first.json.read.id);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockLoadPrices).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts the reuse window from the paid read: a copy never extends it', async () => {
+    const key = svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 });
+    const day = 86400000;
+    const base = { lookup_key: key, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm', ai_flags: JSON.stringify(goodJson().flags), ai_tier: 'med', tech_final_count: null, tech_final_flags: null };
+    // Paid 91 days ago; a copy for estimate 2 was made at day 86 (5 days ago).
+    mockRows.push({ ...base, id: 'paid', cost_estimate_cents: 2, estimate_id: null, customer_id: null, created_at: new Date(Date.now() - 91 * day).toISOString() });
+    mockRows.push({ ...base, id: 'copy', cost_estimate_cents: 0, estimate_id: EST2, customer_id: null, created_at: new Date(Date.now() - 5 * day).toISOString() });
+    const res = await post(home({ estimate_id: EST2 }));
+    expect(res.json.cached).toBe(false);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    // The new paid read starts a new window; a copy made now is reused from it.
+    const other = await post(home({ estimate_id: EST }));
+    expect(other.json.cached).toBe(true);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 });
 
