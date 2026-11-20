@@ -420,12 +420,17 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     }), 'caller_declined_price'],
     ['two open estimates', ({ customerId }) => estimate(customerId), 'more_than_one_estimate'],
     ['two visits on the booking call', ({ customerId, bookingCallId }) => visit(customerId, bookingCallId, { scheduled_date: inDays(12) }), 'more_than_one_visit'],
-    // A follow-up visit, by either link, is the call's only visit left (its first visit cancelled): not a plan's first
-    // visit, and the series parent would keep the link.
-    ['the only visit left is the follow-up of a cancelled first visit', async ({ customerId, bookingCallId, visitId }) => {
+    // A follow-up visit is the call's only visit left: not a plan's first visit. Each row holds one sign of a follow-up
+    // alone: a link to its first visit (cancelled here), or a follow-up path's source action with both links cleared
+    // (deleting the first visit sets them null).
+    ['the only visit left is linked to a cancelled first visit', async ({ customerId, bookingCallId, visitId }) => {
       const first = await visit(customerId, bookingCallId, { scheduled_date: inDays(5), status: 'cancelled' });
-      await trx('scheduled_services').where({ id: visitId }).update({ parent_service_id: first, source_action: 'ai_call_pipeline_followup' });
+      await trx('scheduled_services').where({ id: visitId }).update({ parent_service_id: first });
     }, 'visit_follow_up'],
+    ["the only visit left is a call's follow-up whose first visit was deleted", ({ visitId }) => trx('scheduled_services').where({ id: visitId })
+      .update({ source_action: 'ai_call_pipeline_followup' }), 'visit_follow_up'],
+    ["the only visit left is a package's follow-up whose first visit was deleted", ({ visitId }) => trx('scheduled_services').where({ id: visitId })
+      .update({ source_action: 'package_followup_auto' }), 'visit_follow_up'],
     ['the visit is a follow-up booked from a finished visit', async ({ customerId, visitId }) => {
       const first = await visit(customerId, null, { source_action: 'admin', scheduled_date: inDays(-20), status: 'completed' });
       await trx('scheduled_services').where({ id: visitId }).update({ followup_source_service_id: first });

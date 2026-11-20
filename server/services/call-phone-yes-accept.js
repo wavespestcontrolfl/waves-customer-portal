@@ -332,10 +332,13 @@ function callQuotedRateOf(row) {
 // The tap's own rules on the booked visit row and the estimate, in order (visitProblem reads them after the price and
 // invoice checks).
 const TAP_ROW_RULES = [
-  // A follow-up visit (visit 2 of a call's two-treatment booking, linked to its first by parent_service_id or
-  // followup_source_service_id): not a plan's first visit, even when its first was cancelled or skipped and it is the
-  // call's only visit left. The converter would make it a series parent and keep that link.
-  ['visit_follow_up', (row) => row.parent_service_id != null || row.followup_source_service_id != null],
+  // A follow-up visit: linked to its first by parent_service_id (visit 2 of a call's or a package's booking) or
+  // followup_source_service_id (booked from a finished visit), or written by a follow-up booking path (its source action
+  // stays when deleting the first visit clears both links). Not a plan's first visit, even when its first was cancelled,
+  // skipped or deleted and it is the call's only visit left: the converter would make it a series parent.
+  ['visit_follow_up', (row) => row.parent_service_id != null || row.followup_source_service_id != null
+    || [require('./call-booking-source-actions').CALL_FOLLOWUP_SOURCE_ACTION, require('./package-followup-booking').PACKAGE_FOLLOWUP_SOURCE_ACTION]
+      .includes(row.source_action)],
   // A billing party set on this visit alone: the converter's next visits do not carry it, so the plan's first visit and
   // the rest would bill different parties.
   ['visit_payer', ownBillingParty],
