@@ -25,7 +25,9 @@
  * Step P does what the inventory price handler does for a manual $30.90 entry with no shipping or tax on the product's SiteOne
  * row (item D00001542 AND its vendors row named SiteOne: another vendor can list the same number): PUT /:productId/pricing writes
  * the vendor row (previous price, price, price_amount, landed cost, per-oz figures, last_checked_at) and a price_history row
- * holding the OLD price, then runs its own best-price recalculation in the same transaction (recalcBestPrice from
+ * holding the OLD price, records the new price as the row's price evidence (a price_snapshots row linked as its
+ * latest_snapshot_id; the handler writes that after its transaction, best effort, and Step P only where the table and the link
+ * column exist), then runs its own best-price recalculation in the same transaction (recalcBestPrice from
  * routes/admin-inventory, as migrations 20260907000020 and 20260928060000 do; it takes the same product lock, held here already).
  * The recalculation picks the winner from current prices and writes the catalog best price, its flags and its status, a stale or
  * needs-pricing mark included: the pre-slab and mosquito links read only an unmarked row, and job costing reads best_price
@@ -62,7 +64,8 @@
  * the restored row (a mark up()'s recalculation cleared comes back when the winner up() saw returns); it lifts the stale mark only
  * from a row that
  * still holds the mark and the prices up() saw; it restores the pest breakdown only when its audit row exists AND the row still
- * deep-equals what up() wrote; then it deletes this migration's price_history row, audit rows and changelog row.
+ * deep-equals what up() wrote; then it deletes this migration's price_history and price_snapshots rows (a restored vendor row
+ * links its earlier snapshot again), audit rows and changelog row.
  *
  * The CROSSCHECK_* values are inlined (a pushed migration is frozen): server/tests/bifenthrin-option-crosscheck-migration.test.js asserts
  * they equal the talstar_p and bifen_it products in constants.js, so a later constant change fails that test instead of silently
@@ -164,7 +167,11 @@ const PLANS = {
   onetime_trenching: { from: TALAK_TRENCH, seed: SEED_TRENCH, to: CROSSCHECK_TRENCH },
 };
 
-const VENDOR_COLUMNS = ['previous_price', 'price', 'price_amount', 'landed_cost', 'price_per_oz', 'normalized_unit_price', 'landed_unit_price', 'last_checked_at'];
+const VENDOR_COLUMNS = ['previous_price', 'price', 'price_amount', 'landed_cost', 'price_per_oz', 'normalized_unit_price', 'landed_unit_price', 'last_checked_at',
+  'latest_snapshot_id'];
+// The handler's price_snapshots fields for a manual entry that Step P can know (no URL, branch or availability was entered).
+const SNAPSHOT_COLUMNS = ['product_id', 'vendor_id', 'vendor_pricing_id', 'price', 'price_amount', 'quantity', 'uom', 'normalized_unit_price',
+  'normalized_unit', 'landed_unit_price', 'fetched_at', 'captured_at', 'source_type', 'price_type', 'metadata'];
 // The catalog prices a recalculation rewrites (the stale mark's own columns aside): the stale mark keeps them as it saw them, so
 // down() can tell no price was entered since.
 const CATALOG_SEEN_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_price_updated_at', 'best_vendor_pricing_id', 'unit_size_oz'];
@@ -260,6 +267,23 @@ async function insertPriceHistory(knex, productId, row) {
   return first && typeof first === 'object' ? first.id : first || null;
 }
 
+// The handler's price evidence for the new price (see the header): a price_snapshots row, linked as the row's latest_snapshot_id.
+// Only where the table and the link column exist (older installs have neither; the handler skips them the same way). Returns its id.
+async function insertPriceSnapshot(knex, productId, row, now) {
+  if (!(await knex.schema.hasTable('price_snapshots'))) return null;
+  if (!(await existingColumns(knex, 'vendor_pricing', ['latest_snapshot_id'])).length) return null;
+  const columns = await existingColumns(knex, 'price_snapshots', SNAPSHOT_COLUMNS);
+  const inserted = await knex('price_snapshots').insert(pickColumns({
+    product_id: productId, vendor_id: row.vendor_id, vendor_pricing_id: row.id, price: NEW_PRICE, price_amount: NEW_PRICE,
+    quantity: row.quantity, uom: row.unit ?? null, normalized_unit_price: NEW_PER_OZ, normalized_unit: 'oz', landed_unit_price: NEW_PER_OZ,
+    fetched_at: now, captured_at: now, source_type: 'manual', price_type: 'manual', metadata: JSON.stringify({ source: TAG }),
+  }, columns)).returning('id');
+  const first = Array.isArray(inserted) ? inserted[0] : inserted;
+  const snapshotId = first && typeof first === 'object' ? first.id : first || null;
+  if (snapshotId) await knex('vendor_pricing').where({ id: row.id }).update({ latest_snapshot_id: snapshotId });
+  return snapshotId;
+}
+
 // Mirrors PUT /:productId/pricing on the existing SiteOne row for a manual $30.90 entry: the vendor row, its price_history row, then
 // the handler's own recalculation (see the header). Each catalog row named LESCO Crosscheck Plus on its own: every check is about
 // that product's own vendor rows. True when it changed the rows.
@@ -297,14 +321,17 @@ async function fixProductPrice(knex, productId) {
   const product = await knex('products_catalog').where({ id: productId }).forUpdate().first();
   const vendorColumns = await existingColumns(knex, 'vendor_pricing', VENDOR_COLUMNS);
   const catalogColumns = await existingColumns(knex, 'products_catalog', CATALOG_AUDIT_COLUMNS);
-  const vendorPatch = pickColumns({
+  const priceFields = {
     previous_price: STALE_PRICE, price: NEW_PRICE, price_amount: NEW_PRICE, landed_cost: NEW_PRICE,
     price_per_oz: NEW_PER_OZ, normalized_unit_price: NEW_PER_OZ, landed_unit_price: NEW_PER_OZ, last_checked_at: now,
-  }, vendorColumns);
+  };
+  // Only the price fields: the snapshot link is written with its snapshot (insertPriceSnapshot), never nulled here.
+  const vendorPatch = pickColumns(priceFields, vendorColumns.filter((column) => column in priceFields));
   const before = { vendor_pricing: pickColumns(row, vendorColumns), catalog_seen: pickColumns(product, catalogColumns) };
 
   await knex('vendor_pricing').where({ id: row.id }).update(vendorPatch);
   const historyId = await insertPriceHistory(knex, productId, row);
+  const snapshotId = await insertPriceSnapshot(knex, productId, row, now);
   await recalcBestPrice(knex, productId);
 
   const written = {
@@ -313,7 +340,7 @@ async function fixProductPrice(knex, productId) {
   };
   await knex('pricing_config_audit').insert({
     config_key: CATALOG_AUDIT_KEY,
-    old_value: JSON.stringify({ product_id: productId, vendor_pricing_id: row.id, price_history_id: historyId, ...before }),
+    old_value: JSON.stringify({ product_id: productId, vendor_pricing_id: row.id, price_history_id: historyId, price_snapshot_id: snapshotId, ...before }),
     new_value: JSON.stringify(written),
     changed_by: TAG,
     reason: CATALOG_REASON,
@@ -387,9 +414,9 @@ async function restoreCatalogPrice(knex) {
   }
 }
 
-// The SiteOne row back to what up() saw and its price_history row removed, then the recalculation again: the catalog follows the
-// restored row, and a mark up()'s recalculation cleared (stale, or needing a price) comes back when the winner up() saw returns.
-// Only while the row still holds what up() wrote: a price entered since is kept.
+// The SiteOne row back to what up() saw (its earlier snapshot link included) and its price_history and price_snapshots rows removed,
+// then the recalculation again: the catalog follows the restored row, and a mark up()'s recalculation cleared (stale, or needing a
+// price) comes back when the winner up() saw returns. Only while the row still holds what up() wrote: a price entered since is kept.
 async function restoreProductPrice(knex, before, written) {
   if (!before || !written || !before.vendor_pricing || !written.vendor_pricing) return;
   await lockProduct(knex, before.product_id);
@@ -401,6 +428,9 @@ async function restoreProductPrice(knex, before, written) {
   await knex('vendor_pricing').where({ id: row.id }).update(before.vendor_pricing);
   if (before.price_history_id && await knex.schema.hasTable('price_history')) {
     await knex('price_history').where({ id: before.price_history_id }).del();
+  }
+  if (before.price_snapshot_id && await knex.schema.hasTable('price_snapshots')) {
+    await knex('price_snapshots').where({ id: before.price_snapshot_id }).del();
   }
   await recalcBestPrice(knex, before.product_id);
   const after = await knex('products_catalog').where({ id: before.product_id }).first();

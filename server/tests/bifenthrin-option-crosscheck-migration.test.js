@@ -278,6 +278,40 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
+    // The handler also records the entry as the row's price evidence: a price_snapshots row for $30.90, linked as the row's
+    // latest_snapshot_id (production's row links its $58.42 snapshot of 2026-09-30). down() links the earlier snapshot again and
+    // deletes the new one (pre-push audit 20).
+    test('records the new price as the row\'s latest snapshot, as the handler does; down() restores the earlier link', async () => {
+      const db = world({ vendors: [vendorRow({ latest_snapshot_id: 's0' })] });
+      db.price_snapshots = [{ id: 's0', product_id: 'p1', vendor_id: 'ven1', vendor_pricing_id: 'v1', price: '58.42' }];
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(db.price_snapshots).toHaveLength(2);
+      const added = db.price_snapshots[1];
+      expect(added).toMatchObject({
+        product_id: 'p1', vendor_id: 'ven1', vendor_pricing_id: 'v1', price: 30.9, price_amount: 30.9, quantity: '1 gal',
+        normalized_unit_price: 0.2414, normalized_unit: 'oz', landed_unit_price: 0.2414, source_type: 'manual', price_type: 'manual',
+      });
+      expect(JSON.parse(added.metadata)).toEqual({ source: 'migration:20261119020000_bifenthrin_option_crosscheck' });
+      expect(db.vendor_pricing[0]).toMatchObject({ price: 30.9, latest_snapshot_id: added.id });
+      await migration.down(knex);
+      expect(db.vendor_pricing[0]).toMatchObject({ price: '58.42', latest_snapshot_id: 's0' });
+      expect(db.price_snapshots.map((snapshot) => snapshot.id)).toEqual(['s0']);
+    });
+
+    test('an install without the snapshot table or the link column gets no snapshot, and the price still moves', async () => {
+      const noTable = world();
+      await migration.up(fakeKnex(noTable));
+      expect(noTable.vendor_pricing[0].price).toBe(30.9);
+      expect(noTable.vendor_pricing[0]).not.toHaveProperty('latest_snapshot_id');
+      const noLink = world({ vendors: [vendorRow({ latest_snapshot_id: 's0' })] });
+      noLink.price_snapshots = [{ id: 's0' }];
+      noLink.__missingColumns = ['vendor_pricing.latest_snapshot_id'];
+      await migration.up(fakeKnex(noLink));
+      expect(noLink.vendor_pricing[0]).toMatchObject({ price: 30.9, latest_snapshot_id: 's0' });
+      expect(noLink.price_snapshots.map((snapshot) => snapshot.id)).toEqual(['s0']);
+    });
+
     test('a catalog price already at 30.90 is skipped silently and the pre-slab link goes ahead', async () => {
       const db = world({
         vendors: [vendorRow({ price: '30.90', price_amount: '30.9000', price_per_oz: '0.2414' })],

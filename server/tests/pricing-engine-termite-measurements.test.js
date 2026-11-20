@@ -257,21 +257,27 @@ describe('termite measurement overrides and safeguards', () => {
     expect(high.warnings.join(' ')).toMatch(/reduced finished volume, the same active ingredient per foot/);
     const products = require('../services/pricing-engine/constants').SPECIALTY.trenching.products;
     const savedHigh = products.talstar_p.productOzPerFinishedGallonAtHighRate;
-    products.talstar_p.productOzPerFinishedGallonAtHighRate = 1.5; // a configured high dilution keeps the product per foot too
+    // The label charts one adjustment, twice the standard dilution at half the volume: a configured high dilution off that chart
+    // keeps the full volume, as on main (pre-push audit 20).
+    products.talstar_p.productOzPerFinishedGallonAtHighRate = 1.5;
     try {
-      expect(trench({ applicationRate: 'high' })).toMatchObject({ finishedGallons: 53.33, productOz: 80 });
+      expect(trench({ applicationRate: 'high' })).toMatchObject({ finishedGallons: 80, productOz: 120 });
     } finally {
       products.talstar_p.productOzPerFinishedGallonAtHighRate = savedHigh;
     }
     const taurus = priceTrenching({}, { measurements, productKey: 'taurus_sc', applicationRate: 'high', labelConfirmed: true });
     expect(taurus).toMatchObject({ finishedGallons: 80, productOz: 128 });
     expect(taurus.warnings).toContain('High/problem-soil rate increases chemical usage and requires label confirmation.');
-    // A custom dilution is a manual override (sent to review), and the label's volume rule follows it too: the high rate's own
-    // dilution typed in prices what the high rate does (pre-push audit 12), and a stronger one keeps the same product per foot.
+    // A custom dilution is a manual override (sent to review). The chart's own dilution typed in prices what the high rate does
+    // (pre-push audit 12), at either rate; a stronger one is off the chart and keeps the full volume, with no label-adjustment
+    // warning (pre-push audit 20).
     expect(trench({ applicationRate: 'high', customProductOzPerFinishedGallon: 2 }))
       .toMatchObject({ finishedGallons: 40, productOz: 80, requiresManualReview: true });
-    expect(trench({ customProductOzPerFinishedGallon: 4 }))
-      .toMatchObject({ finishedGallons: 20, productOz: 80, requiresManualReview: true });
+    expect(trench({ customProductOzPerFinishedGallon: 2 }))
+      .toMatchObject({ finishedGallons: 40, productOz: 80, requiresManualReview: true });
+    const offChart = trench({ customProductOzPerFinishedGallon: 4 });
+    expect(offChart).toMatchObject({ finishedGallons: 80, productOz: 320, requiresManualReview: true });
+    expect(offChart.warnings.join(' ')).not.toMatch(/reduced finished volume/);
     // A weaker one keeps the labeled volume: the rule never adds finished gallons.
     expect(trench({ customProductOzPerFinishedGallon: 0.5 }))
       .toMatchObject({ finishedGallons: 80, productOz: 40, requiresManualReview: true });
@@ -1231,10 +1237,10 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
   });
 
   // A replay re-prices the stored inputs, custom ones included, and each custom input still takes the rest of its cost basis from
-  // config (a custom cost divides by the configured container oz): the swap moves them too (pre-push audit 8: a custom rate of 4 oz a
-  // finished gallon, at the quarter volume the label's rule gives it).
+  // config (a custom cost divides by the configured container oz): the swap moves them too (pre-push audit 8: a custom rate of 2 oz a
+  // finished gallon, at the half volume the label's chart gives it).
   test.each([
-    ['a custom rate', { applicationRate: 'standard', customProductOzPerFinishedGallon: 4 }, { sent: 4415, fresh: 4400, productOz: 84, productSurcharge: 15 }],
+    ['a custom rate', { applicationRate: 'standard', customProductOzPerFinishedGallon: 2 }, { sent: 4415, fresh: 4400, productOz: 84, productSurcharge: 15 }],
     ['a custom product cost', { customProductCost: 41.57 }, { sent: 4943, fresh: 4930, productOz: 84, productSurcharge: 15 }],
     ['a custom container size', { customContainerOz: 96 }, { sent: 4943, fresh: 4930, productOz: 84, productSurcharge: 15 }],
   ])('a quote with %s keeps its sent surcharge on replay', (_label, extra, want) => {
