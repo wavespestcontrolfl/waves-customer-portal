@@ -12,7 +12,7 @@
  * Each product moves in every place db-bridge reads one from: the products map, a legacy product_costs map and the top-level key
  * (its overlays read (products || product_costs)[key] || row[key]), so the quote follows whichever one the bridge reads.
  * A product is rewritten only while it still holds the Talak values, or has no label of its own and carries another bottle's
- * figures or name. db-bridge sets only a non-empty label, so such a product shows the code's label, which this change moves to
+ * figures or name, a Talak warning included (pre-push audit at the twelfth push). db-bridge sets only a non-empty label, so such a product shows the code's label, which this change moves to
  * Crosscheck Plus: left as it is, it would quote another bottle's cost under Crosscheck Plus's name and label check. That is the
  * admin seed's Talak product (41.57 / 96 with its rate fields: what ensureTable in routes/admin-pricing-config.js inserted from
  * 2026-10-25 until this change, when it creates the table), with or without an admin's edits since, and an admin's price for that
@@ -787,11 +787,13 @@ async function recalcRestoringMark(knex, productId, seen) {
 const holds = (product, values) => Object.entries(values).every(([k, v]) => isDeepStrictEqual(product[k], v))
   && SHADOWING_ALIASES.every((alias) => product[alias] === undefined);
 // A product with no label of its own (db-bridge sets only a non-empty one) that carries another bottle's figures or name, the
-// fields db-bridge reads as the bottle's own, with their aliases (see the header).
+// fields db-bridge reads as the bottle's own, with their aliases, or a Talak warning: db-bridge lays an override's warnings over the
+// code's Crosscheck Plus product (pre-push audit at the twelfth push). See the header.
 const BOTTLE_FIELDS = ['container_cost', 'container_oz', 'catalog_product_name', 'package_label'];
 const ownLabel = (product) => typeof product.label === 'string' && product.label.trim() !== '';
 const carriesOtherBottle = (product, plan) => !ownLabel(product) && (SHADOWING_ALIASES.some((alias) => product[alias] !== undefined)
-  || BOTTLE_FIELDS.some((field) => field in plan.to && product[field] !== undefined && !isDeepStrictEqual(product[field], plan.to[field])));
+  || BOTTLE_FIELDS.some((field) => field in plan.to && product[field] !== undefined && !isDeepStrictEqual(product[field], plan.to[field]))
+  || (Array.isArray(product.warnings) && product.warnings.some((warning) => plan.from.warnings.includes(warning))));
 const isOldBottle = (product, plan) => holds(product, plan.from) || carriesOtherBottle(product, plan);
 
 // The product on the new bottle: the bottle's fields follow the code's, and its other values stay, an admin's own positioning and

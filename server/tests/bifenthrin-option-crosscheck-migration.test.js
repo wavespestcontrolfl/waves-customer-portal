@@ -1265,6 +1265,28 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
     });
 
+    // An override of the warnings alone, still the Talak wording, names the Talak bottle too: db-bridge lays it over the code's
+    // Crosscheck Plus product, so staff would read the Talak label's instruction under Crosscheck Plus's name (pre-push audit at the
+    // twelfth push). Its Talak entries move in place and an office entry stays; one with its own label stays the admin's.
+    test('an override of the Talak warnings alone moves to the new bottle; an office entry stays', async () => {
+      const officeNote = 'Office: call the builder before the slab pour.';
+      const preslab = { warnings: [...PROD_PRESLAB_PRODUCT.warnings, officeNote] };
+      const trench = { warnings: [TALAK_WARNING], label: 'Mine' };
+      const db = world({ preslab: preslabRow(preslab, PROD_PRESLAB_PRODUCT), trench: trenchRow(trench, PROD_TRENCH_PRODUCT), catalog: [], vendors: [] });
+      const original = JSON.stringify(db.pricing_config);
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual({ ...CROSSCHECK_PRESLAB, warnings: [...CROSSCHECK_PRESLAB.warnings, officeNote] });
+      expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual(PRESLAB_REWRITTEN);
+      expect(productOf(db, 'onetime_trenching', 'talstar_p')).toEqual(trench);
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/onetime_trenching\.products\.talstar_p was edited since the Talak swap/);
+      const after = snapshot(db);
+      await migration.up(knex);
+      expect(snapshot(db)).toBe(after);
+      await migration.down(knex);
+      expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
+    });
+
     // Only another bottle's figures or name move a product with no label of its own: one with none, or with Crosscheck Plus's own,
     // already quotes Crosscheck Plus, and is left as it is, with no warning about another bottle.
     test('a product with no label of its own and no other bottle\'s figures is left alone', async () => {

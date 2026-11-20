@@ -7146,16 +7146,20 @@ function priceTrenching(property = {}, options = {}, replay) {
   const labelHalfVolume = labelStrongerDilution
     && Math.abs(gallonsPer10LFPerFtDepth - product.labelFinishedGallonsPer10LFPerFtDepth) < 1e-9;
   const volumeFactor = labelHalfVolume ? 0.5 : 1;
-  // The label's amount of concentrate per 10 LF per foot of depth: its stronger dilution at half its volume, which is its 0.06% at
-  // the full volume (4 fl oz). A dilution and volume that put down another amount, at either rate, are off the label, so the line
-  // goes to review, a counted label check included (pre-push audit at the tenth push: the standard 1 fl oz a gallon at a configured
-  // 3 gal per 10 LF per foot of depth puts down 3 fl oz).
-  const ozPer10LFPerFtDepth = roundMoney(productOzPerFinishedGallon * gallonsPer10LFPerFtDepth * volumeFactor);
-  const labelOzPer10LFPerFtDepth = roundMoney((product.labelHalfVolumeOzPerFinishedGallon * product.labelFinishedGallonsPer10LFPerFtDepth) / 2);
-  const offLabelAmount = halfVolumeLabel && Math.abs(ozPer10LFPerFtDepth - labelOzPer10LFPerFtDepth) > 1e-9;
-  // The label's reduced volume is that dilution at the label's amount, whether this engine halved the volume or a configured volume
-  // already did (pre-push audit at the eleventh push: 2 fl oz a gallon at a configured 2 gal passed with a checked label box).
-  const labelReducedVolume = labelStrongerDilution && !offLabelAmount;
+  // The label's volume adjustment chart lists two pairs per 10 LF per foot of depth: its 0.06% (half the stronger dilution) at its
+  // full volume, then its 0.12% at half that volume. The final dilution and volume must be one of them, at either rate, whatever the
+  // label check and however the volume was set (this engine's half, or a configured volume). Any other pair goes to review and never
+  // shows the 0.06% label. A list of the label's own pairs, not a rule per case: the pre-push audits at the eighth to twelfth pushes
+  // each named another pair (2 fl oz at 3 gal, 1 fl oz at 3 gal, 2 fl oz at a configured 2 gal, 1.6 fl oz at 2.5 gal).
+  const finalGallonsPer10LFPerFtDepth = gallonsPer10LFPerFtDepth * volumeFactor;
+  const chartPairs = halfVolumeLabel ? [
+    [product.labelHalfVolumeOzPerFinishedGallon / 2, product.labelFinishedGallonsPer10LFPerFtDepth],
+    [product.labelHalfVolumeOzPerFinishedGallon, product.labelFinishedGallonsPer10LFPerFtDepth / 2],
+  ] : [];
+  const chartPair = chartPairs.findIndex(([oz, gallons]) => Math.abs(productOzPerFinishedGallon - oz) < 1e-9
+    && Math.abs(finalGallonsPer10LFPerFtDepth - gallons) < 1e-9);
+  const labelReducedVolume = chartPair === 1;
+  const offLabelChart = halfVolumeLabel && chartPair < 0;
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
   const trenchDepthFt = optionPositiveNumber(options, 'trenchDepthFt', cfg.defaultTrenchDepthFt || 1);
@@ -7184,8 +7188,9 @@ function priceTrenching(property = {}, options = {}, replay) {
     // be achieved (pre-push audit 29). Only this engine knows whether it applies the volume adjustment (the configured dilution and
     // bottle), so this warning names both conditions on the line, and the line stays in review (reduced_volume_confirmation_required).
     warningList.push('Stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). The label allows it only where the soil will not accept the labeled volume and a continuous barrier can still be achieved. Requires label confirmation.');
-  } else if (offLabelAmount) {
-    warningList.push(`The configured dilution and finished volume put down ${ozPer10LFPerFtDepth} fl oz of concentrate per 10 linear feet per foot of depth, not the label's ${labelOzPer10LFPerFtDepth} fl oz (its volume adjustment chart). Requires review before sending.`);
+  } else if (offLabelChart) {
+    const listed = chartPairs.map(([oz, gallons]) => `${roundMoney(oz)} fl oz at ${roundMoney(gallons)} gal`).join(', or ');
+    warningList.push(`The configured dilution and finished volume, ${roundMoney(productOzPerFinishedGallon)} fl oz a finished gallon at ${roundMoney(finalGallonsPer10LFPerFtDepth)} gal per 10 linear feet per foot of depth, are not a pair on the label's volume adjustment chart (${listed}). Requires review before sending.`);
   } else if (rateResolution.applicationRate === 'high') {
     warningList.push('High/problem-soil rate increases chemical usage and requires label confirmation.');
   }
@@ -7212,8 +7217,8 @@ function priceTrenching(property = {}, options = {}, replay) {
   // audits 30 and at the second push: a configured high rate of 1.5 fl oz per gallon keeps the full volume).
   if (labelReducedVolume) {
     manualReviewReasons.push('reduced_volume_confirmation_required');
-  } else if (offLabelAmount) {
-    manualReviewReasons.push('off_label_amount_confirmation_required');
+  } else if (offLabelChart) {
+    manualReviewReasons.push('off_label_chart_confirmation_required');
   }
   if (hasValue(options.customProductCost) || hasValue(options.customProductOzPerFinishedGallon)) {
     manualReviewReasons.push('product_manual_override_used');
@@ -7248,10 +7253,9 @@ function priceTrenching(property = {}, options = {}, replay) {
     positioning: product.positioning,
     applicationRate: rateResolution.applicationRate,
     requestedApplicationRate: rateResolution.requestedApplicationRate,
-    // The label's half-volume dilution is the high rate's, so it shows the high rate's label at either rate, a custom dilution typed
-    // at that figure included, and at a configured volume off the chart too: the label names the dilution the line priced (pre-push
-    // audits 28 and at the ninth push). Each bottle with a half-volume dilution names its high label in code.
-    concentrationLabel: rateResolution.applicationRate === 'high' || labelStrongerDilution
+    // A bottle with a volume adjustment chart shows its 0.06% label only for the chart's 0.06% pair, at either rate; every other pair
+    // shows the high rate's label (pre-push audits 28, and at the ninth and twelfth pushes). Any other bottle names its rate, as on main.
+    concentrationLabel: (halfVolumeLabel ? chartPair !== 0 : rateResolution.applicationRate === 'high')
       ? product.highConcentrationLabel || rateConfig.concentrationLabel
       : product.standardConcentrationLabel || rateConfig.concentrationLabel,
     trenchDepthFt,

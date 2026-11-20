@@ -289,7 +289,7 @@ describe('termite measurement overrides and safeguards', () => {
       // The full volume: no reduced-volume warning and no reduced-volume review (the configured high rate decides it, not the tool).
       expect(fullHigh.warnings.join(' ')).not.toMatch(/reduced finished volume/);
       expect(fullHigh.manualReviewReasons).not.toContain('reduced_volume_confirmation_required');
-      expect(fullHigh.manualReviewReasons).toContain('off_label_amount_confirmation_required'); // 6 fl oz, not the label's 4
+      expect(fullHigh.manualReviewReasons).toContain('off_label_chart_confirmation_required'); // 1.5 fl oz at 4 gal: not a chart pair
       products.talstar_p.productOzPerFinishedGallonAtStandardRate = 0.75;
       const movedPair = trench({ applicationRate: 'high' });
       expect(movedPair).toMatchObject({ finishedGallons: 80, productOz: 120 });
@@ -345,10 +345,10 @@ describe('termite measurement overrides and safeguards', () => {
   // The chart halves the label's own volume, 4.0 gal per 10 LF per foot of depth (production's setting, read 2026-11-20). A configured
   // volume off the chart keeps it at the high rate: half of it is not the label's reduced volume, and would price too little product
   // (pre-push audit at the fourth push).
-  // The label's amount is 4 fl oz of concentrate per 10 LF per foot of depth (its 0.06% at the full volume, its 0.12% at half). Any
-  // dilution and volume that put down another amount go to review whatever the label check, at either rate (pre-push audits at the
-  // eighth and tenth pushes: the standard 1 fl oz a gallon at 3 gal puts down 3 fl oz).
-  test('a configured trench volume off the label chart keeps that volume, and any amount off the label goes to review', () => {
+  // The label's chart lists two pairs per 10 LF per foot of depth: 1 fl oz a finished gallon (0.06%) at 4 gal, and 2 fl oz (0.12%)
+  // at 2 gal. Any other final pair goes to review whatever the label check, at either rate, and shows no 0.06% label (pre-push audits
+  // at the eighth to twelfth pushes).
+  test('a configured trench volume off the label chart keeps that volume, and any pair off the chart goes to review', () => {
     const trenching = require('../services/pricing-engine/constants').SPECIALTY.trenching;
     const saved = trenching.finishedGallonsPer10LFPerFtDepth;
     const savedStandard = trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate;
@@ -361,19 +361,20 @@ describe('termite measurement overrides and safeguards', () => {
       const offChart = trench();
       expect(offChart).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true, requiresManualReview: true });
       expect(offChart.warnings.join(' ')).not.toMatch(/reduced finished volume/);
-      expect(offChart.warnings.join(' ')).toMatch(/put down 6 fl oz of concentrate per 10 linear feet per foot of depth, not the label's 4 fl oz/);
+      expect(offChart.warnings.join(' ')).toMatch(/2 fl oz a finished gallon at 3 gal per 10 linear feet per foot of depth, are not a pair on the label's volume adjustment chart \(1 fl oz at 4 gal, or 2 fl oz at 2 gal\)/);
       expect(offChart.manualReviewReasons).not.toContain('reduced_volume_confirmation_required');
-      expect(offChart.manualReviewReasons).toContain('off_label_amount_confirmation_required');
-      // The label's 0.06% (1 fl oz a gallon) at 3 gal puts down 3 fl oz: in review too, with its checked label box.
+      expect(offChart.manualReviewReasons).toContain('off_label_chart_confirmation_required');
+      // The label's 0.06% (1 fl oz a gallon) at 3 gal is not a chart pair either: in review too, with its checked label box, and it
+      // does not show the 0.06% label.
       const standardOffChart = trench({});
       expect(standardOffChart).toMatchObject({ finishedGallons: 60, productOz: 60, labelConfirmed: true, requiresManualReview: true });
-      expect(standardOffChart.manualReviewReasons).toContain('off_label_amount_confirmation_required');
-      expect(standardOffChart.warnings.join(' ')).toMatch(/put down 3 fl oz of concentrate .* not the label's 4 fl oz/);
-      expect(standardOffChart.concentrationLabel).toBe('0.06%');
+      expect(standardOffChart.manualReviewReasons).toContain('off_label_chart_confirmation_required');
+      expect(standardOffChart.warnings.join(' ')).toMatch(/1 fl oz a finished gallon at 3 gal .* not a pair on the label's volume adjustment chart/);
+      expect(standardOffChart.concentrationLabel).toBe('high_rate');
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 2; // the eighth push's case: the standard rate at 0.12%
       const standardAtTwo = trench({});
       expect(standardAtTwo).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true, requiresManualReview: true });
-      expect(standardAtTwo.manualReviewReasons).toContain('off_label_amount_confirmation_required');
+      expect(standardAtTwo.manualReviewReasons).toContain('off_label_chart_confirmation_required');
       // The line names the dilution it priced, the high rate's, not the standard 0.06% (pre-push audit at the ninth push).
       expect(standardAtTwo.concentrationLabel).toBe('high_rate');
       expect(offChart.concentrationLabel).toBe('high_rate');
@@ -383,22 +384,29 @@ describe('termite measurement overrides and safeguards', () => {
       const configuredReduced = trench({});
       expect(configuredReduced).toMatchObject({ finishedGallons: 40, productOz: 80, labelConfirmed: true, requiresManualReview: true });
       expect(configuredReduced.manualReviewReasons).toContain('reduced_volume_confirmation_required');
-      expect(configuredReduced.manualReviewReasons).not.toContain('off_label_amount_confirmation_required');
+      expect(configuredReduced.manualReviewReasons).not.toContain('off_label_chart_confirmation_required');
       expect(configuredReduced.warnings.join(' ')).toMatch(/reduced finished volume, the same active ingredient per foot/);
       expect(trench()).toMatchObject({ finishedGallons: 40, productOz: 80 }); // the high rate's 2 fl oz there too
       expect(trench().manualReviewReasons).toContain('reduced_volume_confirmation_required');
       trenching.finishedGallonsPer10LFPerFtDepth = 4; // the chart's volume: a standard rate moved off 1 fl oz is off the label too
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 0.8;
-      expect(trench({}).manualReviewReasons).toContain('off_label_amount_confirmation_required');
+      expect(trench({}).manualReviewReasons).toContain('off_label_chart_confirmation_required');
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
       const onChart = trench(); // 80 labeled gallons, halved: 4 fl oz per 10 LF per foot of depth
       expect(onChart).toMatchObject({ finishedGallons: 40, productOz: 80 });
       expect(onChart.manualReviewReasons).toContain('reduced_volume_confirmation_required');
-      expect(onChart.manualReviewReasons).not.toContain('off_label_amount_confirmation_required');
+      expect(onChart.manualReviewReasons).not.toContain('off_label_chart_confirmation_required');
       const standard = trench({}); // production's setting: the label's amount, so no amount review
       expect(standard).toMatchObject({ finishedGallons: 80, productOz: 80, labelConfirmed: true });
-      expect(standard.manualReviewReasons).not.toContain('off_label_amount_confirmation_required');
-      expect(standard.warnings.join(' ')).not.toMatch(/fl oz of concentrate/);
+      expect(standard.manualReviewReasons).not.toContain('off_label_chart_confirmation_required');
+      expect(standard.warnings.join(' ')).not.toMatch(/not a pair on the label's volume adjustment chart/);
+      expect(standard.concentrationLabel).toBe('0.06%');
+      // The twelfth push's pair: 1.6 fl oz at a configured 2.5 gal puts down the label's 4 fl oz, and still is not a chart pair.
+      trenching.finishedGallonsPer10LFPerFtDepth = 2.5;
+      trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 1.6;
+      const sameAmount = trench({});
+      expect(sameAmount).toMatchObject({ productOz: 80, labelConfirmed: true, requiresManualReview: true, concentrationLabel: 'high_rate' });
+      expect(sameAmount.manualReviewReasons).toContain('off_label_chart_confirmation_required');
     } finally {
       trenching.finishedGallonsPer10LFPerFtDepth = saved;
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
