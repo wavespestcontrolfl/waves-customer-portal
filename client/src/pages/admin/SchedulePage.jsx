@@ -78,6 +78,7 @@ import {
   completionWillReview,
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
+  backfillCheckboxHint,
   customReviewTimeProblem,
   firstAskReasonsFrom,
   firstReviewAskFrom,
@@ -14683,8 +14684,9 @@ export function CompletionPanel({
         if (!gone && data) {
           setReviewAlreadyReviewed(alreadyReviewedFrom(data));
           setReviewFirstAskReasons(firstAskReasonsFrom(data));
-          setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
         }
+        // A failed read, or one for a visit the panel has left, never keeps the late-close ask: fewer texts.
+        if (!gone) setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
       });
       return () => { gone = true; };
     }
@@ -14698,9 +14700,10 @@ export function CompletionPanel({
       if (data) {
         setReviewAlreadyReviewed(alreadyReviewedFrom(data));
         setReviewFirstAskReasons(firstAskReasonsFrom(data));
-        setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
       }
       if (cancelled) return;
+      // Only the active request sets it, and a failed read clears it (null reads false).
+      setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
       setReviewSendPreview(data);
       if (data) previewFailureNoticedRef.current = false;
     });
@@ -22085,9 +22088,10 @@ export function CompletionPanel({
                         marginTop: 2,
                       }}
                     >
-                      {backfillCloseout
-                        ? "Records to the visit day, sends no customer messages, and skips auto-charge."
-                        : "Unchecked: completes as today with the normal customer messages."}
+                      {backfillCheckboxHint({
+                        backfillCloseout,
+                        reviewAskGoes: reviewLateCloseAskKept && willReview && !oneTimeRecapOnly,
+                      })}
                     </span>
                   </span>{" "}
                 </label>
@@ -24516,9 +24520,10 @@ export function CompletionPanel({
                     marginTop: 2,
                   }}
                 >
-                  {backfillCloseout
-                    ? "Records to the visit day, sends no customer messages, and skips auto-charge."
-                    : "Unchecked: completes as today with the normal customer messages."}
+                  {backfillCheckboxHint({
+                    backfillCloseout,
+                    reviewAskGoes: reviewLateCloseAskKept && willReview && !oneTimeRecapOnly,
+                  })}
                 </span>
               </span>{" "}
             </label>

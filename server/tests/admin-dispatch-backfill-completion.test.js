@@ -76,7 +76,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseReviewAskKept, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
+const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseReviewAskKept, lateCloseFirstAskEligible, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
@@ -1034,11 +1034,30 @@ describe('lateCloseReviewAskKept — late backdated closeouts keep the review as
     expect(frozenResumeCompletionState({ requestReview: true }).lateCloseReviewKept).toBe(false);
   });
 
+  describe('lateCloseFirstAskEligible: the pre-read for the first-ask rule', () => {
+    const input = { serviceId: 'svc-1', actor: { techRole: 'admin' } };
+    const rows = (row) => jest.fn(() => ({ where: () => ({ first: async () => row }) }));
+    const visit = { arrived_at: null, scheduled_date: etDateString() };
+
+    test('only an admin backfill with the gate on and an in-window visit', async () => {
+      expect(await lateCloseFirstAskEligible({ backfill: true, completionInput: input, database: rows(null) })).toBe(false);
+      expect(await lateCloseFirstAskEligible({ backfill: false, completionInput: input, database: rows(visit) })).toBe(false);
+      expect(await lateCloseFirstAskEligible({ backfill: true, completionInput: { ...input, actor: { techRole: 'technician' } }, database: rows(visit) })).toBe(false);
+      expect(await lateCloseFirstAskEligible({ backfill: true, completionInput: { ...input, systemQuietCloseout: true }, database: rows(visit) })).toBe(false);
+      expect(await lateCloseFirstAskEligible({ backfill: true, completionInput: { ...input, issuedInvoiceCloseout: { invoiceId: 'i' } }, database: rows(visit) })).toBe(false);
+      delete process.env.GATE_REVIEW_LATE_CLOSE_ASK;
+      expect(await lateCloseFirstAskEligible({ backfill: true, completionInput: input, database: rows(visit) })).toBe(false);
+    });
+  });
+
   describe('route wiring (source contract)', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
     test('the decision is made once at the commit, from the locked row, and frozen with the normal expression', () => {
-      expect((src.match(/lateCloseReviewKept = lateCloseReviewAskKept\(/g) || []).length).toBe(1);
+      expect((src.match(/const lateCloseEligible = lateCloseReviewAskKept\(/g) || []).length).toBe(1);
+      // The choice is resolved once, as the initial enrollment reads it (an omitted requestReview is no ask), and frozen as that boolean.
+      expect(src).toMatch(/lateCloseReviewKept = lateCloseEligible && !!requestReview && !\(wrapUpReviewAsk === true && !reviewAskAllowed\);/);
+      expect(src).toMatch(/if \(isBackfillCompletion && !lateCloseEligible\) reviewFirstAskLock = null;/);
       expect(src).toMatch(/svc: \{ \.\.\.svc, \.\.\.\(lockedSvcRow \|\| \{\}\) \}, closedAt: completionEndedAt/);
       expect(src).toMatch(/customerRequestedReview: \(isIncompleteVisit \|\| isInternalOnlyCompletion \|\| \(isBackfillCompletion && !lateCloseReviewKept\)\)/);
     });
@@ -1047,6 +1066,12 @@ describe('lateCloseReviewAskKept — late backdated closeouts keep the review as
       expect(src).toMatch(/&& \(!suppressTypedCustomerComms \|\| lateCloseReviewKept\)/);
       const forced = src.match(/if \(isBackfillCompletion\) \{\s*\n\s*suppressTypedCustomerComms = true;\s*\n\s*effectiveSendCompletionSms = false;\s*\n\s*\}/g) || [];
       expect(forced.length).toBe(2);
+    });
+
+    test('a kept late-close ask gets the first-ask rule: the lock reads it, the opt-out reason is saved in the record transaction', () => {
+      expect(src).toMatch(/const lateCloseFirstAsk = requestReviewPosted === false && backfill === true && visitOutcome === 'completed'\s*\n\s*&& await lateCloseFirstAskEligible\(/);
+      expect(src).toMatch(/\(backfill !== true \|\| lateCloseFirstAsk\)/);
+      expect(src).toMatch(/reviewFirstAskLock\.optOutReason === require\('\.\/review-request'\)\.ALREADY_LEFT_REVIEW_REASON/);
     });
 
     test('the commit passes the delivery posture from BEFORE the backfill override', () => {

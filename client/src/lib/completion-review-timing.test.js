@@ -13,6 +13,7 @@ import {
   FIRST_REVIEW_ASK_LABEL,
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
+  backfillCheckboxHint,
   LATE_CLOSE_ASK_LABEL,
   completionReviewSuppressionReason,
   completionWillReview,
@@ -280,5 +281,17 @@ describe('late close ask (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
     expect(reviewBoxLabel({ reviewSuppressionReason: 'backfill', lateCloseAskKept: true })).toBe('Review request suppressed');
     expect(reviewBoxLabel({ reviewSuppressionReason: null, firstAsk: true, lateCloseAskKept: true })).toBe(FIRST_REVIEW_ASK_LABEL);
     expect(reviewBoxLabel({ reviewSuppressionReason: null })).toBe('Send review request');
+  });
+});
+
+describe('backdate checkbox hint (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
+  test('checked and no ask: today\'s words', () => {
+    expect(backfillCheckboxHint({ backfillCloseout: true })).toBe('Records to the visit day, sends no customer messages, and skips auto-charge.');
+  });
+  test('checked and the review ask goes: names the one exception', () => {
+    expect(backfillCheckboxHint({ backfillCloseout: true, reviewAskGoes: true })).toBe('Records to the visit day, sends no customer messages except the review ask (closed within 3 days), and skips auto-charge.');
+  });
+  test('unchecked: the normal-messages line either way', () => {
+    expect(backfillCheckboxHint({ backfillCloseout: false, reviewAskGoes: true })).toBe('Unchecked: completes as today with the normal customer messages.');
   });
 });

@@ -339,6 +339,15 @@ export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firs
   return firstAsk ? FIRST_REVIEW_ASK_LABEL : "Send review request";
 }
 
+// The line under the "Backdated closeout" checkbox. Checked, it promises no customer messages, except the review ask
+// when the closeout keeps it (GATE_REVIEW_LATE_CLOSE_ASK) and the review box is on.
+export function backfillCheckboxHint({ backfillCloseout = false, reviewAskGoes = false } = {}) {
+  if (!backfillCloseout) return "Unchecked: completes as today with the normal customer messages.";
+  return reviewAskGoes
+    ? "Records to the visit day, sends no customer messages except the review ask (closed within 3 days), and skips auto-charge."
+    : "Records to the visit day, sends no customer messages, and skips auto-charge.";
+}
+
 // The preview's own verdict on the first ask, only when the server sent one (no visit named: no key).
 export const firstReviewAskFrom = (preview) => (typeof preview?.firstReviewAsk === "boolean" ? preview.firstReviewAsk : null);
 

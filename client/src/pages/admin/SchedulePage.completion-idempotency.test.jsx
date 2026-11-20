@@ -294,6 +294,24 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     expect(completionWillReview({ requestReview: true, reviewSuppressionReason: reason })).toBe(true);
   });
 
+  it("the late-close read lands only for the active request and a failed read clears it (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    // One-shot read: skipped once the effect is cleaned up; a failed read (null) sets false.
+    expect(src).toMatch(/if \(!gone\) setReviewLateCloseAskKept\(lateCloseAskKeptFrom\(data\)\);/);
+    // Poll: set only after the cancellation check, so an obsolete response cannot overwrite the verdict.
+    const cancelAt = src.indexOf("if (cancelled) return;\n      // Only the active request sets it");
+    const setAt = src.indexOf("setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));", cancelAt);
+    expect(cancelAt).toBeGreaterThan(0);
+    expect(setAt).toBeGreaterThan(cancelAt);
+    expect(src).not.toMatch(/if \(data\) \{[^}]*setReviewLateCloseAskKept/);
+  });
+
+  it("both backdate checkbox layouts word the line from the review answer, not a fixed promise of silence", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect((src.match(/backfillCheckboxHint\(\{/g) || []).length).toBe(2);
+    expect(src).not.toContain('"Records to the visit day, sends no customer messages, and skips auto-charge."');
+  });
+
   it("without backfill the existing suppression chain is unchanged", () => {
     expect(completionReviewSuppressionReason({})).toBe(null);
     expect(completionReviewSuppressionReason({ isIncompleteVisit: true })).toBe("incomplete");

@@ -1,6 +1,14 @@
 // The day a drafted review text speaks about (owner 2026-10-27, "FIX"): the day the
 // technician was at the visit, not the close day a late completion stamps on the record.
 jest.mock('../models/db', () => jest.fn());
+const mockProfile = { value: { findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' } };
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForServiceId: jest.fn(async () => {
+    if (mockProfile.value instanceof Error) throw mockProfile.value;
+    return mockProfile.value;
+  }),
+}));
 const { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskKeptForVisit } = require('../services/review-visit-day');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 
@@ -155,6 +163,30 @@ describe('lateCloseAskKeptForVisit: the preview read', () => {
   test('a visit worked 2 days ago is kept; one worked 5 days ago is not', async () => {
     expect(await lateCloseAskKeptForVisit('v1', visitDb({ arrived_at: null, scheduled_date: '2026-11-18' }), now)).toBe(true);
     expect(await lateCloseAskKeptForVisit('v1', visitDb({ arrived_at: null, scheduled_date: '2026-11-15' }), now)).toBe(false);
+  });
+
+  describe('delivery posture the commit enforces (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
+    const inWindow = { arrived_at: null, scheduled_date: '2026-11-18' };
+    afterEach(() => { mockProfile.value = { findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' }; });
+
+    test('an internal-only assessment is never kept', async () => {
+      mockProfile.value = { findingsType: null, completionMode: 'internal_only', deliveryMode: 'auto_send', category: 'pest' };
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
+    });
+
+    test('a typed profile with delivery off is never kept; an auto-send one is', async () => {
+      mockProfile.value = { findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'internal_only', category: 'pest' };
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
+      mockProfile.value = { findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' };
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(true);
+    });
+
+    test('an unreadable profile is false', async () => {
+      mockProfile.value = null;
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
+      mockProfile.value = new Error('pg blip');
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
+    });
   });
 
   test('no visit, no id, or a failed read is false', async () => {

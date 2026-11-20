@@ -114,13 +114,26 @@ function closedWithinDaysOfWorkedDay({ arrivedAt = null, scheduledDate = null, c
 }
 
 /**
- * Whether a backdated closeout of this visit made NOW would keep the review ask (the completion panel's preview).
- * Any read failure, or no such visit, is false: fewer texts. The server's own commit decision is what counts.
+ * Whether a backdated closeout of this visit made NOW would keep the review ask (the completion panel's preview and
+ * the first-ask rule's pre-read). It also applies the delivery posture the commit reads for this visit (an internal-only
+ * consultation, or a typed profile with delivery off, silences every customer text), so it never says true where the
+ * commit says false. The visit outcome is only known at the commit. Any read failure, or no such visit, is false: fewer
+ * texts. The server's own commit decision is what counts.
  */
 async function lateCloseAskKeptForVisit(serviceId, database = db, now = new Date()) {
   try {
     const visit = serviceId ? await database('scheduled_services').where({ id: serviceId }).first('arrived_at', 'scheduled_date') : null;
-    return Boolean(visit) && closedWithinDaysOfWorkedDay({ arrivedAt: visit.arrived_at, scheduledDate: visit.scheduled_date, closedAt: now });
+    if (!visit || !closedWithinDaysOfWorkedDay({ arrivedAt: visit.arrived_at, scheduledDate: visit.scheduled_date, closedAt: now })) return false;
+    const Profiles = require('./service-completion-profiles');
+    const profile = await Profiles.resolveCompletionProfileForServiceId(serviceId, database);
+    if (!profile) return false;
+    return !Profiles.resolveCompletionDeliveryPosture({
+      typedFindingsType: profile.findingsType || null,
+      completionMode: profile.completionMode,
+      profileDeliveryMode: profile.deliveryMode,
+      specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+      profileCategory: profile.category,
+    }).suppressCustomerComms;
   } catch {
     return false;
   }
