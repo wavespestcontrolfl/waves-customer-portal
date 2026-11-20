@@ -58,7 +58,7 @@
 
 import { isAdminPath } from './adminBookmarkMeta';
 import {
-  isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
+  browserOffline, isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
 } from './portalReload';
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
@@ -265,8 +265,9 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
 // missing chunk (a real outage then gets the retry screen, not a reload
 // loop), 'storage' when session storage is blocked (no one-shot guard),
 // 'page-use' when the tab was used on this page (its retry screen asks
-// first, as the preload error would), or 'manual' on a page that never
-// reloads by itself. Null when it can.
+// first, as the preload error would), 'manual' on a page that never reloads
+// by itself, or 'offline' while the browser reports itself offline (a reload
+// would open an error page). Null when it can.
 function selfReloadRuledOut() {
   try {
     if (chunkReloadAttempted()) return 'reloaded';
@@ -274,7 +275,8 @@ function selfReloadRuledOut() {
     return 'storage';
   }
   if (usedOnThisStaffPage()) return 'page-use';
-  return staffSelfReloadBarred() ? 'manual' : null;
+  if (staffSelfReloadBarred()) return 'manual';
+  return browserOffline() ? 'offline' : null;
 }
 
 // Whether a screen for missing staff code (App.jsx, components/LazyPanel.jsx)

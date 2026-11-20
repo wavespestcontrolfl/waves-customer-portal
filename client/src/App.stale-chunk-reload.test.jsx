@@ -882,6 +882,23 @@ describe('on a staff page', () => {
     }
   });
 
+  test('offline, a page whose code is missing does not wait for a request still open: an offline tab cannot reload by itself, so its retry screen comes at once', async () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const read = target.fetch('/api/admin/dashboard');
+      const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 500); });
+      await expect(Promise.race([reloadForMissingCode({ reload }), waited])).resolves.toBe('request');
+      expect(reload).not.toHaveBeenCalled();
+      pending[0]({ headers: new Headers() });
+      await read;
+    } finally {
+      uninstall();
+    }
+  });
+
   test('held work that starts as the wait for open work ends keeps the tab: the holds are read in the same turn as the reload', async () => {
     // Queued first, so it runs after the wait's last look at open work and
     // before the page goes on.
