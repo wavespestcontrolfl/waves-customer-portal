@@ -61,6 +61,13 @@ beforeEach(() => {
     if (path === "/api/admin/estimates" && init?.method === "POST") {
       return Promise.resolve(reply({ id: JSON.parse(init.body).clientDraftId, status: "draft", editVersion: "v1", token: "t", monthlyTotal: 0, annualTotal: 0, onetimeTotal: 99 }));
     }
+    if (path.endsWith("/edit-source")) {
+      return Promise.resolve(reply({
+        id: "qa-roof-estimate", status: "draft", editable: true, editVersion: "v1", customerName: "QA Contact", address: ADDRESS,
+        inputs: { svcExclusion: true }, engineProfile: { homeSqFt: 2000, lotSqFt: 9000, stories: 1 },
+        result: { recurring: { services: [] }, oneTime: { total: 0, items: [] }, results: {}, totals: {} },
+      }));
+    }
     if (path.includes("/discounts")) return Promise.resolve(reply([]));
     return Promise.resolve(reply({}));
   });
@@ -158,6 +165,26 @@ describe("resets", () => {
     expect(await screen.findByTestId("roof-read-snapped")).toBeInTheDocument();
     expect(screen.queryByTestId("roof-read-button")).toBeNull();
     expect(roofPosts()).toHaveLength(0);
+  });
+
+  it("links a reopened estimate only while the address is the one it was saved with", async () => {
+    render(<MemoryRouter><EstimateToolViewV2 editEstimateId="qa-roof-estimate" /></MemoryRouter>);
+    await screen.findByDisplayValue("QA Contact");
+    await lookUp();
+    fireEvent.click(await screen.findByTestId("roof-read-button"));
+    await screen.findByTestId("roof-read-result");
+    expect(JSON.parse(roofPosts()[0][1].body).estimate_id).toBe("qa-roof-estimate");
+    expect(screen.getByTestId("roof-read-save")).not.toBeDisabled();
+    // A different address: the estimate's id no longer fits the roof, so the read runs without it and Save stays locked.
+    fireEvent.change(screen.getByLabelText("Service address"), { target: { value: "12 Example Lane, Bradenton FL" } });
+    await waitFor(() => expect(screen.queryByTestId("roof-read-result")).toBeNull());
+    await lookUp();
+    fireEvent.click(await screen.findByTestId("roof-read-button"));
+    await screen.findByTestId("roof-read-result");
+    expect(roofPosts()).toHaveLength(2);
+    expect(JSON.parse(roofPosts()[1][1].body)).not.toHaveProperty("estimate_id");
+    expect(screen.getByTestId("roof-read-save")).toBeDisabled();
+    expect(screen.getByTestId("roof-read-save-first")).toBeInTheDocument();
   });
 
   it("starts blank when the customer changes", async () => {

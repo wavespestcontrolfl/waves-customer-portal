@@ -2656,6 +2656,8 @@ export default function EstimateToolViewV2({
           status: d.status,
           editVersion: d.editVersion,
           customerName: d.customerName || "",
+          // The address the estimate was saved with, for the roof read's estimate link.
+          address: seeded.address || "",
           hasInputs: !!d.inputs,
         });
         setMoveEstimate(d.moveEstimate ? { ...d.moveEstimate, estimateId: d.id } : null);
@@ -8572,7 +8574,7 @@ export default function EstimateToolViewV2({
                       key={`${roofReadEpoch}|${form.address}|${form.customerId || ""}|${form.leadId || ""}|${form.propertyId || ""}|${savedId || editMode?.id || ""}|${lookupMeta?.roofSpot?.lat ?? ""},${lookupMeta?.roofSpot?.lng ?? ""}`}
                       spot={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.roofSpot || null : null}
                       addressDoubt={lookupMeta?.address === String(form.address || "").trim() && lookupMeta?.roofAddressDoubt === true}
-                      estimateId={savedId || editMode?.id || null}
+                      estimateId={savedId || (editMode?.id && String(editMode.address || "").trim() === String(form.address || "").trim() ? editMode.id : null)}
                       customerId={form.customerId || null}
                     />
                   )}

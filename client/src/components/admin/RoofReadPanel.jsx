@@ -194,6 +194,8 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
         return;
       }
       setResult((prev) => ({ ...prev, read: body.read }));
+      // What the server holds now, then clear the edited markers.
+      setCount(body.read.tech_final_count == null ? "" : String(body.read.tech_final_count));
       setTechFlags(techFlagsFrom(body.read));
       setTouched({});
       setCountEdited(false);
@@ -256,7 +258,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
                     id={`roof-read-tech-${key}`}
                     aria-label={`Tech saw: ${label}`}
                     checked={!!techFlags[key]}
-                    disabled={saveState.busy}
+                    disabled={saveState.busy || !estimateId}
                     onChange={() => {
                       setTechFlags((f) => ({ ...f, [key]: !f[key] }));
                       setTouched((t) => ({ ...t, [key]: true }));
@@ -267,7 +269,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
             })}
           </div>
           <Field label="Entry points the tech counted" id="roof-read-tech-count" className="mb-2">
-            <Input type="number" inputMode="numeric" min="0" max={String(MAX_TECH_COUNT)} step="1" value={count} disabled={saveState.busy} onChange={(e) => { setCount(e.target.value); setCountEdited(true); }} />
+            <Input type="number" inputMode="numeric" min="0" max={String(MAX_TECH_COUNT)} step="1" value={count} disabled={saveState.busy || !estimateId} onChange={(e) => { setCount(e.target.value); setCountEdited(true); }} />
           </Field>
           <div className="flex items-center gap-3">
             <Button variant="secondary" size="sm" onClick={saveTech} loading={saveState.busy} disabled={saveState.busy || !estimateId} data-testid="roof-read-save">

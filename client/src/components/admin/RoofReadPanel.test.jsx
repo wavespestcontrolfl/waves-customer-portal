@@ -187,12 +187,34 @@ describe("an ok read", () => {
     await screen.findByTestId("roof-read-result");
     expect(screen.getByTestId("roof-read-save")).toBeDisabled();
     expect(screen.getByTestId("roof-read-save-first")).toHaveTextContent("Save the estimate first to record the tech's count.");
-    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "2" } });
+    // The count input and the checkboxes are under the same guard, so nothing can be entered that cannot be saved.
+    expect(screen.getByLabelText("Entry points the tech counted")).toBeDisabled();
+    for (const { label } of ROOF_TYPES) expect(screen.getByRole("checkbox", { name: `Tech saw: ${label}` })).toBeDisabled();
     fireEvent.click(screen.getByTestId("roof-read-save"));
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
     rerender(<RoofReadPanel spot={SPOT} estimateId={EST} />);
     expect(screen.getByTestId("roof-read-save")).not.toBeDisabled();
+    expect(screen.getByLabelText("Entry points the tech counted")).not.toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Tech saw: Gable vents" })).not.toBeDisabled();
     expect(screen.queryByTestId("roof-read-save-first")).toBeNull();
+  });
+
+  it("shows what the server returns after a save, not what was typed", async () => {
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_final_count: 9, tech_final_flags: { gable_vents: "yes" } }) }));
+    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Tech saw: Chimney or flue" }));
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    await screen.findByText("Saved.");
+    expect(screen.getByLabelText("Entry points the tech counted")).toHaveValue(9);
+    expect(screen.getByRole("checkbox", { name: "Tech saw: Gable vents" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Tech saw: Chimney or flue" })).not.toBeChecked();
+    // The edited markers are clear: the next save of nothing sends nothing.
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Change the count or an entry point first/);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
   });
 
   it("locks the count, the checkboxes and Save while a save is pending", async () => {
