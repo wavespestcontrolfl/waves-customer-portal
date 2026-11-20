@@ -54,14 +54,17 @@ function useBuilders(kind) {
   return { ...state, load };
 }
 
+// Each read takes a number that is never used again (a kind switch clears `latest`, not `seq`), so a late answer for
+// a kind or a read the owner already left never lands on the rows shown now.
 function useJobSites(kind) {
   const [open, setOpen] = useState("");
   const [sites, setSites] = useState({});
+  const seq = useRef(0);
   const latest = useRef({});
   useEffect(() => { setOpen(""); setSites({}); latest.current = {}; }, [kind]);
 
   const fetchSites = useCallback((key) => {
-    const ticket = (latest.current[key] || 0) + 1;
+    const ticket = ++seq.current;
     latest.current[key] = ticket;
     setSites((prev) => ({ ...prev, [key]: { loading: true, error: "", permits: null } }));
     api(`/builders/permits?kind=${kind}&builder=${encodeURIComponent(key)}`)

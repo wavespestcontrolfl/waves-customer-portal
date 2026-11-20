@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -138,6 +138,32 @@ it("home job sites show the type of work column", async () => {
   const sites = await screen.findByRole("table", { name: "Newest job sites" });
   expect(within(sites).getByRole("columnheader", { name: "Type of work" })).toBeInTheDocument();
   expect(within(sites).getByText("New Single Family")).toBeInTheDocument();
+});
+
+it("a late job-site answer from the kind the owner left never replaces the job sites of the kind shown now", async () => {
+  // One builder that pulls both pool and home permits: the same key under both kinds.
+  const both = { key: "SAMPLE BUILDERS", name: "SAMPLE BUILDERS INC", license: "CBC444", permits30: 1, permits90: 3, permits365: 9, firstPermit: "2026-01-05", lastPermit: "2026-11-10", isNew: false, isCustomer: false };
+  let answerPool;
+  route({
+    "/admin/prospects/builders?kind=pool": () => reply({ ...POOL, builders: [both] }),
+    "/admin/prospects/builders?kind=home": () => reply({ ...HOME, builders: [both] }),
+    "/admin/prospects/builders/permits?kind=pool&builder=SAMPLE%20BUILDERS": () => new Promise((resolve) => { answerPool = resolve; }),
+    "/admin/prospects/builders/permits?kind=home&builder=SAMPLE%20BUILDERS": () => reply({ permits: [{ id: "H-9", issuedDate: "2026-11-14", status: "Permit Issued", address: "300 SAMPLE CT", city: null, zip: "34219", typeOfWork: "New Single Family" }] }),
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "SAMPLE BUILDERS INC" })); // the pool read stays in flight
+  fireEvent.click(screen.getByRole("button", { name: "Home builders" }));
+  await screen.findByText("1 new-home permit in the 7 days to Nov 16, from 1 builder.");
+  fireEvent.click(screen.getByRole("button", { name: "SAMPLE BUILDERS INC" })); // the home read answers first
+  expect(within(await screen.findByRole("table", { name: "Newest job sites" })).getByText("300 SAMPLE CT")).toBeInTheDocument();
+
+  await act(async () => {
+    answerPool({ ok: true, status: 200, json: async () => SITES }); // the pool answer arrives last
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+  });
+  const sites = screen.getByRole("table", { name: "Newest job sites" });
+  expect(within(sites).getByText("300 SAMPLE CT")).toBeInTheDocument();
+  expect(within(sites).queryByText("200 SAMPLE TRL")).toBeNull();
 });
 
 it("summaryText says 'permit' for one and 'permits' for many, and names the week by its last day", () => {
