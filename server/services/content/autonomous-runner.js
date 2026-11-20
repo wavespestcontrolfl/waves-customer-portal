@@ -247,7 +247,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null, terminalHoldPass = false } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null, availableNowIds = null, terminalHoldPass = false } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -265,7 +265,7 @@ class AutonomousRunner {
     const t1 = Date.now();
     let opp;
     try {
-      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}), ...(bucket ? { bucket } : {}), ...(onlyIds ? { onlyIds } : {}) });
+      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}), ...(bucket ? { bucket } : {}), ...(onlyIds ? { onlyIds } : {}), ...(availableNowIds?.length ? { availableNowIds } : {}) });
     } catch (err) {
       logger.warn(`[autonomous-runner] claim failed: ${err.message}`);
       return finalize(run, t0, { outcome: 'failed', failure_message: `claim:${err.message}` });
@@ -338,7 +338,27 @@ class AutonomousRunner {
     // gates and the gates on the draft all read the brief the draft was
     // written from. Null (gate off, dry run, nothing waiting) = compose.
     const terminalWriter = require('./terminal-writer');
-    const handedBrief = await this._briefHandedToTerminal(opp.id, { dryRun });
+    const macJob = !dryRun && terminalWriter.runningOnMac();
+    let handedBrief;
+    try {
+      // Mac mode, on either side: a replacement brief would orphan a draft already pushed for the old one.
+      handedBrief = await this._briefHandedToTerminal(opp.id, { dryRun, throwOnError: macJob || terminalWriter.editorialReviewOnMac() });
+    } catch (err) {
+      // A lookup that failed is no answer. No run is stored, so the row keeps its wait on the same
+      // brief and draft; it counts as a failure of the pass.
+      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.recheckMs()), { claimToken });
+      return finalize(run, t0, { outcome: 'failed_terminal_brief_lookup', failure_message: err.message }, { persist: false });
+    }
+    // The Mac job takes only a row whose brief was handed to the terminal: it composes none, since a new
+    // brief can route the row to a paid agent. The server briefs the row again after the deferral.
+    if (!handedBrief && macJob) {
+      const finalized = await finalize(run, t0, {
+        outcome: 'skipped_mac_brief_missing', skip_reason: terminalWriter.MAC_BRIEF_MISSING,
+        reviewer_notes: 'the brief this row was listed with could not be loaded; the server briefs it again',
+      });
+      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.recheckMs()), { claimToken });
+      return finalized;
+    }
     let brief;
     try {
       brief = handedBrief || await briefBuilder.compose(opp.id, {
@@ -707,7 +727,9 @@ class AutonomousRunner {
     // with the dispatcher's own runWithBrief contract, or null (gate off,
     // dry run, a title/meta rewrite) = the agent. Only this step changes:
     // the claim, the brief and every gate below are the same.
-    const draftSource = terminalWriter.draftSourceFor(opp.id, brief, { handed: Boolean(handedBrief), dryRun }) || dispatcher;
+    // The Mac job never starts an agent session (a paid API call): a row the terminal does not write waits.
+    const draftSource = terminalWriter.draftSourceFor(opp.id, brief, { handed: Boolean(handedBrief), dryRun })
+      || (terminalWriter.runningOnMac() ? terminalWriter.macNoAgentSource() : dispatcher);
     const dispatchOnce = () => draftSource.runWithBrief(brief, dispatchOptions).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
@@ -756,7 +778,7 @@ class AutonomousRunner {
         skip_reason: dispatchResult.code,
         reviewer_notes: dispatchResult.reason,
       });
-      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
+      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.recheckMs()), { claimToken });
       return finalized;
     }
     // The terminal held the row: it cannot be written as briefed (owner 2026-11-02, "A").
@@ -805,6 +827,9 @@ class AutonomousRunner {
       if (!['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
         err = require('./editorial-evidence').reviewError(null);
       }
+      // The Mac job: a reviewer that could not run (a claude -p limit or timeout) is no verdict on the
+      // terminal draft. Keep the draft on its branch and wait on the same brief, as a plan-review outage does.
+      if (macReviewOutage(err, run)) return this._awaitTerminalReviewer({ queue, opp, run, t0, finalize, claimToken, reason: err.message });
       return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
         claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
       });
@@ -1568,6 +1593,8 @@ class AutonomousRunner {
       if (err.code === 'BLOG_OWNER_LIST_BLOCKED' || err.code === 'BLOG_OWNER_LIST_UNVERIFIED') {
         return this._ownerListCommitRefused(queue, opp, run, t0, finalize, { claimToken, err, unattendedBlog });
       }
+      // Not the Mac outage wait here: a publish retried later would pay for its images again. The gate
+      // retry is bounded, and the terminal writes its next draft free.
       if (['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
@@ -1963,18 +1990,119 @@ class AutonomousRunner {
   // run that waited for the draft carries the lane its claim was fenced to.
   // Gate off, kill switch off or any read failure: none (the batch claims by
   // score as before).
-  async _terminalFirstIds(actionType = null) {
+  // `ignoreDraftsFirstSwitch` (Mac mode): the Mac job's rows and the server's
+  // exclusions do not depend on the priority-order switch.
+  // `throwOnError` (Mac mode): a failed listing is not an empty one.
+  async _terminalFirstIds(actionType = null, { ignoreDraftsFirstSwitch = false, throwOnError = false } = {}) {
     const none = { written: [], held: [] };
     const terminalWriter = require('./terminal-writer');
-    if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return none;
+    if (!terminalWriter.terminalWriterLive() || !(ignoreDraftsFirstSwitch || envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true))) return none;
     try {
       const listing = await terminalWriter.awaitingTerminalDrafts();
       const ids = (rows) => (rows || []).filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
-      return { written: ids(listing.written), held: ids(listing.held) };
+      const handoff = ids([...(listing.written || []), ...(listing.held || [])].filter((row) => row.handoff));
+      return { written: ids(listing.written), held: ids(listing.held), ...(handoff.length ? { handoff } : {}) };
     } catch (err) {
+      if (throwOnError) throw err;
       logger.warn(`[autonomous-runner] written terminal drafts could not be listed (${err.message}); the batch claims by score`);
       return none;
     }
+  }
+
+  // The batch's terminal lists. On the server in Mac mode the Mac job takes
+  // every terminal draft and hold, so the batch's own lists are empty and the
+  // listed rows are returned to keep out of its claims.
+  async _terminalClaimPlan(actionType) {
+    const terminalWriter = require('./terminal-writer');
+    if (!(terminalWriter.editorialReviewOnMac() && !terminalWriter.runningOnMac())) return { terminalFirst: await this._terminalFirstIds(actionType), macOwnedIds: [] };
+    // One retry, then claim without the exclusions (logged): in Mac mode this server reads no draft
+    // branch and consumes nothing (draftSourceFor waits with AWAITS_MAC before any read), so a
+    // Mac-owned row it claims blind is only rechecked 30 minutes later.
+    const listed = await this._terminalFirstIds(actionType, { ignoreDraftsFirstSwitch: true, throwOnError: true })
+      .catch(() => this._terminalFirstIds(actionType, { ignoreDraftsFirstSwitch: true }));
+    return { terminalFirst: { written: [], held: [] }, macOwnedIds: [...listed.written, ...listed.held] };
+  }
+
+  /**
+   * The Mac job's pass (CONTENT_EDITORIAL_REVIEW_HOST=mac and
+   * CONTENT_EDITORIAL_REVIEW_RUNNER=mac, both strict): takes the terminal rows
+   * only, written drafts first and then the held rows, as _runDailyInner's
+   * terminal-first passes do (same claim scope, same consecutive-failure stop).
+   * No score claims, no backfill slots, no digest and no drought alert. It
+   * refuses anywhere else and writes nothing then. Model calls made while it
+   * runs (the answer-plan review, the editorial review) ride the Mac's plan.
+   */
+  async runTerminalDrafts({ limit = null } = {}) {
+    const terminalWriter = require('./terminal-writer');
+    if (!(terminalWriter.editorialReviewOnMac() && terminalWriter.runningOnMac())) {
+      return { outcome: 'skipped_not_mac', skipped: true, reason: 'not_the_mac_job', count: 0, runs: [] };
+    }
+    // Production gate semantics: off production, feature-gates reads gates such as the master gate and
+    // named-competitor posts as on whatever their variables say. `railway run` sets NODE_ENV=production.
+    if (process.env.NODE_ENV !== 'production') {
+      return { outcome: 'skipped_not_production', skipped: true, reason: 'node_env_not_production', count: 0, runs: [] };
+    }
+    // The server cron checks the master gate before runDaily; runNext does not.
+    if (process.env.GATE_AUTONOMOUS_CONTENT !== 'true') {
+      return { outcome: 'skipped_engine_off', skipped: true, reason: 'content_engine_off', count: 0, runs: [] };
+    }
+    // The owner's spend line (2026-11-19, "A"): the review calls ride the Max plan or nothing runs.
+    if (!terminalWriter.maxPlanAdapterCovers()) {
+      logger.warn('[autonomous-runner] runTerminalDrafts: the Max-plan adapter does not answer the editorial review lanes; nothing is claimed');
+      return { outcome: 'failed_max_plan_adapter', reason: 'max_plan_adapter_missing', count: 0, failures: 1, runs: [] };
+    }
+    return this._withEngineLock('runTerminalDrafts', () => this._runTerminalDraftsInner({ limit }));
+  }
+
+  async _runTerminalDraftsInner({ limit = null } = {}) {
+    const batchLimit = dailyBatchLimit(limit);
+    const maxConsecutiveFailures = envInt('AUTONOMOUS_CONTENT_MAX_CONSECUTIVE_FAILURES', 2);
+    const runs = [];
+    const failedOppIds = [];
+    let streak = 0;
+    // A Mac pass that died holding its claim leaves the row claimed, and the listing reads pending rows
+    // only: recover stale claims first, as claimNext does (fail-soft; claimNext recovers again).
+    const recovered = (await this._recoverStaleClaimsSoft('runTerminalDrafts')) !== false;
+    let terminalFirst;
+    try {
+      terminalFirst = await this._terminalFirstIds(null, { ignoreDraftsFirstSwitch: true, throwOnError: true });
+    } catch (err) {
+      // Not "nothing to take": the Mac job reports a failure, so its run bell rings.
+      logger.warn(`[autonomous-runner] runTerminalDrafts: terminal drafts could not be listed (${err.message})`);
+      return { outcome: 'failed_terminal_listing', reason: err.message, count: 0, limit: batchLimit, failures: 1, runs: [] };
+    }
+    for (let i = 0; i < batchLimit; i += 1) {
+      const scope = terminalFirstScope(terminalFirst);
+      if (!scope) break;
+      // A draft or hold pushed after a handoff wait is taken now, not at the wait's recheck time.
+      const handoff = scope.ids.filter((id) => terminalFirst.handoff?.includes(id));
+      // minScore 0: every listed row was handed to the terminal by a run that passed its own floor (an
+      // admin Run now may pass a lower one), so the default floor would strand its draft.
+      const run = await this.runNext({ minScore: 0, excludeIds: [...failedOppIds], ...terminalScopeArgs(scope), ...(handoff.length ? { availableNowIds: handoff } : {}) });
+      takeFromTerminalScope(terminalFirst, scope, run);
+      if (run.outcome === 'skipped_no_opportunity') { i -= 1; continue; }
+      runs.push(run);
+      if (run.outcome === require('./terminal-writer').HOLD_OUTCOME) { i -= 1; streak = 0; continue; }
+      if (!macPassFailure(run)) { streak = 0; continue; }
+      streak += 1;
+      if (run.opportunity_id != null) failedOppIds.push(run.opportunity_id);
+      if (streak >= maxConsecutiveFailures) {
+        logger.warn(`[autonomous-runner] runTerminalDrafts halting after ${streak} consecutive failed runs (last: ${run.failure_message || run.outcome})`);
+        break;
+      }
+    }
+    await this.settleTerminalWork(runs);
+    // Nothing taken after a failed recovery is not "nothing to take": a draft may sit on a stale claim.
+    if (!runs.length && !recovered) {
+      return { outcome: 'failed_stale_claim_recovery', reason: 'stale_claim_recovery_failed', count: 0, limit: batchLimit, failures: 1, runs };
+    }
+    return {
+      outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
+      count: runs.length,
+      limit: batchLimit,
+      failures: runs.filter(macPassFailure).length,
+      runs,
+    };
   }
 
   async _runDailyInner({ limit = null, actionType = null } = {}) {
@@ -2052,7 +2180,12 @@ class AutonomousRunner {
     // Then the rows whose terminal hold is pushed (owner 2026-11-02), in a
     // pass of their own so a hold never outranks a written draft; a run that
     // parks a held row gives its slot back (nothing is written or published).
-    const terminalFirst = await this._terminalFirstIds(actionType);
+    // Blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST=mac): the server
+    // neither consumes nor defers a written draft or a hold. It skips both
+    // passes and keeps those rows out of every claim; runTerminalDrafts, run
+    // by the Mac job, takes them. Rows still waiting for a draft are claimed
+    // and deferred as before.
+    const { terminalFirst, macOwnedIds } = await this._terminalClaimPlan(actionType);
     for (let i = 0; i < slotBudget; i += 1) {
       const scope = terminalFirstScope(terminalFirst);
       const reserve = !scope && reservedLeft > 0 && !scopedActionType;
@@ -2061,7 +2194,7 @@ class AutonomousRunner {
       // through to claimNext; spread conditionally so the unscoped daily
       // batch's claim args stay byte-identical.
       const run = await this.runNext({
-        excludeIds: [...failedOppIds],
+        excludeIds: [...failedOppIds, ...macOwnedIds],
         ...(scopedActionType ? { actionType: scopedActionType } : {}),
         ...terminalScopeArgs(scope),
         ...(reserve ? { bucket: CITABILITY_BACKFILL_BUCKET } : {}),
@@ -2082,6 +2215,8 @@ class AutonomousRunner {
         continue;
       }
       runs.push(run);
+      // A row the server could only wait on (Mac mode) is not claimed again in this batch.
+      if (run.skip_reason === require('./terminal-writer').AWAITS_MAC) macOwnedIds.push(run.opportunity_id);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
       if (run.outcome === require('./terminal-writer').HOLD_OUTCOME) {
@@ -2202,7 +2337,11 @@ class AutonomousRunner {
    * the alert's own rules stay as they are. A send failure is logged.
    */
   async _reportBlogDrought(...args) {
-    if (await require('./terminal-writer').blogDraftRequested()) return;
+    const terminalWriter = require('./terminal-writer');
+    if (await terminalWriter.blogDraftRequested()) return;
+    if (await terminalWriter.macHoldsBlogDraft()) return;
+    // Mac mode: the Mac job publishes blogs outside this batch, so read the day's record, not only these runs.
+    if (terminalWriter.editorialReviewOnMac() && await this._blogStartedToday().catch(() => false)) return;
     // the caller's own arguments, unchanged
     await this._sendBlogDroughtSms(...args).catch((err) => {
       logger.warn(`[autonomous-runner] blog drought alert failed: ${err.message}`);
@@ -2354,6 +2493,33 @@ class AutonomousRunner {
    * needs_owner hold's question from the stored run and deletes the branch,
    * like a taken draft's (settleTerminalWork).
    */
+  // Stale-claim recovery that never stops its caller (claimNext recovers again).
+  // False when the recovery failed (logged); the caller goes on with the pending rows.
+  async _recoverStaleClaimsSoft(label) {
+    try {
+      await getQueue()?.recoverStaleClaims?.();
+      return true;
+    } catch (err) {
+      logger.warn(`[autonomous-runner] ${label} stale-claim recovery failed (${err.message}); listing pending rows only`);
+      return false;
+    }
+  }
+
+  // A terminal draft whose editorial review could not run on the Mac: not consumed (the branch stays,
+  // since cleanup deletes only a run's terminal_draft_revision), recorded as a wait on the same brief,
+  // and rechecked like any terminal wait (the attempt is refunded).
+  async _awaitTerminalReviewer({ queue, opp, run, t0, finalize, claimToken, reason }) {
+    const terminalWriter = require('./terminal-writer');
+    run.terminal_draft_revision = undefined;
+    const finalized = await finalize(run, t0, {
+      outcome: terminalWriter.AWAITING_OUTCOME,
+      skip_reason: terminalWriter.REVIEW_UNAVAILABLE,
+      reviewer_notes: `the editorial review could not run; the draft is kept and the row looks again later: ${reason}`.slice(0, 760),
+    });
+    await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.recheckMs()), { claimToken });
+    return finalized;
+  }
+
   async _parkHeldTerminalRow({ queue, opp, run, t0, claimToken, dispatchResult }) {
     const terminalWriter = require('./terminal-writer');
     const { hold } = dispatchResult;
@@ -4524,7 +4690,7 @@ class AutonomousRunner {
    * wrote for gets a fresh brief). A lookup failure is null too: the row is
    * then briefed again, never blocked.
    */
-  async _briefHandedToTerminal(opportunityId, { dryRun = false } = {}) {
+  async _briefHandedToTerminal(opportunityId, { dryRun = false, throwOnError = false } = {}) {
     const terminalWriter = require('./terminal-writer');
     if (dryRun || !terminalWriter.terminalWriterLive()) return null;
     try {
@@ -4535,6 +4701,7 @@ class AutonomousRunner {
       return age <= terminalWriter.MAX_BRIEF_AGE_MS ? brief : null;
     } catch (err) {
       logger.warn(`[autonomous-runner] terminal brief lookup failed for ${opportunityId}: ${err.message}`);
+      if (throwOnError) throw err;
       return null;
     }
   }
@@ -5304,6 +5471,21 @@ function isDeterministicPublishError(err) {
     /^autonomous draft canonical points off-site /,
     /^autonomous draft canonical must match slug /,
   ].some((pattern) => pattern.test(message));
+}
+
+// The Mac job: an editorial review of a terminal draft that could not run (sources, the model or its
+// answer; not a document the review refuses as input) is no verdict on the draft.
+function macReviewOutage(err, run) {
+  return err?.code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' && err.transient === true
+    && Boolean(run?.terminal_draft_revision) && require('./terminal-writer').runningOnMac();
+}
+
+// The Mac pass counts a reviewer that could not run (the draft is kept and the row
+// waits) as a failure, so a model outage stops the pass and its run bell rings.
+function macPassFailure(run) {
+  const tw = require('./terminal-writer');
+  // UNREADABLE: GitHub failed on the draft the listing had just read; the draft stays for the next pass.
+  return String(run.outcome).startsWith('failed') || [tw.PLAN_UNAVAILABLE, tw.REVIEW_UNAVAILABLE, tw.MAX_PLAN_MISSING, tw.UNREADABLE].includes(run.skip_reason);
 }
 
 // The claim scope for the next batch slot (_terminalFirstIds lists): the

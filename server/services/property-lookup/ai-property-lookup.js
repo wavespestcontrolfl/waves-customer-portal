@@ -1685,7 +1685,7 @@ async function lookupPropertyFromAI(address) {
       elapsedMs,
       confidence: parsed.confidence,
       source: parsed.source,
-      fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
+      fields: factFieldNames(parsed),
     });
 
     return shapeAsPropertyRecord(parsed, address, 'claude');
@@ -1777,6 +1777,14 @@ async function lookupPropertyFromOpenAI(address) {
     });
     if (!record._aiSourceUrl && record._aiSources.length) record._aiSourceUrl = record._aiSources[0].url;
     refreshRecordSourceEvidence(record);
+    // How long a success took, as the Claude leg logs it. Every failure of
+    // this leg already logs its time; without this line the wait the leg
+    // adds to a lookup cannot be read from the logs (owner 2026-11-19).
+    logger.info('[ai-property] OpenAI got facts', {
+      elapsedMs: Date.now() - t0,
+      confidence: confidenceLabel(parsed),
+      fields: factFieldNames(parsed),
+    });
     return record;
   } catch (err) {
     clearTimeout(timer);
@@ -1847,6 +1855,12 @@ async function lookupPropertyFromGemini(address) {
       });
       return null;
     }
+    // Success time: see the OpenAI leg.
+    logger.info('[ai-property] Gemini got facts', {
+      elapsedMs: Date.now() - t0,
+      confidence: confidenceLabel(parsed),
+      fields: factFieldNames(parsed),
+    });
     return shapeAsPropertyRecord(parsed, address, 'gemini');
   } catch (err) {
     clearTimeout(timer);
@@ -5460,6 +5474,19 @@ function normalizeLookupPropertyType(raw) {
     'Apartment',
     'HOA Common Area',
   ]);
+}
+
+// The names of the facts a provider returned, for its success log line.
+// Names only: no value and no address goes to the log.
+function factFieldNames(parsed) {
+  return Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence');
+}
+
+// A provider's confidence, for a log line: one of the three labels the
+// prompt asks for, else null. The parsed value is the provider's own string
+// (lowercased), so anything else could carry text about the property.
+function confidenceLabel(parsed) {
+  return ['high', 'medium', 'low'].includes(parsed?.confidence) ? parsed.confidence : null;
 }
 
 function hasAnyPropertyFact(parsed) {

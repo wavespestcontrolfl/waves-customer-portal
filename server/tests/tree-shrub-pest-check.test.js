@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  INSECT_TYPE_KEYS, normalizePestCheck, freezePestCheck,
+  INSECT_TYPE_KEYS, LIFE_STAGE_KEYS, normalizePestCheck, typedPestCheck, validatePestTreatmentEvidence, freezePestCheck,
 } = require('../services/tree-shrub-pest-check');
 
 const saved = process.env.GATE_TS_PEST_CHECK;
@@ -16,12 +16,13 @@ const NOW = new Date('2026-10-05T15:00:00.000Z');
 
 test('the enum is the six approved types', () => {
   expect(INSECT_TYPE_KEYS).toEqual(['armored_scale', 'soft_scale', 'whitefly', 'caterpillars', 'mites', 'other']);
+  expect(LIFE_STAGE_KEYS).toEqual(['eggs', 'crawlers_nymphs', 'larvae', 'adults', 'mixed_other']);
 });
 
 describe('normalizePestCheck', () => {
   test('Yes keeps enum types once each, in enum order', () => {
-    expect(normalizePestCheck({ liveInsectsFound: true, insectTypes: ['mites', 'armored_scale', 'mites'] }))
-      .toEqual({ liveInsectsFound: true, insectTypes: ['armored_scale', 'mites'] });
+    expect(normalizePestCheck({ liveInsectsFound: true, insectTypes: ['mites', 'armored_scale', 'mites'], lifeStage: 'crawlers_nymphs' }))
+      .toEqual({ liveInsectsFound: true, insectTypes: ['armored_scale', 'mites'], lifeStage: 'crawlers_nymphs' });
   });
   test('Yes with no types is a valid answer', () => {
     expect(normalizePestCheck({ liveInsectsFound: true })).toEqual({ liveInsectsFound: true, insectTypes: [] });
@@ -31,8 +32,8 @@ describe('normalizePestCheck', () => {
       .toEqual({ liveInsectsFound: true, insectTypes: ['soft_scale'] });
   });
   test('No stores no types, whatever was sent', () => {
-    expect(normalizePestCheck({ liveInsectsFound: false, insectTypes: ['whitefly'] }))
-      .toEqual({ liveInsectsFound: false, insectTypes: [] });
+    expect(normalizePestCheck({ liveInsectsFound: false, insectTypes: ['whitefly'], preventiveReason: '  Spring systemic timing on the label.  ' }))
+      .toEqual({ liveInsectsFound: false, insectTypes: [], preventiveReason: 'Spring systemic timing on the label.' });
   });
   test('anything but a real boolean is no answer', () => {
     for (const bad of ['true', 'yes', 1, 0, null, undefined]) {
@@ -43,6 +44,63 @@ describe('normalizePestCheck', () => {
   test('a flood of types is bounded', () => {
     const flood = Array.from({ length: 5000 }, (_, i) => `junk_${i}`);
     expect(normalizePestCheck({ liveInsectsFound: true, insectTypes: [...flood, 'mites'] }).insectTypes).toEqual([]);
+  });
+});
+
+describe('treatment evidence', () => {
+  beforeEach(() => { process.env.GATE_TS_PEST_CHECK = 'true'; });
+
+  test('scout-only needs no evidence, while an insect treatment needs target plus stage or a preventive reason', () => {
+    expect(validatePestTreatmentEvidence(null, { hasInsectProduct: false })).toEqual([]);
+    expect(validatePestTreatmentEvidence(null, { hasInsectProduct: true })[0].code).toBe('tree_shrub_treatment_evidence_required');
+    expect(validatePestTreatmentEvidence({ pestCheck: { liveInsectsFound: true, insectTypes: ['whitefly'] } }, { hasInsectProduct: true })[0].code)
+      .toBe('tree_shrub_life_stage_required');
+    expect(validatePestTreatmentEvidence({ pestCheck: { liveInsectsFound: true, insectTypes: ['whitefly'], lifeStage: 'crawlers_nymphs' } }, { hasInsectProduct: true }))
+      .toEqual([]);
+    expect(validatePestTreatmentEvidence({ pestCheck: { liveInsectsFound: false, preventiveReason: 'Label preventive timing and site history.' } }, { hasInsectProduct: true, productNames: ['Merit 2F'] }))
+      .toEqual([]);
+  });
+
+  test('live-finds-only products cannot substitute a preventive reason', () => {
+    const blocks = validatePestTreatmentEvidence(
+      { pestCheck: { liveInsectsFound: false, preventiveReason: 'Routine calendar spray.' } },
+      { hasInsectProduct: true, productNames: ['Distance IGR'] },
+    );
+    expect(blocks[0].code).toBe('tree_shrub_live_find_required');
+  });
+
+  test('the full typed form supplies the same target/stage or preventive evidence fallback', () => {
+    const liveValues = { insect_target: 'Whitefly', insect_life_stage: 'Crawlers / nymphs' };
+    expect(typedPestCheck(liveValues)).toEqual({ liveInsectsFound: true, insectTypes: ['whitefly'], lifeStage: 'crawlers_nymphs' });
+    expect(validatePestTreatmentEvidence(null, { hasInsectProduct: true, productNames: ['Mainspring GNL'], fallbackValues: liveValues })).toEqual([]);
+    expect(validatePestTreatmentEvidence(null, {
+      hasInsectProduct: true,
+      productNames: ['Merit 2F'],
+      fallbackValues: { insect_preventive_reason: 'Label-supported systemic timing and documented site history.' },
+    })).toEqual([]);
+    expect(validatePestTreatmentEvidence(null, {
+      hasInsectProduct: true,
+      productNames: ['Merit 2F'],
+      fallbackValues: { ...liveValues, insect_preventive_reason: 'Contradictory reason.' },
+    })[0].code).toBe('tree_shrub_treatment_evidence_contradiction');
+  });
+
+  test('Distance is held for every recorded scale target on fast and full typed paths', () => {
+    for (const insectTypes of [['armored_scale'], ['soft_scale']]) {
+      expect(validatePestTreatmentEvidence({ pestCheck: { liveInsectsFound: true, insectTypes, lifeStage: 'crawlers_nymphs' } }, {
+        hasInsectProduct: true, productNames: ['Distance IGR'],
+      })[0].code).toBe('tree_shrub_distance_scale_hold');
+    }
+    expect(validatePestTreatmentEvidence(null, {
+      hasInsectProduct: true,
+      productNames: ['Distance IGR'],
+      fallbackValues: { insect_target: 'Soft scale', insect_life_stage: 'Crawlers / nymphs' },
+    })[0].code).toBe('tree_shrub_distance_scale_hold');
+    expect(validatePestTreatmentEvidence(null, {
+      hasInsectProduct: true,
+      productNames: ['Distance IGR'],
+      fallbackValues: { insect_target: 'Whitefly', insect_life_stage: 'Crawlers / nymphs' },
+    })).toEqual([]);
   });
 });
 

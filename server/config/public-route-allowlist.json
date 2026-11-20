@@ -35,8 +35,9 @@
         "USE /api/public/appointment (inline function#e6220f30)",
         "USE /api/public/appointment (visitPrepPreParserGuard#0755b055)",
         "USE /api/public/bug-id-extension (inline function#2801442c)",
-        "USE /api/public/careers (inline function#1ef2d7c2)",
+        "USE /api/public/careers (inline function#d3c28fc6)",
         "USE /api/public/careers/interview (inline function#656a8908)",
+        "USE /api/public/careers/offer (inline function#6885abc0)",
         "USE /api/public/estimate-assessment (inline function#b8185035)",
         "USE /api/public/inspection (inline function#ae857f75)",
         "USE /api/public/lawn-assessment (inline function#8e4982f2)",
@@ -612,6 +613,19 @@
       ]
     },
     {
+      "router": "server/routes/public-careers-offer.js",
+      "mount": "/api/public/careers/offer",
+      "reason": "Owner-approved 2026-11-19 (job offer flow): the applicant's private job offer by 64-hex bearer token (job_offers.token, set when the owner presses Send) to read the frozen personal terms + issued Technician Terms, then sign by typing a name, ask for another start date, or decline. GATE_JOB_OFFERS dark-404 before the limiter (the index.js USE entry is that gate; this router's USE is noStore + the same gate), router.param format gate before any DB read, generic 404 for unknown/draft tokens, 30/10min per-IP limiter, every action one transaction locking the application then the offer row, reads only the snapshot frozen at Send (docs/public-route-contracts.md)",
+      "routes": [
+        "USE /api/public/careers/offer (inline function#2ffb8b22)",
+        "GET /api/public/careers/offer/:token",
+        "POST /api/public/careers/offer/:token/text-consent",
+        "POST /api/public/careers/offer/:token/accept",
+        "POST /api/public/careers/offer/:token/date-request",
+        "POST /api/public/careers/offer/:token/decline"
+      ]
+    },
+    {
       "router": "server/routes/estimate-slots-public.js",
       "mount": "/api/public/estimates",
       "reason": "Estimate scheduling/deposit flow by unguessable estimate token (ask/find-slots carry the signed askToken contract from AGENTS.md); the /reserve/:id/extend leg pushes an EXISTING hold's expiry out under the same token gate, uuid-gates the hold id, and answers the same generic 404 for an unknown/foreign/committed/past-grace hold (owner case 2026-09-11); the USE entry is the router's no-cache header stamp (always next())",
@@ -758,7 +772,7 @@
     {
       "router": "server/routes/pay-v2.js",
       "mount": "/api/pay",
-      "reason": "Tokenized invoice payment page (format-gated tokens; the /pay contract). promo-code is the same token contract behind GATE_PAY_PROMO_CODE (owner 2026-11-18: the customer types a promo code on the pay page; it saves the code on the invoice only, the credit posts and applies at the /setup that follows)",
+      "reason": "Tokenized invoice payment page (format-gated tokens; the /pay contract). promo-code is the same token contract behind GATE_PAY_PROMO_CODE (owner 2026-11-18: the customer types a promo code on the pay page; it saves the code on the invoice only, the credit posts and applies at the /setup that follows). plan-choice is the same token contract behind GATE_PAY_PLAN_CHOICE (owner 2026-11-19: on the first invoice of an accepted plan the customer picks annual prepay; it mints one unpaid prepay invoice at a server-derived price and charges, sends and voids nothing)",
       "routes": [
         "GET /api/pay/:token",
         "GET /api/pay/:token/attachments/:attachmentId",
@@ -768,6 +782,7 @@
         "POST /api/pay/:token/consent",
         "POST /api/pay/:token/error",
         "POST /api/pay/:token/finalize",
+        "POST /api/pay/:token/plan-choice",
         "POST /api/pay/:token/promo-code",
         "POST /api/pay/:token/quote",
         "POST /api/pay/:token/setup",

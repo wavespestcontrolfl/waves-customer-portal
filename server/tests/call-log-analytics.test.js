@@ -72,6 +72,15 @@ describe('call-log analytics', () => {
       basis: 'The dialed number is currently assigned only to this website placement.',
     });
 
+    // The website-only line (2026-11-19) is a dedicated website placement, and
+    // the registry alone proves it even before its source row exists.
+    expect(sourceEvidence({ to_phone: '+19412542617' }))
+      .toEqual(expect.objectContaining({ kind: 'website', label: 'Website' }));
+    expect(sourceEvidence({
+      to_phone: '+19412542617', _source_name: 'Main Site — web-only line (wavespestcontrol.com)',
+      _source_type: 'main_site', _source_domain: 'wavespestcontrol.com',
+    })).toEqual(expect.objectContaining({ kind: 'website', detail: 'Website · wavespestcontrol.com' }));
+
     // No DB source row: the code-owned line registry still proves this is a
     // dedicated domain line, never a geography/timing guess.
     expect(sourceEvidence({ to_phone: '+19412535279' }))

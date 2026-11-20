@@ -34,14 +34,15 @@ async function zoneHourlyOutlooks(zones, zoneCoords) {
 
 /**
  * Sets `rainAtStop` (0–100 or null) in place on each service from its zone's
- * hourly outlook at its window-start hour on `date`.
+ * hourly outlook at its window-start hour on `date`. `zoneOf` names the
+ * forecast zone of a stop (default: its own `zone`).
  */
-function attachStopRain(services, date, hourlyByZone) {
+function attachStopRain(services, date, hourlyByZone, zoneOf = (s) => s.zone) {
   for (const s of services || []) {
     s.rainAtStop = null;
     if (NOT_A_STOP.has(s.status)) continue;
     const key = hourKey(date, s.windowStart);
-    const hours = hourlyByZone?.[s.zone];
+    const hours = hourlyByZone?.[zoneOf(s)];
     if (!key || !Array.isArray(hours)) continue;
     const hour = hours.find((h) => String(h?.startTime || '').slice(0, 13) === key);
     if (hour && Number.isFinite(hour.rainChance)) s.rainAtStop = hour.rainChance;

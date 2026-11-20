@@ -23,6 +23,7 @@ const { phoneMatchDigits } = require('../utils/phone');
 const { appendCommsHistory, maskPhone, errorSummary } = require('./recruiting-comms');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
+const { redactOfferLinks } = require('../utils/offer-link-redaction');
 
 const OPEN_STATUSES = ['new', 'reviewed', 'interview', 'offer'];
 const RECENT_OUTBOUND_DAYS = 45;
@@ -141,7 +142,9 @@ async function matchApplicantReply(fromPhone, toNumber) {
  *
  * @returns {Promise<{ persisted: boolean, duplicate: boolean }>}
  */
-async function recordApplicantReply({ applicationId, from, to, body, messageSid, mediaCount = 0, media = [], unifiedMessageId = null }) {
+async function recordApplicantReply({ applicationId, from, to, body: rawBody, messageSid, mediaCount = 0, media = [], unifiedMessageId = null }) {
+  // A quoted job-offer text must not leave its signing link in the history or the sms_log row (the webhook redacts too).
+  const body = redactOfferLinks(rawBody);
   const entry = {
     id: crypto.randomUUID(),
     at: new Date().toISOString(),

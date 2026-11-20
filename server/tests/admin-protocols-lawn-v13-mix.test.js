@@ -32,6 +32,11 @@ const STONEWALL = 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herb
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const F44 = 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer';
 const TETRINO = 'Tetrino Insecticide';
+const TETRINO_EVIDENCE = Object.freeze({
+  tetrinoTarget: 'chinch',
+  tetrinoCurrentObservations: 'Four damage-edge counts recorded; live chinch bugs found.',
+});
+const TETRINO_SELECTION = Object.freeze({ ...TETRINO_EVIDENCE, selectedConditionalProductNames: TETRINO });
 const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
 const CATALOG = [
   { id: 'nt', name: NUTRA, aliases: [], default_rate_per_1000: 12, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
@@ -56,7 +61,7 @@ const V13_SUMMARY = {
     { productId: 'are', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { trigger: 'chinch_20_to_25_per_sqft' } },
     { productId: 'cel', applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz', gates: { annualCounter: 'celsius_oz_per_1000' } },
     { productId: 'nis', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { concentration: '0.25% v/v', tankMixWith: 'Celsius WG' } },
-    { productId: 'tet', ratePer1000: 0.367, rateUnit: 'fl oz', gates: { sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true } },
+    { productId: 'tet', productName: TETRINO, ratePer1000: 0.367, rateUnit: 'fl oz', gates: { sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true } },
   ],
 };
 
@@ -280,15 +285,29 @@ test('gate on with no staged v13 protocol: 409, never a sheet priced at catalog 
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'lawn_v13_protocol_missing' }));
 });
 
-test('May Tetrino is sunny-turf-only: 10,000 sq ft with no turf profile is the half, 1.835 fl oz, not 3.67', async () => {
-  const body = await lawnMix({ month: '5' });
+test.each([
+  ['May Tetrino awaiting scouting evidence', TETRINO, { month: '5', selectedConditionalProductNames: TETRINO }],
+  ['January herbicide on mixed turf', STONEWALL, { month: '1', grassType: 'mixed' }],
+  ['January herbicide on unknown turf', STONEWALL, { month: '1', grassType: 'unknown' }],
+])('%s has no job or full-tank quantity, even as a preview', async (_case, name, query) => {
+  const sheet = await lawnMix(query);
+  expect(itemFor(sheet, name)).toMatchObject({
+    fieldHold: expect.any(String), selected: false,
+    jobMix: null, plannedMix: null, fullTankMix: null, plannedFullTankMix: null,
+  });
+  expect(sheet.mixingOrder.map(step => step.productName)).not.toContain(name);
+  expect(sheet.warnings).toContainEqual(expect.objectContaining({ productName: name, code: 'lawn_v13_' + itemFor(sheet, name).fieldHold }));
+});
+
+test('May Tetrino with current evidence is sunny-turf-only: 10,000 sq ft with no turf profile is the half, 1.835 fl oz, not 3.67', async () => {
+  const body = await lawnMix({ month: '5', ...TETRINO_SELECTION });
   expect(itemFor(body, TETRINO).jobMix).toMatchObject({ ratePer1000: 0.367, rateSource: 'protocol_rate', amount: 1.835 });
   // A row without the flag is whole-lawn: January Nutra-TECH is still the full 60.
   expect(itemFor(await lawnMix({ month: '1' }), NUTRA).jobMix.amount).toBe(60);
 });
 
 test('May Tetrino alone: its gate notes ride the item, the water-distance warning shows, no block, a mixing order stands', async () => {
-  const body = await lawnMix({ month: '5' });
+  const body = await lawnMix({ month: '5', ...TETRINO_SELECTION });
   const item = itemFor(body, TETRINO);
   expect(item.gates).toEqual({ sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true });
   expect(item.gateNotes.map((n) => `${n.severity}:${n.key}`)).toEqual(['required:minDistanceFromWaterFt', 'note:applyAlone', 'note:sunnyTurfOnly']);
@@ -298,8 +317,8 @@ test('May Tetrino alone: its gate notes ride the item, the water-distance warnin
 });
 
 test('May Tetrino with Arena selected beside it: the plan engine\'s apply-alone rule, a block and no combined mixing order', async () => {
-  const body = await lawnMix({ month: '5', selectedConditionalProductNames: 'Arena 50 WDG' });
-  expect(body.selectedItems.map((i) => i.product.name).sort()).toEqual(['Arena 50 WDG', TETRINO]);
+  const body = await lawnMix({ month: '5', ...TETRINO_EVIDENCE, selectedConditionalProductNames: `${TETRINO}, Arena 50 WDG` });
+  expect(body.selectedItems.map((i) => i.product?.name).filter(Boolean).sort()).toEqual(['Arena 50 WDG', TETRINO]);
   expect(body.blocks).toHaveLength(1);
   expect(body.blocks[0]).toMatchObject({ code: 'lawn_v13_apply_alone', productName: TETRINO });
   expect(body.mixingOrder).toEqual([]);
@@ -359,7 +378,7 @@ test('spot rows get no quantity anywhere on the sheet: no job, planned or full-t
 });
 
 test('a blocked sheet withholds every quantity of the selected products, spot or not, and keeps the reason', async () => {
-  const body = await lawnMix({ month: '5', selectedConditionalProductNames: 'Arena 50 WDG' });
+  const body = await lawnMix({ month: '5', ...TETRINO_EVIDENCE, selectedConditionalProductNames: `${TETRINO}, Arena 50 WDG` });
   expect(body.blocks).toHaveLength(1);
   for (const item of body.items.filter((i) => i.selected)) {
     expect({ name: item.product?.name, mixes: [item.jobMix, item.plannedMix, item.fullTankMix, item.plannedFullTankMix] })

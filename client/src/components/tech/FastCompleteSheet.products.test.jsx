@@ -25,7 +25,9 @@ const CATALOG = [
   // The house mix (lib/pest-default-mix.js). Numeric stock arrives as a
   // string, the way the database sends numerics.
   { id: 'taurus', name: 'Taurus SC', category: 'insecticide', active_ingredient: 'fipronil', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', inventory_unit: 'fl_oz', inventory_on_hand: '120.0000' },
-  { id: 'talak', name: 'Atticus Talak 7.9 F', category: 'insecticide', active_ingredient: 'bifenthrin', inventory_unit: 'fl_oz', inventory_on_hand: 96 },
+  { id: 'crosscheck', name: 'LESCO Crosscheck Plus', category: 'insecticide', active_ingredient: 'bifenthrin', inventory_unit: 'fl_oz', inventory_on_hand: 96 },
+  // Retired as the house bifenthrin 2026-11-18; still a valid product (leftover stock) the picker lists.
+  { id: 'talak', name: 'Atticus Talak 7.9 F', category: 'insecticide', active_ingredient: 'bifenthrin', inventory_unit: 'fl_oz', inventory_on_hand: 4 },
   { id: 'lesco', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
   // Stock kept in a bare oz says nothing; it is usually recorded in grams.
   { id: 'alpine', name: 'Alpine WSG', category: 'insecticide', active_ingredient: 'dinotefuran', inventory_unit: 'oz', inventory_on_hand: 10 },
@@ -73,6 +75,8 @@ const COMMON = [
   { productId: 'retired', visits: 3, usualUnit: 'g', usualAmount: 1 },
 ];
 
+// This home's Taurus count so far this year (room under the yearly label limit, so the house mix keeps Taurus).
+const HOUSE_COUNT = { count: 0, high: 0, low: 0, eligible: true, year: 2026 };
 const CONTEXT_SERVICE = {
   id: 'svc-1', customerName: 'Pat Jones', customerId: 'cust-1', propertyId: 'prop-1',
   serviceType: 'Pest Control Re-Service', scheduledDate: '2026-09-26', address: { line1: '123 Main St' },
@@ -87,7 +91,7 @@ function makeRequest({ products = CATALOG, commonProducts = COMMON, stockAdvisor
     calls.push({ path, options });
     if (path.split('?')[0].endsWith('/pest-recap/context')) {
       const rows = typeof products === 'function' ? products() : products;
-      return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: rows, commonProducts, existingRecord: null, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
+      return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: rows, commonProducts, existingRecord: null, taurusYearly: HOUSE_COUNT, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
     }
     if (path.endsWith('/tech-rating-allowed')) return { allowed: false };
     if (path.endsWith('/tech-tips')) return { available: false };
@@ -167,7 +171,7 @@ describe('FastCompleteSheet + Other product picker', () => {
     const allPest = within(picker).getByRole('group', { name: 'All pest products' });
     expect(optionNames(allPest)).toEqual([
       'Advion Ant Bait Gel', 'Atticus Talak 7.9 F', 'Bifen XTS', 'Contrac Blox', 'Cyzmic CS', 'Imidacloprid 2F',
-      'LESCO 90/10 Nonionic Surfactant', 'Quali-Pro Imidacloprid 2F', 'Taurus SC', 'Tekko Pro', 'Temprid FX', 'TREE-age G4',
+      'LESCO 90/10 Nonionic Surfactant', 'LESCO Crosscheck Plus', 'Quali-Pro Imidacloprid 2F', 'Taurus SC', 'Tekko Pro', 'Temprid FX', 'TREE-age G4',
     ]);
     expect(option(picker, 'Tekko Pro').textContent).toContain('IGR');
   });
@@ -272,7 +276,7 @@ describe('FastCompleteSheet + Other product picker', () => {
     await waitFor(() => expect(submit.disabled).toBe(false));
     expect(screen.queryByText(/shows 0 in stock/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Taurus SC — 4 fl oz' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Taurus SC — 1.6 fl oz' })).toBeTruthy();
     // Only the sheet's first read asks for the most-used aggregate; the stock
     // re-read (and the recap modal, which shares the endpoint) never does.
     const contextReads = request.calls.map((c) => c.path).filter((p) => p.includes('/pest-recap/context'));
@@ -282,7 +286,7 @@ describe('FastCompleteSheet + Other product picker', () => {
     ]);
 
     const body = await completeBody(request);
-    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz', targets: ['Ants'] });
+    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz', targets: ['Ants'] });
   });
 
   // Owner 2026-10-20, "dont block": /complete takes the stock below zero instead.
@@ -294,7 +298,7 @@ describe('FastCompleteSheet + Other product picker', () => {
     expect(screen.queryByText(/Update inventory or remove it/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
     const body = await completeBody(request);
-    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz' });
+    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz' });
   });
 
   test('a stock the amount can\'t be counted against is flagged but never holds Complete', async () => {
@@ -389,9 +393,9 @@ describe('FastCompleteSheet added product amounts', () => {
   });
 
   test('the house mix keeps its own units: a usual unit never relabels a house total', async () => {
-    // Taurus usually logged in gal: its house 4 fl oz must not open as 4 gal.
+    // Taurus usually logged in gal: its house 1.6 fl oz must not open as 1.6 gal.
     const request = await openSheet(makeRequest({ commonProducts: [{ productId: 'taurus', visits: 120, usualUnit: 'gal', usualAmount: 1 }] }));
-    expect(screen.getByRole('button', { name: 'Taurus SC — 4 fl oz' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Taurus SC — 1.6 fl oz' })).toBeTruthy();
     // The surfactant's 0.25 fl oz is 1½ tsp on its tile and in Edit amounts.
     fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
     expect(screen.getByLabelText('LESCO 90/10 Nonionic Surfactant').value).toBe('1.5');
@@ -399,7 +403,7 @@ describe('FastCompleteSheet added product amounts', () => {
 
     fillVisit();
     const body = await completeBody(request);
-    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz' });
+    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz' });
     expect(productIn(body, 'lesco')).toMatchObject({ totalAmount: 0.25, amountUnit: 'fl_oz' });
   });
 
@@ -436,16 +440,16 @@ describe('FastCompleteSheet added product amounts', () => {
     // Neither a catalog oddity (percent_solution) nor a unit that only looks
     // like one of the server's (fl_oz/1000sf is not on its list) is shown or
     // sent: either would make the server refuse the whole visit.
-    const products = CATALOG.map((p) => (p.id === 'talak' ? { ...p, default_rate_per_1000: '0.5', default_unit: 'fl_oz/1000sf' } : p));
+    const products = CATALOG.map((p) => (p.id === 'crosscheck' ? { ...p, default_rate_per_1000: '0.5', default_unit: 'fl_oz/1000sf' } : p));
     const request = await openSheet(makeRequest({ products }));
     enterAmount(addProduct('Cyzmic CS'), 2);
     fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
-    expect(screen.queryByLabelText('Atticus Talak 7.9 F rate')).toBeNull();
+    expect(screen.queryByLabelText('LESCO Crosscheck Plus rate')).toBeNull();
     expect(screen.queryByLabelText('Cyzmic CS rate')).toBeNull();
     fillVisit();
     const body = await completeBody(request);
     expect(productIn(body, 'cyzmic')).toMatchObject({ totalAmount: 2, amountUnit: 'fl_oz' });
-    expectNoRate(productIn(body, 'talak'));
+    expectNoRate(productIn(body, 'crosscheck'));
     expectNoRate(productIn(body, 'cyzmic'));
   });
 
@@ -473,7 +477,7 @@ describe('FastCompleteSheet added product amounts', () => {
     expectNoRate(productIn(body, 'gentrol'));
     expect(productIn(body, 'advion')).toMatchObject({ rate: 0.5, rateUnit: 'g/spot', totalAmount: 2, amountUnit: 'g' });
     // The house mix still starts at the rate the full form seeds.
-    expect(productIn(body, 'taurus')).toMatchObject({ rate: 4, rateUnit: 'oz' });
+    expect(productIn(body, 'taurus')).toMatchObject({ rate: 1.6, rateUnit: 'oz' });
   });
 
   test('a label rate kept in mL is neither shown nor recorded', async () => {
@@ -485,7 +489,7 @@ describe('FastCompleteSheet added product amounts', () => {
     expect(screen.queryByLabelText('Taurus SC rate')).toBeNull();
     fillVisit();
     const taurus = productIn(await completeBody(request), 'taurus');
-    expect(taurus).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz' });
+    expect(taurus).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz' });
     expectNoRate(taurus);
   });
 
@@ -512,7 +516,7 @@ describe('FastCompleteSheet added product amounts', () => {
     fillVisit();
     const body = await completeBody(request);
     expect(productIn(body, 'alpine')).toBeUndefined();
-    expect(body.products.map((p) => p.productId).sort()).toEqual(['lesco', 'talak', 'taurus']);
+    expect(body.products.map((p) => p.productId).sort()).toEqual(['crosscheck', 'lesco', 'taurus']);
   });
 });
 

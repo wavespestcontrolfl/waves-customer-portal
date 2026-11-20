@@ -1,0 +1,202 @@
+import { describe, expect, it } from 'vitest';
+import { pestDefaultMixSelections } from './pest-default-mix';
+import {
+  applyTaurusYearlyLimit,
+  isHighTaurusRate,
+  isHouseTaurusAmount,
+  isTaurusProduct,
+  taurusLeftOutLine,
+  taurusOverLimitWarning,
+  taurusYearlyNote,
+  taurusYearlyOf,
+} from './taurus-yearly-limit';
+
+const CATALOG = [
+  { id: 't', name: 'Taurus SC' },
+  { id: 'c', name: 'LESCO Crosscheck Plus' },
+  { id: 's', name: 'LESCO 90/10 Nonionic Surfactant' },
+];
+const names = (selections) => selections.map(({ product }) => product.name);
+const ROOM = { high: 0, low: 3, count: 3, eligible: true, year: 2026 };
+const FULL = { high: 0, low: 4, count: 4, eligible: false, year: 2026 };
+const TWO_HIGH = { high: 2, low: 0, count: 2, eligible: false, year: 2026 };
+const WITHOUT_TAURUS = ['LESCO Crosscheck Plus', 'LESCO 90/10 Nonionic Surfactant'];
+const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home is still within the label's yearly limit.";
+
+describe('applyTaurusYearlyLimit', () => {
+  const mix = pestDefaultMixSelections(CATALOG);
+
+  it('keeps the whole mix only when the home has room under the label', () => {
+    expect(names(applyTaurusYearlyLimit(mix, ROOM))).toEqual(['Taurus SC', ...WITHOUT_TAURUS]);
+  });
+
+  it('leaves Taurus out when no application fits (4 at 0.03%, or the 0.06% scenarios), keeping Crosscheck and the surfactant', () => {
+    expect(names(applyTaurusYearlyLimit(mix, FULL))).toEqual(WITHOUT_TAURUS);
+    expect(names(applyTaurusYearlyLimit(mix, TWO_HIGH))).toEqual(WITHOUT_TAURUS);
+  });
+
+  it('leaves Taurus out when the answer is unknown (label eligibility not known)', () => {
+    for (const unknown of [null, undefined, {}, { count: 1 }, { eligible: 'yes' }]) {
+      expect(names(applyTaurusYearlyLimit(mix, unknown))).toEqual(WITHOUT_TAURUS);
+    }
+  });
+
+  it('does not touch the amounts of the rows it keeps', () => {
+    expect(applyTaurusYearlyLimit(mix, FULL).map((row) => row.totalAmount)).toEqual(mix.slice(1).map((row) => row.totalAmount));
+  });
+});
+
+describe('taurusYearlyOf', () => {
+  it('returns the server answer when it says whether another application fits, and unknown for anything else', () => {
+    expect(taurusYearlyOf(ROOM)).toBe(ROOM);
+    expect(taurusYearlyOf(FULL)).toBe(FULL);
+    expect(taurusYearlyOf(null)).toBeNull();
+    expect(taurusYearlyOf(undefined)).toBeNull();
+    expect(taurusYearlyOf({ count: 2 })).toBeNull();
+    expect(taurusYearlyOf({ eligible: 1 })).toBeNull();
+  });
+});
+
+describe('notes', () => {
+  it('names the count in the left-out line when the home has no room', () => {
+    expect(taurusLeftOutLine(FULL)).toBe("Taurus left out: this home reached the label's yearly limit (4 this year).");
+    expect(taurusLeftOutLine(TWO_HIGH)).toBe("Taurus left out: this home reached the label's yearly limit (2 this year).");
+    expect(taurusLeftOutLine(ROOM)).toBeNull();
+  });
+
+  it('says the count is unavailable when it is unknown', () => {
+    expect(taurusLeftOutLine(null)).toBe(UNKNOWN_LINE);
+    expect(taurusLeftOutLine(undefined)).toBe(UNKNOWN_LINE);
+  });
+
+  it('warns on a manual Taurus when no application fits', () => {
+    expect(taurusOverLimitWarning(FULL, [{ name: 'Taurus SC' }])).toBe("Over the label's yearly Taurus limit at this home.");
+    expect(taurusOverLimitWarning(TWO_HIGH, [{ name: 'Taurus SC' }])).toBe("Over the label's yearly Taurus limit at this home.");
+  });
+
+  it('judges a manual Taurus row mixed above 0.4 fl_oz/gal (0.06%) by whether another 0.06% application fits', () => {
+    // Three at 0.03%: another 0.03% fits, another 0.06% does not.
+    const THREE_LOW = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const strong = { name: 'Taurus SC', rate: '0.8', rateUnit: 'fl_oz/gal' };
+    expect(taurusOverLimitWarning(THREE_LOW, [strong])).toBe("Over the label's yearly Taurus limit at this home.");
+    expect(taurusOverLimitWarning(THREE_LOW, [{ name: 'Taurus SC', rate: '0.4', rateUnit: 'fl_oz/gal' }])).toBeNull();
+    expect(taurusOverLimitWarning(THREE_LOW, [{ name: 'Taurus SC', rate: '1.6', rateUnit: 'oz' }])).toBeNull();
+    expect(taurusOverLimitWarning(THREE_LOW, [{ name: 'Taurus SC' }])).toBeNull();
+    // Room for a 0.06% application (none at 0.03%, one 0.06%): the strong row is fine too.
+    const ONE_HIGH = { high: 1, low: 0, count: 1, eligible: true, eligibleHigh: true, year: 2026 };
+    expect(taurusOverLimitWarning(ONE_HIGH, [strong])).toBeNull();
+    // An older server without eligibleHigh falls back to `eligible`.
+    expect(taurusOverLimitWarning(ROOM, [strong])).toBeNull();
+    expect(taurusOverLimitWarning(FULL, [strong])).toBe("Over the label's yearly Taurus limit at this home.");
+    // The left-out line and the house-mix filter still follow the low-rate answer.
+    expect(taurusLeftOutLine(THREE_LOW)).toBeNull();
+    expect(names(applyTaurusYearlyLimit(pestDefaultMixSelections(CATALOG), THREE_LOW))).toEqual(['Taurus SC', ...WITHOUT_TAURUS]);
+  });
+
+  it('does not warn without Taurus selected, with room under the label, or with an unknown answer', () => {
+    expect(taurusOverLimitWarning(FULL, [{ name: 'LESCO Crosscheck Plus' }])).toBeNull();
+    expect(taurusOverLimitWarning(ROOM, [{ name: 'Taurus SC' }])).toBeNull();
+    expect(taurusOverLimitWarning(null, [{ name: 'Taurus SC' }])).toBeNull();
+    expect(taurusOverLimitWarning(FULL, undefined)).toBeNull();
+  });
+
+  it('shows the warning in place of the left-out line once Taurus is back on the list', () => {
+    expect(taurusYearlyNote(FULL, [], { mixVisit: true })).toMatch(/^Taurus left out: this home reached/);
+    expect(taurusYearlyNote(FULL, [{ name: 'Taurus SC' }], { mixVisit: true })).toMatch(/^Over the label's yearly Taurus limit/);
+  });
+
+  it('shows the left-out line only on a house-mix visit with Taurus off the list', () => {
+    expect(taurusYearlyNote(FULL, [])).toBeNull();
+    expect(taurusYearlyNote(null, [], { mixVisit: true })).toBe(UNKNOWN_LINE);
+    // Added by hand while the answer is unknown: no warning (nothing to compare), and no "left out" line either.
+    expect(taurusYearlyNote(null, [{ name: 'Taurus SC' }], { mixVisit: true })).toBeNull();
+    expect(taurusYearlyNote(ROOM, [], { mixVisit: true })).toBeNull();
+  });
+});
+
+describe('isTaurusProduct', () => {
+  it('matches the catalog name, not other products', () => {
+    expect(isTaurusProduct({ name: ' Taurus SC ' })).toBe(true);
+    expect(isTaurusProduct({ productName: 'taurus sc' })).toBe(true);
+    expect(isTaurusProduct({ name: 'LESCO Crosscheck Plus' })).toBe(false);
+    expect(isTaurusProduct(null)).toBe(false);
+  });
+});
+
+describe('isHighTaurusRate (the same rule the server applies to a saved ledger row)', () => {
+  it('lets a fl_oz/gal rate decide when the row has one', () => {
+    expect(isHighTaurusRate({ rate: '0.8', rateUnit: 'fl_oz/gal' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '0.4', rateUnit: 'fl_oz/gal', totalAmount: 3.2, amountUnit: 'fl_oz' })).toBe(false);
+  });
+
+  it('reads a bare oz rate or an amount above the 1.6 fl oz house mix as the old 0.06% tank', () => {
+    expect(isHighTaurusRate({ rate: '3.2', rateUnit: 'oz' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', totalAmount: 3.2, amountUnit: 'fl_oz' })).toBe(true);
+    expect(isHighTaurusRate({ totalAmount: 3.2 })).toBe(true);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', totalAmount: 1.6, amountUnit: 'fl_oz' })).toBe(false);
+    expect(isHighTaurusRate({ totalAmount: 3.2, amountUnit: 'g' })).toBe(false);
+    expect(isHighTaurusRate({ name: 'Taurus SC' })).toBe(false);
+  });
+
+  it('reads an oz/gal rate like fl_oz/gal, and converts a teaspoon amount to fl oz first', () => {
+    expect(isHighTaurusRate({ rate: '0.8', rateUnit: 'oz/gal' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '0.4', rateUnit: 'oz/gal', totalAmount: 3.2, amountUnit: 'fl_oz' })).toBe(false);
+    expect(isHighTaurusRate({ totalAmount: 19.2, amountUnit: 'tsp' })).toBe(true);
+    expect(isHighTaurusRate({ totalAmount: 9.6, amountUnit: 'tsp' })).toBe(false);
+    expect(isHighTaurusRate({ rate: 9.6, rateUnit: 'tsp' })).toBe(false);
+  });
+
+  it('converts a gallon or mL amount to fl oz like the fl oz entry it equals, as the server does', () => {
+    expect(isHighTaurusRate({ totalAmount: 0.025, amountUnit: 'gal' })).toBe(true); // 3.2 fl oz
+    expect(isHighTaurusRate({ totalAmount: 0.0125, amountUnit: 'gal' })).toBe(false); // 1.6 fl oz
+    expect(isHighTaurusRate({ rate: 0.025, rateUnit: 'gal' })).toBe(true);
+    expect(isHighTaurusRate({ totalAmount: 94.6, amountUnit: 'ml' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '23.7', rateUnit: 'ml/gal' })).toBe(true); // 0.8 fl oz/gal
+    // 0.0125 gal entered is saved as 0.013 gal (the ledger keeps 3 decimals): both read as the house mix.
+    expect(isHighTaurusRate({ totalAmount: 0.013, amountUnit: 'gal' })).toBe(false);
+    expect(isHouseTaurusAmount(0.0125, 'gal')).toBe(true);
+    expect(isHouseTaurusAmount(9.6, 'tsp')).toBe(true);
+    expect(isHouseTaurusAmount(1.6)).toBe(true);
+    expect(isHouseTaurusAmount(3.2, 'fl_oz')).toBe(false);
+  });
+
+  it("reads a reopened recap's ledger dilution first, as the count does", () => {
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', dilution: '0.06%' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '0.8', rateUnit: 'fl_oz/gal', dilution: '0.03%' })).toBe(false);
+    expect(isHighTaurusRate({ rate: '0.8', rateUnit: 'fl_oz/gal', dilution: '0.4 fl oz/gal' })).toBe(true);
+  });
+
+  it("reads a reopened recap's application date: before the 0.03% ruling, the old mix counts as 0.06%", () => {
+    const oldSheet = { rate: '0.2', rateUnit: 'fl_oz/gal', totalAmount: 4, amountUnit: 'fl_oz' };
+    expect(isHighTaurusRate({ ...oldSheet, applicationDate: '2026-11-12' })).toBe(true);
+    expect(isHighTaurusRate(oldSheet)).toBe(false);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', applicationDate: '2026-10-01' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', applicationDate: '2026-11-20' })).toBe(false);
+    expect(isHighTaurusRate({ rate: '0.4', rateUnit: 'fl_oz/gal', totalAmount: 1.6, amountUnit: 'fl_oz', applicationDate: '2026-11-19' })).toBe(false);
+  });
+
+  it("dates a row being entered by the server's beforeRuling; a ledger row's own date wins", () => {
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz' }, { beforeRuling: true })).toBe(true);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz' })).toBe(false);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', applicationDate: '2026-11-20' }, { beforeRuling: true })).toBe(false);
+    // A visit dated before the ruling at 1.6 oz, after three 0.03% applications: the count will read 0.06%, so it warns.
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const row = [{ name: 'Taurus SC', rate: '1.6', rateUnit: 'oz' }];
+    expect(taurusOverLimitWarning({ ...threeLow, beforeRuling: true }, row)).toBe("Over the label's yearly Taurus limit at this home.");
+    expect(taurusOverLimitWarning({ ...threeLow, beforeRuling: false }, row)).toBeNull();
+    // The house mix's 0.4 fl oz/gal row stays 0.03% on that day too.
+    expect(taurusOverLimitWarning({ ...threeLow, beforeRuling: true }, [{ name: 'Taurus SC', rate: '0.4', rateUnit: 'fl_oz/gal', totalAmount: 1.6, amountUnit: 'fl_oz' }])).toBeNull();
+  });
+
+  it('reads a per-100-gallon rate as fl oz per gallon, as the server does', () => {
+    expect(isHighTaurusRate({ rate: '80', rateUnit: 'fl_oz/100gal' })).toBe(true);
+    expect(isHighTaurusRate({ rate: 80, rateUnit: 'oz/100gal' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '40', rateUnit: 'fl_oz/100gal', totalAmount: 3.2, amountUnit: 'fl_oz' })).toBe(false);
+  });
+
+  it('warns when a 3.2 oz edit is made after three 0.03% applications (no 0.06% slot left after them)', () => {
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    expect(taurusOverLimitWarning(threeLow, [{ name: 'Taurus SC', rate: '1.6', rateUnit: 'oz' }])).toBeNull();
+    expect(taurusOverLimitWarning(threeLow, [{ name: 'Taurus SC', rate: '3.2', rateUnit: 'oz' }])).toBe("Over the label's yearly Taurus limit at this home.");
+  });
+});

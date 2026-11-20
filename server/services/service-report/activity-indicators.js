@@ -4015,6 +4015,22 @@ function frozenCompanionSnapshots(serviceData) {
     : [];
 }
 
+// A frozen card's four-section body (stamped bodyFormat 'four_section' at
+// completion) shows only while GATE_REPORT_WRITER_RULES is on: with it off
+// (the kill switch) the card keeps its headline and drops that body
+// (Codex #5500). A reconcile confirmation frozen beside that body goes with
+// it, so a dropped card approves no summary copy either. Every reader of the
+// summary rule below sees the cards through it, so none can accept a body
+// the web report has dropped.
+function withoutDarkFourSectionBody(snapshot) {
+  const result = snapshot?.todaysResult;
+  if (!result || result.bodyFormat !== 'four_section' || require('../../config/feature-gates').reportWriterRulesLive()) return snapshot;
+  const {
+    body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, reconcileConfirmed: _reconcileConfirmed, ...rest
+  } = result;
+  return { ...snapshot, todaysResult: rest };
+}
+
 // The governing typed story's verdict on the body. When a typed story
 // GOVERNS the visit (the primary snapshot, or on companion-only profiles
 // any customer-visible companion snapshot), the body may stand only if that
@@ -4087,15 +4103,18 @@ function trapScreenAcceptsBody({ typedSnapshot, companionSnapshots = [], staffVi
 // (context-aggregator.js customerSafeVisitNotes). A completion-time
 // request-context rejection frozen into service_data refuses it (codex
 // r58); so do the governing typed story and the trapping screens above.
-// report-data passes the snapshots it already normalised (its dark
-// four-section transform); everyone else reads them off service_data.
+// report-data passes the snapshots it already normalised (the dark
+// four-section transform above); everyone else reads them off service_data
+// through the same transform.
 function technicianReportDrivesSummary({
   serviceData = {}, body, staffViewer = false, typedSnapshot, companionSnapshots,
 } = {}) {
   const sd = serviceData && typeof serviceData === 'object' ? serviceData : {};
   if (!body || sd.technicianReportBodyRejected) return false;
-  const typed = typedSnapshot === undefined ? frozenTypedSnapshot(sd) : typedSnapshot;
-  const companions = companionSnapshots === undefined ? frozenCompanionSnapshots(sd) : companionSnapshots;
+  const typed = typedSnapshot === undefined ? withoutDarkFourSectionBody(frozenTypedSnapshot(sd)) : typedSnapshot;
+  const companions = companionSnapshots === undefined
+    ? frozenCompanionSnapshots(sd).map(withoutDarkFourSectionBody)
+    : companionSnapshots;
   return governingStoryAcceptsBody(typed, companions)
     && trapScreenAcceptsBody({ typedSnapshot: typed, companionSnapshots: companions, staffViewer, body });
 }
@@ -4238,6 +4257,13 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
     copyMapVersion: COPY_MAP_VERSION,
     fields: (config.findingsFields || [])
       .filter((f) => {
+        // The three delegated insect-evidence fields mirror
+        // validatePestTreatmentEvidence, which is dark when its gate is off.
+        // Do not ask a technician for evidence the backend will ignore.
+        if (
+          ['insect_target', 'insect_life_stage', 'insect_preventive_reason'].includes(f.key)
+          && require('../../config/feature-gates').tsPestCheckLive?.() !== true
+        ) return false;
         // companionOnly fields exist for COMPANION sections only (combined
         // visits run no per-line AI assessment, so hand capture stays the
         // condition source there) — the primary slice never serves them.
@@ -4277,6 +4303,10 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
           ...(COMPANION_EDITABLE_FINDINGS_FIELDS[projectType] || []),
         ].includes(f.key)),
         pesticideOnly: !!f.pesticideOnly,
+        // Which product/evidence predicate makes a pesticide compliance
+        // field applicable. The client uses this same schema metadata for
+        // primary and companion sections; the server remains authoritative.
+        ...(f.pesticideComplianceWhen ? { pesticideComplianceWhen: f.pesticideComplianceWhen } : {}),
         // The state's notice questions: always a tap, never filled from the
         // technician's notes (typed voice fill, visit-typed-facts.js).
         tapOnly: !!f.tapOnly,
@@ -4415,6 +4445,7 @@ module.exports = {
   typedBodyContradictions,
   typedStoryAcceptsBody,
   technicianReportDrivesSummary,
+  withoutDarkFourSectionBody,
   isInitialRodentTrapSetup,
   setupContradictions,
   countContradictions,

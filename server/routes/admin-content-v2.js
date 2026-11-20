@@ -8,6 +8,7 @@ const BlogAuditor = require('../services/content/blog-auditor');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { invalidSpokeSites } = require('../services/content-astro/spoke-sites');
+const { isIdentificationPost } = require('../services/content/licensed-photo-library');
 const autonomousReviewQueue = require('../services/content/autonomous-review-queue');
 const internalLinkReviewQueue = require('../services/content/internal-link-review-queue');
 const { isEnabled } = require('../config/feature-gates');
@@ -213,10 +214,12 @@ function parseBoundedInt(value, { defaultValue, min, max, name }) {
 //
 // Call sites are expected to wrap this in try/catch and store the
 // error string alongside the post for display.
-async function generateFeaturedImage({ title, topic, keyword, slug }) {
+async function generateFeaturedImage({ title, topic, keyword, slug, identification = false }) {
   const AstroPublisher = require('../services/content-astro/astro-publisher');
   try {
-    const hero = await AstroPublisher.generatePlannedImage({ title, topic, keyword, mode: 'blog-hero', slug, index: 0 });
+    // identification: an identification post never gets a people-free hero
+    // (image-generator planFor; owner 2026-11-19).
+    const hero = await AstroPublisher.generatePlannedImage({ title, topic, keyword, mode: 'blog-hero', slug, index: 0, identification });
     logger.info(`[content] Generated featured image for "${title}" via ${hero.model} (${hero.plan.style}, ${String(hero.plan.setting).split(',')[0]})`);
     if (hero.screen?.checked && !hero.screen.ok) {
       logger.warn(`[content] Featured image for "${title}" still failed the text/logo screen after a retry (${hero.screen.reasons.join('; ')}) — operator review`);
@@ -234,6 +237,9 @@ async function generateFeaturedImage({ title, topic, keyword, slug }) {
     let dataUrl = hero.dataUrl;
     if (hero.logoReference) dataUrl = AstroPublisher._internals.stampLogoReference(dataUrl);
     if (hero.vanWrapReference) dataUrl = AstroPublisher._internals.stampVanWrapReference(dataUrl);
+    // Publish refuses an unmarked editor hero on an identification post: the
+    // marker says this one was planned under that post type's rules.
+    if (hero.plan && hero.plan.identification === true) dataUrl = AstroPublisher._internals.stampIdentificationPlan(dataUrl);
     return dataUrl;
   } catch (err) {
     // Match the legacy throw contract — single-line Error the
@@ -753,24 +759,58 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
     if (post.publish_status === 'publishing' || publishClaimActive(post)) {
       return res.status(409).json({ error: 'Post is being published right now — retry after it finishes.' });
     }
+    // The picture is planned from the SAVED row. The editor sends the post
+    // type it has selected: one that would make the post an identification
+    // post, not saved yet, would buy a hero planned without that post type's
+    // picture limits, which publish then refuses. Refuse before the image
+    // call. A hero planned for an identification post is safe on any post,
+    // so the other direction goes on. (A caller that sends no post_type, e.g.
+    // a tab opened before this change, skips this check; the publish-time
+    // marker check still holds.)
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'post_type')
+        && !isIdentificationPost(post)
+        && isIdentificationPost({ ...post, post_type: req.body.post_type || null })) {
+      return res.status(409).json({ error: 'Save the post type change first: the picture is planned from the saved post type.' });
+    }
+    // The save stores the hero as a data URL of several MB. In production
+    // featured_image_url is varchar(255) (migration 20260401000034; read
+    // 11-19), so the save cannot hold it: refuse before the paid image call
+    // instead of paying and then failing. Where the column has no small
+    // length limit, the button works. An unreadable column counts as too short.
+    const heroColumn = await db('blog_posts').columnInfo('featured_image_url').catch(() => null);
+    if (!heroColumn?.type || (heroColumn.maxLength != null && Number(heroColumn.maxLength) < 10e6)) {
+      return res.status(409).json({ error: 'The editor cannot save a generated picture yet: the featured image field is too short for one. No picture was made.' });
+    }
 
     const url = await generateFeaturedImage({
       title: post.title,
       topic: post.meta_description,
       keyword: post.keyword,
       slug: blogSlug(post),
+      identification: isIdentificationPost(post),
     });
 
     // Same predicates ATOMICALLY on the write (the image call above is slow —
-    // a publish can start during it).
-    const [updated] = await whereNoLivePublishClaim(
-      db('blog_posts')
-        .where('id', req.params.id)
-        .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing')),
-    )
+    // a publish can start during it). A hero planned for a post that is not
+    // an identification post must not land on a row that became one mid-call
+    // (isIdentificationPost: the trimmed post_type is 'diagnostic'): the row's
+    // type must be unchanged, null, or free of the word 'diagnostic', which
+    // every identification type contains. A change between two other post
+    // types keeps the paid picture. A hero planned for an identification post
+    // is safe on any row.
+    let save = db('blog_posts')
+      .where('id', req.params.id)
+      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'));
+    if (!isIdentificationPost(post)) {
+      save = save.where((q) => {
+        q.whereNull('post_type').orWhereRaw("strpos(post_type, 'diagnostic') = 0");
+        if (post.post_type != null) q.orWhere('post_type', post.post_type);
+      });
+    }
+    const [updated] = await whereNoLivePublishClaim(save)
       .update({ featured_image_url: url, updated_at: new Date() })
       .returning('*');
-    if (!updated) return res.status(409).json({ error: 'Post is being published right now — retry after it finishes.' });
+    if (!updated) return res.status(409).json({ error: 'The post changed while the picture was made (a publish started, or its post type changed) — retry.' });
 
     res.json({ success: true, post: updated });
   } catch (err) {

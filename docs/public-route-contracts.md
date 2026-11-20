@@ -492,6 +492,21 @@ render (gate on or off, every service line) — `report-data.js`'s
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
 
+Findings in the dynamic context (2026-11-19; no new key): the AI summary card
+(`dynamicContext.aiSummary`, `ai-summary.js`), the premium cards
+(`dynamicContext.premiumExperience`, `premium-experience.js`), the pressure
+trend (`dynamicContext.pressureTrend` `mainDriver` and counts, this visit and
+the prior ones, `pressure-trend.js`), the since-last-visit lines
+(`since-last-visit.js`, which the staff pre-visit brief also reads) and the
+report writer's prior-visit grounding (`report-copy-context.js`) read a
+visit's `service_findings` rows only through `provenFindingRows`
+(`service-report/finding-provenance.js`), each against that visit's own form
+snapshot: a row with a detail or a recommendation, or one whose title the
+completion form's `structured_notes.formObservations` lists. A bare title (the
+form's free-text observations, a `[Found]` line of the raw technician note
+among them) never prints, as in the report document, the texting prompt and
+the voice relay.
+
 Pest rain outlook (owner 2026-10-24; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
 (`/api/reports/:token/data` and the PDF) the existing `weatherCall.body` (inside
@@ -1365,6 +1380,11 @@ A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
 
+A confirmed visit keeps its place when staff book it from an estimate hold, even
+after the original hold expires. Confirmation counts that visit in the fixed-hour
+conflict check and in the locked arrival-window route check. An unclaimed hold
+frees its time at expiry.
+
 Tech-aware confirm conflict checks for a second field technician
 (`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; owner
 2026-10-30: it no longer needs `GATE_SCHEDULING_CAPACITY`, so two technicians can
@@ -1785,7 +1805,10 @@ last free card drops out when the list was full. `/reserve` takes the
 make-room path only for that signature, with the gate read inside the
 transaction, and re-proves the hour from current data under the date,
 tech-day and zone locks; any failure is the ordinary `SLOT_UNAVAILABLE` and
-no hold is written. The hold stores the stops that would move in
+no hold is written. This check includes staff-booked appointments at the
+proposed destinations even after their original estimate holds expire.
+An expired, unclaimed hold at a destination frees that time.
+The hold stores the stops that would move in
 `scheduled_services.make_room_moves`. While that hold is live its moves'
 destinations stay busy for every other offer, reserve, same-slot refresh,
 `/extend` and accept (the accepted window as resolved at accept, so a hold
@@ -2047,6 +2070,11 @@ allocation order at the certified anchor, using a nonblocking day fence for
 callers already holding rows. A busy reorder aborts allocation for recovery.
 Capacity stays off until the other booking/dispatch writers and parent traffic
 prerequisites integrate.
+
+An estimate can still show an hour after staff book its last opening. If the
+new reservation no longer fits, `/reserve` returns the existing 409
+`SLOT_UNAVAILABLE`, including when staff booked that estimate's original hold.
+
 Phone-booking primary and follow-up inserts (owner ruling 2026-09-11, option 1)
 try the shared day fence — rung 1 date occupancy plus the tech-day or
 unassigned-day rung — with a bounded non-blocking wait (`CALL_BOOKING_FENCE_WAIT_MS`,
@@ -2993,6 +3021,29 @@ report's own service line (same statuses as `nextAppointment`, no cross-line
 fallback), for the "What's next" line; `stripLiveOnlyScheduleFields` removes it
 from the PDF, static and sms_preview renders like `nextAppointment`. Both keys
 are absent for every other report.
+The gate is also the kill switch for what completion already froze: while it
+is off, a frozen Today's Result card whose body is four-section (`bodyFormat:
+'four_section'`) keeps its headline and carries no `body`, `bodySource`,
+`bodyFormat` or `reconcileConfirmed` (`withoutDarkFourSectionBody`,
+`activity-indicators.js`). The summary rule (`technicianReportDrivesSummary`)
+reads the cards through the same transform for every customer render: this
+payload, the PDF key (`summaryCopySignature`) and the visit notes on the other
+surfaces (`customerSafeVisitNotes`). A record's render depends on the gate
+(`reportDependsOnWriterRules`, `technician-report-copy.js`) when its notes have
+the four-section shape (they print as the summary only while it is on) or a
+card it prints (the primary card or an `auto_send` companion) has a
+four-section body. The PDF key of such a record also ends in `-fson` or
+`-fsoff`, by the gate, so a flip either way re-renders its cached PDF. The
+browser that renders a PDF fetches this payload itself, so in `mode=pdf` the
+payload carries `writerRules: 'on' | 'off'`, the state it was built in (no
+other mode carries the key). The PDF document shows it on its root element
+(`data-writer-rules`), and for such a record both PDF providers print only once
+that root shows the state the render's key was computed under
+(`reportPdfReadySelector` in `server/services/service-report/pdf.js`). A page
+built in the other state (a rolling restart's overlap), or by a page bundle or
+server from before this key, never matches: the render times out and nothing
+is stored. Every other record renders the same in both states and waits for
+the report root alone.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
@@ -5157,6 +5208,13 @@ estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
 `storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
 the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
 it on both paths; the response otherwise describes only the requested parcel).
+While `GATE_CAGE_TWO_SIZES` is on (owner 2026-11-19, "cage 1000"; dark by default), the
+returned and lead-stored `enriched` profile also carries `poolCageLegacySize`, the
+four-size pool cage answer (SMALL/MEDIUM/LARGE/OVERSIZED, or NONE) while
+`poolCageSize` is the two-size answer (MEDIUM or LARGE). It is derived from the same
+county cage area and satellite read already in the payload, so it adds no new data
+and no new field source. With the gate off the key is absent and the profile is
+unchanged. `/api/public/quote/calculate` reads it (see that entry).
 Operational `meta.providerStatus` (credential configuration and attempted-provider
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
@@ -5251,6 +5309,23 @@ a staff correction) and its prompt are never overwritten. Unknown values are
 silently dropped, the question is never required, and the response is
 unchanged; the pair is staff-only, never part of `extracted_data`, the
 quote text, or any customer-facing copy.
+Pool cage hold (`GATE_CAGE_TWO_SIZES`, owner 2026-11-19, "hold"; dark by default):
+the lookup's `enriched.poolCageLegacySize` (the four-size answer, see the
+property-lookup entry), and the server's own cache-only re-read of the same
+address, decide the cage under the gate state of THIS request, the re-read first
+and the county area first (`server/services/property-lookup/cage-sizes.js`). Gate
+on: the priced size is the two-size answer (Medium up to 1,000 sq ft, Large above),
+and a cage that today's four sizes call Large or Oversized is held
+(`quote_required`, the existing manual-quote answer). A visitor who answers no
+cage (`NO` in any case, or `false`) is not held and not charged; a client with no
+decided cage answer (omitted, `POSSIBLE`, `UNKNOWN` or any other value) takes the
+re-read's decided answer, so it prices like an explicit answer and a partial or
+undecided `enriched` cannot drop a hold. Gate off: a profile that carries
+`poolCageLegacySize` (one from before a rollback) prices the four-size answer, the
+re-read first, with the same rule for an undecided answer; any other profile
+prices its own `poolCageSize`, exactly as before the gate. Either way a Large or
+Oversized cage is held as before. The response
+shape does not change; `quote_required` was already a possible answer.
 `services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
 present tier must be a currently-sold one (`standard`/`enhanced`) or the
 route answers 400 before pricing — `light` (4x/quarterly, retired for new
@@ -8543,6 +8618,33 @@ that gate is dark the confirmation is skipped entirely (byte-identical to
 before the lane); it is never a blocking part of the request either way.
 Treat the gate, the limiters, the no-customer/no-lead rule, and the
 fire-and-forget-only comms contract as security-critical.)
+`/api/public/careers/offer/:token` (GET; `/offer/:token/text-consent`, `/offer/:token/accept`,
+`/offer/:token/date-request` and `/offer/:token/decline`, all POST — the applicant's private job offer
+(`services/job-offers.js`), gated `GATE_JOB_OFFERS` ALONE: 404 `{error:'Not found'}` for the WHOLE `/offer/*`
+family before even the limiter runs, and `index.js` carves `/offer` out of the `jobApplications` intake gate so a
+sent offer keeps working if intake closes). The token is `job_offers.token`, 64 lowercase hex (32 random bytes set
+when the owner presses Send), format-gated via `router.param` before any database read; an unknown, malformed or
+draft token answers the same generic 404. Privacy headers (`noStore`) are mounted AHEAD of the gates and the global
+`/api` limiter so every answer, the dark 404 included, carries them; the SPA document `/careers/offer/<64-hex>` gets
+the same headers via `utils/sensitive-spa-headers.js`. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
+behind the gates. GET returns `{state:'open'|'signed'|'declined'|'date_requested', firstName, jobTitle, startDate,
+hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{name,title,sentOn}, expiresAt,
+textConsent, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
+snapshot frozen at Send (`job_offers.snapshot`), never from live records, so the Terms the applicant reads are the
+issued version the owner sent; for `superseded`, `withdrawn` and `expired` it returns only `{state, message,
+contactPhone}` (no terms). A sent offer past `expires_at` reads `expired` before any sweep, and an offer whose
+application the owner moved to hired/rejected/withdrawn reads `withdrawn` (that stage change also marks the offer row withdrawn in the same transaction, so reopening the application cannot revive the link). The first GET stamps `opened_at`, every
+GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean}` -> `{textConsent}`; `accept {signedName}` (trimmed,
+3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
+'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500)}` -> `{state:'date_requested'}`; `decline {reason? (<= 500)}` ->
+`{state:'declined'}`. Each acts only from state `open`; any other state answers 409 with the current state body (an
+identical replay of a signature answers 200 with the stored signature). Every action runs in one transaction that
+locks the application row, then the offer row, and re-reads the state under the lock, so a double tap or a replay
+cannot sign twice. Accept records the IP, user agent and a signature hash (sha256 of the snapshot hash, the Terms
+content hash, the typed name and the signing instant), moves the application to `hired` and raises an owner bell;
+decline moves it to `withdrawn` (history entry by `applicant`, reason `offer_declined`) and bells; a date request
+leaves the application at `offer` and bells. Treat the gate, the limiter, the format gate, the snapshot-only reads and
+the lock order as security-critical.)
 `/api/public/careers/interview/:token` (GET; `/interview/:token/book` and
 `/interview/:token/withdraw`, both POST — the interview self-scheduling
 funnel a `job_interview_invite` text/email sends the applicant, gated
@@ -8960,3 +9062,5 @@ Day-only customer screens (`GATE_DAY_ONLY_PROMISE`, part C1, additive; gate off 
 Referral code in the same field (`GATE_ESTIMATE_REFERRAL_CODE`, dark in prod, owner 2026-11-18): `POST /api/estimates/:token/promo-code` also takes a referrer's code. The route is live when either gate is on (both off = generic 404, limiter skipped); every guard above is unchanged. Under the estimate row lock the route keeps one code of either kind per estimate (the kind already on it answers), sends a code that is a promo code in admin Discounts to the promo path, and tries anything else as a referral code (`services/estimate-referral-code.js` `enterReferralCode`), which saves one `estimate_referral_codes` row and an activity row. It moves no money and sends nothing. Refusals are the same: `invalid_code` (nobody holds the code, the program is paused, the customer's own household, or a customer with a completed visit; one answer for all) and `code_already_entered`. Success answers `{ success, promoCode: { canEnter: false, applied: { code, referral: true, note } } }`; `code` is the referrer's code as issued and `note` is one sentence written by the server from the live program settings. It carries nothing else about the referrer: no name, id or contact. The `promoCode` block of `GET /api/estimates/:token/data` and the accept response gains, only with this gate on, `acceptsReferral: true` while a referral code can be entered (plus `acceptsPromo: false` when a promo code cannot), and the same `applied` shape once a referral code is on the estimate. With this gate off the block is byte-identical to the promo-only one. The referrer is confirmed later, off the request path (after the accept commits and hourly), through the existing deferred-only inbound confirm, which sends nothing. Treat the no-referrer-identity payload and the generic refusal as security-critical.
 
 `/api/pay/:token/promo-code` (POST, body `{ code }`; the "Have a promo code?" field on the invoice pay page, `GATE_PAY_PROMO_CODE`, dark in prod, owner 2026-11-18). It inherits the `/api/pay` router's baseline (token format gate with the generic 404, `payLimiter`, `noStore` privacy headers) and adds its own limiter, 10/hour keyed per caller and token, skipped while the gate is off so a dark route answers the generic 404 on every probe. Under the invoice row lock it saves one `invoice_promo_codes` row with the amount frozen from the `discounts` row, and an activity row. It changes nothing on the invoice, moves no money and makes no Stripe call. A refused code answers 400 `{ error }`: `invalid_code` (unknown, inactive, expired, out of uses, not a fixed-dollar code, a code scoped by a rule this path cannot check, a customer who is not eligible, or an invoice that takes no code: payer-billed, statement-billed, not collectible, nothing due, or one that must save a payment method first; one answer for all) or `code_already_entered` (one code per invoice, a unique index). Success answers `{ success, promoCode: { canEnter: false, applied: { code, creditAmount, credited } } }` and the page reloads. Logs carry the invoice id and the error code only, never the token or the typed code. `GET /api/pay/:token` gains, only with the gate on, a `promoCode` block: `{ canEnter: true, applied: null }` where a code can be entered, `{ canEnter: false, applied }` once one is on the invoice, absent otherwise; the GET stays a read. `POST /api/pay/:token/setup` is unchanged in request; its response gains, only with the gate on and a code on the invoice, a `promoCode` key: the same `{ canEnter: false, applied }` block once the credit has posted, or `null` when it did not (the code was voided, or the invoice took none of it), so the page drops its note and never promises a credit the payment was not priced with. With the gate on, a code waiting on the invoice is redeemed and its amount applied to the invoice as one all-or-nothing step inside its transaction (`services/invoice-promo-code.js` `redeemAndApplyPromoCode`, in a savepoint that can never fail the setup; the draw is `applyAccountCreditToInvoice` with `customerRequested` and `applyAtMost`; if the invoice takes none of it, nothing is posted and the code stays entered), after any open payment is retired and before the payment is priced, so the PaymentIntent, the invoice's amount due and the webhook-verified amount stay in agreement as they do for automatic credit. Treat the gate, the generic refusal, the one-code-per-invoice and one-mint-per-row indexes, the promo-amount-only draw and the no-Stripe-call rule of the entry route as security-critical.
+
+`/api/pay/:token/plan-choice` (POST, body `{ plan: 'prepay_annual' }`; the "prepay the year" pick on the invoice pay page, `GATE_PAY_PLAN_CHOICE`, dark everywhere unless exactly `true`, owner 2026-11-19). It inherits the `/api/pay` router's baseline (token format gate with the generic 404, `payLimiter`, `noStore` privacy headers) and answers that same 404 while the gate is off or the token is unknown. While the gate is off the request skips `payLimiter` (a `skip` on the router limiter for this path only), so a dark probe never sees a 429 and spends none of the caller's quota for the live pay routes. `400 { error: 'invalid_plan' }` for any other plan (paying per application is paying the invoice as it stands; it has no action here). `409 { error: 'plan_choice_unavailable' }` when the choice is not, or no longer, offered on this invoice. `200 { success: true, payUrl }`: `payUrl` is the pay link of the annual prepay invoice this pick minted (an unsent draft plus a `payment_pending` term), and a repeat answers with the same link, never a second invoice. `503` on a failure the customer can retry. Every amount is derived server-side from the booked series; the body's `plan` is the only field read. Nothing is charged, sent or voided: the first invoice stays payable, and paying the prepay closes it. The read side is a `planChoice` key on `GET /api/pay/:token`, absent with the gate off or when the choice is not offered (that payload stays byte-identical): `{ selected: false, serviceType, visitsPerYear, perApplication: { perVisit, setupFee, yearTotal }, prepay: { total, setupFeeWaived, discount, discountLabel, savings } }` before a pick, `{ selected: true, prepay: { total } }` after one. It never carries the prepay invoice's token; only the POST answers the link.

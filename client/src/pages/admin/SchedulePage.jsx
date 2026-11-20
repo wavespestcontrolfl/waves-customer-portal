@@ -57,6 +57,7 @@ import CompletionPricingCard from "../../components/schedule/CompletionPricingCa
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
 import BlogPostPicker from "../../components/schedule/BlogPostPicker";
 import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
+import LawnPlanTab from "../../components/schedule/LawnPlanTab";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -118,7 +119,14 @@ import {
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
+import FERTILIZER_EVIDENCE from "../../../../shared/tree-shrub-fertilizer-evidence.json";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
+import {
+  TYPED_INSECT_EVIDENCE_KEYS,
+  missingTypedPesticideCompliance,
+  typedInsectEvidencePath,
+  typedPesticideFieldApplies,
+} from "../../lib/tree-shrub-pest-check";
 import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
@@ -130,6 +138,11 @@ import {
 import {
   protocolCompletionDefaultSelections,
 } from "../../lib/protocol-completion-defaults";
+import {
+  applyTaurusYearlyLimit,
+  taurusYearlyNote,
+  taurusYearlyOf,
+} from "../../lib/taurus-yearly-limit";
 import { BED_FEED_CAP_LB_PER_1000, bedFeedRatePer1000, bedFeedCountyLimitLine } from "../../lib/bed-feed-rate";
 import {
   exclusiveProtocolProductConflict,
@@ -6895,10 +6908,10 @@ function JobCardChip({ tone = "unknown", label, D }) {
   );
 }
 
-function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D, domId = undefined }) {
+// `aside` sits beside the header button, not inside it (a control cannot nest in a button).
+function JobCardCollapsible({ title, right = null, aside = null, defaultOpen = false, children, D, domId = undefined }) {
   const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+  const header = (
       <button
         type="button"
         id={domId}
@@ -6927,6 +6940,10 @@ function JobCardCollapsible({ title, right = null, defaultOpen = false, children
         </span>
         {right && <span style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>{right}</span>}
       </button>
+  );
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+      {aside ? <div style={{ display: "flex", alignItems: "center" }}>{header}{aside}</div> : header}
       {open && <div style={{ padding: "0 14px 14px", borderTop: `1px solid ${D.border}` }}>{children}</div>}
     </div>
   );
@@ -7101,14 +7118,16 @@ export function JobCardOrderButton({ productId, name, order, serviceId, D, compa
 
 // A chemical area add-on's label text: what the estimate sold, the grass it was priced on, rate, area
 // basis, yearly limit and the one safety line. A spray-check Hold, an unverified label or a missing
-// grass sends the reason in place of the rate.
-export function JobCardGoverned({ governed, D }) {
+// grass sends the reason in place of the rate. `pending`: the card is being read again, so no rate
+// from the old read shows (the card's header says "Checking the amounts…").
+export function JobCardGoverned({ governed, D, pending = false }) {
   if (!governed) return null;
+  const rate = governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>;
   return (
     <div style={{ fontSize: 14, display: "grid", gap: 4 }}>
       {governed.sold && <div style={{ fontWeight: 500 }}>{governed.sold}</div>}
       {governed.grass && <div>{governed.grass}</div>}
-      {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
+      {!pending && rate}
       <div>Area: {governed.area}</div>
       <div>Limit: {governed.limit}</div>
       {governed.use && <div>{governed.use}</div>}
@@ -7117,40 +7136,87 @@ export function JobCardGoverned({ governed, D }) {
   );
 }
 
-function JobCardProduct({ p, serviceId, D }) {
-  const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
+// The "Use" tick on an "if needed" lawn product: asks the job card to plan it. Not saved to the visit.
+function JobCardUse({ name, use, D }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 14px 0 4px", minHeight: 44, fontSize: 14, color: D.text, cursor: use.disabled ? "default" : "pointer", flexShrink: 0 }}>
+      <input type="checkbox" checked={use.checked} disabled={use.disabled} onChange={() => use.onSet(!use.checked)} aria-label={`Use ${name}`} style={{ width: 18, height: 18, accentColor: D.heading }} />
+      Use
+    </label>
+  );
+}
+
+// A numbered mixing order (the plan's own steps: no amounts).
+function JobCardMixingOrder({ title, steps, D }) {
+  if (!steps?.length) return null;
+  return (
+    <JobCardCollapsible title={title} D={D}>
+      <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+        {steps.map((step) => (
+          <div key={`${step.step}-${step.productId}`} style={{ display: "flex", gap: 10, fontSize: 14, color: D.text }}>
+            <span style={{ width: 22, height: 22, borderRadius: 2, background: D.heading, color: D.white, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{step.step}</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 500 }}>{step.productName}</div>
+              <div style={{ color: D.muted }}>{step.instruction}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+// A mix's required conditions (the plan's own warnings for its planned products: water setback, storm hold, the Bermuda
+// spot's growth, morning and test-patch rules), open under that mix's order, each once with the products it names.
+function JobCardRequired({ title, notes, D }) {
+  if (!notes?.length) return null;
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, padding: "10px 14px", marginBottom: 8, fontSize: 14, color: D.text, display: "grid", gap: 4 }}>
+      <div style={{ fontWeight: 500 }}>{title}</div>
+      {notes.map((note) => (
+        <div key={note.text}>{note.products?.length ? `${note.products.join(", ")}: ` : ""}{note.text}</div>
+      ))}
+    </div>
+  );
+}
+
+// `pending`: a "Use" tick is being read again; the amounts on this card belong to the old selection, so none shows.
+function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
+  const amount = pending ? null : fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
-  const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
+  const demand = pending ? null : fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
+  const short = p.short && !pending;
   const right = (
     <>
       {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
-      {p.short && <JobCardChip tone="hold" label="Short" D={D} />}
+      {short && <JobCardChip tone="hold" label="Short" D={D} />}
       <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
       {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
+      {pending && <span style={{ fontSize: 14, color: D.muted }}>Checking the amounts…</span>}
     </>
   );
   return (
-    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
+    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} aside={use && <JobCardUse name={p.name} use={use} D={D} />} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
-        <JobCardGoverned governed={p.governed} D={D} />
+        <JobCardGoverned governed={p.governed} D={D} pending={pending} />
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}
         {p.verdictAction && <div style={{ fontSize: 14, color: D.text }}>{p.verdictAction}</div>}
         {p.precautions && <div>{p.precautions}</div>}
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
-        {p.short && (
+        {short && (
           <div style={{ color: "#C8312F" }}>
             {demand
               ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${demand} planned.`
               : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount (withheld).`}
           </div>
         )}
-        {!p.short && p.onHand != null && (
+        {!short && !pending && p.onHand != null && (
           <div style={{ color: D.muted }}>On hand {fmtAmount(p.onHand, p.onHandUnit)}{p.lowStock ? " (low)" : ""}</div>
         )}
-        {p.amountNote && <div style={{ color: D.muted }}>{p.amountNote}</div>}
+        {p.amountNote && !pending && <div style={{ color: D.muted }}>{p.amountNote}</div>}
         {p.stockNote && <div style={{ color: D.muted }}>{p.stockNote}</div>}
         {p.rotation && <div style={{ color: D.muted }}>{p.rotation}</div>}
         {(p.labelUrl || p.sdsUrl) && (
@@ -7159,13 +7225,16 @@ function JobCardProduct({ p, serviceId, D }) {
             {p.sdsUrl && <a href={p.sdsUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>SDS</a>}
           </div>
         )}
-        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />
+        {/* While a tick is re-read the order is sized for the old selection, so there is no order button; it comes
+            back idle (any open confirmation gone) with the new quantity. */}
+        {!pending && <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />}
       </div>
     </JobCardCollapsible>
   );
 }
 
-function JobCardTank({ tank, serviceId, D }) {
+// `ticks`: the Use ticks (comma list) the card was read with; the search reads the same plan.
+function JobCardTank({ tank, serviceId, ticks = "", D }) {
   const [gallons, setGallons] = useState(110);
   // A rig row picked in place of the 110 / 1 gal presets: a full tank of
   // that rig, dosed on its own carrier and volume.
@@ -7211,12 +7280,12 @@ function JobCardTank({ tank, serviceId, D }) {
     // Never show the previous product's verdict beside the new one.
     setMix(null);
     const volume = pickedRigId ? `rig=${encodeURIComponent(pickedRigId)}` : `gallons=${gallons}`;
-    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}`)
+    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}${ticks ? `&selectedConditionalProductIds=${encodeURIComponent(ticks)}` : ""}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [picked, gallons, pickedRigId, serviceId]);
+  }, [picked, gallons, pickedRigId, serviceId, ticks]);
 
   const pill = (selected) => ({
     flex: 1,
@@ -7448,7 +7517,11 @@ export function JobCardAwayWatch({ lines, D }) {
   ));
 }
 
-export function JobCardTab({ card, loading, error, D }) {
+// `lawn` (lawn visits): { selectedIds, ticks, pending, onSet(productIds, wanted), onOpenPlan() } from the panel, which
+// holds the "Use" ticks. Only a card the server marks `planOption` (the primary lawn plan's "if needed" line) gets a
+// box; it reads the server's own selection (`!conditional`), or the local tick while a re-read is pending. While
+// `pending` the card's amounts, the mixing orders and the Tank search belong to the old selection, so none shows.
+export function JobCardTab({ card, loading, error, D, lawn = null }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
   }
@@ -7479,11 +7552,28 @@ export function JobCardTab({ card, loading, error, D }) {
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>Visit note: {card.notes.visitNotes}</p>
       )}
       <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
-      <JobCardTank tank={card.tank} serviceId={card.serviceId} D={D} />
-      {card.planBlocks?.length > 0 && (
+      {!lawn?.pending && (
+        <>
+          <JobCardTank key={lawn?.ticks || ""} tank={card.tank} serviceId={card.serviceId} ticks={lawn?.ticks || ""} D={D} />
+          <JobCardMixingOrder title="Mixing order" steps={card.mixingOrder} D={D} />
+          <JobCardRequired title="Required for the mix" notes={card.mixRequired} D={D} />
+          <JobCardMixingOrder title="Bermuda backpack mix" steps={card.bermudaMixingOrder} D={D} />
+          <JobCardRequired title="Required for the Bermuda backpack mix" notes={card.bermudaRequired} D={D} />
+        </>
+      )}
+      {!lawn?.pending && card.planBlocks?.length > 0 && (
         <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
           <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>
           {card.planBlocks.map((b, i) => <div key={b.code || i}>{b.message}</div>)}
+          {lawn?.onOpenPlan && (
+            <button
+              type="button"
+              onClick={lawn.onOpenPlan}
+              style={{ marginTop: 8, minHeight: 44, padding: "0 12px", border: `1px solid ${D.inputBorder}`, borderRadius: 2, background: D.card, color: D.heading, fontSize: 14, fontWeight: 500, cursor: "pointer" }}
+            >
+              See Plan tab
+            </button>
+          )}
         </div>
       )}
       {products.length > 0 && (
@@ -7494,7 +7584,17 @@ export function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} />)}
+      {products.map((p) => {
+        // The bermuda removal step is one selection: its lines tick together.
+        // A tick is matched by the id the engine selects by (`selectionId`: the original product's when a substitution swaps it).
+        const ids = (p.bermudaStep ? products.filter((c) => c.bermudaStep) : [p]).map((c) => String(c.selectionId || c.id));
+        const use = lawn && p.planOption ? {
+          checked: lawn.pending ? lawn.selectedIds.includes(String(p.selectionId || p.id)) : !p.conditional,
+          disabled: lawn.pending,
+          onSet: (wanted) => lawn.onSet(ids, wanted),
+        } : null;
+        return <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} use={use} pending={Boolean(lawn?.pending)} />;
+      })}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
@@ -7512,7 +7612,10 @@ function protocolMonthForService(service) {
   );
 }
 
-export function ProtocolPanel({ service, onClose }) {
+const NO_TICKS = [];
+
+// `initialSection`: the tab to open on ("lawn_plan" from the Plan entry points); lawn visits only.
+export function ProtocolPanel({ service, onClose, initialSection = null }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
   const panelRef = useModalFocus(true, onClose);
@@ -7557,6 +7660,25 @@ export function ProtocolPanel({ service, onClose }) {
   const [jobCard, setJobCard] = useState(null);
   const [jobCardLoading, setJobCardLoading] = useState(true);
   const [jobCardError, setJobCardError] = useState(false);
+  // The tick query the shown card was read with: a card read with another one is pending its re-read.
+  const [jobCardQuery, setJobCardQuery] = useState("");
+  // "Use" ticks on "if needed" lawn lines: product ids for this visit. Not saved to the visit; a new visit starts clean.
+  const [useTicks, setUseTicks] = useState({ serviceId: null, ids: [] });
+  const selectedConditionalIds = useTicks.serviceId === service?.id ? useTicks.ids : NO_TICKS;
+  const selectedQuery = selectedConditionalIds.length
+    ? `?selectedConditionalProductIds=${encodeURIComponent(selectedConditionalIds.join(","))}`
+    : "";
+  // The lawn plan (GET /admin/treatment-plans), read with the same ticks. It feeds only the Plan tab, so it is read
+  // from the first time that tab opens (the server builds a full plan for it).
+  const [planSeenFor, setPlanSeenFor] = useState(null);
+  const [lawnPlan, setLawnPlan] = useState(null);
+  // The tick query the shown plan was read with: a plan read with other ticks is not shown as current.
+  const [lawnPlanQuery, setLawnPlanQuery] = useState("");
+  const [lawnPlanLoading, setLawnPlanLoading] = useState(false);
+  const [lawnPlanError, setLawnPlanError] = useState("");
+  // The Plan tab's Refresh re-reads the plan AND the job card, so the two tabs never show two reads.
+  const [refreshKey, setRefreshKey] = useState(0);
+  const jobCardShownFor = useRef(null);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const payGrowthAvailable = usePayGrowthAvailable();
@@ -7597,11 +7719,15 @@ export function ProtocolPanel({ service, onClose }) {
   // ask bar. A failed request is shown as a notice under the header instead.
   const jobCardEnabled = Boolean(jobCard?.enabled);
   const protocolEnabled = Boolean(jobCard?.protocol?.enabled);
-  const defaultSection = jobCardEnabled
+  // The shown card was read with other ticks, or a Refresh is out: nothing that card says about amounts, blocks or
+  // mixes shows as current on the Job or Protocol tab until the new read lands.
+  const cardPending = Boolean(jobCard) && jobCardQuery !== selectedQuery;
+  const wantedSection = initialSection === "lawn_plan" && !isLawn ? null : initialSection;
+  const defaultSection = wantedSection || (jobCardEnabled
     ? "job_card"
     : isLawn
       ? "lawn_protocol"
-      : "overview";
+      : "overview");
   const [requestedSection, setActiveSection] = useState(defaultSection);
 
   useEffect(() => {
@@ -7610,24 +7736,32 @@ export function ProtocolPanel({ service, onClose }) {
 
   useEffect(() => {
     let cancelled = false;
-    setJobCard(null);
+    // A "Use" tick re-reads the card in place; only another visit blanks it.
+    const sameVisit = jobCardShownFor.current === service?.id;
+    if (!sameVisit) setJobCard(null);
     setJobCardError(false);
     if (!service?.id) {
       setJobCardLoading(false);
       return undefined;
     }
-    setJobCardLoading(true);
-    setJobCardError(false);
-    adminFetch(`/admin/protocols/job-card/${service.id}`)
+    setJobCardLoading(!sameVisit);
+    adminFetch(`/admin/protocols/job-card/${service.id}${selectedQuery}`)
       .then((data) => {
         if (cancelled) return;
-        setJobCard(data && data.enabled ? data : { enabled: false });
+        // Only the server's literal word opens a path: `enabled: true` with a card, or `enabled: false` (the Job tab is
+        // off, the one answer that shows the legacy Lawn tab's mix amounts). Any other answer fails closed below.
+        if (typeof data?.enabled !== "boolean") throw new Error("Job card answer has no enabled flag");
+        jobCardShownFor.current = service.id;
+        setJobCardQuery(selectedQuery);
+        setJobCard(data.enabled ? data : { enabled: false });
       })
       .catch(() => {
         if (cancelled) return;
-        // A failed request (503 safety-data outage, network) keeps the tab
-        // and shows its unavailable state — never a silent fall-back to
-        // the legacy view. Only a successful { enabled: false } hides it.
+        // A failed request (503 safety-data outage, network, an answer with
+        // no enabled flag) keeps the tab and shows its unavailable state —
+        // never a silent fall-back to the legacy view. Only a successful
+        // { enabled: false } hides it.
+        jobCardShownFor.current = null;
         setJobCard(null);
         setJobCardError(true);
       })
@@ -7637,7 +7771,39 @@ export function ProtocolPanel({ service, onClose }) {
     return () => {
       cancelled = true;
     };
+  }, [service?.id, selectedQuery, refreshKey]);
+
+  useEffect(() => {
+    setLawnPlan(null);
   }, [service?.id]);
+
+  const planTabOpen = isLawn && requestedSection === "lawn_plan";
+  useEffect(() => {
+    if (planTabOpen) setPlanSeenFor(service?.id);
+  }, [planTabOpen, service?.id]);
+
+  const readPlan = planTabOpen || (isLawn && planSeenFor === service?.id);
+  useEffect(() => {
+    if (!readPlan || !service?.id) return undefined;
+    let cancelled = false;
+    setLawnPlanLoading(true);
+    setLawnPlanError("");
+    adminFetch(`/admin/treatment-plans/${service.id}${selectedQuery}`)
+      .then((data) => {
+        if (cancelled) return;
+        setLawnPlanQuery(selectedQuery);
+        setLawnPlan(data?.plan || null);
+      })
+      .catch((err) => {
+        if (!cancelled) setLawnPlanError(err?.message || "Failed to load treatment plan");
+      })
+      .finally(() => {
+        if (!cancelled) setLawnPlanLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [readPlan, service?.id, selectedQuery, refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -7771,6 +7937,7 @@ export function ProtocolPanel({ service, onClose }) {
 
   const SECTIONS = [
     ...(jobCardEnabled ? [{ id: "job_card", label: "Job", count: null }] : []),
+    ...(isLawn ? [{ id: "lawn_plan", label: "Plan", count: null }] : []),
     ...(protocolEnabled ? [{ id: "visit_protocol", label: " Protocol", count: null }] : []),
     ...(!protocolEnabled && isLawn
       ? [
@@ -7965,7 +8132,7 @@ export function ProtocolPanel({ service, onClose }) {
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && (
+        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && activeSection !== "lawn_plan" && (
           <div role="alert" style={{ border: `1px solid ${D.border}`, padding: 12, marginBottom: 16, fontSize: 14, color: D.text }}>
             <div>Could not load: {loadErrors.join(", ")}.</div>
             <div style={{ marginTop: 4 }}>Available guidance is shown below.</div>
@@ -7981,9 +8148,42 @@ export function ProtocolPanel({ service, onClose }) {
         {activeSection === "score" && canScore ? (
           <ServiceScore key={service.id} serviceId={service.id} manage={isAdmin} initialData={participantScore || null} />
         ) : activeSection === "job_card" && jobCardEnabled ? (
-          <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
+          <JobCardTab
+            card={jobCard}
+            loading={jobCardLoading}
+            error={jobCardError}
+            D={D}
+            lawn={isLawn ? {
+              selectedIds: selectedConditionalIds,
+              ticks: selectedConditionalIds.join(","),
+              pending: cardPending,
+              onSet: (productIds, wanted) => setUseTicks({
+                serviceId: service.id,
+                ids: wanted
+                  ? [...new Set([...selectedConditionalIds, ...productIds])]
+                  : selectedConditionalIds.filter((id) => !productIds.includes(id)),
+              }),
+              onOpenPlan: () => setActiveSection("lawn_plan"),
+            } : null}
+          />
+        ) : activeSection === "lawn_plan" && isLawn ? (
+          <LawnPlanTab
+            jobTab={jobCard ? jobCardEnabled : null}
+            plan={lawnPlanQuery === selectedQuery ? lawnPlan : null}
+            loading={lawnPlanLoading || (Boolean(lawnPlan) && lawnPlanQuery !== selectedQuery)}
+            error={lawnPlanError}
+            onRefresh={() => {
+              // Until the card's re-read lands the Job tab is pending: no amount from the old read shows.
+              setJobCardQuery(null);
+              setRefreshKey((k) => k + 1);
+            }}
+          />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (
-          <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
+          cardPending ? (
+            <div style={{ padding: 40, textAlign: "center", color: D.muted, fontSize: 14 }}>Checking the amounts…</div>
+          ) : (
+            <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
+          )
         ) : loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...
@@ -8088,7 +8288,13 @@ export function ProtocolPanel({ service, onClose }) {
                         lawn sqft before using product amounts.
                       </div>
                     )}
-                    {lawnMix && (
+                    {/* Mix amounts only on the server's current word that the Job tab is off ({ enabled: false }): not
+                        while the card loads, after a failed read (503, a failed tick re-read), or while a Refresh is out. */}
+                    {lawnMix && (jobCard?.enabled !== false || cardPending ? (
+                      <div style={{ fontSize: 14, color: D.muted, marginBottom: 12 }}>
+                        {jobCardEnabled ? "Amounts show on the Job tab." : "Amounts show once the job card loads."}
+                      </div>
+                    ) : (
                       <div
                         style={{
                           background: D.bg,
@@ -8333,7 +8539,7 @@ export function ProtocolPanel({ service, onClose }) {
                           </div>
                         )}
                       </div>
-                    )}
+                    ))}
                     {lawnProtocol && (
                       <>
                         <div
@@ -9923,6 +10129,9 @@ export function TypedFindingsSection({
   recommendations,
   onRecommendationsChange,
   pesticideProductPresent = true,
+  pesticideComplianceScope = null,
+  insectEvidencePath: controlledInsectEvidencePath,
+  onInsectEvidencePathChange,
   frozen = false,
   // Typed voice fill (GATE_TYPED_VOICE_FILL): the words each filled field
   // came from ({ key: { value, quotes } }) and the fields the notes left
@@ -9955,6 +10164,42 @@ export function TypedFindingsSection({
   const accent = mobile ? CP_M.ink : D.teal;
   const accentFg = mobile ? CP_M.actionFg : D.teal;
   const requiredColor = mobile ? "#C2410C" : D.red;
+  const complianceScope = pesticideComplianceScope || {
+    pesticideProductPresent,
+    insectProductPresent: pesticideProductPresent,
+    insectProductUnknown: false,
+    rotationProductPresent: pesticideProductPresent,
+  };
+  const storedInsectEvidencePath = typedInsectEvidencePath(values);
+  const [localInsectEvidencePath, setLocalInsectEvidencePath] = useState(storedInsectEvidencePath);
+  const insectEvidencePath = storedInsectEvidencePath
+    || controlledInsectEvidencePath
+    || localInsectEvidencePath;
+  useEffect(() => {
+    if (storedInsectEvidencePath) setLocalInsectEvidencePath(storedInsectEvidencePath);
+  }, [storedInsectEvidencePath]);
+  const insectEvidenceFieldsServed = (schema.fields || []).some((field) =>
+    ['insect_live', 'insect_preventive'].includes(field.pesticideComplianceWhen),
+  );
+  const showInsectEvidenceChoice = insectEvidenceFieldsServed
+    && complianceScope.pesticideProductPresent === true && (
+    complianceScope.insectProductPresent === true
+    || complianceScope.insectProductUnknown === true
+    || storedInsectEvidencePath != null
+  );
+  const setInsectEvidencePath = (nextPath) => {
+    const normalized = nextPath === "live" || nextPath === "preventive" ? nextPath : null;
+    setLocalInsectEvidencePath(normalized);
+    onInsectEvidencePathChange?.(normalized);
+    const clear = normalized === "live"
+      ? TYPED_INSECT_EVIDENCE_KEYS.preventive
+      : normalized === "preventive"
+        ? TYPED_INSECT_EVIDENCE_KEYS.live
+        : [...TYPED_INSECT_EVIDENCE_KEYS.live, ...TYPED_INSECT_EVIDENCE_KEYS.preventive];
+    for (const key of clear) {
+      if (String(values?.[key] ?? "").trim()) onFieldChange(key, "");
+    }
+  };
   const scoreLabels = schema.activity?.techScoreLabels || {};
   const fieldLabelStyle = {
     fontSize: 14,
@@ -9976,13 +10221,20 @@ export function TypedFindingsSection({
   // products) and never rendered — companion schema slices clear the flag
   // for fields the companion must collect (shared products list can't be
   // attributed per service line), so this filter is schema-driven for both
-  // contexts. pesticideOnly compliance fields appear once a pesticide
-  // product is recorded (the server 422s them if missed, so hiding them
-  // can't skip enforcement). detail fields collapse behind one optional
+  // contexts. pesticideOnly compliance fields follow the served schema's
+  // product/evidence predicate: rotations for pesticide families,
+  // pollinator status for insect products, and exactly one insect evidence
+  // path. The server remains authoritative. detail fields collapse behind one optional
   // expander so routine visits stay a short form (owner directive
   // 2026-07-21).
   const visibleFields = (schema.fields || []).filter(
-    (f) => !f.autoFilled && (!f.pesticideOnly || pesticideProductPresent),
+    (f) => !f.autoFilled && (
+      !f.pesticideOnly
+      || typedPesticideFieldApplies(f, values, complianceScope, insectEvidencePath)
+      // Never hide a restored contradictory value: keep it visible so the
+      // tech can clear it or use the evidence-path choice to reconcile it.
+      || String(values?.[f.key] ?? "").trim() !== ""
+    ),
   );
   // A detail field that is REQUIRED for the current values (requiredUnless /
   // conditional cores — flea evidence, roach follow-up window, rodent
@@ -10020,11 +10272,8 @@ export function TypedFindingsSection({
       )}
       <div style={fieldLabelStyle}>
         {typedFieldLabel(schema.type, field, values)}
-        {/* pesticideOnly compliance fields only render when a pesticide
-            product is recorded — and then the server REQUIRES them
-            (validateTreeShrubTypedCompliance), so they carry the required
-            marker whenever visible (codex P2 r13). */}
-        {(typedFieldRequiredNow(field, values) || field.pesticideOnly) && (
+        {(typedFieldRequiredNow(field, values)
+          || (field.pesticideOnly && typedPesticideFieldApplies(field, values, complianceScope, insectEvidencePath))) && (
           <span style={{ color: requiredColor }}> *</span>
         )}
       </div>
@@ -10074,6 +10323,31 @@ export function TypedFindingsSection({
         aria-disabled={frozen || undefined}
         style={{ border: "none", margin: 0, padding: 0, minWidth: 0, opacity: frozen ? 0.55 : 1 }}
       >
+      {showInsectEvidenceChoice && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fieldLabelStyle}>
+            {complianceScope.insectProductPresent
+              ? "Evidence for this insect treatment"
+              : "If this was an insect treatment, choose its evidence"}
+            {complianceScope.insectProductPresent && <span style={{ color: requiredColor }}> *</span>}
+          </div>
+          <select
+            aria-label="Insect treatment evidence path"
+            value={insectEvidencePath === "conflict" ? "" : (insectEvidencePath || "")}
+            onChange={(event) => setInsectEvidencePath(event.target.value)}
+            style={{ width: "100%", boxSizing: "border-box" }}
+          >
+            <option value="">{complianceScope.insectProductPresent ? "Choose evidence path" : "No insect treatment recorded"}</option>
+            <option value="live">Current live target and life stage</option>
+            <option value="preventive">Documented label-supported preventive use</option>
+          </select>
+          {storedInsectEvidencePath === "conflict" && (
+            <div role="alert" style={{ fontSize: 14, color: requiredColor, marginTop: 4 }}>
+              Choose one evidence path; current live evidence and preventive use cannot both be recorded.
+            </div>
+          )}
+        </div>
+      )}
       {primaryFields.map(renderField)}
       {detailFields.length > 0 && (
         <details style={{ marginBottom: 12 }}>
@@ -10463,31 +10737,12 @@ const TREE_SHRUB_LIFE_STAGE_OPTIONS = [
   { value: "unknown", label: "Unknown" },
 ];
 
-function treeShrubLocationText(service = {}) {
-  return [
-    service.city,
-    service.address,
-    service.serviceAddress,
-    service.propertyAddress,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-}
+const { soilTestBasis, alreadyAppliedBasis, namePattern } = FERTILIZER_EVIDENCE.nutriRoot;
+const NUTRIROOT_NAME = new RegExp(namePattern, "i");
 
-function inferTreeShrubOrdinanceZoneClient(service = {}) {
-  const location = treeShrubLocationText(service);
-  if (/\bnorth\s*port\b/.test(location)) return "north_port";
-  if (/\b(parrish|manatee|bradenton|palmetto|ellenton|lakewood\s*ranch)\b/.test(location)) {
-    return "manatee_parrish";
-  }
-  if (/\b(sarasota|venice|nokomis|osprey|englewood)\b/.test(location)) return "sarasota_venice";
-  return "other_unknown";
-}
-
-function defaultTreeShrubCloseout(service = {}) {
+function defaultTreeShrubCloseout() {
   return {
-    ordinanceZone: inferTreeShrubOrdinanceZoneClient(service),
+    ordinanceZone: "",
     bedSqft: "",
     palmCount: "",
     palmRootZoneSqft: "",
@@ -10512,8 +10767,8 @@ function defaultTreeShrubCloseout(service = {}) {
   };
 }
 
-function normalizeTreeShrubCloseoutDraft(value = {}, service = {}) {
-  const defaults = defaultTreeShrubCloseout(service);
+function normalizeTreeShrubCloseoutDraft(value = {}) {
+  const defaults = defaultTreeShrubCloseout();
   return {
     ...defaults,
     ...(value || {}),
@@ -10571,7 +10826,13 @@ function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
     /\b(herbicide|pre[\s-]?emergent|post[\s-]?emergent|weeds?|glyphosate|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|barricade|dimension|gallery|ronstar|snapshot|specticle|marengo|freehand|roundup|finale|reward|sedgehammer)\b/.test(productsText(product)),
   );
   const hasSnapshot = selectedProducts.some((product) => /\bsnapshot\b/.test(productsText(product)));
+  const isNutriRoot = (product) => {
+    const catalogRow = catalog.find((row) => String(row.id) === String(product.productId));
+    return NUTRIROOT_NAME.test(catalogRow?.name || product.name || "");
+  };
+  const hasNutriRoot = selectedProducts.some(isNutriRoot);
   const hasNpFertilizer = selectedProducts.some((product) => {
+    if (isNutriRoot(product)) return false; // Its evidence rule permits recording an already-applied exception.
     const textValue = productsText(product);
     const analysis = textValue.match(/\b(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\b/);
     if (analysis) return Number(analysis[1]) > 0 || Number(analysis[2]) > 0;
@@ -10594,10 +10855,36 @@ function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
     hasHerbicideProduct,
     needsIracFracLog: hasInsectProduct || hasFungicideProduct || hasHerbicideProduct,
     hasSnapshot,
+    hasNutriRoot,
     hasNpFertilizer,
     hasInjectionProduct,
     injectionRows,
     missingActuals,
+  };
+}
+
+export function treeShrubTypedPesticideScopeClient(selectedProducts = []) {
+  const flags = treeShrubProductFlagsClient(selectedProducts);
+  const unclassifiedPesticideProductPresent = selectedProducts.some((product) => {
+    const category = String(product.category || product.product_category || "");
+    if (/pesticid|termitic|systemic|hort/i.test(`${product.name || ""} ${category}`)) return true;
+    return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
+  });
+  const pesticideProductPresent = flags.hasInsectProduct
+    || flags.hasFungicideProduct
+    || flags.hasHerbicideProduct
+    || unclassifiedPesticideProductPresent;
+  return {
+    pesticideProductPresent,
+    insectProductPresent: flags.hasInsectProduct,
+    insectProductUnknown: unclassifiedPesticideProductPresent
+      && !flags.hasInsectProduct
+      && !flags.hasFungicideProduct
+      && !flags.hasHerbicideProduct,
+    // Preserve the conservative pre-submit rotation prompt for a catalog row
+    // whose family is unknown; unlike insect evidence, it makes no claim
+    // about what target was treated.
+    rotationProductPresent: pesticideProductPresent,
   };
 }
 
@@ -10621,6 +10908,7 @@ function isNoneLikeTreeShrubValue(value = "") {
 export function treeShrubCloseoutBlocksClient({
   closeout,
   productFlags,
+  fertilizerContext,
   injectionProducts = [],
   servicePhotos,
   service,
@@ -10637,6 +10925,16 @@ export function treeShrubCloseoutBlocksClient({
   const snapshotYtd = treeShrubNumber(closeout.snapshotAppliedYtd);
 
   if (!closeout.ordinanceZone) push("Select ordinance zone.", "ordinanceZone");
+  if (productFlags.hasNutriRoot) {
+    const basis = closeout.nutriroot_application_basis;
+    if (basis === soilTestBasis && fertilizerContext?.nutriRootSoilTestEligible) {
+      if (!String(closeout.nutriroot_soil_test_reference || "").trim()) {
+        push("Enter the phosphorus-deficiency soil-test report date or file reference.", "nutriroot_soil_test_reference");
+      }
+    } else if (basis !== alreadyAppliedBasis) {
+      push("Record an eligible NutriRoot application basis or remove the product.", "nutriroot_application_basis");
+    }
+  }
   if (!bedSqft || bedSqft <= 0) push("Enter bed square footage.", "bedSqft");
   if (palmCount === null || palmCount < 0 || !Number.isInteger(palmCount)) push("Enter palm count, even if it is 0.", "palmCount");
   if (palmCount > 0 && (!palmRootZoneSqft || palmRootZoneSqft <= 0)) push("Enter palm canopy/root-zone square footage.", "palmRootZoneSqft");
@@ -10676,7 +10974,8 @@ export function treeShrubCloseoutBlocksClient({
       "products",
     );
   }
-  if (productFlags.hasNpFertilizer && treeShrubDateInBlackout(service, closeout.ordinanceZone)) {
+  if (productFlags.hasNpFertilizer && (treeShrubDateInBlackout(service, closeout.ordinanceZone)
+    || (productFlags.hasNutriRoot && treeShrubDateInBlackout(service, fertilizerContext?.ordinanceZone || "other_unknown")))) {
     push("N/P fertilizer is blocked for this ordinance zone from June 1 through September 30.", "ordinanceZone");
   }
 
@@ -11020,6 +11319,7 @@ export function TreeShrubCloseoutBlock({
   onChange,
   blocks,
   productFlags,
+  fertilizerContext,
   injectionProducts = [],
   inputStyle: baseInputStyle,
   selectStyle,
@@ -11063,7 +11363,7 @@ export function TreeShrubCloseoutBlock({
         Closeout is locked until ordinance, plant inventory, pollinator status, pest/life stage, YTD Snapshot/fertilizer, product actuals, and photos are recorded.
       </div>
       <select
-        value={value.ordinanceZone || ""}
+        value={value.ordinanceZone || fertilizerContext?.ordinanceZone || "other_unknown"}
         onChange={(e) => setField("ordinanceZone", e.target.value)}
         style={select}
       >
@@ -11073,6 +11373,31 @@ export function TreeShrubCloseoutBlock({
           </option>
         ))}
       </select>
+      {productFlags.hasNutriRoot && (
+        <fieldset style={{ minWidth: 0, margin: 0, padding: "8px 12px", border: `1px solid ${colors.border}`, borderRadius: 10, fontSize: 14, lineHeight: 1.4 }}>
+          <legend style={{ padding: "0 4px", fontWeight: 600 }}>NutriRoot application</legend>
+          <p style={{ margin: "0 0 10px" }}>{fertilizerContext?.nutriRootHoldReason || "Confirm the service property's fertilizer rules before applying NutriRoot."}</p>
+          <label>
+            Application basis
+            <select
+              value={value.nutriroot_application_basis === soilTestBasis && !fertilizerContext?.nutriRootSoilTestEligible ? "" : value.nutriroot_application_basis || ""}
+              onChange={(event) => setField("nutriroot_application_basis", event.target.value)}
+              style={select}
+            >
+              <option value="">Choose a basis</option>
+              {fertilizerContext?.nutriRootSoilTestEligible && <option value={soilTestBasis}>{soilTestBasis}</option>}
+              <option value={alreadyAppliedBasis}>{alreadyAppliedBasis}</option>
+            </select>
+          </label>
+          {fertilizerContext?.nutriRootSoilTestEligible && value.nutriroot_application_basis === soilTestBasis && (
+            <label>
+              Soil-test report date or file reference
+              <input value={value.nutriroot_soil_test_reference || ""} maxLength={240} style={input}
+                onChange={(event) => setField("nutriroot_soil_test_reference", event.target.value)} />
+            </label>
+          )}
+        </fieldset>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <input
           type="number"
@@ -12447,19 +12772,13 @@ export function CompletionPanel({
   // for surfaces the fields here; a category-word-only test hid them for
   // brand-named pre-emergents and left the tech no way to satisfy the
   // server 400 (codex P1 r5).
-  const tsPesticideFlags = treeShrubProductFlagsClient(selectedProducts);
-  const pesticideProductPresent =
-    tsPesticideFlags.hasInsectProduct ||
-    tsPesticideFlags.hasFungicideProduct ||
-    tsPesticideFlags.hasHerbicideProduct ||
-    selectedProducts.some((p) => {
-      const category = String(p.category || p.product_category || "");
-      if (/pesticid|termitic|systemic|hort/i.test(`${p.name || ""} ${category}`)) return true;
-      // "Uncategorized"/"other" style categories are non-blank but carry no
-      // signal (prod has Bifen XTS filed as Uncategorized) — they must stay
-      // on the conservative show-the-fields path, same as a missing category.
-      return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
-    });
+  // Unknown catalog categories keep the rotation prompt available, but do
+  // not assert that an insect treatment occurred. The tech can explicitly
+  // choose a live-evidence or preventive path if the unknown product was in
+  // fact an insecticide; known fungicide/herbicide rows never ask for insect
+  // evidence or pollinator status.
+  const typedPesticideComplianceScope = treeShrubTypedPesticideScopeClient(selectedProducts);
+  const { pesticideProductPresent } = typedPesticideComplianceScope;
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
@@ -12608,7 +12927,7 @@ export function CompletionPanel({
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
   const [turfHeight, setTurfHeight] = useState({ heightIn: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
-    defaultTreeShrubCloseout(service),
+    defaultTreeShrubCloseout(),
   );
   const lawnDefaultAreas = completionImprovements && visitServiceLine(service, service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
     ? LAWN_DEFAULT_AREAS : [];
@@ -13067,6 +13386,12 @@ export function CompletionPanel({
     ),
   );
   const [findingsValues, setFindingsValues] = useState({});
+  // UI-only branch choice for the mutually exclusive typed insect evidence
+  // fields. Once a field is entered the persisted values themselves recover
+  // the path; keeping the empty selection here lets pre-submit still require
+  // the branch's fields before the first value is chosen.
+  const [typedInsectEvidencePath, setTypedInsectEvidencePath] = useState(null);
+  const [companionInsectEvidencePaths, setCompanionInsectEvidencePaths] = useState({});
   // Invalidate an untouched generated report only when the station autofill
   // ACTUALLY wrote a count (flag set by its applyCounts) — never on a
   // discarded auto candidate against a hand-overridden field (codex r70).
@@ -13860,7 +14185,7 @@ export function CompletionPanel({
   }, [isRegularPestVisit, areasServiced, selectedProducts]);
   // Default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29):
   // recurring general-pest, one-time pest, and pest re-service completions
-  // open with Taurus SC + Atticus Talak 7.9 F + the LESCO 90/10 Nonionic
+  // open with Taurus SC + LESCO Crosscheck Plus + the LESCO 90/10 Nonionic
   // Surfactant already on the Products list, totals prefilled
   // (4 oz / 4 oz / 0.25 oz, marked manual so a rate/area edit can't
   // recompute them). Seeds ONCE per panel open, only into an empty list —
@@ -13869,7 +14194,7 @@ export function CompletionPanel({
   // ignore the untouched seed (merely opening the panel must not mint a
   // restore-prompt draft). "Completed" only, and each row is flagged
   // pestDefaultMixProduct (Codex r3 P1, PR #5049) — picking inspection_only
-  // / customer_declined after this seeds must not leave Taurus/Talak/LESCO
+  // / customer_declined after this seeds must not leave Taurus/Crosscheck/LESCO
   // selected: the outcome-driven clearing effect below removes rows this
   // flag names and re-arms the seed for a return to "completed", exactly
   // like protocolDefaultProduct's own clearing.
@@ -13886,19 +14211,27 @@ export function CompletionPanel({
   // #5049 r3 — a pest-mix row the tech removed must not come back when the
   // outcome goes declined → completed).
   const [protocolCompletionDefaultsRemovedIds, setProtocolCompletionDefaultsRemovedIds] = useState([]);
+  // The server's protocol/default-products answer, read once per visit. It also
+  // carries Taurus SC's yearly label answer for this home: the pest
+  // mix seed waits for the answer to settle (a failure settles it too, with the
+  // count unknown, so Taurus stays off the mix; nothing blocks the close-out).
+  const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
+  const [protocolCompletionDefaultsSettled, setProtocolCompletionDefaultsSettled] = useState(false);
+  const taurusYearly = taurusYearlyOf(protocolCompletionDefaults?.taurusYearly);
   const pestDefaultMixSeededRef = useRef(false);
   const pestDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
     if (pestDefaultMixSeededRef.current) return;
     if (isTypedFindings || isBedBugVisit || !isPestDefaultMixVisit(service)) return;
     if (visitOutcome !== "completed") return;
+    if (!protocolCompletionDefaultsSettled) return;
     if (!Array.isArray(products) || products.length === 0) return;
     if (selectedProducts.length) {
       pestDefaultMixSeededRef.current = true;
       return;
     }
     pestDefaultMixSeededRef.current = true;
-    const rows = pestDefaultMixSelections(products)
+    const rows = applyTaurusYearlyLimit(pestDefaultMixSelections(products), taurusYearly)
       .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
       .map(({ product, totalAmount }) => ({
       // A regular pest visit's seeded rows start on their area (owner
@@ -13918,7 +14251,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds, protocolCompletionDefaultsSettled, taurusYearly]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -13926,16 +14259,20 @@ export function CompletionPanel({
   // completionDefaultProducts entries. Lawn and pest already seed
   // themselves through their own mechanisms; lib/protocol-completion-
   // defaults.js keeps this hook out of their way.
-  const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
   useEffect(() => {
     let cancelled = false;
     setProtocolCompletionDefaults(null);
-    if (!service.id) return undefined;
+    setProtocolCompletionDefaultsSettled(false);
+    if (!service.id) {
+      setProtocolCompletionDefaultsSettled(true);
+      return undefined;
+    }
     adminFetch(`/admin/dispatch/${service.id}/default-products`)
       .then((data) => { if (!cancelled) setProtocolCompletionDefaults(data); })
       // Fail-soft on the client too: a failed lookup just means no prefill,
       // never a blocked drawer.
-      .catch(() => { if (!cancelled) setProtocolCompletionDefaults(null); });
+      .catch(() => { if (!cancelled) setProtocolCompletionDefaults(null); })
+      .finally(() => { if (!cancelled) setProtocolCompletionDefaultsSettled(true); });
     return () => { cancelled = true; };
   }, [service.id]);
   const protocolCompletionDefaultsSeededRef = useRef(false);
@@ -14653,10 +14990,16 @@ export function CompletionPanel({
       rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }),
     };
   });
+  const treeShrubFertilizer = protocolCompletionDefaults?.serviceId === service.id ? protocolCompletionDefaults?.treeShrubFertilizer : null;
+  const effectiveTreeShrubCloseout = {
+    ...treeShrubCloseout,
+    ordinanceZone: treeShrubCloseout.ordinanceZone || treeShrubFertilizer?.ordinanceZone || "other_unknown",
+  };
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
-        closeout: treeShrubCloseout,
+        closeout: effectiveTreeShrubCloseout,
         productFlags: treeShrubProductFlags,
+        fertilizerContext: treeShrubFertilizer,
         injectionProducts,
         servicePhotos,
         service,
@@ -15157,7 +15500,7 @@ export function CompletionPanel({
   }, [completionFlagReady, calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision, lawnPlanArea, lawnPlanReloadKey]);
 
   useEffect(() => {
-    setTreeShrubCloseout(defaultTreeShrubCloseout(service));
+    setTreeShrubCloseout(defaultTreeShrubCloseout());
   }, [service.id]);
 
   function saveDraftSnapshot(draft) {
@@ -15326,7 +15669,7 @@ export function CompletionPanel({
       oneTimeRecapOnly ||
       reviewTiming !== REVIEW_TIMING_DEFAULT ||
       reviewCustomAt.trim() ||
-      JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout(service)) ||
+      JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout()) ||
       Object.keys(findingsValues).length ||
       typedActivityScore != null ||
       typedRecommendations.trim() ||
@@ -15954,7 +16297,7 @@ export function CompletionPanel({
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setTreeShrubCloseout(
-      normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
+      normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout),
     );
     // Type-aware pruning against the CURRENT schema — see
     // pruneRestoredFindingsValues for why key presence alone isn't enough.
@@ -18171,20 +18514,12 @@ export function CompletionPanel({
             String(findingsValues[f.key] ?? "").trim() === "",
         )
         .map((f) => f.label);
-      // Pesticide compliance answers: the server blocks completion without
-      // pollinator_status and irac_frac_logged = Yes whenever a pesticide
-      // product is recorded — mirror that pre-submit so the tech is guided
-      // to the field instead of a generic server failure (codex P2 r13).
-      if (pesticideProductPresent) {
-        for (const f of typedFindingsSchema.fields || []) {
-          if (!f.pesticideOnly) continue;
-          const value = String(findingsValues[f.key] ?? "").trim();
-          if (!value) missingTypedRequired.push(f.label);
-          else if (f.key === "irac_frac_logged" && value !== "Yes") {
-            missingTypedRequired.push(`${f.label} (must be confirmed Yes)`);
-          }
-        }
-      }
+      missingTypedRequired.push(...missingTypedPesticideCompliance(
+        typedFindingsSchema.fields || [],
+        findingsValues,
+        typedPesticideComplianceScope,
+        typedInsectEvidencePath,
+      ));
       // Tech-set-only gauge types (no derive field) still require a score
       // on any completed-side outcome — the server 422s
       // (activity_score_required) the same way. A derive-mapped type has
@@ -18273,19 +18608,12 @@ export function CompletionPanel({
               String(entry.values[f.key] ?? "").trim() === "",
           )
           .map((f) => f.label);
-        // Pesticide compliance mirror for companions (codex P2 r15): same
-        // gate as the primary form — the server requires these whenever a
-        // pesticide product is on the (shared) products list.
-        if (pesticideProductPresent) {
-          for (const f of schema.fields || []) {
-            if (!f.pesticideOnly) continue;
-            const value = String(entry.values[f.key] ?? "").trim();
-            if (!value) missingCompanionRequired.push(f.label);
-            else if (f.key === "irac_frac_logged" && value !== "Yes") {
-              missingCompanionRequired.push(`${f.label} (must be confirmed Yes)`);
-            }
-          }
-        }
+        missingCompanionRequired.push(...missingTypedPesticideCompliance(
+          schema.fields || [],
+          entry.values,
+          typedPesticideComplianceScope,
+          companionInsectEvidencePaths[schema.type] || null,
+        ));
         // Same derive-mapped exemption as the primary (owner ruling
         // 2026-09-26): a companion gauge with a findings-derived score is
         // never blocked here, only a tech-set-only one.
@@ -18570,7 +18898,7 @@ export function CompletionPanel({
             } : null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
-              ...treeShrubCloseout,
+              ...effectiveTreeShrubCloseout,
               // Don't fall back to the hidden customerRecap state (auto-generated /
               // restored, never reviewed) — use the tech's note or the typed notes.
               customerNote:
@@ -19611,6 +19939,8 @@ export function CompletionPanel({
         onReload={() => setLawnPlanReloadKey(key => key + 1)} />
         : null
   );
+  // Taurus SC's yearly label limit at this home, shown in both layouts. Warns only, never blocks the save.
+  const taurusNoteText = taurusYearlyNote(taurusYearly, selectedProducts, { mixVisit: isRegularPestVisit && protocolCompletionDefaultsSettled });
   if (isMobile) {
     const M = {
       page: "#FAFAFA",
@@ -20227,9 +20557,10 @@ export function CompletionPanel({
               <Field label="Tree & Shrub protocol closeout">
                 <TreeShrubCloseoutBlock
                   value={treeShrubCloseout}
+                  fertilizerContext={treeShrubFertilizer}
                   onChange={(next) =>
                     setTreeShrubCloseout(
-                      normalizeTreeShrubCloseoutDraft(next, service),
+                      normalizeTreeShrubCloseoutDraft(next),
                     )
                   }
                   blocks={treeShrubCloseoutBlocks}
@@ -21025,6 +21356,9 @@ export function CompletionPanel({
                 variant="mobile"
                 frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
+                pesticideComplianceScope={typedPesticideComplianceScope}
+                insectEvidencePath={typedInsectEvidencePath}
+                onInsectEvidencePathChange={setTypedInsectEvidencePath}
                 schema={findingsDisplaySchema}
                 values={findingsValues}
                 onFieldChange={handleTypedFindingChange}
@@ -21053,6 +21387,9 @@ export function CompletionPanel({
                   variant="mobile"
                   frozen={generating}
                   pesticideProductPresent={pesticideProductPresent}
+                  pesticideComplianceScope={typedPesticideComplianceScope}
+                  insectEvidencePath={companionInsectEvidencePaths[schema.type] || null}
+                  onInsectEvidencePathChange={(path) => setCompanionInsectEvidencePaths((current) => ({ ...current, [schema.type]: path }))}
                   schema={schema}
                   values={entry.values}
                   onFieldChange={(key, value) =>
@@ -21081,6 +21418,7 @@ export function CompletionPanel({
             {/* Products applied */}
             <Field label="Products applied">
               {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
+              {taurusNoteText ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{taurusNoteText}</p> : null}
               {quickComplete ? (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
@@ -22634,9 +22972,10 @@ export function CompletionPanel({
               <label style={labelStyle}>Tree & Shrub Protocol Closeout</label>
               <TreeShrubCloseoutBlock
                 value={treeShrubCloseout}
+                fertilizerContext={treeShrubFertilizer}
                 onChange={(next) =>
                   setTreeShrubCloseout(
-                    normalizeTreeShrubCloseoutDraft(next, service),
+                    normalizeTreeShrubCloseoutDraft(next),
                   )
                 }
                 blocks={treeShrubCloseoutBlocks}
@@ -23505,6 +23844,9 @@ export function CompletionPanel({
               variant="desktop"
               frozen={generating}
               pesticideProductPresent={pesticideProductPresent}
+              pesticideComplianceScope={typedPesticideComplianceScope}
+              insectEvidencePath={typedInsectEvidencePath}
+              onInsectEvidencePathChange={setTypedInsectEvidencePath}
               schema={findingsDisplaySchema}
               values={findingsValues}
               onFieldChange={handleTypedFindingChange}
@@ -23533,6 +23875,9 @@ export function CompletionPanel({
                 variant="desktop"
                 frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
+                pesticideComplianceScope={typedPesticideComplianceScope}
+                insectEvidencePath={companionInsectEvidencePaths[schema.type] || null}
+                onInsectEvidencePathChange={(path) => setCompanionInsectEvidencePaths((current) => ({ ...current, [schema.type]: path }))}
                 schema={schema}
                 values={entry.values}
                 onFieldChange={(key, value) =>
@@ -23559,6 +23904,7 @@ export function CompletionPanel({
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
+          {taurusNoteText ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{taurusNoteText}</p> : null}
           {quickComplete ? (
             <div
               style={{

@@ -249,7 +249,10 @@ router.post('/sms', async (req, res) => {
       return res.type('text/xml').send('<Response></Response>');
     }
 
-    const { From, To, Body, MessageSid } = req.body;
+    const { From, To, MessageSid } = req.body;
+    // An applicant can reply with a quoted job-offer text: the signing link in it is never stored, by any of the
+    // inbound writers below (sms_log, the unified message, the recruiting history). utils/offer-link-redaction.js.
+    const Body = require('../utils/offer-link-redaction').redactOfferLinks(req.body.Body);
     const smsReaction = isSmsReaction(Body);
     const contactCorrection = require('../services/contact-correction');
     const correctionQueue = require('../services/contact-correction-queue');

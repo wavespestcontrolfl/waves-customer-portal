@@ -78,6 +78,9 @@ function lawnProtocols() {
 // A lawn whose recorded grass names none of them (mixed, unknown, free text)
 // plans from this key while GATE_LAWN_V13 is live: the copies are the same
 // steps and the same safety rules, so the key changes nothing but the lookup.
+// The plan engine marks that fallback and holds its herbicides until the turf
+// species is confirmed for the treated area; this helper never claims the
+// borrowed key is a species identification.
 // Gate off: null, and such a lawn has no track, as before. Planning only (the
 // plan engine): historical readers never synthesize a track for a past visit.
 // Bahiagrass is the one grass that never takes this key: v13 weed spots use
