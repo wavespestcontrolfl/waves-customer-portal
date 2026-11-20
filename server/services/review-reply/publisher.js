@@ -197,19 +197,6 @@ function updatedCount(updated) {
   return Array.isArray(updated) ? updated.length : updated;
 }
 
-// Did the agent write this text? The runner and the Intelligence Bar post
-// agent text. A person's post is agent text when it came from an AI draft
-// (Use Draft, AI Reply: a token, edited or not); while an Agent Ops draft
-// stands on the row as a [DRAFT] (Use Draft sends no token for it, so any
-// reply posted then counts, edited or not); or when it is the stored
-// pipeline draft unchanged. A stored draft with version 'human' is a
-// person's earlier attempt (an uncertain manual post), not agent text.
-function isAgentText(review, text, { actor, fromDraft }) {
-  if (actor.type !== 'admin' || fromDraft) return true;
-  if (review.auto_reply_version === 'agent_ops' && isDraftReply(review.review_reply)) return true;
-  return review.auto_reply_version !== 'human' && text === String(review.auto_reply_draft || '').trim();
-}
-
 /**
  * Publish a reply.
  *
@@ -221,7 +208,8 @@ function isAgentText(review, text, { actor, fromDraft }) {
  * @param {object} [p.autoFields]    extra google_reviews columns to stamp in the SAME conditional write (runner)
  * @param {object} [p.auditMeta]     activity_log metadata
  * @param {boolean} [p.requireGoogle=false]  refuse the dev local-only save (callers that report "posted")
- * @param {boolean} [p.fromDraft=false]  the text came from an AI draft (the route saw a draft or grounding token)
+ * @param {boolean} [p.fromDraft=false]  a person's post that started from an AI or Agent Ops draft, edited or not
+ *        (Use Draft, AI Reply, a restored agent draft, Post now on an agent draft): the strict app-name rule
  * @param {(fresh: object) => (string|null)} [p.guard]  re-checked INSIDE the publish claim,
  *        immediately before the Google call, against a fresh row read: return a reason
  *        string to abort (e.g. the caller's auto claim was lost to a human skip/dismiss)
@@ -236,8 +224,13 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   if (!review || review.reviewer_name === '_stats') throw new ReviewReplyError(CODES.NOT_FOUND, 'Review not found', { status: 404 });
   if (review.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
   // Owner 2026-11-19: the app is "the Waves app" (app-name.js). Checked
-  // here, where every path to Google meets, before any write.
-  const appRefusal = appNameRefusal(replyText, { agentText: isAgentText(review, replyText, { actor, fromDraft }) });
+  // here, where every path to Google meets, before any write. Agent text
+  // meets the strict rule: the runner and the Intelligence Bar post it, and
+  // a person's post says so (fromDraft) when it started from an AI or Agent
+  // Ops draft. Every other reply is a person's own words and meets the never
+  // list. No row state is read to guess who wrote the text.
+  const agentText = actor.type !== 'admin' || fromDraft;
+  const appRefusal = appNameRefusal(replyText, { agentText });
   if (appRefusal) throw new ReviewReplyError(CODES.APP_NAME, appRefusal, { status: 422 });
   if (!allowOverwrite && hasRealReply(review.review_reply)) {
     throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
@@ -535,7 +528,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // A manual attempt (admin editor / IB): keep the exact text and mark
       // the version manual, so the sync that later clears the park hands
       // that text back to a person instead of the automatic lane (codex r75).
-      Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || 'human', auto_reply_mode: null });
+      // 'agent_ops' (machine-authored) when the text started from an AI or
+      // Agent Ops draft: the restored [DRAFT] keeps that origin, so Use Draft
+      // and Post now send it with the strict app-name rule.
+      Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || (agentText ? 'agent_ops' : 'human'), auto_reply_mode: null });
     }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {

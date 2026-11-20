@@ -126,32 +126,19 @@ describe('publishReviewReply', () => {
     }
   });
 
-  test('owner 2026-11-19: agent text meets the strict app-name rule: a draft token, the stored draft unchanged, or a restored Agent Ops draft', async () => {
+  test('owner 2026-11-19: a post that started from an AI or Agent Ops draft meets the strict app-name rule; a person\'s own words meet the never list', async () => {
     const { asDraft } = require('../services/review-reply/draft-prefix');
     const machine = 'Thanks Dana. Glad our customer app helps.';
     const refused = { code: CODES.APP_NAME, status: 422, message: expect.stringContaining('came from an AI draft and says "app"') };
-    // Sent from an AI draft (the route saw a Use Draft or AI Reply token), edited or not.
+    // The caller says the post started from an AI or Agent Ops draft (Use Draft, AI Reply, a restored agent draft), edited or not.
     await expect(publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true, fromDraft: true })).rejects.toMatchObject(refused);
-    // The stored pipeline draft posted unchanged (Use Draft, Post now).
-    Object.assign(state.rows[0], { auto_reply_draft: machine, auto_reply_version: 'reply-v2', review_reply: asDraft(machine) });
-    await expect(publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject(refused);
-    // An Agent Ops draft the sync restored as a [DRAFT] after an uncertain post (auto_reply_draft cleared).
-    Object.assign(state.rows[0], { auto_reply_draft: null, auto_reply_version: 'agent_ops', review_reply: asDraft(machine) });
-    await expect(publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject(refused);
-    // …edited too: Use Draft sends no token for it, so any reply posted while it stands is agent text.
-    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks so much, Dana! Glad our customer app helps.', actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject(refused);
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
-    // A person's own [DRAFT] with the same words meets the never list only, and posts.
-    Object.assign(state.rows[0], { auto_reply_version: 'human' });
-    const r = await publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true });
-    expect(r.googlePosted).toBe(true);
-    expect(state.rows[0].review_reply).toBe(machine);
-    // A person's earlier attempt (an uncertain manual post stores its text with version 'human') retried unchanged is
-    // still their own words: the App Store passes.
+    // No row state is read to guess: a person's own reply, typed while an Agent Ops draft stands, meets the never list only.
+    Object.assign(state.rows[0], { auto_reply_draft: null, auto_reply_version: 'agent_ops', review_reply: asDraft('Hi Dana, thank you for the kind review.') });
     const own = 'Thanks Dana. Get the Waves app on the App Store.';
-    Object.assign(state.rows[0], { review_reply: null, auto_reply_draft: own, auto_reply_version: 'human' });
-    const again = await publishReviewReply({ reviewId: 'rev-1', text: own, actor: { type: 'admin' }, allowOverwrite: true });
-    expect(again.googlePosted).toBe(true);
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: own, actor: { type: 'admin' }, allowOverwrite: true });
+    expect(r.googlePosted).toBe(true);
+    expect(state.rows[0].review_reply).toBe(own);
   });
 
   test('P0: a human reply that lands between the pre-check and the publish claim aborts inside the claim', async () => {
@@ -664,6 +651,21 @@ describe('publishReviewReply', () => {
     // codex r75: the manual attempt's exact text + a manual version ride the
     // park, so the clearing sync hands it back to a person, not the auto lane.
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana.', auto_reply_version: 'human', auto_reply_mode: null });
+  });
+
+  test('owner 2026-11-19: a timed-out post that started from an AI draft keeps that origin (version agent_ops) for its restored [DRAFT]', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    state.rows[0].auto_reply_status = null;
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'admin' }, allowOverwrite: true, fromDraft: true });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null });
   });
 
   test('a non-overwriting PUT timeout on a never-queued (NULL state) row still records google_uncertain', async () => {

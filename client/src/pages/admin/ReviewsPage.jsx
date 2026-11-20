@@ -350,6 +350,9 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
   // Set by "AI Reply": binds the generated text to the review + account facts
   // it was grounded on (validated at publish time).
   const [groundingToken, setGroundingToken] = useState(null);
+  // Set by "Use Draft" on a machine-authored draft (Agent Ops, or a restored
+  // attempt from an AI draft): the server checks its app name strictly.
+  const [fromAgentDraft, setFromAgentDraft] = useState(false);
   // The card keeps its key across reloads; when the live reply changes
   // underneath it (retract, sync, Google-side edit) the editor must follow,
   // or a retracted reply could be re-posted from stale editor text.
@@ -362,6 +365,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
     setEditing(false);
     setDraftToken(null);
     setGroundingToken(null);
+    setFromAgentDraft(false);
     setObservedDraft(review.draftReply || null);
   }, [review.reply, review.draftReply, review.reviewToken]);
   const [submitting, setSubmitting] = useState(false);
@@ -374,6 +378,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
       await onReplySubmit(review.id, replyText.trim(), {
         draftToken,
         groundingToken,
+        fromAgentDraft,
         expectedReply: review.reply || null,
         expectedDraft: observedDraft,
         expectedReview: review.reviewToken || null,
@@ -397,6 +402,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
         setReplyText(data.reply);
         setGroundingToken(data.groundingToken || null);
         setDraftToken(null);
+        setFromAgentDraft(false);
         setEditing(true);
       }
     } catch (e) {
@@ -509,6 +515,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                   setReplyText(review.draftReply);
                   setDraftToken(review.draftToken || null);
                   setGroundingToken(null);
+                  setFromAgentDraft(Boolean(review.draftFromAgent));
                   setEditing(true);
                 }}
                 variant="secondary"
@@ -639,6 +646,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                     // An ordinary manual edit carries no draft identity (codex r55).
                     setDraftToken(null);
                     setGroundingToken(null);
+                    setFromAgentDraft(false);
                     setEditing(true);
                     setReplyText(review.reply);
                   }}
@@ -720,6 +728,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                     setReplyText(review.reply || "");
                     setDraftToken(null);
                     setGroundingToken(null);
+                    setFromAgentDraft(false);
                   }}
                   variant="secondary"
                 >
@@ -1859,6 +1868,7 @@ export default function ReviewsPage() {
     {
       draftToken = null,
       groundingToken = null,
+      fromAgentDraft = false,
       expectedReply = null,
       expectedDraft = null,
       expectedReview = null,
@@ -1873,6 +1883,7 @@ export default function ReviewsPage() {
         ...(expectedReview ? { expectedReview } : {}),
         ...(draftToken ? { draftToken } : {}),
         ...(groundingToken ? { groundingToken } : {}),
+        ...(fromAgentDraft ? { fromAgentDraft: true } : {}),
       }),
     });
     // A reply removes the row from the server-side "needs reply" result set.
@@ -1898,6 +1909,7 @@ export default function ReviewsPage() {
               // follow-up edit does not report the obsolete draft as observed.
               draftReply: null,
               draftToken: null,
+              draftFromAgent: false,
               draftStale: false,
               // A manual post closes out the auto-reply state server-side
               // (skipped/manual_reply); mirror it so Retract — which deletes

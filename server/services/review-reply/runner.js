@@ -1147,6 +1147,10 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
           auto_reply_claimed_until: null,
         },
         auditMeta: humanDraft ? { version: 'human', mode: null, intent: 'post_now' } : { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
+        // A pipeline or Agent Ops draft, or a machine-authored attempt the
+        // sync restored as a [DRAFT] (version agent_ops), is agent text: the
+        // publisher's strict app-name rule (owner 2026-11-19).
+        fromDraft: !humanDraft || row.auto_reply_version === 'agent_ops',
         // Post-now publishes the draft the admin is looking at — a human
         // draft on the row is the payload, not an intervention.
         guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraft ? null : storedGrounding?.accountFingerprint || null }),
