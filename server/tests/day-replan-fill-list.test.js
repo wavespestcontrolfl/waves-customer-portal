@@ -161,10 +161,16 @@ function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = 
   return { conn: db, calls, planCalls };
 }
 
-// Every listed day's stops (the gap tool's read): by date, numbered in route order as dispatch saves them.
+// Every listed day's stops (the gap tool's read): by date, numbered in route order as dispatch saves them. The clause the
+// fill list adds to the read is recorded (dayClauses).
+const dayClauses = [];
 function dayStops(byDay) {
   dayStopsQuery.mockImplementation((_conn, { dateStr }) => ({
-    whereRaw: async () => (byDay[dateStr] || []).map((row, i) => ({ route_order: i + 1, ...row })),
+    where: async (clause) => {
+      const q = new Proxy({}, { get: (_target, m) => (...args) => { dayClauses.push(['scheduled_services', m, args]); return q; } });
+      clause(q);
+      return (byDay[dateStr] || []).map((row, i) => ({ route_order: i + 1, ...row }));
+    },
   }));
 }
 
@@ -179,6 +185,7 @@ function locations(byId) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  dayClauses.length = 0;
   slots.resolveCatalogSlotProfile.mockResolvedValue(PROFILE);
   getServices.mockResolvedValue({ services: CATALOG });
   loadReminderOffIds.mockResolvedValue(new Set());
@@ -458,6 +465,27 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     const { conn } = fakeConn({ plan: rows, inactive: { termite: [TECH] } });
     const byId = Object.fromEntries((await _internals.movableVisits(conn, blocks)).visits.map((v) => [v.row.id, v.candidate]));
     expect([byId.combo.deactivated, byId.pest.deactivated]).toEqual([[TECH], []]);
+  });
+
+  test('a seasonal visit moves only inside its season: never into January', async () => {
+    const febBlocks = [{ day: '2041-01-30', techId: TECH, start: 540, min: 240 }, { day: '2041-02-01', techId: TECH, start: 540, min: 240 }];
+    const rows = [planVisit('mosquito', '2041-02-04'), planVisit('pest', '2041-02-04')];
+    const extra = { mosquito: { recurring_pattern: 'seasonal_feb_oct' }, pest: { recurring_pattern: 'quarterly' } };
+    loadGapCandidate.mockImplementation(async (id) => loaded(rows.find((row) => row.id === id), extra[id]));
+    const { conn } = fakeConn({ plan: rows });
+    const byId = Object.fromEntries((await _internals.movableVisits(conn, febBlocks)).visits.map((v) => [v.row.id, v.candidate]));
+    expect(['2041-01-30', '2041-02-01'].map(byId.mosquito.dayOpen)).toEqual([false, true]);
+    expect(['2041-01-30', '2041-02-01'].map(byId.pest.dayOpen)).toEqual([true, true]);
+  });
+
+  test('a combined add-on needs the technician\'s capability for each of its families', async () => {
+    const rows = [planVisit('with-combo', '2040-09-13')];
+    loadGapCandidate.mockResolvedValue(loaded(rows[0]));
+    // The add-on's catalog row is pest + termite bait (estimate-converter.js comboRouteFamiliesFromCatalogKey).
+    const { conn } = fakeConn({ plan: rows, inactive: { termite: [TECH] }, addOns: [{ scheduled_service_id: 'with-combo', service_id: null,
+      service_name: 'Quarterly Pest Control Service', service_key_snapshot: 'pest_termite_bait_quarterly' }] });
+    const [{ candidate }] = (await _internals.movableVisits(conn, blocks)).visits;
+    expect(candidate.deactivated).toEqual([TECH]);
   });
 
   test('a lawn round visit moves only where the move stays a one-off: inside its round, at most 7 days from its regular date', async () => {
@@ -878,8 +906,21 @@ describe('fillList', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('lead l-down unread (rules timeout)'));
   });
 
+  test('a booked stop that kept its hold timestamp is a booked stop, as the staff finder\'s saved route counts it', async () => {
+    // An untimed stop: the gap tool cannot place a hold with no start, so a booked row read as a hold would close the day.
+    const claimed = stop('claimed', null, { customer_id: 'c-booked', reservation_expires_at: new Date('2040-09-01T00:00:00Z') });
+    dayStops({ [DAY]: [claimed] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const { conn } = fakeConn({ estimates: [estimate('near')] });
+    expect((await fillList(conn, [morning], NOW)).byBlock[0]).toHaveLength(1);
+    expect(dayClauses).toEqual(BOOKED_OR_LIVE_HOLD);
+    // A hold no customer has claimed stays a hold: untimed, it closes the day.
+    dayStops({ [DAY]: [{ ...claimed, customer_id: null, reservation_expires_at: new Date('2040-09-10T00:00:00Z') }] });
+    expect((await fillList(conn, [morning], NOW)).byBlock[0]).toEqual([]);
+  });
+
   test('a failed read of the day throws: the notice says the fill list was not built', async () => {
-    dayStopsQuery.mockImplementation(() => ({ whereRaw: async () => { throw new Error('db down'); } }));
+    dayStopsQuery.mockImplementation(() => ({ where: async () => { throw new Error('db down'); } }));
     locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
     const { conn } = fakeConn({ estimates: [estimate('near')] });
     await expect(fillList(conn, [morning], NOW)).rejects.toThrow('db down');
