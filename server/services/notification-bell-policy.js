@@ -52,6 +52,9 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   // Owner 2026-11-04, "banner": the owner's 7 PM open-visit nudge arrives as a phone banner instead of a text. pushOnly
   // like the morning banner, so no bell row, but the policy still gates the push once per event.
   'open_visits_nudge',
+  // Owner 2026-11-19 (plan page "Lead to Customer Plan", phase 1): the 9 AM "Call today" estimate banner, pushOnly like the
+  // morning summary: no bell row, the policy still gates the push once per event.
+  'estimate_call_today',
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
   'reservice_self_booked',          // a customer booked a free re-service and described the problem (owner 2026-10-05)
   // Owner ruling 2026-09-11: a declined card / returned ACH is the one money

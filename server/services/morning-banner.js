@@ -27,8 +27,8 @@
 //
 // Sends nothing to a customer and calls no paid API.
 
-const db = require('../models/db');
 const logger = require('./logger');
+const { takeSendClaim, releaseSendClaim } = require('./sms-send-claims');
 const { etDateString } = require('../utils/datetime-et');
 const { AREAS } = require('./admin-alert-compose');
 
@@ -65,18 +65,12 @@ async function countWaiting() {
 }
 
 async function claimDay(day) {
-  const claim = await db.raw(
-    `INSERT INTO sms_send_claims (claim_key) VALUES (?)
-     ON CONFLICT (claim_key) DO NOTHING
-     RETURNING id`,
-    [`${CLAIM_PREFIX}${day}`],
-  );
-  return (claim?.rows || []).length > 0;
+  return takeSendClaim(`${CLAIM_PREFIX}${day}`);
 }
 
 async function releaseDay(day) {
   try {
-    await db('sms_send_claims').where({ claim_key: `${CLAIM_PREFIX}${day}` }).del();
+    await releaseSendClaim(`${CLAIM_PREFIX}${day}`);
   } catch (err) {
     logger.error(`[morning-banner] claim release failed for ${day}: ${err?.code || err?.message || 'error'}`);
   }

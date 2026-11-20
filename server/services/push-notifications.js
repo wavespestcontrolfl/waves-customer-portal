@@ -72,6 +72,15 @@ try {
 // for immediate delivery; low-priority pushes stay deferrable on purpose.
 const URGENCY_BY_PRIORITY = { urgent: 'high', high: 'high', normal: 'normal', low: 'low' };
 
+// The push service's TTL. ephemeral is deliver now or never (0). A notification with its own expiresAt (an ISO time)
+// lives only until then: the service drops it undelivered after that, so a phone offline past it never shows a stale
+// banner (Web Push otherwise keeps it for weeks). apns.js and fcm.js read the same field. Otherwise the service default.
+function webPushTtl(notification, now = Date.now()) {
+  if (notification.ephemeral) return { TTL: 0 };
+  const at = Date.parse(notification.expiresAt || '');
+  return Number.isFinite(at) ? { TTL: Math.max(0, Math.floor((at - now) / 1000)) } : {};
+}
+
 // Waves Admin (the iOS staff app) stores its bundle and APNs environment with
 // its token (admin-push.js native-subscribe): its route is the one extra
 // apns.send argument. Every other iOS row passes none, so apns.send keeps the
@@ -126,7 +135,7 @@ async function sendSubscription(sub, notification, options) {
     await webpush.sendNotification(
       JSON.parse(sub.subscription_data),
       JSON.stringify(notification),
-      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal', ...(notification.ephemeral ? { TTL: 0 } : {}) },
+      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal', ...webPushTtl(notification) },
     );
     return { sent: true };
   } catch (err) {
