@@ -335,6 +335,26 @@ jest.setTimeout(120000);
       expect(mockSendStageComms).not.toHaveBeenCalled();
     });
 
+    // The card's dated update names the asked day. On that day (Eastern) the server no longer takes it as a start date:
+    // the dated update is refused and writes nothing, so no draft starts on another day than its button named. A Revise
+    // without a date still falls back to the suggested start.
+    test('on the asked day, the dated update is refused and writes nothing; a Revise without a date falls back to the suggested start', async () => {
+      const app = await newApplication();
+      const sent = await sendNew(app);
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      const wanted = addStaffWorkDays(JobOffers.suggestStartDate(), 14);
+      await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks', version: await shownVersion(token) });
+      const onTheDay = new Date(`${wanted}T17:00:00Z`); // noon in Eastern time on the asked day
+      await expect(JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested', startDate: wanted }, actor(), onTheDay)).rejects.toMatchObject({
+        status: 409,
+        code: 'START_DATE_UNAVAILABLE',
+        message: 'The start date must be in the future. Nothing was changed. Use Revise to choose another start date.',
+      });
+      expect(await root('job_offers').where({ application_id: app.id, status: 'draft' })).toEqual([]);
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested' }, actor(), onTheDay);
+      expect(revised.startDate).toBe(JobOffers.suggestStartDate(onTheDay));
+    });
+
     test('a date request becomes a revised offer at the requested date', async () => {
       const app = await newApplication();
       const sent = await sendNew(app);
