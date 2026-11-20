@@ -999,12 +999,17 @@ async function mintPricedEstimate({
     // The frozen setup fee is part of the offer (codex pre-push P0): a quote
     // minted before the freeze carries none, so its accept would bill the
     // code constant instead of the fee its page shows.
-    const offerFingerprint = (data) => stableStringify({
+    // Both sides in their stored JSON form (codex pre-push P1): the live row
+    // went through JSON.stringify, which drops a key whose value is undefined
+    // (the property resolver leaves bedArea or palmCount unset), so today's
+    // offer drops it too. Else an identical second tap re-mints and releases
+    // the first quote's slot hold.
+    const offerFingerprint = (data) => stableStringify(JSON.parse(JSON.stringify({
       engineInputs: data?.engineInputs ?? null,
       priorQualifyingServices: Array.isArray(data?.priorQualifyingServices) ? [...data.priorQualifyingServices].sort() : [],
       result: data?.result ?? null,
       setupFeeQuote: data?.setupFeeQuote ?? null,
-    });
+    })));
     // Same premises (codex pre-push P1): the offer fingerprint carries the
     // property facts, not the street, so a quote minted before the account's
     // address changed would hand back a link addressed to the old house. Its

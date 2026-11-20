@@ -88,7 +88,7 @@ it('posts the selected option and every amount it shows, then hands off to the e
   }
 });
 
-it('falls back to today\'s request on a 409 (or any error), so the customer never hits a dead end', async () => {
+it('falls back to today\'s request on a refusal the server answered (a 409), so the customer never hits a dead end', async () => {
   const err = Object.assign(new Error('The price changed.'), { status: 409 });
   api.startPlan.mockRejectedValue(err);
   await priceIt(priced(OFFER));
@@ -98,6 +98,49 @@ it('falls back to today\'s request on a 409 (or any error), so the customer neve
     category: 'add_service', subject: 'Add Pest Control to my plan', description: 'Customer priced Quarterly pest control in the portal.',
   });
   expect(await screen.findByText('Request sent')).toBeInTheDocument();
+});
+
+it('a start whose answer was lost asks once more and opens the quote; it never files a request (codex pre-push P1)', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const assign = vi.fn();
+  const original = window.location;
+  Object.defineProperty(window, 'location', { configurable: true, value: { ...original, assign } });
+  try {
+    // The first mint committed, but its answer never arrived; the second tap hands back the same quote.
+    api.startPlan
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({ ok: true, url: '/estimate/tok123', estimateId: 'e1', reused: true });
+    await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    expect(await screen.findByRole('link', { name: 'Open it now' })).toHaveAttribute('href', '/estimate/tok123');
+    expect(api.startPlan).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(1600);
+    expect(assign).toHaveBeenCalledWith('/estimate/tok123');
+    expect(api.createRequest).not.toHaveBeenCalled();
+  } finally {
+    Object.defineProperty(window, 'location', { configurable: true, value: original });
+    vi.useRealTimers();
+  }
+});
+
+it.each([
+  ['no answer', () => new TypeError('Failed to fetch')],
+  ['a gateway error', () => Object.assign(new Error('Request failed (502)'), { status: 502 })],
+])('a start that gets %s twice tells the customer to tap again and files no request (codex pre-push P1)', async (_label, failure) => {
+  api.startPlan.mockRejectedValue(failure());
+  const alerts = [];
+  const onDialog = (event) => alerts.push(event.detail.message);
+  window.addEventListener('waves:customer-dialog', onDialog);
+  try {
+    await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    await waitFor(() => expect(alerts).toHaveLength(1));
+    expect(alerts[0]).toMatch(/could not confirm your estimate/);
+    expect(api.startPlan).toHaveBeenCalledTimes(2);
+    expect(api.createRequest).not.toHaveBeenCalled();
+  } finally {
+    window.removeEventListener('waves:customer-dialog', onDialog);
+  }
 });
 
 it('turns the button off while a new answer loads: the option on screen is the old answer\'s', async () => {

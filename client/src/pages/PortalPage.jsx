@@ -11080,20 +11080,29 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     }
   };
 
-  // Opens the priced estimate (pick a time, save a card there). Any refusal or error falls back to
-  // today's request, so the customer never hits a dead end. Off while a new answer loads (the
-  // option on screen is the old answer's) and while an earlier start still mints (codex pre-push P1s).
+  // A refusal the server answered (a 4xx: priced by hand, the price changed) made no quote. No
+  // answer, or a server or gateway error, may hide a quote the server already made (codex pre-push P1).
+  const startRefused = (err) => Number.isInteger(err?.status) && err.status >= 400 && err.status < 500;
+
+  // Opens the priced estimate (pick a time, save a card there). A refusal falls back to today's
+  // request, so the customer never hits a dead end. Any other failure asks once more (a repeat
+  // tap hands back the quote the first one may have made) and never files a request, so one tap
+  // never makes both a quote and a request. Off while a new answer loads (the option on screen is
+  // the old answer's) and while an earlier start still mints (codex pre-push P1s).
   const startPlan = async () => {
     if (minting || startingPlan || requesting || loading || !selected) return;
     const seq = planStartSeq.current;
     setMinting(true);
     setStartingPlan(true);
+    const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;
+    const start = () => api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
     let out = null;
+    let refused = false;
     try {
-      const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;
-      out = await api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
-    } catch {
-      // Any refusal or error files today's request below.
+      out = await start();
+    } catch (err) {
+      refused = startRefused(err);
+      if (!refused && seq === planStartSeq.current) out = await start().catch(() => null);
     } finally {
       setMinting(false);
     }
@@ -11105,7 +11114,11 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
       return;
     }
     setStartingPlan(false);
-    await submitRequest();
+    if (refused) {
+      await submitRequest();
+      return;
+    }
+    showCustomerAlert('We could not confirm your estimate. Please tap again in a moment, or call us at (941) 297-5749.');
   };
 
   const promptChips = [

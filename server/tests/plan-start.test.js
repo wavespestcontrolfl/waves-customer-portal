@@ -853,6 +853,17 @@ describe('mintPlanStartEstimate', () => {
       expect(tables.estimates.find((r) => r.id === next.estimateId).address).toBe('1 Main St, Parrish, FL 34219');
     });
 
+    test('an identical second tap is handed back when today\'s property facts carry an unset field, which the stored quote dropped (codex pre-push P1)', async () => {
+      // The real property resolver leaves fields such as bedArea unset; storing the quote as JSON drops them.
+      const unset = { pricingAi: { ...deps().pricingAi, resolvePropertyContext: async () => ({ propertyInput: { homeSqFt: 2200, lotSqFt: 9000, stories: 1, bedArea: undefined, palmCount: undefined }, grassType: 'st_augustine', palmCount: null }) } };
+      const first = await mint({}, unset);
+      expect(JSON.parse(tables.estimates[0].estimate_data).engineInputs).not.toHaveProperty('bedArea');
+      const again = await mint({}, unset);
+      expect(again).toEqual({ estimateId: first.estimateId, token: first.token, url: first.url, reused: true });
+      expect(tables.estimates).toHaveLength(1);
+      expect(tables.estimates[0].archived_at == null).toBe(true);
+    });
+
     test('a live quote stored at the same home without the ZIP the account has since gained is reused (codex pre-push P1)', async () => {
       const first = await mint();
       tables.estimates[0].address = '1 Main St, Parrish, FL';
