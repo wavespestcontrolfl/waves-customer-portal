@@ -681,6 +681,26 @@ describe('mintPlanStartEstimate', () => {
       expect(tables.estimates).toHaveLength(0);
     });
 
+    test('a footprint the engine guessed is priced by hand, even on a line with no other review flag (codex pre-push r30 P1)', async () => {
+      const { engineResultNeedsReview } = require('../services/cancellation-resolution/restart');
+      expect(engineResultNeedsReview({ lineItems: [PEST_LINE] })).toBe(false);
+      for (const marker of [
+        { footprintWasDefaulted: true },
+        { footprintSource: 'fallback_2000' },
+        { footprintSource: 'footprint_unknown_fallback' },
+        { fpSource: 'county_fallback' },
+      ]) {
+        const guessed = { ...PEST_LINE, ...marker, requiresManualReview: false, manualReviewReasons: [] };
+        expect(engineResultNeedsReview({ lineItems: [guessed] })).toBe(true);
+        recompute.mockResolvedValueOnce(pricedAs(guessed));
+        await expect(mint()).rejects.toMatchObject({ code: 'pricing_unavailable' });
+      }
+      expect(tables.estimates).toHaveLength(0);
+      // A measured footprint keeps the online price.
+      recompute.mockResolvedValueOnce(pricedAs({ ...PEST_LINE, footprintSource: 'homeSqFt', footprintWasDefaulted: false }));
+      await expect(mint()).resolves.toMatchObject({ reused: false });
+    });
+
     test('an unknown option, an unlisted service, or an unusable shown price refuses before any DB work', async () => {
       await refused('not_eligible', { optionId: 'pest-weekly' });
       await refused('not_eligible', { optionId: 'lawn-enhanced' });

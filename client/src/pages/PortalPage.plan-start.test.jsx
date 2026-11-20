@@ -140,9 +140,14 @@ it('a quote staff are sending right now (409 delivery_in_flight) shows the serve
 
 const lostAnswer = () => new TypeError('Failed to fetch');
 const gatewayError = () => Object.assign(new Error('Request failed (502)'), { status: 502 });
+// A 4xx with no code is not a sure refusal unless it is the gate-off 404 (codex pre-push r30 P1).
+const proxyTimeout = () => Object.assign(new Error('Request failed (408)'), { status: 408 });
+const unreadConflict = () => Object.assign(new Error('Request failed (409)'), { status: 409 });
 it.each([
   ['no answer', lostAnswer],
   ['a gateway error', gatewayError],
+  ['a proxy timeout (a 408 with no code)', proxyTimeout],
+  ['a 409 whose body did not parse (no code)', unreadConflict],
 ])('a start that gets %s files nothing, never repeats on its own, and asks for a new tap, which opens the quote the first call made (codex pre-push P1s)', async (_label, failure) => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   const assign = vi.fn();
@@ -383,7 +388,7 @@ it('offers the button per option: another option the server did not list keeps t
 
 it.each([
   ['answers with an estimate', (settle) => settle.resolve({ ok: true, url: '/estimate/old-option', estimateId: 'e0', reused: false })],
-  ['fails', (settle) => settle.reject(Object.assign(new Error('The price changed.'), { status: 409 }))],
+  ['fails', (settle) => settle.reject(Object.assign(new Error('The price changed.'), { status: 409, code: 'offer_changed' }))],
 ])('a start for an option the customer left, which then %s, is dropped: no hand-off, no request', async (_label, finish) => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   const assign = vi.fn();
@@ -446,7 +451,7 @@ it('a second start waits until the first settles: the mint archives the account\
 });
 
 it('a fallback request that lands after the customer picked another option never marks that option as sent', async () => {
-  api.startPlan.mockRejectedValue(Object.assign(new Error('The price changed.'), { status: 409 }));
+  api.startPlan.mockRejectedValue(Object.assign(new Error('The price changed.'), { status: 409, code: 'offer_changed' }));
   const settle = {};
   api.createRequest.mockReturnValue(new Promise((resolve) => Object.assign(settle, { resolve })));
   await priceIt(pricedTwo());

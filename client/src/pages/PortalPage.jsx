@@ -11094,13 +11094,17 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     }
   };
 
-  // A refusal the server answered (a 4xx: priced by hand, the price changed) made no quote. No
-  // answer, or a server or gateway error, may hide a quote the server already made (codex pre-push P1).
-  const startRefused = (err) => Number.isInteger(err?.status) && err.status >= 400 && err.status < 500;
+  // Sure refusals made no quote: a 4xx the mint coded (priced by hand, the price changed, a quote on
+  // its way), and the 404 the route answers before the mint while plan start is off. No answer, a
+  // server or gateway error, or any other 4xx with no code (a proxy timeout, a 409 whose body did
+  // not parse, which may be delivery_in_flight) may hide a quote the server already made, or one on
+  // its way (codex pre-push P1s).
+  const startRefused = (err) => Number.isInteger(err?.status) && err.status >= 400 && err.status < 500
+    && (Boolean(err.code) || err.status === 404);
 
   // Opens the priced estimate (pick a time, save a card there). A pricing or eligibility refusal,
-  // or a refusal before the mint ran (a 4xx with no code), falls back to today's request, so the
-  // customer never hits a dead end. A failure with no sure answer files nothing and asks for a new
+  // or the 404 the route answers before the mint while plan start is off, falls back to today's
+  // request, so the customer never hits a dead end. A failure with no sure answer files nothing and asks for a new
   // tap, which hands back the quote the first call may have made: one tap never makes both a quote
   // and a request. The card never repeats a start on its own, because a late repeat would replace
   // a quote another tab made since and free its slot hold (codex pre-push P1). Off while a new

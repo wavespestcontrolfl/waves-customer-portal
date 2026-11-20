@@ -707,15 +707,24 @@ async function singlePremisesStreet(dbh, customer, { proof, strict = false } = {
 // subset missed heuristic turf BASES, such as plausibleMaxTurfCap at MEDIUM
 // confidence, and the other markers lineRequiresReview covers:
 // requiresMeasurement, manualReviewReasons, the zero-tree underquote, ...),
-// a line graded low confidence, or a result asking for field verification.
-// The mint refuses on it, and the plan-start hint runs it on its own engine
-// result, so the card never offers what the mint refuses (codex pre-push P1).
+// a line graded low confidence, a footprint the engine guessed, or a result
+// asking for field verification. The mint refuses on it, and the plan-start
+// hint runs it on its own engine result, so the card never offers what the
+// mint refuses (codex pre-push P1).
+//
+// A guessed footprint is AGENTS.md's "fpSource fallback" marker: the pricers
+// write it as footprintWasDefaulted and a *fallback footprintSource. They set
+// requiresManualReview with it today; the check reads the marker itself, so a
+// line that carries only the marker still routes to review (codex pre-push
+// r30 P1).
 function engineResultNeedsReview(raw) {
   const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
   return (raw?.lineItems || []).some((l) => l && (
     lineRequiresReview(l)
     || lineHasHeuristicTurf(l)
     || String(l.pricingConfidence || '').toLowerCase() === 'low'
+    || l.footprintWasDefaulted === true
+    || [l.footprintSource, l.fpSource].some((source) => /fallback/i.test(String(source || '')))
   )) || (Array.isArray(raw?.fieldVerify) && raw.fieldVerify.length > 0);
 }
 
