@@ -393,7 +393,9 @@ describe('CareersOfferPage — open state', () => {
     await waitFor(() => expect(screen.getByLabelText('Text me about this offer')).toBeChecked());
   });
 
-  it('re-reads the offer when a successful sign reply cannot be read', async () => {
+  // Only a read shows the signature (the reply was lost): another tab may have
+  // signed in the same name, so the page names the signer, never "You signed".
+  it('re-reads the offer when a successful sign reply cannot be read, and names the signer', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('cut off'); } })
@@ -402,7 +404,30 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
-    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026/)).toBeInTheDocument();
+    expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
+  });
+
+  // Codex P1: this tab's sign was refused, then a signature in the same name
+  // came from elsewhere. Nothing this tab sent went through, so the page names
+  // the signer, never "You signed".
+  it('after this tab\'s sign is refused, a signature in the same name from elsewhere is never "You signed"', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'This offer changed. Please review it.' }, 409)) // the sign: refused
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: '2026-12-11T09:00:00.000Z' }))) // the read: still open
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed' }, 409)) // the decline: signed meanwhile
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'Jordan Rivera', signedAt: '2026-12-12T13:15:00.000Z' })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Decline' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, decline' }));
+    expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it('sends a date request for a future Monday to Thursday only', async () => {
@@ -625,7 +650,7 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByText(/^This offer was signed on Sat, Dec 12, 2026\./)).toBeInTheDocument();
   });
 
-  it('re-reads the offer when signing answers 502; the name on record is this signature in any letter case and spacing', async () => {
+  it('re-reads the offer when signing answers 502; the name this tab sent, in any letter case and spacing, is named without "already"', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({}, 502))
@@ -635,7 +660,8 @@ describe('CareersOfferPage — open state', () => {
     // The server stores "Jordan Rivera": each run of spaces collapsed, as job-offers.js cleanText does.
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: '  Jordan   Rivera ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
-    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026/)).toBeInTheDocument();
+    expect(await screen.findByText(/^This offer was signed by JORDAN RIVERA on Sat, Dec 12, 2026\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
   });
 
   // Another tab signed under another name while this tab's reply was lost:

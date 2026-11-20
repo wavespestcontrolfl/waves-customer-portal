@@ -303,6 +303,31 @@ describe('past the decoding budget the text fails closed', () => {
   });
 });
 
+describe('malformed markup is read in one pass', () => {
+  // The tag scan reads the body once. The old tag pattern rescanned the rest of the body from each unfinished "<":
+  // 200 KB of "<a " took about 25 s, and an inbound text with no offer link is scanned too.
+  const token = createHash('sha256').update('malformed markup').digest('hex');
+  test.each([
+    ['unfinished tag starts', '<a '],
+    ['tag starts inside a tag', '<<a'],
+    ['unclosed quotes', '<a "x '],
+    ['unclosed comments', '<!-- '],
+  ])('%s: a link after them is still hidden, and the rest is kept', (name, piece) => {
+    const filler = piece.repeat(400);
+    expect(redactOfferLinks(`${filler} Open ${portalUrl(`/careers/offer/${token}`)} today`))
+      .toBe(`${filler} Open ${portalUrl('/careers/offer/[link hidden]')} today`);
+  });
+
+  test('200 KB of unfinished tag starts comes back unchanged in seconds', () => {
+    for (const piece of ['<a ', '<<a']) {
+      const body = piece.repeat(Math.ceil(200000 / piece.length));
+      const started = Date.now();
+      expect(redactOfferLinks(body)).toBe(body);
+      expect(Date.now() - started).toBeLessThan(10000);
+    }
+  }, 60000);
+});
+
 describe('the deferred replay body', () => {
   const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
   const stored = `Hi Jordan, your job offer: portal.wavespestcontrol.com/careers/offer/${OFFER_LINK_HIDDEN} It stays open until Fri, Dec 18.`;

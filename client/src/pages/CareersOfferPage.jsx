@@ -210,10 +210,14 @@ function ClosedState({ data }) {
   );
 }
 
-// signer: who signed, as far as this page can tell. 'self': this tab sent the
-// name on record. 'other': a 409, or a read after a lost reply, shows another
-// name. 'record': the page opened on a signed offer, so it cannot tell who is
-// reading; it names the signer and the date, never "you".
+// signer: who signed, as far as this page can tell. 'self': the server answered
+// this tab's own sign with that signature. 'record': the page opened on a
+// signed offer, or a read shows the name this tab last sent but the server
+// never answered that send with it (its reply was lost, or it was refused and
+// another tab signed in the same name), so the page cannot tell whose
+// signature it is; it names the signer and the date, never "you". 'other':
+// the page saw the offer open, and the name on record is not the one this tab
+// last sent.
 function resultMessage(data, signer) {
   const who = ownerFirstName(data);
   if (data.state === 'signed') {
@@ -625,13 +629,23 @@ function SignBlock({ name, onName, onAccept, busy, saving, frozen }) {
   );
 }
 
-function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onSign }) {
+function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onOwnSign }) {
   const [name, setName] = useState('');
   const [panel, setPanel] = useState('none'); // none | date | decline
   const [unknown, setUnknown] = useState(false);
   const [rechecking, setRechecking] = useState(false);
   const markUnknown = useCallback(() => setUnknown(true), []);
-  const accept = useOfferAction({ token, onApplied: (b, sent) => onApplied({ ...b, signedName: sent.signedName }), onRefused, onReload, onInvalid, onUnknown: markUnknown });
+  const accept = useOfferAction({
+    token,
+    onApplied: (b, sent) => {
+      onOwnSign({ name: sent.signedName, answered: true });
+      onApplied({ ...b, signedName: sent.signedName });
+    },
+    onRefused,
+    onReload,
+    onInvalid,
+    onUnknown: markUnknown,
+  });
   const dateReq = useOfferAction({ token, onApplied: (b, sent) => onApplied({ requestedStartDate: sent.requestedStartDate, ...b }), onRefused, onReload, onInvalid, onUnknown: markUnknown });
   const decline = useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUnknown: markUnknown });
   const [consentPending, setConsentPending] = useState(false);
@@ -670,7 +684,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onS
           saving={accept.busy}
           frozen={accept.frozen}
           onAccept={() => {
-            onSign(name.trim());
+            onOwnSign({ name: name.trim(), answered: false });
             accept.run('/accept', { signedName: name.trim(), version: data.version });
           }}
         />
@@ -778,7 +792,10 @@ function OfferPage({ token }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null); // null | 'notfound' | 'temporary'
   const [firstState, setFirstState] = useState(null); // the state the first read showed
-  const [sentName, setSentName] = useState(null); // the last signature this tab sent
+  // The last signature this tab sent, { name, answered }, or null. answered:
+  // the server answered that sign with it. Only then does the page say "You
+  // signed": a sent name alone may be in flight, lost or refused.
+  const [ownSign, setOwnSign] = useState(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const seq = useRef(0);
 
@@ -849,11 +866,15 @@ function OfferPage({ token }) {
   if (CLOSED_STATES.includes(data.state)) return <ClosedState data={data} />;
   if (ANSWERED_STATES.includes(data.state)) {
     // Opened as signed: anyone with the link may be reading, so the page names
-    // the signer. Seen open first: the signature is this tab's only when its
-    // name is the one this tab sent.
+    // the signer. Seen open first: "You signed" only on the server's own answer
+    // to this tab's sign; a read alone cannot tell whose it is, so it names the
+    // signer too.
     let signer = 'record';
-    if (firstState !== 'signed') signer = sameName(sentName, data.signedName) ? 'self' : 'other';
+    if (firstState !== 'signed') {
+      if (!sameName(ownSign?.name, data.signedName)) signer = 'other';
+      else if (ownSign.answered) signer = 'self';
+    }
     return <ResultState data={data} signer={signer} />;
   }
-  return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} onSign={setSentName} />;
+  return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} onOwnSign={setOwnSign} />;
 }

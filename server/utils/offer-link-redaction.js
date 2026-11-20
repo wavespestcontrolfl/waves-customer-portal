@@ -4,7 +4,7 @@
  * but every STORED copy of an offer text or email (sms_log, the unified messages rows, the messaging audit preview, the
  * email ledger, the deferred queue row, comms_history) keeps the path with the token hidden, so no staff reader, shared
  * inbox, scheduled-message list or tool can show it. Applied at each write point; a body with no offer link is returned
- * unchanged, so no other message is affected. A deferred text is rebuilt with the real links from the job_offers rows
+ * unchanged (unless it is still encoded past the decoding budget, below), so no other message is affected. A deferred text is rebuilt with the real links from the job_offers rows
  * at replay time (messaging/deferred-replay-registry.js replayBodyFor): the offer text by its pinned offer, any other
  * held text (an owner reply that pastes a link) by the offers its links were pinned to when it was queued.
  *
@@ -17,7 +17,7 @@
  *   backslashes read as slashes, the path ending at the first "?" or "#", "." and ".." segments resolved (also written
  *   with %2e; an empty segment counts, as in a browser), any other percent-encoding kept, and each segment decoded and
  *   lowercased only to compare it, as the page router does. Once as a reader can: character references and
- *   percent-encoding undone (repeated, for double encoding), full-width forms folded, invisible characters dropped,
+ *   percent-encoding undone (repeated up to four times, for double encoding), full-width forms folded, invisible characters dropped,
  *   lowercase, and each part between a "?" and a "#" read as a path. A unit in which any reading holds
  *   /careers/offer/<64-hex token> (a repeated slash read as one) is replaced as a whole by the standard link with the
  *   token hidden, once for each such token in the order they appear, so the replay can rebuild each one as the link
@@ -36,6 +36,9 @@
  *   token split over several units is hidden in all of them: the bare marker in the first (or the standard hidden link
  *   for an offer-path token that unit holds whole, as above) and nothing in the rest. Tags and spaces between units
  *   stay, so the bare marker never forms the hidden link the replay rebuilds.
+ * - A unit still encoded after four decoding passes (it may hide a route word or a token): the text fails closed. That
+ *   unit is replaced as a whole by the bare marker, and so is every unit that a run of 64 or more hex touches in the
+ *   joined reading, split as above.
  * An /careers/interview/ link is not on that path and is left alone. Out of reach: a token mixed with characters a
  * reader sees (a dash every few letters), or split by text the email hides by style; a person has to edit such a text,
  * or craft it, to use the token.
@@ -50,8 +53,45 @@ const TOKEN_SEGMENT_RE = /^([0-9a-f]{64})(?![0-9a-f])/;
 // The route word, also after punctuation that opens the unit ("(careers", url=careers); a host such as x.careers is not.
 const CAREERS_SEGMENT_RE = /(?:^|[^a-z0-9.-])careers$/;
 const UNIT_RE = /=\s*(?:"[^"]*"|'[^']*')|(?:(?!=\s*["'])[^\s<>])+/g;
-// An HTML tag or comment: the units inside it (its name and attributes) are not text a reader sees.
-const TAG_RE = /<!--[\s\S]*?-->|<[!/?]?[a-z][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/gi;
+// An HTML tag or comment: the units inside it (its name and attributes) are not text a reader sees. A comment runs from
+// "<!--" to the first "-->"; a tag from "<" before a letter (after an optional "!", "/" or "?") to the first ">" outside
+// a quoted value, and a quote that never closes means no tag. Anything else is text.
+const TAG_START_RE = /<[!/?]?[a-z]/iy;
+
+// The [start, end) spans of the tags and comments in `text`, in one linear pass, so a body of unfinished tag starts
+// cannot make the scan rescan the rest of the text from each one. close[p] is where a tag body read from p ends (the
+// index of its ">"), quoted values skipped, or -1 when it never ends; it is filled from the end of the text back.
+function tagSpans(text) {
+  const n = text.length;
+  const close = new Int32Array(n + 1).fill(-1);
+  let nextDouble = -1;
+  let nextSingle = -1;
+  for (let p = n - 1; p >= 0; p -= 1) {
+    const c = text[p];
+    if (c === '>') close[p] = p;
+    else if (c === '"') [close[p], nextDouble] = [nextDouble === -1 ? -1 : close[nextDouble + 1], p];
+    else if (c === "'") [close[p], nextSingle] = [nextSingle === -1 ? -1 : close[nextSingle + 1], p];
+    else close[p] = close[p + 1];
+  }
+  const spans = [];
+  let commentsClose = true; // false once a "<!--" has no "-->" after it: none after it can have one either
+  for (let i = text.indexOf('<'); i !== -1;) {
+    let end = -1;
+    if (commentsClose && text.startsWith('<!--', i)) {
+      const at = text.indexOf('-->', i + 4);
+      if (at === -1) commentsClose = false;
+      else end = at + 3;
+    }
+    TAG_START_RE.lastIndex = i;
+    if (end === -1 && TAG_START_RE.test(text) && close[i + 1] !== -1) end = close[i + 1] + 1;
+    if (end === -1) i = text.indexOf('<', i + 1);
+    else {
+      spans.push([i, end]);
+      i = text.indexOf('<', end);
+    }
+  }
+  return spans;
+}
 
 function percentDecode(seq) {
   try {
@@ -62,19 +102,21 @@ function percentDecode(seq) {
 }
 
 const decodeOnce = (text) => decodeHTML(text).replace(/(?:%[0-9a-f]{2})+/gi, percentDecode);
+// Only a character reference (&) or a percent escape (%) decodes, so text with neither is read as it is.
+const decodable = (text) => /[&%]/.test(text);
 const DECODE_PASSES = 4;
 
 // The unit as a browser or a reader resolves it. Decoding repeats, so a double-encoded spelling resolves too, up to
 // DECODE_PASSES. `undecided`: the reading would still decode further, so it may hide a route word (see scan).
 function reading(unit) {
   let out = unit;
-  for (let pass = 0; pass < DECODE_PASSES; pass += 1) {
+  for (let pass = 0; pass < DECODE_PASSES && decodable(out); pass += 1) {
     const next = decodeOnce(out);
     if (next === out) break;
     out = next;
   }
   const seen = out.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/').toLowerCase();
-  return { seen, undecided: decodeOnce(seen) !== seen };
+  return { seen, undecided: decodable(seen) && decodeOnce(seen) !== seen };
 }
 const readable = (unit) => reading(unit).seen;
 
@@ -144,7 +186,7 @@ function offerTokensOf(unit, seen = readable(unit)) {
 // The units of `text` in order: each with where it starts, its reader's text, whether that reading is undecided, and
 // whether it sits inside a tag.
 function unitsOf(text) {
-  const tags = [...text.matchAll(TAG_RE)].map((m) => [m.index, m.index + m[0].length]);
+  const tags = tagSpans(text);
   let t = 0;
   return [...text.matchAll(UNIT_RE)].map((m) => {
     while (t < tags.length && tags[t][1] <= m.index) t += 1;
@@ -187,19 +229,23 @@ function overlapping(spans, from, to) {
   return out;
 }
 
-// Each found token split over several units of a view: the first of those units is marked 'first', the rest 'rest'.
-// A token whole inside one unit is left to that unit's own reading.
+// The units a piece of a view covers: the first is marked 'first', the rest 'rest'.
+function markParts(marks, parts) {
+  parts.forEach(({ u }, k) => {
+    if (k === 0) marks.set(u.at, 'first');
+    else if (!marks.has(u.at)) marks.set(u.at, 'rest');
+  });
+}
+
+// Each found token split over several units of a view is marked. A token whole inside one unit is left to that unit's
+// own reading.
 function splitMarks(views, linked) {
   const marks = new Map();
   for (const { text, spans } of views) {
     for (const token of linked) {
       for (let at = text.indexOf(token); at !== -1; at = text.indexOf(token, at + 1)) {
         const parts = overlapping(spans, at, at + token.length);
-        if (parts.length < 2) continue;
-        parts.forEach(({ u }, k) => {
-          if (k === 0) marks.set(u.at, 'first');
-          else if (!marks.has(u.at)) marks.set(u.at, 'rest');
-        });
+        if (parts.length > 1) markParts(marks, parts);
       }
     }
   }
@@ -243,12 +289,16 @@ function scan(text) {
     for (const token of offerTokensOf(u.text, u.seen)) linked.add(token);
   }
   for (const view of views) for (const token of joinedTokens(view)) linked.add(token);
-  // A unit still encoded past the decoding budget may hide a route word, so such a text fails closed: that unit is
-  // hidden whole, and every run of 64 hex in the text counts as a found token, so each unit holding one is hidden too.
   const undecided = units.some((u) => u.undecided);
-  if (undecided) for (const view of views) for (const m of view.text.matchAll(/[0-9a-f]{64}/g)) linked.add(m[0]);
   if (!linked.size && !undecided) return { redacted: text, tokens: [] };
   const marks = splitMarks(views, linked);
+  // A unit still encoded past the decoding budget may hide a route word, so such a text fails closed: that unit is
+  // hidden whole (storedUnit), and so is every unit that a run of 64 or more hex touches in either view.
+  if (undecided) {
+    for (const { text: joined, spans } of views) {
+      for (const m of joined.matchAll(/[0-9a-f]{64,}/g)) markParts(marks, overlapping(spans, m.index, m.index + m[0].length));
+    }
+  }
   const tokens = [];
   let redacted = '';
   let last = 0;

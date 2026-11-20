@@ -8653,8 +8653,9 @@ units' reader text is also read run together (once with every unit, once with th
 every character a reader does not see dropped, so a link or a copy split by markup, white space (also `&nbsp;`), line
 breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
 every piece: the marker in the first unit, nothing in the rest, the tags kept. Decoding stops after four passes; a unit
-that would still decode further may hide a route word, so it is hidden whole, and in such a text every run of 64 hex
-counts as a found token (each unit holding one is hidden). The
+that would still decode further may hide a route word, so it is hidden whole, and in such a text so is every unit that
+a run of 64 or more hex touches in the joined reading. Tags are found in one pass over the text, so malformed markup
+costs time in proportion to its length. The
 service worker never handles an offer page, in any request mode (`client/public/sw.js` `isOfferLinkPath`: the path,
 percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the
 server routes `/API/` as `/api/`). It stores no URL that could carry the link, because a stored response or request
