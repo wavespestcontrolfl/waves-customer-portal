@@ -1,6 +1,7 @@
 /**
- * Restaurant prospect parsers (services/prospects/dbpr-restaurants.js): the three file parsers and the phone rule
- * for the swapped ownership-change columns. Fixtures are synthetic: "SAMPLE DINER", "200 SAMPLE TRL".
+ * Weekly restaurant prospect sync (services/prospects/dbpr-restaurants.js): the three file parsers, the phone
+ * rule for the swapped ownership-change columns, and the sync flow with fetch and the store faked. Fixtures are
+ * synthetic: "SAMPLE DINER", "200 SAMPLE TRL".
  */
 jest.mock('../models/db', () => {
   const db = jest.fn();
@@ -8,7 +9,11 @@ jest.mock('../models/db', () => {
   db.raw = jest.fn();
   return db;
 });
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+const fs = require('fs');
+const path = require('path');
+const logger = require('../services/logger');
 const svc = require('../services/prospects/dbpr-restaurants');
 
 const csvLine = (cells) => cells.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',');
@@ -21,7 +26,7 @@ const INSP_HEAD = [
   ...Array.from({ length: 58 }, (_, i) => `Violation ${String(i + 1).padStart(2, '0')}`),
   'License ID', 'Inspection Visit ID',
 ];
-function inspRow({ county = 'Manatee', date = '10/20/2026', v35 = 1, visit = '9001', licenseId = '5001', name = 'SAMPLE DINER', city = 'BRADENTON', zip = '34208' } = {}) {
+function inspRow({ county = 'Manatee', date = '11/16/2026', v35 = 1, visit = '9001', licenseId = '5001', name = 'SAMPLE DINER', city = 'BRADENTON', zip = '34208' } = {}) {
   const v = Array.from({ length: 58 }, (_, i) => (i === 34 ? String(v35) : '0'));
   return csvLine(['D7', '41', county, '2010', 'SEA0000001', name, '200 SAMPLE TRL', city, zip, '1', '1', 'Food',
     'Routine - Food', 'Warning Issued', date, '2', ...v, licenseId, visit]);
@@ -36,7 +41,7 @@ const LIC_HEAD = ['Application Number', 'Application Type', 'Application Approva
   'Location Zip Code', 'Location County Code', 'Location County', 'Secondary Phone Number', 'District', 'Region', 'License Number',
   'Primary Status Code', 'Secondary Status Code', 'License Expiry Date', 'Last Inspection Date', 'Number of Seats',
   'Base Risk Level', 'Secondary Risk Level'];
-function licRow({ app = '7001', county = 'Sarasota', primary = '555-010-0000', mailCounty = '51', secondary = '941-555-0101', seats = '40', date = '08/21/2026', city = 'SARASOTA', zip = '34231-1234', line3 = '' } = {}) {
+function licRow({ app = '7001', county = 'Sarasota', primary = '555-010-0000', mailCounty = '51', secondary = '941-555-0101', seats = '40', date = '11/12/2026', city = 'SARASOTA', zip = '34231-1234', line3 = '' } = {}) {
   return csvLine([app, 'Plan Review and Initial (COMBO SEAT)', date, '200', '2010', 'SAMPLE DINER LLC', 'SEAT', '', 'SAMPLE DINER LLC', '', '1 MAIL ST', ' ',
     'TAMPA', 'FL', '33601', primary, mailCounty, 'SAMPLE DINER', ' ', '200 SAMPLE TRL', 'UNIT 3', line3, city, 'FL', zip, '68', county,
     secondary, 'D7', '07', 'SEA0000002', '20', '20', '12/01/2026', '10/29/2026', seats]);
@@ -115,7 +120,7 @@ describe('parseInspectionRows', () => {
     expect(out.map((r) => r.source_key)).toEqual(['9001', '9002', '9003', '9009']);
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
-      address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-10-20',
+      address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-11-16',
       detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2 },
     });
   });
@@ -135,20 +140,22 @@ describe('parseLicenseRows and the phone rule', () => {
     expect(out[2]).toMatchObject({ address: '200 SAMPLE TRL UNIT 3 BLDG B', zip: '34236' });
     expect(out[0]).toMatchObject({
       kind: 'new_license', license_number: 'SEA0000002', business_name: 'SAMPLE DINER', address: '200 SAMPLE TRL UNIT 3',
-      city: 'SARASOTA', zip: '34231', county: 'Sarasota', phone: '9415550101', seats: 40, event_date: '2026-08-21',
+      city: 'SARASOTA', zip: '34231', county: 'Sarasota', phone: '9415550101', seats: 40, event_date: '2026-11-12',
       detail: { applicationType: 'Plan Review and Initial (COMBO SEAT)' },
     });
     expect(out[1].seats).toBeNull();
   });
 
-  test('an application number longer than the key column, or a date that is not a real day, is skipped and counted', () => {
+  test('an application number longer than the key column, or a date that is not a real day or is after today, is skipped and counted', () => {
     const rows = parseDbprCsv(licCsv([
       licRow({ app: 'A'.repeat(40) }), licRow({ app: 'A'.repeat(41) }), licRow({ app: '' }), licRow({ app: '7009', county: 'Polk' }),
       licRow({ app: '7010', date: '02/30/2026' }), licRow({ app: '7011', date: '' }),
+      // After today: malformed in the area; outside it, skipped like any row outside it.
+      licRow({ app: '7012', date: '11/20/2026' }), licRow({ app: '7013', county: 'Polk', date: '11/20/2026' }),
     ]));
     const counts = { malformed: 0 };
-    expect(svc.parseLicenseRows(rows, 'new_license', counts).map((r) => r.source_key)).toEqual(['A'.repeat(40)]);
-    expect(counts).toEqual({ malformed: 4, valid: 1 });
+    expect(svc.parseLicenseRows(rows, 'new_license', counts, '2026-11-19').map((r) => r.source_key)).toEqual(['A'.repeat(40)]);
+    expect(counts).toEqual({ malformed: 5, valid: 1 });
   });
 
   test('a row cut short is skipped and counted; an empty cell is still a cell', () => {
@@ -202,5 +209,235 @@ describe('parseLicenseRows and the phone rule', () => {
     expect(svc.pickPhone({ 'Secondary Phone Number': '041-555-0101', 'Mailing County Code': '(813) 555-0110' })).toBe('8135550110');
     expect(svc.pickPhone({ 'Secondary Phone Number': '123456789012345', 'Primary Phone Number': '9415550177' })).toBe('9415550177');
     expect(svc.pickPhone({ 'Secondary Phone Number': '1-041-555-0101' })).toBeNull();
+  });
+});
+
+describe('syncRestaurantProspects', () => {
+  let store;
+  let upserts;
+  let fetchText;
+
+  function makeStore() {
+    upserts = [];
+    return {
+      upsertRecords: jest.fn(async (records) => { upserts.push(...records); return records.length; }),
+    };
+  }
+  const files = {
+    '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9001' }), inspRow({ visit: '9001' }), inspRow({ visit: '9002', county: 'Hillsborough' })]),
+    'newfood.csv': () => licCsv([licRow({ app: '7001' })]),
+    'chgownr_food.csv': () => licCsv([licRow({ app: '7001' })]),
+  };
+  // A fixed day (Thursday Nov 19, 2026, 10:36 AM ET), so no test depends on the day it runs. A test may pass its own
+  // `now`.
+  const NOW = new Date('2026-11-19T15:36:00Z');
+  const sync = (deps) => svc.syncRestaurantProspects({ now: NOW, ...deps });
+  // Both license files with one row on the given day, for a test with its own `now`.
+  const licFiles = (date) => ({
+    'newfood.csv': () => licCsv([licRow({ app: '7001', date })]),
+    'chgownr_food.csv': () => licCsv([licRow({ app: '7001', date })]),
+  });
+  function makeFetch(overrides = {}) {
+    return jest.fn(async (url) => {
+      const name = url.split('/').pop();
+      const body = (overrides[name] || files[name] || (() => { throw new Error('unexpected url'); }))();
+      if (body instanceof Error) throw body;
+      return body;
+    });
+  }
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.DBPR_PROSPECT_SYNC_DISABLED;
+  });
+  afterAll(() => { delete process.env.DBPR_PROSPECT_SYNC_DISABLED; });
+
+  test('upserts every kind under its own key, once per (kind, source_key)', async () => {
+    store = makeStore();
+    fetchText = makeFetch();
+    const result = await sync({ fetchText, store });
+    expect(upserts.map((r) => `${r.kind}:${r.source_key}`)).toEqual(['inspection:9001', 'new_license:7001', 'owner_change:7001']);
+    expect(result.failures).toBe(0);
+    expect(result.files.inspection).toEqual({ kept: 1, malformed: 0, upserted: 1 });
+  });
+
+  test('a failed download is logged by count, other files still load, and nothing throws', async () => {
+    store = makeStore();
+    fetchText = makeFetch({ 'newfood.csv': () => new Error('HTTP 403 for SAMPLE DINER'), 'chgownr_food.csv': () => '<html>Not a CSV</html>' });
+    const result = await sync({ fetchText, store });
+    expect(result.failures).toBe(2);
+    expect(result.files.new_license).toEqual({ failed: true });
+    expect(result.files.owner_change).toEqual({ failed: true });
+    expect(upserts.map((r) => r.kind)).toEqual(['inspection']);
+    const logged = [...logger.warn.mock.calls, ...logger.info.mock.calls].map((c) => c[0]).join('\n');
+    expect(logged).not.toMatch(/SAMPLE DINER|SAMPLE TRL/);
+  });
+
+  test('rows skipped for a bad key are counted per file, and the log carries the count only', async () => {
+    store = makeStore();
+    const good = Array.from({ length: 10 }, (_, i) => licRow({ app: String(7001 + i) }));
+    fetchText = makeFetch({ 'newfood.csv': () => licCsv([...good, licRow({ app: 'X'.repeat(41) })]) });
+    const result = await sync({ fetchText, store });
+    expect(result.failures).toBe(0);
+    expect(result.files.new_license).toEqual({ kept: 10, malformed: 1, upserted: 10 });
+    expect(logger.info.mock.calls.map((c) => c[0]).join('\n')).toMatch(/new_license=10\(1 malformed\)/);
+  });
+
+  test.each([
+    ['Business (DBA-Does Business As) Name', '7fdinspi.csv', 'inspection'],
+    ['Location Address', '7fdinspi.csv', 'inspection'],
+    ['Business Name', 'newfood.csv', 'new_license'],
+    ['Location Street Address', 'newfood.csv', 'new_license'],
+    ['Primary Phone Number', 'chgownr_food.csv', 'owner_change'],
+  ])('a renamed stored column (%s in %s) refuses that file whole, so blanks are never stored', async (column, name, kind) => {
+    store = makeStore();
+    fetchText = makeFetch({ [name]: () => files[name]().replace(`"${column}"`, `"${column} (renamed)"`) });
+    const result = await sync({ fetchText, store });
+    expect(result.files[kind]).toEqual({ failed: true });
+    expect(result.failures).toBe(1);
+    expect(upserts.some((r) => r.kind === kind)).toBe(false);
+  });
+
+  test('a file with a header and no rows fails; a file whose rows all fall outside the area does not, even with a mistyped date', async () => {
+    store = makeStore();
+    // A quiet week: no new license in the area, and one row outside it dated after today.
+    const quiet = [licRow({ county: 'Polk' }), licRow({ app: '7002', county: 'Polk', date: '11/20/2026' })];
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]), 'newfood.csv': () => licCsv(quiet) });
+    const result = await sync({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
+    expect(result.failures).toBe(1);
+    expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 0, malformed: 0 }, owner_change: { kept: 1 } });
+  });
+
+  test('in the first week of July a header alone is a new fiscal year, not a failed file', async () => {
+    store = makeStore();
+    fetchText = makeFetch({ ...licFiles('06/28/2030'), '7fdinspi.csv': () => inspCsv([]) });
+    // Monday 1 July 2030, 10:36 AM ET; then Sunday 7 July late in the evening ET (already 8 July in UTC); then 8 July.
+    for (const at of ['2030-07-01T14:36:00Z', '2030-07-08T03:30:00Z']) {
+      const result = await sync({ fetchText, store, now: new Date(at) });
+      expect(result.failures).toBe(0);
+      expect(result.files.inspection).toEqual({ kept: 0, malformed: 0, upserted: 0 });
+    }
+    const later = await sync({ fetchText, store, now: new Date('2030-07-08T14:36:00Z') });
+    expect(later.files.inspection).toEqual({ failed: true });
+  });
+
+  test('malformed rows over a tenth of the rows that count fail the file, beside good rows too; a tenth passes', async () => {
+    store = makeStore();
+    const good = Array.from({ length: 9 }, (_, i) => licRow({ app: String(7101 + i) }));
+    fetchText = makeFetch({
+      // Every row in the area malformed (a new date format): no good row.
+      'newfood.csv': () => licCsv([licRow({ app: '7001', date: '2026-08-21' }), licRow({ app: '7002', date: '2026-08-22' })]),
+      // One malformed row beside nine good ones: a tenth, a stray row.
+      'chgownr_food.csv': () => licCsv([licRow({ app: '7003', date: '2026-08-21' }), ...good]),
+    });
+    const result = await sync({ fetchText, store });
+    expect(result.failures).toBe(1);
+    expect(result.files).toMatchObject({ new_license: { failed: true }, owner_change: { kept: 9, malformed: 1 } });
+    // Two rows of a new width (the risk levels filled) beside the nine good ones: over a tenth, so the file fails.
+    const filled = (app) => `${licRow({ app })},"1","1"`;
+    fetchText = makeFetch({ 'chgownr_food.csv': () => licCsv([filled('7004'), filled('7005'), ...good]) });
+    const second = await sync({ fetchText, store });
+    expect(second.files.owner_change).toEqual({ failed: true });
+  });
+  test('good inspections that cite nothing, beside a malformed row, are a quiet week, not a failed file', async () => {
+    store = makeStore();
+    const quiet = Array.from({ length: 9 }, (_, i) => inspRow({ visit: String(9301 + i), v35: 0 }));
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...quiet, inspRow({ visit: '9401', date: 'not a date' })]) });
+    const result = await sync({ fetchText, store });
+    expect(result.failures).toBe(0);
+    expect(result.files.inspection).toEqual({ kept: 0, malformed: 1, upserted: 0 });
+  });
+
+  test('a row wider than its header is malformed: an extra cell would shift the two report ids', async () => {
+    store = makeStore();
+    // An extra cell before the ids: License ID would read it, and Inspection Visit ID would read the License ID.
+    const wide = inspRow({ visit: '9003' }).replace('"5001","9003"', '"0","5001","9003"');
+    const good = Array.from({ length: 9 }, (_, i) => inspRow({ visit: String(9101 + i) }));
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...good, wide]) });
+    const result = await sync({ fetchText, store });
+    expect(result.files.inspection).toEqual({ kept: 9, malformed: 1, upserted: 9 });
+    expect(upserts.filter((r) => r.kind === 'inspection').map((r) => r.source_key)).not.toContain('9003');
+  });
+
+  test('a file without a column the parsers need, or with one named twice, is refused whole; the other files still load', async () => {
+    store = makeStore();
+    fetchText = makeFetch({
+      '7fdinspi.csv': () => files['7fdinspi.csv']().replace('"License ID"', '"License Ref"'),
+      'newfood.csv': () => files['newfood.csv']().replace('"Location City"', '"Location Town"'),
+    });
+    const result = await sync({ fetchText, store });
+    expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { failed: true }, owner_change: { kept: 1 } });
+    expect(upserts.map((r) => r.kind)).toEqual(['owner_change']);
+    // An unused column renamed to Application Number: its later cell (200) would be every row's key.
+    fetchText = makeFetch({ 'chgownr_food.csv': () => files['chgownr_food.csv']().replace('"Board Code"', '"Application Number"') });
+    expect((await sync({ fetchText, store })).files).toMatchObject({ inspection: { kept: 1 }, owner_change: { failed: true } });
+  });
+
+  test('a database failure fails that file only: it goes into the result, never out of the sync', async () => {
+    store = makeStore();
+    store.upsertRecords.mockRejectedValueOnce(new Error('connection lost'));
+    const result = await sync({ fetchText: makeFetch(), store });
+    expect(result.failures).toBe(1);
+    expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 1 }, owner_change: { kept: 1 } });
+  });
+
+  test('a row in the area dated after today is malformed and never stored', async () => {
+    store = makeStore();
+    // One row dated after today (Nov 19, 2026) beside 21 good ones: it is malformed and never stored.
+    const rows = [...Array.from({ length: 21 }, (_, i) => inspRow({ visit: String(9001 + i) })), inspRow({ visit: '9101', date: '11/20/2026' })];
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv(rows) });
+    expect((await sync({ fetchText, store })).files.inspection).toEqual({ kept: 21, malformed: 1, upserted: 21 });
+    expect(upserts.map((record) => record.source_key)).not.toContain('9101');
+    // A cut file whose one row has a mistyped year: no good row, so it fails.
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9001', date: '03/02/2031' })]) });
+    expect((await sync({ fetchText, store })).files.inspection).toEqual({ failed: true });
+  });
+
+  test('a license row loads only with the usual 36 cells: a cell added, two added or one lost is malformed', async () => {
+    store = makeStore();
+    // 37 cells: an extra cell before Secondary Phone Number would move the phone and the license number.
+    const added = licRow({ app: '7002' }).replace('"Sarasota","941-555-0101"', '"Sarasota","X","941-555-0101"');
+    const lost = licRow({ app: '7003' }).replace('"UNIT 3",', ''); // 35 cells
+    // 38 cells from two stray cells after Location County: the district would read as the license number.
+    const twoAdded = licRow({ app: '7004' }).replace('"Sarasota","941-555-0101"', '"Sarasota","X","Y","941-555-0101"');
+    const filled = `${licRow({ app: '7005' })},"1","1"`; // 38 cells: the two risk levels filled
+    // Forty good rows, so the four malformed ones stay under a tenth and the file loads.
+    const good = Array.from({ length: 40 }, (_, i) => licRow({ app: String(7101 + i) }));
+    fetchText = makeFetch({ 'newfood.csv': () => licCsv([...good, added, lost, twoAdded, filled]) });
+    const result = await sync({ fetchText, store });
+    expect(result.files.new_license).toEqual({ kept: 40, malformed: 4, upserted: 40 });
+    const malformed = ['7002', '7003', '7004', '7005'];
+    expect(upserts.filter((r) => r.kind === 'new_license' && malformed.includes(r.source_key))).toEqual([]);
+  });
+
+  test('a short first row never hides a column: the file loads and the short row is counted', async () => {
+    store = makeStore();
+    const short = licRow({ app: '7002' }).split(',').slice(0, 27).join(',');
+    const good = Array.from({ length: 9 }, (_, i) => licRow({ app: String(7001 + i) }));
+    fetchText = makeFetch({ 'newfood.csv': () => licCsv([short, ...good]) });
+    const result = await sync({ fetchText, store });
+    expect(result.failures).toBe(0);
+    expect(result.files.new_license).toEqual({ kept: 9, malformed: 1, upserted: 9 });
+  });
+
+  test.each(['1', 'true', 'ON'])('DBPR_PROSPECT_SYNC_DISABLED=%s makes the sync a no-op', async (value) => {
+    process.env.DBPR_PROSPECT_SYNC_DISABLED = value;
+    store = makeStore();
+    fetchText = makeFetch();
+    const result = await sync({ fetchText, store });
+    expect(result.skipped).toBe('disabled');
+    expect(fetchText).not.toHaveBeenCalled();
+    expect(store.upsertRecords).not.toHaveBeenCalled();
+  });
+
+  test('the Monday job runs under its own lease and a deploy-kill retry, and a failure fails the run', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+    expect(src).toMatch(/cron\.schedule\('36 10 \* \* 1', \(\) => runRestaurantProspectSyncTick\(\), \{ timezone: 'America\/New_York' \}\)/);
+    // The kill switch returns before the lease, so a run that did nothing never reads as a success in job_health.
+    expect(src).toMatch(/const runRestaurantProspectSyncTick = async \(\) => \{\s*const prospects = require\('\.\/prospects\/dbpr-restaurants'\);\s*\/\/[^\n]*\n\s*if \(prospects\.syncDisabled\(\)\) return;\s*await runExclusive\('restaurant-prospect-sync', async \(\) => \{\s*const result = await prospects\.syncRestaurantProspects\(\);/);
+    // A failed file or database call must read as a failed run in job_health: the leased callback throws (a count only).
+    expect(src).toMatch(/if \(result\.failures > 0\) throw new Error\(`restaurant prospect sync: \$\{result\.failures\} failure\(s\)`\);/);
+    expect(src).toMatch(/registerDeployKillRetry\('restaurant-prospect-sync'/);
+    // Daily in the last week of June: the files start over on July 1.
+    expect(src).toMatch(/cron\.schedule\('36 10 24-30 6 \*', \(\) => runRestaurantProspectSyncTick\(\), \{ timezone: 'America\/New_York' \}\)/);
   });
 });

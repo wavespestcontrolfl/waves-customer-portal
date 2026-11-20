@@ -1,8 +1,6 @@
 /**
  * Weekly restaurant prospect list from Florida's public restaurant files (DBPR; free, no key; owner approval
- * 2026-11-19): the store calls on `restaurant_prospects` and the pure parsers for the three files. The weekly job
- * that downloads the files and calls them is the next change; until it lands, nothing calls this file. It sends
- * nothing and calls no AI.
+ * 2026-11-19). Backend only: it fills `restaurant_prospects` and sends nothing to anyone, calls no AI.
  *
  *   7fdinspi.csv      district 7 inspections, current fiscal year. Kept: visits that cited violation 35 in
  *                     Manatee, Sarasota or Charlotte, outside Punta Gorda (not served; excluded-localities.js).
@@ -10,20 +8,42 @@
  *   chgownr_food.csv  ownership changes statewide. Kept: the same places. In this file the values under
  *                     "Primary Phone Number" and "Mailing County Code" arrive swapped, so a phone is picked by shape.
  *
+ * The state rebuilds the three files each morning, and each holds one fiscal year (July to June): on July 1 they
+ * start over. The year before is not posted as these CSVs. Its archives are statewide XLSX files, checked
+ * 2026-11-20: inspections about 55 MB, new licenses posted about July 9, no ownership-change archive since 2022-23.
+ * Reading them is not worth one day of rows a year. So the job also runs daily on June 24-30 (scheduler.js), and
+ * at most the last day of June goes unread.
+ *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
- * read yet, true = a 35A finding, false = 35B only. detail_attempts counts failed report reads.
+ * read yet, true = a 35A finding, false = 35B only. The report-page reads that fill it are the next change; until
+ * then every inspection stays NULL.
+ *
+ * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
+ * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
+ * elapsed time only, never a business name, address or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true
+ * or on); the scheduler checks it before the run starts, so job_health keeps the last real outcome.
  */
 
 const db = require('../../models/db');
+const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
+const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
+const { etDateString } = require('../../utils/datetime-et');
 
+const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
+const FILES = {
+  inspection: '7fdinspi.csv',
+  new_license: 'newfood.csv',
+  owner_change: 'chgownr_food.csv',
+};
 // Every column a parser reads. A row without one is skipped and counted (hasEveryColumn): no License ID would store
 // inspections whose report can never be read, no city or ZIP would let Punta Gorda rows through, and a renamed name,
 // address or phone column would store blanks that no later file repairs (a known key only refreshes last_seen_at).
-// An empty cell is still allowed. The two license files share one layout.
+// An empty cell is still allowed. The two license files share one layout. loadFile refuses a whole file whose
+// header lacks one.
 const PLACE_COLUMNS = ['Location City', 'Location Zip Code'];
 const LICENSE_COLUMNS = [
   'Application Number', 'Application Type', 'Application Approval Date', 'License Number', 'License Type Code',
@@ -44,8 +64,13 @@ const REQUIRED_COLUMNS = {
 // applications, and one value too long would make PostgreSQL refuse its whole insert batch.
 const KEY_MAX = 40;
 
+const FILE_TIMEOUT_MS = 60 * 1000;
 const REPORT_MAX_ATTEMPTS = 3;
 const UPSERT_CHUNK = 500;
+
+function syncDisabled(env = process.env) {
+  return /^(1|true|on)$/i.test(String(env.DBPR_PROSPECT_SYNC_DISABLED || '').trim());
+}
 
 // ── Parsers (pure) ──────────────────────────────────────────────
 
@@ -108,10 +133,10 @@ function hasEveryColumn(row, kind) {
 
 /**
  * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row cut short, or a row
- * in the area with a bad report id, date or violation-35 count, is skipped and counted in counts.malformed; a row in
- * the area that passes counts in counts.valid, cited or not.
+ * in the area with a bad report id, date (or one after `today`, when given) or violation-35 count, is skipped and
+ * counted in counts.malformed; a row in the area that passes counts in counts.valid, cited or not.
  */
-function parseInspectionRows(rows, counts = {}) {
+function parseInspectionRows(rows, counts = {}, today = null) {
   counts.malformed ??= 0;
   counts.valid ??= 0;
   const out = [];
@@ -127,7 +152,7 @@ function parseInspectionRows(rows, counts = {}) {
     const cited = wholeNumber(row['Violation 35']);
     // A row without both report ids is left out: its report could never be read, and once stored it would block a
     // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
-    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || cited === null) {
+    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || (today && eventDate > today) || cited === null) {
       counts.malformed += 1;
       continue;
     }
@@ -159,11 +184,12 @@ function parseInspectionRows(rows, counts = {}) {
 
 /**
  * New-license or ownership-change rows (same layout) -> one record per application in the three counties. A row cut
- * short, or a row in the area with no application number, one longer than the key column, or no real approval date,
- * is skipped and counted in counts.malformed: once stored, a known key only refreshes last_seen_at, so a corrected
- * copy in a later file could never fill it in. A row kept counts in counts.valid.
+ * short, or a row in the area with no application number, one longer than the key column, or no real approval date
+ * (or one after `today`, when given: a mistyped date), is skipped and counted in counts.malformed: once stored, a
+ * known key only refreshes last_seen_at, so a corrected copy in a later file could never fill it in. A row kept
+ * counts in counts.valid.
  */
-function parseLicenseRows(rows, kind, counts = {}) {
+function parseLicenseRows(rows, kind, counts = {}, today = null) {
   counts.malformed ??= 0;
   counts.valid ??= 0;
   const out = [];
@@ -175,7 +201,7 @@ function parseLicenseRows(rows, kind, counts = {}) {
     if (!inServiceArea(row['Location County'], row['Location City'], row['Location Zip Code'])) continue;
     const sourceKey = clean(row['Application Number']);
     const eventDate = parseUsDate(row['Application Approval Date']);
-    if (!sourceKey || sourceKey.length > KEY_MAX || !eventDate) {
+    if (!sourceKey || sourceKey.length > KEY_MAX || !eventDate || (today && eventDate > today)) {
       counts.malformed += 1;
       continue;
     }
@@ -248,7 +274,91 @@ async function bumpAttempts(id) {
   await db('restaurant_prospects').where({ id }).increment('detail_attempts', 1);
 }
 
+// ── Weekly job ──────────────────────────────────────────────────
+
+const defaultStore = { upsertRecords };
+
+// The row width each file has, as cells minus header names. The inspection file fills every header column. The
+// license files never fill their last two (Base Risk Level, Secondary Risk Level): every row of the 2026-11-20 files
+// has 36 cells under 38 names. Any other width means a cell went missing or crept in and every cell after it moved:
+// a shifted phone, license number or report id would pass every other check. Such a row is malformed, a 38-cell
+// license row too (two stray cells reach 38). So a file that starts to fill the risk levels fails, by the rule
+// below, until this width is changed.
+const ROW_WIDTHS = { inspection: 0, new_license: -2, owner_change: -2 };
+// Malformed rows may be at most this share of the rows that count (loadFile).
+const MALFORMED_SHARE = 0.1;
+
+async function loadFile(kind, fetchText, now) {
+  const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
+  const counts = { malformed: 0, valid: 0 };
+  const records = [];
+  const today = etDateString(now);
+  let rowsRead = 0;
+  // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
+  const header = await eachDbprCsvRow(text, (row, { cells, columns }) => {
+    rowsRead += 1;
+    if (cells - columns !== ROW_WIDTHS[kind]) {
+      counts.malformed += 1;
+      return;
+    }
+    // A row dated after today (Eastern) is a mistyped date. The parsers skip it, counted as malformed only when it is
+    // in the area (stored, it would stay wrong).
+    records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts, today) : parseLicenseRows([row], kind, counts, today)));
+  });
+  // A required column missing from the header is renamed or gone. One named twice would take the later cell (a
+  // renamed column could give two applications one key). Either way the whole file is refused.
+  if (REQUIRED_COLUMNS[kind].some((column) => header.filter((name) => name === column).length !== 1)) {
+    throw new Error('unexpected file layout');
+  }
+  // A header with no rows is a download cut short, not a quiet week, so the file fails. The files start over on
+  // July 1, so in the first week of July (Eastern date; it spans the July 4 holiday) a header alone is a new year
+  // with nothing in it yet. A file whose rows all fall outside the area is fine.
+  if (!rowsRead && !/-07-0[1-7]$/.test(today)) throw new Error('empty file');
+  // Malformed rows over a tenth of the rows that count mean a changed format (a new date format, rows of a new
+  // width), not a stray row: the file fails, even beside good rows. With no good row, one malformed row fails it. The
+  // rows that count are the good and malformed ones: malformed counts rows in the area and rows that cannot be placed
+  // (a wrong width); a row outside the area never counts, whatever its date. A file whose rows all fall outside the
+  // area, or whose good rows cite nothing, succeeds. Each file holds the whole year, so a later good read still
+  // writes every row.
+  if (counts.malformed > (counts.valid + counts.malformed) * MALFORMED_SHARE) throw new Error('too many malformed rows');
+  return { records, malformed: counts.malformed };
+}
+
+async function syncFiles(deps, result) {
+  for (const kind of Object.keys(FILES)) {
+    try {
+      const { records, malformed } = await loadFile(kind, deps.fetchText, deps.now);
+      const unique = dedupeByKey(records);
+      result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
+    } catch (err) {
+      result.failures += 1;
+      result.files[kind] = { failed: true };
+      logger.warn(`[dbpr-prospects] ${kind} file failed (${err.code || err.name})`);
+    }
+  }
+}
+
+/**
+ * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
+ * { fetchText, store, now }.
+ * @returns {Promise<{ skipped?: string, failures: number, files: object, elapsedMs: number }>}
+ */
+async function syncRestaurantProspects(deps = {}) {
+  const started = Date.now();
+  const result = { failures: 0, files: {}, elapsedMs: 0 };
+  if (syncDisabled()) return { ...result, skipped: 'disabled' };
+  await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
+  result.elapsedMs = Date.now() - started;
+  const counts = Object.entries(result.files)
+    .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${f.malformed ? `(${f.malformed} malformed)` : ''}`)
+    .join(' ');
+  logger.info(`[dbpr-prospects] ${counts} failures=${result.failures} ${result.elapsedMs}ms`);
+  return result;
+}
+
 module.exports = {
+  syncRestaurantProspects,
+  syncDisabled,
   parseUsDate,
   parseInspectionRows,
   parseLicenseRows,
