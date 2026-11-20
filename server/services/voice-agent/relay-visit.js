@@ -368,17 +368,19 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   }
 
   const [findings, allProducts] = await Promise.all([
-    // ⭐ OVERFETCH, THEN CUT AFTER THE FILTERS — the estimates/invoices rule.
+    // ⭐ READ EVERY ROW, THEN CUT AFTER THE FILTERS — the estimates/invoices rule.
     // The spoken cap used to be this query's LIMIT, but the provenance filter
     // below discards title-only raw-note rows AFTER the query: six synthesized
     // rows up front would consume the whole limit and a genuine structured
     // finding behind them was never fetched, so the report said nothing was
-    // found. The cap is applied to the FILTERED list instead; the fetch stays
-    // bounded well above any real per-visit row count.
+    // found. The cap is applied to the FILTERED list instead, and the read
+    // takes every finding of the visit (production, 2026-11-20: at most 4 on
+    // one visit): on a note record the screen below refuses rows too, so any
+    // bound before it could fill with refused rows.
     safeRows(db('service_findings')
       .where({ service_record_id: record.id })
       .orderBy('created_at', 'asc')
-      .limit(SERVICE_REPORT_FINDING_LIMIT * 10)
+      .orderBy('id', 'asc')
       .select('category', 'severity', 'title', 'detail', 'recommendation')),
     // Columns are the UNION of what the spoken report needs and what
     // buildReentryContext reads (id, applied_at, created_at, application_area,

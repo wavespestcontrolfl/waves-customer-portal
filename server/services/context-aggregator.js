@@ -259,13 +259,14 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
 async function loadLatestVisitFindings(record) {
   if (!record?.id || !require('../config/feature-gates').smsPromptB1Live() || !customerSafeVisitNotes(record)) return null;
   try {
-    // the provenance rule runs in SQL, before the cap, so title-only rows cannot use up the five.
-    // Overfetch, then cut after the filters (voice-agent/relay-visit.js does the same): on a record that
-    // carries the technician's own note, provenFindingRows screens each title and keeps a stock-detail row
-    // only for a screened label of the record's own form (finding-provenance.js), as the report does.
+    // The provenance rule runs in SQL. Every row of the visit is read (production, 2026-11-20: at most 4 on
+    // one visit) and the cut to five runs after the filters: on a record that carries the technician's own
+    // note, provenFindingRows screens each row as the report does (finding-provenance.js), so a cap before
+    // the screen could fill with refused rows and hide one that passes. voice-agent/relay-visit.js reads the
+    // same way.
     const rows = await db('service_findings').where({ service_record_id: record.id })
       .whereRaw("(btrim(COALESCE(detail, '')) <> '' OR btrim(COALESCE(recommendation, '')) <> '')")
-      .orderBy('created_at').limit(50)
+      .orderBy('created_at').orderBy('id')
       .select('title', 'detail', 'recommendation', 'severity', 'category');
     const { provenFindingRows } = require('./service-report/finding-provenance');
     // PROVENANCE, not category (the customer report's own rule, ServiceReportDocument.jsx; voice-agent/relay-visit.js applies the same one):

@@ -674,10 +674,12 @@ function customerCopyViolations(text) {
 // left out. Days stay legal: they name the next visit and when results show.
 // The one exception is a sentence that names drying or re-entry ("dry",
 // "re-enter", "keep … off", "stay … inside", "off-limits", "avoid") or the
-// people and pets a re-entry line is about: there any day word decides, a
+// people and pets a re-entry line is about: there any figure or number word
+// decides ("pets can return 11/22", "keep off 2d"), and so does a day word: a
 // unit ("dries in half a day", "keep pets off for two days"), a weekday,
-// "today", or a part of the day ("dry by this evening"). Inside such a
-// sentence the only time a note may give is the idiom "until dry". A full
+// "today", a part of the day ("dry by this evening"), a month or a season.
+// Inside such a sentence the only time a note may give is the idiom "until
+// dry". A full
 // stop ends a sentence only before a capital letter or the end of the text,
 // so "1.5 days" and "approx. 2 days" stay in their sentence; a line break
 // does not end one. Singular "second" stays legal: it is the ordinal ("second visit"), and no
@@ -686,8 +688,8 @@ function customerCopyViolations(text) {
 // ("Have a great afternoon!"). A count
 // after one of those time words ("at 3 stations") is withheld too: nothing
 // tells it from a clock time. A read-only production count of this rule
-// (2026-11-20): a match in 46 of 474 pest customer recaps (2 clock times; in
-// 41 a drying word and a day unit share a sentence) and in 48 of 401
+// (2026-11-20): a match in 47 of 474 pest customer recaps (2 clock times; in
+// 41 a drying word and a day unit share a sentence) and in 56 of 401
 // technician notes, none in the form lists or the finding fields. The
 // access-code check matched none of them.
 const NOTE_HOUR_SRC = '(?:\\p{N}{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
@@ -711,8 +713,18 @@ const NOTE_DRY_REENTRY_SRC = `(?<!\\p{L})(?:${[
   '(?:avoid|avoids|avoiding|avoided)',
   '(?:pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|kids?|child(?:ren)?|toddlers?|bab(?:y|ies)|people|family|anyone|everyone|guests?)',
 ].join('|')})(?!\\p{L})`;
-// A day word: a unit from a day up, a weekday, today, or a part of the day.
-const NOTE_DAY_WORD_SRC = '(?<!\\p{L})(?:days?|nights?|weeks?|weekends?|fortnights?|months?|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mornings?|afternoons?|evenings?|sunset|sundown|sunrise|dawn|dusk|lunch(?:time)?|dinner(?:time)?|bedtime|breakfast)(?!\\p{L})';
+// What withholds a drying or re-entry sentence: any figure, any number word,
+// a unit from a day up, a weekday, today, a part of the day or a meal, a
+// month (not "may", the verb) or a season (not "fall", the verb).
+const NOTE_MARKED_TIME_SRC = `(?:\\p{N}|(?<!\\p{L})(?:${[
+  'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen',
+  'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|dozen|half|couple',
+  'days?|nights?|weeks?|weekends?|fortnights?|months?|today',
+  'monday|tuesday|wednesday|thursday|friday|saturday|sunday',
+  'mornings?|afternoons?|evenings?|sunset|sundown|sunrise|dawn|dusk|lunch(?:time)?|dinner(?:time)?|bedtime|breakfast',
+  'january|february|march|april|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec',
+  'spring|summer|autumn|winter',
+].join('|')})(?!\\p{L}))`;
 const NOTE_RECORD_TIME_RE = new RegExp([
   '(?<!\\p{L})(?:half-?|quarter-?)?(?:hours?|minutes?|mins?|hrs?|secs?|seconds)(?!\\p{L})',
   '\\p{N}\\s*[hm](?!\\p{L})',
@@ -725,8 +737,8 @@ const NOTE_RECORD_TIME_RE = new RegExp([
   `(?<!\\p{L})${NOTE_HOUR_SRC}\\s+(?:in\\s+the\\s+(?:morning|afternoon|evening|night)|at\\s+night|this\\s+(?:morning|afternoon|evening))`,
   `(?<!\\p{L})(?:at|after|until|till|til|by|before|around|past|between|from)\\s+(?:about\\s+|around\\s+)?(?:${NOTE_HOUR_SRC}|${NOTE_24H_CLOCK_SRC})(?![\\p{L}\\p{N}])`,
   '\\b(?:overnight|tonight|tomorrow|noon|midnight)\\b',
-  `${NOTE_DRY_REENTRY_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DAY_WORD_SRC}`,
-  `${NOTE_DAY_WORD_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DRY_REENTRY_SRC}`,
+  `${NOTE_DRY_REENTRY_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_MARKED_TIME_SRC}`,
+  `${NOTE_MARKED_TIME_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DRY_REENTRY_SRC}`,
 ].join('|'), 'iu');
 
 function noteRecordCopyViolations(text) {

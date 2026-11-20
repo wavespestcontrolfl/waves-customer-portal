@@ -594,10 +594,9 @@ describe('get_service_report', () => {
     const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toContain('Ant trail at kitchen slab');
     expect(out).not.toContain('raw note');
-    // The mock ignores LIMIT, so pin the overfetch bound itself: the query must
-    // fetch beyond the spoken cap or the filter has nothing left to keep.
-    const limitArgs = builders.service_findings.limit.mock.calls.map(([n]) => n);
-    expect(Math.max(...limitArgs)).toBeGreaterThan(6);
+    // The mock ignores LIMIT, so pin the read itself: it takes every finding of
+    // the visit, as any bound before the screens could fill with refused rows.
+    expect(builders.service_findings.limit).not.toHaveBeenCalled();
   });
 
   // ⭐ THE CAP RUNS AFTER THE COMPLIANCE SCREEN TOO. Six leading findings whose

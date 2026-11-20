@@ -172,6 +172,13 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the yard. Keep off the treated grass for the rest of today.',
       'I treated the yard. The spray will be dry by this evening.',
       'I treated the yard. Stay inside until after lunch.',
+      // Any figure or number word, a month or a season.
+      'I treated the yard. Pets can return 11/22.',
+      'I treated the yard. Keep off 2d.',
+      'I treated the yard. Keep pets inside until twenty past.',
+      'I treated the yard. Keep pets inside for another two.',
+      'I treated the yard. Keep pets off the lawn until November.',
+      'I treated the yard. Avoid the treated soil until spring.',
     ]) {
       const parsed = reportNoteCustomerCopy(stored({ text }));
       expect(parsed.body).toBeNull();
@@ -181,6 +188,9 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the lanai. Keep people and pets off treated areas until dry.',
       'I placed bait in the garage. I will check the stations again in 14 days.',
       'I treated the lanai. Keep an eye out for activity over the next two weeks.',
+      // "may" the verb and "fall" the verb are no month or season.
+      'I treated the lanai. Pets may return once it is dry.',
+      'I treated the lanai. The webs fall away once the spray is dry.',
       // A full stop before a capital ends the sentence.
       'I treated the lanai. Keep pets off until dry. In two weeks you should see fewer ants.',
     ]) expect(reportNoteCustomerCopy(stored({ text })).body).toBe(text);

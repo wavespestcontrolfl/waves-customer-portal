@@ -518,8 +518,9 @@ text left is then dropped too, the stored "no activity" row of the pest,
 mosquito, termite and rodent lines among them (its fixed detail, "were clear",
 fails the screen). The texting prompt (`loadLatestVisitFindings`)
 and the voice relay (`get_service_report`) run `provenFindingRows` too, after
-their own rule that a row needs a detail or a recommendation, and cut to their
-limits (5 and 6) after the filters.
+their own rule that a row needs a detail or a recommendation. Each reads every
+finding of the visit, with no cap before the screens (production, 2026-11-20:
+at most 4 on one visit), and cuts to its limit (5 and 6) after the filters.
 
 Pest rain outlook (owner 2026-10-24; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
@@ -3113,15 +3114,16 @@ the copy. A count after such a time word ("at 3 stations") is withheld too.
 Days stay legal (the next visit, when results show), except in a sentence
 that names drying or re-entry ("dry", "re-enter", "keep … off", "stay …
 inside", "off-limits", "avoid") or the people and pets a re-entry line is
-about: there any day word withholds the copy (a unit from a day up, a weekday,
-"today", a part of the day or a meal), so "until dry" is the only time such a
-sentence may give. A full stop ends that sentence only before a capital letter
+about: there any figure or number word withholds the copy ("11/22", "2d"),
+and so does a day word (a unit from a day up, a weekday, "today", a part of
+the day or a meal, a month other than "may", a season other than "fall"), so
+"until dry" is the only time such a sentence may give. A full stop ends that sentence only before a capital letter
 or the end ("1.5 days", "approx. 2 days" stay in it); a line break does not.
 "Keep an eye out" is no keep-off. The ordinal "second" and "am" after
 anything but a number stay legal, and so does a part of the day with no hour
 outside such a sentence.
-Production count (read-only, 2026-11-20): the rule matches 46 of 474 pest
-customer recaps and 48 of 401 technician notes, none of the form lists or
+Production count (read-only, 2026-11-20): the rule matches 47 of 474 pest
+customer recaps and 56 of 401 technician notes, none of the form lists or
 finding fields; the access-code check matches none. Otherwise it is what the report builds with no free text (the lawn visit
 summary, or on a live view a narrative of the typed card under that narrative's
 own gate, which reads an empty recap) or empty, never `customerRecap`. A
