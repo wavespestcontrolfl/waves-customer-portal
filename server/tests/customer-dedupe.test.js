@@ -2074,9 +2074,18 @@ describe('executeMerge', () => {
           { noLoserRow: true, timer: X2 },
         );
         expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
-        expect(recorded.kept_customer_timer).toEqual({ row_id: 'pp-1', before: X2 });
+        expect(recorded.kept_customer_timer).toEqual({ row_id: 'pp-1', before: X2, home_changed_at: null });
         expect(recorded.moved_pref_timer).toBe(null);
         expect(result.repointed['property_preferences.kept_customer_sprinkler_timer_cleared']).toBe(1);
+      });
+
+      it('only the kept customer has a row: the row\'s home stamp after the merge\'s own stamp is journaled with the cleared timer', async () => {
+        const STAMP = new Date('2026-11-01T14:00:00.000Z');
+        const { recorded } = await merge(
+          { address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' },
+          { noLoserRow: true, timer: { ...X2, irrigation_home_changed_at: STAMP } },
+        );
+        expect(recorded.kept_customer_timer).toEqual({ row_id: 'pp-1', before: X2, home_changed_at: STAMP.getTime() });
       });
 
       it('only the kept customer has a row and their home does not change: their timer stays and nothing is journaled', async () => {

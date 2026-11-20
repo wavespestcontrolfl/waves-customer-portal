@@ -1724,18 +1724,33 @@ describe('revertMerge', () => {
     // A merge that cleared the kept customer's own timer because its backfill changed their home (only they had a
     // preferences row) journaled it as kept_customer_timer: the undo that takes that home back puts it back.
     const timerWrites = (state) => state.flagRestores.filter((r) => r.table === 'property_preferences' && 'irrigation_controller_brand' in r.payload);
-    const CLEARED_BY_MERGE = { row_id: 'pp-9', before: X2 };
+    const MERGE_STAMP = new Date('2026-07-30T04:00:00.000Z');
+    const CLEARED_BY_MERGE = { row_id: 'pp-9', before: X2, home_changed_at: MERGE_STAMP.getTime() };
+    const EMPTY_SINCE_MERGE = { ...NO_TIMER, irrigation_home_changed_at: MERGE_STAMP };
     it('the merge cleared the kept customer\'s own timer: the undo that takes the inherited unit back puts it back on their empty row', async () => {
-      const { error, state } = await revertWithPrefs(NO_TIMER, { address_line2: 'Apt 4' }, OWN_STREET, CLEARED_BY_MERGE);
+      const { error, state } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, OWN_STREET, CLEARED_BY_MERGE);
       expect(error).toBeUndefined();
       expect(timerWrites(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-9', customer_id: WINNER }, payload: X2 }]);
+    });
+
+    it('a move since (only the street changed, the inherited unit stays): the timer is not put back at the new street, and the undo says so', async () => {
+      const MOVED_AT = new Date('2026-08-15T15:00:00.000Z');
+      const { error, state, result } = await revertWithPrefs(
+        { ...NO_TIMER, irrigation_home_changed_at: MOVED_AT },
+        { address_line2: 'Apt 4' },
+        { address_line1: '200 Other Ave', city: 'Bradenton' },
+        CLEARED_BY_MERGE,
+      );
+      expect(error).toBeUndefined();
+      expect(timerWrites(state)).toEqual([]);
+      expect(result.skipped).toContainEqual({ key: 'property_preferences.kept_customer_sprinkler_timer', reason: 'home_changed_since_merge' });
     });
 
     it('a timer entered since still REFUSES; a journaled row that is not theirs now, or an undo that keeps their home, writes nothing', async () => {
       const refused = await revertWithPrefs({ ...NO_TIMER, irrigation_controller_brand: 'rain_bird' }, { address_line2: 'Apt 4' }, OWN_STREET, CLEARED_BY_MERGE);
       expect(refused.error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer is on file for the kept customer/) });
       for (const [backfills, entry] of [[{ address_line2: 'Apt 4' }, { ...CLEARED_BY_MERGE, row_id: 'pp-other' }], [{ zip: '34205' }, CLEARED_BY_MERGE]]) {
-        const { error, state } = await revertWithPrefs(NO_TIMER, backfills, OWN_STREET, entry);
+        const { error, state } = await revertWithPrefs(EMPTY_SINCE_MERGE, backfills, OWN_STREET, entry);
         expect(error).toBeUndefined();
         expect(timerWrites(state)).toEqual([]);
       }
