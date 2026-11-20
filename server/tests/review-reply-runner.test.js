@@ -622,17 +622,16 @@ describe('processDueAutoReplies — state machine', () => {
     expect(forced?.id).toBe('old-q');
   });
 
-  test('a reconciliation that still fails on the last attempt parks as reconcile_failed, not google_failed, and a failed bell re-rings the same way', async () => {
+  test('a failed live-reply reconciliation parks as reconcile_failed at once: never already_replied (codex r74), not google_failed, no retry; a failed bell re-rings the same way', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    // A reconcile retry carries the verified draft it stored; it reuses it and never drafts.
-    const fp = Runner.reviewFingerprint(row());
-    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 2, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
+    state.rows = [row()];
     const { ReviewReplyError } = require('../services/review-reply/publisher');
     mockPublish.mockRejectedValueOnce(new ReviewReplyError('reconcile_failed', 'Google shows an owner reply but recording it failed: connection reset', { status: 503 }));
     // The notifier is down: the bell fails and the row is stamped for the bell sweep.
     mockNotify.mockReset().mockResolvedValue(null);
-    await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 3 });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ claimed: 1, parked: 1, retry: 0, skipped: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 1, auto_reply_claimed_until: null });
     const bell = mockNotify.mock.calls.find((c) => c[3]?.metadata?.reason === 'reconcile_failed');
     expect(bell[1]).toBe('Review reply needs reconciling');
     expect(bell[2]).toContain('not recorded here (Google shows an owner reply but recording it failed: connection reset)');
@@ -657,55 +656,16 @@ describe('processDueAutoReplies — state machine', () => {
     mockNotify.mockReset().mockResolvedValue({});
   });
 
-  test('a reconcile_failed retry never drafts: it reuses the verified draft, and with none it parks for reconciliation', async () => {
-    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    const fp = Runner.reviewFingerprint(row());
-    const stored = { auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } };
-    // The retry goes straight to the publisher, whose live read finds the owner reply and records it.
-    state.rows = [row(stored)];
-    const { ReviewReplyError } = require('../services/review-reply/publisher');
-    mockPublish.mockRejectedValueOnce(new ReviewReplyError('already_replied', 'This review already has a posted reply', { status: 409 }));
-    await Runner.processDueAutoReplies();
-    expect(mockDraft).not.toHaveBeenCalled();
-    expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied' });
-    // A stored draft that no longer verifies is not redrafted: the row parks for reconciliation, with its bell.
-    state.rows = [row({ ...stored, id: 'rc2' })];
-    mockVerify.mockReturnValueOnce('repetitive_opening');
-    mockNotify.mockClear();
-    await Runner.processDueAutoReplies();
-    expect(mockDraft).not.toHaveBeenCalled();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed', auto_reply_claimed_until: null });
-    expect(mockNotify.mock.calls.find((c) => c[3]?.metadata?.reason === 'reconcile_failed')?.[1]).toBe('Review reply needs reconciling');
-  });
-
-  test('a later failure that learns nothing new keeps reconcile_failed: a 403 on the live read retries and parks as reconcile_failed, never google_failed', async () => {
+  test('a reconcile_failed retry row from before this change parks for reconciliation at its claim, with no draft and no publish', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const fp = Runner.reviewFingerprint(row());
     state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
-    mockPublish.mockRejectedValueOnce(googleFailure(403));
-    await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 2 });
-    state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
-    // jsonb reads back as an object (the fake keeps the written string).
-    state.rows[0].auto_reply_grounding = JSON.parse(state.rows[0].auto_reply_grounding);
-    mockPublish.mockRejectedValueOnce(googleFailure(404));
     mockNotify.mockClear();
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 3 });
-    expect(mockNotify.mock.calls.find((c) => c[3]?.metadata?.reason === 'reconcile_failed')?.[1]).toBe('Review reply needs reconciling');
-    expect(mockNotify.mock.calls.some((c) => c[1] === 'Review reply needs you')).toBe(false);
     expect(mockDraft).not.toHaveBeenCalled();
-  });
-
-  test('a failed live-reply reconciliation retries instead of closing the row as already_replied (codex r74)', async () => {
-    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    state.rows = [row()];
-    const { ReviewReplyError } = require('../services/review-reply/publisher');
-    mockPublish.mockRejectedValueOnce(new ReviewReplyError('reconcile_failed', 'Google shows an owner reply but recording it failed: connection reset', { status: 503 }));
-    const stats = await Runner.processDueAutoReplies();
-    expect(stats).toMatchObject({ claimed: 1, retry: 1, skipped: 0 });
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 1, auto_reply_claimed_until: null });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed', auto_reply_claimed_until: null });
+    expect(mockNotify.mock.calls.find((c) => c[3]?.metadata?.reason === 'reconcile_failed')?.[1]).toBe('Review reply needs reconciling');
   });
 
   test('batch rows re-stamp their claim just before processing; a lost claim is skipped without drafting (codex r73)', async () => {

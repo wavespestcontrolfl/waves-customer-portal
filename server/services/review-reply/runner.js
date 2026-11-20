@@ -62,7 +62,7 @@ const GOOGLE_RETRY_DELAYS_MIN = [10, 30, 60, 180, 360, 720];
 // the short MAX_ATTEMPTS retry, as before.
 const GOOGLE_TEMPORARY_STATUSES = new Set([404, 408, 429]);
 const googleMayAcceptLater = (cause) => cause?.timedOut === true || GOOGLE_TEMPORARY_STATUSES.has(cause?.googleStatus) || cause?.googleStatus >= 500;
-const PUBLISH_RETRYABLE_CODES = new Set([CODES.LOCK_BUSY, CODES.GOOGLE_FAILED, CODES.NO_RESOURCE, CODES.RECONCILE_FAILED, 'account_read_failed', 'unexpected']);
+const PUBLISH_RETRYABLE_CODES = new Set([CODES.LOCK_BUSY, CODES.GOOGLE_FAILED, CODES.NO_RESOURCE, 'account_read_failed', 'unexpected']);
 const LAST_RETRY_MARGIN_MS = 60 * 60 * 1000;
 const IDENTITY_BACKOFF_MIN = 60;
 // Deploy-forward is a property of the REVIEW: nothing older than this at
@@ -688,12 +688,20 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // (Post now on such a row parks the freshly drafted text for the person).
   const humanOnly = rating === 0 || rating <= 3 || rating < cfg.minStars;
 
+  // A reconcile_failed retry row from before 2026-11-20 (the runner no
+  // longer retries reconciliation, see the publish catch): it parks for
+  // reconciliation with no draft, and the hourly sync records the reply.
+  if (intent !== 'post_now' && merged.auto_reply_status === STATUS.FAILED && merged.auto_reply_reason === CODES.RECONCILE_FAILED) {
+    if (await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: CODES.RECONCILE_FAILED })) await reconcileFailedBell(merged);
+    return { outcome: 'parked', reason: CODES.RECONCILE_FAILED };
+  }
+
   // A publish retry reuses the verifier-approved draft it already produced —
   // redrafting would burn attempts on the model (and could park as
   // provider_down with a perfectly good reply on the row). Only rows that
   // never produced a draft, or whose stored draft came from a different
   // prompt version, go back to the model.
-  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, CODES.RECONCILE_FAILED, 'gbp_not_configured', 'account_read_failed', 'google_uncertain_cleared', 'unexpected', 'runner_error']);
+  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, 'gbp_not_configured', 'account_read_failed', 'google_uncertain_cleared', 'unexpected', 'runner_error']);
   const storedGrounding = merged.auto_reply_grounding && typeof merged.auto_reply_grounding === 'object' ? merged.auto_reply_grounding : null;
   const reusable = merged.auto_reply_status === STATUS.FAILED
     && PUBLISH_RETRY_REASONS.has(merged.auto_reply_reason)
@@ -721,15 +729,6 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     } else {
       logger.info(`[review-auto-reply] stored draft for ${merged.id} no longer verifies (${verdict}) — redrafting`);
     }
-  }
-  // A reconcile retry (Google shows an owner reply that was not recorded
-  // here) never drafts: no new reply can go over that one. It reuses the
-  // verified draft, so the publisher's live read records the reply. With no
-  // reusable draft it parks for reconciliation (bell; Monday "check Google
-  // first"), and the sync records the reply when it reads it.
-  if (!reuseOk && intent !== 'post_now' && merged.auto_reply_status === STATUS.FAILED && merged.auto_reply_reason === CODES.RECONCILE_FAILED) {
-    if (await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: CODES.RECONCILE_FAILED })) await reconcileFailedBell(merged);
-    return { outcome: 'parked', reason: CODES.RECONCILE_FAILED };
   }
   if (!reuseOk) {
     // Draft (grounding is public-safe by construction).
@@ -958,11 +957,6 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       return { outcome: 'skipped', reason: code };
     }
     if (transientStale) code = 'account_read_failed';
-    // Google showed an owner reply on an earlier try that was not recorded
-    // here. A later failure that learns nothing new (a 403 or 404 on the live
-    // read, a busy lock) does not undo that: the row keeps reconcile_failed,
-    // so its retry, its park bell and the Monday list still say check Google.
-    if (merged.auto_reply_reason === CODES.RECONCILE_FAILED) code = CODES.RECONCILE_FAILED;
     const attempts = (merged.auto_reply_attempts || 0) + 1;
     // Every transient class (lock contention, unexpected) shares ONE retry
     // ceiling (MAX_ATTEMPTS); a Google failure that Google may still accept
@@ -982,8 +976,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     const dueMs = Date.now() + delayMin * 60000;
     const windowMs = cfg.maxQueueAgeHours * 3600000;
     const lastRetryMs = new Date(merged.review_created_at).getTime() + windowMs - Math.min(LAST_RETRY_MARGIN_MS, windowMs / 4);
-    // RECONCILE_FAILED (codex r74): Google shows an owner reply but the
-    // local record of it failed — transient, retry; never "already replied".
+    // RECONCILE_FAILED (codex r74) is never "already replied", and it is not
+    // retried: a retry re-ran the whole publish path, where a later failure
+    // could hide what Google showed. It parks for reconciliation (below),
+    // and the hourly sync records the reply Google shows.
     if (PUBLISH_RETRYABLE_CODES.has(code) && dueMs < lastRetryMs) {
       const due = new Date(dueMs).toISOString();
       await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: (draft.reused && merged.auto_reply_drafted_at) || new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
