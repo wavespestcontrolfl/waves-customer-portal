@@ -23,6 +23,7 @@ jest.mock('../services/service-report/application-conditions', () => ({
 }));
 
 const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
+const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 
 // scheduledServices/serviceRecords rows are pre-resolved fixtures — this
 // stub never evaluates the real COALESCE/divergence SQL (that lives in
@@ -240,7 +241,8 @@ describe('buildReportCopyContext — writer rules', () => {
       { id: 'sr-1', customer_id: 'c1', status: 'completed', service_line: 'pest', service_date: '2026-04-15', service_type: 'Pest Control Service' },
     ],
     serviceFindings: [
-      { service_record_id: 'sr-1', category: 'no_activity', severity: 'info', title: 'No activity observed this visit' },
+      // The row completion writes (its detail included).
+      { service_record_id: 'sr-1', ...buildNoActivityFinding('pest') },
     ],
     propertyPreferences: [{ customer_id: 'c1', pet_count: 2, chemical_sensitivities: null }],
   });

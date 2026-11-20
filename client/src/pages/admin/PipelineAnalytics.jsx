@@ -11,9 +11,14 @@ import {
 import { classifyEstimateForPipeline } from "./EstimatePage";
 import { Button, Card } from "../../components/ui";
 import { etParts } from "../../lib/timezone";
+// The "Call today" rule lives in shared/estimate-call-today.cjs so the 9 AM push counts the same list.
+import {
+  HOUR,
+  lastEngagementMs,
+  isCallTodayEstimate,
+} from "@estimate-call-today";
 
 const DAY = 86400000;
-const HOUR = 3600000;
 const DATE_RANGES = [
   { key: "all", label: "All" },
   { key: "7d", label: "7d" },
@@ -100,20 +105,6 @@ export function withinDateRange(iso, range, nowMs = Date.now()) {
   return true;
 }
 
-// Most recent customer touch on the estimate. First-view timestamps alone
-// misclassify customers who re-open or click days later, so idle-time checks
-// must key off the latest of view/re-view/click.
-export function lastEngagementMs(estimate) {
-  const stamps = [
-    estimate?.lastViewedAt,
-    estimate?.viewedAt,
-    estimate?.lastClickedAt,
-  ]
-    .map((iso) => (iso ? new Date(iso).getTime() : NaN))
-    .filter((ts) => !Number.isNaN(ts));
-  return stamps.length ? Math.max(...stamps) : null;
-}
-
 // When the offer left the pipeline: acceptance, decline, or expiry date.
 // Fallbacks cover rows that predate the timestamp columns. Returns null for
 // still-open offers.
@@ -131,7 +122,12 @@ export function resolutionDate(estimate) {
 // viewed offer gone quiet past the going-cold window (7d+). Kept DISJOINT from
 // isGoingColdEstimate so the two "Needs attention" cards never double-count the
 // same offer — every open offer lands in at most one bucket.
+// None of the three follow-up buckets lists a self-serve quote nobody delivered
+// (undeliveredSelfServe, from the server: plan restart, plan start, report
+// card): the customer opened it from the portal, and it carries a
+// zero-follow-up contract.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
+  if (estimate?.undeliveredSelfServe) return false;
   if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
     const sentAt = new Date(estimate.sentAt).getTime();
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
@@ -143,35 +139,28 @@ export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   return false;
 }
 
+// The Sent tile's rows, shared with its drilldown (the Estimates page's
+// sent_group filter) so the count and the list always agree: awaiting,
+// viewed (follow_up) and scheduled estimates, except a self-serve quote
+// nobody delivered that still waits on the customer. That is no send (codex
+// pre-push P1). One staff scheduled to send counts, as scheduled.
+const SENT_GROUP_CLASSES = new Set(["awaiting", "follow_up", "scheduled"]);
+export function isSentGroupEstimate(estimate) {
+  if (!SENT_GROUP_CLASSES.has(estimate?._class)) return false;
+  return !(estimate._class === "awaiting" && estimate.undeliveredSelfServe);
+}
+
 // Going cold = the early-warning window only: a VIEWED offer idle 48h–7d. A
 // never-opened send is follow-up-overdue (not "cold"), and past 7d a viewed
 // offer crosses into follow-up-overdue too — so this is the complement slice,
 // disjoint from isFollowUpOverdueEstimate.
 export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== "viewed") return false;
+  if (estimate?.status !== "viewed" || estimate.undeliveredSelfServe)
+    return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;
   const age = nowMs - last;
   return age > 48 * HOUR && age < 168 * HOUR;
-}
-
-// Call today = the hot window the 48h "Going cold" check misses: a VIEWED
-// offer whose last customer touch was 2h–48h ago and that nobody has phoned or followed up on since.
-// The upper edge is inclusive and isGoingColdEstimate starts strictly past 48h, so the two never
-// share an offer (and the 7d+ overdue bucket sits further out still). Needs a phone to call.
-export function isCallTodayEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== "viewed" || estimate.archivedAt) return false;
-  if (!String(estimate.customerPhone || "").trim()) return false;
-  const last = lastEngagementMs(estimate);
-  if (last == null) return false;
-  const age = nowMs - last;
-  if (age < 2 * HOUR || age > 48 * HOUR) return false;
-  // Any contact AFTER the customer's last touch takes the offer off the list.
-  for (const contact of [estimate.lastCalledAt, estimate.lastFollowUpAt]) {
-    const ts = contact ? new Date(contact).getTime() : NaN;
-    if (!Number.isNaN(ts) && ts > last) return false;
-  }
-  return true;
 }
 
 // Pick reason = an offer the expiry sweep closed after the customer opened
@@ -583,9 +572,14 @@ export default function PipelineAnalytics({
     const readyToSend = classified.filter(
       (e) => e._class === "ready_to_send",
     ).length;
-    const awaiting = classified.filter((e) => e._class === "awaiting").length;
-    const followUp = classified.filter((e) => e._class === "follow_up").length;
-    const scheduled = classified.filter((e) => e._class === "scheduled").length;
+    // The Sent tile and its lines count isSentGroupEstimate rows, the rows
+    // its drilldown lists.
+    const sentGroup = classified.filter(isSentGroupEstimate);
+    const sentOfClass = (cls) =>
+      sentGroup.filter((e) => e._class === cls).length;
+    const awaiting = sentOfClass("awaiting");
+    const followUp = sentOfClass("follow_up");
+    const scheduled = sentOfClass("scheduled");
     // Won = won forever: archiving an accepted estimate (housekeeping)
     // must not shrink the funnel, so archived-accepted rows still count.
     const won = classified.filter(
@@ -651,7 +645,7 @@ export default function PipelineAnalytics({
         drafts: needsEstimate + readyToSend,
         needsEstimate,
         readyToSend,
-        sent: awaiting + followUp + scheduled,
+        sent: sentGroup.length,
         awaiting,
         viewed: followUp,
         scheduled,

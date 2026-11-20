@@ -5,16 +5,14 @@
  *             curb, misses ~4 minutes of pulling out, parking and idling)
  *   minutes = 7.88 + 2.20 x straight-line miles (the calibrated estimate is
  *             4.25 + 2.35; per leg, GPS minus estimate: median +1.9, p75 +7.6)
- * With GATE_DRIVE_TIME_CALIBRATION on, every drive leg in the scheduling math
- * carries this: estimate legs use the fitted pair, Google legs get the park
+ * Every drive leg in the scheduling math carries this: estimate legs use the fitted pair, Google legs get the park
  * minutes added when READ (never stored in a cache, so the raw values stay
  * intact). Nothing is fitted or derived from Google answers (Google Maps
  * terms).
  *
- * GATE_DRIVE_TIME_CALIBRATION is read at CALL time via gateEnvValue. Settings (env, read at call time): a finite number inside its bounds, else
+ * Settings (env, read at call time): a finite number inside its bounds, else
  * the default.
  */
-const { gateEnvValue } = require('../../config/feature-gates');
 
 const SETTINGS = {
   fixed: { env: 'DRIVE_CLOCK_FIXED_MINUTES', fallback: 7.9, min: 0, max: 30 },
@@ -22,12 +20,6 @@ const SETTINGS = {
   park: { env: 'DRIVE_CLOCK_PARK_MINUTES', fallback: 4, min: 0, max: 20 },
 };
 const GOOGLE_SOURCES = new Set(['google_traffic', 'google_road']);
-
-// The drive clock runs whenever GATE_DRIVE_TIME_CALIBRATION is on: with that
-// off, every leg, Google's park minutes and the saved label all stay legacy.
-function driveClockLive() {
-  return gateEnvValue('GATE_DRIVE_TIME_CALIBRATION');
-}
 
 function driveClockSetting(name) {
   const { env, fallback, min, max } = SETTINGS[name];
@@ -41,24 +33,24 @@ function driveClockMinutes(miles) {
   return driveClockSetting('fixed') + miles * driveClockSetting('perMile');
 }
 
-/** A Google leg's minutes plus the park minutes (drive clock on), else unchanged. A
- * same-place leg (0 minutes) never carries them. */
+/** A Google leg's minutes plus the park minutes. A same-place leg (0 minutes)
+ * never carries them. */
 function parkedMinutes(minutes) {
-  if (!driveClockLive() || !(minutes > 0)) return minutes;
+  if (!(minutes > 0)) return minutes;
   return minutes + driveClockSetting('park');
 }
 
 /** A travel answer ({ minutes, source }) with the park minutes added when it
  * came from Google; a model or unverified answer is returned as is. */
 function withDriveClockPark(answer) {
-  if (!answer || !GOOGLE_SOURCES.has(answer.source) || !driveClockLive()) return answer;
+  if (!answer || !GOOGLE_SOURCES.has(answer.source)) return answer;
   const minutes = parkedMinutes(answer.minutes);
   return minutes === answer.minutes ? answer : { ...answer, minutes };
 }
 
 /** The `drive_model` label saved with a day's quality numbers. */
 function driveModelLabel() {
-  return driveClockLive() ? 'drive_clock' : 'legacy';
+  return 'drive_clock';
 }
 
-module.exports = { driveClockLive, driveClockSetting, driveClockMinutes, parkedMinutes, withDriveClockPark, driveModelLabel };
+module.exports = { driveClockSetting, driveClockMinutes, parkedMinutes, withDriveClockPark, driveModelLabel };

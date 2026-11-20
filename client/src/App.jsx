@@ -1,7 +1,8 @@
 import React, { Component, useEffect, useRef, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useOutletContext, useParams } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import { CHUNK_RELOAD_FLAG, isStaleChunkReloadPending, markStaleChunkReloadPending } from './lib/staleChunkReload';
+import { PortalUpdateBar, PortalUpdateGate } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -252,6 +253,8 @@ import AdminChangePasswordPage from './pages/AdminChangePasswordPage';
 import AdminForgotPasswordPage from './pages/AdminForgotPasswordPage';
 import AdminResetPasswordPage from './pages/AdminResetPasswordPage';
 import AdminLayout from './components/AdminLayoutV2';
+import AdminFieldViewEntry from './components/AdminFieldViewEntry';
+import AdminIndexRedirect from './components/AdminIndexRedirect';
 import TechPortalRedirect from './components/tech/TechPortalRedirect';
 import TechNavigationLock from './components/tech/TechNavigationLock';
 import InstallPrompt from './components/InstallPrompt';
@@ -412,6 +415,7 @@ const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage
 const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestPressureSettingsPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
 const CareersInterviewPage = lazyWithRetry(() => import('./pages/CareersInterviewPage'));
+const CareersOfferPage = lazyWithRetry(() => import('./pages/CareersOfferPage'));
 const CardPage = lazyWithRetry(() => import('./pages/CardPage'));
 const AdminTwoStepPage = lazyWithRetry(() => import('./pages/AdminTwoStepPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
@@ -456,13 +460,6 @@ const AdminTodayShell = lazyWithRetry(() => import('./pages/admin/TodayShell'));
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
 const ServiceOutlinePage = lazyWithRetry(() => import('./pages/ServiceOutlinePage'));
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
-
-// /admin lands technicians on their field workspace; everyone else on the
-// dashboard (a requireAdmin page that would be a wall of 403s for a technician).
-function AdminIndexRedirect() {
-  const role = useOutletContext()?.user?.role;
-  return <Navigate to={role === 'technician' ? 'today' : 'dashboard'} replace />;
-}
 
 // Route-tree error boundary: keyed on pathname so navigating away from a
 // crashed page automatically clears the fallback. Customer routes previously
@@ -681,7 +678,9 @@ export default function App() {
         <PublicFunnelTracking />
         <AdminSafariShell />
         <InstallPrompt />
+        <PortalUpdateBar />
         <BiometricGate>
+        <PortalUpdateGate fallback={<RouteFallback label="Loading the new version..." />}>
         <RoutesErrorBoundary>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
@@ -690,6 +689,8 @@ export default function App() {
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><RatePage /></WavesShell></Suspense>} />
           {/* Applicant self-scheduling link (recruiting-comms) — same external-WavesShell shape as /rate/:token. */}
           <Route path="/careers/interview/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><CareersInterviewPage /></WavesShell></Suspense>} />
+          {/* Applicant job offer link (job offer flow) — same shape as the interview link above. */}
+          <Route path="/careers/offer/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><CareersOfferPage /></WavesShell></Suspense>} />
           {/* Digital business card — navy glass scene, so the fallback wash
               matches the scene instead of the light doc wash. */}
           <Route path="/card/:token" element={<Suspense fallback={<div style={{background:'#04395E',minHeight:'100vh'}}/>}><WavesShell><CardPage /></WavesShell></Suspense>} />
@@ -707,7 +708,7 @@ export default function App() {
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="reschedule" flow="reschedule" /></Suspense>} />
           <Route path="/reservice/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="reservice" flow="reservice" /></Suspense>} />
-          {/* Moving link (GATE_MOVING_FLOW): the token is customer_moves.token; the API 404s while the gate is dark. */}
+          {/* Moving link: the token is customer_moves.token. */}
           <Route path="/moving/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><MovingPage /></Suspense>} />
           <Route path="/inspection/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="inspection" flow="inspection" /></Suspense>} />
           {/* "Book a free Waves Assessment first" from an estimate: the token is the estimate's. */}
@@ -746,7 +747,7 @@ export default function App() {
               /admin/today. Installed PWAs, push notifications and bookmarks still
               open /tech/*, so every such URL redirects there permanently. */}
           <Route path="/tech/*" element={<TechPortalRedirect />} />
-          <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
+          <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminFieldViewEntry><AdminLayout /></AdminFieldViewEntry></PageErrorBoundary>}>
             <Route index element={<AdminIndexRedirect />} />
             <Route path="dashboard" element={<Suspense fallback={<RouteFallback label="Loading dashboard..." />}><AdminDashboardPage /></Suspense>} />
             <Route path="customers" element={<Suspense fallback={<RouteFallback label="Loading customers..." />}><AdminCustomersPage /></Suspense>} />
@@ -899,6 +900,7 @@ export default function App() {
           />
         </Routes>
         </RoutesErrorBoundary>
+        </PortalUpdateGate>
         <CustomerDialogHost />
         </BiometricGate>
       </BrowserRouter>

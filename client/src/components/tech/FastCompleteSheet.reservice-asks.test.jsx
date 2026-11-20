@@ -20,7 +20,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
 
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
-  { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  { id: 'talstar', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
 ];
 const VISIT = {
@@ -56,7 +56,7 @@ function makeRequest({ reportFlow = false, asks = { enabled: true, lane: 'pest',
     calls.push({ path, body: options?.body ? JSON.parse(options.body) : null });
     const bare = path.split('?')[0];
     if (bare.endsWith('/pest-recap/context')) {
-      return { ok: true, eligible: true, ...(reportFlow ? { reportFlow: true } : {}), service: VISIT, products: CATALOG, existingRecord: null };
+      return { ok: true, eligible: true, taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 }, ...(reportFlow ? { reportFlow: true } : {}), service: VISIT, products: CATALOG, existingRecord: null };
     }
     if (bare.endsWith('/reservice-asks')) {
       askReads += 1;
@@ -121,8 +121,8 @@ describe('the short re-service form', () => {
     tap(card('Request form · Oct 6'), 'Treated');
     const picker = within(card('Request form · Oct 6')).getByRole('group', { name: 'Products used for this item' });
     // Every row on the completion is offered (the house mix); none names ants, so they stay in sheet order.
-    expect(within(picker).getAllByRole('button').map((b) => b.textContent)).toEqual(['Taurus SC', 'Atticus Talak 7.9 F', 'LESCO 90/10 Nonionic Surfactant']);
-    tap(picker, 'Atticus Talak 7.9 F');
+    expect(within(picker).getAllByRole('button').map((b) => b.textContent)).toEqual(['Taurus SC', 'LESCO Crosscheck Plus', 'LESCO 90/10 Nonionic Surfactant']);
+    tap(picker, 'LESCO Crosscheck Plus');
     fireEvent.change(within(card('Question · Oct 8')).getByLabelText('Your answer'), { target: { value: 'No, the smell fades fast.' } });
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     expect(screen.queryByText(HINT)).toBeNull();
@@ -177,7 +177,7 @@ describe('the report flow', () => {
   const FLAGGED = { ...REPORT_SERVICE, reserviceAsksEnabled: true };
   async function openReport(request, service = FLAGGED) {
     render(<FastCompleteSheet service={service} request={request} onClose={() => {}} onCompleted={() => {}} />);
-    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText(/Taurus SC 1.6 fl oz/);
   }
   async function generate() {
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Ghost ants on the counter, light. Baited the counter edge.' } });

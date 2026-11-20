@@ -530,6 +530,8 @@ module.exports = {
   REASON_CODE,
   MOOT_RULE,
   REFUSALS,
+  // Shared with call-phone-yes-word.js: the choices a call can name.
+  BILLING_CHOICES,
   billingChoiceOf,
   quotePlanOf,
   derivePrepayCoverage,
@@ -540,4 +542,10 @@ module.exports = {
   cardSummary,
   previewTokenOf,
   lastStepInAccept,
+  // Shared with call-phone-yes-accept.js (the pay-per-application yes): the same visits-of-a-call read, the same
+  // termite rule and the same booked-row rules.
+  callCreatedSourceActions,
+  liveVisitsOfCall,
+  termiteEstimate,
+  BOOKED_ROW_RULES,
 };

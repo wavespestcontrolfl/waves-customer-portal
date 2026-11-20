@@ -1,4 +1,5 @@
 /** Real offer/hold queries and lock ordering in a synthetic private schema. */
+const { randomUUID } = require('node:crypto');
 const { createCapacityDbFixture, describeDb } = require('./helpers/scheduling-capacity-db');
 const { reserveSlot } = require('../services/slot-reservation');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -71,14 +72,120 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
     }
   });
 
+  describe.each([
+    ['fixed-hour', 'false'],
+    ['arrival-window', 'true'],
+  ])('%s reservation writes at 10 a.m.', (_, capacityGate) => {
+    test.each([
+      ['unclaimed', false, false],
+      ['booked for another estimate', true, false],
+      ['booked from this estimate', true, true],
+    ])('expiry releases the last opening only when staff left it unclaimed (%s)', async (_, claimed, sameEstimate) => {
+      process.env.GATE_SCHEDULING_CAPACITY = capacityGate;
+      const [firstEstimate, secondEstimate] = f.ids.estimates;
+      const estimate = await f.db('estimates').where({ id: firstEstimate }).first();
+      const { durationMinutes } = await require('../services/estimate-slot-availability')
+        .resolveCatalogSlotProfile(estimate, {}, f.db);
+      await f.db('tech_schedule_blocks').insert({
+        id: randomUUID(), date: f.date, technician_id: f.ids.technician,
+        block_type: 'blocked', start_time: '11:00', end_time: '18:00',
+      });
+      const first = await reserveSlot({
+        estimateId: firstEstimate,
+        slotId: f.signedSlot(firstEstimate, durationMinutes),
+      });
+      const bookedCustomer = randomUUID();
+      if (claimed) {
+        await f.db('customers').insert({
+          id: bookedCustomer, first_name: 'Office', last_name: 'Booking', phone: '+19415550112',
+        });
+        await f.db('scheduled_services').where({ id: first.scheduledServiceId })
+          .update({ customer_id: bookedCustomer, status: 'confirmed' });
+      }
+      await f.db('scheduled_services').where({ id: first.scheduledServiceId })
+        .update({ reservation_expires_at: f.db.raw("NOW() - INTERVAL '1 minute'") });
+
+      const requestingEstimate = sameEstimate ? firstEstimate : secondEstimate;
+      const second = reserveSlot({
+        estimateId: requestingEstimate,
+        slotId: f.signedSlot(requestingEstimate, durationMinutes),
+      });
+      if (claimed) {
+        await expect(second).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(await f.db('scheduled_services').where({ source_estimate_id: requestingEstimate }).pluck('id'))
+          .toEqual(sameEstimate ? [first.scheduledServiceId] : []);
+        expect(await f.db('scheduled_services').where({ id: first.scheduledServiceId })
+          .first('customer_id', 'window_start')).toEqual({
+          customer_id: bookedCustomer,
+          window_start: '10:00:00',
+        });
+      } else {
+        await expect(second).resolves.toHaveProperty('scheduledServiceId');
+      }
+    });
+  });
+
+  test.each([
+    ['another estimate after expiry', 0, -1],
+    ['the requesting estimate before expiry', 1, 1],
+  ])('a staff booking from %s invalidates a prepared capacity proof without adding road requests', async (_, estimateIndex, minutesToExpiry) => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const { prepareArrivalCapacity, verifyArrivalCapacity } = require('../services/scheduling/arrival-route');
+    await f.db('scheduled_services').insert(f.baseStop({
+      window_start: '08:00', window_end: '08:30', route_order: 1,
+    }));
+    const travel = require('../services/route-optimizer').createSchedulingTravel({ maxRequests: 0 });
+    const preload = jest.fn(async () => {});
+    const options = {
+      conn: f.db,
+      now: new Date(),
+      date: f.date,
+      technicianId: f.ids.technician,
+      excludeEstimateId: f.ids.estimates[1],
+      prospective: {
+        lat: Number(f.PIN.lat) + 0.01,
+        lng: f.PIN.lng,
+        service_type: 'Pest Control',
+        estimated_duration_minutes: 30,
+      },
+      windowStart: '10:00',
+      windowEnd: '10:30',
+      durationMinutes: 30,
+      travel: { ...travel, preload },
+    };
+    const before = await prepareArrivalCapacity(options);
+    const roadRequests = preload.mock.calls.slice();
+    expect(roadRequests.some(([legs]) => legs.length)).toBe(true);
+    preload.mockClear();
+
+    await f.db('scheduled_services').insert(f.baseStop({
+      technician_id: null,
+      window_start: '10:00',
+      window_end: '11:00',
+      estimated_duration_minutes: 60,
+      source_estimate_id: f.ids.estimates[estimateIndex],
+      reservation_expires_at: f.db.raw('NOW() + make_interval(mins => ?)', [minutesToExpiry]),
+    }));
+    const after = await prepareArrivalCapacity(options);
+    expect(preload.mock.calls).toEqual(roadRequests);
+    expect(after.fingerprint).not.toBe(before.fingerprint);
+    await expect(f.db.transaction(conn => verifyArrivalCapacity(before, { conn })))
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'route_changed' });
+    await expect(f.db.transaction(conn => verifyArrivalCapacity(after, { conn })))
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+  });
+
   // The placed visit plans the owner table now (owner 2026-10-30: this fixture's uncadenced
-  // 'pest_control' reads one-time pest, 45), so the last gap is the 60 minutes before the block;
-  // the row it holds is still its 30-minute allowance.
+  // 'pest_control' reads one-time pest, 45); the row it holds is still its 30-minute allowance.
+  // The block starts at 17:15, so the last gap is the 75 minutes after the 16:00 stop. On the drive clock one visit
+  // needs 61 of them (45 minutes of work, the 15-minute margin before the block and 1 minute of drive) and two need
+  // 96 (the first hold's 30, the second visit's 45, the margin and 6 minutes of drive): one fits, two do not. A
+  // 17:00 block (a 60-minute gap) fit one visit only on the old straight-line minutes, which needed 60 and 90.
   test('concurrent customers cannot both consume the final gap', async () => {
     await f.db('scheduled_services').insert(f.baseStop({ window_start: '08:00', window_end: '16:00',
       estimated_duration_minutes: 480, route_order: 1 }));
     await f.db('tech_schedule_blocks').insert({ id: require('node:crypto').randomUUID(), date: f.date,
-      technician_id: f.ids.technician, block_type: 'blocked', start_time: '17:00', end_time: '18:00' });
+      technician_id: f.ids.technician, block_type: 'blocked', start_time: '17:15', end_time: '18:00' });
     const outcomes = await Promise.allSettled(f.ids.estimates.map(estimateId => reserveSlot({
       estimateId, slotId: f.signedSlot(estimateId, 30, '16:00'),
     })));

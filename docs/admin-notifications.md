@@ -56,7 +56,9 @@ quote in `detail`. One exception: the SMS reader's review bell ("Comms — check
 note") never stores the text, because a text can hold a code or a word that opens a door and no
 screen catches every form; the bell list reads it from the text itself while it serves the list
 (`withTextNoteSources` in `server/services/sms-operational-actions.js`, admin role only, masked
-the same way) and the bell shows it in quotes as `source_text`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
+the same way) and the bell shows it in quotes as `source_text`. The phone-yes card bell (`server/services/call-phone-yes-bell.js`)
+never stores the caller's words either, for the same reason (a spoken turn can hold a gate code or a card number); the card in
+Triage shows them. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
 long name inside the 60-character headline; `whyWithQuote` budgets the quote; `nameOnFileForPhone` names the
 person behind a number with no customer link: the customer records on it, then estimates, then leads, only when
 they agree on one person. The promise chaser, a text to a website line and a voicemail use it; owner 2026-10-21 and
@@ -254,9 +256,8 @@ customer's message by this rule.
    masked like every bell body, then the masked number; with a name on file for the number
    (`nameOnFileForPhone`), the name leads the title and the why ends "via <the line>".
    Its link and Call follow the latest text.
-   `GATE_RING_NEW_CONTACTS` (owner 2026-11-04, "ring new", dark) gives a number with no
-   customer record texting a location line or a Google Business Profile line the same row
-   (`ringUnknownOfficeText`, source "the Parrish (Pest) line"), and the quiet `inbound-text`
+   A number with no customer record (owner 2026-11-04, "ring new") texting a location line
+   or a Google Business Profile line rings the same row (`ringUnknownOfficeText`, source "the Parrish (Pest) line"), and the quiet `inbound-text`
    Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
    staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
    closes these rows once a person answers, like a tracking-line row.
@@ -280,7 +281,7 @@ customer's message by this rule.
    lock for the customer's key before it reads or locks the row. An email follow-up keeps one row
    per promise (`email-commitment:<promise id>`).
    A customer's number that keeps failing texts is one subject too (owner 2026-11-04, "fix check",
-   `GATE_DEAD_NUMBER_ALERT`, `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
+   `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
    30005; no delivered text in between, ordered by send time) to the same number in 180 days raises ONE row,
    "Customers — Jane D.'s phone can't get texts" (`dedupeKey` `dead-number:<customerId>:<last10>`, open-only,
    done-when `phone_replaced`). It closes at the customer's next delivered text when that text went to the dead
@@ -347,6 +348,11 @@ customer's message by this rule.
    (`server/services/auto-dispatch/check-down-notice.js`) rings once per outage and is never
    held back by the allowance; it counts toward it. A tool that has stopped moving visits is
    the notice that must reach a person.
+   Exception (owner ruling 2026-11-19, decision page "Same-time visit check", option A): a new
+   same-start pair for tomorrow (`server/services/same-start-visits-check.js`, the schedule
+   watchdog's last class) always rings, even when the run's allowance is spent, and it counts
+   toward it; so does a new pair later today whose start is still ahead. By the next run the
+   pair may be under way. At most one bell per customer.
    Far double bookings (owner audit 2026-10-22, decision D1):
    a visit auto-dispatch leaves in conflict more than 14 days out is a line on one standing
    Activity row (ops digest `auto-dispatch-far-conflicts`, audience fyi), outside the allowance
@@ -384,8 +390,8 @@ customer's message by this rule.
    marked them read). A text promise the run only took off a customer's alert that stayed open goes back on that
    alert without a ring (`restoreSmsCommitmentAlerts`); when a person has closed that alert since, the promise's
    next overdue check rings a fresh one.
-   Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF";
-   `GATE_ALERT_QUIET_FALL_OFF`): a second policy of the same module, `runAdminAlertQuietPolicy` in
+   Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF"):
+   a second policy of the same module, `runAdminAlertQuietPolicy` in
    `server/services/admin-alert-retention.js`. It shares the nightly policy's candidates, activity stamps, `RERING`
    registry, version-fenced writer and cursor helpers, and differs in cadence (its own cron, every 10 minutes, its own
    lock and its own cursor key) and rules. An open bell row with no new activity for 72 hours is marked done
@@ -587,27 +593,96 @@ nothing; a write inside a nested transaction waits for the outermost commit). It
 `pushOnly`, to admin-role phones, with the row's own title, body and link and a tag per row. A new kind of this sort is one
 line in `BELL_BANNER_KINDS`, one registry entry whose `build` takes `alertTitle` / `alertBody` / `alertLink`, and a sound line.
 
-New-lead email banner (owner 2026-11-04, "ring new"; gate `GATE_RING_NEW_CONTACTS`, dark): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
+New-lead email banner (owner 2026-11-04, "ring new"): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
 banner on the owner's phone at any hour (kind `new_lead_email`, the New lead sound). The writer (`email-actions.js`) keys the
 existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id>`) and names the kind with
 `notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
-second banner, and no second bell row is written. Gate off: the unkeyed row and no banner, as before.
+second banner, and no second bell row is written.
 
-Lead call-back reminder banner (owner 2026-11-05, "remind"; gate `GATE_LEAD_CALL_REMINDER`, dark): two kinds of lead
+Lead call-back reminder banner (owner 2026-11-05, "remind"): two kinds of lead
 bell reach only the portal bell. A "Missed call request" bell (`lead-call-reply-missed:<callLogId>`, a press-1 ring nobody
 answered) and a night call-back bell (`lead-call-text-followup:<requestId>`, raised by `lead-call-text-followup.js`
-`raiseLeadBell`) send no banner. With the gate on, the alert-relevance sweep (every 10 minutes, after its closes) runs
+`raiseLeadBell`) send no bell banner of their own. The alert-relevance sweep (every 10 minutes, after its closes) runs
 `server/services/lead-call-reminder.js`. A bell of those kinds that is still open one business hour after its latest
 event (the follow-up SLA's clock, 8 AM to 8 PM ET) sends ONE banner (`lead_call_reminder`, the Missed call sound) when
 nobody has reached the lead since. "Reached" uses the shared contact witnesses after that event: a person's text, a call
 a person placed and spoke on, an inbound call a person answered, a person's Gmail send to the lead's customer's own
 address, a visit booked for that customer, or an estimate handed off. A deleted lead, or one a person closed, sends nothing. Banners go out
-only from 8:00 AM up to 8:00 PM Eastern, and only for bells of the last 24 hours. The banner carries the row's own title,
+only from 8:00 AM up to 8:00 PM Eastern (asked again with a fresh clock before each stamp and at the banner's dispatch),
+and only for bells of the last 24 hours. Each banner expires at the push provider at 8:00 PM that day
+(`payload.expiresAt`, which `pushExpiryFor` turns into the web push TTL, the APNs expiration and the FCM ttl), so a
+phone that was offline does not show it later. The banner carries the row's own title,
 body and link, led by "Reminder: nobody has reached this lead yet.", `pushOnly` to admin-role phones with a tag per row.
 The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in one statement fenced on the row being open
-and unchanged since it was read, so a row sends at most one banner. The stamp is not a ring, so the 3-day quiet fall-off
+and unchanged since it was read, under notifyAdmin's advisory lock for the row's dedupe key (a refresh rewrites the
+metadata under that lock), so a row sends at most one banner. The banner goes only while the row is still an open bell in
+the bell feed with exactly the stamped metadata: a bell that rang again or moved to Activity since the stamp sends
+nothing. Before that row read, the lead is judged again with fresh reads (`lead-reminder-sweep.js` `waitingNow`): a lead
+a person reached, or one that closed, since the sweep read it sends nothing, and a failed read sends nothing. The row
+read is the last read before the handoff, so a Done or a new ring during the lead's reads still stops it. The same check
+runs again before each device's handoff (the push service's `beforeHandoff`, passed through `triggerNotification`), so a
+Done, a contact or the hours closing while an earlier device's request runs stops the remaining devices. Neither reminder's stamp is part of the bell's content version (`NOTIFICATION_VERSION_SQL` leaves out
+`REMINDER_STAMP_KEYS`), so a stamp that lands after an admin opened the bell never refuses that admin's Done. The stamp is not a ring, so the 3-day quiet fall-off
 still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
-still waits for a call") or by unsetting the gate. It sends nothing to a lead.
+still waits for a call"). It sends nothing to a lead.
+
+New-lead re-alert (owner 2026-11-19, "do phase 1 first"; no gate: the push goes to admin users only): in the 12 weeks to
+2026-11-19, 82 of 437 leads never got a call, text, email or estimate from a person and none booked. A form lead gets one bell
+and one push; 44 of 129 form bells in 30 days were never opened. The alert-relevance sweep (every 10 minutes, after its
+closes) also runs `server/services/new-lead-reminder.js`. An open `new_lead` bell that names a lead, or an open repeat-form
+bell (`lead-repeat-form:`, category `lead`: a lead sent the quote form again; the relevance sweep's `lead_repeat_form`
+class), that no person has reached gets ONE more phone push 15 minutes after its latest event (`lead_call_reminder`, `pushOnly`, admin users only, the
+row's own title, body and link). The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM ET (`staffedDeadline`; holidays
+are not skipped), and nothing is sent outside those hours: they are judged again with a fresh clock before each stamp and before
+each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A push more than 2 business hours past due is dropped,
+also when that time passes while the sweep reads (checked again before the stamp, and before and after the push's open-row read). Bells of
+the last 48 hours only. Each push expires at the push provider at 6:00 PM that day, or at the end of its late window if that
+comes first (`payload.expiresAt`, as for the call-back banner). The push is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`),
+under the same dedupe-key lock (the hours and the late window are asked again once the lock is held), so a row gets
+at most one for each event of the row. A lead gets at most one push in 48 hours (the plan's "at most twice per lead" is
+this push and the 60-minute call): the stamp also takes an advisory lock on the lead, after the dedupe-key lock, and holds
+back a bell when any bell, itself included, holds a push for its lead in the 48 hours before. Each stamp keeps the lead it
+was for (`metadata.newLeadRealertLeads`, left out of the bell version like the stamps), because the repeat-form row is
+keyed by customer and a form for the customer's other lead refreshes it: the first lead stays capped, and the other lead
+is judged on its own. So a lead with an open intake
+bell and a repeat form gets one push, for the latest inquiry: the lead's latest inquiry sets its clock, so an older open
+bell of the lead waits for the newer one (the sweep reads every page before it judges any row), and a form sent again
+just before the older bell falls due gets the push 15 minutes after that form. A bell of that lead written or rung in
+the next 48 hours gets none (the writer's own ring still
+reaches the phones). A row that rang again after its stamp (a repeat form refreshes its row and keeps the stamp) is read
+again, so after those 48 hours it can push for its new event. The stamp is the clock when it is written, and the hours
+and the late window are asked last, just before that write. As with the call-back reminder, it goes only while the row is
+still an open bell in the bell feed with exactly the stamped metadata, and while the lead still waits when judged again
+with fresh reads (a person who reached it, or a lead closed or quoted, since the sweep read it sends nothing). The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
+call"). "Reached" is judged on the lead, whatever the close gates say, and not only after the bell (a "New call lead" bell
+is written minutes after a call a person already answered): a deleted lead, a lead outside the shared open-lead predicate
+(`lead-statuses.js`: status new, contacted, estimate_sent or estimate_viewed, and not converted, so spam, cancelled, won, lost and the
+like are out), or one with an estimate sent or viewed; the call that made the lead answered by a
+person (`answered_by = 'human'`; only for the intake bell: the one the new-lead trigger writes for a lead its writer
+created, `metadata.triggerKey` `new_lead` as the relevance sweep's `new_lead` class defines it, with `payload.createdLead`
+set by that writer (the form webhook, the call processor's `notifyNewCallLead`, the /book preferred-time request); the
+call processor's bell by its title (`New call lead`, `New voicemail lead`; no other writer uses them), also one written
+before the mark existed, so its call, which ends before the bell, is still judged; or the quote wizard's bell for its own row (`public-quote.js` writes it straight to `notifyAdmin`, with `metadata.createdLead`, only
+for a `quote_wizard` lead: never on a repeat filed as a duplicate, nor on a voicemail or inbound-call lead the prefill token
+attached the form to), within 15 minutes of the lead's creation; every other bell, such as a repeat form, a form
+attached to an open call lead (`createdLead` false), an email follow-up's draft or another bell written before the mark existed, is
+a fresh inquiry); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone after
+the bell's inquiry began (a text or call tied to another customer never counts, even for a lead with no customer; one tied to
+no customer counts on the lead's own phone only while no other open lead holds that phone, by `lead-contact-sync.js`
+`openLeadIdentities`; the customer's file phone is not added), with no look-back before it (the shared contact witnesses, kind `customer`; for the intake bell, the
+earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
+lead made days ago, the bell itself); a person's email to the lead's own address since that moment (only one the shared email linkage,
+`emailCustomerLink`, ties to the lead's customer, or shows names no customer at all: Cc and Bcc captured, no customer in its
+thread, no recipient on a customer's file, and no other open lead holding the address, by `lead-contact-sync.js`
+`openLeadIdentities`; a send the linkage cannot settle, such as a mixed thread, is no proof; a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up
+bell is written after classification and drafting; the push deadline stays on the bell); or an estimate sent (`sent_at`, as
+`newLeadMovedOn` reads it: the one the bell names, `metadata.estimateId`, the lead's own, or any to its customer) or handed off. A lead needs a customer, a 10-digit phone or an email
+address to be judged, so a lead from email intake with no phone is judged on email and estimate evidence. A missing lead
+row, or a read that fails, sends nothing. The quiet 72 h close and the 21-day staleness are unchanged. Sends nothing to a
+lead or a customer. The scan, the once-only stamp, the open-row recheck and the push are shared with the lead call-back
+reminder above (`server/services/lead-reminder-sweep.js`). A sweep reads at most 5 pages of 100 bells; one that stops at the
+cap remembers where (a module variable, as the relevance sweep's own cursor) and the next sweep resumes after it, so old
+reached bells cannot hide a due one. A restart starts again from the oldest bell.
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
@@ -626,7 +701,28 @@ trigger, sent `pushOnly`: no bell row, admin-role phones only, and one banner pe
 day missed while the server was down is not made up). The owner turns it off in Push Settings (Alerts group,
 "Morning summary: items waiting for you"). It sends nothing to a customer.
 
-The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BANNER`, dark): the 7 PM open-visit nudge
+The 9 AM "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1; no gate, an internal admin
+push): one banner a day to the admin phones says "Call today: N estimates" ("1 estimate" when one), body "Follow up on
+these recently active estimates." (the list can include an estimate that was called before the customer reopened it,
+or one called without an answer, so the words never claim nobody has called), and a tap opens `/admin/estimates?view=call_today`, the Estimates page on its Call
+today filter. N is that page's own list: `services/estimate-call-today-push.js` takes the rows the page loads (`estimateListQuery` in
+`services/estimate-call-list.js`, the list route's own selection: sent-list rows, newest 2,000, unarchived), then applies `isCallTodayEstimate` from
+`shared/estimate-call-today.cjs` (the one home of the rule; the page imports it too) to rows built by
+`callTodayFields` in `services/estimate-call-list.js` (the same mapping the list route uses). The words carry a count
+only, never a customer name or phone. With nothing on the list it sends nothing. It is the `estimate_call_today`
+trigger (area Estimates, fyi, expires in 7 days), sent `pushOnly`: no bell row, admin-role phones only, one banner per ET
+day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>`; a day missed while the server was down
+is not made up). The banner expires with its day: it carries `expiresAt` (the next ET midnight, `pushExpiryFor` in
+`notification-triggers.js`), which web push sends as its TTL, APNs as `apns-expiration` and FCM as `android.ttl`, so a
+phone offline past the day never shows an old count. The banner counts as sent only when a phone accepted it: with push off, no device to send to, or one of the dispatcher's own pre-send skips (`claude_queue`, `bell_policy`, `superseded_before_push`; a failed device counter comes first) the day's claim is released
+(a later run may try); after a device failure, no result at all, or any result it does not recognize, it is kept (no second banner). A device the push service skipped because its provider has no credentials (APNs, FCM or web push not configured) is a failure, not a skip: its claim is released and the run reports `push_not_configured`, so job health shows a banner lost for want of keys. The dispatcher marks a
+throw in its push path (`pushFailed`; it leaves `push: null`, like a push that is off): a throw in its recipient lookup, or in the push
+block before the first device's banner is built (the subscription lookup), reached no provider, so its claim is released; a throw after a
+device send began may have reached a phone, so its claim is kept. Both are failures. A count, claim or delivery failure
+throws inside the cron's `runExclusive` callback, so job health records the run as failed; a skip stays a success. The cron is `0 9 * * *` in `America/New_York` (`scheduler.js`). Each admin turns it off in Push Settings
+(Alerts group, "Morning list: estimates to call today"). It sends nothing to a customer.
+
+The owner's open-visit banner (owner 2026-11-04, "banner"): the 7 PM open-visit nudge
 (`server/services/tech-open-visit-nudge.js`) reaches the owner as a Waves Admin banner instead of a text. It is the
 `open_visits_nudge` trigger, sent `pushOnly` to his own admin user only (`onlyUserIds`): no bell row, one banner per ET day
 (the nudge's own per-technician claim), same words as the text, a tap opens `/tech`. It counts as delivered only when a phone
@@ -658,6 +754,53 @@ fact, a one-time job over the limit, an engine line to review, a possible curren
 relevance sweep (class `tech_estimate_office_first`) closes the row once the estimate is sent, accepted, declined, expired, archived
 or gone. A send that is only queued, in flight or failed keeps the row open, because the close is final. A failure to raise is
 logged with ids only and never fails the technician's create. It sends nothing to a customer.
+
+Phone-yes card bell (owner 2026-11-18 "ok go", phone-yes step 1, page v4; under `GATE_CALL_PHONE_YES_ACCEPT`, no gate of its own):
+`server/services/call-phone-yes-bell.js`, run by the phone-yes sweep (every 10 minutes while the gate is on, after its filing and its
+moot close), rings the bell once for each `call_phone_yes` card when it is filed, and once more while the card is open and time runs
+short: an open estimate on the card expires within 24 hours, or the soonest visit to come that keeps the card open (a pest visit the
+call booked, on the calendar and not linked to an estimate) starts within 48 hours, the edge included (a card filed at the edge
+rings the time-short bell alone). Only a visit still to come (`pending`,
+`confirmed`, `en_route`) makes time short: a visit parked for a new slot (`rescheduled`, which keeps its old date and time), under
+way or done keeps the card open but is no time to ring for. Only a card with status `open` whose evidence
+still matches it rings or is rewritten: the pass reads the card's state again under the lock (`cardState`), and a card with a
+change not yet written (an estimate accepted, a yes taken back) or whose read fails rings nothing until a later run writes it.
+While a call in the card's word window still owes a read, or the call with the card's yes is read again (the card's
+`yes_rechecking` mark, which the moot pass sets; a resend can move the window past that call), the card rings nothing new (the
+read may take the yes back, and the tap refuses meanwhile), but its open row still follows the card quietly. A ring held this
+way is not spent: it goes out once the read ends.
+The time short is read by the clock after the card's lock. A claimed card (`in_progress`) keeps its row until it closes. Nothing rings while every active admin has the type's Bell switch off in
+Push Settings (no row, so no banner either; open rows are still rewritten and closed): the switch is read for each ring, under the
+card's lock, by the rule `triggerNotification` writes a shared bell row by (`bellWanted`); a card that rang nothing meanwhile
+rings once the switch is on again, if it is still open. Category `estimate` with
+`bell: true`, headline "Estimates — check <who>'s estimate" (the why says whether the caller said yes, no yes was heard, or the
+yes is being read again) or "check <who>'s booked visit" once an estimate on the card was accepted and the visit is not linked;
+never "accept": the card's tap decides whether it can accept, checking everything again under its own locks when tapped, and no
+bell can keep that answer true until the office taps. Subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
+Keys `call-phone-yes:<card id>` (filed) and `call-phone-yes-due:<card id>` (time short), both without `dedupeOpenOnly`: a closed row
+still holds its key, so each key rings at most once and no `RERING` entry is owed. The filed row closes in the commit that writes the
+time-short row (every pass retries that close, and a raise that wrote no row closes nothing), so a card has one open row; the close also
+takes over a filed row a person already marked Done, so Reopen cannot bring it back beside the time-short row; a card filed when
+time is already short rings the time-short bell alone, and nothing rings for a card after its time-short bell. Between rings the
+open row is rewritten quietly when the card's words change (a yes taken back, an estimate accepted, the visit moved):
+`refreshOnDedupe` with `ringOnRefresh` false, so no ring, no banner, and the row keeps its read state. The bell never stores the
+caller's words (headline, why, detail or metadata), as the SMS reader's review bell keeps a text's words off its row: a spoken turn
+can hold a gate code or a card number, no screen catches every form, and the why reaches a phone's lock screen. The why says the
+caller said yes to pay per application and names the visit day; `detail` holds the card's summary and points to the card in
+Triage, which shows the words. Each card rings in a transaction of its own that holds its call's
+triage lock (the lock every card writer takes first; the ring takes it without waiting, as the tap does, so a card whose call
+another change holds rings nothing this run and one busy call never holds up the pass) and reads the card and its evidence again
+there, so a card the tap accepts, a person claims or a customer's accept changes while the pass runs rings nothing. A customer's own accept takes no
+triage lock, so the ring also holds every row it reads FOR SHARE to its commit, as the tap does (`holdCardRows`: the customer's row,
+whose numbers decide which unlinked calls are theirs, their estimates, their calls in the window the card's check reads, by id
+the booking call and the call the yes came from (the check reads both by id, also when a resend moved the window past them), the
+service catalog with the tap's own SHARE lock taken before the visits, the call's visits); a row changing right now skips the card this run
+(NOWAIT). A call or a visit inserted meanwhile has no row to hold; the next run reads it. Each ring sends a phone banner with the New lead sound
+(`bell-banners.js` kind `call_phone_yes`, 7:00 AM to 9:00 PM Eastern; the 8 AM banner counts a ring at night). The same pass closes
+the rows of every card that is no longer open, listed again after the rings: accepted by the tap, resolved or dismissed by a
+person, or closed as moot. With the
+gate off the sweep does not run, so open rows stay as they are until it runs again. A failed ring is logged with ids only and is
+tried again on the next run. It sends nothing to a customer.
 
 Paid-at-the-visit receipt check (owner 2026-11-18, "the daily check"; no gate, read-only): `server/services/paid-visit-receipt-check.js`
 runs hourly at :50 from 9 AM to 7 PM Eastern (scheduler job `paid-visit-receipt-check`, under `runExclusive`). A customer paid by

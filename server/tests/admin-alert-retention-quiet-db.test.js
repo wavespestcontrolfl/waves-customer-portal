@@ -1,9 +1,13 @@
 /**
- * The quiet policy of admin-alert-retention.js against live Postgres: what falls off, what stays, the gate states,
+ * The quiet policy of admin-alert-retention.js against live Postgres: what falls off, what stays, the shadow preview,
  * the fenced write, Reopen and its 72-hour hold (also across a concurrent quiet refresh), a ring bringing a fallen-off
  * alert back, both policies together, the relevance sweep and the undo function. Synthetic data only; every fixture row carries the title
  * below and the pass is scoped to it, so it never touches another suite's rows.
  */
+// The new-lead re-alert pass (new-lead-reminder.js) is not this suite's subject. It has no gate, so the sweep run here in
+// office hours would judge, stamp and push every open lead bell in the connected database. Its own suite
+// (new-lead-reminder-postgres.test.js) runs it inside rolled-back transactions with the push mocked.
+jest.mock('../services/new-lead-reminder', () => ({ runNewLeadReminder: jest.fn(async () => ({ skipped: true, reason: 'not_this_suite' })) }));
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
@@ -172,9 +176,8 @@ maybeDescribe('admin alert quiet policy (live Postgres)', () => {
     expect((await get(customer.id)).done_at).toBeNull();
   });
 
-  test('gate off and gate shadow write nothing; shadow counts', async () => {
+  test('a shadow pass (the dry-run preview) writes nothing; it counts', async () => {
     const quiet = await bell({});
-    expect(await run('off')).toEqual({ skipped: true, reason: 'gate_off' });
     expect(await run('shadow')).toMatchObject({ mode: 'shadow', expire: { total: 1, byCategory: { alert: 1 } } });
     expect((await get(quiet.id)).done_at).toBeNull();
     expect((await get(quiet.id)).read_at).toBeNull();

@@ -59,7 +59,7 @@ jest.mock('../services/visual-service-notes', () => ({
 
 const db = require('../models/db');
 const adminEstimatesRouter = require('../routes/admin-estimates');
-const { lastCalledAtByEstimateId, callLogPhoneFor, CUSTOMER_ANSWERED_SQL } = require('../services/estimate-call-list');
+const { lastCalledAtByEstimateId, callLogPhoneFor, CUSTOMER_ANSWERED_SQL, estimateListQuery } = require('../services/estimate-call-list');
 const { extendEstimate } = require('../services/estimate-extension');
 
 function routeHandler(router, path, method) {
@@ -281,5 +281,102 @@ describe('lastCalledAt (one batched read)', () => {
   test('callLogPhoneFor refuses garbage', () => {
     expect(callLogPhoneFor({ customer_phone: 'abc' })).toBeNull();
     expect(callLogPhoneFor({ customer_phone: '(941) 555-0101' })).toBe('+19415550101');
+  });
+});
+
+// The list route's row selection, shared with the 9 AM Call today push (estimate-call-today-push.js).
+describe('estimateListQuery', () => {
+  const recorder = () => {
+    const calls = [];
+    const q = new Proxy({}, { get: (_t, name) => (...args) => { calls.push([name, ...args]); return q; } });
+    return { q, calls };
+  };
+
+  test('joins the creator, newest first, hides archived rows by default', () => {
+    const { q, calls } = recorder();
+    estimateListQuery(() => q);
+    expect(calls).toEqual([
+      ['leftJoin', 'technicians', 'estimates.created_by_technician_id', 'technicians.id'],
+      ['select', 'estimates.*', 'technicians.name as created_by_name'],
+      ['orderBy', 'estimates.created_at', 'desc'],
+      // A stable tie-breaker: the push and the page cut the newest 2,000 at the same rows.
+      ['orderBy', 'estimates.id', 'desc'],
+      ['whereNull', 'estimates.archived_at'],
+    ]);
+  });
+
+  test('status, source list and archived modes narrow the same query', () => {
+    const only = recorder();
+    estimateListQuery(() => only.q, { status: 'draft', sources: ['a', 'b'], archived: 'only' });
+    expect(only.calls).toContainEqual(['where', 'estimates.status', 'draft']);
+    expect(only.calls).toContainEqual(['whereIn', 'estimates.source', ['a', 'b']]);
+    expect(only.calls).toContainEqual(['whereNotNull', 'estimates.archived_at']);
+    const all = recorder();
+    estimateListQuery(() => all.q, { archived: 'all' });
+    expect(all.calls.map(([name]) => name)).not.toContain('whereNull');
+    expect(all.calls.map(([name]) => name)).not.toContain('whereNotNull');
+  });
+});
+
+describe('clickStatsByEstimateId (the click read the list route and the Call today push share)', () => {
+  const { clickStatsByEstimateId } = require('../services/estimate-call-list');
+
+  test('one grouped read: summed click counts and the newest click, keyed by estimate id', async () => {
+    const calls = [];
+    const q = {};
+    for (const name of ['where', 'whereIn', 'groupBy', 'select', 'sum', 'max']) q[name] = (...args) => { calls.push([name, ...args]); return q; };
+    q.then = (ok, no) => Promise.resolve([{ entity_id: 'e1', click_count: '3', last_clicked_at: '2026-11-19T15:00:00Z' }]).then(ok, no);
+    const database = jest.fn(() => q);
+    const stats = await clickStatsByEstimateId(database, ['e1', 'e2']);
+    expect(database).toHaveBeenCalledTimes(1);
+    expect(database).toHaveBeenCalledWith('short_codes');
+    expect(calls).toEqual([
+      ['where', { entity_type: 'estimates' }],
+      ['whereIn', 'entity_id', ['e1', 'e2']],
+      ['groupBy', 'entity_id'],
+      ['select', 'entity_id'],
+      ['sum', { click_count: 'click_count' }],
+      ['max', { last_clicked_at: 'last_clicked_at' }],
+    ]);
+    expect(stats.get('e1')).toMatchObject({ click_count: '3', last_clicked_at: '2026-11-19T15:00:00Z' });
+    expect(stats.has('e2')).toBe(false);
+  });
+
+  test('no ids = no query', async () => {
+    const database = jest.fn();
+    expect((await clickStatsByEstimateId(database, [])).size).toBe(0);
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  // One click read: a change to which clicks count reaches the page and the push together.
+  test('the list route and the Call today push both read clicks through it', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const file of ['routes/admin-estimates.js', 'services/estimate-call-today-push.js']) {
+      const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+      expect(src).toContain('clickStatsByEstimateId(db, ');
+      expect(src).not.toMatch(/\.max\(\{ last_clicked_at: 'last_clicked_at' \}\)/);
+    }
+  });
+});
+
+describe('callTodayFields: an undelivered self-serve quote carries no sentAt (codex pre-push P1)', () => {
+  const { callTodayFields } = require('../services/estimate-call-list');
+  const stored = {
+    status: 'viewed', customer_phone: '+19415550101', archived_at: null, sent_at: '2026-11-12T15:00:00.000Z',
+    viewed_at: '2026-11-12T15:05:00.000Z', last_viewed_at: '2026-11-13T15:00:00.000Z', last_follow_up_at: null,
+  };
+
+  test('its sent_at is the mint stamp, so the row shows no send; the customer\'s opens stay as stored', () => {
+    expect(callTodayFields(stored, { undeliveredSelfServe: true })).toMatchObject({
+      status: 'viewed', sentAt: null, viewedAt: stored.viewed_at, lastViewedAt: stored.last_viewed_at, undeliveredSelfServe: true,
+    });
+  });
+
+  test('any other row reads as stored', () => {
+    expect(callTodayFields(stored)).toMatchObject({
+      status: 'viewed', sentAt: stored.sent_at, viewedAt: stored.viewed_at, lastViewedAt: stored.last_viewed_at,
+      undeliveredSelfServe: false,
+    });
   });
 });

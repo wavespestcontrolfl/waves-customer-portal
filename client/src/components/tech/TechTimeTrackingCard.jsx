@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -119,7 +120,7 @@ export default function TechTimeTrackingCard({ nextStop }) {
     };
   }, [load]);
 
-  const act = async (key, path, { location = false } = {}) => {
+  const sendPunch = async (key, path, { location = false } = {}) => {
     if (busy) return;
     setBusy(key);
     setFeedback(null);
@@ -134,6 +135,11 @@ export default function TechTimeTrackingCard({ nextStop }) {
       setBusy('');
     }
   };
+
+  // A punch with the location waits up to 7 s for it before its request
+  // starts, so no save is open yet: each punch holds an out-of-date tab's
+  // reload until it settles, at any page move (lib/reloadHolds.js).
+  const act = (...args) => holdReloadWhileSending('time-clock', () => sendPunch(...args));
 
   // "No lunch today": the unpaid 30-minute lunch comes off a day over 6 hours
   // unless the tech taps this. Hidden while GATE_AUTO_LUNCH is off (the status

@@ -49,6 +49,12 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   // alert list". The morning summary is the one non-customer phone banner the owner asked for. It is pushOnly, so it
   // never writes a bell row, but the policy still gates the push once per event.
   'waiting_summary',
+  // Owner 2026-11-04, "banner": the owner's 7 PM open-visit nudge arrives as a phone banner instead of a text. pushOnly
+  // like the morning banner, so no bell row, but the policy still gates the push once per event.
+  'open_visits_nudge',
+  // Owner 2026-11-19 (plan page "Lead to Customer Plan", phase 1): the 9 AM "Call today" estimate banner, pushOnly like the
+  // morning summary: no bell row, the policy still gates the push once per event.
+  'estimate_call_today',
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
   'reservice_self_booked',          // a customer booked a free re-service and described the problem (owner 2026-10-05)
   // Owner ruling 2026-09-11: a declined card / returned ACH is the one money
@@ -63,11 +69,6 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
 // Owner 2026-10-29, "small" E1: a customer's invoice payment that failed at checkout,
 // bank or card, rings beside payment_failed under the same 09-11 ruling.
 const GATED_TRIGGER_BELL_ALLOWLIST = new Set(['bill_payment_error']);
-
-// GATE_OWNER_NUDGE_BANNER (owner 2026-11-04, "banner": the owner's 7 PM open-visit nudge arrives as a phone banner instead of
-// a text): pushOnly like the morning banner, so no bell row, but the policy still gates the push once per event. Read only
-// while the gate is on.
-const OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST = new Set(['open_visits_nudge']);
 
 
 const TRIGGER_BELL_DENYLIST = new Set([
@@ -258,22 +259,12 @@ function ringsAsCustomerAlert({ triggerKey = null, declared = null } = {}) {
   return declared?.contact === true || declared?.promise === true || GATED_TRIGGER_BELL_ALLOWLIST.has(triggerKey);
 }
 
-// A trigger on the always-ringing allowlist, or on a banner's while its gate is on (GATE_OWNER_NUDGE_BANNER; read at
-// call time; guarded: a test that mocks feature-gates without the reader reads it as off).
-function onAllowlist(triggerKey) {
-  if (TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return true;
-  const reader = OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST.has(triggerKey) ? 'ownerNudgeBannerLive' : null;
-  if (!reader) return false;
-  const gates = require('../config/feature-gates');
-  return typeof gates[reader] === 'function' && gates[reader]();
-}
-
 async function bellAllowed({ category, triggerKey, options = {}, declared = null } = {}) {
   if (options.bell === true) return true;
   if (options.bell === false) return false;
   // Step 1b: a customer alert rings whatever the steps below say; a site's explicit `bell: false` above still wins.
   if (ringsAsCustomerAlert({ triggerKey, declared })) return true;
-  if (triggerKey && onAllowlist(triggerKey)) return true;
+  if (triggerKey && TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return true;
   if (triggerKey && TRIGGER_BELL_DENYLIST.has(triggerKey)) return false;
   const overrides = await loadCategoryOverrides();
   if (category && overrides.has(category)) return overrides.get(category) === true;
@@ -298,7 +289,6 @@ module.exports = {
   _private: {
     TRIGGER_BELL_ALLOWLIST,
     GATED_TRIGGER_BELL_ALLOWLIST,
-    OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST,
     TRIGGER_BELL_DENYLIST,
     CATEGORY_BELL_ALLOWLIST,
     loadCategoryOverrides,

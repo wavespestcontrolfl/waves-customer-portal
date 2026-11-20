@@ -101,13 +101,8 @@ describe('bell copy', () => {
 describe('guards that return before any read', () => {
   const noDatabase = () => { throw new Error('the database must not be read'); };
 
-  test('gate off', async () => {
-    await expect(runCallerCallbackBell({ database: noDatabase, gateEnabled: false })).resolves.toEqual({ skipped: 'disabled' });
-    await expect(runCallerCallbackBell({ database: noDatabase })).resolves.toEqual({ skipped: 'disabled' });
-  });
-
   test('call commitments off, and the alert-episodes switch off', async () => {
-    await expect(runCallerCallbackBell({ database: noDatabase, gateEnabled: true })).resolves.toEqual({ skipped: 'commitments_off' });
+    await expect(runCallerCallbackBell({ database: noDatabase })).resolves.toEqual({ skipped: 'commitments_off' });
 
     process.env.GATE_CALL_COMMITMENTS = 'true';
     process.env.ALERT_EPISODES = 'off';
@@ -115,7 +110,7 @@ describe('guards that return before any read', () => {
       // feature-gates reads GATE_CALL_COMMITMENTS once, when it loads, so load the whole chain fresh.
       jest.resetModules();
       const isolated = require('../services/caller-callback-bell');
-      await expect(isolated.runCallerCallbackBell({ database: noDatabase, gateEnabled: true })).resolves.toEqual({ skipped: 'episodes_off' });
+      await expect(isolated.runCallerCallbackBell({ database: noDatabase })).resolves.toEqual({ skipped: 'episodes_off' });
     } finally {
       delete process.env.GATE_CALL_COMMITMENTS;
       delete process.env.ALERT_EPISODES;

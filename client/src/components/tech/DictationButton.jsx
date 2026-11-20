@@ -38,6 +38,9 @@ import { setDictationPending } from "../../hooks/dictationPending";
  *   onPendingChange optional — told true from the mic tap until a recorded
  *                   clip is taken and transcribed (the upload path only),
  *                   so the caller can hold a save until the words arrive
+ *   resendWanted    optional — () => boolean, true while the field can still
+ *                   take the words: a send that got no answer then asks to
+ *                   send the same recording again (useSpeechDictation)
  */
 function micLabel({ uploading, listening, title }) {
   if (uploading) return "Transcribing";
@@ -118,10 +121,11 @@ export default function DictationButton({
   dictationContext,
   clipHandler,
   onPendingChange,
+  resendWanted,
 }) {
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
-  const { listening, supported, toggle, cancel, mode, starting, uploading, liveText } = useSpeechDictation(onAppend, { uploadServiceId, clipHandler, dictationContext });
+  const { listening, supported, toggle, cancel, mode, starting, uploading, liveText } = useSpeechDictation(onAppend, { uploadServiceId, clipHandler, dictationContext, resendWanted });
 
   // A recorded clip has no transcript until it is stopped and transcribed;
   // a save in that window would go out without it. The window opens at the

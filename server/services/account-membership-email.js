@@ -918,7 +918,7 @@ async function sendAppIntro({ customerId, sourceId = null, trackToken = null, tr
 }
 
 // The moving link, sent by hand from the Customer 360 Moving card (owner
-// 2026-11-02, dark behind GATE_MOVING_FLOW). Never sent by a trigger: a staff
+// 2026-11-02). Never sent by a trigger: a staff
 // click is the only caller. The key repeats within a minute (a double click is
 // one email) but a deliberate resend a minute later goes out. The same
 // recipient and "Email Messages" opt-out checks as every other sender here run

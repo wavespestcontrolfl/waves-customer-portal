@@ -11,17 +11,26 @@
  * A sender must also pass Gmail's SPF/DKIM check for its own domain (a typed From
  * header proves nothing), and quarantined, SPAM, TRASH or spam rows are skipped.
  *
- * Costs $0: plain string and regex rules over rows already in the database. No
- * model call, no paid API, no network. Read-only: it writes nothing but the bell.
+ * Deal tests, deadlines and product names are plain string and regex rules over rows
+ * already in the database: $0, no network. One exception, dark behind
+ * GATE_SITEONE_DEAL_AI_END_DATE (owner 2026-11-19 "B"): with it on, the scheduled Monday
+ * run takes each deal's end date from one Claude Haiku read of the whole email, shown with
+ * the email's own words (siteone-deal-end-date.js; at most 20 reads, about $0.04 a week);
+ * a read that fails keeps the date-pattern deadline, and the catch-up reruns use the date
+ * patterns only (and, with the gate on, leave a bell saved that week as it is). It writes
+ * nothing but the bell and, with the gate on, the week's AI-pass claim (one
+ * ops_email_send_state row; see claimAiPass).
  *
  * The bell follows docs/admin-notifications.md: it is raised through
  * raiseAdminAlert (headline and why inside the copy rules), and the one-line-
  * per-deal list lives in `detail` ("Show full text" on the bell). One bell per
  * ET week (dedupeKey siteone-deals:<Monday>), rewritten in place when a rerun
- * finds a different list.
+ * finds a different list (with the gate on, only by the run that holds the week's
+ * AI pass).
  */
 const logger = require('../logger');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
+const { stripQuotedHistory, NUMERIC_DATE, QUOTE_CHARS } = require('./deal-email-text');
 const { etWeekStart, etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const WINDOW_DAYS = 7;
@@ -44,8 +53,12 @@ const MAKER_DOMAINS = [
 ];
 const SENDER_DOMAINS = [SITEONE_DOMAIN, ...MAKER_DOMAINS];
 
-// Order, cart, account and auto-reply mail is never a deal, whatever words it carries.
-const TRANSACTIONAL_SUBJECT = /invoice|order summary|order has been submitted|order\b.*\bis ready|shopping cart|ewallet|automatic reply|out of office|statement|payment received|password|verify your/i;
+// Order, cart, account, support-case and auto-reply mail is never a deal, whatever words it
+// carries. A support case notice starts with its case ID, after any RE:/FW: ("Case: CS0012345
+// has been updated.", "RE: Case Number: CS0012345", "Case #01234567"). A deal that names a code
+// after "case" ("10% off by the case: CS12345XL") stays a deal. Each optional marker takes its
+// own trailing spaces, so a run of spaces has one way to match and a long one cannot stall it.
+const TRANSACTIONAL_SUBJECT = /invoice|order summary|order has been submitted|order\b.*\bis ready|shopping cart|ewallet|automatic reply|out of office|statement|payment received|password|verify your|^\s*(?:(?:re|fwd?)\s*:\s*)*case\s*(?:(?::\s*)?cs\s*|#\s*|number\s*(?:[:#]\s*)?(?:cs\s*)?)\d{5,}\b/i;
 
 // One entry per kind of deal word. promo/promotion share an entry, and "cash
 // discount" is not also counted as "discount", so "two different deal words"
@@ -145,24 +158,6 @@ function isDealEmail(email) {
 
 const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
 const MONTH_DAY = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?:,?\s+(20\d{2})\b)?/gi;
-// m/d, m/d/yy, m/d/yyyy. Not part of a longer number or path, and not a fraction of a unit ("1/2 gal").
-const NUMERIC_DATE = /(?<![\d/.])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/])(?!\s*(?:oz|lbs?|gal|gallons?|inch|in\b|"|%|cups?|pt|qt|tons?|acres?|ac\b))/gi;
-const QUOTED_HISTORY = [
-  /^[ \t]*From:/im,
-  /^[ \t>]*-{2,}[ \t]*Original Message[ \t]*-{2,}/im,
-  /^[ \t>]*On\s[\s\S]{0,250}?\swrote:/im,
-];
-
-/** Drops quoted reply history: everything from its first marker line on. */
-function stripQuotedHistory(text) {
-  let end = text.length;
-  for (const re of QUOTED_HISTORY) {
-    const m = re.exec(text);
-    if (m && m.index < end) end = m.index;
-  }
-  return text.slice(0, end);
-}
-
 const pad2 = (n) => String(n).padStart(2, '0');
 const isoOf = (y, m, d) => `${y}-${pad2(m)}-${pad2(d)}`;
 function validYmd(y, m, d) {
@@ -248,20 +243,39 @@ const clip = (s, n) => {
   return t.length <= n ? t : `${t.slice(0, n - 1).trimEnd()}…`;
 };
 
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
 function shortDate(date) {
   const p = etParts(date);
-  return `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][p.month - 1]} ${p.day}`;
+  return `${MONTH_NAMES[p.month - 1]} ${p.day}`;
 }
 
-function dealLine(email, products) {
+/**
+ * The deadline part of a line. `aiRead` is the AI end-date read ({ endDate, quote,
+ * priceIncrease }; endDate null = the email states no end; priceIncrease = endDate is the day
+ * a new price starts, so the line says "price rises", not "ends"), absent when the gate is off
+ * or the read failed; then the date patterns decide, as they always have.
+ */
+function deadlineNote(email, received, aiRead) {
+  if (aiRead?.endDate) {
+    const [year, month, day] = aiRead.endDate.split('-').map(Number);
+    const sameYear = year === etParts(received).year;
+    const what = aiRead.priceIncrease === true ? 'price rises' : 'ends';
+    return `${what} ${MONTH_NAMES[month - 1]} ${day}${sameYear ? '' : `, ${year}`} ("${clip(aiRead.quote, QUOTE_CHARS)}")`;
+  }
+  if (aiRead) return 'deadline not stated';
+  const deadline = extractDeadline(`${email.subject || ''}\n${bodyPlainText(email)}`, received);
+  return `deadline ${deadline || 'not stated'}`;
+}
+
+function dealLine(email, products, aiRead) {
   const received = new Date(email.received_at);
   const who = clip(email.from_name, 60) || clip(email.from_address, 80);
-  const deadline = extractDeadline(`${email.subject || ''}\n${bodyPlainText(email)}`, received);
   return [
     shortDate(received),
     who,
     clip(email.subject, SUBJECT_CLIP) || '(no subject)',
-    `deadline ${deadline || 'not stated'}`,
+    deadlineNote(email, received, aiRead),
     `your products: ${matchProducts(`${email.subject || ''}\n${bodyPlainText(email)}`, products).join(', ') || 'none named'}`,
   ].join(' · ');
 }
@@ -294,12 +308,42 @@ function candidateEmailQuery(conn, since, now) {
     .limit(MAX_CANDIDATE_ROWS);
 }
 
+// ---- the week's paid AI pass -----------------------------------------------
+// With the gate on, the Monday run claims the ET week's AI pass before the first model call:
+// one ops_email_send_state row (the job markers' table; no new table), stamped only when its
+// stamp is older than this ET week's Monday 00:00. A second Monday run that week (a deploy-
+// overlap tick that waited out the first one's lock) finds the claim taken and keeps the date
+// patterns, so a week pays for one pass at most. A claim that cannot be written pays nothing.
+// Either way that run leaves a bell already saved this week as it is (see runSiteOneDealsDigest).
+// `key` is for the Postgres test only, so its cleanup never touches the live claim.
+const AI_PASS_KEY = 'siteone-deal-end-date-pass';
+
+async function claimAiPass(conn, now, key = AI_PASS_KEY) {
+  try {
+    const claimed = await conn.raw(
+      `INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT (email_key) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at, updated_at = EXCLUDED.updated_at
+       WHERE ops_email_send_state.last_sent_at IS NULL OR ops_email_send_state.last_sent_at < ?
+       RETURNING email_key`,
+      [key, now, now, parseETDateTime(`${etWeekStart(now)}T00:00`)],
+    );
+    if (claimed?.rows?.length) return true;
+    logger.info('[siteone-deals] end dates: this week\'s AI pass already ran; date patterns kept');
+  } catch (err) {
+    logger.warn(`[siteone-deals] end dates not read by AI: weekly claim not written: ${err.message}`);
+  }
+  return false;
+}
+
 /**
  * Scans the last 7 days of mail, rings ONE bell when there are deals.
  * `notify` has raiseAdminAlert's shape (category, spec, opts); tests pass a fake.
+ * `aiEndDates: true` is the scheduled Monday run only (scheduler.js): it alone may pay
+ * for the AI end-date reads, so a catch-up after a failed save or a restart pays nothing
+ * again and the week's reads stay at one run's cap.
  * Returns { scanned, deals, notified }.
  */
-async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
+async function runSiteOneDealsDigest({ now = new Date(), db, notify, aiEndDates = false } = {}) {
   const conn = db || require('../../models/db');
   const raise = notify || ((...args) => require('../admin-alert-compose').raiseAdminAlert(...args));
   const since = new Date(now.getTime() - WINDOW_DAYS * 86400000);
@@ -324,6 +368,19 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
     logger.warn(`[siteone-deals] product names not read: ${err.message}`);
   }
 
+  // Gate off: no model call, every line keeps its date-pattern deadline, and a rerun rewrites
+  // the week's bell as it does today. Gate on: only the scheduled Monday run that holds this ET
+  // week's AI pass reads, and only it may rewrite a bell saved this week. Any other run (a
+  // catch-up after a run that saved its bell but not its job_health stamp, a duplicate Monday
+  // run, a claim that failed) makes no model call and adds a bell only when none was saved, so
+  // the AI dates a paid pass saved stay.
+  let endDates = new Map();
+  let keepSavedBell = false;
+  if (require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true) {
+    if (aiEndDates === true && await claimAiPass(conn, now)) endDates = await require('./siteone-deal-end-date').readDealEndDates(conn, deals);
+    else keepSavedBell = true;
+  }
+
   const dedupeKey = `siteone-deals:${etWeekStart(now)}`;
   const count = deals.length;
   const result = await raise('system', {
@@ -338,9 +395,9 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
   }, {
     // 'system' alone is suppressed under the bell policy; a deal list is a handoff.
     bell: true,
-    detail: [...deals.map((e) => dealLine(e, productNames)), ...(capped ? [CAP_NOTE] : [])].join('\n'),
+    detail: [...deals.map((e) => dealLine(e, productNames, endDates.get(e.id))), ...(capped ? [CAP_NOTE] : [])].join('\n'),
     dedupeKey,
-    refreshOnDedupe: true,
+    refreshOnDedupe: !keepSavedBell,
     metadata: { source: 'siteone-deals-digest', dealCount: count, emailIds: deals.map((e) => e.id) },
   });
   // The notification service resolves null when it could not save the row.
@@ -396,6 +453,10 @@ async function weekIsMissing(opts = {}) {
  * Meant to run inside runExclusive(JOB_NAME); it checks again under that lock, so
  * a tick that finished while this one waited for the lock is not run twice. That
  * second read throws on failure (see readWeekMissing), so the run is recorded as failed.
+ * It never asks for AI end dates (no aiEndDates): the Monday run may already have paid
+ * for them, so this bell keeps the date-pattern deadlines. With the gate on it adds a bell
+ * only when none was saved this week: a Monday run that saved its bell but stopped before
+ * job_health recorded the run keeps its AI dates.
  */
 async function runSiteOneDealsCatchUp({ now = new Date(), db, notify } = {}) {
   if (!(await readWeekMissing({ now, db }))) return { skipped: 'already_ran' };
@@ -405,5 +466,5 @@ async function runSiteOneDealsCatchUp({ now = new Date(), db, notify } = {}) {
 module.exports = {
   weekIsMissing, runSiteOneDealsCatchUp, scheduledTickFor,
   runSiteOneDealsDigest, isDealEmail, extractDeadline, matchProducts, isDealSenderDomain,
-  candidateEmailQuery, MAX_CANDIDATE_ROWS, BODY_CHARS, HTML_CHARS,
+  candidateEmailQuery, MAX_CANDIDATE_ROWS, BODY_CHARS, HTML_CHARS, claimAiPass, AI_PASS_KEY,
 };

@@ -99,7 +99,7 @@ describe('notification trigger push tags', () => {
     expect(TRIGGER_REGISTRY.waiting_summary.techVisible).toBeUndefined();
   });
 
-  // GATE_OWNER_NUDGE_BANNER (owner 2026-11-04, "banner").
+  // Owner 2026-11-04, "banner".
   test('open_visits_nudge carries the text\'s words, opens the tech close-out page and has no bell-row rule beyond fyi', () => {
     const built = TRIGGER_REGISTRY.open_visits_nudge.build({
       headline: '3 visits from today are still open',
@@ -132,6 +132,31 @@ describe('notification trigger push tags', () => {
     expect(built.title).toBe('Bank payment error');
     expect(built.body).toBe('Invoice WPC-2026-0100 - Virginia Demo - Bank account during Stripe confirmation: Bank account could not be verified');
     expect(built.link).toBe('/admin/invoices?invoice=inv_123');
+  });
+
+  test('a quiz lead\'s bell names the quiz and its answers in place of the service line', () => {
+    const built = TRIGGER_REGISTRY.new_lead.build({
+      name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Cockroach Control',
+      quizAnswers: 'Roaches, condo, wants it today', quizNamesRequest: true, leadId: 'lead-9',
+    });
+    expect(built.title).toBe('New lead');
+    expect(built.body).toBe('Pat Sample via Pest Quiz (34202) - Roaches, condo, wants it today');
+    expect(built.link).toBe('/admin/leads?lead=lead-9');
+    // A "Not sure" or partly answered quiz does not say what the visitor
+    // wants, so the service line stays beside the answers.
+    const partial = (quizAnswers) => TRIGGER_REGISTRY.new_lead.build({
+      name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Pest Control', quizAnswers, quizNamesRequest: false, leadId: 'lead-9',
+    }).body;
+    expect(partial('Not sure, condo, wants it today')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - Not sure, condo, wants it today');
+    expect(partial('wants it today')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - wants it today');
+    // A named problem with no property or timing is partial too.
+    expect(partial('Ants')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - Ants');
+    // A caller that sends answers with no flag keeps the service line too.
+    expect(TRIGGER_REGISTRY.new_lead.build({ name: 'Pat Sample', source: 'Pest Quiz', service: 'Pest Control', quizAnswers: 'condo' }).body)
+      .toBe('Pat Sample via Pest Quiz - Wants Pest Control - condo');
+    // Every other lead keeps the service line.
+    expect(TRIGGER_REGISTRY.new_lead.build({ name: 'Pat Sample', source: 'Main site', zip: '34202', service: 'Pest Control', leadId: 'lead-9' }).body)
+      .toBe('Pat Sample via Main site (34202) - Wants Pest Control');
   });
 
   test('new lead trigger can carry tracking number context', () => {
@@ -475,6 +500,22 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  // A quiet missed call's bell row is titled likely robocall; its push goes only when no bell row
+  // was written (missed-call-bell.js pushGuard) and keeps the ordinary caller title (pre-push audit r23).
+  test('a missed-call push carries its push-only title while the bell row keeps its own', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'likely robocall (GBP — Parrish)', pushName: 'unknown caller (GBP — Parrish)', phone: '+19415550100', callLogId: 'call-2' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('Missed call — likely robocall (GBP — Parrish)');
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').title).toBe('Missed call — unknown caller (GBP — Parrish)');
+    // With no push name the push carries the bell's title, as before.
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'unknown caller (GBP — Parrish)', phone: '+19415550100', callLogId: 'call-3' });
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').title).toBe('Missed call — unknown caller (GBP — Parrish)');
+  });
+
   // A banner for a bell row its writer rang under bell: true keeps that authorization, so a type the
   // policy would otherwise silence (one with no customer declaration) still gets its banner.
   test.each(['dashboard_alert'])(
@@ -529,6 +570,47 @@ describe('triggerNotification bell outcome', () => {
     const quiet = await pushFor('customer_missed_call', missed);
     expect(quiet).toMatchObject({ silent: true, vibrate: [0] });
     expect(quiet).not.toHaveProperty('sound');
+  });
+
+  test('beforeHandoff reaches the push service\'s per-device check, and a fan-out it stopped part way keeps its count', async () => {
+    const PushService = require('../services/push-notifications');
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }])
+        : table === 'notification_preferences'
+          ? tableMock([{ admin_user_id: 'admin-1', trigger_key: 'lead_call_reminder', bell_enabled: true, push_enabled: true, sound_enabled: true }])
+          : tableMock([])));
+    // Two devices, as the push service runs them (push-notifications-before-handoff.test.js): the check before each
+    // handoff; a false answer stops that device and every later one.
+    PushService.sendToAdminUsers.mockClear();
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payload, opts) => {
+      const results = [];
+      for (let device = 0; device < 2; device += 1) {
+        if ((await opts.beforeHandoff()) === false) {
+          return { subscriptions: 2, sent: results.length, expired: 0, failed: 0, skipped: 2 - results.length, results, superseded: true };
+        }
+        results.push({ sent: true });
+      }
+      return { subscriptions: 2, sent: 2, expired: 0, failed: 0, skipped: 0, results };
+    });
+    const answers = [true, false];
+    const beforeHandoff = jest.fn(async () => answers.shift());
+    const expiresAt = '2026-11-09T23:00:00.000Z';
+    const stats = await triggerNotification('lead_call_reminder', { alertRowId: 'n-1', alertTitle: 'Leads — call Pat Sample back', alertBody: 'b', expiresAt },
+      { pushOnly: true, adminOnly: true, bellAuthorized: true, beforePush: async () => true, beforeHandoff });
+    // The reminder's expiry reaches every device's payload (web push TTL, apns-expiration, FCM ttl).
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1')).toMatchObject({ expiresAt });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][2].beforeHandoff).toBe(beforeHandoff);
+    expect(beforeHandoff).toHaveBeenCalledTimes(2);
+    // One device has the push: the count stays, it is not read as "stopped before the push".
+    expect(stats.push).toMatchObject({ sent: 1, superseded: true });
+  });
+
+  test('pushExpiryFor: the lead reminders\' push carries its own expiry; no other trigger reads one from its payload', () => {
+    expect(__private.pushExpiryFor('lead_call_reminder', { expiresAt: '2026-11-09T23:00:00.000Z' })).toEqual({ expiresAt: '2026-11-09T23:00:00.000Z' });
+    expect(__private.pushExpiryFor('lead_call_reminder', {})).toEqual({});
+    expect(__private.pushExpiryFor('lead_call_reminder', { expiresAt: 'not a time' })).toEqual({});
+    expect(__private.pushExpiryFor('new_lead', { expiresAt: '2026-11-09T23:00:00.000Z' })).toEqual({});
   });
 
   test('portal_ask is a pushOnly page: it writes no bell row and pushes one banner tagged by the ask', async () => {
@@ -1069,8 +1151,8 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     }
   });
 
-  // GATE_OWNER_NUDGE_BANNER: pushOnly + onlyUserIds reaches only the named admin, never a bell row, only while its gate is on.
-  test.each([['true', 1], [undefined, 0]])('GATE_OWNER_NUDGE_BANNER=%p: the pushOnly open_visits_nudge banner sends %p push(es) to the owner alone, never a bell row', async (gate, pushes) => {
+  // pushOnly + onlyUserIds reaches only the named admin, never a bell row.
+  test('the pushOnly open_visits_nudge banner sends one push to the owner alone, never a bell row', async () => {
     const PushService = require('../services/push-notifications');
     const bellPolicy = require('../services/notification-bell-policy');
     const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
@@ -1079,7 +1161,6 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     ));
     NotificationService.notifyAdmin.mockClear();
     PushService.sendToAdminUsers.mockClear();
-    if (gate) process.env.GATE_OWNER_NUDGE_BANNER = gate;
     try {
       const stats = await triggerNotification(
         'open_visits_nudge',
@@ -1087,11 +1168,8 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
         { pushOnly: true, adminOnly: true, onlyUserIds: ['owner-1'] },
       );
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(pushes);
-      if (!pushes) {
-        expect(stats.policySilenced).toBe(true);
-        return;
-      }
+      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+      expect(stats.policySilenced).toBeFalsy();
       const [adminIds, payloadFor] = PushService.sendToAdminUsers.mock.calls[0];
       expect(adminIds).toEqual(['owner-1']);
       expect(payloadFor('owner-1')).toMatchObject({
@@ -1099,7 +1177,6 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
         tag: 'waves-open_visits_nudge-2026-11-04', sound: 'waves-reminder.caf', priority: 'normal',
       });
     } finally {
-      delete process.env.GATE_OWNER_NUDGE_BANNER;
       gateSpy.mockRestore();
     }
   });
@@ -1419,7 +1496,7 @@ describe('bell banner triggers', () => {
     expect(keys.indexOf('messenger_reply')).toBe(keys.indexOf('sms_reply') + 1);
   });
 
-  test('new_lead_email (GATE_RING_NEW_CONTACTS) builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
+  test('new_lead_email builds from the written row, is admin-only, and pushes with the New lead sound', async () => {
     const lead = TRIGGER_REGISTRY.new_lead_email;
     expect(lead).toEqual(expect.objectContaining({ category: 'new_lead', priority: 'high', group: 'Leads & Sales', adminRoleOnly: true }));
     expect(lead.rule).toEqual({ area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 });

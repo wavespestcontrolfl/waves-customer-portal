@@ -5930,7 +5930,8 @@ function classifyAppointmentTag(serviceType) {
   return require('../services/appointment-tagger').classifyAppointmentType(serviceType).tag;
 }
 
-function getZone(city, zip) {
+// `fallback` is the zone for a city and ZIP no rule matches.
+function getZone(city, zip, fallback = 'lakewood_ranch') {
   const c = (city || '').toLowerCase();
   const z = zip || '';
   if (['parrish', 'ellenton'].includes(c) || z === '34219') return 'parrish';
@@ -5952,7 +5953,7 @@ function getZone(city, zip) {
     'englewood', 'port charlotte', 'punta gorda', 'murdock',
     'rotonda west', 'placida', 'boca grande',
   ].includes(c)) return 'venice_north_port';
-  return 'lakewood_ranch';
+  return fallback;
 }
 
 const ZONE_COLORS = {
@@ -5980,6 +5981,27 @@ const ZONE_COORDS = {
   sarasota: { lat: 27.3364, lng: -82.5307 },
   venice_north_port: { lat: 27.0998, lng: -82.4543 },
 };
+
+// The forecast zone of a day-board stop, read from its scheduled_services row:
+// the stored zone, never the card's display zone, which defaults to Lakewood
+// Ranch for a city and ZIP no rule places. A stored zone with a forecast point
+// stays; else the row's city and ZIP place the stop, else the stored zone read
+// as a place name by the same rules (self-booking stores the service zone's
+// first name: 'bradenton', 'venice', 'port charlotte'; a board zone key such
+// as 'bradenton_south' is not a place name); a stop none of these place has
+// no forecast zone (owner 2026-11-02, "leave the rain for all";
+// 11-19: 18 of 84 stops, stored 'bradenton', showed no rain). The day query
+// fills each missing stamp field from the primary address, so a stamp for
+// another property reads only its own city and ZIP ("no pin beats a wrong
+// pin", services/stamped-address.js).
+function stopForecastZone(row) {
+  if (ZONE_COORDS[row.zone]) return row.zone;
+  const ownAddress = require('../services/stamped-address').stampedAddressDiverges(row);
+  const city = ownAddress ? row.service_address_city : row.city;
+  // getZone matches 5-digit ZIPs exactly: '34211-1234' reads as '34211'.
+  const zip = require('../services/customer-properties').normalizeZip(ownAddress ? row.service_address_zip : row.zip);
+  return getZone(city, zip, ZONE_COLORS[row.zone] ? null : getZone(row.zone, null, null));
+}
 
 // Completion reuses a non-void invoice already attached to the visit
 // (pre-minted Charge Now / accept-minted first-visit with setup fee / payer
@@ -6768,6 +6790,9 @@ router.get('/', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+        // The primary address on file, for the rain step's stopForecastZone
+        // (stampedAddressDiverges): kept on the row only, never in the response.
+        'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
         // Visit coordinates for map-centered tools (treatment-zone mapper):
         // stamped visit coords win; the customer mirror only backfills a
         // NON-divergent stamp — a divergent stamp with no coords must degrade
@@ -7426,7 +7451,10 @@ router.get('/', async (req, res, next) => {
     const { attachStopRain, zoneHourlyOutlooks, weatherNow } = require('../services/scheduling/stop-rain');
     attachStopRain(enriched, date, {});
     try {
-      const zonesPresent = [...new Set(enriched.map((s) => s.zone))].filter((z) => ZONE_COORDS[z]);
+      // From the raw rows: `enriched` carries only the display zone.
+      const forecastZoneById = new Map(services.map((s) => [s.id, stopForecastZone(s)]));
+      const forecastZoneOf = (stop) => forecastZoneById.get(stop.id) || null;
+      const zonesPresent = [...new Set(enriched.map(forecastZoneOf))].filter((z) => ZONE_COORDS[z]);
       const [outlook, perZone, hourlyByZone, officeWeather] = await Promise.all([
         rainOutlookPromise,
         Promise.all(zonesPresent.map(async (z) => {
@@ -7441,7 +7469,7 @@ router.get('/', async (req, res, next) => {
       const officeChance = outlook?.[date]?.rainChance;
       rainChance = Number.isFinite(officeChance) ? officeChance : null;
       if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);
-      attachStopRain(enriched, date, hourlyByZone);
+      attachStopRain(enriched, date, hourlyByZone, forecastZoneOf);
     } catch { /* rain outlook is optional */ }
 
     await attachOfficeToldFields(req, enriched);
@@ -24105,7 +24133,6 @@ function optimizeRefusalMessage(reason) {
   if (reason === 'WINDOW_FIT_GATE_OFF') return 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
   if (reason === 'LIVE_STOP_IN_PROGRESS') return 'A stop on this route is already in progress — reorder it once that visit is complete.';
   if (reason === 'COORDLESS_STOPS') return 'A stop on this route has no map location, so its arrival window cannot be verified — nothing was changed.';
-  if (reason === 'MODEL_UNCALIBRATED') return 'Drive-time calibration is off, so this route\'s arrival windows cannot be verified without live traffic data — nothing was changed.';
   if (reason === 'PROGRESS_ORIGIN_UNKNOWN') return 'This route is already under way and the last completed stop has no map location, so the remaining drive cannot be verified — nothing was changed.';
   return 'No legal stop order keeps every promised arrival window — nothing was changed.';
 }
@@ -24432,9 +24459,6 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       RouteOptimizer, googleOrder: result.orderedStops, sourceStops: services, googleSource: result.source, legs: result.legs, startMin,
       origin: techDayOrigins.origins.get(techKey) || null,
       home: homeFromMap(techHomes, techKey),
-      // This button WRITES; it may not certify a promise on the uncalibrated
-      // model when Google's legs were discarded.
-      requireCalibratedModel: true,
     });
     if (!outcome.orderedStops) {
       return res.status(409).json({
@@ -24994,7 +25018,12 @@ const {
   stripPrepaySwitchSupersededMarkers: stripSupersededMarkers,
 } = require('../services/invoice');
 
-async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db }) {
+// `delivered` (the invoice pay page's plan choice, pay-plan-choice.js): the
+// customer is reading this invoice on its own pay link, so having gone out —
+// or carrying the PaymentIntent that page opens — is the normal state, not a
+// refusal. That lane voids nothing at the choice; every money guard below
+// (collected, part-paid, credited, deposit, payer, foreign lines) still holds.
+async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db, delivered = false }) {
   if (!Array.isArray(visitIds) || visitIds.length === 0) {
     return { ok: true, supersedes: [] };
   }
@@ -25070,10 +25099,10 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     // UNDELIVERED DRAFTS ONLY (Codex P0 r1). A delivered invoice has a live
     // pay link in the customer's hands; one carrying a PaymentIntent has a
     // payment in flight. Voiding either is a deliberate office decision.
-    if (inv.sent_at || inv.stripe_payment_intent_id) {
+    if (!delivered && (inv.sent_at || inv.stripe_payment_intent_id)) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has already gone out to the customer. Void it from Invoices first, then switch` };
     }
-    if (status !== 'draft') {
+    if (status !== 'draft' && !(delivered && ['sent', 'viewed', 'overdue'].includes(status))) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is ${status}, not an unsent draft. Resolve it first, then mint the prepay from Customer 360` };
     }
     if (Number(inv.amount_paid || 0) > 0) {
@@ -25302,7 +25331,7 @@ router.get('/cancel-call-notice', requireAdmin, async (req, res, next) => {
 //               and persists its own estimated_price, so a draft-shaped
 //               payload replayed after save could invoice a per-visit amount
 //               the committed series never carried.
-async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switchLaneOverride } = {}) {
+async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switchLaneOverride, payPageInvoiceId = null } = {}) {
     // Dark by default (GATE_PREPAY_ON_BOOK): 404 rather than a blockReason —
     // while the lane is off the endpoint is unobservable, exactly like the
     // /secure select-plan route. GATE_ONSITE_PREPAY_SWITCH opens the SAME
@@ -25314,6 +25343,14 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // the same committed-mode switch lane by passing switchLane: true.
     const switchLane = switchLaneOverride === true || isEnabled('onsitePrepaySwitch');
     if (!isEnabled('prepayOnBook') && !switchLane) return { httpStatus: 404, httpBody: { error: 'Not found' } };
+    // The invoice pay page's plan choice (GATE_PAY_PLAN_CHOICE, its own gate in
+    // pay-plan-choice.js; it passes switchLane: true): the customer reads the
+    // accept-minted first invoice on its pay link and may prepay the year
+    // instead. Same eligibility and price as the switch, with three
+    // differences, each marked `payPage` below: the invoice has been delivered,
+    // its visit may already be completed (owner 2026-11-19: that visit counts
+    // as visit 1 of the year), and nothing is voided at the choice.
+    const payPage = payPageInvoiceId ? String(payPageInvoiceId) : null;
     const {
       computeSeriesPrepayPricing,
       PLAN_CLASS_BY_SERVICE_KEY,
@@ -25361,6 +25398,11 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
             'booster_months', 'source_estimate_id')
         : visit;
       const anchor = parent || visit;
+      // payPage: only the accept-minted first invoice, which the converter
+      // attaches to the series' first visit, carries the choice.
+      if (payPage && (!anchor.source_estimate_id || String(visit.id) !== String(anchor.id))) {
+        return blocked('isn’t the first invoice of an accepted plan');
+      }
       // An estimate-origin series already made its billing choice at accept —
       // that lane owns its own prepay control.
       //
@@ -25612,6 +25654,12 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     const firstVisitDate = validScheduleDate(input.firstVisitDateRaw)
       ? String(input.firstVisitDateRaw).split('T')[0]
       : null;
+    // payPage: the first visit may already be done. The year still starts on
+    // that visit's own date, so coverage counts it as visit 1; no first-visit
+    // promise is recorded for a date that has passed.
+    const pastAnchorDate = payPage && !firstVisitDate
+      ? require('../utils/datetime-et').validCalendarDate(input.firstVisitDateRaw, { allowTimeSuffix: true })
+      : null;
     const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
     const normalizedWindowStart = firstVisitDate && input.windowStartRaw
       ? AnnualPrepayTimes.normalizeWindowStart(String(input.windowStartRaw))
@@ -25634,10 +25682,10 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // as past. Falling back to today would start the term after the booked
     // visit, so coverage could not adopt it — the visit would bill per
     // application while the seeder scheduled a replacement inside the window.
-    if (input.mode === 'committed' && !firstVisitDate) {
+    if (input.mode === 'committed' && !firstVisitDate && !pastAnchorDate) {
       return blocked('couldn’t anchor the prepaid year on the booked visit — its date is no longer in the future. Refresh, and mint from Customer 360 if this visit still needs prepay');
     }
-    const termStart = firstVisitDate || today;
+    const termStart = firstVisitDate || pastAnchorDate || today;
 
     // Surface an existing term as a block rather than letting the mint 409
     // after the appointment is already booked. Compared against the PROPOSED
@@ -25665,9 +25713,15 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
         estimateId: anchorEstimateId,
         customerId,
         conn,
+        delivered: !!payPage,
       });
       if (!resolved.ok) return blocked(resolved.blockReason);
       supersedes = resolved.supersedes;
+      // payPage: the year replaces exactly the invoice the customer is
+      // reading, or the choice is not offered.
+      if (payPage && !(supersedes.length === 1 && String(supersedes[0].id) === payPage)) {
+        return blocked('isn’t the first invoice of an accepted plan');
+      }
     } else if (switchLane && input.mode === 'committed' && scheduledServiceId) {
       // NON-ESTIMATE committed series under the switch gate: run the SAME
       // resolver the write path runs (estimateId null ⇒ live-attached-
@@ -25716,6 +25770,10 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
       .reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
     const unwaivedSetupFee = directSetupFee > 0 ? directSetupFee : supersededRodentSetup;
     const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
+    // payPage: a bait-station setup is carried onto the prepay, never waived,
+    // which the two-option block does not explain. Those plans switch through
+    // the office.
+    if (payPage && pricing.prepay.setupAmount > 0) return blocked('carries a bait-station setup — switch it from the office');
     const planLabel = `${coverageServiceType} Annual Prepay`;
 
     // The setup fee is only real — and therefore only waivable — when it is
@@ -25788,9 +25846,11 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
         termStart,
         ...(firstVisitDate ? { firstVisitDate } : {}),
         ...(firstVisitWindowStart ? { firstVisitWindowStart } : {}),
-        note: isAcceptedSwitch
-          ? 'Annual prepay sold at the visit — switched from per application.'
-          : 'Annual prepay sold when the visit was booked.',
+        note: payPage
+          ? require('../services/pay-plan-choice').prepayInvoiceNote(supersedes[0].invoiceNumber)
+          : (isAcceptedSwitch
+            ? 'Annual prepay sold at the visit — switched from per application.'
+            : 'Annual prepay sold when the visit was booked.'),
       },
       // Internal: the switch endpoint's supersede context. Stripped from
       // the HTTP payload by the route wrapper.
@@ -25863,13 +25923,17 @@ function prepaySwitchMatchesExpected(live, expected) {
 }
 
 // Every caller passes visitId, acknowledgeNoticedAmount, actor and auditSource;
-// switchLane and expected are the bar's alone.
+// switchLane and expected are the bar's alone. payPageInvoiceId is the invoice
+// pay page's (pay-plan-choice.js): the customer chose the year on that
+// invoice's own page, so it stays payable (owner 2026-11-19: "keep it
+// payable") and nothing is voided here. Paying the prepay closes it
+// (annual-prepay-renewals closeAcceptInvoiceReplacedByPaidTerm).
 async function runPrepaySwitch({
-  visitId, acknowledgeNoticedAmount, actor, switchLane, expected, auditSource,
+  visitId, acknowledgeNoticedAmount, actor, switchLane, expected, auditSource, payPageInvoiceId = null,
 }) {
   // Server-derived eligibility + pricing — the same computation the sheet
   // previewed, re-run fresh so nothing stale or client-shaped is minted.
-  const previewOpts = { switchLane: switchLane === true };
+  const previewOpts = { switchLane: switchLane === true, payPageInvoiceId };
   const p = await computeAnnualPrepayPreview({ scheduledServiceId: visitId }, db, previewOpts);
   if (p.httpStatus) return { httpStatus: p.httpStatus, httpBody: p.httpBody };
   if (!p.eligible) return { httpStatus: 409, httpBody: { error: `This visit ${p.blockReason}` } };
@@ -25909,7 +25973,9 @@ async function runPrepaySwitch({
       // deliberately never stamps completed/skipped rows, so a terminal
       // visit could collect a year that then reports visitCovered:false
       // forever. Only a visit that can still be stamped may switch.
-      const LIVE_SWITCH_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+      // The pay page admits a completed first visit: paying its prepay
+      // stamps that visit as visit 1 of the year (the closer named above).
+      const LIVE_SWITCH_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site', ...(payPageInvoiceId ? ['completed'] : [])];
       if (!liveVisit || !LIVE_SWITCH_STATUSES.includes(String(liveVisit.status || ''))) {
         const err = new Error(liveVisit && ['completed', 'skipped'].includes(String(liveVisit.status || ''))
           ? 'This visit is already closed out — coverage can’t stamp it. Sell the prepay from Customer 360 instead'
@@ -26050,6 +26116,7 @@ async function runPrepaySwitch({
         estimateId: target.estimateId,
         customerId: target.customerId,
         conn: trx,
+        delivered: !!payPageInvoiceId,
       });
       if (!resolved.ok) {
         const err = new Error(`This visit ${resolved.blockReason}`);
@@ -26074,11 +26141,19 @@ async function runPrepaySwitch({
           .whereIn('status', ['paid', 'processing'])
           .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(inv.id)])
           .first('id');
-        if (recordedPayment) {
+        // The pay page's invoice may also carry an out-of-band part payment
+        // (Charge Now's prepaid credit lowers the total and stamps
+        // payment_recorded_at, leaving amount_paid at 0).
+        const recordedOnRow = payPageInvoiceId
+          ? await trx('invoices').where({ id: inv.id }).whereNotNull('payment_recorded_at').first('id')
+          : null;
+        if (recordedPayment || recordedOnRow) {
           const err = new Error(`${inv.invoiceNumber || 'The per-application invoice'} has a recorded payment — resolve it from Invoices, never a switch`);
           err.switchConflict = true;
           throw err;
         }
+        // The pay page keeps its invoice payable: checked like any other, never voided here.
+        if (payPageInvoiceId) continue;
         const retired = await trx('invoices')
           .where({ id: inv.id, status: 'draft' })
           .whereNull('sent_at')
@@ -26096,7 +26171,7 @@ async function runPrepaySwitch({
         // applied credit, and no deposit line — the states the canonical
         // voidInvoice exists to untangle are all refused upstream.
       }
-      voided = resolved.supersedes.map((inv) => ({ id: inv.id, invoiceNumber: inv.invoiceNumber, total: inv.total }));
+      voided = payPageInvoiceId ? [] : resolved.supersedes.map((inv) => ({ id: inv.id, invoiceNumber: inv.invoiceNumber, total: inv.total }));
 
       // A direct (non-estimate) rodent series' non-member setup rides the
       // recomputed payload as setupFeeAmount — billed as its OWN line
@@ -26122,7 +26197,7 @@ async function runPrepaySwitch({
           unit_price: switchSetupFee,
           category: 'Setup fee',
         }] : [])],
-        notes: `${mintPayload.note} (visit ${target.visit.id})`,
+        notes: payPageInvoiceId ? mintPayload.note : `${mintPayload.note} (visit ${target.visit.id})`,
         dueDate: etDateString(),
       });
       // The sheet displayed a tax-free residential total; anything else
@@ -26165,7 +26240,9 @@ async function runPrepaySwitch({
         await trx('invoices')
           .where({ id: inv.id })
           .update({
-            notes: trx.raw('concat(coalesce(notes, ?), ?)', ['', `\n${supersededByMarker(invoice.id)}`]),
+            // `||`, not concat(): concat() takes "any", so Postgres cannot type
+            // the bound marker and refuses the whole switch (42P18).
+            notes: trx.raw('coalesce(notes, ?) || ?', ['', `\n${supersededByMarker(invoice.id)}`]),
             updated_at: new Date(),
           });
       }
@@ -26258,7 +26335,7 @@ async function runPrepaySwitch({
       annual_prepay_term_id: mintedTerm?.id || null,
       scheduled_service_id: target.visit.id,
       superseded_invoice_ids: voided.map((v) => v.id),
-      charge_in_person: true,
+      charge_in_person: !payPageInvoiceId,
       source: auditSource,
     }),
     created_at: new Date(),
@@ -26572,10 +26649,10 @@ router.get('/:id/card-request', async (req, res, next) => {
     if (!(await technicianOwnsScheduledService(req, req.params.id))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
-    const { isSecureCardLaneReady } = require('../services/appointment-card-request');
+    const { isSecureCardLaneReady, visitCardLinkClosedReason } = require('../services/appointment-card-request');
     const visit = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'card_link_sent_at');
+      .first('id', 'customer_id', 'card_link_sent_at', 'status', 'scheduled_date');
     if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
     const request = await db('appointment_card_requests')
       .where({ scheduled_service_id: visit.id })
@@ -26593,6 +26670,10 @@ router.get('/:id/card-request', async (req, res, next) => {
       enabled: await isSecureCardLaneReady(),
       autopayActive,
       cardLinkSentAt: visit.card_link_sent_at || null,
+      // Non-null once the visit can no longer take a card link (tech en route
+      // or on site, done, cancelled, or a past date): the panel shows why in
+      // place of a send button the funnel would refuse.
+      closedReason: visitCardLinkClosedReason(visit),
       request: request
         ? {
           status: request.status,
@@ -26620,6 +26701,10 @@ router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
     if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
     const { requestCardForAppointment } = require('../services/appointment-card-request');
     const result = await requestCardForAppointment({ scheduledServiceId: visit.id, trigger: 'admin' });
+    // A skip answers 200 and writes no row, so this line is the only record
+    // of why an office tap sent nothing (2026-11-19: read from body size).
+    // The code before ':' only: an error or provider suffix is free text.
+    logger.info(`[schedule] office card-link tap for ${visit.id}: ${result.action} (${String(result.reason || '').split(':')[0]})`);
     res.json({ requested: result.requested, action: result.action, reason: result.reason });
   } catch (err) { next(err); }
 });
@@ -30437,6 +30522,7 @@ module.exports.buildAppointmentPricing = buildAppointmentPricing;
 // new-caller booking route (admin-schedule-new-caller.js), which books by
 // address before a customer exists.
 module.exports.getZone = getZone;
+module.exports.stopForecastZone = stopForecastZone;
 module.exports.newCallerRowFields = newCallerRowFields;
 // The percent-discount exclusion predicate (termite bond, rodent bait,
 // bed bug, Bora-Care, pre-slab, ...) — consumed lazily by the IB

@@ -9,6 +9,7 @@ import {
 import { isFieldPath } from "../lib/adminBookmarkMeta";
 import { installStaffSessionGuard } from "../lib/staffSessionGuard";
 import { adminFetch, adminLoginUrl } from "../utils/admin-fetch";
+import { signInReturnLocation } from "../lib/fieldView";
 import { refetchFlags } from "./useFeatureFlag";
 
 // Bound on the staff check so a dead zone cannot hold the field workspace on
@@ -51,7 +52,7 @@ export default function useStaffSession() {
   useEffect(() => {
     const token = getAdminAuthToken();
     if (!token) {
-      navigate(adminLoginUrl(location), { replace: true });
+      navigate(adminLoginUrl(signInReturnLocation(location)), { replace: true });
       return undefined;
     }
     // The field workspace (/admin/today) must open with no signal, so only
@@ -122,7 +123,7 @@ export default function useStaffSession() {
       .catch((err) => {
         if (superseded()) return;
         if (err?.status === 401) {
-          endSession(adminLoginUrl(location));
+          endSession(adminLoginUrl(signInReturnLocation(location)));
           return;
         }
         // Judged on the path NOW: navigating off Today while the check was
@@ -193,7 +194,7 @@ export default function useStaffSession() {
     if (!onField) return undefined;
     return installStaffSessionGuard({
       getToken: getAdminAuthToken,
-      onRejected: () => endSession(adminLoginUrl(locationRef.current)),
+      onRejected: () => endSession(adminLoginUrl(signInReturnLocation(locationRef.current))),
       onEnrollmentRequired: toTwoStep,
     });
   }, [navigate, onField]);

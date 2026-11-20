@@ -18,6 +18,12 @@ vi.mock("./BidKitPage", () => ({
   },
 }));
 
+vi.mock("./BuilderProspectsPage", () => ({
+  default: function BuildersStub({ embedded }) {
+    return <div data-testid="builders" data-embedded={String(Boolean(embedded))}>builders</div>;
+  },
+}));
+
 import BidsPage from "./BidsPage";
 import AdminTabRedirect from "../../components/admin/AdminTabRedirect";
 
@@ -100,4 +106,20 @@ it("redirects /admin/bid-kit to the kit tab and keeps ?item= and the hash", () =
 it("redirects plain /admin/bid-kit to /admin/bids?tab=kit", () => {
   renderAt("/admin/bid-kit");
   expect(screen.getByTestId("where").textContent).toBe("/admin/bids?tab=kit");
+});
+
+it("opens the Builders tab for ?tab=builders", () => {
+  renderAt("/admin/bids?tab=builders");
+  expect(screen.getByTestId("builders")).toHaveAttribute("data-embedded", "true");
+  expect(screen.queryByTestId("desk")).toBeNull();
+  expect(screen.queryByTestId("kit")).toBeNull();
+  expect(screen.getByRole("button", { name: "Builders" })).toHaveAttribute("aria-current", "page");
+});
+
+it("switching to Builders sets ?tab=builders, and an unknown tab falls back to Open bids", () => {
+  renderAt("/admin/bids?tab=nope");
+  expect(screen.getByTestId("desk")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Builders" }));
+  expect(new URLSearchParams(screen.getByTestId("where").textContent.split("?")[1]).get("tab")).toBe("builders");
+  expect(screen.getByTestId("builders")).toBeInTheDocument();
 });

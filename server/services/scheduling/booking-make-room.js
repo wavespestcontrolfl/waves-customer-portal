@@ -653,14 +653,16 @@ async function loadOpenTechDays(conn, env, { dates, capabilityRows, budget }) {
   return (dateStr, techId) => open.has(String(techId)) && !blackout.has(dateStr) && !absent.has(`${techId}:${dateStr}`);
 }
 
-async function ownHoldIds(conn, estimateId) {
+async function ownHoldIds(conn, estimateId, unclaimedOnly = false) {
   if (!estimateId) return new Set();
-  const rows = await conn('scheduled_services').where({ source_estimate_id: estimateId })
-    .whereNotNull('reservation_expires_at').select('id');
+  const query = conn('scheduled_services').where({ source_estimate_id: estimateId })
+    .whereNotNull('reservation_expires_at');
+  if (unclaimedOnly) query.whereNull('customer_id');
+  const rows = await query.select('id');
   return new Set(rows.map((row) => String(row.id)));
 }
 
-function defaultDeps() {
+function defaultDeps({ writeProof = false } = {}) {
   const replan = require('../day-replan')._internals;
   const arrivalRoute = require('./arrival-route');
   const startPoints = require('./tech-start-point');
@@ -670,8 +672,8 @@ function defaultDeps() {
   const pushRouting = require('../messaging/push-channel-routing');
   const policy = require('./policy');
   return {
-    loadDayStops: (conn, dateStr) => replan.loadDayStops(conn, dateStr, false),
-    loadDayContext: replan.loadDayContext,
+    loadDayStops: (conn, dateStr) => replan.loadDayStops(conn, dateStr, writeProof),
+    loadDayContext: (conn, dateStr, now) => replan.loadDayContext(conn, dateStr, now, writeProof),
     fixedReason: replan.fixedReason,
     skipReason: replan.skipReason,
     loadBlocks: replan.loadBlocks,
@@ -679,7 +681,9 @@ function defaultDeps() {
     legMin: replan.legMin,
     loadTechStartPoints: startPoints.loadTechStartPoints,
     homeFromMap: startPoints.homeFromMap,
-    loadArrivalRouteContext: arrivalRoute.loadArrivalRouteContext,
+    // The locked write proof uses the saved-route loader, which counts customer-linked bookings with stale hold stamps
+    // as visits. Picker/background checks retain their existing read-side route loader.
+    loadArrivalRouteContext: writeProof ? arrivalRoute.loadSavedRouteContext : arrivalRoute.loadArrivalRouteContext,
     evaluateArrivalPlacement: arrivalRoute.evaluateArrivalPlacement,
     arrivalWindowsOn: arrivalRoute.arrivalWindowRoutingEnabled,
     getReminderPrefs: reminders.getReminderPrefs,
@@ -696,7 +700,7 @@ function defaultDeps() {
     appDeviceStatus: (customerId, conn) => require('../push-notifications').customerStatus(customerId, conn, { withReachable: true }),
     techBlind: () => !occupancy.techScopedConfirmActive(),
     closeMin: require('../auto-dispatch/candidate-slots').DAY_CLOSE,
-    ownHoldIds,
+    ownHoldIds: (conn, estimateId) => ownHoldIds(conn, estimateId, writeProof),
     // Stops make-room already moved: a stop moves at most once.
     // The page's offer: another live make-room hold's chain takes this chain's stop or destination (see otherHoldTakesChain).
     otherChainClash: (conn, { date, techId, moves, estimateId }) => require('../slot-reservation')._internals
@@ -847,8 +851,8 @@ function plannedMinutes(durationMinutes) {
 
 // The reads the finder and the hold's proof both start from, under one budget: { env, dayRows, open, caps }, or null when
 // the budget ran out (report.timedOut) or a day read failed (loadDays records it).
-async function loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, zoneSlug, budget, report }) {
-  const base = deps || defaultDeps();
+async function loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, zoneSlug, budget, report, writeProof = false }) {
+  const base = deps || defaultDeps({ writeProof });
   const homes = await budget.race(() => base.loadTechStartPoints(conn));
   const holdIds = homes === TIMED_OUT ? TIMED_OUT : await budget.race(() => base.ownHoldIds(conn, estimateId));
   if (holdIds === TIMED_OUT) {
@@ -1067,7 +1071,10 @@ async function verifyMakeRoomHour({ conn, date, startMin, techId, durationMinute
     if (!techId || !date || !Number.isFinite(startMin)) return { reason: 'no_hour' };
     if (typeof admit !== 'function' || typeof placement !== 'function') return { reason: 'no_request' };
     const scratch = { byReason: {}, timedOut: false, twoHourTried: 0 };
-    const facts = await loadCheckFacts(conn, deps, { dates: [date], estimateId, capabilityRows, zoneSlug, budget, report: scratch });
+    // Recheck the destination under the booking locks, including stops staff booked from this estimate.
+    const facts = await loadCheckFacts(conn, deps, {
+      dates: [date], estimateId, capabilityRows, zoneSlug, budget, report: scratch, writeProof: true,
+    });
     if (!facts) return timedOut;
     const { env, dayRows, open, caps } = facts;
     if (!open(date, techId)) return { reason: 'tech_day_closed' };

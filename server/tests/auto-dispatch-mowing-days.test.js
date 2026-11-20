@@ -40,17 +40,15 @@ const { analyzeGapCandidate } = require('../services/scheduling/gap-candidates')
 const { _internals: { evaluatePlacement, standingConflict } } = require('../services/auto-dispatch');
 
 const GATE = 'GATE_AUTO_DISPATCH_MOWING_DAYS';
-const SAVED = { mowing: process.env[GATE], drive: process.env.GATE_DRIVE_TIME_CALIBRATION, shared: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
+const SAVED = { mowing: process.env[GATE], shared: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
 function restore(name, value) {
   if (value === undefined) delete process.env[name]; else process.env[name] = value;
 }
 beforeAll(() => {
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
 });
 afterAll(() => {
   restore(GATE, SAVED.mowing);
-  restore('GATE_DRIVE_TIME_CALIBRATION', SAVED.drive);
   restore('GATE_AUTO_DISPATCH_SHARED_MODEL', SAVED.shared);
 });
 beforeEach(() => {
@@ -559,6 +557,59 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
     }
   });
 
+  // Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19 "build south"): a far-south stop holds its date only for its
+  // own technician's slots; an unassigned far-south stop (STOP_WED carries no technician) holds it for every one.
+  // The switch is the scheduler's tech-scope reader (occupancy.js techScopedConfirmActive), mocked on for this suite.
+  describe('per truck (GATE_MULTI_TECH_CONFIRM)', () => {
+    const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+    afterEach(() => techScopedConfirmActive.mockImplementation(() => true));
+    const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
+    const runWith = (stops, service = NORTH) => findValidCandidateSlots(service, plain(), ctx({ db: southDb({ stops }) }));
+
+    test('on: another technician\'s far-south stop leaves the date open; the same technician\'s or an unassigned one holds it', async () => {
+      techScopedConfirmActive.mockReturnValue(true);
+      const other = await runWith(stopOf('t2'));
+      expect(other.candidates.map((c) => c.date)).toEqual([TUE, WED, THU]);
+      expect(other.drops.south_day_kept).toBe(0);
+      for (const stops of [stopOf('t1'), STOP_WED]) {
+        const held = await runWith(stops);
+        expect(held.candidates.map((c) => c.date)).toEqual([TUE, THU]);
+        expect(held.drops.south_day_kept).toBe(1);
+      }
+    });
+
+    test('on: the slot\'s technician decides, so an unassigned visit keeps only the other truck\'s slot that day', async () => {
+      techScopedConfirmActive.mockReturnValue(true);
+      findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '08:00', 't1'), slot(WED, '10:00', 't2')] });
+      const out = await runWith(stopOf('t1'), { ...NORTH, technician_id: null });
+      expect(out.candidates.map((c) => `${c.date} ${c.technician_id}`)).toEqual([`${WED} t2`]);
+      expect(out.drops.south_day_kept).toBe(1);
+    });
+
+    test('on: a grouped visit keeps the fleet\'s zone days (each member commits on its own technician first)', async () => {
+      techScopedConfirmActive.mockReturnValue(true);
+      findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '10:00', 't2')] });
+      const offered = async (visitId) => {
+        const out = await findValidCandidateSlots({ ...NORTH, visit_id: visitId, technician_id: 't1' }, plain(), ctx({
+          db: southDb({ stops: stopOf('t1') }),
+          ...(visitId ? { groupContext: { excludeIds: new Set(['s1', 's2']), siblings: [{ id: 's2', scheduled_date: TUE, technician_id: 't1' }], visitWindowStart: null } } : {}),
+        }));
+        return out.candidates.map((c) => `${c.date} ${c.technician_id}`);
+      };
+      // Alone, the visit may take t2's slot: the far-south stop is t1's.
+      expect(await offered(null)).toEqual([`${WED} t2`]);
+      // Grouped, any far-south stop holds the date, as with the gate off.
+      expect(await offered('v1')).toEqual([]);
+    });
+
+    test('off: any far-south stop holds the date for the whole fleet, whoever drives it (one truck today)', async () => {
+      techScopedConfirmActive.mockReturnValue(false);
+      const out = await runWith(stopOf('t2'));
+      expect(out.candidates.map((c) => c.date)).toEqual([TUE, THU]);
+      expect(out.drops.south_day_kept).toBe(1);
+    });
+  });
+
   describe('the decision (index.js evaluatePlacement)', () => {
     const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35, minDayMoveDriveSavingMinutes: 6 };
     const mowingCtx = (stops) => ctx({ conflictMoves: true, db: southDb({ stops, prefs: { preferred_day: null, mowing_days: ['Mon'] } }) });
@@ -624,6 +675,58 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       await expect(check({ ...NORTH, zone: null, customer_city: null }, WED, southDb({ stops: STOP_WED }))).resolves.toBeUndefined();
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED, zonesFail: true }))).resolves.toBeUndefined();
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED }))).rejects.toMatchObject({ code: 'REFUSED' });
+    });
+
+    test('per truck (GATE_MULTI_TECH_CONFIRM on): each technician a single visit can sit with decides, and the move guard passes them; a grouped visit keeps the fleet\'s view', async () => {
+      const { assertDestinationClear } = require('../services/auto-dispatch/south-day-kept');
+      const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED' });
+      const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
+      const check = (stops, techIds, row = NORTH, snapshot = NORTH) => assertDestinationClear(southDb({ stops }), row, snapshot, WED, refuse, techIds);
+      // The verdict of the guard's own far-south check, for a move to t1 (best.technician_id) whose transaction writes
+      // `written`: true = refused for a far-south stop, false = passed. The guard must reach that check; its later
+      // checks (this mock cannot answer them) are not this test's, and any other error from the check fails the test.
+      const guardHeld = async (stops, written, service = NORTH) => {
+        const southDayKept = require('../services/auto-dispatch/south-day-kept');
+        const spy = jest.spyOn(southDayKept, 'assertDestinationClear');
+        try {
+          await guardFor(service)({ trx: southDb({ stops }), technicianId: written }).catch(() => {});
+          expect(spy).toHaveBeenCalledTimes(1);
+          return await spy.mock.results[0].value.then(() => false, (e) => {
+            if (!String(e.message).includes('far-south stop')) throw e;
+            return true;
+          });
+        } finally {
+          spy.mockRestore();
+        }
+      };
+      const GROUPED = { ...NORTH, visit_id: 'v1' };
+      const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+      try {
+        techScopedConfirmActive.mockReturnValue(true);
+        await expect(check(stopOf('t2'), ['t1'])).resolves.toBeUndefined();
+        await expect(check(stopOf('t2'), ['t2'])).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(stopOf('t2'), ['t1', 't2'])).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(STOP_WED, ['t1'])).rejects.toMatchObject({ code: 'REFUSED' });
+        // A move whose transaction writes t1 (the rebooker's kept technician) is not held by t2's day.
+        expect(await guardHeld(stopOf('t2'), 't1')).toBe(false);
+        // A transaction that writes t2 (the visit was reassigned after the run ranked it) is held by t2's day, and any
+        // stop holds an unassigned row.
+        expect(await guardHeld(stopOf('t2'), 't2')).toBe(true);
+        expect(await guardHeld(stopOf('t2'), null)).toBe(true);
+        // The receiving technician's own day holds it, whatever this transaction writes.
+        expect(await guardHeld(stopOf('t1'), 't2')).toBe(true);
+        expect(await guardHeld(stopOf('t3'), 't2')).toBe(false);
+        // A grouped visit (the moving row or the pass-1 snapshot) keeps the fleet's view: t2's stop holds a move to t1.
+        await expect(check(stopOf('t2'), ['t1'], GROUPED, NORTH)).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(stopOf('t2'), ['t1'], NORTH, GROUPED)).rejects.toMatchObject({ code: 'REFUSED' });
+        expect(await guardHeld(stopOf('t2'), 't1', GROUPED)).toBe(true);
+        // Off: t2's far-south stop holds the date for t1 as well.
+        techScopedConfirmActive.mockReturnValue(false);
+        await expect(check(stopOf('t2'), ['t1'])).rejects.toMatchObject({ code: 'REFUSED' });
+        expect(await guardHeld(stopOf('t2'), 't1')).toBe(true);
+      } finally {
+        techScopedConfirmActive.mockImplementation(() => true);
+      }
     });
   });
 });

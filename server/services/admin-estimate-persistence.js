@@ -1351,6 +1351,9 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     // Mosquito misting quote-time snapshot: the same reader the public replay uses.
     const mistingKnobs = require('./estimate-tree-shrub-knob-replay').mistingKnobSignalForReplay(estimateData);
     if (mistingKnobs) v1Input.mistingPricingKnobs = mistingKnobs;
+    // Whole-home exclusion quote-time minimum and renewal price: the same stored-row reader the public replay uses.
+    v1Input.wholeHomeSealReplay = require('./estimate-whole-home-replay').wholeHomeSealReplaySignal(estimateData) || undefined;
+    v1Input.roofStyleReplay = require('./estimate-roof-style-replay').roofStyleReplaySignal(estimateData) || undefined;
     // A customer restore deleted the old termite result row on removal, so
     // the ordinary reader above has no quote-time stamp to recover. The
     // service-mix route passes the server-captured removal provenance for

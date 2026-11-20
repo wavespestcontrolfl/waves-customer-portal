@@ -1,5 +1,5 @@
 /**
- * Dead-number alert (owner 2026-11-04, "fix check", GATE_DEAD_NUMBER_ALERT, dark by default).
+ * Dead-number alert (owner 2026-11-04, "fix check"; live).
  *
  * A customer's phone on file can be dead: every text to it fails with Twilio 30003 (unreachable handset)
  * or 30005 (unknown handset). Nothing used to tell staff. When a text to a customer's number fails with one
@@ -25,7 +25,6 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { deadNumberAlertLive } = require('../config/feature-gates');
 
 const UNREACHABLE_CODES = new Set(['30003', '30005']);
 const FAILED_STATUSES = ['failed', 'undelivered'];
@@ -192,7 +191,6 @@ async function raiseForNumber(trx, { customerId, key, sid, errorCode }) {
  */
 async function handleDeadNumberFailure({ sid, status, errorCode, to, attempt = 0 } = {}) {
   try {
-    if (!deadNumberAlertLive()) return null;
     if (!sid || !FAILED_STATUSES.includes(String(status)) || !UNREACHABLE_CODES.has(String(errorCode))) return null;
 
     const row = await outboundCustomerText(sid, { status, attempt });
@@ -248,7 +246,6 @@ async function closeForDelivery(trx, { customerId, deliveredKey, sid }) {
  */
 async function closeDeadNumberAlerts({ sid, status, attempt = 0 } = {}) {
   try {
-    if (!deadNumberAlertLive()) return 0;
     if (!sid || String(status) !== 'delivered') return 0;
 
     const row = await outboundCustomerText(sid, { status, attempt });

@@ -10,7 +10,7 @@ const { pagedAtColumn, canonicalRun, humanize, modelLabel, keyset, notMirrored, 
 const { whereNotSandboxCall } = require('../../voice-agent/relay-protocol');
 // the processor's retry limits (one config): an extraction_failed call still
 // inside them is queued work its sweep will claim again, not a failure (Codex r9)
-const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../../../config/call-extraction-retry');
+const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, sweepLengthOk, sweepLengthSql } = require('../../../config/call-extraction-retry');
 
 const SOURCE = 'call_log';
 const LANE = 'call_extraction';
@@ -45,11 +45,12 @@ const STATUS_MAP = Object.freeze({
   extraction_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure' },
   voicemail: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
   spam: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
-  // transcription never landed: the processor's sweep reclaims this state on
-  // EVERY tick with no age gate or cap (processAllPending), so it is queued
-  // work — never a finished no-op (Codex r2), never terminal either (r10) —
-  // WHILE the row carries media the sweep will claim (retryEligible, r11);
-  // without a claimable recording nothing will ever retry it: an errored
+  // transcription never landed: the processor's sweep retries this state
+  // under the extraction attempt cap with no age gate (processAllPending; the
+  // cap since codex #6271 r38), so it is queued work — never a finished no-op
+  // (Codex r2), never terminal either (r10) — WHILE it is under the cap and
+  // the row carries media the sweep will claim (retryEligible, r11); at the
+  // cap, or without claimable media, nothing will ever retry it: an errored
   // transcription. The last failure stays as the run's code (fromRow).
   no_transcription: { lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure' },
   // extraction landed but the customer / lead write did not (the processor
@@ -69,23 +70,27 @@ const RETRY_WINDOW_MS = Number(EXTRACTION_RETRY_WINDOW_DAYS) * 864e5;
 // processAllPending's media gates, as the sweep applies them (Codex r11):
 // a row is claimable only with a non-empty recording — or, for every state
 // but no_transcription, a PAN-quarantined MASKED transcript (its transcript-
-// only branch) — AND real content: over 10 s, or PAN-quarantined (a card
+// only branch) — AND real content: the processor's length rule (over 10 s;
+// with GATE_SHORT_CALL_RECORDING_SWEEP on, also a shorter first pass of a
+// call under 24 h old, never a retry state), or PAN-quarantined (a card
 // readback was heard). A retry state without them is never reclaimed.
-function claimable(c, status) {
+function claimable(c, status, now = Date.now()) {
   const recording = !!(c.recording_url && c.recording_url !== '');
   const pan = c.pan_detected === true;
   const media = recording || (status !== TRANSCRIBE_FAILED && pan && !!c.has_transcript);
-  return media && (Number(c.recording_duration_seconds ?? c.duration_seconds ?? 0) > 10 || pan);
+  return media && (sweepLengthOk(c, now) || pan);
 }
 
-// What the sweep will claim again: no_transcription unconditionally (no
-// cap, no age gate); extraction_failed inside the processor's retry limits.
+// What the sweep will claim again: no_transcription under the processor's
+// attempt cap (no age gate); extraction_failed under the cap and inside its
+// creation window. Both only with media the sweep will claim.
 function retryEligible(c, status, now = Date.now()) {
-  if (status === TRANSCRIBE_FAILED) return claimable(c, status);
+  const underCap = Number(c.extraction_attempts || 0) < Number(CALL_EXTRACTION_MAX_ATTEMPTS);
+  if (status === TRANSCRIBE_FAILED) return underCap && claimable(c, status, now);
   return status === 'extraction_failed'
-    && Number(c.extraction_attempts || 0) < Number(CALL_EXTRACTION_MAX_ATTEMPTS)
+    && underCap
     && new Date(c.created_at).getTime() > now - RETRY_WINDOW_MS
-    && claimable(c, status);
+    && claimable(c, status, now);
 }
 
 // The processor's own stage vocabularies (call-recording-processor.js,
@@ -109,31 +114,28 @@ function failureClassFor(c, status, map) {
   return EXTRACT_FAILURE_CLASS[c.v2_extraction_status] || map.failureClass;
 }
 
-// extraction_attempts counts FAILED extractions (the processor increments it
-// on failure only): the attempts that ran = failures + the current pass
-// unless the current pass is itself the recorded failure (Codex r7). A
-// transcription retry (no_transcription) is a different policy — reclaimed
-// without a cap and never counted — so its attempts and limit are unknown,
-// not the extraction limit (r11).
+// extraction_attempts counts FAILED passes (the processor increments it on an
+// extraction failure and, since codex #6271 r38, on a no_transcription
+// result): the attempts that ran = failures + the current pass unless the
+// current pass is itself the recorded failure (Codex r7). Both retry states
+// share the one limit.
 function attemptsFor(c, status) {
-  if (status === TRANSCRIBE_FAILED) return null;
-  return Math.max(1, Number(c.extraction_attempts || 0) + (status === 'extraction_failed' ? 0 : 1));
-}
-function maxAttemptsFor(status) {
-  return status === TRANSCRIBE_FAILED ? null : Number(CALL_EXTRACTION_MAX_ATTEMPTS);
+  const recordedFailure = status === 'extraction_failed' || status === TRANSCRIBE_FAILED;
+  return Math.max(1, Number(c.extraction_attempts || 0) + (recordedFailure ? 0 : 1));
 }
 // The sweep's media gates in SQL (claimable() above, one to one). A never-
 // claimed row (processing_status NULL / pending) is queued work only when
 // the restart-safe sweep would claim it: a non-empty recording, or a PAN-
 // quarantined row whose recording_url is cleared by design but whose MASKED
 // transcript still needs processing (its transcript-only branch), with real
-// content — over 10 s, or PAN-quarantined. Anything else with those
+// content — the length rule, or PAN-quarantined. Anything else with those
 // statuses is a recording the sweep never picks up — not a run (Codex r6);
 // the same gates decide whether a retry state is queued (r11).
 const HAS_RECORDING = "(recording_url IS NOT NULL AND recording_url <> '')";
-const HAS_CONTENT = `(COALESCE(recording_duration_seconds, duration_seconds, 0) > 10 OR ${PAN_DETECTED})`;
-const SWEEP_CLAIMABLE = `((${HAS_RECORDING} OR (${PAN_DETECTED} AND transcription IS NOT NULL)) AND ${HAS_CONTENT})`;
-const TRANSCRIBE_RETRY_CLAIMABLE = `(${HAS_RECORDING} AND ${HAS_CONTENT})`;
+// Built per query: the length rule reads its gate at call time.
+const hasContent = () => `(${sweepLengthSql()} OR ${PAN_DETECTED})`;
+const sweepClaimable = () => `((${HAS_RECORDING} OR (${PAN_DETECTED} AND transcription IS NOT NULL)) AND ${hasContent()})`;
+const transcribeRetryClaimable = () => `(${HAS_RECORDING} AND ${hasContent()})`;
 
 function stepStatus(done, running) {
   return done ? 'done' : running ? 'running' : 'skipped';
@@ -186,7 +188,7 @@ function fromRow(c) {
     lastHeartbeatAt: beat,
     lastProgressAt: beat,
     attempts: attemptsFor(c, status),
-    maxAttempts: maxAttemptsFor(status),
+    maxAttempts: Number(CALL_EXTRACTION_MAX_ATTEMPTS),
     steps: stepsFor(c, status, map),
     // CommunicationsPageV2 selects the tab and CallLogTabV2 the focused call from the HASH (Codex r14)
     link: `/admin/communications#tab=calls&call=${c.id}`,
@@ -202,7 +204,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       // treats NULL as queued): listed only when the sweep would claim it
       .where((q) => {
         q.whereNotNull('processing_status').whereNot('processing_status', 'pending');
-        q.orWhereRaw(SWEEP_CLAIMABLE);
+        q.orWhereRaw(sweepClaimable());
       })
       // a voice-agent sandbox call is not a run anyone supervises
       .modify((qb) => whereNotSandboxCall(qb))
@@ -210,13 +212,15 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
         // queued (NULL / pending) and in-flight calls stay listed however old (a stuck queue is the point)
         q.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']);
         // … and so does a failure the sweep will retry (retryEligible): a
-        // transcription failure with claimable media, an extraction failure
-        // inside the processor's limits with claimable media
-        q.orWhere((r) => r.where('processing_status', TRANSCRIBE_FAILED).whereRaw(TRANSCRIBE_RETRY_CLAIMABLE));
+        // transcription failure under the attempt cap with claimable media,
+        // an extraction failure inside the processor's limits with claimable media
+        q.orWhere((r) => r.where('processing_status', TRANSCRIBE_FAILED)
+          .whereRaw('COALESCE(extraction_attempts, 0) < ?', [Number(CALL_EXTRACTION_MAX_ATTEMPTS)])
+          .whereRaw(transcribeRetryClaimable()));
         q.orWhere((r) => r.where('processing_status', 'extraction_failed')
           .whereRaw('COALESCE(extraction_attempts, 0) < ?', [Number(CALL_EXTRACTION_MAX_ATTEMPTS)])
           .where('created_at', '>', db.raw(`NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'`))
-          .whereRaw(SWEEP_CLAIMABLE));
+          .whereRaw(sweepClaimable()));
         q.orWhere(START(), '>=', from);
       }), { source: SOURCE, idColumn: 'call_log.id' }), { start: PAGED, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };

@@ -680,12 +680,11 @@ router.get('/sync-status', async (req, res, next) => {
 
 // GET /api/admin/ads/health — the read-only Ad health card on Ads → Dashboard (owner 2026-11-04, PPC gap page
 // option A): live serving status, disapprovals, conversion uploads and a 30-day who-changed-what timeline. It only
-// reads. GATE_ADS_HEALTH_CARD off: 404, and the card renders nothing.
+// reads.
 let _adsHealth;
 function getAdsHealth() { return _adsHealth || (_adsHealth = require('../services/ads/ads-health')); }
 router.get('/health', async (req, res, next) => {
   try {
-    if (require('../config/feature-gates').adsHealthCardLive?.() !== true) return res.status(404).json({ error: 'ads_health_off' });
     return res.json(await getAdsHealth().buildAdsHealth());
   } catch (err) { return next(err); }
 });

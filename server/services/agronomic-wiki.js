@@ -78,13 +78,18 @@ function daysFrom(date, days) {
 // pages on the raw string splits one product's outcome data across pages.
 // Returns the canonical name plus every known name variant (catalog name +
 // aliases) so outcome aggregation covers all spellings.
-async function resolveCanonicalProduct(productName) {
-  const fallback = { canonicalName: productName, variants: [productName] };
+// A product id a visit stored (service_products.product_id) names its product first: an alias can move to another product after the
+// visit (owner 2026-11-18: "Talstar P").
+async function resolveCanonicalProduct(productName, productId = null) {
+  const fallback = { canonicalName: productName, variants: [productName], productId: null };
   if (!productName) return fallback;
   try {
-    let catalogRow = await db('products_catalog')
-      .whereRaw('LOWER(name) = ?', [productName.toLowerCase()])
-      .first('id', 'name');
+    let catalogRow = productId ? await db('products_catalog').where({ id: productId }).first('id', 'name') : null;
+    if (!catalogRow) {
+      catalogRow = await db('products_catalog')
+        .whereRaw('LOWER(name) = ?', [productName.toLowerCase()])
+        .first('id', 'name');
+    }
     if (!catalogRow) {
       const alias = await db('product_aliases')
         .whereRaw('LOWER(alias_name) = ?', [productName.toLowerCase()])
@@ -103,11 +108,68 @@ async function resolveCanonicalProduct(productName) {
     const variants = [...new Set(
       [catalogRow.name, ...aliasRows.map((a) => a.alias_name), productName].filter(Boolean)
     )];
-    return { canonicalName: catalogRow.name, variants };
+    return { canonicalName: catalogRow.name, variants, productId: catalogRow.id };
   } catch (err) {
     logger.warn(`[agronomic-wiki] Canonical product lookup failed for "${productName}": ${err.message}`);
     return fallback;
   }
+}
+
+// The outcomes one catalog product's page aggregates. An alias can move to another product (owner 2026-11-18: "Talstar P" named the
+// Atticus Talak bottle until the house bifenthrin became LESCO Crosscheck Plus, and names Crosscheck after), so a name another
+// product carries says nothing about which bottle a past visit used: the product id its visit's service_products row stored
+// decides. An outcome counts when its visit stored this product's id, under any name. A name alone (a visit row with no product id,
+// or an outcome with no visit, or whose visit stored no product rows) counts when it is the catalog name, or an alias no other
+// product carries (`unshared`: see unsharedVariants), so a stable vendor alias keeps its history; a name that moved or is shared
+// needs the stored id. With no catalog product (productId null) the name match decides, as before. A recorded name matches only
+// whole ("Headway G" is not "Headway"). Production 2026-11-18: all 76 outcomes have a visit, and no outcome visit has a product
+// row without an id.
+async function outcomesForProduct(variants, productId, catalogName, unshared = []) {
+  const outcomes = await db('treatment_outcomes')
+    .where(function () {
+      for (const variant of variants) {
+        this.orWhereRaw("products_applied::text ILIKE ? ESCAPE '\\'", [`%${escapeLike(variant)}%`]);
+      }
+      if (productId) this.orWhereRaw('service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', [productId]);
+    })
+    .orderBy('treatment_date', 'desc');
+  if (!productId) return outcomes;
+  const key = (name) => String(name || '').trim().toLowerCase();
+  const byName = new Set([catalogName, ...unshared].map(key).filter(Boolean));
+  const visits = [...new Set(outcomes.map((o) => o.service_record_id).filter(Boolean).map(String))];
+  const rows = visits.length ? await db('service_products').whereIn('service_record_id', visits).select('service_record_id', 'product_id', 'product_name') : [];
+  const recorded = new Set(); // visits that stored product rows
+  const mine = new Set(); // visits that stored this product
+  for (const row of rows || []) {
+    const visit = String(row.service_record_id);
+    recorded.add(visit);
+    const stored = row.product_id == null ? null : String(row.product_id);
+    if (stored === String(productId) || (stored == null && byName.has(key(row.product_name)))) mine.add(visit);
+  }
+  return outcomes.filter((o) => {
+    const visit = o.service_record_id == null ? null : String(o.service_record_id);
+    if (visit && recorded.has(visit)) return mine.has(visit);
+    return recordedProducts(o.products_applied).some((p) => byName.has(key(p.name)));
+  });
+}
+
+// The products an outcome recorded: products_applied is a JSON array of { name, rate, unit, method, area }.
+function recordedProducts(productsApplied) {
+  let list = productsApplied;
+  if (typeof list === 'string') {
+    try { list = JSON.parse(list); } catch { list = []; }
+  }
+  return Array.isArray(list) ? list.filter((p) => p && typeof p === 'object' && p.name) : [];
+}
+
+// The products whose pages an outcome feeds: the names it recorded, and its visit's stored product rows by id (an alias that moved
+// since the visit still names the product the visit used, so both pages are refreshed).
+async function pageProductsForOutcome(outcome) {
+  const products = recordedProducts(outcome.products_applied).map((p) => ({ name: p.name, productId: null }));
+  if (!outcome.service_record_id) return products;
+  const rows = await db('service_products').where({ service_record_id: outcome.service_record_id }).select('product_name', 'product_id');
+  for (const row of rows || []) if (row.product_name) products.push({ name: row.product_name, productId: row.product_id });
+  return products;
 }
 
 function getSeason(month) {
@@ -658,9 +720,11 @@ const AgronomicWiki = {
 
       // 4. Gather products applied
       let productsApplied = [];
+      let pageProducts = []; // the page refresh goes by the id each row stored (an alias can move after the visit)
       try {
         const products = await db('service_products')
           .where({ service_record_id: serviceRecordId });
+        pageProducts = products.map((p) => ({ name: p.product_name, productId: p.product_id }));
         productsApplied = products.map((p) => ({
           name: p.product_name,
           rate: p.application_rate,
@@ -761,8 +825,8 @@ const AgronomicWiki = {
         }
         try {
           // Update product pages
-          for (const p of productsApplied) {
-            if (p.name) await AgronomicWiki.updateProductPage(p.name);
+          for (const p of pageProducts) {
+            if (p.name) await AgronomicWiki.updateProductPage(p.name, { productId: p.productId });
           }
           // Update track page
           if (outcome.grass_track) {
@@ -851,21 +915,19 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   // updateProductPage — aggregate outcomes for a product, generate wiki page
   // ────────────────────────────────────────────────────────────
-  async updateProductPage(productName, { rethrow = false, withState = false } = {}) {
+  async updateProductPage(productName, { rethrow = false, withState = false, productId } = {}) {
     try {
       // One page per catalog product: resolve the applied-product string to
       // its canonical catalog name and aggregate outcomes across every known
-      // name variant, so vendor-listing spellings don't split the data.
-      const { canonicalName, variants } = await resolveCanonicalProduct(productName);
+      // name variant, so vendor-listing spellings don't split the data; the visit's stored product id
+      // settles a name that moved between products (outcomesForProduct).
+      const resolved = await resolveCanonicalProduct(productName, productId);
+      const { canonicalName, variants } = resolved;
       const slug = `product/${slugify(canonicalName)}`;
 
-      const outcomes = await db('treatment_outcomes')
-        .where(function () {
-          for (const variant of variants) {
-            this.orWhereRaw("products_applied::text ILIKE ? ESCAPE '\\'", [`%${escapeLike(variant)}%`]);
-          }
-        })
-        .orderBy('treatment_date', 'desc');
+      // The names no other product carries: a name alone attributes an outcome, and a leftover page may fold in, only under these.
+      const unshared = await unsharedVariants(variants, resolved.productId);
+      const outcomes = await outcomesForProduct(variants, resolved.productId, canonicalName, unshared);
 
       if (!outcomes.length) {
         logger.info(`[agronomic-wiki] No outcomes found for product ${productName}`);
@@ -894,7 +956,7 @@ const AgronomicWiki = {
       const mergeSafe = result && ['generated', 'skipped'].includes(result.writeState)
         && entry && !entry.content?.includes('*Pending AI generation');
       if (mergeSafe) {
-        await mergeVariantProductPages(entry, variants, slug);
+        await mergeVariantProductPages(entry, unshared, slug, data.allOutcomeIds);
 
         // The merge re-points variant contradictions onto the canonical page —
         // a page stamped trusted moments ago may have inherited an open
@@ -1483,15 +1545,9 @@ Length: keep the whole page under ${PAGE_WORD_BUDGET} words. Rewrite the page as
       if (!outcome) return 0;
       const slugs = new Set();
 
-      let products = outcome.products_applied;
-      if (typeof products === 'string') {
-        try { products = JSON.parse(products); } catch { products = []; }
-      }
-      for (const p of Array.isArray(products) ? products : []) {
-        if (p?.name) {
-          const { canonicalName } = await resolveCanonicalProduct(p.name);
-          slugs.add(`product/${slugify(canonicalName)}`);
-        }
+      for (const { name, productId } of await pageProductsForOutcome(outcome)) {
+        const { canonicalName } = await resolveCanonicalProduct(name, productId);
+        slugs.add(`product/${slugify(canonicalName)}`);
       }
 
       if (outcome.grass_track) slugs.add(`track/${slugify(String(outcome.grass_track))}`);
@@ -1902,13 +1958,18 @@ Length: keep the whole page under ${PAGE_WORD_BUDGET} words. Rewrite the page as
 // ══════════════════════════════════════════════════════════════
 
 // source_treatment_ids is jsonb — pg usually returns it parsed, but tolerate
-// a raw string from older rows or mocks.
-function sameSourceIds(existingIds, newIds) {
-  let parsed = existingIds;
+// a raw string from older rows or mocks. Anything but a list is null.
+function sourceIdList(value) {
+  let parsed = value;
   if (typeof parsed === 'string') {
-    try { parsed = JSON.parse(parsed); } catch { return false; }
+    try { parsed = JSON.parse(parsed); } catch { return null; }
   }
-  if (!Array.isArray(parsed)) return false;
+  return Array.isArray(parsed) ? parsed : null;
+}
+
+function sameSourceIds(existingIds, newIds) {
+  const parsed = sourceIdList(existingIds);
+  if (!parsed) return false;
   if (parsed.length !== newIds.length) return false;
   const a = [...parsed].sort();
   const b = [...newIds].sort();
@@ -1931,21 +1992,64 @@ function extractSummary(content) {
   return line?.trim()?.substring(0, 500) || '';
 }
 
+// The variant names no other product carries: not another product's catalog name or alias, and never stored by a visit under
+// another product's id. An alias can move (owner 2026-11-18: "Talstar P" named the Talak bottle, then LESCO Crosscheck Plus), and
+// such a name may stand for the other product's history. Only these names attribute an outcome by name alone (outcomesForProduct)
+// and only their leftover pages may fold into this product's page (the merge deletes). The lookup names (variants) stay whole for
+// outcome matching. When the check fails, the list is empty: only the catalog name attributes by name, and nothing merges.
+async function unsharedVariants(variants, productId) {
+  if (!productId) return variants;
+  const key = (name) => String(name || '').trim().toLowerCase();
+  const names = [...new Set(variants.map(key))];
+  const otherProduct = (id) => id != null && String(id) !== String(productId);
+  const shared = new Set();
+  const carriers = [
+    ['products_catalog', 'name', 'id'],
+    ['product_aliases', 'alias_name', 'product_id'],
+    ['service_products', 'product_name', 'product_id'],
+  ];
+  try {
+    for (const [table, nameColumn, idColumn] of carriers) {
+      const rows = await db(table).whereRaw('LOWER(TRIM(??)) = ANY(?)', [nameColumn, names])
+        .groupBy(idColumn, nameColumn).select(idColumn, nameColumn);
+      for (const row of rows || []) if (otherProduct(row[idColumn])) shared.add(key(row[nameColumn]));
+    }
+  } catch (err) {
+    logger.warn(`[agronomic-wiki] Variant merge skipped: could not check which names other products carry: ${err.message}`);
+    return [];
+  }
+  return variants.filter((name) => !shared.has(key(name)));
+}
+
+// The merge deletes the variant page, so it goes only when the refreshed canonical page holds every outcome the variant was built
+// from. outcomesForProduct can leave out an outcome that page was built from (one whose visit stored other products, or one that
+// names only a name another product carries), and only the variant page then holds it. The vision token in a fingerprint (countVisionScored) is not an outcome. A page with no source list stays.
+function variantPageCovered(page, covered) {
+  const ids = sourceIdList(page.source_treatment_ids);
+  if (!ids) return false;
+  return ids.filter((id) => !String(id).startsWith('vision-scored:')).every((id) => covered.has(String(id)));
+}
+
 // Delete leftover product pages that were keyed on a non-canonical name
 // variant, re-pointing every cross-system reference at the canonical page
 // first — knowledge_bridge rows would otherwise be dropped by the ON DELETE
 // CASCADE and knowledge_contradictions links nulled by SET NULL (migrations
 // 20260414000018/19), silently losing curated links and contradiction
 // history.
-async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug) {
+async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug, canonicalOutcomeIds = []) {
+  const covered = new Set(canonicalOutcomeIds.map(String));
   for (const variant of variants) {
     const variantSlug = `product/${slugify(variant)}`;
     if (variantSlug === canonicalSlug) continue;
     try {
       const dupe = await db('knowledge_entries')
         .where({ slug: variantSlug, category: 'product' })
-        .first('id', 'slug', 'kb_entry_id');
+        .first('id', 'slug', 'kb_entry_id', 'source_treatment_ids');
       if (!dupe) continue;
+      if (!variantPageCovered(dupe, covered)) {
+        logger.info(`[agronomic-wiki] Kept ${variantSlug}: ${canonicalSlug} does not hold every outcome it was built from`);
+        continue;
+      }
 
       // Carry the direct wiki→KB back-pointer if the variant was the only
       // linked page — the bridge dashboard and unified search read it.

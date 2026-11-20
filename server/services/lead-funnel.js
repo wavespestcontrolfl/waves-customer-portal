@@ -139,11 +139,17 @@ const HEARD_ABOUT_LABELS = {
   nextdoor: 'Nextdoor', yelp: 'Yelp', friend_neighbor: 'Friend or neighbor',
   truck_yard_sign: 'Truck or yard sign', other: 'Other',
 };
+// The site's two quiz pages (/pest-control-quiz/, /lawn-care-quiz/). A quiz
+// is a form, not a traffic source: a quiz lead keeps its real source row
+// (Google Ads, main site), so the quiz split is its own view and never
+// re-labels a source.
+const QUIZ_LABELS = { pest_quiz: 'Pest Quiz', lawn_quiz: 'Lawn Quiz' };
 const BREAKDOWN_LABELS = {
   page: (k) => k,
   service: (k) => SERVICE_LABELS[k] || k,
   city: (k) => k,
   heard: (k) => HEARD_ABOUT_LABELS[k] || (k === UNKNOWN ? 'No answer (not asked or skipped)' : k),
+  quiz: (k) => QUIZ_LABELS[k] || (k === UNKNOWN ? 'Not a quiz lead' : k),
 };
 
 // Group keys for the other views, as SQL over the route's aliases (asa =
@@ -194,6 +200,9 @@ const FUNNEL_BREAKDOWN_SQL = {
   service: `COALESCE(NULLIF(asa.service_line, ''), '${UNKNOWN}')`,
   city: `COALESCE(NULLIF(initcap(trim(COALESCE(NULLIF(l.city, ''), c.city, ''))), ''), '${UNKNOWN}')`,
   heard: `COALESCE(NULLIF(l.heard_about, ''), '${UNKNOWN}')`,
+  // extracted_data.quiz.kind: 'pest' or 'lawn', a fixed token the lead webhook
+  // stores for a quiz lead. Any other value, and no value, reads as unknown.
+  quiz: `COALESCE(CASE l.extracted_data->'quiz'->>'kind' WHEN 'pest' THEN 'pest_quiz' WHEN 'lawn' THEN 'lawn_quiz' END, '${UNKNOWN}')`,
 };
 
 /**

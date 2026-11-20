@@ -3,7 +3,7 @@
 // two Needs-attention cards and the reason-only decline modal.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import {
   act,
   cleanup,
@@ -106,19 +106,32 @@ function response(body) {
 }
 
 let patches;
+let listRows;
 
-function renderPage(width = 1440) {
+// The page's current URL and a navigate function, read from inside the router.
+const routerProbe = { search: null, navigate: null };
+function RouterProbe() {
+  routerProbe.search = useLocation().search;
+  routerProbe.navigate = useNavigate();
+  return null;
+}
+
+function renderPage(width = 1440, search = "?tab=estimates") {
   window.innerWidth = width;
-  return render(
-    <MemoryRouter initialEntries={["/admin/pipeline?tab=estimates"]}>
+  const tree = () => (
+    <MemoryRouter initialEntries={[`/admin/pipeline${search}`]}>
+      <RouterProbe />
       <EstimatesPageV2 />
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  const view = render(tree());
+  return { ...view, rerenderSame: () => view.rerender(tree()) };
 }
 
 beforeEach(() => {
   flags.estimates_v2_status_pills = false;
   patches = [];
+  listRows = ROWS;
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "fetch",
@@ -131,7 +144,7 @@ beforeEach(() => {
       if (parsed.pathname === "/api/admin/estimates") {
         if (parsed.searchParams.get("archived") === "only") return response({ estimates: [] });
         if (parsed.searchParams.get("status") === "draft") return response({ estimates: [] });
-        return response({ estimates: ROWS, truncated: false });
+        return response({ estimates: listRows, truncated: false });
       }
       return response({ resolved: 0, drafted: 0, sources: [] });
     }),
@@ -143,6 +156,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
+
+// The pipeline's draft read runs once per load, so it counts loads.
+const draftReadCount = () => globalThis.fetch.mock.calls.filter(([url, init = {}]) => {
+  const parsed = new URL(String(url), "http://fixture.invalid");
+  return parsed.pathname === "/api/admin/estimates" && init.method !== "PATCH" && parsed.searchParams.get("status") === "draft";
+}).length;
+const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
 
 const rowIds = (container) =>
   Array.from(container.querySelectorAll("[data-estimate-id]")).map((n) => n.getAttribute("data-estimate-id"));
@@ -156,6 +176,130 @@ it("(desktop) the Call today card counts only the 2h-48h, uncalled viewed offers
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
   // The Call action is on those rows.
   expect(screen.getAllByRole("button", { name: /^Call .* via Waves$/ })).toHaveLength(2);
+});
+
+// The 9 AM push links to /admin/estimates?view=call_today, which redirects to /admin/pipeline?tab=estimates&view=call_today.
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) ?view=call_today opens the list on the Call today filter, then drops view from the URL", async (_label, width) => {
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  // Taken once: a later filter change, a refresh or a return to the page is not pinned to Call today.
+  expect(routerProbe.search).toBe("?tab=estimates");
+});
+
+it("(desktop) the link also works on a list that is already open", async () => {
+  const { container } = renderPage(1440, "?tab=estimates");
+  await screen.findByText("Fresh View");
+  expect(rowIds(container)).toContain("v-1h");
+  act(() => routerProbe.navigate("/admin/pipeline?tab=estimates&view=call_today"));
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+});
+
+// A search left on an open list would hide rows the push counted: the link clears it (and the date filter and page).
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) the link on an open list clears a search that hid the Call today rows", async (_label, width) => {
+  const { container } = renderPage(width, "?tab=estimates");
+  await screen.findByText("Fresh View");
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search estimates" }), { target: { value: "Fresh View" } });
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-1h"]));
+  act(() => routerProbe.navigate("/admin/pipeline?tab=estimates&view=call_today"));
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  expect(screen.getByRole("searchbox", { name: "Search estimates" })).toHaveValue("");
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+});
+
+// The link a list opens on is loaded by the mount's own fetch: a second load would rerun the whole pipeline batch
+// (sent, draft pricing-risk and, on desktop, archived wins) for nothing. Each load reads the draft list once.
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) a list opened by the link loads the pipeline once", async (_label, width) => {
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+  await settle();
+  expect(draftReadCount()).toBe(1);
+});
+
+// React StrictMode replays each mount effect in development (the mount fetch too, so two loads either way). The link
+// a list opens on is still taken once: the same reads as a list opened without the link.
+it("(desktop) under StrictMode, the link a list opens on adds no pipeline load", async () => {
+  const mount = (search) => {
+    window.innerWidth = 1440;
+    return render(
+      <React.StrictMode>
+        <MemoryRouter initialEntries={[`/admin/pipeline${search}`]}>
+          <RouterProbe />
+          <EstimatesPageV2 />
+        </MemoryRouter>
+      </React.StrictMode>,
+    );
+  };
+  const plain = mount("?tab=estimates");
+  await screen.findByText("Fresh View");
+  await settle();
+  const plainLoads = draftReadCount();
+  plain.unmount();
+  globalThis.fetch.mockClear();
+  const { container } = mount("?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+  await settle();
+  expect(draftReadCount()).toBe(plainLoads);
+});
+
+// With Call today already selected, a new link changes no filter: the list must still load fresh rows, or it keeps
+// showing an estimate another admin has called since (or misses one viewed since).
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) a second link on an open Call today list loads the rows fresh", async (_label, width) => {
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+  const before = globalThis.fetch.getMockImplementation();
+  globalThis.fetch.mockImplementation(async (url, init = {}) => {
+    const parsed = new URL(String(url), "http://fixture.invalid");
+    const listRead = parsed.pathname === "/api/admin/estimates" && init.method !== "PATCH"
+      && parsed.searchParams.get("archived") !== "only" && parsed.searchParams.get("status") !== "draft";
+    if (!listRead) return before(url, init);
+    // Another admin called the five-hour estimate after the first load.
+    return response({ estimates: ROWS.map((r) => (r.id === "v-5h" ? { ...r, lastCalledAt: new Date().toISOString() } : r)), truncated: false });
+  });
+  act(() => routerProbe.navigate("/admin/pipeline?tab=estimates&view=call_today"));
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+});
+
+it("(mobile) the status-pills flag loading after the link keeps Call today; after the customer picks All it stays All", async () => {
+  flags.estimates_v2_status_pills = false;
+  const { container, rerenderSame } = renderPage(390, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  flags.estimates_v2_status_pills = true; // the flag resolves after mount
+  rerenderSame();
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  fireEvent.click(screen.getByRole("button", { name: /^Filter: / }));
+  fireEvent.click(await screen.findByText(/^All \(\d+\)$/));
+  await waitFor(() => expect(rowIds(container)).toContain("v-1h"));
+  flags.estimates_v2_status_pills = false; // a flag refetch flips it again
+  rerenderSame();
+  await waitFor(() => expect(rowIds(container)).toContain("v-1h"));
+  expect(routerProbe.search).toBe("?tab=estimates");
+});
+
+it.each([
+  ["an unknown view", "?tab=estimates&view=nope"],
+  ["no view", "?tab=estimates"],
+])("(desktop) %s leaves the list on its default filter", async (_label, search) => {
+  const { container } = renderPage(1440, search);
+  await screen.findByText("Fresh View");
+  expect(rowIds(container)).toContain("v-1h");
+  expect(rowIds(container)).toContain("v-cold");
 });
 
 it("(desktop) Pick reason lists recently expired opened offers and saves a reason without a status", async () => {
@@ -186,6 +330,58 @@ it.each([
   expect(await screen.findByText(/^Pick reason \(1\)$/)).toBeInTheDocument();
   fireEvent.click(screen.getByText(/^Call today \(2\)$/));
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+});
+
+// A quote the customer opened from the portal (plan restart, plan start) that nobody delivered
+// carries the zero-follow-up contract: the list row's undeliveredSelfServe keeps it out of every
+// follow-up prompt on the page (codex pre-push P1). The same row unflagged is the control.
+it.each([
+  ["a staff quote (control)", false, { followUp: 6, awaiting: 0, action: 4 }],
+  ["a self-serve quote nobody delivered", true, { followUp: 5, awaiting: 1, action: 3 }],
+])("%s viewed 3 days ago: row badge, Follow Up Now, Awaiting Response and Action Required", async (_label, flagged, counts) => {
+  listRows = [...ROWS, viewed("ss-1", "Portal Quote", 3 * DAY, { source: "plan_start", undeliveredSelfServe: flagged })];
+  const { container } = renderPage();
+  await screen.findByText("Portal Quote");
+  const row = container.querySelector('[data-estimate-id="ss-1"]');
+  if (flagged) expect(within(row).queryByText("Follow up")).not.toBeInTheDocument();
+  else expect(within(row).getByText("Follow up")).toBeInTheDocument();
+  // The row's Follow Up action too (codex pre-push P1).
+  expect(Boolean(within(row).queryByRole("button", { name: "Follow Up" }))).toBe(!flagged);
+  cleanup();
+
+  renderPage(390);
+  await screen.findByText("Portal Quote");
+  fireEvent.click(screen.getByRole("button", { name: /^Filter: / }));
+  expect(await screen.findByText(`Follow Up Now (${counts.followUp})`)).toBeInTheDocument();
+  expect(screen.getByText(`Awaiting Response (${counts.awaiting})`)).toBeInTheDocument();
+  cleanup();
+
+  flags.estimates_v2_status_pills = true;
+  renderPage(390);
+  await screen.findByText("Portal Quote");
+  fireEvent.click(screen.getByRole("button", { name: /^Filter: / }));
+  expect(await screen.findByText(`Action Required (${counts.action})`)).toBeInTheDocument();
+});
+
+// The Sent tile counts the rows its drilldown lists (codex pre-push P1): a self-serve quote nobody
+// delivered is no send, so both leave it out; the same row unflagged is the control. One staff
+// scheduled to send (ss-2) counts either way, as scheduled.
+it.each([
+  ["a staff quote (control)", false],
+  ["a self-serve quote nobody delivered", true],
+])("%s viewed 3 days ago: the Sent tile counts the rows its drilldown lists", async (_label, flagged) => {
+  const scheduled = {
+    ...viewed("ss-2", "Portal Scheduled", 4 * DAY, { source: "plan_start", undeliveredSelfServe: true }),
+    status: "scheduled",
+  };
+  listRows = [...ROWS, viewed("ss-1", "Portal Quote", 3 * DAY, { source: "plan_start", undeliveredSelfServe: flagged }), scheduled];
+  const { container } = renderPage();
+  await screen.findByText("Portal Quote");
+  const sentRows = ["v-1h", "v-5h", "v-30h", "v-called", "v-cold", "ss-2", ...(flagged ? [] : ["ss-1"])];
+  const tile = screen.getByRole("button", { name: /^Sent/ });
+  expect(tile.querySelector(".u-nums").textContent).toBe(String(sentRows.length));
+  fireEvent.click(tile);
+  await waitFor(() => expect([...rowIds(container)].sort()).toEqual([...sentRows].sort()));
 });
 
 // The click-to-call answers before the customer picks up, so the answered-call proof (lastCalledAt)

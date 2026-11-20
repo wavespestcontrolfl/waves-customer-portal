@@ -35,7 +35,7 @@ describe('Twilio messaging provider adapter', () => {
       .toMatchObject({ sent: false, blocked: true, code: 'DELIVERY_SUPPRESSED' });
   });
 
-  test("forwards the sender's keep-the-customer's-channel mark next to the operator flag (GATE_APP_FIRST_ANY_DEVICE)", async () => {
+  test("forwards the sender's keep-the-customer's-channel mark next to the operator flag", async () => {
     await sendViaTwilio(baseInput({
       audience: 'customer', purpose: 'tech_en_route', customerId: 'c-1', operatorInitiated: true,
       metadata: { original_message_type: 'tech_en_route', useCustomerChannel: true },

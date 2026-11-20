@@ -94,6 +94,41 @@ test('gate off: the legacy list, with no v13-only product', async () => {
   expect(body.facts.every((row) => !row.key.startsWith('v13_'))).toBe(true);
 });
 
+// Owner 2026-11-18: LESCO Crosscheck Plus is the house bifenthrin. Gate off, both June lines name it, and the July "Bifen" and
+// "bifenthrin" mentions mean it: one row, read by its full catalog name only.
+const BIFENTHRIN_DECOYS = ['Bifen XTS', 'Bifen I/T', 'Talstar P'].map((name, i) => ({ id: `decoy-${i}`, name, category: 'insecticide' }));
+const BIFENTHRIN_TEXT = /bifen|talstar|crosscheck/i;
+
+test('gate off: one LESCO Crosscheck Plus row, referenced by both June lines and the July bifenthrin mentions; no Talstar or Bifen I/T row', async () => {
+  CATALOG.unshift(...BIFENTHRIN_DECOYS);
+  try {
+    const body = await getFacts();
+    const rows = body.facts.filter((row) => BIFENTHRIN_TEXT.test(`${row.needle} ${row.product?.name || ''}`));
+    expect(rows.map((row) => [row.key, row.product?.name])).toEqual([['crosscheck', 'LESCO Crosscheck Plus']]);
+    expect(rows[0].references).toEqual([
+      { turf: 'st_augustine', month: 'Jun', visit: 6 },
+      { turf: 'st_augustine', month: 'Jul', visit: 7 },
+      { turf: 'bermuda', month: 'Jun', visit: 6 },
+      { turf: 'bermuda', month: 'Jul', visit: 7 },
+    ]);
+  } finally { CATALOG.splice(0, BIFENTHRIN_DECOYS.length); }
+});
+
+test('gate off, no LESCO Crosscheck Plus row in the catalog: its row has no product, never Bifen XTS or a retired bifenthrin', async () => {
+  const at = CATALOG.findIndex((row) => row.name === 'LESCO Crosscheck Plus');
+  expect(at).toBeGreaterThanOrEqual(0);
+  const [crosscheck] = CATALOG.splice(at, 1);
+  CATALOG.unshift(...BIFENTHRIN_DECOYS);
+  try {
+    const body = await getFacts();
+    expect(body.facts.find((row) => row.key === 'crosscheck').product).toBeNull();
+    expect(body.facts.filter((row) => BIFENTHRIN_TEXT.test(row.product?.name || ''))).toEqual([]);
+  } finally {
+    CATALOG.splice(0, BIFENTHRIN_DECOYS.length);
+    CATALOG.splice(at, 0, crosscheck);
+  }
+});
+
 test('gate on: the 9x April product (Dimension 18-0-10, named only in the April cadence variant) is attributed to April', async () => {
   process.env.GATE_LAWN_V13 = 'true';
   const body = await getFacts();

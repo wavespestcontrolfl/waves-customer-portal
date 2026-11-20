@@ -78,9 +78,27 @@ function clipForm(blob, durationSeconds) {
   return form;
 }
 
+// A send that got no answer: fetch() rejected (iOS shows a bare "Load failed"; owner 2026-11-06
+// 10:49, the IB mic: the server got the request headers and no audio), or a 2xx answer was cut
+// off before its words (reading `{}` there used to drop the recording without a word).
+// `unsent` lets the hook offer to send the same recording again.
+export const UNSENT_MESSAGE = "The words did not come back.";
+function unsentError() {
+  const err = new Error(UNSENT_MESSAGE);
+  err.unsent = true;
+  return err;
+}
+
 async function postClip(url, blob, durationSeconds, token) {
-  const r = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: clipForm(blob, durationSeconds) });
-  const data = await r.json().catch(() => ({}));
+  let r;
+  try {
+    r = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: clipForm(blob, durationSeconds) });
+  } catch (e) {
+    if (e?.name === "AbortError") throw e;
+    throw unsentError();
+  }
+  // A refusal's body is optional; a 2xx body that cannot be read is a send with no answer.
+  const data = r.ok ? await r.json().catch(() => { throw unsentError(); }) : await r.json().catch(() => ({}));
   if (!r.ok) {
     const err = new Error(data?.error || `Transcription failed (HTTP ${r.status})`);
     err.status = r.status;
@@ -109,6 +127,50 @@ export function transcribeClip(blob, durationSeconds, clip, token) {
   return clip.server
     ? transcribeOnServer(blob, durationSeconds, clip, token)
     : transcribeServiceClip(blob, durationSeconds, clip.serviceId, token);
+}
+
+// Worded for both cases: no answer at all, or a 2xx answer cut off (the server may have heard it).
+export const RESEND_QUESTION = `${UNSENT_MESSAGE} Send the recording again?`;
+
+// A hidden page (the app went to the background as the recording stopped) may not show a
+// question at all, and a suppressed confirm() reads as "no": ask only once the page is back.
+// `signal` (the mic unmounted) ends the wait at once, so the recording is let go.
+function pageVisible(signal) {
+  if (document.visibilityState !== "hidden" || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      document.removeEventListener("visibilitychange", onChange);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const onChange = () => {
+      if (document.visibilityState !== "hidden") done();
+    };
+    document.addEventListener("visibilitychange", onChange);
+    signal?.addEventListener("abort", done);
+  });
+}
+
+/**
+ * transcribeClip, and when a send got no answer while `canResend()` holds (the field is still
+ * there and still this recording's), asks to send the SAME recording again, once the page is
+ * visible. Never automatic: when only the answer was lost, the server already paid for those
+ * words. Resolves null when the person says no; throws the unsent error when the field moved on.
+ * `signal` aborts when the mic unmounts: a wait for the page then ends at once.
+ */
+export async function transcribeClipWithResend(blob, durationSeconds, clip, token, canResend, signal) {
+  for (;;) {
+    try {
+      return await transcribeClip(blob, durationSeconds, clip, token);
+    } catch (e) {
+      if (!e?.unsent || !canResend()) throw e;
+      await pageVisible(signal);
+      if (!canResend()) throw e;
+      if (!window.confirm(RESEND_QUESTION)) return null;
+      // Another tab can sign out or switch login while the question is open: check again.
+      if (!canResend()) throw e;
+    }
+  }
 }
 
 /** The older per-visit upload (GATE_TECH_DICTATION_UPLOAD): the same clip, the visit's own route. */
@@ -194,6 +256,20 @@ export function guardRecording(stopRecording, maxMs) {
     document.removeEventListener("visibilitychange", onHidden);
     window.removeEventListener("pagehide", stopRecording);
   };
+}
+
+/**
+ * Stops every recording, guarded or not, when another tab signs out or switches staff
+ * (`sameLogin()` false on a `storage` event), so nothing records or streams on under another
+ * login; the stop then sends nothing (useSpeechDictation's uploadClip). Returns the function that
+ * takes it off.
+ */
+export function stopOnLoginChange(stopRecording, sameLogin) {
+  const onStorage = () => {
+    if (!sameLogin()) stopRecording();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => window.removeEventListener("storage", onStorage);
 }
 
 /** Stops a recorder; one that already stopped (or is gone) is not an error. */

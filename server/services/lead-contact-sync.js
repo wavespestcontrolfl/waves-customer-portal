@@ -1,6 +1,6 @@
 /**
- * Lead contact sync: GATE_LEAD_STATUS_FOLLOWS_CONTACT (owner 2026-11-04,
- * "WHY ARENT THESE UPDATED ... FOR ALL COMUNNICATION LINES").
+ * Lead contact sync (owner 2026-11-04, "WHY ARENT THESE UPDATED ... FOR ALL
+ * COMUNNICATION LINES").
  *
  * A lead row reads 'new' until one of three narrow writers moves it: the call
  * agent on a live conversation, a manual text from the Leads page, and an
@@ -36,12 +36,11 @@
  * than one open lead (a visit cannot say which), when the contact row belongs
  * to a different customer than the lead, or when a person already returned the
  * lead to 'new' by hand (a 'Status: x -> new' history row: the documented
- * undo stands). Shadow mode judges the same way and writes nothing.
+ * undo stands).
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { leadStatusFollowsContactMode } = require('../config/feature-gates');
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { excludeInternalTestLeads } = require('./lead-waiting-queue');
 const { phoneIdentityKey } = require('../utils/phone');
@@ -50,7 +49,7 @@ const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staf
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { callEndedAtSql, callStartedAtSql } = require('./sms-pending-conversations');
-const { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
+const { personSentFilter, emailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 
 const PERFORMED_BY = 'Lead contact sync';
@@ -192,7 +191,7 @@ async function staffEmails(dbi, addresses, since) {
     .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at as at');
   const named = await Promise.all(rows.map(async (row) => {
     const recipients = extractEmailAddresses([row.to_address, row.cc_address, row.bcc_address].filter(Boolean).join(','));
-    const linked = await resolveEmailCustomerLink(dbi, row);
+    const { customerId: linked } = await emailCustomerLink(dbi, row);
     return recipients.filter((addr) => addresses.includes(addr))
       .map((addr) => witness('staff_email', 'email', addr, { ...row, customer_id: linked }));
   }));
@@ -307,38 +306,18 @@ async function judgeLeads(dbi, leads) {
   return verdicts;
 }
 
-// What a verdict does in each mode. Shadow logs and reports success without a
-// write; true moves the lead through the one writer that owns the transition.
-const APPLY = {
-  shadow: async (dbi, lead, verdict) => {
-    logger.info(`[lead-contact-sync] shadow: lead ${lead.id} would move to contacted (${verdict.evidenceType})`);
-    return { contacted: true };
-  },
-  true: (dbi, lead, verdict) => require('./lead-estimate-link').markLeadContactedFromEvidence({
-    database: dbi,
-    leadId: lead.id,
-    customerId: lead.customer_id ?? null,
-    evidenceType: verdict.evidenceType,
-    evidenceId: verdict.evidenceId,
-    performedBy: PERFORMED_BY,
-    respondedAt: verdict.at,
-    identity: verdict.identity,
-  }),
-};
-
 const tally = (counts, key) => { counts[key] = (counts[key] || 0) + 1; };
 
 /**
- * The sweep. `mode` defaults to the gate: 'off' does nothing, 'shadow' judges
- * and logs what would move (counts by evidence type), 'true' writes.
+ * The sweep. Moves each judged lead through the one writer that owns the
+ * transition, markLeadContactedFromEvidence.
  */
 async function runLeadContactSync(options = {}) {
-  const { dbi, now, mode, pageSize, maxPages, writeCap } = {
-    dbi: db, now: new Date(), mode: leadStatusFollowsContactMode(), pageSize: PAGE_SIZE, maxPages: MAX_PAGES, writeCap: WRITE_CAP, ...options,
+  const { dbi, now, pageSize, maxPages, writeCap } = {
+    dbi: db, now: new Date(), pageSize: PAGE_SIZE, maxPages: MAX_PAGES, writeCap: WRITE_CAP, ...options,
   };
-  if (!APPLY[mode]) return { skipped: 'gate_off' };
 
-  const results = { mode, scanned: 0, candidates: 0, moved: 0, byEvidence: {}, skipped: {}, errors: 0, moves: [] };
+  const results = { scanned: 0, candidates: 0, moved: 0, byEvidence: {}, skipped: {}, errors: 0, moves: [] };
   let cursor = resumeAfter;
   resumeAfter = null;
   for (let page = 0; page < maxPages; page += 1) {
@@ -357,7 +336,16 @@ async function runLeadContactSync(options = {}) {
       results.candidates += 1;
       if (results.moved >= writeCap) { tally(results.skipped, 'write_cap'); continue; }
       try {
-        const outcome = await APPLY[mode](dbi, lead, verdict);
+        const outcome = await require('./lead-estimate-link').markLeadContactedFromEvidence({
+          database: dbi,
+          leadId: lead.id,
+          customerId: lead.customer_id ?? null,
+          evidenceType: verdict.evidenceType,
+          evidenceId: verdict.evidenceId,
+          performedBy: PERFORMED_BY,
+          respondedAt: verdict.at,
+          identity: verdict.identity,
+        });
         if (!outcome.contacted) { tally(results.skipped, outcome.reason); continue; }
         results.moved += 1;
         tally(results.byEvidence, verdict.evidenceType);
@@ -370,7 +358,7 @@ async function runLeadContactSync(options = {}) {
     if (leads.length < pageSize) break;
   }
 
-  logger.info(`[lead-contact-sync] mode=${mode} scanned=${results.scanned} moved=${results.moved} errors=${results.errors} byEvidence=${JSON.stringify(results.byEvidence)} skipped=${JSON.stringify(results.skipped)}`);
+  logger.info(`[lead-contact-sync] scanned=${results.scanned} moved=${results.moved} errors=${results.errors} byEvidence=${JSON.stringify(results.byEvidence)} skipped=${JSON.stringify(results.skipped)}`);
   return results;
 }
 
@@ -378,6 +366,7 @@ module.exports = {
   runLeadContactSync,
   judgeLeads,
   candidateLeadsQuery,
+  openLeadIdentities,
   PERFORMED_BY,
   LOOKBACK_DAYS,
   _test: { usablePhoneKey, leadEmail, resumeAfter: () => resumeAfter, resetResume: () => { resumeAfter = null; } },

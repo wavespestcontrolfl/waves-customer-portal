@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 process.env.SENDGRID_WEBHOOK_PUBLIC_KEY = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
 
-const mockState = { message: null, txOpen: 0, txDone: 0, ledger: new Set(), raw: [], failRaw: false, failLookup: false };
+const mockState = { message: null, txOpen: 0, txDone: 0, ledger: new Set(), ledgerRows: [], raw: [], failRaw: false, failLookup: false };
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => {
@@ -38,7 +38,7 @@ jest.mock('../models/db', () => {
             };
           }
           if (prop === 'first') return () => { mode = 'first'; return b; };
-          if (prop === 'insert') return (row) => { op = 'insert'; if (table === 'sendgrid_webhook_events') { fresh = !mockState.ledger.has(row.event_id); mockState.ledger.add(row.event_id); } return b; };
+          if (prop === 'insert') return (row) => { op = 'insert'; if (table === 'sendgrid_webhook_events') { fresh = !mockState.ledger.has(row.event_id); mockState.ledger.add(row.event_id); mockState.ledgerRows.push(row); } return b; };
           if (prop === 'update' || prop === 'del' || prop === 'delete' || prop === 'increment') return () => { op = 'update'; return b; };
           return () => b;
         },
@@ -103,7 +103,7 @@ async function post(events, { signed = true, key = privateKey } = {}) {
 const MESSAGE = { id: 'em-1', provider_message_id: 'smsg1', template_key: 'billing.rate_review_notice', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'cust1@example.com', send_attempt_token: null, status: 'sent' };
 const event = (over = {}) => ({ event: 'bounce', type: 'bounce', email: 'cust1@example.com', sg_message_id: 'smsg1.filter', sg_event_id: `evt-${Math.random()}`, timestamp: 1790000000, reason: '550 mailbox not found', ...over });
 
-beforeEach(() => { mockState.message = { ...MESSAGE }; mockState.ledger = new Set(); mockState.raw = []; mockHandle.mockReset().mockResolvedValue([]); mockRaise.mockReset(); });
+beforeEach(() => { mockState.message = { ...MESSAGE }; mockState.ledger = new Set(); mockState.ledgerRows = []; mockState.raw = []; mockHandle.mockReset().mockResolvedValue([]); mockRaise.mockReset(); });
 
 describe('SendGrid event webhook → rate review letter reconciliation', () => {
   test('a signed bounce for a rate review letter reaches the reconciliation inside the event transaction, then raises its alerts', async () => {
@@ -243,5 +243,29 @@ describe('SendGrid event webhook → a blocked bounce for a domain with no mail 
     } finally {
       [attempt, alert, rescueCall, recheck, retryAlert].forEach((spy) => spy.mockRestore());
     }
+  });
+});
+
+describe('SendGrid event webhook → event ledger', () => {
+  test("each logged event keeps SendGrid's own event time, so a late batch is counted by when the open happened", async () => {
+    mockState.message = { ...MESSAGE, template_key: 'billing.invoice' };
+    const ev = event({ event: 'open', type: undefined, reason: undefined, sg_event_id: 'evt-open-time', timestamp: 1790000000 });
+    expect((await post([ev])).status).toBe(200);
+    expect(mockState.ledgerRows.find((row) => row.event_id === 'evt-open-time')).toMatchObject({
+      event_type: 'open',
+      email: 'cust1@example.com',
+      occurred_at: new Date(1790000000 * 1000),
+    });
+  });
+
+  test.each([
+    ['an open Apple Mail Privacy Protection made', { sg_machine_open: true }, true],
+    ['a conventional open', { sg_machine_open: false }, false],
+    ['an open with no flag', {}, null],
+  ])("the logged event keeps SendGrid's machine-open flag: %s", async (_label, flag, expected) => {
+    mockState.message = { ...MESSAGE, template_key: 'billing.invoice' };
+    const ev = event({ event: 'open', type: undefined, reason: undefined, sg_event_id: 'evt-open-machine', ...flag });
+    expect((await post([ev])).status).toBe(200);
+    expect(mockState.ledgerRows.find((row) => row.event_id === 'evt-open-machine')).toMatchObject({ event_type: 'open', machine_open: expected });
   });
 });

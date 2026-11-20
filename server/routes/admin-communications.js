@@ -4,6 +4,7 @@ const db = require('../models/db');
 const ClickGuard = require('../services/review-click-guard');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { websiteLineRefusal } = require('../services/website-line-contact');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -404,7 +405,7 @@ async function sendSmsHandler(req, res, next) {
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
   let prepLinkSends = null;
-  // Verified moving links (GATE_MOVING_FLOW) — a real send is the link's delivery.
+  // Verified moving links — a real send is the link's delivery.
   let movingLinkMoveIds = null;
   // Composer-carried contract signing links: a prepared link is ACTIVATED
   // (delivered state stamped, windowed from the send) before the provider
@@ -568,6 +569,9 @@ async function sendSmsHandler(req, res, next) {
     // A technician texts from an office line or its own tech line only; any
     // other line is ignored and the default office line is used.
     const fromNumber = technicianAllowedFromNumber(req, requestedFromNumber);
+    // A website-only line texts only someone who already called or texted it.
+    const websiteLineBlock = await websiteLineRefusal(fromNumber, to);
+    if (websiteLineBlock) return res.status(400).json({ error: websiteLineBlock, code: 'WEBSITE_LINE_FIRST_CONTACT' });
     let trustedCustomerId;
     if (customerId) {
       const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
@@ -2616,19 +2620,58 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// A technician's Messages badge: the same needs-a-reply count, over texts from the customers on its own route
-// only. A text from a number that matches no customer is office work and never counts.
+const READ_BEFORE_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+// POST /api/admin/communications/messages/read-all — the inbox's Mark all read (owner 2026-11-19), and with
+// contactPhone a row's Mark read (that sender only): every unread inbound text the inbox can show up to readBefore
+// (the newest text the caller's list showed), through the one read writer. Internal admin-phone traffic stays out,
+// as in /log. Office roles only: a technician reads one thread at a time through /messages/read, which checks each
+// text against its own customers.
+router.post('/messages/read-all', async (req, res, next) => {
+  try {
+    if (isTechnicianRequest(req)) return res.status(403).json({ error: 'Mark all read is for the office' });
+    // An ISO instant with Z or an offset: a bare wall-clock time would be read in the server's zone.
+    const rawBefore = req.body?.readBefore;
+    const readBefore = typeof rawBefore === 'string' && READ_BEFORE_INSTANT_RE.test(rawBefore) ? new Date(rawBefore) : null;
+    if (!readBefore || Number.isNaN(readBefore.getTime())) return res.status(400).json({ error: 'readBefore required (an ISO time with Z or an offset)' });
+    // contactPhone: one inbox row's Mark read (that sender's texts only). Only a request without the field reads the
+    // whole inbox; a present but empty or invalid phone is refused, never widened.
+    const hasSender = Object.prototype.hasOwnProperty.call(req.body || {}, 'contactPhone');
+    const contactPhone = hasSender ? req.body.contactPhone : null;
+    if (hasSender && (typeof contactPhone !== 'string' || !phoneIdentityKey(contactPhone))) {
+      return res.status(400).json({ error: 'contactPhone must be a phone number' });
+    }
+    const { markAllInboundSmsRead } = require('../services/inbound-sms-read');
+    const { updated, notificationsCleared } = await markAllInboundSmsRead({
+      readBefore,
+      adminUserId: req.technicianId || null,
+      role: req.techRole,
+      excludePhones: ADMIN_PHONES,
+      contactPhone,
+    });
+    res.json({ success: true, updated, notificationsCleared });
+  } catch (err) { next(err); }
+});
+
+// A technician's Messages badge: the same unread needs-a-reply count, over the texts its inbox shows: threads whose
+// conversation belongs to a customer on its own route (as /log scopes it), so Mark all read can clear every one. A
+// text in a thread with no customer is office work and never counts.
 async function technicianUnreadCount(req, customerId) {
   const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
-  const owned = new Set((await technicianCustomerIdsSubquery(req, db)).map((row) => row.customer_id));
-  const rows = (await loadPendingSmsConversations({
-    excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE,
-  })).filter((row) => row.customer_id && owned.has(row.customer_id));
+  const pending = await loadPendingSmsConversations({ excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE });
+  const ids = pending.map((row) => row.id).filter(Boolean);
+  const visible = new Set(ids.length ? await db('messages as m')
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .whereIn('m.id', ids)
+    .whereIn('c.customer_id', technicianCustomerIdsSubquery(req, db))
+    .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+    .pluck('m.id') : []);
+  const rows = pending.filter((row) => visible.has(row.id));
   return { conversations: new Set(rows.map((row) => row.peer)).size, messages: rows.length };
 }
 
-// Shared inbox count; Customer 360 may scope it to the selected customer. A technician gets the count for its own
-// customers only (Messages badge).
+// Shared inbox count: needs-a-reply texts nobody has read (owner 2026-11-19); Customer 360 may scope it to the
+// selected customer. A technician gets the count for its own customers only (Messages badge).
 router.get('/unread-count', async (req, res, next) => {
   try {
     const { customerId } = req.query;
@@ -2641,7 +2684,7 @@ router.get('/unread-count', async (req, res, next) => {
     }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
     return res.json(await countUnreadInboundSms({
-      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE,
+      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE, unreadOnly: true,
     }));
   } catch (err) { return next(err); }
 });
@@ -3307,18 +3350,15 @@ async function reserviceLinkHandler(req, res) {
 router.post('/reservice-link', requireAdmin, (req, res) => reserviceLinkHandler(req, res));
 
 // POST /api/admin/communications/moving-link  { customerId?, phone }
-// Composer helper (owner 2026-11-02, dark behind GATE_MOVING_FLOW): the
+// Composer helper (owner 2026-11-02): the
 // customer's /moving/:token short link for insertion into the SMS body. With a
 // selected customer, the full 10-digit phone must match it (as /reservice-link).
 // Without one (a new text opened from Customer 360 by phone), the number must
 // belong to exactly one customer profile; the composer adopts that customer.
 // Opens the customer's move if there is none; sends nothing (the operator's
-// own send is the only text). 404 while the gate is dark.
+// own send is the only text).
 async function movingLinkHandler(req, res) {
   try {
-    if (!require('../config/feature-gates').movingFlowLive()) {
-      return res.status(404).json({ error: 'Moving links are not enabled' });
-    }
     const last10 = fullPhoneLast10(req.body?.phone);
     if (!last10) {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
@@ -3933,8 +3973,6 @@ router.get('/link-library', async (req, res) => {
       // Codex #4709 r3 P1: the composer omits "Free consultation" while
       // GATE_LEAD_INSPECTION_LINK is dark.
       consultationLinksEnabled: featureGates.leadInspectionLinkLive(),
-      // GATE_MOVING_FLOW: the composer omits "Moving link" while it is dark.
-      movingLinksEnabled: featureGates.movingFlowLive(),
     });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);

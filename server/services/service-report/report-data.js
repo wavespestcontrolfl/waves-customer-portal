@@ -2226,17 +2226,6 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
   return pest ? { city: nearYouCity, pest } : null;
 }
 
-// A frozen card's four-section body (stamped bodyFormat 'four_section' at
-// completion) shows only while GATE_REPORT_WRITER_RULES is on: with it off
-// (the kill switch) the card keeps its headline and drops that body
-// (Codex #5500).
-function withoutDarkFourSectionBody(snapshot) {
-  const result = snapshot?.todaysResult;
-  if (!result || result.bodyFormat !== 'four_section' || featureGates.reportWriterRulesLive()) return snapshot;
-  const { body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, ...rest } = result;
-  return { ...snapshot, todaysResult: rest };
-}
-
 // The report's next-appointment shape for a scheduled_services row.
 // `dayOnly` (GATE_DAY_ONLY_PROMISE, part C1): the customer was told only the day, so no hour leaves the server. The
 // narrative builders read windowStart, so a blank one makes them print the date alone.
@@ -4512,6 +4501,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
+  // The dark four-section transform (the kill switch), shared with every
+  // other reader of the summary rule (activity-indicators.js).
+  const { withoutDarkFourSectionBody } = require('./activity-indicators');
   // Typed specialty completion snapshot (persisted at completion — the
   // immutable source for Today's Result + customer-labeled findings). Its
   // presence suppresses Pest Pressure for this report and swaps in the
