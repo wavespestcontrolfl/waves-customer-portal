@@ -71,7 +71,7 @@
  * hold stops counting, so another truck may have taken the day; it keeps its
  * own zone stamp, which decides). The assessment link's list and its booking
  * resolve the zone from the one booking address the same way
- * (resolveEstimateZone: its city, then its text; createSelfBooking
+ * (resolveEstimateZone: its city decides, its text only without one; createSelfBooking
  * callbackVisit.zoneAddress), so the offer never shows a time the check
  * refuses, and the visit's stamp makes it a zone stop for the next booking.
  * Off, every zone day is the fleet's, as with one truck.

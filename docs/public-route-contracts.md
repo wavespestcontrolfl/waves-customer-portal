@@ -1423,7 +1423,7 @@ under their date lock where a hold starts to hold its day (a new hold, and a
 lapsed hold that an extend revives or an accept graduates, checked in the zone
 stamped on it), with the existing `SLOT_UNAVAILABLE` answer. The assessment
 link's list and its booking resolve the zone from the one booking address the
-same way (its city first, then its text; `callbackVisit.zoneAddress`), so a list
+same way (its city decides, its text only without one; `callbackVisit.zoneAddress`), so a list
 never offers a time that check refuses. No field or status changes.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
@@ -7604,7 +7604,8 @@ The booking transaction checks it again under the date lock (`createSelfBooking`
 `callbackVisit.slotGuard`, `truckMayTakeDate`, with the zone the visit is
 stamped with): when another commit booked a different technician south on that
 day first, it answers `SLOT_TAKEN`. Every list reads the zone from the address's
-own city first, else from the address text, and the booking resolves its zone
+own city (the zone that lists it, else the zone whose city its name contains;
+the address text only when there is no city), and the booking resolves its zone
 from the same address the same way (`callbackVisit.zoneAddress`), so its stamp
 and its check match the list. No field, status, error code, limiter or header
 changes. `POST /:token/find-slots` is the same natural-language search

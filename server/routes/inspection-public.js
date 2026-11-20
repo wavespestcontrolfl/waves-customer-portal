@@ -779,9 +779,9 @@ async function serviceAreaFailure(location, address = null) {
   return null;
 }
 
-// The address as the south-zone day funnel resolves its zone from: its text and its city (resolveEstimateZone: the
-// city first, then the text), or null when there is no text. One shape for the list (zoneFunnelAddress /
-// zoneFunnelCity) and the booking (callbackVisit.zoneAddress), so the two resolve the same zone.
+// The address as the south-zone day funnel resolves its zone from: its text and its city (resolveEstimateZone: a
+// city decides alone, the text only without one), or null when there is no text. One shape for the list
+// (zoneFunnelAddress / zoneFunnelCity) and the booking (callbackVisit.zoneAddress), so the two resolve the same zone.
 function zoneFunnelInputs(address) {
   const text = [address?.line1, address?.line2, address?.city, address?.state, address?.zip].filter(Boolean).join(', ');
   return text ? { address: text, city: address?.city || null } : null;
@@ -2728,7 +2728,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // Owner rule B per truck, under the booking's date lock: two commits can rebuild the same new far-south day
     // before either inserts, each with a different truck; the second finds the first's stop and gets SLOT_TAKEN.
     // createSelfBooking hands over the zone it stamps on the visit, resolved from the booking address as this link's
-    // list resolved it (zoneAddress: its city, then its text), so the list, the check and the row agree.
+    // list resolved it (zoneAddress: its city decides, its text only without one), so the list, the check and the row agree.
     const slotGuard = (conn, { zone = null } = {}) => truckMayTakeDate(conn, {
       estimateZone: zone, date, technicianId: bookingSlot.technician_id ?? null,
     });

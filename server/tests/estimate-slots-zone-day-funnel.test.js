@@ -747,12 +747,13 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
     });
   });
 
-  // The offer reads the zone as the booking will stamp it (createSelfBooking: the zone that lists the customer's city),
-  // so the commit check never refuses a time the list showed.
+  // The offer reads the zone as the booking will stamp it (createSelfBooking resolves callbackVisit.zoneAddress the
+  // same way), so the commit check never refuses a time the list showed. With a city, the city alone decides.
   test.each([
     ['a Venice address on Sarasota Street, Sarasota listed first', [SARASOTA_ZONE, VENICE_ZONE], '100 Sarasota St, Venice, FL, 34285', 'Venice', null, VENICE_VIEW],
     ['a Sarasota address on Venice Avenue, Venice listed first', [VENICE_ZONE, SARASOTA_ZONE], '100 Venice Ave, Sarasota, FL, 34231', 'Sarasota', VENICE_VIEW, null],
-    ['a city no zone lists (North Venice): the address text decides', [VENICE_ZONE, SARASOTA_ZONE], '9 Palm Way, North Venice, FL, 34275', 'North Venice', VENICE_VIEW, VENICE_VIEW],
+    ['a city no zone lists (North Venice): the zone city its name contains', [SARASOTA_ZONE, VENICE_ZONE], '9 Sarasota Way, North Venice, FL, 34275', 'North Venice', null, VENICE_VIEW],
+    ['a city no zone lists on a street named for one (Wimauma, Venice Ave): no zone', [VENICE_ZONE, SARASOTA_ZONE], '100 Venice Ave, Wimauma, FL, 33598', 'Wimauma', VENICE_VIEW, null],
   ])('%s: the city decides the zone, as the booking stamps it', async (_label, zones, address, city, textOnly, withCity) => {
     mockDb({ scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })], zones });
     const view = (c) => offerFunnelView({ address, city: c, ...WINDOW_ARGS, conn: db });

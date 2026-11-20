@@ -39,12 +39,14 @@ async function resolveEstimateZone(dbc, estimate) {
     }
   }
   // A booking address's own city (the lead assessment link: its list, zone-day-funnel.js offerFunnelView, and its
-  // booking, createSelfBooking callbackVisit.zoneAddress, which stamps the visit with this zone): the zone that lists
-  // it. A city no zone lists falls through to the address text below (a 'North Venice' address still matches Venice
-  // there).
-  if (!zone && estimate.city) {
-    const city = String(estimate.city).trim().toLowerCase();
-    zone = zones.find((z) => (z.cities || []).some((c) => String(c || '').toLowerCase() === city)) || null;
+  // booking, createSelfBooking callbackVisit.zoneAddress, which stamps the visit with this zone) decides alone: the
+  // zone that lists it, else the zone whose city its name contains (a 'North Venice' address is in Venice). The
+  // address text is not read, so a street named for a zone city ('100 Venice Ave, Wimauma') does not move it.
+  const city = String(estimate.city || '').trim().toLowerCase();
+  if (!zone && city) {
+    return zones.find((z) => (z.cities || []).some((c) => String(c || '').toLowerCase() === city))
+      || zones.find((z) => (z.cities || []).some((c) => c && city.includes(String(c).toLowerCase())))
+      || null;
   }
   if (!zone && estimate.address) {
     const addr = String(estimate.address).toLowerCase();

@@ -167,9 +167,9 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(datesOf(await buildLead(VENICE))).toEqual([D]);
   });
 
-  // The zone comes from the address's own city first, as createSelfBooking stamps the visit's zone, so the commit's
-  // truck check (callbackVisit.slotGuard) never refuses a time this list showed. Here the text alone names Sarasota,
-  // the zone listed first.
+  // The zone comes from the address's own city, as createSelfBooking stamps the visit's zone (zoneAddress), so the
+  // commit's truck check (callbackVisit.slotGuard) never refuses a time this list showed. Here the text alone names
+  // Sarasota, the zone listed first.
   test('the city decides the zone: a Venice address on a Sarasota street is funneled', async () => {
     stopRows = [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null }];
     expect(datesOf(await buildLead({ ...VENICE, line1: '9 Sarasota St' }))).toEqual([D1]);

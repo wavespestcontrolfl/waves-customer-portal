@@ -501,7 +501,7 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
     const zone = { id: 'zone-1', zone_name: 'Bradenton', cities: ['Bradenton'] };
     await callbackVisit.slotGuard(trx, { zone });
     expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, { estimateZone: zone, date: FUTURE_DATE, technicianId: 'tech-1' });
-    // The commit's rebuild reads the funnel zone from the address's own city first, then its text, and the booking
+    // The commit's rebuild reads the funnel zone from the address's own city (its text only without one), and the booking
     // resolves its zone from the same address the same way (callbackVisit.zoneAddress), so the two agree.
     expect(mockBuildAvailability).toHaveBeenCalledWith(expect.objectContaining({
       rangeFrom: FUTURE_DATE, rangeTo: FUTURE_DATE, zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton',
