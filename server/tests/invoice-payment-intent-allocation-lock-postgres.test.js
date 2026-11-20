@@ -223,13 +223,14 @@ postgres('invoice PaymentIntent allocation locking', () => {
     }
   });
 
-  test('authenticated success locks a restored canceled sibling before its higher-id target', async () => {
+  test('authenticated success locks a restored canceled sibling before its higher-id parked target', async () => {
     const targetId = invoiceIds[1];
     const siblingId = invoiceIds[0];
     const attemptId = randomUUID();
     const succeededPiId = `pi_authenticated_${attemptId.replaceAll('-', '')}`;
     const paymentMethodId = `pm_authenticated_${attemptId.replaceAll('-', '')}`;
     await database('customers').where({ id: customerId }).update({ account_credits: 40 });
+    await database('invoices').where({ id: targetId }).update({ stripe_payment_intent_id: null });
     await database('stripe_invoice_charge_attempts').insert({
       id: attemptId,
       invoice_id: targetId,
