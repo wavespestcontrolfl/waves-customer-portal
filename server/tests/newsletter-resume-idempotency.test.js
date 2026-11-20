@@ -221,6 +221,21 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(result.skipped_ineligible).toBe(0);
   });
 
+  test('a holdout name this server does not know stops a first send before anything is sent', async () => {
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: { subscriber_ids: [1], holdout: 'pest-insider-v2' }, subject_b: null,
+      },
+      subscribers: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: KEPT_CUSTOMER }],
+      deliveries: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }],
+    });
+
+    await expect(sendCampaign('send-1')).rejects.toMatchObject({ code: 'UNKNOWN_HOLDOUT' });
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+  });
+
   test('a row a webhook already terminalized: recipient still excluded from the payload, but NOT counted as skipped here', async () => {
     let skipUpdate = null;
     buildDb({
@@ -1359,6 +1374,41 @@ describe('resumeCampaign — preconditions', () => {
     expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
     expect(result.skipped_ineligible).toBe(1);
     expect(finalUpdate.recipient_count).toBe(1);
+  });
+
+  test('resume: a holdout name this server does not know stops the resume before anything is sent (it never reads the subscriber query)', async () => {
+    const sentSend = {
+      id: 's',
+      status: 'sent',
+      sent_at: new Date('2026-05-01T10:00:00Z'),
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider-v2' },
+      subject_b: null,
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: sentSend }),                           // resume fetch
+        chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
+        chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 2 }),                                  // rows exist
+        chain({ count: 2 }),                                  // two outstanding
+      ],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'UNKNOWN_HOLDOUT' });
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
   });
 
   test('resume skips a delivery row that self-healed before the external send claim', async () => {

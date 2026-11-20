@@ -78,18 +78,19 @@ describe('subscriber_ids', () => {
 });
 
 describe('warmAudienceQuery', () => {
-  test('starts from the send path query and requires an opened Waves email or Waves newsletter between the cutoff and asOf', () => {
+  test('starts from the send path query and requires an open event on the current address between the cutoff and asOf', () => {
     const since = new Date('2026-09-03T12:00:00Z');
     const until = new Date('2026-12-02T12:00:00Z');
     const base = shapeOf(null);
     const { sql, bindings } = warmAudienceQuery({ since, until }).toSQL();
     expect(bindings.slice(0, base.bindings.length)).toEqual(base.bindings);
-    expect(bindings.slice(-4)).toEqual([since, until, since, until]);
-    // One group: either open counts, and the group is ANDed with every send-path rule before it.
-    expect(sql).toContain(' and (exists (select 1 from "email_messages" as "opened" where lower(opened.recipient_email_snapshot) = lower(newsletter_subscribers.email)'
-      + ' and "opened"."opened_at" >= ? and "opened"."opened_at" <= ?)'
-      + ' or exists (select 1 from "newsletter_send_deliveries" as "nl_open" where (nl_open.subscriber_id = newsletter_subscribers.id or lower(nl_open.email) = lower(newsletter_subscribers.email))'
-      + ' and "nl_open"."opened_at" >= ? and "nl_open"."opened_at" <= ?)) order by');
+    expect(bindings.slice(-3)).toEqual(['open', since, until]);
+    // One group, ANDed with every send-path rule before it.
+    expect(sql).toContain(' and (exists (select 1 from "sendgrid_webhook_events" as "opened" where "opened"."event_type" = ?'
+      + ' and lower(opened.email) = lower(newsletter_subscribers.email)'
+      + ' and "opened"."created_at" >= ? and "opened"."created_at" <= ?)) order by');
+    // The address alone decides: a subscriber-id match would let a former address's open qualify a corrected one.
+    expect(sql.slice(base.sql.length)).not.toMatch(/subscriber_id/);
     // The send path query opens with its WITH clauses; the main select after them reads two columns.
     expect(sql).toContain(') select "newsletter_subscribers"."id", "newsletter_subscribers"."customer_id" from "newsletter_subscribers" where ');
     expect(sql).toMatch(/order by "newsletter_subscribers"\."id" asc$/);

@@ -724,6 +724,15 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
   if (!send.html_body && !send.text_body) throw new Error('body required');
+  // A holdout name this server does not know stops the send on every path. A
+  // resume with a delivery ledger never runs buildSubscriberQuery (which
+  // matches nobody for an unknown name), so without this stop it would mail
+  // every retryable row with no holdout check at all.
+  if (send.segment_filter?.holdout != null && !sendHoldout(send.segment_filter)) {
+    const err = new Error('the segment filter names a holdout this server does not know');
+    err.code = 'UNKNOWN_HOLDOUT';
+    throw err;
+  }
 
   // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
   // A TRUE PARTIAL resume — preclaimed AND constrained to the existing

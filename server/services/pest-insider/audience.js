@@ -2,10 +2,13 @@
  * Who gets a Waves Pest Insider issue.
  *
  * Warm phase: a new email stream starts with the readers whose mailbox opened a Waves email
- * in the last 90 days, so the first issues go to people who read Waves mail. A Waves email is
- * any email Waves sent: a transactional or automated one (email_messages.opened_at) or a Waves
- * newsletter (newsletter_send_deliveries.opened_at, where SendGrid records newsletter opens).
- * A later phase widens this to every opted-in reader.
+ * in the last 90 days, so the first issues go to people who read Waves mail. The opens come
+ * from the SendGrid webhook's event log (sendgrid_webhook_events), which keeps one row for
+ * every event on a tracked Waves email: a Waves newsletter, an automation step, a template
+ * message. So a repeat open counts (the delivery and message rows keep only the FIRST open),
+ * and the open belongs to the address that opened it: an open by a former address, before an
+ * address correction, never qualifies the new one. A later phase widens this to every
+ * opted-in reader.
  *
  * Holdout: a fixed 10% of customer-linked subscribers never get an issue, so the issues'
  * effect on renewals and add-ons can be measured against them. Membership is a hash of the
@@ -44,29 +47,26 @@ function isHeldOut(customerId) {
 }
 
 /**
- * The warm readers as a query: every subscriber the send path would mail whose address opened
- * a Waves email (an email_messages row, or a Waves newsletter delivered to this subscriber or
- * this address) from `since` through `until` (both inclusive), so a plan made for a past moment
- * counts only the opens before it. Ordered by id; selects the id and the linked customer only.
+ * The warm readers as a query: every subscriber the send path would mail whose CURRENT address
+ * has an open event in the SendGrid webhook log from `since` through `until` (both inclusive),
+ * so a plan made for a past moment counts only the opens before it. The log's time is when the
+ * webhook recorded the event, seconds after the open. Ordered by id; selects the id and the
+ * linked customer only.
  */
 function warmAudienceQuery({ since, until }) {
   // Lazy: the sender pulls the whole newsletter stack; the planner loads this only when it runs.
   const db = require('../../models/db');
   const { buildSubscriberQuery } = require('../newsletter-sender');
   return buildSubscriberQuery(null)
+    // Grouped, so the check is ANDed with every send-path rule before it.
     .where(function openedWavesEmail() {
-      this.whereExists(function openedEmail() {
+      this.whereExists(function openEvent() {
         this.select(db.raw('1'))
-          .from('email_messages as opened')
-          .whereRaw('lower(opened.recipient_email_snapshot) = lower(newsletter_subscribers.email)')
-          .where('opened.opened_at', '>=', since)
-          .where('opened.opened_at', '<=', until);
-      }).orWhereExists(function openedNewsletter() {
-        this.select(db.raw('1'))
-          .from('newsletter_send_deliveries as nl_open')
-          .whereRaw('(nl_open.subscriber_id = newsletter_subscribers.id or lower(nl_open.email) = lower(newsletter_subscribers.email))')
-          .where('nl_open.opened_at', '>=', since)
-          .where('nl_open.opened_at', '<=', until);
+          .from('sendgrid_webhook_events as opened')
+          .where('opened.event_type', 'open')
+          .whereRaw('lower(opened.email) = lower(newsletter_subscribers.email)')
+          .where('opened.created_at', '>=', since)
+          .where('opened.created_at', '<=', until);
       });
     })
     .select('newsletter_subscribers.id', 'newsletter_subscribers.customer_id')

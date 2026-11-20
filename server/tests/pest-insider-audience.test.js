@@ -107,26 +107,20 @@ describe('selectIssueAudience', () => {
     expect(order).toEqual(['relink', 'query']);
   });
 
-  test('asks for an opened Waves email or Waves newsletter in the 90 days up to asOf, and none after it', async () => {
+  test('asks for an open event on the current address in the SendGrid log, in the 90 days up to asOf', async () => {
     buildSubscriberQuery.mockReturnValue(fakeQuery([]));
     const asOf = new Date('2026-12-02T12:00:00Z');
     const since = new Date(asOf.getTime() - 90 * 24 * 60 * 60 * 1000);
     await selectIssueAudience({ asOf });
+    // One row per open (a repeat open counts), matched on the address that opened it only.
     expect(record(captured.where)).toEqual([
       ['whereExists', [
         ['select', { raw: '1' }],
-        ['from', 'email_messages as opened'],
-        ['whereRaw', 'lower(opened.recipient_email_snapshot) = lower(newsletter_subscribers.email)'],
-        ['where', 'opened.opened_at', '>=', since],
-        ['where', 'opened.opened_at', '<=', asOf],
-      ]],
-      // A reader who opened only a Waves newsletter (SendGrid records those opens on the delivery row).
-      ['orWhereExists', [
-        ['select', { raw: '1' }],
-        ['from', 'newsletter_send_deliveries as nl_open'],
-        ['whereRaw', '(nl_open.subscriber_id = newsletter_subscribers.id or lower(nl_open.email) = lower(newsletter_subscribers.email))'],
-        ['where', 'nl_open.opened_at', '>=', since],
-        ['where', 'nl_open.opened_at', '<=', asOf],
+        ['from', 'sendgrid_webhook_events as opened'],
+        ['where', 'opened.event_type', 'open'],
+        ['whereRaw', 'lower(opened.email) = lower(newsletter_subscribers.email)'],
+        ['where', 'opened.created_at', '>=', since],
+        ['where', 'opened.created_at', '<=', asOf],
       ]],
     ]);
   });
