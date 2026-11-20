@@ -673,8 +673,9 @@ function customerCopyViolations(text) {
 // refused note shows nothing, and a refused list value or finding field is
 // left out. Days stay legal: they name the next visit and when results show.
 // The one exception is a sentence that names drying or re-entry ("dry",
-// "re-enter", "keep … off", "stay … inside", "off-limits", "avoid") or the
-// people and pets a re-entry line is about: there any figure or number word
+// "re-enter", "keep … off", "stay … inside", "off-limits", "avoid"), the
+// people and pets a re-entry line is about, or a customer's permission to
+// use the place again ("you can use it", "feel free to use"): there any figure or number word
 // decides ("pets can return 11/22", "keep off 2d"), and so does a day word: a
 // unit ("dries in half a day", "keep pets off for two days"), a weekday,
 // "today", a part of the day ("dry by this evening"), a month or a season.
@@ -684,8 +685,12 @@ function customerCopyViolations(text) {
 // return to the treated area in two days"), but not after I, we, the
 // technician or the team: that is a follow-up. A full
 // stop ends a sentence only before a capital letter or the end of the text,
-// so "1.5 days" and "approx. 2 days" stay in their sentence; a line break
-// does not end one. Singular "second" stays legal: it is the ordinal ("second visit"), and no
+// and never after "approx." or a like abbreviation, so "1.5 days",
+// "approx. 2 days" and "approx. Two days" stay in their sentence; a line
+// break does not end one. The text is cut into sentences before the
+// sentence rules run, with a split that tells a capital from a small letter:
+// the rules ignore case, and under that flag \p{Lu} matches a small letter
+// too. Singular "second" stays legal: it is the ordinal ("second visit"), and no
 // re-entry time is one second. So do "am" after anything but a number ("I am")
 // and, outside a drying or re-entry sentence, a part of the day with no hour
 // ("Have a great afternoon!"). A count
@@ -701,12 +706,26 @@ const NOTE_HOUR_SRC = '(?:\\p{N}{1,2}|one|two|three|four|five|six|seven|eight|ni
 const NOTE_24H_CLOCK_SRC = '(?:(?:[01]?\\p{Nd}|2[0-3])[0-5]\\p{Nd}|2400)';
 // The number words of a clock's hour and minutes (0 to 59: "four thirty am").
 const NOTE_CLOCK_WORD_SRC = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|oh)';
-// One sentence: a question or exclamation mark or a semicolon ends it; a
-// full stop ends it only before a capital letter or the end of the text.
-const NOTE_SENTENCE_CHAR_SRC = '(?:[^.!?;]|\\.(?!\\s*(?:\\p{Lu}|$)))';
+// Where a sentence ends: a question or exclamation mark or a semicolon, or a
+// full stop before a capital letter or the end of the text, unless the full
+// stop closes an abbreviation that comes before a quantity ("approx. Two
+// days"). This split tells case apart (no i flag); the sentence rules below
+// run on one sentence at a time.
+const NOTE_SENTENCE_ABBREVIATION_SRC = ['approx', 'apprx', 'appx', 'est', 'ca', 'abt', 'e.g', 'i.e']
+  .map((word) => word.replace(/\p{L}/gu, (letter) => `[${letter.toLowerCase()}${letter.toUpperCase()}]`).replace(/\./g, '\\.'))
+  .join('|');
+const NOTE_SENTENCE_END_RE = new RegExp(
+  `[!?;]|(?<!(?<!\\p{L})(?:${NOTE_SENTENCE_ABBREVIATION_SRC}))\\.(?=\\s*(?:\\p{Lu}|$))`,
+  'u',
+);
+// Any character inside one sentence: the text is split before the sentence
+// rules run.
+const NOTE_SENTENCE_CHAR_SRC = '[\\s\\S]';
 // What marks a drying or re-entry sentence: a drying word, re-entry, keep or
 // stay with off, out, away, inside, indoors or clear ("keep an eye out" is
-// not one), off-limits, avoid, or the people and pets a re-entry line names.
+// not one), off-limits, avoid, the people and pets a re-entry line names, or
+// a customer's permission to use the place again: "you can use", "you're
+// free to enjoy", "feel free to use", "it is safe to use".
 const NOTE_DRY_REENTRY_SRC = `(?<!\\p{L})(?:${[
   '(?:dry|dries|drying|dried|wet|damp)',
   're-?\\s?ent(?:er|ers|ered|ering|ry|ries|rance)',
@@ -715,6 +734,7 @@ const NOTE_DRY_REENTRY_SRC = `(?<!\\p{L})(?:${[
   'off[\\s-]?limits',
   '(?:avoid|avoids|avoiding|avoided)',
   '(?:pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|kids?|child(?:ren)?|toddlers?|bab(?:y|ies)|people|family|anyone|everyone|guests?)',
+  `(?:you(?:\\s*['\u2019]ll|\\s+will|\\s+can|\\s+may|\\s+could|\\s+should|\\s+might)(?:\\s+(?:safely|then|now|also|soon|easily))?(?:\\s+be\\s+able\\s+to)?|you(?:\\s+are|['\u2019]re)\\s+(?:free|welcome|able|good|okay|ok|fine|clear|cleared|safe)\\s+to|feel\\s+free\\s+to|(?:it\\s+is|it['\u2019]s|it\\s+will\\s+be|it['\u2019]ll\\s+be)\\s+(?:safe|fine|ok|okay|alright|all\\s+right)\\s+to)\\s+(?:use|enjoy|resume|reopen)`,
 ].join('|')})(?!\\p{L})`;
 // A day word: a unit from a day up, a weekday, today, a part of the day or a
 // meal, a month (not "may", the verb), a season (not "fall", the verb), a
@@ -751,6 +771,9 @@ const NOTE_RECORD_TIME_RE = new RegExp([
   `(?<!\\p{L})${NOTE_HOUR_SRC}\\s+(?:in\\s+the\\s+(?:morning|afternoon|evening|night)|at\\s+night|this\\s+(?:morning|afternoon|evening))`,
   `(?<!\\p{L})(?:at|after|until|till|til|by|before|around|past|between|from)\\s+(?:about\\s+|around\\s+)?(?:${NOTE_HOUR_SRC}|${NOTE_24H_CLOCK_SRC})(?![\\p{L}\\p{N}])`,
   '\\b(?:overnight|tonight|tomorrow|noon|midnight)\\b',
+].join('|'), 'iu');
+// The sentence rules: each runs on one sentence (NOTE_SENTENCE_END_RE).
+const NOTE_MARKED_SENTENCE_RE = new RegExp([
   `${NOTE_DRY_REENTRY_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_MARKED_TIME_SRC}`,
   `${NOTE_MARKED_TIME_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DRY_REENTRY_SRC}`,
   `${NOTE_REENTRY_VERB_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DAY_WORD_SRC}`,
@@ -761,7 +784,10 @@ function noteRecordCopyViolations(text) {
   const value = String(text || '');
   const violations = customerCopyViolations(value);
   if (COMPLETION_ACCESS_CODE_RE.test(value)) violations.push('note_record_access_code');
-  if (NOTE_RECORD_TIME_RE.test(value)) violations.push('note_record_time');
+  if (NOTE_RECORD_TIME_RE.test(value)
+    || value.split(NOTE_SENTENCE_END_RE).some((sentence) => NOTE_MARKED_SENTENCE_RE.test(sentence))) {
+    violations.push('note_record_time');
+  }
   return violations;
 }
 

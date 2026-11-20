@@ -162,6 +162,12 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the lawn edge. Keep pets off the treated grass for two days.',
       'I treated the yard. Keep off the treated grass for 1.5 days.',
       'I treated the yard. Keep off the grass approx. 2 days.',
+      // The split into sentences tells case apart: a small letter after a
+      // full stop never starts a sentence, and "approx." never ends one.
+      'I treated the yard. Avoid the patio for approx. two days.',
+      'I treated the yard. Avoid the patio for approx. Two days.',
+      'I treated the yard. Avoid the patio for Approx. Two days.',
+      'I treated the yard. Keep pets off the grass treated w. granules for two days.',
       'I treated the yard. Stay off the treated grass for a couple of days.',
       'I treated the yard. Re-entry is fine in two days.',
       'I treated the yard. The yard is off-limits for a day.',
@@ -187,6 +193,13 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the yard. Stay off the treated grass for another two.',
       'I treated the yard. For a day the yard is off-limits.',
       'I treated the yard. Pets can go out in 48.',
+      // A customer's permission to use the place again, with a named place
+      // or a pronoun.
+      'I treated the patio. You can use the patio again in two days.',
+      'I treated the patio. You can use it again in two days.',
+      'I treated the lanai. Feel free to use the lanai after 2.',
+      'I treated the yard. It is fine to enjoy the yard in two days.',
+      'I treated the pool deck. You\u2019re free to use the pool deck on Monday.',
     ]) {
       const parsed = reportNoteCustomerCopy(stored({ text }));
       expect(parsed.body).toBeNull();
@@ -199,6 +212,8 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       // "may" the verb and "fall" the verb are no month or season.
       'I treated the lanai. Pets may return once it is dry.',
       'I treated the lanai. The webs fall away once the spray is dry.',
+      // The technician's own use is no permission to the customer.
+      'I placed bait in the garage. I will use a new bait in two weeks.',
       // A full stop before a capital ends the sentence.
       'I treated the lanai. Keep pets off until dry. In two weeks you should see fewer ants.',
     ]) expect(reportNoteCustomerCopy(stored({ text })).body).toBe(text);

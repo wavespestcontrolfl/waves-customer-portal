@@ -3113,8 +3113,9 @@ word, the clock marker, the time word before an hour) and each match withholds
 the copy. A count after such a time word ("at 3 stations") is withheld too.
 Days stay legal (the next visit, when results show), except in a sentence
 that names drying or re-entry ("dry", "re-enter", "keep … off", "stay …
-inside", "off-limits", "avoid") or the people and pets a re-entry line is
-about: there any figure or number word withholds the copy ("11/22", "2d"),
+inside", "off-limits", "avoid"), the people and pets a re-entry line is
+about, or a customer's permission to use the place again ("you can use it",
+"feel free to use", "it is fine to enjoy"): there any figure or number word withholds the copy ("11/22", "2d"),
 and so does a day word (a unit from a day up, a weekday, "today", a part of
 the day or a meal, a month other than "may", a season other than "fall"), so
 "until dry" is the only time such a sentence may give. The re-entry verbs the
@@ -3123,7 +3124,10 @@ return, come back, walk on, use the treated area, ready for use, …) withhold a
 sentence with a day word too ("You can return to the treated area in two
 days."), unless the verb follows I, we, the technician or the team: that is a
 follow-up ("I will return in two weeks to check the stations"). A full stop ends that sentence only before a capital letter
-or the end ("1.5 days", "approx. 2 days" stay in it); a line break does not.
+or the end, and never after "approx." or a like abbreviation ("1.5 days",
+"approx. two days", "approx. Two days" stay in it); a line break does not.
+The text is cut into sentences before these rules run, by a split that tells
+a capital from a small letter (the rules themselves ignore case).
 "Keep an eye out" is no keep-off. The ordinal "second" and "am" after
 anything but a number stay legal, and so does a part of the day with no hour
 outside such a sentence.
