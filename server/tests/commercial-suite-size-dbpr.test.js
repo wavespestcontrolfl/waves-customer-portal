@@ -169,6 +169,9 @@ describe('defaultFetchText', () => {
     await expect(defaultFetchText('https://example.invalid/x.csv', 1000, 32)).rejects.toThrow('extract too large');
     global.fetch = jest.fn(async () => new Response('', { status: 503 }));
     await expect(defaultFetchText('https://example.invalid/x.csv', 1000)).rejects.toThrow('HTTP 503');
+    // A partial file is refused, even a valid CSV prefix that ends on a row.
+    global.fetch = jest.fn(async () => new Response('"License Number","Business Name"\n"SEA0000001","SAMPLE DINER"\n', { status: 206 }));
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000)).rejects.toThrow('HTTP 206');
   });
 });
 

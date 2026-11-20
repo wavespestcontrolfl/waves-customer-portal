@@ -331,7 +331,8 @@ const DBPR_MAX_BYTES = 32 * 1024 * 1024;
 
 async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS, maxBytes = DBPR_MAX_BYTES) {
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-  if (!res || !res.ok) throw new Error(`HTTP ${res && res.status}`);
+  // Only a whole file: a 206 (partial content) that ends on a row would pass every row check.
+  if (!res || res.status !== 200) throw new Error(`HTTP ${res && res.status}`);
   const chunks = [];
   let size = 0;
   for await (const chunk of res.body || []) {
