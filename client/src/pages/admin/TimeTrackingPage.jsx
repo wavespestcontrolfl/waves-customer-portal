@@ -9,6 +9,7 @@ import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import PayGrowth from "../../components/payGrowth/PayGrowth";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import PayrollSettings from "../../components/payroll/PayrollSettings";
+import ProtocolAudit from "../../components/techRewards/ProtocolAudit";
 import ServiceLinesCard from "./ServiceLinesCard";
 import TerritoryReadoutCard from "./TerritoryReadoutCard";
 import usePayrollAvailable from "../../hooks/usePayrollAvailable";
@@ -193,6 +194,7 @@ const STAFF_SECTIONS = [
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
   { key: "pay-growth", label: "Growth", Icon: BarChart3 },
+  { key: "protocol-audit", label: "Protocol audit", Icon: CheckCircle2 },
   { key: "payroll", label: "Payroll", Icon: Wallet },
   { key: "pay-stubs", label: "Pay stubs", Icon: Receipt },
 ];
@@ -212,7 +214,7 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents", "pay-growth", "payroll"],
+    tabs: ["team", "documents", "pay-growth", "protocol-audit", "payroll"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -224,7 +226,7 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 // Staff page is Dashboard, its own pay stubs and the team roster. Documents is
 // office-only too: its list and upload are admin routes (a technician reads its
 // own documents under Today -> More).
-const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics", "documents"]);
+const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics", "documents", "protocol-audit"]);
 
 // Resolve the LEAF the page will actually render for a ?tab= deep link.
 // Gate-off or non-admin deep links to pay-growth fall back to the group's
@@ -343,6 +345,7 @@ export default function TimeTrackingPage() {
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
       {tab === "pay-growth" && <PayGrowth manage />}
+      {tab === "protocol-audit" && <ProtocolAudit />}
       {tab === "payroll" && <PayrollSettings />}
       {tab === "pay-stubs" && <TechPayStubs stubs={payStubs} />}
       {tab === null && <p role="status" style={{ color: "#71717A" }}>{rawTab === "payroll" ? "Checking payroll availability…" : rawTab === "pay-stubs" ? "Checking pay stub availability…" : "Checking pay and growth availability…"}</p>}

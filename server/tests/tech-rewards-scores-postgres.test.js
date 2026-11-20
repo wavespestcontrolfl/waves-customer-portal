@@ -503,6 +503,16 @@ describe('tech rewards scores input checks', () => {
       expect(await scores.readOnTime(tech, WINDOW)).toBe(0);
     });
 
+    test('onTime: a delivered-only email counts as a confirmed send, so it keeps a consent-blocked report-waived record owed', async () => {
+      const snap = { v: 1, source: 'catalog', requiresServiceReport: false, requiresApplicationLog: false, requiresCustomerSignature: false,
+        requiresCustomerNotice: true, requiresLicense: false, requiredPhotoCount: 0 };
+      const record = await visit(tech, { structured_notes: { completionSmsStatus: 'blocked', closeoutRequirements: snap } });
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull(); // blocked text + report waived: nothing owed
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'delivered', sent_at: null,
+        queued_at: ts('2026-04-10T15:01:00Z'), delivered_at: ts('2026-04-10T15:05:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100); // a report email did go out: owed, and on time
+    });
+
     test('onTime: a delivered email with no send time is judged by its queued..delivered bounds', async () => {
       const record = await visit(tech); // completed 2026-04-10T15:00Z: window 14:00 that day .. 15:00 next day
       const key = `service_report_ready:${record.id}:primary`;
