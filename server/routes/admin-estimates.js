@@ -93,7 +93,7 @@ const { OUTLINE_PROGRAMS, outlineProgram } = require('../services/service-outlin
 
 // ESTIMATE_LIST_LIMIT (the hard ceiling for limit=all list fetches) and SENT_ONLY_DELIVERY_ATTEMPT_STATUSES live with
 // the list's row selection in services/estimate-call-list.js, which the 9 AM Call today push shares.
-const { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery } = require('../services/estimate-call-list');
+const { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId } = require('../services/estimate-call-list');
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
 
 function estimateMatchesSentOnlyScope(estimate = {}) {
@@ -4282,23 +4282,9 @@ router.get('/', async (req, res, next) => {
       estimates = await query.limit(lim).offset(offset);
     }
 
-    // Aggregate shortlink click telemetry per estimate. One estimate can
-    // accumulate multiple short_codes rows when /send is hit again (re-send
-    // / follow-up flows), so SUM the click counts and MAX the last-clicked
-    // timestamp. Bot UAs are filtered upstream in public-shortlinks so the
-    // numbers reflect real customer taps.
+    // Short-link click telemetry per estimate (summed counts, newest click), the read the Call today push shares.
     const ids = estimates.map((e) => e.id);
-    let clickStats = new Map();
-    if (ids.length) {
-      const rows = await db('short_codes')
-        .where({ entity_type: 'estimates' })
-        .whereIn('entity_id', ids)
-        .groupBy('entity_id')
-        .select('entity_id')
-        .sum({ click_count: 'click_count' })
-        .max({ last_clicked_at: 'last_clicked_at' });
-      clickStats = new Map(rows.map((r) => [r.entity_id, r]));
-    }
+    const clickStats = await clickStatsByEstimateId(db, ids);
 
     // The newest outline per estimate and program: each program's packets (service-outline-programs.js: Tree & Shrub,
     // Pest Control, Mosquito) apart; every other packet is lawn.

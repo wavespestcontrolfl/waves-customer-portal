@@ -53,7 +53,7 @@ beforeEach(() => {
     return { rows: [{ id: claimed.size }] };
   });
   const chain = (rows) => {
-    const q = { where: () => q, whereNull: () => q, whereRaw: () => q, whereIn: () => q, groupBy: () => q, select: () => q, max: () => q, then: (ok, no) => Promise.resolve(rows).then(ok, no) };
+    const q = { where: () => q, whereNull: () => q, whereRaw: () => q, whereIn: () => q, groupBy: () => q, select: () => q, sum: () => q, max: () => q, then: (ok, no) => Promise.resolve(rows).then(ok, no) };
     return q;
   };
   // The estimates list query: records every call and applies limit(n) to the rows (newest first, as the query orders them).

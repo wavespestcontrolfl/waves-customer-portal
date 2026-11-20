@@ -41,7 +41,7 @@ beforeEach(() => {
   });
   db.mockImplementation((table) => {
     const q = {};
-    for (const name of ['leftJoin', 'select', 'clearSelect', 'orderBy', 'where', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereIn', 'groupBy', 'max']) q[name] = () => q;
+    for (const name of ['leftJoin', 'select', 'clearSelect', 'orderBy', 'where', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereIn', 'groupBy', 'sum', 'max']) q[name] = () => q;
     if (table === 'estimates') {
       q.limit = () => Promise.resolve([viewedRow]);
     } else if (table === 'short_codes') {

@@ -30,7 +30,9 @@ const logger = require('./logger');
 const { takeSendClaim, releaseSendClaim } = require('./sms-send-claims');
 const { etDateString } = require('../utils/datetime-et');
 const { isCallTodayEstimate } = require('../../shared/estimate-call-today.cjs');
-const { ESTIMATE_LIST_LIMIT, estimateListQuery, lastCalledAtByEstimateId, callTodayFields } = require('./estimate-call-list');
+const {
+  ESTIMATE_LIST_LIMIT, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId, callTodayFields,
+} = require('./estimate-call-list');
 
 const CLAIM_PREFIX = 'estimate_call_today:';
 // The dispatcher's `pushFailed` markers for a throw before any push reached a provider: its recipient lookup, or the
@@ -51,16 +53,11 @@ async function candidateRows() {
   return rows.filter((row) => row.status === 'viewed' && !row.archived_at && String(row.customer_phone || '').trim());
 }
 
-// Newest short-link click per estimate: the same read the list route makes for lastClickedAt (one batched query).
+// Newest short-link click per estimate: the list route's own read for lastClickedAt (estimate-call-list.js
+// clickStatsByEstimateId, one batched query), so a change to which clicks count moves the page and the push together.
 async function lastClickedAtById(ids) {
-  if (!ids.length) return new Map();
-  const rows = await db('short_codes')
-    .where({ entity_type: 'estimates' })
-    .whereIn('entity_id', ids)
-    .groupBy('entity_id')
-    .select('entity_id')
-    .max({ last_clicked_at: 'last_clicked_at' });
-  return new Map(rows.map((r) => [r.entity_id, r.last_clicked_at]));
+  const stats = await clickStatsByEstimateId(db, ids);
+  return new Map([...stats].map(([id, row]) => [id, row.last_clicked_at]));
 }
 
 // How many estimates are on the Call today list right now. Throws when a read fails: a count that missed the

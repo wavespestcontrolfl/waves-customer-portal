@@ -317,3 +317,45 @@ describe('estimateListQuery', () => {
     expect(all.calls.map(([name]) => name)).not.toContain('whereNotNull');
   });
 });
+
+describe('clickStatsByEstimateId (the click read the list route and the Call today push share)', () => {
+  const { clickStatsByEstimateId } = require('../services/estimate-call-list');
+
+  test('one grouped read: summed click counts and the newest click, keyed by estimate id', async () => {
+    const calls = [];
+    const q = {};
+    for (const name of ['where', 'whereIn', 'groupBy', 'select', 'sum', 'max']) q[name] = (...args) => { calls.push([name, ...args]); return q; };
+    q.then = (ok, no) => Promise.resolve([{ entity_id: 'e1', click_count: '3', last_clicked_at: '2026-11-19T15:00:00Z' }]).then(ok, no);
+    const database = jest.fn(() => q);
+    const stats = await clickStatsByEstimateId(database, ['e1', 'e2']);
+    expect(database).toHaveBeenCalledTimes(1);
+    expect(database).toHaveBeenCalledWith('short_codes');
+    expect(calls).toEqual([
+      ['where', { entity_type: 'estimates' }],
+      ['whereIn', 'entity_id', ['e1', 'e2']],
+      ['groupBy', 'entity_id'],
+      ['select', 'entity_id'],
+      ['sum', { click_count: 'click_count' }],
+      ['max', { last_clicked_at: 'last_clicked_at' }],
+    ]);
+    expect(stats.get('e1')).toMatchObject({ click_count: '3', last_clicked_at: '2026-11-19T15:00:00Z' });
+    expect(stats.has('e2')).toBe(false);
+  });
+
+  test('no ids = no query', async () => {
+    const database = jest.fn();
+    expect((await clickStatsByEstimateId(database, [])).size).toBe(0);
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  // One click read: a change to which clicks count reaches the page and the push together.
+  test('the list route and the Call today push both read clicks through it', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const file of ['routes/admin-estimates.js', 'services/estimate-call-today-push.js']) {
+      const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+      expect(src).toContain('clickStatsByEstimateId(db, ');
+      expect(src).not.toMatch(/\.max\(\{ last_clicked_at: 'last_clicked_at' \}\)/);
+    }
+  });
+});

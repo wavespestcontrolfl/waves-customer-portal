@@ -72,6 +72,22 @@ async function lastCalledAtByEstimateId(database, estimates, nowMs = Date.now())
 const ESTIMATE_LIST_LIMIT = 2000;
 const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
 
+// Short-link click telemetry per estimate, one batched query. One estimate can hold several short_codes rows when
+// /send runs again (a re-send or a follow-up), so the click counts are SUMMED and the last-clicked time is the MAX.
+// Bot taps are filtered upstream in public-shortlinks, so the numbers are real customer taps. The list route reads
+// both fields and the Call today push reads last_clicked_at, so the page and the push count the same clicks.
+async function clickStatsByEstimateId(database, ids) {
+  if (!ids.length) return new Map();
+  const rows = await database('short_codes')
+    .where({ entity_type: 'estimates' })
+    .whereIn('entity_id', ids)
+    .groupBy('entity_id')
+    .select('entity_id')
+    .sum({ click_count: 'click_count' })
+    .max({ last_clicked_at: 'last_clicked_at' });
+  return new Map(rows.map((r) => [r.entity_id, r]));
+}
+
 /**
  * The base row selection of GET /admin/estimates: ONE home for the list route and the 9 AM Call today push, so the
  * push counts only rows the Estimates page can load. The page loads sentOnly rows (limit=all, the newest
@@ -137,4 +153,4 @@ function staffReasonOnExpiredAllowed(estimate, body = {}) {
   return (estimate.disposition || '') !== 'expired_unsent';
 }
 
-module.exports = { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, lastCalledAtByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };
+module.exports = { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };
