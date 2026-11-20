@@ -262,13 +262,20 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   hasCommercialRecurringLine, the bait check and the accept's own check);
 // - the property answer of a quiz page, where the object keeps a quiz
 //   ('business': quizIsCommercial in lead-quiz.js). A lead keeps the quiz in
-//   its payload, and the intake marks the lead by the same rule.
+//   its payload, and the intake marks the lead by the same rule;
+// - the commercial category and a commercial subtype, each read ALONE. The
+//   engine's rule prices one profile, so a residential type or a toggle set
+//   to no in the same object wins there over a category or a subtype. Here
+//   one mark is enough, as it is for the intake's rule for a form
+//   (structuredCommercialSignal in lead-estimate-automation.js) and for the
+//   payload scan of the save.
 function nodeSaysCommercial(node) {
   const converter = require('./estimate-converter');
   return saysYes(node.isCommercial) || saysYes(node.is_commercial)
     || require('./pricing-engine/commercial-helpers').isCommercialProperty(node)
     || isCommercialPropertyType(node.property_type)
-    || isSetSubtype(node.commercial_subtype)
+    || isSetSubtype(node.commercial_subtype) || isSetSubtype(node.commercialSubtype)
+    || String(node.category ?? '').trim().toUpperCase() === 'COMMERCIAL'
     || isSet(node.commercialRiskType) || isSet(node.commercial_risk_type)
     || converter.isCommercialRecurringLine(node)
     || String(converter.recurringServiceKey(node) || '').startsWith('commercial_')
@@ -308,6 +315,12 @@ function jsonValue(raw, what) {
   }
 }
 const asObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
+// Does one object of a JSON value, at any depth, pass the test?
+function someObject(value, test) {
+  if (!value || typeof value !== 'object') return false;
+  if (!Array.isArray(value) && test(value)) return true;
+  return Object.values(value).some((item) => someObject(item, test));
+}
 // Does one text of a JSON value, at any depth, pass the test?
 function someText(value, test) {
   if (typeof value === 'string') return test(value);
@@ -399,14 +412,17 @@ async function hasCommercialEstimate(database, customerId) {
 //   (lead-estimate-automation.js);
 // - the lead's own tier, by the account's rule for the tier;
 // - the payload the intake kept (extracted_data: a form, a quiz, the
-//   classification of an email), by the rules for an estimate payload. It
-//   keeps the same fields (isCommercial, commercialSubtype, propertyType).
+//   classification of an email), by the rules for an estimate payload: the
+//   marks on every object, the text prefix, and the payload scan of the save
+//   (isCommercialEstimateData). It keeps the same fields (isCommercial,
+//   category, commercialSubtype, propertyType).
 function isCommercialLeadRow(lead) {
   const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
-  return lead.is_commercial === true || lead.is_residential === false
-    || isCommercialServiceRow({ service_type: lead.service_interest, service_key: lead.service_key })
-    || isCommercialAccount({ waveguard_tier: lead.waveguard_tier })
-    || payloadSaysCommercial(jsonValue(lead.extracted_data, 'a lead payload'));
+  if (lead.is_commercial === true || lead.is_residential === false) return true;
+  if (isCommercialServiceRow({ service_type: lead.service_interest, service_key: lead.service_key })) return true;
+  if (isCommercialAccount({ waveguard_tier: lead.waveguard_tier })) return true;
+  const payload = jsonValue(lead.extracted_data, 'a lead payload');
+  return payloadSaysCommercial(payload) || require('./estimate-delivery-options').isCommercialEstimateData(payload);
 }
 
 // EVERY lead of the account counts. A deleted lead too: the removal of a lead
@@ -464,8 +480,13 @@ async function hasCommercialContract(database, customerId) {
 //   commercial property type, any commercial subtype, an HOA common area, the
 //   owner or the manager of a multi-unit building. By that rule the tenant of
 //   an apartment and the owner of a condo stay homes.
-// - The occupancy the extraction gave the service address ('commercial': the
-//   mark a saved property carries in occupancy_type).
+// - A property the extraction describes, wherever a format keeps it: the
+//   main one (`property` of the extraction, the root of the first format) or
+//   an additional one (additional_properties, in both formats). It counts by
+//   a commercial occupancy ('commercial': the mark a saved property carries
+//   in occupancy_type) or by a type the rule above reads as commercial. A
+//   second address that is a business makes the account one with a business
+//   premises, as a saved property does.
 // - The extraction's commercial-signals block with a value set in it (a
 //   business name, a budget or a procurement remark). The extraction leaves
 //   the block null for a home.
@@ -486,6 +507,11 @@ const COMMERCIAL_CALL_FLAGS = Object.freeze(['commercial_requires_quote', 'hoa_c
 const isCommercialCallFlag = (text) => COMMERCIAL_CALL_FLAGS.includes(text);
 const carriesCommercialWord = (text) => text.toLowerCase().includes('commercial');
 const hasSetValue = (block) => Object.values(asObject(block)).some((value) => (Array.isArray(value) ? value.length > 0 : isSet(value)));
+function describesCommercialProperty(node) {
+  const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
+  return node.service_address_occupancy === 'commercial' || node.occupancy === 'commercial'
+    || Boolean(commercialCategoryConflict({ extraction: { property: node }, intent: null }));
+}
 function isBusinessAddress(addressCheck) {
   const use = asObject(asObject(addressCheck).addressUse);
   return use.business === true && use.residential === false;
@@ -497,7 +523,7 @@ function isCommercialCallRow(call) {
   const addressCheck = jsonValue(call.ai_address_validation, "a call's address check");
   const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
   return Boolean(commercialCategoryConflict({ extraction, intent: null }))
-    || asObject(extraction.property).service_address_occupancy === 'commercial'
+    || someObject(extraction, describesCommercialProperty) || someObject(firstFormat, describesCommercialProperty)
     || hasSetValue(extraction.commercial_signals)
     || someText(extraction, isCommercialCallFlag) || someText(validation, isCommercialCallFlag)
     || someText(firstFormat.requested_service, carriesCommercialWord)

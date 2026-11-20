@@ -281,6 +281,8 @@ describe('planStartBlocker', () => {
         ...change,
       });
       const withEstimates = (estimates, given = {}) => world({ ...given, tables: { estimates } });
+      // A mark 20 levels down: below the 12 levels the payload scan of the save reads.
+      const farDown = (mark) => Array.from({ length: 20 }).reduce((inner) => ({ next: [inner] }), mark);
 
       // Each case carries ONE mark, so each rule is proved alone. The commercial estimate stands between two home
       // estimates: one mark on one estimate is enough.
@@ -320,6 +322,11 @@ describe('planStartBlocker', () => {
         // Marks only the pipeline's reader of service lines reads, on an estimate with no service line.
         ["a copy of the service label in the form's inputs", ESTIMATE({ estimate_data: { inputs: { leadServiceInterest: 'Commercial Lawn Care' } } })],
         ['notes the app sorts as a commercial line', ESTIMATE({ notes: 'Quote the commercial pest program for the bakery.', estimate_data: {} })],
+        // A category or a subtype beside a field that reads residential. The engine's rule lets the residential field
+        // win, and the scan of the save does not reach this depth: the mark is read alone.
+        ['a commercial category beside a residential type, far down', ESTIMATE({ estimate_data: farDown({ category: 'COMMERCIAL', propertyType: 'single_family' }) })],
+        ['a commercial category in another spelling, far down', ESTIMATE({ estimate_data: farDown({ category: ' commercial ', isCommercial: false }) })],
+        ['a commercial subtype beside a toggle set to no, far down', ESTIMATE({ estimate_data: farDown({ isCommercial: 'NO', commercialSubtype: 'office' }) })],
         // The quiz of the lead an estimate was drafted from, where the payload keeps it.
         ["the 'business' answer of a quiz page, kept in the payload", ESTIMATE({ estimate_data: { lead: { quiz: { kind: 'lawn', property: 'business' } } } })],
         // The payload scan reads the toggle only as a boolean, and never the engine's spelling.
@@ -359,6 +366,8 @@ describe('planStartBlocker', () => {
           notes: 'Asked about commercial_pest for a friend.', mode: 'small_commercial_pilot', tags: ['non_commercial_account', 'pest'],
         } })],
         ['a field whose NAME starts with the prefix', ESTIMATE({ estimate_data: { commercial_lawn: { selected: false }, commercial_notes: 'none' } })],
+        ['a residential category and an empty subtype, far down', ESTIMATE({ estimate_data: farDown({ category: 'RESIDENTIAL', commercialSubtype: 'none', isCommercial: 'NO' }) })],
+        ['a category of another vocabulary', ESTIMATE({ estimate_data: { products: [{ category: 'pest_control' }, { category: 'lawn_care' }] } })],
         ['a home tier on the estimate', ESTIMATE({ waveguard_tier: 'Bronze' })],
         ['no tier on the estimate', ESTIMATE({ waveguard_tier: null })],
         ['a home service label and home notes', ESTIMATE({ service_interest: 'Quarterly Pest Control', notes: 'Ants in the kitchen. Side gate is open.', estimate_data: {} })],
@@ -487,6 +496,11 @@ describe('planStartBlocker', () => {
         ['a business property type in the payload', LEAD({ extracted_data: { quiz: { propertyType: 'Restaurant' } } })],
         ['a commercial key in the payload', LEAD({ extracted_data: { classification: { intent: 'commercial_inquiry' } } })],
         ['a payload saved as JSON text', LEAD({ extracted_data: JSON.stringify({ engine: { is_commercial: true } }) })],
+        // Marks beside a field that reads residential: one mark is enough.
+        ['a commercial category beside a residential type in one object of the payload', LEAD({ extracted_data: { enriched: { category: 'COMMERCIAL', propertyType: 'single_family' } } })],
+        ['a commercial subtype beside a toggle set to no', LEAD({ extracted_data: { isCommercial: 'NO', commercialSubtype: 'office' } })],
+        // A mark only the payload scan of the save reads.
+        ['the mark of commercial estimated pricing', LEAD({ extracted_data: { quote: { commercialEstimatedPricing: true } } })],
         // A quiz page's property question. The lead keeps the quiz object as the visitor answered it.
         ["the 'business' answer of a quiz page", LEAD({ extracted_data: { attribution: {}, quiz: { kind: 'pest', seeing: 'ants', property: 'business' } } })],
       ])('%s: commercial, and no plan record is read', async (_label, lead) => {
@@ -505,6 +519,7 @@ describe('planStartBlocker', () => {
         ['a payload that is a bare text', LEAD({ extracted_data: JSON.stringify('asked about pest control') })],
         ['a quiz answered for a house, a townhome or a condo', LEAD({ extracted_data: { quiz: { kind: 'pest', property: 'house' }, earlier: [{ quiz: { kind: 'lawn', property: 'townhome' } }, { quiz: { kind: 'pest', property: 'condo' } }] } })],
         ['a quiz with no property answer', LEAD({ extracted_data: { quiz: { kind: 'lawn', seeing: 'brown_patches' } } })],
+        ['a residential category beside a residential type', LEAD({ extracted_data: { enriched: { category: 'RESIDENTIAL', propertyType: 'single_family' }, quote: { commercialEstimatedPricing: false } } })],
       ])('%s is not commercial', async (_label, lead) => {
         expect(await blocker(withLeads([lead, LEAD()]))).toBeNull();
       });
@@ -642,6 +657,12 @@ describe('planStartBlocker', () => {
         ['an HOA common area service at a condo', CALL(extraction({ property: { property_type: 'condo', hoa_common_area_service: true } }))],
         ['the owner of a multi-unit building', CALL(extraction({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'owner' } }))],
         ['a commercial occupancy of the service address', CALL(extraction({ property: { property_type: 'unknown', service_address_occupancy: 'commercial' } }))],
+        // The first format keeps the occupancy at its root, and both formats keep the other properties of the call.
+        ['a commercial occupancy of the service address in the first format', CALL({ ai_extraction: JSON.stringify({ requested_service: 'Pest control', service_address_occupancy: 'commercial' }) })],
+        ['an additional property with a commercial occupancy', CALL(extraction({ property: { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'commercial', property_type: null }] } }))],
+        ['an additional property of a commercial type', CALL(extraction({ property: { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: null, property_type: 'commercial' }] } }))],
+        ['an additional property with a commercial occupancy in the first format', CALL({ ai_extraction: JSON.stringify({ requested_service: 'Pest control', additional_properties: [{ address_line1: '12 Example Test Way', is_rental: false, occupancy: 'commercial', property_type: null }] }) })],
+        ['an additional property that is an HOA common area in the first format', CALL({ ai_extraction: JSON.stringify({ requested_service: 'Pest control', additional_properties: [{ address_line1: '12 Example Test Way', occupancy: null, property_type: 'hoa_common_area' }] }) })],
         // The commercial-signals block: the extraction leaves it null for a home.
         ['a business name in the commercial-signals block', CALL(extraction({ commercial_signals: { business_name: 'Synthetic Bakery', annual_contract_interest: false } }))],
         ['a compliance need in the commercial-signals block', CALL(extraction({ commercial_signals: { business_name: null, insurance_or_compliance_requirements: ['certificate of insurance'] } }))],
@@ -682,6 +703,14 @@ describe('planStartBlocker', () => {
         ['an address that is neither, by the check', CALL(addressUse({ business: false, residential: false }))],
         ['an address use the check did not get', CALL(addressUse(null))],
         ['a call with no address check', CALL({ ai_address_validation: null })],
+        // Other properties of the call that are homes, in both formats.
+        ['a second home and a rental among the properties of the call', CALL({
+          ai_extraction: JSON.stringify({
+            requested_service: 'Pest control', service_address_occupancy: 'owner_occupied',
+            additional_properties: [{ address_line1: '12 Example Test Way', is_rental: true, occupancy: 'rental_investment', property_type: 'multi_family' }],
+          }),
+          ...extraction({ property: { property_type: 'single_family', service_address_occupancy: 'seasonal', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'rental_investment', property_type: 'condo' }] } }),
+        })],
         // The words of a call are not read: the caller can name a workplace and want service at home.
         ['the word in the summaries of the call', CALL({
           ai_extraction: JSON.stringify({ requested_service: 'Pest control at home', call_summary: 'Works at a commercial bakery. Wants service at home.' }),

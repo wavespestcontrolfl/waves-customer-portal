@@ -518,6 +518,7 @@ postgres('planStartBlocker (live Postgres)', () => {
       ["a lead with the commercial toggle in the intake's payload", { extracted_data: JSON.stringify({ isCommercial: 'YES' }) }],
       ['a deleted lead with a commercial key in its payload', { extracted_data: JSON.stringify({ classification: { intent: 'commercial_inquiry' } }), deleted_at: new Date() }],
       ["a quiz lead that answered 'business'", { extracted_data: JSON.stringify({ quiz: { kind: 'pest', seeing: 'ants', property: 'business' } }) }],
+      ['a lead whose payload has a commercial category beside a residential type', { extracted_data: JSON.stringify({ enriched: { category: 'COMMERCIAL', propertyType: 'single_family' } }) }],
     ])('%s, beside a home lead: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedLead(customer);
@@ -534,6 +535,7 @@ postgres('planStartBlocker (live Postgres)', () => {
         extracted_data: JSON.stringify({ isCommercial: false, commercialSubtype: null, commercialDetectionSource: null, propertyType: 'Single Family' }),
       }],
       ["a quiz lead that answered 'house'", { extracted_data: JSON.stringify({ quiz: { kind: 'pest', seeing: 'ants', property: 'house' } }) }],
+      ['a lead whose payload has a residential category', { extracted_data: JSON.stringify({ enriched: { category: 'RESIDENTIAL', propertyType: 'single_family' } }) }],
     ])('%s is not commercial', async (_label, change) => {
       expect(await blockerFor((customer) => seedLead(customer, change))).toBeNull();
     });
@@ -582,6 +584,13 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['an HOA common area service at a condo', enriched({ property: { property_type: 'condo', hoa_common_area_service: true } })],
       ['the owner of a multi-unit building', enriched({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'owner' } })],
       ['a commercial occupancy of the service address', enriched({ property: { property_type: 'unknown', service_address_occupancy: 'commercial' } })],
+      ['a commercial occupancy of the service address in the first format, with no other verdict', {
+        ai_extraction: { requested_service: 'Pest control', service_address_occupancy: 'commercial' }, ai_extraction_enriched: null, ai_validation: null,
+      }],
+      ['an additional property of a commercial type', enriched({ property: { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: null, property_type: 'commercial' }] } })],
+      ['an additional property with a commercial occupancy in the first format', {
+        ai_extraction: { requested_service: 'Pest control', additional_properties: [{ address_line1: '12 Example Test Way', is_rental: false, occupancy: 'commercial' }] },
+      }],
       ['a business name in the commercial-signals block', enriched({ commercial_signals: { business_name: 'Synthetic Bakery', annual_contract_interest: false } })],
       ["the commercial flag among the extraction's own flags", enriched({ triage_flags: ['quote_promised', 'commercial_requires_quote'] })],
       ['the commercial flag among the routing flags', { ai_validation: { routing: { flags: ['commercial_requires_quote'], appointment_blocking_flags: [] } } }],
@@ -598,6 +607,7 @@ postgres('planStartBlocker (live Postgres)', () => {
     test.each([
       ['calls about a home only', {}],
       ['a call with no extraction, no validation and no address check', { ai_extraction: null, ai_extraction_enriched: null, ai_validation: null, ai_address_validation: null }],
+      ['a rental among the properties of the call', enriched({ property: { property_type: 'single_family', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'rental_investment', property_type: 'condo' }] } })],
       ['an address the check reads as a business and as a home', { ai_address_validation: { status: 'validated_accept', addressUse: { business: true, residential: true, poBox: false } } }],
       ['the tenant of an apartment', enriched({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'tenant' } })],
       ['a commercial-signals block with nothing set', enriched({ commercial_signals: { business_name: null, decision_authority_confirmed: false, insurance_or_compliance_requirements: [] } })],
