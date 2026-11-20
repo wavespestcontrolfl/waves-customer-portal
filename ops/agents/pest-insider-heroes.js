@@ -142,6 +142,8 @@ async function draw(H) {
   const { HEROES, HERO_DIR, HERO_WIDTH, HERO_HEIGHT, ART_DIR } = H;
   const outDir = path.resolve(opt('--out') || path.join(repoRoot, HERO_DIR));
   const wanted = Object.entries(HEROES).filter(([key]) => !only || only.has(key));
+  const unknown = only ? [...only].filter((id) => !Object.prototype.hasOwnProperty.call(HEROES, id)) : [];
+  if (unknown.length) { console.error(`No top picture for ${unknown.join(', ')}; nothing drawn.`); process.exit(2); }
   if (!execute) {
     for (const [id, hero] of wanted) console.log(`${id}  ${hero.file}  ${fs.existsSync(path.join(outDir, hero.file)) ? 'drawn' : 'would draw'}`);
     console.log(`Dry run: nothing written. Add --execute to draw into ${outDir}.`);

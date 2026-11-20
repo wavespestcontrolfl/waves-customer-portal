@@ -89,6 +89,15 @@ describe('the top picture list', () => {
     }
   });
 
+  test('a drawing script stops on a fact it has no picture for, or a flag with no value', () => {
+    for (const [file, what] of [['ops/agents/pest-insider-heroes.js', 'top picture'], ['ops/agents/pest-insider-cards.js', 'card']]) {
+      const draw = (...more) => spawnSync(process.execPath, [path.join(ROOT, file), ...more], { cwd: ROOT, encoding: 'utf8', env: process.env });
+      const unknown = draw('--only', 'T03,R99');
+      expect([file, unknown.status, unknown.stderr]).toEqual([file, 2, expect.stringContaining(`No ${what} for R99`)]);
+      expect([file, draw('--only').status, draw('--out').status]).toEqual([file, 2, 2]);
+    }
+  }, 60000);
+
   test('the art a picture names is the art file in the repo, and no other art file stays', () => {
     const named = Object.values(HEROES).filter((h) => h.art);
     expect(listed(path.join(ROOT, ART_DIR))).toEqual(named.map((h) => h.artFile).sort());

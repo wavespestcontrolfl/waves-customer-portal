@@ -177,6 +177,8 @@ async function fitText(page, layout) {
 
 (async () => {
   const wanted = Object.entries(CARDS).filter(([id]) => !only || only.has(id));
+  const unknown = only ? [...only].filter((id) => !Object.prototype.hasOwnProperty.call(CARDS, id)) : [];
+  if (unknown.length) { console.error(`No card for ${unknown.join(', ')}; nothing drawn.`); process.exit(2); }
   if (!execute) {
     for (const [id, card] of wanted) console.log(`${id}  ${card.file}  ${fs.existsSync(path.join(outDir, card.file)) ? 'drawn' : 'would draw'}`);
     console.log(`Dry run: nothing written. Add --execute to draw into ${outDir}.`);
