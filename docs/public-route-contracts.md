@@ -2815,6 +2815,22 @@ Won / phone accept) and to booking from a linked not-yet-accepted estimate
 (409 before any appointment is written). Estimates accepted before the
 retirement are unaffected.
 
+Termite bottle pins (2026-11-19, the house bifenthrin moved to LESCO Crosscheck
+Plus): a replay of a sent estimate (`GET /:token/data`, the view, `PUT /accept`
+and every money gate that re-prices it) keeps the cost a pre-slab or trench line
+was quoted with when a stored row carries it: the pre-slab container cost and
+size, and the trench product surcharge (server-owned
+`preSlabTermiticidePricingKnobs` / `trenchingTermiticidePricingKnobs`, like the
+termite station and misting pins). The engine uses a pin only for the product
+it was quoted with (for trenching, also the rate and product oz); a cost set on
+the service still wins. A never-issued draft replays its pins like every other
+pin, so its first send and every later replay agree; a re-save in the estimate
+tool prices today's bottle. An estimate that kept only its engine inputs has no
+stored row, so no pin: it prices today's bottle, as the other pins do without
+their stored rows. On 2026-11-19 no open sent or viewed estimate held a slab
+or trench service. A send snapshot that serves as sent is unchanged. No new
+quote-required reason.
+
 Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
 or an annual-plan offer already delivered before the gate turned off): a
 `prepay_annual` accept of the Subterranean Termite Protection annual plan

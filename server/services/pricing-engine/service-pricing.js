@@ -844,6 +844,12 @@ function normalizePreSlabTermiticideProduct(value, options = {}) {
     talstar_professional: 'talstar_p',
     talak: 'talstar_p',
     atticus_talak: 'talstar_p',
+    crosscheck: 'talstar_p',
+    crosscheck_plus: 'talstar_p',
+    lesco_crosscheck_plus: 'talstar_p',
+    cross_check: 'talstar_p',
+    cross_check_plus: 'talstar_p',
+    lesco_cross_check_plus: 'talstar_p',
   };
   if (options.legacyPayload || options.allowIngredientAliases) {
     aliases.fipronil = 'termidor_sc';
@@ -1464,8 +1470,8 @@ function normalizeMosquitoAddOnCount(value, key) {
 // Per-visit cost model shared by the footprint pricer and the bedroom-band
 // pricer — fully allocated (on-site + drive time + chemicals).
 function pestVisitCostModel({ roachType = 'none', frequency = 'quarterly', visitsPerYear = 4, annual = 0 } = {}) {
-  const chemCost = { talak: 1.30, taurus: 4.87, surfactant: 0.50 }; // per service
-  const materialPerVisit = (roachType === 'german' ? 15 : roachType === 'regular' ? 10 : chemCost.talak + chemCost.taurus + chemCost.surfactant);
+  const chemCost = { bifenthrin: 0.97, taurus: 4.87, surfactant: 0.50 }; // per service; bifenthrin = 4 fl oz of LESCO Crosscheck Plus @ $30.90/gal (owner 2026-11-18)
+  const materialPerVisit = (roachType === 'german' ? 15 : roachType === 'regular' ? 10 : chemCost.bifenthrin + chemCost.taurus + chemCost.surfactant);
   const onSiteMin = frequency === 'monthly' ? 20 : 25;
   const onSiteLaborCost = GLOBAL.LABOR_RATE * onSiteMin / 60;
   const driveLaborCost = GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME / 60;
@@ -6934,6 +6940,12 @@ function normalizeTrenchingTermiticideProduct(value, options = {}) {
     talstar_professional: 'talstar_p',
     talak: 'talstar_p',
     atticus_talak: 'talstar_p',
+    crosscheck: 'talstar_p',
+    crosscheck_plus: 'talstar_p',
+    lesco_crosscheck_plus: 'talstar_p',
+    cross_check: 'talstar_p',
+    cross_check_plus: 'talstar_p',
+    lesco_cross_check_plus: 'talstar_p',
   };
   const productKey = aliases[raw];
   if (productKey && cfg.products?.[productKey]) {
@@ -7042,7 +7054,71 @@ function resolveTrenchDepthPriceMultiplier(cfg = {}, trenchDepthFt) {
   return 1 + halfFeetAboveBaseline * premiumPerHalfFt;
 }
 
-function priceTrenching(property = {}, options = {}) {
+// Owner 2026-11-18: talstar_p and bifen_it name the LESCO Crosscheck Plus bottle since then, under the same keys. A label check on
+// either counts only when the caller says it was made for that bottle (options.labelBottle: the estimate tool sends it; a request
+// or engine input saved before then lacks it) AND the configured product names that bottle, so a check made for the earlier
+// bottle never carries over to a replay or re-price, and a Crosscheck Plus check never counts for a product that still names
+// Talak (one an admin edited, which the 2026-11-19 migration leaves alone). The product is the one this engine resolves and
+// prices, aliases included. Fipronil checks are unchanged.
+const BIFENTHRIN_LABEL_BOTTLE = 'lesco_crosscheck_plus';
+const BIFENTHRIN_TERMITICIDE_KEYS = new Set(['talstar_p', 'bifen_it']);
+// The names this bottle goes by, letters and digits only: its catalog row ("LESCO Crosscheck Plus"), the code label ("Crosscheck
+// Plus - Bifenthrin") and the inventory spelling ("LESCO Cross Check Plus"). Another Crosscheck product is not this bottle.
+const CROSSCHECK_PLUS_NAMES = new Set(['crosscheckplus', 'lescocrosscheckplus', 'crosscheckplusbifenthrin', 'lescocrosscheckplusbifenthrin']);
+// The bottle a configured product names: every name it carries, its catalog link (pre-slab) and its label (a trenching product
+// has no link). Each comes from pricing_config over the code field by field, so a partial overlay can mix them (a Talak label over
+// the code's Crosscheck Plus link): every name present must be one of this bottle's.
+const namesBottle = (product, bottleNames) => {
+  const names = [product.catalogProductName, product.label]
+    .map((name) => String(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean);
+  return names.length > 0 && names.every((name) => bottleNames.has(name));
+};
+const namesCrosscheckPlus = (product = {}) => namesBottle(product, CROSSCHECK_PLUS_NAMES);
+// The earlier bottle under the same keys, Atticus Talak 7.9 F (EPA 91234-145), by its code label and catalog name. Its label carries
+// the same Volume Adjustment Chart as Crosscheck Plus, so the trench half volume holds for it too (priceTrenching).
+const TALAK_79F_NAMES = new Set(['talak79f', 'talak79fbifenthrin', 'atticustalak79f', 'atticustalak79fbifenthrin']);
+// A bottle whose label was read for the trench half volume: a product an admin renamed to any other bottle keeps the full volume.
+const namesHalfVolumeLabel = (product = {}) => namesCrosscheckPlus(product) || namesBottle(product, TALAK_79F_NAMES);
+function labelCheckCounts(options, productKey, product) {
+  if (!optionBooleanTrue(options.labelConfirmed)) return false;
+  return !BIFENTHRIN_TERMITICIDE_KEYS.has(productKey)
+    || (options.labelBottle === BIFENTHRIN_LABEL_BOTTLE && namesCrosscheckPlus(product));
+}
+
+// A replayed quote keeps the product surcharge its stored trench line priced with (replay = input.trenchingTermiticidePricingKnobs,
+// set only by the server replay paths from estimate-tree-shrub-knob-replay; a save never carries it) when it prices the same
+// product, rate and product oz. Custom inputs count too: a replay re-prices the stored inputs, and a custom rate, cost or
+// container size still takes the rest of its cost basis from config (a custom cost divides by the configured container oz).
+// A quote priced before the label's volume adjustment stored the product for the full labeled volume, so that oz matches too.
+function trenchReplayPinApplies(replay, priced) {
+  if (!replay || typeof replay !== 'object') return false;
+  // The replay reader emits numbers only; a null or blank figure is no pin, never a $0 one (pre-push audit 17).
+  const pinned = replay.productSurcharge;
+  const samePricing = replay.productKey === priced.productKey && replay.applicationRate === priced.applicationRate
+    && typeof replay.productOz === 'number' && [priced.productOz, priced.labeledProductOz].includes(replay.productOz);
+  return samePricing && Number.isInteger(pinned) && pinned >= 0;
+}
+
+// The label volume chart's verdict on a trench line (priceTrenching), by the chart pair its final dilution and volume make: the 0.06%
+// pair (0) has none; the half-volume pair (1) and no pair (-1, off the chart) each keep the line in review, at every rate and with a
+// counted label check, with their own warning and reason (Codex review: a table, not a branch per case in priceTrenching).
+const TRENCH_CHART_VERDICTS = new Map([
+  // The label allows a reduced volume only where the soil will not accept the labeled volume and a continuous barrier can still be
+  // achieved (pre-push audit 29). Only this engine knows whether it applies the volume adjustment (the configured dilution and
+  // bottle), so the warning names both conditions on the line, and the estimate tool's label box confirms the label rate and trench
+  // depth, never a volume (pre-push audits 30 and at the second push: a configured high rate of 1.5 fl oz per gallon keeps the full
+  // volume).
+  [1, {
+    reason: 'reduced_volume_confirmation_required',
+    warning: () => 'Stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). The label allows it only where the soil will not accept the labeled volume and a continuous barrier can still be achieved. Requires label confirmation.',
+  }],
+  [-1, {
+    reason: 'off_label_chart_confirmation_required',
+    warning: (chartPairs, oz, gallons) => `The configured dilution and finished volume, ${roundMoney(oz)} fl oz a finished gallon at ${roundMoney(gallons)} gal per 10 linear feet per foot of depth, are not a pair on the label's volume adjustment chart (${chartPairs.map(([pairOz, pairGallons]) => `${roundMoney(pairOz)} fl oz at ${roundMoney(pairGallons)} gal`).join(', or ')}). Requires review before sending.`,
+  }],
+]);
+
+function priceTrenching(property = {}, options = {}, replay) {
   const measurements = resolveTrenchingMeasurements(property || {}, options || {});
   const cfg = SPECIALTY.trenching;
   const hasExplicitTrenchingOptions = [
@@ -7072,28 +7148,56 @@ function priceTrenching(property = {}, options = {}) {
       ? product.productOzPerFinishedGallonAtHighRate
       : product.productOzPerFinishedGallonAtStandardRate,
   );
+  // A label that allows a stronger dilution only at a reduced volume (the bifenthrin bottles) charts one adjustment: its 0.12%
+  // dilution at half the labeled finished volume, so the active ingredient per foot stays the 0.06% amount. The bottle names that
+  // dilution in code (labelHalfVolumeOzPerFinishedGallon), and the cut applies to it only: the high rate's, or the same one typed as
+  // a custom dilution (pre-push audit 12). Any other dilution is off the chart, whatever the configured rates (a standard and high
+  // pair moved together keeps their ratio, not the label's dilution): it keeps the full volume, as on main, and a custom one stays
+  // a manual override sent to review (pre-push audits 20 and 21). The code field outlives a config rename, so the configured product
+  // must still name a bottle whose label was read (Crosscheck Plus or Talak 7.9 F; pre-push audit 22). The chart halves the label's
+  // own volume (labelFinishedGallonsPer10LFPerFtDepth, 4.0 gal per 10 LF per foot of depth): a configured volume off the chart keeps
+  // it too, since half of it is not the label's reduced volume (pre-push audit at the fourth push). That stronger dilution at a
+  // volume off the chart is neither labeled amount, so its line goes to review (pre-push audit at the eighth push).
+  // The label's volume adjustment chart lists two pairs per 10 LF per foot of depth: its 0.06% (half the stronger dilution) at its
+  // full volume, then its 0.12% at half that volume. The final dilution and volume must be one of them, at either rate, whatever the
+  // label check and however the volume was set (this engine's half, or a configured volume); any other pair takes the off-chart
+  // verdict and never shows the 0.06% label. A list of the label's own pairs, not a rule per case: the pre-push audits at the eighth
+  // to twelfth pushes each named another pair (2 fl oz at 3 gal, 1 fl oz at 3 gal, 2 fl oz at a configured 2 gal, 1.6 fl oz at 2.5 gal).
+  const gallonsPer10LFPerFtDepth = cfg.finishedGallonsPer10LFPerFtDepth || 4;
+  const chartPairs = product.labelHalfVolumeOzPerFinishedGallon > 0 && namesHalfVolumeLabel(product) ? [
+    [product.labelHalfVolumeOzPerFinishedGallon / 2, product.labelFinishedGallonsPer10LFPerFtDepth],
+    [product.labelHalfVolumeOzPerFinishedGallon, product.labelFinishedGallonsPer10LFPerFtDepth / 2],
+  ] : [];
+  const chartPairAt = (gallons) => chartPairs.findIndex(([oz, chartGallons]) => Math.abs(productOzPerFinishedGallon - oz) < 1e-9
+    && Math.abs(gallons - chartGallons) < 1e-9);
+  // The stronger dilution at the label's full volume makes the half-volume pair at half that volume, so this engine halves it.
+  const volumeFactor = chartPairAt(gallonsPer10LFPerFtDepth / 2) === 1 ? 0.5 : 1;
+  const finalGallonsPer10LFPerFtDepth = gallonsPer10LFPerFtDepth * volumeFactor;
+  const chartVerdict = chartPairs.length > 0 && TRENCH_CHART_VERDICTS.get(chartPairAt(finalGallonsPer10LFPerFtDepth));
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
-  const trenchDepthFt = optionPositiveNumber(options, 'trenchDepthFt', cfg.defaultTrenchDepthFt || 1);
-  const concreteVolumePadPct = optionNonNegativeNumber(
-    options,
-    'concreteVolumePadPct',
-    cfg.defaultConcreteVolumePadPct || 0,
-  );
+  const defaultTrenchDepthFt = cfg.defaultTrenchDepthFt || 1;
+  const trenchDepthFt = optionPositiveNumber(options, 'trenchDepthFt', defaultTrenchDepthFt);
+  const defaultConcreteVolumePadPct = cfg.defaultConcreteVolumePadPct || 0;
+  const concreteVolumePadPct = optionNonNegativeNumber(options, 'concreteVolumePadPct', defaultConcreteVolumePadPct);
   const warrantyResolution = normalizeTrenchingWarrantyTier(options.warrantyTier, product);
   const warrantyTier = cfg.warrantyTiers?.[warrantyResolution.warrantyTier]
     ? warrantyResolution.warrantyTier
     : defaultTrenchingWarrantyTier(product);
   const warrantyConfig = cfg.warrantyTiers?.[warrantyTier] || cfg.warrantyTiers?.none || {};
-  const labelConfirmed = optionBooleanTrue(options.labelConfirmed);
-  const labelConfirmationRequiredForPayload = !legacyTrenchingPayload;
+  const labelConfirmed = labelCheckCounts(options, productResolution.productKey, product);
+  // A bifenthrin bottle always needs its label confirmed, a legacy payload's configured default included (the bottle changed
+  // 2026-11-18; pre-push audit 13). Other legacy payloads keep main's exemption.
+  const labelConfirmationRequiredForPayload = !legacyTrenchingPayload || BIFENTHRIN_TERMITICIDE_KEYS.has(productResolution.productKey);
   const warningList = [
     ...(product.warnings || []),
     ...productResolution.warnings,
     ...rateResolution.warnings,
     ...warrantyResolution.warnings,
   ];
-  if (rateResolution.applicationRate === 'high') {
+  if (chartVerdict) {
+    warningList.push(chartVerdict.warning(chartPairs, productOzPerFinishedGallon, finalGallonsPer10LFPerFtDepth));
+  } else if (rateResolution.applicationRate === 'high') {
     warningList.push('High/problem-soil rate increases chemical usage and requires label confirmation.');
   }
   if (product.chemistryType === 'repellent_pyrethroid') {
@@ -7114,19 +7218,23 @@ function priceTrenching(property = {}, options = {}) {
   if (labelConfirmationRequiredForPayload && !labelConfirmed) {
     manualReviewReasons.push('label_confirmation_required');
   }
+  if (chartVerdict) {
+    manualReviewReasons.push(chartVerdict.reason);
+  }
   if (hasValue(options.customProductCost) || hasValue(options.customProductOzPerFinishedGallon)) {
     manualReviewReasons.push('product_manual_override_used');
   }
-  if (hasValue(options.trenchDepthFt) && Number(options.trenchDepthFt) !== Number(cfg.defaultTrenchDepthFt || 1)) {
+  if (hasValue(options.trenchDepthFt) && Number(options.trenchDepthFt) !== Number(defaultTrenchDepthFt)) {
     manualReviewReasons.push('trench_depth_manual_override_used');
   }
-  if (hasValue(options.concreteVolumePadPct) && concreteVolumePadPct > (cfg.defaultConcreteVolumePadPct || 0)) {
+  if (hasValue(options.concreteVolumePadPct) && concreteVolumePadPct > defaultConcreteVolumePadPct) {
     manualReviewReasons.push('significant_concrete_volume_pad_applied');
   }
 
   const chemistryAllowedForWarranty = (warrantyConfig.allowedChemistryTypes || []).includes(product.chemistryType);
+  const repellentWarrantyRisk = !chemistryAllowedForWarranty && product.chemistryType === 'repellent_pyrethroid';
   let warrantyQuoteRequired = false;
-  if (!chemistryAllowedForWarranty && product.chemistryType === 'repellent_pyrethroid') {
+  if (repellentWarrantyRisk) {
     warningList.push('Long repair-and-retreat warranty on bifenthrin is high risk and requires admin approval or custom quote.');
     if (warrantyConfig.repellentQuoteRequired && !(
       options.allowWarrantyOverride || options.managerOverride || options.customManagerOverride
@@ -7147,9 +7255,13 @@ function priceTrenching(property = {}, options = {}) {
     positioning: product.positioning,
     applicationRate: rateResolution.applicationRate,
     requestedApplicationRate: rateResolution.requestedApplicationRate,
-    concentrationLabel: rateResolution.applicationRate === 'high'
-      ? product.highConcentrationLabel || rateConfig.concentrationLabel
-      : product.standardConcentrationLabel || rateConfig.concentrationLabel,
+    // The label names the dilution the line priced, whatever its volume: a bottle with a volume adjustment chart shows its 0.06% label
+    // only at that dilution (the chart's first pair's), at either rate, and the high rate's label at any other; an off-chart volume
+    // goes to review on its own reason (pre-push audits 28, and at the ninth, twelfth and fifteenth pushes: 1 fl oz a gallon at 3 gal
+    // is still the 0.06% dilution). Any other bottle names its rate, as on main.
+    concentrationLabel: ((chartPairs.length > 0 ? Math.abs(productOzPerFinishedGallon - chartPairs[0][0]) > 1e-9 : rateResolution.applicationRate === 'high')
+      ? product.highConcentrationLabel
+      : product.standardConcentrationLabel) || rateConfig.concentrationLabel,
     trenchDepthFt,
     perimeter: measurements.perimeter,
     perimeterSource: measurements.perimeterSource,
@@ -7163,6 +7275,7 @@ function priceTrenching(property = {}, options = {}) {
     concreteVolumePadPct,
     dirtFinishedGallons: null,
     concreteFinishedGallons: null,
+    concreteVolumePadGallons: null,
     finishedGallons: null,
     productOzPerFinishedGallon,
     productOz: null,
@@ -7200,15 +7313,12 @@ function priceTrenching(property = {}, options = {}) {
       ...warrantyResolution.warnings,
     ]),
     requiresMeasurement: measurements.requiresMeasurement,
+    // A reason pushed above already counts here: an invalid product, the rate's warnings, a missing label check and a product
+    // override each push one. A custom price counts here too, before it adds its own reason to the priced line.
     requiresManualReview: manualReviewReasons.length > 0 ||
       measurements.requiresManualReview ||
-      productResolution.requiresManualReview ||
       !!rateConfig.requiresManualReview ||
-      rateResolution.warnings.length > 0 ||
-      (labelConfirmationRequiredForPayload && !labelConfirmed) ||
-      (!chemistryAllowedForWarranty && product.chemistryType === 'repellent_pyrethroid') ||
-      hasValue(options.customProductCost) ||
-      hasValue(options.customProductOzPerFinishedGallon) ||
+      repellentWarrantyRisk ||
       hasValue(options.customPriceOverride),
     manualReviewReasons: uniqueList(manualReviewReasons),
     inputSourceSummary: {
@@ -7230,22 +7340,38 @@ function priceTrenching(property = {}, options = {}) {
     };
   }
 
-  const finishedGallonsPerLFPerFtDepth = (cfg.finishedGallonsPer10LFPerFtDepth || 4) / 10;
-  const dirtFinishedGallons = measurements.dirtLF * finishedGallonsPerLFPerFtDepth * trenchDepthFt;
-  const concreteFinishedGallons = measurements.concreteLF *
+  const finishedGallonsPerLFPerFtDepth = gallonsPer10LFPerFtDepth / 10;
+  const labeledDirtGallons = measurements.dirtLF * finishedGallonsPerLFPerFtDepth * trenchDepthFt;
+  const labeledConcreteGallons = measurements.concreteLF *
     finishedGallonsPerLFPerFtDepth *
     trenchDepthFt *
     (1 + concreteVolumePadPct);
+  const labeledGallons = labeledDirtGallons + labeledConcreteGallons;
+  const dirtFinishedGallons = labeledDirtGallons * volumeFactor;
+  const concreteFinishedGallons = labeledConcreteGallons * volumeFactor;
+  // The concrete volume pad (main's default 20%) is solution that drilling and rodding consume beyond the applied volume, an
+  // allowance and not a pair on the label's chart, so the chart check reads the volume before it. The line reports the pad's
+  // gallons on their own, beside the gallons that include them (pre-push audit at the fourteenth push).
+  const concreteVolumePadGallons = concreteFinishedGallons * (concreteVolumePadPct / (1 + concreteVolumePadPct));
   const finishedGallons = dirtFinishedGallons + concreteFinishedGallons;
   const productOz = finishedGallons * productOzPerFinishedGallon;
   const chemicalCostPerOz = containerCost / containerOz;
   const allocatedChemicalCost = productOz * chemicalCostPerOz;
   const includedProduct = cfg.products?.[cfg.defaultIncludedProductKey] || cfg.products?.[cfg.defaultProductKey] || product;
-  const includedChemicalCost = finishedGallons *
+  // The install price includes the included product at its standard rate over the labeled volume, a reduced volume or not.
+  const includedChemicalCost = labeledGallons *
     includedProduct.productOzPerFinishedGallonAtStandardRate *
     (includedProduct.containerCost / includedProduct.containerOz);
   const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
-  const productSurcharge = Math.round(chemicalPremiumCost * (cfg.productPremiumMultiplier || 1));
+  const surchargePinned = trenchReplayPinApplies(replay, {
+    productKey: productResolution.productKey,
+    applicationRate: rateResolution.applicationRate,
+    productOz: roundMoney(productOz),
+    labeledProductOz: roundMoney(labeledGallons * productOzPerFinishedGallon),
+  });
+  const productSurcharge = surchargePinned
+    ? Number(replay.productSurcharge)
+    : Math.round(chemicalPremiumCost * (cfg.productPremiumMultiplier || 1));
   const totalLF = Math.max(1, measurements.dirtLF + measurements.concreteLF);
   const chemicalCostPerLF = allocatedChemicalCost / totalLF;
   const containersRequired = Math.max(1, Math.ceil(productOz / containerOz));
@@ -7278,6 +7404,7 @@ function priceTrenching(property = {}, options = {}) {
     ...baseResult,
     dirtFinishedGallons: roundMoney(dirtFinishedGallons),
     concreteFinishedGallons: roundMoney(concreteFinishedGallons),
+    concreteVolumePadGallons: roundMoney(concreteVolumePadGallons),
     finishedGallons: roundMoney(finishedGallons),
     productOz: roundMoney(productOz),
     chemicalCostPerOz: roundMoney(chemicalCostPerOz),
@@ -7295,7 +7422,6 @@ function priceTrenching(property = {}, options = {}) {
     priceBeforeWarranty,
     price,
     quoteRequired: warrantyQuoteRequired,
-    requiresManualReview: baseResult.requiresManualReview || finalManualReviewReasons.length > 0,
     manualReviewReasons: finalManualReviewReasons,
   };
 }
@@ -7438,7 +7564,7 @@ function pricePreSlabTermiticide(input, options = {}) {
   }
   const warrantyExtendedPrice = warrantyExtendedSelected ? cfg.warrantyExtended : 0;
   const warrantyAdder = warrantyExtendedPrice;
-  const labelConfirmed = optionBooleanTrue(options.labelConfirmed);
+  const labelConfirmed = labelCheckCounts(options, productResolution.productKey, product);
   const requiresLabelConfirmation = product.requiresLabelConfirmation === true;
   const labelManualReviewReasons = requiresLabelConfirmation && !labelConfirmed
     ? ['pre_slab_label_confirmation_required']
@@ -7653,12 +7779,17 @@ function pricePreSlabTermidor(input, volumeDiscount = 'none', extraOptions = {})
     discountInput = extraOptions.volumeDiscount;
   }
 
+  const productKey = options.productKey || 'termidor_sc';
+  // A legacy payload never asked for a label check, so it defaults to one, for fipronil only. Nobody made that default for the
+  // Crosscheck Plus bottle: a bifenthrin legacy quote counts its check only when the caller confirms it, with the bottle mark
+  // (options.labelBottle passes through as sent), as every other path does.
+  const bifenthrin = BIFENTHRIN_TERMITICIDE_KEYS.has(normalizePreSlabTermiticideProduct(productKey, { legacyPayload: true }).productKey);
   return pricePreSlabTermiticide(input, {
     ...options,
     legacyPayload: true,
-    productKey: options.productKey || 'termidor_sc',
+    productKey,
     volumeDiscount: discountInput,
-    labelConfirmed: hasValue(options.labelConfirmed) ? options.labelConfirmed : true,
+    labelConfirmed: hasValue(options.labelConfirmed) ? options.labelConfirmed : !bifenthrin,
   });
 }
 
@@ -10464,9 +10595,12 @@ module.exports = {
   resolvePalmCount,
   normalizeTrenchingTermiticideProduct,
   normalizeTrenchingApplicationRate,
+  // The migration 20261119020000 reads a Crosscheck Plus name by this same rule (pre-push audit at the sixteenth push).
+  namesCrosscheckPlus,
   resolveBoraCareSqFt,
   resolvePreSlabSqFt,
   normalizePreSlabTermiticideProduct,
+  BIFENTHRIN_LABEL_BOTTLE,
   normalizePestFrequency,
   normalizePestPricingVersion,
   normalizeRoachType,

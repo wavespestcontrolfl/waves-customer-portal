@@ -20595,6 +20595,15 @@ function savedFloorReplayOverrides(estData) {
   // Mosquito misting quote-time snapshot (GATE_MOSQUITO_MISTING): a sent misting quote keeps the prices it was sent at.
   const mistingKnobs = require('../services/estimate-tree-shrub-knob-replay').mistingKnobSignalForReplay(estData);
   if (mistingKnobs) overrides.mistingPricingKnobs = mistingKnobs;
+  // Termiticide pins (owner 2026-11-18 bottle swap): a sent slab quote keeps the container cost it priced with, and a sent trench
+  // quote its product surcharge. Both keys are set on every replay (undefined when the stored rows carry none), so a copy inside
+  // the stored inputs never prices. A never-issued draft replays them too, like every pin above: its first send and every later
+  // replay read the same stored row, so the price it was sent at never moves after delivery (pre-push audit 16). A re-save in the
+  // estimate tool prices today's bottle. An estimate that kept only its engine inputs has no stored row, so no pin: it prices
+  // today's bottle, as the termite station, misting and tree and shrub pins above do without their stored rows. On 2026-11-19 no
+  // open sent or viewed estimate held a slab or trench service (migration 20261119020000).
+  Object.assign(overrides, { preSlabTermiticidePricingKnobs: undefined, trenchingTermiticidePricingKnobs: undefined },
+    require('../services/estimate-tree-shrub-knob-replay').termiticideReplayOverrides(estData));
   // Whole-home exclusion quote-time minimum and renewal price (GATE_EXCLUSION_WHOLE_HOME): set even when EMPTY
   // (undefined), like the pins below, so a value stored inside the browser-controlled inputs is neutralized.
   overrides.wholeHomeSealReplay = require('../services/estimate-whole-home-replay').wholeHomeSealReplaySignal(estData) || undefined;
