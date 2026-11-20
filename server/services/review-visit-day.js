@@ -113,4 +113,17 @@ function closedWithinDaysOfWorkedDay({ arrivedAt = null, scheduledDate = null, c
   return gap >= 0 && gap <= maxDays;
 }
 
-module.exports = { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay };
+/**
+ * Whether a backdated closeout of this visit made NOW would keep the review ask (the completion panel's preview).
+ * Any read failure, or no such visit, is false: fewer texts. The server's own commit decision is what counts.
+ */
+async function lateCloseAskKeptForVisit(serviceId, database = db, now = new Date()) {
+  try {
+    const visit = serviceId ? await database('scheduled_services').where({ id: serviceId }).first('arrived_at', 'scheduled_date') : null;
+    return Boolean(visit) && closedWithinDaysOfWorkedDay({ arrivedAt: visit.arrived_at, scheduledDate: visit.scheduled_date, closedAt: now });
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskKeptForVisit };

@@ -266,15 +266,18 @@ export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adju
 // requestReview=false under a backdated quiet closeout — with the reason set,
 // the review checkbox shows the suppressed state and the custom-review-time
 // validation never blocks a submit the server would silence anyway.
+// GATE_REVIEW_LATE_CLOSE_ASK: `lateCloseAskKept` (the send-time preview says a closeout made now is
+// within 3 days of the worked day) lifts only that reason; the other reasons still apply.
 export function completionReviewSuppressionReason({
   isIncompleteVisit = false,
   backfillQuietCloseout = false,
+  lateCloseAskKept = false,
   visitOutcome = "completed",
   customerConcernInteraction = false,
   alreadyReviewed = false,
 } = {}) {
   if (isIncompleteVisit) return "incomplete";
-  if (backfillQuietCloseout) return "backfill";
+  if (backfillQuietCloseout && !lateCloseAskKept) return "backfill";
   if (visitOutcome === "customer_declined") return "customer_declined";
   if (visitOutcome === "customer_concern" || customerConcernInteraction) {
     return "customer_concern";
@@ -320,16 +323,19 @@ export const COMPLAINT_ON_SITE_PROMPT = "Turn it off for a complaint on site? OK
 // The client suppression reason for a customer marked as already reviewed (GATE_REVIEW_ALREADY_REVIEWED).
 export const ALREADY_REVIEWED_SUPPRESSION = "already_reviewed";
 export const ALREADY_REVIEWED_LABEL = "Already left a Google review";
+// GATE_REVIEW_LATE_CLOSE_ASK: a backdated closeout within 3 days of the worked day still sends the review ask.
+export const LATE_CLOSE_ASK_LABEL = "Review ask still goes (closed within 3 days)";
 
 // The label of the review box: the suppressed, included and plain wordings are today's.
 // `reviewedOn` ('YYYY-MM-DD' or null) dates the already-reviewed label.
-export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk, reviewedOn = null }) {
+export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk, reviewedOn = null, lateCloseAskKept = false }) {
   if (reviewSuppressionReason === ALREADY_REVIEWED_SUPPRESSION) {
     const on = formatETDateOnly(reviewedOn, { month: "short", day: "numeric", year: "numeric" });
     return on ? `${ALREADY_REVIEWED_LABEL} (${on})` : ALREADY_REVIEWED_LABEL;
   }
   if (reviewSuppressionReason) return "Review request suppressed";
   if (oneTimeRecapOnly) return "Review request included";
+  if (lateCloseAskKept && !firstAsk) return LATE_CLOSE_ASK_LABEL;
   return firstAsk ? FIRST_REVIEW_ASK_LABEL : "Send review request";
 }
 
@@ -342,6 +348,10 @@ export const alreadyReviewedFrom = (preview) => {
   const value = preview?.alreadyReviewed;
   return value && typeof value === "object" ? { reviewedOn: typeof value.reviewedOn === "string" ? value.reviewedOn : null } : null;
 };
+
+// GATE_REVIEW_LATE_CLOSE_ASK: the preview's read that a backdated closeout made now keeps the review ask.
+// Only a boolean true counts; no key (gate off) or a failed read is false: the box stays suppressed.
+export const lateCloseAskKeptFrom = (preview) => preview?.lateCloseAskKept === true;
 
 // The off reasons the server honors for a first ask now: the known ones it lists, else only
 // "Complaint on site" (gate off: no key).

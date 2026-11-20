@@ -983,7 +983,7 @@ describe('frozenResumeCompletionState — resume derives mode AND duration from 
 describe('lateCloseReviewAskKept — late backdated closeouts keep the review ask (owner 2026-11-20, D6 R3, GATE_REVIEW_LATE_CLOSE_ASK)', () => {
   const closedAt = new Date('2026-11-20T15:00:00Z');
   const workedTwoDaysAgo = { scheduled_date: '2026-11-18', arrived_at: null };
-  const base = { isBackfillCompletion: true, visitOutcome: 'completed', svc: workedTwoDaysAgo, closedAt };
+  const base = { isBackfillCompletion: true, visitOutcome: 'completed', deliverySuppressed: false, svc: workedTwoDaysAgo, closedAt };
   let saved;
   beforeEach(() => { saved = process.env.GATE_REVIEW_LATE_CLOSE_ASK; process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'true'; });
   afterEach(() => { if (saved === undefined) delete process.env.GATE_REVIEW_LATE_CLOSE_ASK; else process.env.GATE_REVIEW_LATE_CLOSE_ASK = saved; });
@@ -1015,6 +1015,13 @@ describe('lateCloseReviewAskKept — late backdated closeouts keep the review as
     expect(lateCloseReviewAskKept({ ...base, isInternalOnlyCompletion: true })).toBe(false);
   });
 
+  test('a typed disabled / internal-only delivery posture keeps requestReview false: only the backfill\'s own silence is lifted', () => {
+    expect(lateCloseReviewAskKept({ ...base, deliverySuppressed: true })).toBe(false);
+    // A caller that does not say defaults to silenced.
+    const { deliverySuppressed: _omit, ...unsaid } = base;
+    expect(lateCloseReviewAskKept(unsaid)).toBe(false);
+  });
+
   test('an unreadable worked day does not keep it', () => {
     expect(lateCloseReviewAskKept({ ...base, svc: {} })).toBe(false);
   });
@@ -1040,6 +1047,10 @@ describe('lateCloseReviewAskKept — late backdated closeouts keep the review as
       expect(src).toMatch(/&& \(!suppressTypedCustomerComms \|\| lateCloseReviewKept\)/);
       const forced = src.match(/if \(isBackfillCompletion\) \{\s*\n\s*suppressTypedCustomerComms = true;\s*\n\s*effectiveSendCompletionSms = false;\s*\n\s*\}/g) || [];
       expect(forced.length).toBe(2);
+    });
+
+    test('the commit passes the delivery posture from BEFORE the backfill override', () => {
+      expect(src).toMatch(/deliverySuppressed: deliveryPosture\.suppressCustomerComms,/);
     });
 
     test('a resume restores the frozen decision before any ask is read', () => {

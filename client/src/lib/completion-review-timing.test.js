@@ -12,6 +12,8 @@ import {
   COMPLAINT_ON_SITE_REASON,
   FIRST_REVIEW_ASK_LABEL,
   alreadyReviewedFrom,
+  lateCloseAskKeptFrom,
+  LATE_CLOSE_ASK_LABEL,
   completionReviewSuppressionReason,
   completionWillReview,
   firstAskReasonsFrom,
@@ -241,5 +243,42 @@ describe('a customer already marked as reviewed (GATE_REVIEW_ALREADY_REVIEWED)',
     expect(reviewBoxLabel({ reviewSuppressionReason: 'already_reviewed', reviewedOn: '2025-10-28' })).toBe('Already left a Google review (Oct 28, 2025)');
     expect(reviewBoxLabel({ reviewSuppressionReason: 'already_reviewed', reviewedOn: null })).toBe('Already left a Google review');
     expect(reviewBoxLabel({ reviewSuppressionReason: 'customer_concern', reviewedOn: '2025-01-01' })).toBe('Review request suppressed');
+  });
+});
+
+// GATE_REVIEW_LATE_CLOSE_ASK (owner 2026-11-20, D6 R3): a backdated closeout within 3 days of the worked day keeps the ask.
+describe('late close ask (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
+  test('backdated and kept: no suppression reason, so the box follows the toggle', () => {
+    const reason = completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true });
+    expect(reason).toBeNull();
+    expect(completionWillReview({ requestReview: true, reviewSuppressionReason: reason })).toBe(true);
+    expect(completionWillReview({ requestReview: false, reviewSuppressionReason: reason })).toBe(false);
+  });
+
+  test('backdated and not kept (the default, or a failed read): still "backfill"', () => {
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: false })).toBe('backfill');
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true })).toBe('backfill');
+  });
+
+  test('kept lifts only the backfill reason: incomplete, declined and concern visits stay suppressed', () => {
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, isIncompleteVisit: true })).toBe('incomplete');
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, visitOutcome: 'customer_declined' })).toBe('customer_declined');
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, alreadyReviewed: true })).toBe('already_reviewed');
+  });
+
+  test('the preview key counts only as boolean true', () => {
+    expect(lateCloseAskKeptFrom({ lateCloseAskKept: true })).toBe(true);
+    expect(lateCloseAskKeptFrom({ lateCloseAskKept: false })).toBe(false);
+    expect(lateCloseAskKeptFrom({})).toBe(false);
+    expect(lateCloseAskKeptFrom(null)).toBe(false);
+    expect(lateCloseAskKeptFrom({ lateCloseAskKept: 'true' })).toBe(false);
+  });
+
+  test('the label says the ask still goes, never over a suppression or a first ask', () => {
+    expect(reviewBoxLabel({ reviewSuppressionReason: null, lateCloseAskKept: true })).toBe(LATE_CLOSE_ASK_LABEL);
+    expect(LATE_CLOSE_ASK_LABEL).toBe('Review ask still goes (closed within 3 days)');
+    expect(reviewBoxLabel({ reviewSuppressionReason: 'backfill', lateCloseAskKept: true })).toBe('Review request suppressed');
+    expect(reviewBoxLabel({ reviewSuppressionReason: null, firstAsk: true, lateCloseAskKept: true })).toBe(FIRST_REVIEW_ASK_LABEL);
+    expect(reviewBoxLabel({ reviewSuppressionReason: null })).toBe('Send review request');
   });
 });

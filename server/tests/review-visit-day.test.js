@@ -1,7 +1,7 @@
 // The day a drafted review text speaks about (owner 2026-10-27, "FIX"): the day the
 // technician was at the visit, not the close day a late completion stamps on the record.
 jest.mock('../models/db', () => jest.fn());
-const { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay } = require('../services/review-visit-day');
+const { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskKeptForVisit } = require('../services/review-visit-day');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const DAY = 86400000;
@@ -145,5 +145,21 @@ describe('closedWithinDaysOfWorkedDay: the 3-day late-close window', () => {
 
   test('a worked day after the close is outside the window', () => {
     expect(within('2026-11-22')).toBe(false);
+  });
+});
+
+describe('lateCloseAskKeptForVisit: the preview read', () => {
+  const now = new Date('2026-11-20T15:00:00Z');
+  const visitDb = (row, fail = false) => jest.fn(() => ({ where: () => ({ first: async () => { if (fail) throw new Error('pg blip'); return row; } }) }));
+
+  test('a visit worked 2 days ago is kept; one worked 5 days ago is not', async () => {
+    expect(await lateCloseAskKeptForVisit('v1', visitDb({ arrived_at: null, scheduled_date: '2026-11-18' }), now)).toBe(true);
+    expect(await lateCloseAskKeptForVisit('v1', visitDb({ arrived_at: null, scheduled_date: '2026-11-15' }), now)).toBe(false);
+  });
+
+  test('no visit, no id, or a failed read is false', async () => {
+    expect(await lateCloseAskKeptForVisit('v1', visitDb(null), now)).toBe(false);
+    expect(await lateCloseAskKeptForVisit('', visitDb({ scheduled_date: '2026-11-18' }), now)).toBe(false);
+    expect(await lateCloseAskKeptForVisit('v1', visitDb(null, true), now)).toBe(false);
   });
 });

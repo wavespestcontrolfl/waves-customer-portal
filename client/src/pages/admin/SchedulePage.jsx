@@ -77,6 +77,7 @@ import {
   completionTimeOnSiteBody,
   completionWillReview,
   alreadyReviewedFrom,
+  lateCloseAskKeptFrom,
   customReviewTimeProblem,
   firstAskReasonsFrom,
   firstReviewAskFrom,
@@ -12826,6 +12827,8 @@ export function CompletionPanel({
   // reviewed ({ reviewedOn } or null), and the off reasons a first ask may carry. Kept, like
   // reviewFirstAsk, when the preview is cleared (box off).
   const [reviewAlreadyReviewed, setReviewAlreadyReviewed] = useState(null);
+  // GATE_REVIEW_LATE_CLOSE_ASK: the preview says a backdated closeout made now keeps the review ask. False until a read says so.
+  const [reviewLateCloseAskKept, setReviewLateCloseAskKept] = useState(false);
   const [reviewFirstAskReasons, setReviewFirstAskReasons] = useState(() => firstAskReasonsFrom(null));
   const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
   const [reviewCustomAt, setReviewCustomAt] = useState("");
@@ -14596,10 +14599,13 @@ export function CompletionPanel({
   // false while the backdate checkbox is active, so the review checkbox shows
   // "Review request suppressed", the timing selector hides, and the
   // custom-review-time validation cannot block a submit whose review the
-  // server forces off anyway.
+  // server forces off anyway. Exception (GATE_REVIEW_LATE_CLOSE_ASK): when the
+  // send-time preview says the closeout is within 3 days of the worked day, the
+  // reason lifts and the box follows the operator's toggle like a normal completion.
   const reviewSuppressionReason = completionReviewSuppressionReason({
     isIncompleteVisit,
     backfillQuietCloseout,
+    lateCloseAskKept: reviewLateCloseAskKept,
     visitOutcome,
     customerConcernInteraction:
       isCustomerConcernInteraction(customerInteraction),
@@ -14677,6 +14683,7 @@ export function CompletionPanel({
         if (!gone && data) {
           setReviewAlreadyReviewed(alreadyReviewedFrom(data));
           setReviewFirstAskReasons(firstAskReasonsFrom(data));
+          setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
         }
       });
       return () => { gone = true; };
@@ -14691,6 +14698,7 @@ export function CompletionPanel({
       if (data) {
         setReviewAlreadyReviewed(alreadyReviewedFrom(data));
         setReviewFirstAskReasons(firstAskReasonsFrom(data));
+        setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
       }
       if (cancelled) return;
       setReviewSendPreview(data);
@@ -14708,7 +14716,7 @@ export function CompletionPanel({
   useEffect(() => {
     if (reviewFirstAsk && !requestReview && !reviewOptOutReason) setRequestReview(true);
   }, [reviewFirstAsk, requestReview, reviewOptOutReason]);
-  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk, reviewedOn: reviewAlreadyReviewed?.reviewedOn });
+  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk, reviewedOn: reviewAlreadyReviewed?.reviewedOn, lateCloseAskKept: backfillQuietCloseout && reviewLateCloseAskKept });
   const handleReviewToggle = (checked) => {
     const next = nextReviewChoice({
       checked,

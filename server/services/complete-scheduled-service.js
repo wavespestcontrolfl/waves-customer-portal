@@ -737,10 +737,13 @@ function lateCloseReviewAskKept({
   issuedInvoiceCloseout = null,
   visitOutcome = null,
   isInternalOnlyCompletion = false,
+  // Whether the delivery posture ALONE (typed internal-only or disabled delivery, before the backfill override) silences
+  // customer comms. Only the backfill's own silence is lifted, so the default is silenced.
+  deliverySuppressed = true,
   svc = null,
   closedAt = null,
 } = {}) {
-  if (!isBackfillCompletion || systemQuietCloseout || issuedInvoiceCloseout) return false;
+  if (!isBackfillCompletion || systemQuietCloseout || issuedInvoiceCloseout || deliverySuppressed) return false;
   if (visitOutcome !== 'completed' || isInternalOnlyCompletion) return false;
   if (!require('../config/feature-gates').reviewLateCloseAskLive()) return false;
   return require('./review-visit-day').closedWithinDaysOfWorkedDay({
@@ -1315,12 +1318,8 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
   // uses. Rejecting a numeric id here restored undefined, which skipped
   // enforcement and let a post-commit payer change mint the frozen rate
   // for the wrong party.
-  const backfillMintPayerId = backfillMintRequired
-    && ('backfillMintPayerId' in frozen)
-    && (frozenPayer === null
-      || (typeof frozenPayer === 'string' && frozenPayer)
-      || (typeof frozenPayer === 'number' && Number.isFinite(frozenPayer)))
-    ? (frozenPayer === null ? null : String(frozenPayer))
+  const backfillMintPayerId = backfillMintRequired && 'backfillMintPayerId' in frozen
+    ? restoredFrozenPayerId(frozenPayer)
     : undefined;
   return {
     isBackfillCompletion,
@@ -1333,6 +1332,15 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
     lateCloseReviewKept: isBackfillCompletion && frozen.requestReview === true,
     bodyDisagreed: Boolean(requestBackfill) !== isBackfillCompletion,
   };
+}
+
+// A frozen Bill-To id as the resume compares it: null (frozen self-pay) or the id as a string; undefined for garbage.
+function restoredFrozenPayerId(frozenPayer) {
+  const valid = frozenPayer === null
+    || (typeof frozenPayer === 'string' && frozenPayer)
+    || (typeof frozenPayer === 'number' && Number.isFinite(frozenPayer));
+  if (!valid) return undefined;
+  return frozenPayer === null ? null : String(frozenPayer);
 }
 
 async function loadSubmittedCatalogProducts(submittedProducts = [], database = db) {
@@ -7342,6 +7350,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           lateCloseReviewKept = lateCloseReviewAskKept({
             isBackfillCompletion, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, isInternalOnlyCompletion,
+            deliverySuppressed: deliveryPosture.suppressCustomerComms,
             svc: { ...svc, ...(lockedSvcRow || {}) }, closedAt: completionEndedAt,
           });
           const structuredNotes = {

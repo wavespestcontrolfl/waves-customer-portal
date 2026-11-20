@@ -288,6 +288,12 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     ).toBe(false);
   });
 
+  it("backfill within 3 days of the worked day (GATE_REVIEW_LATE_CLOSE_ASK) follows the operator's toggle", () => {
+    const reason = completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true });
+    expect(reason).toBe(null);
+    expect(completionWillReview({ requestReview: true, reviewSuppressionReason: reason })).toBe(true);
+  });
+
   it("without backfill the existing suppression chain is unchanged", () => {
     expect(completionReviewSuppressionReason({})).toBe(null);
     expect(completionReviewSuppressionReason({ isIncompleteVisit: true })).toBe("incomplete");

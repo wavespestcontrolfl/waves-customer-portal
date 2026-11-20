@@ -26,6 +26,7 @@ jest.mock('../services/review-request', () => ({
   firstAskOptOutReasons: jest.fn(() => ['complaint_on_site', 'already_left_review']),
   __private: { reviewCadenceTickMinutes: () => [14, 44], LEGACY_REVIEW_TICK_MINUTES: [0, 15, 30, 45], calculateReviewSendPlan: jest.fn() },
 }));
+jest.mock('../services/review-visit-day', () => ({ lateCloseAskKeptForVisit: jest.fn() }));
 jest.mock('../services/google-business', () => ({}));
 jest.mock('../services/review-incentives', () => ({}));
 jest.mock('../services/review-reply/publisher', () => ({}));
@@ -38,11 +39,13 @@ jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const ReviewService = require('../services/review-request');
+const { lateCloseAskKeptForVisit } = require('../services/review-visit-day');
 
 beforeEach(() => {
   ReviewService.customerNeverAskedForReview.mockReset().mockResolvedValue(true);
   ReviewService.firstAskLockVisit.mockReset().mockResolvedValue({ customer_id: 'cust-1' });
   ReviewService.alreadyReviewedForVisit.mockReset().mockResolvedValue(null);
+  lateCloseAskKeptForVisit.mockReset().mockResolvedValue(false);
 });
 
 async function preview(query) {
@@ -117,3 +120,30 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ALREADY_REVIEWED
   });
 });
 
+
+// GATE_REVIEW_LATE_CLOSE_ASK (owner 2026-11-20, D6 R3): with a visit named, the preview says whether a backdated closeout now would keep the ask.
+describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_LATE_CLOSE_ASK', () => {
+  const was = process.env.GATE_REVIEW_LATE_CLOSE_ASK;
+  afterEach(() => { if (was === undefined) delete process.env.GATE_REVIEW_LATE_CLOSE_ASK; else process.env.GATE_REVIEW_LATE_CLOSE_ASK = was; });
+
+  test('gate off: no lateCloseAskKept key, and the visit is never read', async () => {
+    delete process.env.GATE_REVIEW_LATE_CLOSE_ASK;
+    const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
+    expect(out).not.toHaveProperty('lateCloseAskKept');
+    expect(lateCloseAskKeptForVisit).not.toHaveBeenCalled();
+  });
+
+  test('gate on, no visit named: no key', async () => {
+    process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'true';
+    expect(await preview({ serviceType: 'Pest' })).not.toHaveProperty('lateCloseAskKept');
+  });
+
+  test('gate on with a visit: true inside the window, false outside', async () => {
+    process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'true';
+    lateCloseAskKeptForVisit.mockResolvedValue(true);
+    expect((await preview({ serviceType: 'Pest', serviceId: 'svc-1' })).lateCloseAskKept).toBe(true);
+    expect(lateCloseAskKeptForVisit).toHaveBeenCalledWith('svc-1');
+    lateCloseAskKeptForVisit.mockResolvedValue(false);
+    expect((await preview({ serviceType: 'Pest', serviceId: 'svc-1' })).lateCloseAskKept).toBe(false);
+  });
+});
