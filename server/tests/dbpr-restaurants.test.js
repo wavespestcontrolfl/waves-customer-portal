@@ -126,7 +126,7 @@ describe('parseInspectionRows', () => {
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
       address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-11-16',
-      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2 },
+      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2, violation35: 1 },
     });
   });
 });
@@ -276,6 +276,16 @@ describe('parseInspectionReport', () => {
     expect(svc.parseInspectionReport(b)).toEqual({ pestEvidence: false, findings: [] });
   });
 
+  test('a page that lists fewer violation-35 rows than the file counted cannot answer: the missing one could be 35A', () => {
+    const b = fixture('report-35b.html');
+    expect(svc.parseInspectionReport(b, { cited35: 2 })).toBeNull();
+    expect(svc.parseInspectionReport(b, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    // A follow-up report may list more than the visit counted (earlier visits' rows).
+    expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: 1 })).toMatchObject({ pestEvidence: true });
+    // A row stored before the count was kept has none: read as before.
+    expect(svc.parseInspectionReport(b, { cited35: null })).toEqual({ pestEvidence: false, findings: [] });
+  });
+
   test('each violations row is read whole: a code alone in the Observation cell is text; an unreadable code cell is no answer', () => {
     // A 35B row whose observation is a 35A code alone: text, not a second finding.
     expect(svc.parseInspectionReport(reportPage('<tr><td>35B-03-4</td><td>&nbsp;</td><td>35A-02-8</td></tr>')))
@@ -422,6 +432,15 @@ describe('syncRestaurantProspects', () => {
     expect(store.saveReport.mock.calls.map(([id]) => id)).toEqual(['d']);
     expect(fetchText.mock.calls.filter(([u]) => u.includes('inspectionDetail.asp'))).toHaveLength(3);
     expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 3 });
+  });
+
+  test('each report read is checked against its inspection\'s violation-35 count', async () => {
+    store = makeStore([{ id: 'a', source_key: '9000', license_id: '5001', violation35: 2 }, { id: 'b', source_key: '9001', license_id: '5001', violation35: 1 }]);
+    fetchText = jest.fn(async (url) => (url.includes('inspectionDetail.asp') ? fixture('report-35b.html') : files[url.split('/').pop()]()));
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(store.bumpAttempts.mock.calls.map(([id]) => id)).toEqual(['a']);
+    expect(store.saveReport.mock.calls.map(([id, r]) => [id, r.pestEvidence])).toEqual([['b', false]]);
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 1 });
   });
 
   test('a failed save is a database failure: it stops the reads, counts once, and costs the row no read attempt', async () => {

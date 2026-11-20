@@ -133,7 +133,8 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
 
   test('pending reads only unanswered inspections under 3 attempts inside the window, newest first', async () => {
     await svc.upsertRecords([
-      rec(10, { event_date: '2026-11-01' }), rec(11, { event_date: '2026-11-15' }), rec(12, { event_date: '2026-09-01' }),
+      rec(10, { event_date: '2026-11-01' }), rec(11, { event_date: '2026-11-15', detail: { disposition: 'Warning Issued', violation35: 2 } }),
+      rec(12, { event_date: '2026-09-01' }),
       rec(13, { event_date: '2026-11-16' }), rec(14, { event_date: '2026-11-17', kind: 'new_license' }),
     ]);
     const stored = await rows();
@@ -143,6 +144,8 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     const pending = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100 });
     const mine = pending.filter((p) => [10, 11, 12, 13, 14].some((n) => p.id === id(n)));
     expect(mine.map((p) => p.id)).toEqual([id(11), id(10)]);
+    // The file's violation-35 count rides along; a row stored without one has none.
+    expect(mine.map((p) => p.violation35)).toEqual([2, null]);
     const [one] = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 1 });
     expect(one).toBeDefined();
     expect((await rows().where({ id: id(10) }))[0].detail_attempts).toBe(1);

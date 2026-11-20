@@ -196,6 +196,8 @@ function parseInspectionRows(rows, counts = {}, today = null) {
         disposition: clean(row['Inspection Disposition'], 120),
         inspectionType: clean(row['Inspection Type'], 120),
         highPriority: wholeNumber(row['Number of High Priority Violations']),
+        // The violation-35 citations the file counted: a report page that lists fewer cannot answer.
+        violation35: cited,
       },
     });
   }
@@ -301,7 +303,9 @@ function newestNoteFirst(text) {
 /**
  * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. A page
  * answers only when it is whole (the state office footer closes it) and lists the violation 35 the file counted (a
- * 35A or 35B code). An error page, a changed layout or a page cut short is a failed read, retried later, never
+ * 35A or 35B code), at least as many as the file counted when the count is known (cited35: the missing one could be
+ * 35A; a follow-up report may list more, from earlier visits). An error page, a changed layout or a page cut short
+ * is a failed read, retried later, never
  * "no pests". The violations table is the rows after its "Violation" / "Observation" head, up to the next table
  * tag. Each of its rows is read whole, by cell position: the cell in the Violation column is the code and the cells
  * after it are the observation, so a code quoted in a note, a comment or a script never starts an entry. A row whose
@@ -309,7 +313,7 @@ function newestNoteFirst(text) {
  * footer), means the page is not laid out as expected: no answer, never a guess either way. findings holds the
  * 35A entries only, each note of a follow-up report newest first (newestNoteFirst).
  */
-function parseInspectionReport(html) {
+function parseInspectionReport(html, { cited35 = null } = {}) {
   const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
   const whole = htmlText(page);
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
@@ -344,7 +348,8 @@ function parseInspectionReport(html) {
     row = [];
   }
   endRow();
-  if (unreadable || !entries.some((entry) => /^35[AB]-/.test(entry.code))) return null;
+  const listed35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).length;
+  if (unreadable || !listed35 || (Number.isInteger(cited35) && listed35 < cited35)) return null;
   const findings = entries
     .filter((entry) => /^35A-/.test(entry.code))
     .map((entry) => ({ code: entry.code, text: newestNoteFirst(entry.parts.join(' ')).slice(0, FINDING_TEXT_MAX) }));
@@ -380,8 +385,9 @@ async function pendingInspections({ cutoff, limit }) {
     .where('event_date', '>=', cutoff)
     .orderBy('event_date', 'desc')
     .limit(limit)
-    .select('id', 'license_id', 'source_key');
-  return rows;
+    .select('id', 'license_id', 'source_key', db.raw("detail->>'violation35' AS violation35"));
+  // violation35 is null for a row stored before the count was kept.
+  return rows.map((row) => ({ ...row, violation35: wholeNumber(row.violation35) }));
 }
 
 async function saveReport(id, report) {
@@ -598,7 +604,7 @@ async function readOneReport(row, deps) {
   const url = reportUrl(row.source_key, row.license_id);
   if (!url) return null;
   try {
-    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS));
+    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS), { cited35: row.violation35 });
   } catch {
     return null;
   }
