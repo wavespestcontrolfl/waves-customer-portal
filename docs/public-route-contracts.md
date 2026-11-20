@@ -7733,7 +7733,9 @@ resolver and trusted customer as its next commit. A booking moved to a matched
 profile's other stored location also answers `address_changed: true` when that
 profile is the trusted customer the next commit loads and still has the stored
 pin and address phase one adopted: the page drops the typed address, so its
-reload and its retry read that profile's stored location and address. When the
+reload and its retry read that profile's stored location and address. Until that
+reload brings the address on file, the page shows no address, and its change-address
+action stays. When the
 next commit would load another profile, staff changed that profile's pin or
 address since phase one, or that read fails, the typed address stays. A failed build answers with no times too.
 When a `SLOT_TAKEN` answer carries no times and the page's own reload then fails,
@@ -7753,8 +7755,8 @@ page. Any answer but a booking also drops a search still running, so its late ti
 never land over the page. The reload runs under the page's request controller: a
 change of address while it runs supersedes it, and it then applies no list,
 clears nothing and shows no message. A refusal that lands after a change of
-address (or a reload) belongs to the old page, and the page applies none of it: no
-times, no dropped address, no message. A booking always shows. With the
+address, a reload or another link (which remounts the page) belongs to the old page,
+and the page applies none of it: no times, no dropped address, no message, no reload. A booking always shows. With the
 funnel off, every refusal carries fresh times at the booking location, as
 before. No field,
 status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search

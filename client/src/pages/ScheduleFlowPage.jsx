@@ -1690,9 +1690,11 @@ function InspectionHero({ data, details, onDetails, onChangeAddress, topCard = n
             Not you?
           </a>
         </div>
-        {lead.address_display ? (
+        {/* While the page knows no address (a refusal withdrew the typed one),
+            it shows none, and the change action stays (pre-push P1 on a8a0462d10). */}
+        {lead.address_display || onChangeAddress ? (
           <div style={{ marginTop: 10, fontSize: 14, color: S.body, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'baseline' }}>
-            <span>{lead.address_display}</span>
+            {lead.address_display ? <span>{lead.address_display}</span> : null}
             {onChangeAddress ? (
               <button
                 type="button"
@@ -2270,8 +2272,9 @@ function ScheduleFlowPage({ flow }) {
       // A refusal that lands after the page moved on belongs to the old page:
       // the new list is on screen, and this answer's times, address and
       // message are not for it (pre-push P1 on 6db4e39ca7). A booking above
-      // always shows.
-      if (loadAbortRef.current !== pageRequests) return;
+      // always shows. A closed page (another link remounts it) keeps its
+      // last controller, aborted (pre-push P1 on a8a0462d10).
+      if (loadAbortRef.current !== pageRequests || pageRequests.signal.aborted) return;
       // Any answer but a booking supersedes the searches still running, as
       // onChangeAddress does: their times were built before it and could
       // land over what it shows (pre-push P1s on 8f40c19990 and 4e9d76bcb1).
@@ -2321,10 +2324,11 @@ function ScheduleFlowPage({ flow }) {
         // drop the held supplied address so the next confirm doesn't
         // resubmit the stale one, and show the address actually on file.
         // A refused booking that moved to the matched profile's address on
-        // file says so too, with no address (the reload brings it).
+        // file says so too, with no address: the page shows none until its
+        // reload brings that one (pre-push P1 on a8a0462d10).
         if (flow === 'inspection' && body.address_changed) {
           setResolvedAddress('');
-          if (body.lead) mergeData({ lead: body.lead });
+          setData((prev) => (prev ? { ...prev, lead: body.lead || { ...prev.lead, address_display: null } } : prev));
         }
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));

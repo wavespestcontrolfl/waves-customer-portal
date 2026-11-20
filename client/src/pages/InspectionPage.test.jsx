@@ -9,7 +9,7 @@
 // ?slot= preselect with its nearest-slot fallback notice.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ScheduleFlowPage from './ScheduleFlowPage';
@@ -739,7 +739,9 @@ describe('InspectionPage: an address race without availability refreshes at the 
   // confirm books the address on file. When the reload fails, or answers no
   // list, nothing on the page can show times for that address under the
   // typed one: the times clear, the search closes, and the page asks for a
-  // reload. A newly typed address brings its own list, and the search opens.
+  // reload. The hero shows no address, and "Different address?" stays (pre-push
+  // P1 on a8a0462d10). A newly typed address brings its own list, and the
+  // search opens.
   it.each([
     ['fails', () => jsonResponse({ error: 'unavailable' }, 503)],
     ['answers 200 with no list', () => jsonResponse(okPayload({ availability: null }))],
@@ -793,6 +795,9 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
     expect(getCalls).toBe(2);
     expect(availabilityPosts).toBe(1); // the reload never posts the dropped address
+    // The answer withdrew the typed address and the reload brought none: the
+    // hero shows no address, and its change action stays (pre-push P1 on a8a0462d10).
+    expect(screen.queryByText('123 Palm Ave, Bradenton, FL 34209')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Different address?' }));
     fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '9 Gulf Dr, Sarasota, FL 34231' } });
@@ -938,6 +943,48 @@ describe('InspectionPage: an address race without availability refreshes at the 
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     await waitFor(() => expect(otherCommitBodies).toHaveLength(1));
     expect(otherCommitBodies[0]).not.toHaveProperty('address');
+  });
+
+  // Pre-push P1 on a8a0462d10: another link remounts the page, and the closed
+  // page keeps its last controller, aborted. Its booking's late refusal then
+  // starts nothing for the old link: no reload, no search.
+  it('a refusal that lands after another link opened starts no reload for the old link', async () => {
+    let resolveCommit = null;
+    let oldLinkGets = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/feedface')) return Promise.resolve(jsonResponse(okPayload()));
+      if (opts.method === 'POST') return new Promise((resolve) => { resolveCommit = resolve; });
+      oldLinkGets += 1;
+      return Promise.resolve(jsonResponse(okPayload()));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    function OtherLink() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/inspection/feedface')}>Open another link</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={['/inspection/deadbeef']}>
+        <OtherLink />
+        <Routes>
+          <Route path="/inspection/:token" element={<ScheduleFlowPage flow="inspection" />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(resolveCommit).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Open another link' }));
+    expect(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toBeInTheDocument();
+    expect(oldLinkGets).toBe(1);
+    await act(async () => {
+      resolveCommit(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null }, 409));
+      await new Promise((r) => { setTimeout(r, 50); });
+    });
+    expect(oldLinkGets).toBe(1);
+    expect(screen.queryByText(/That time was just taken/i)).not.toBeInTheDocument();
   });
 
   // Pre-push P1 on 8f40c19990: a search still running when the refusal lands
