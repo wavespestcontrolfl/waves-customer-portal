@@ -128,8 +128,23 @@ test('the timer a form saw comes from either writer\'s field, as brand|model|app
   expect(controllerTimerSeen({ controllerTimerSeen: '||' })).toEqual(['||']);
   for (const body of [
     {}, null, { controller_timer_seen: 7 }, { controllerTimerSeen: null }, { controller_timer_seen: [] },
-    { controller_timer_seen: ['||', 7] }, { controller_timer_seen: Array(9).fill('||') }, { controller_timer_seen: 'x'.repeat(65) },
+    { controller_timer_seen: ['||', 7] }, { controller_timer_seen: Array.from({ length: 33 }, (_, i) => `hunter|${i}|`) },
+    { controller_timer_seen: 'x'.repeat(65) },
   ]) expect(controllerTimerSeen(body)).toBeNull();
+  // Each key counts once, so a repeated key never makes a list too long.
+  expect(controllerTimerSeen({ controller_timer_seen: [...Array(40).fill('||'), 'hunter|x2|'] })).toEqual(['||', 'hunter|x2|']);
+  // Every timer that can exist fits in one list, so no history a form builds is cut off.
+  const everyTimer = [];
+  for (const brand of [null, ...Object.keys(CONTROLLER_BRANDS)]) {
+    for (const model of [null, ...Object.keys(CONTROLLER_MODELS)]) {
+      for (const app of [null, 'yes', 'no', 'unknown']) {
+        const timer = timerColumns([brand, model, app]);
+        if (!settle({ ...timer }).rejected.length) everyTimer.push(controllerTimerKey(timer));
+      }
+    }
+  }
+  expect(everyTimer).toHaveLength(20);
+  expect(controllerTimerSeen({ controller_timer_seen: everyTimer })).toEqual(everyTimer);
 });
 
 test('a write rendered against a home the customer has left is rejected, a clear included', () => {

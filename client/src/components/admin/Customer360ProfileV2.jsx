@@ -8077,8 +8077,11 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
   // The home stamp the form rendered from (irrigation_home_changed_at). A sod
   // date set after the home changed is refused unless the save echoes it back.
   const renderStampRef = useRef(null);
-  // The sprinkler timers a failed save of this editor sent: they may have landed, so the next save names them beside
-  // the timer the form opened with (controllerTimerSeen).
+  // The sprinkler timers this editor's saves sent that got no answer from the server: they may have landed. Until the
+  // server answers a timer save, every save sends the timer (a change back to the opening values is never skipped)
+  // and names these beside the timer the form opened with (controllerTimerSeen). Opening the editor again starts an
+  // empty list from the values on screen: a screen that may be stale never sends its timer unasked, and a timer change
+  // over a lost save's timer is refused with a request to reload.
   const timerTriedRef = useRef([]);
   // Read-only hold lines for the saved sod record from GET /new-sod.
   const [sodInfo, setSodInfo] = useState(null);
@@ -8146,10 +8149,15 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
         { method: "PUT", body: JSON.stringify(body) },
       );
     } catch (e) {
-      // No refusal from the server (a lost answer, a 5xx): the timer may have landed.
-      if (sendsTimer && !Array.isArray(e?.body?.rejected)) timerTriedRef.current = [...timerTriedRef.current, timerKey(draft)];
+      // A refusal is an answer (nothing saved). Anything else (a lost response, a 5xx) leaves the timer unknown: it
+      // may have landed.
+      if (sendsTimer) {
+        timerTriedRef.current = Array.isArray(e?.body?.rejected) ? [] : [...new Set([...timerTriedRef.current, timerKey(draft)])];
+      }
       throw e;
     }
+    // The server answered: the timer is saved, or refused with a reason.
+    if (sendsTimer) timerTriedRef.current = [];
     return { failed: accessPrefsRejectedMap(response?.rejected), preferences: response?.preferences };
   };
 
@@ -8160,9 +8168,12 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
       setErr(blackoutError);
       return;
     }
-    const dirtyKeys = accessPrefsSodClearKeys(
+    const changedKeys = accessPrefsSodClearKeys(
       initialDraftRef.current, draft, accessPrefsDirtyKeys(initialDraftRef.current, draft),
     );
+    // While a timer save's outcome is unknown, the timer goes with every save: a change back to the opening values
+    // must still reach a row that may hold the lost save's timer.
+    const dirtyKeys = timerTriedRef.current.length ? [...new Set([...changedKeys, ...ACCESS_PREFS_TIMER_KEYS])] : changedKeys;
     if (!dirtyKeys.length) return closeEditor();
 
     setSaving(true);

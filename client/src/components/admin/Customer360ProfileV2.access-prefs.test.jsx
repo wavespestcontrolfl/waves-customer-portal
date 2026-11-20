@@ -819,7 +819,7 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     });
   });
 
-  it('after a save that got no answer, the next save also names the timer that save sent: it may have landed', async () => {
+  it('after a save that got no answer, the timer goes with the next save naming both timers, until the server answers one', async () => {
     const bodies = [];
     vi.stubGlobal('fetch', vi.fn((url, options) => {
       const path = String(url);
@@ -828,7 +828,9 @@ describe('Customer 360 → Property → Access & Preferences', () => {
       if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
         bodies.push(JSON.parse(options.body));
         if (bodies.length === 1) return Promise.reject(new TypeError('Failed to fetch'));
-        return response({ success: true, saved: true, preferences: BASE_PREFS });
+        // The second save stores the timer and refuses the note, so the editor stays open.
+        const rejected = bodies.length === 2 ? [{ field: 'accessNotes', message: 'Access notes are too long.' }] : undefined;
+        return response({ success: true, saved: true, preferences: BASE_PREFS, rejected });
       }
       if (path.endsWith('/admin/customers/customer-a')) {
         return response(customerDetail({ irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' }));
@@ -842,15 +844,30 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     await screen.findByText('Access & Preferences');
     fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
     const select = (label) => screen.getByText(label).closest('label').querySelector('select');
+    const save = async (count) => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(bodies).toHaveLength(count));
+    };
+    const editorStaysOpen = () => waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
     fireEvent.change(select('Runs From Phone App'), { target: { value: 'no' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(bodies).toHaveLength(1));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
-    fireEvent.change(select('Runs From Phone App'), { target: { value: 'unknown' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(bodies).toHaveLength(2));
+    await save(1);
+    await editorStaysOpen();
     expect(bodies[0].controllerTimerSeen).toEqual(['hunter|x2|yes']);
-    expect(bodies[1].controllerTimerSeen).toEqual(['hunter|x2|yes', 'hunter|x2|no']);
-    expect(bodies[1].irrigationControllerApp).toBe('unknown');
+
+    // Back to the opening answer: the lost No may be on file, so the timer still goes, naming both timers.
+    fireEvent.change(select('Runs From Phone App'), { target: { value: 'yes' } });
+    fireEvent.change(screen.getByText('Access Notes').closest('label').querySelector('textarea'), { target: { value: 'x'.repeat(20) } });
+    await save(2);
+    await editorStaysOpen();
+    expect(bodies[1]).toMatchObject({
+      irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes',
+      controllerTimerSeen: ['hunter|x2|yes', 'hunter|x2|no'],
+    });
+
+    // The server answered that save: the lost No is no longer named.
+    fireEvent.change(select('Runs From Phone App'), { target: { value: 'unknown' } });
+    await save(3);
+    expect(bodies[2]).toMatchObject({ irrigationControllerApp: 'unknown', controllerTimerSeen: ['hunter|x2|yes'] });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).toBeNull());
   });
 });
