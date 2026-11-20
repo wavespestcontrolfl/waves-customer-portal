@@ -286,14 +286,17 @@ function visitNotes(text) {
   const marks = [...text.matchAll(VISIT_NOTE_RE)];
   if ((text.match(VISIT_LABEL_RE) || []).length !== marks.length) return { unreadable: true };
   if (!marks.length) return { routine: true };
+  const ends = marks.map((mark, i) => (i + 1 < marks.length ? marks[i + 1].index : text.length));
+  // A label with no observation after it ("From initial inspection : - From follow-up …") cannot be read.
+  if (marks.some((mark, i) => !/[A-Za-z0-9]/.test(text.slice(mark.index + mark[0].length, ends[i])))) return { unreadable: true };
   const notes = marks.map((mark, i) => ({
     date: mark[1] || null,
-    text: text.slice(mark.index, i + 1 < marks.length ? marks[i + 1].index : undefined).replace(/^-\s*/, '').trim(),
+    text: text.slice(mark.index, ends[i]).replace(/^-\s*/, '').trim(),
   }));
   return { label: text.slice(0, marks[0].index).trim(), notes };
 }
 
-// The initial note first (the first visit's citation, the visit a follow-up report answers for), then the later
+// The initial note first (the first visit's citation, the only visit a page answers for), then the later
 // notes newest first, each with its label, so the cap never drops it. A routine row, or one with a single note, is
 // unchanged.
 function initialNoteFirst(row) {
@@ -362,20 +365,25 @@ function readReportTables(page) {
  * a failed read, retried later, never "no pests". The page answers only when:
  * - it is whole (the state office footer closes it): an error page or a page cut short gives no answer;
  * - it is the read visit's: its inspection table gives one date, visitDate (checked when given);
+ * - the read visit is its inspection's first (visitNumber 1). A later visit's page holds free text that may clear an
+ *   earlier citation ("No flies observed", "door repaired"), labelled or not, so a later visit, or one whose number
+ *   is not known, gets no answer either way;
  * - its violations table reads cleanly: the rows after the "Violation" / "Observation" head, up to the next table
  *   tag, each read whole by cell position (the cell in the Violation column is the code, the cells after it are the
  *   observation), so a code quoted in a note, a comment or a script never starts an entry. A row whose Violation cell
  *   is not a code alone (blank, or 35A-02-8*), or a code cell outside that table (another table, the footer), means
  *   the page is not laid out as expected;
- * - each 35 row has observation text, and every visit label on them reads. A follow-up report (any violations row
- *   labelled with its visit) answers only for the first visit (visitNumber 1), whose initial notes are its
- *   citations, and each 35 row on it must be labelled. A later visit's notes are free text ("No flies observed",
- *   "door repaired"), so a later visit gets no answer either way;
+ * - each 35 row has observation text, and every visit label on them reads and has text after it. On a follow-up
+ *   report (any violations row labelled with its visit) each 35 row must be labelled, and its initial note is the
+ *   first visit's citation;
  * - it lists at least as many 35A or 35B rows of the read visit as the file counted for it (cited35): the missing
  *   one could be 35A. Without the count only a 35A row answers.
  * findings holds the visit's 35A rows, each with its initial note first, cut at FINDING_TEXT_MAX.
  */
 function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNumber = null } = {}) {
+  // Only an inspection's first visit gets an answer. The list shows pests only, and the first visit's own row answers
+  // for the inspection; a sighting first cited at a callback is not read.
+  if (visitNumber !== 1) return null;
   const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
   const whole = htmlText(page);
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
@@ -390,10 +398,6 @@ function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNu
   // on it cannot be tied to one. A 35 row with no observation text cannot answer either.
   const followUp = entries.some((entry) => !visitNotes(entry.parts.join(' ')).routine);
   if (unreadable || rows35.some((row) => row.notes.unreadable || !row.text || (followUp && row.notes.routine))) return null;
-  // A follow-up report answers only for the first visit, whose initial notes are its citations. A later visit's notes
-  // are free text ("**Time Extended**", "No flies observed", "door repaired"), so it gets no answer either way:
-  // the list shows pests only, so that costs a later visit nothing but its retries.
-  if (followUp && visitNumber !== 1) return null;
   // The read visit's own 35 rows: every row of a routine report; on a follow-up report, those with the initial note.
   const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => note.date === null));
   if (!ofVisit.length) return null;
