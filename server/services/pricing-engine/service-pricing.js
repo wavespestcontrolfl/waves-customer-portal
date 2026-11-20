@@ -9786,7 +9786,8 @@ function roofStyleTerms(options, cfg) {
     style,
     tile,
     barrel,
-    multiplier: tile ? positive(options.frozenTileMultiplier, cfg.tileRoofMultiplier) : 1,
+    // One tile multiplier source: the Settings-hydrated value the legacy pricer reads, the code constant only when it is missing.
+    multiplier: tile ? positive(options.frozenTileMultiplier, positive(SPECIALTY.exclusion.roofMultipliers?.tile, cfg.tileRoofMultiplier)) : 1,
     eaveFt: barrel ? Math.max(0, Number(options.barrelEaveFt) || 0) : 0,
     perFt: positive(options.frozenBarrelPerFt, cfg.barrelEaveClosure.perFt),
     minimum: positive(options.frozenBarrelMinimum, cfg.barrelEaveClosure.minimum),

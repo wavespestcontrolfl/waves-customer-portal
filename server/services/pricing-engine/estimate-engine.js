@@ -898,8 +898,8 @@ function wholeHomeSealInputs(exclusion, property, input) {
 // pricer inputs, else null (no pick). THE one gate decision for roof-style pricing, shaped like wholeHomeSealInputs and read
 // for EVERY exclusion shape: a NEW request with a pick while the gate is off is refused (fail closed), never priced as if
 // nothing was tapped; a stored estimate re-priced as sold (input.savedEstimateReplay) keeps its quote-time multiplier and
-// per-foot rate (input.roofStyleReplay, read from its own saved rows and honored only on a replay). Only a barrel closure
-// (eave feet) needs the V2 shape; a legacy shape with measured feet is refused.
+// per-foot rate (input.roofStyleReplay, read from its own saved rows and honored only on a replay). The pick never changes
+// the shape: it prices only the V2 per-point model, and measured barrel feet on a request that is not V2-shaped are refused.
 const ROOF_STYLES = ['shingle', 'flat_tile', 'barrel_tile', 'metal', 'other'];
 
 // THE one roof type for exclusion and rodent guarantee work: the technician's confirmed roof style when there is one
@@ -919,7 +919,7 @@ function roofStyleInputs(exclusion, input) {
     throw wholeHomeInputError('The roof style must be shingle, flat tile, barrel tile, metal or other.', 'EXCLUSION_ROOF_STYLE_INVALID');
   }
   if (exclusion.pricingVersion !== 'v2' && style === 'barrel_tile' && Number(exclusion.barrelEaveFt) > 0) {
-    throw wholeHomeInputError('A barrel tile eave closure needs the per-point exclusion (pricingVersion v2). Clear the eave feet or reprice from the estimate tool.', 'EXCLUSION_ROOF_STYLE_INCOMPATIBLE');
+    throw wholeHomeInputError('Count the entry points, or choose Whole home, before adding the barrel eave closure.', 'EXCLUSION_ROOF_STYLE_NEEDS_COUNTS');
   }
   const frozen = replay ? input.roofStyleReplay : null;
   return {
@@ -2313,7 +2313,8 @@ function generateEstimate(input) {
   let rodentExclusionV2Summary = null;
   const wholeHomeSeal = wholeHomeSealInputs(services.exclusion || {}, property, input);
   const roofStyle = roofStyleInputs(services.exclusion || {}, input);
-  // The technician's confirmed roof style beats the lookup's roof type in every exclusion and guarantee reader below.
+  // The technician's confirmed roof style beats the lookup's roof type for the rodent guarantee tier (whole-home renewal,
+  // separate guarantee, guarantee combo). The legacy exclusion pricers keep reading the lookup, as before.
   const exclusionRoofType = (lookupRoofType) => effectiveExclusionRoofType(lookupRoofType, roofStyle?.roofStyle);
   if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control', {
     // Only the V2 shape is unit-scoped (per point + per LF, no home-sqft
@@ -2375,7 +2376,7 @@ function generateEstimate(input) {
         specialtyCustomTotal: services.exclusion.specialtyCustomTotal || 0,
         homeSqFt: services.exclusion.homeSqFt || property.footprint || 2000,
         stories: services.exclusion.stories || property.stories || 1,
-        roofType: exclusionRoofType(services.exclusion.roofType || property.roofType || 'shingle'),
+        roofType: services.exclusion.roofType || property.roofType || 'shingle',
         constructionType: services.exclusion.constructionType
           || property.constructionMaterial || 'block',
         waiveInspection: services.exclusion.waiveInspection || false,
@@ -2553,7 +2554,7 @@ function generateEstimate(input) {
     const result = calculateExclusionPrice({
       sqft: services.exclusionV2.sqft || property.footprint,
       stories: services.exclusionV2.stories || property.stories,
-      roofType: exclusionRoofType(services.exclusionV2.roofType || property.roofType),
+      roofType: services.exclusionV2.roofType || property.roofType,
       entryPointsFound: services.exclusionV2.entryPointsFound,
       includesScreening: services.exclusionV2.includesScreening,
       constructionType: services.exclusionV2.constructionType || property.constructionMaterial,
