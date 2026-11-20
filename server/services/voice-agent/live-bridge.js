@@ -582,6 +582,12 @@ class LiveBridge {
     // reservation; an unsettled call leaves its row alone (it keeps it all). A
     // bridge that never claimed the row leaves it to the cell route's release.
     if (summary.cost_usd !== undefined && this.admitted) await this.settleLedger(summary.cost_usd);
+    // Only the bridge that holds the reservation writes the call's summary: a
+    // refused or never-admitted socket must not overwrite the real session's.
+    if (!this.admitted) {
+      logger.warn(`[voice-live] not admitted, no summary callSid=${this.callSid} reason=${reason}`);
+      return;
+    }
     const merged = JSON.stringify(summary);
     await db('call_log').where({ twilio_call_sid: this.callSid }).update({
       metadata: db.raw(

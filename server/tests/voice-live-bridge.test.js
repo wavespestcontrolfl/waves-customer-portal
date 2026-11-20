@@ -96,6 +96,11 @@ function setup({ closeReply = true, deps = {} } = {}) {
 }
 
 const summaryOf = (t) => JSON.parse(t.db.raw.mock.calls[0][1][0]);
+// Wait until the bridge has fully finalized (summary written or skipped).
+const finalized = async (t) => {
+  await waitFor(() => Boolean(t.bridge._finalizing));
+  await t.bridge._finalizing;
+};
 
 beforeEach(() => jest.clearAllMocks());
 
@@ -722,11 +727,11 @@ describe('reservation admission', () => {
   test('a stalled admission ends the call at the start deadline; OpenAI never opens and the ledger is left alone', async () => {
     const t = setup({ deps: { admit: () => new Promise(() => {}), startDeadlineMs: 20, closeWaitMs: 20 } });
     await t.twilioStart();
-    await waitFor(() => t.update.mock.calls.length > 0);
+    await finalized(t);
     expect(t.openaiFactory).not.toHaveBeenCalled();
     expect(t.twilio.close).toHaveBeenCalled();
     expect(t.ledgerUpdate).not.toHaveBeenCalled();
-    expect(summaryOf(t)).toMatchObject({ close_reason: 'start_timeout', openai_contacted: false });
+    expect(t.update).not.toHaveBeenCalled(); // not admitted: no summary
   });
 
   test('an admission that lands after the call ended settles that row at $0 (OpenAI never opened)', async () => {
@@ -734,7 +739,7 @@ describe('reservation admission', () => {
     const admit = () => new Promise((resolve) => { admitNow = resolve; });
     const t = setup({ deps: { admit, startDeadlineMs: 20, closeWaitMs: 20 } });
     await t.twilioStart();
-    await waitFor(() => t.update.mock.calls.length > 0);
+    await finalized(t);
     expect(t.ledgerUpdate).not.toHaveBeenCalled();
     admitNow(true); // the stalled claim finally commits
     await flush();
@@ -742,15 +747,15 @@ describe('reservation admission', () => {
     expect(t.ledgerUpdate).toHaveBeenCalledWith({ cost_usd: 0, settled_at: expect.any(Date) });
   });
 
-  test('a reservation not admitted (released, settled, or a database error) opens no OpenAI session and leaves the ledger alone', async () => {
+  test('a reservation not admitted (released, settled, or a database error) opens no OpenAI session, leaves the ledger alone and never writes over the call summary', async () => {
     for (const admit of [jest.fn(async () => false), jest.fn(async () => { throw new Error('db down'); })]) {
       const t = setup({ deps: { admit } });
       await t.twilioStart();
-      await waitFor(() => t.update.mock.calls.length > 0);
+      await finalized(t);
       expect(t.openaiFactory).not.toHaveBeenCalled();
       expect(t.twilio.close).toHaveBeenCalled();
       expect(t.ledgerUpdate).not.toHaveBeenCalled();
-      expect(summaryOf(t)).toMatchObject({ close_reason: 'not_admitted', openai_contacted: false });
+      expect(t.update).not.toHaveBeenCalled();
     }
   });
 

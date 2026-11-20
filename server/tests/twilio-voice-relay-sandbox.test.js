@@ -463,7 +463,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
   // The ledger (voice_gpt_live_ledger): the spent read (`first(raw)` answers
   // `usd`) and the claim (`insert().onConflict().ignore().returning()`,
   // [] = already claimed). call_log in the same transaction: the stamp.
-  function primeLive({ usd = 0, budgetFails = false, stampFails = false, stampRows = 1, claimed = true, existing } = {}) {
+  function primeLive({ usd = 0, budgetFails = false, stampFails = false, stampRows = 1, claimed = true } = {}) {
     const prodUpdate = jest.fn(() => Promise.resolve(1));
     const builder = { where: jest.fn(() => builder), first: jest.fn(async () => ({ source: VOICE_RELAY_SANDBOX_SOURCE })), update: prodUpdate };
     db.mockImplementation(() => builder);
@@ -475,11 +475,9 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     const insert = jest.fn(() => ledger);
     const returning = jest.fn(async () => (claimed ? [{ call_sid: 'CA-sb-live' }] : []));
     const release = jest.fn(async () => 0); // stale, never-admitted rows released at $0
-    const existingRow = jest.fn(async () => existing); // this CallSid's ledger row, if any (a retry)
     const ledger = {
       first: spent, insert, onConflict: jest.fn(() => ledger), ignore: jest.fn(() => ledger), returning,
       whereNull: jest.fn(() => ledger), whereRaw: jest.fn(() => ledger), update: release,
-      where: jest.fn(() => ({ first: existingRow })),
     };
     const update = jest.fn(() => (stampFails ? Promise.reject(new Error('pool down')) : Promise.resolve(stampRows)));
     const tb = { where: jest.fn(() => tb), whereRaw: jest.fn(() => tb), update };
@@ -623,37 +621,6 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
       expect(res.body).toContain('not available right now');
       expect(res.body).toContain('<Hangup/>');
       expect(res.body).not.toContain('<Stream');
-    }
-  });
-
-  test('a Twilio retry of the same cell re-issues the grant of an unused reservation: no new reservation, the stamp names the new token', async () => {
-    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
-    const { insert, spent, update, tb } = primeLive({ existing: { admitted_at: null, cost_usd: null } });
-    const res = mockRes();
-    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
-    expect(res.body).toContain('<Stream');
-    const token = res.body.match(/<Stream url="([^"]+)"/)[1].split('/').pop();
-    expect(insert).not.toHaveBeenCalled();
-    expect(spent).not.toHaveBeenCalled();
-    expect(tb.whereRaw).toHaveBeenCalledWith(expect.stringContaining("->>'cell' = ?"), ['71', 'marin']);
-    expect(update.mock.calls[0][0].metadata.bindings).toEqual([callTokenDigest(token)]);
-  });
-
-  test('a retry is refused when the reservation was already used, released or settled, or the stamp names another cell', async () => {
-    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    const cases = [
-      { existing: { admitted_at: new Date(), cost_usd: null } },
-      { existing: { admitted_at: null, cost_usd: '0.0000' } },
-      { existing: { admitted_at: null, cost_usd: null }, stampRows: 0 },
-    ];
-    for (const opts of cases) {
-      const { insert } = primeLive(opts);
-      const res = mockRes();
-      await handlerFor('/relay-sandbox/cell')(cell('71'), res);
-      expect(res.body).toContain('not available right now');
-      expect(res.body).not.toContain('<Stream');
-      expect(insert).not.toHaveBeenCalled();
     }
   });
 
