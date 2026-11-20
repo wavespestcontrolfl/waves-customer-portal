@@ -43,23 +43,31 @@ const { chromium } = require('playwright');
 const sharp = require('sharp');
 const { CARDS, CARD_DIR, CARD_WIDTH, CARD_HEIGHT, SCHEMES } = require('../../server/services/pest-insider/cards');
 
-const args = process.argv.slice(2);
-// A flag's value. A flag with no value stops the run, so "--only" alone
-// never means "all".
-function opt(name) {
-  const i = args.indexOf(name);
-  if (i < 0) return null;
-  const value = args[i + 1];
-  if (typeof value !== 'string' || value.startsWith('--') || !value.trim()) {
-    console.error(`${name} needs a value`);
-    process.exit(2);
+// The command line, checked whole: an unknown flag, a flag with no value,
+// a flag given twice or an extra word stops the run (exit 2), so a typo
+// such as "--olny" never widens what it touches.
+function readArgs(argv, valueFlags, words) {
+  const out = { execute: false, values: {}, words: [] };
+  const stop = (why) => { console.error(`${why}. See the top of ${path.basename(__filename)}.`); process.exit(2); };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--execute') out.execute = true;
+    else if (valueFlags.includes(arg)) {
+      const value = argv[i + 1];
+      if (typeof value !== 'string' || value.startsWith('-') || !value.trim()) stop(`${arg} needs a value`);
+      if (Object.prototype.hasOwnProperty.call(out.values, arg)) stop(`${arg} is given twice`);
+      out.values[arg] = value;
+      i += 1;
+    } else if (!arg.startsWith('-') && out.words.length < words) out.words.push(arg);
+    else stop(`Unknown argument: ${arg}`);
   }
-  return value;
+  return out;
 }
+const cli = readArgs(process.argv.slice(2), ['--out', '--only'], 0);
 const repoRoot = path.resolve(__dirname, '../..');
-const outDir = path.resolve(opt('--out') || path.join(repoRoot, CARD_DIR));
-const execute = args.includes('--execute');
-const only = opt('--only') === null ? null : new Set(opt('--only').split(',').map((s) => s.trim()).filter(Boolean));
+const outDir = path.resolve(cli.values['--out'] || path.join(repoRoot, CARD_DIR));
+const execute = cli.execute;
+const only = cli.values['--only'] === undefined ? null : new Set(cli.values['--only'].split(',').map((s) => s.trim()).filter(Boolean));
 if (only && !only.size) { console.error('--only needs fact ids, such as --only T03,R01'); process.exit(2); }
 
 // How strongly the thin edge line and the unlit month chips show, per color

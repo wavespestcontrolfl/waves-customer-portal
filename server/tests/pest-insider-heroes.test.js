@@ -84,17 +84,19 @@ describe('the top picture list', () => {
       // a picture is written whole under a temporary name (flag wx), then hard-linked to its name, which never replaces a file
       expect((src.match(/fs\.writeFileSync\([^\n]*/g) || [])).toEqual(["fs.writeFileSync(temp, bytes, { flag: 'wx' });"]);
       expect(src).toContain('fs.linkSync(temp, path.join(outDir, file));');
-      expect(src).toContain("const execute = args.includes('--execute');");
+      // only --execute writes; the whole command line is checked first
+      expect(src).toContain("if (arg === '--execute') out.execute = true;");
+      expect(src).toContain('const execute = cli.execute;');
       expect(src).toContain('MUTATES (dry-run default');
     }
   });
 
-  test('a drawing script stops on a fact it has no picture for, or a flag with no value', () => {
+  test('a drawing script stops on a fact it has no picture for, a flag with no value, or a typo', () => {
     for (const [file, what] of [['ops/agents/pest-insider-heroes.js', 'top picture'], ['ops/agents/pest-insider-cards.js', 'card']]) {
       const draw = (...more) => spawnSync(process.execPath, [path.join(ROOT, file), ...more], { cwd: ROOT, encoding: 'utf8', env: process.env });
       const unknown = draw('--only', 'T03,R99');
       expect([file, unknown.status, unknown.stderr]).toEqual([file, 2, expect.stringContaining(`No ${what} for R99`)]);
-      expect([file, draw('--only').status, draw('--out').status]).toEqual([file, 2, 2]);
+      expect([file, draw('--only').status, draw('--out').status, draw('--olny', 'T03').status, draw('T03').status]).toEqual([file, 2, 2, 2, 2]);
     }
   }, 60000);
 
@@ -163,9 +165,10 @@ describe('taking new art', () => {
 
     fs.writeFileSync(path.join(input, 't02.png'), 'not a picture');
     expect(run('--execute').status).toBe(1);
-    // "--only" with no fact ids never means "all", and every fact it names needs its picture
+    // "--only" with no fact ids, or a typo of it, never means "all"; every fact it names needs its picture
     expect(run('--execute', '--only').status).toBe(2);
     expect(run('--execute', '--only', ',').status).toBe(2);
+    expect(run('--execute', '--olny', 'T03').status).toBe(2);
     fs.rmSync(path.join(input, 't02.png'));
     const missing = run('--execute', '--only', 'T03,R01');
     expect([missing.status, missing.stderr]).toEqual([1, expect.stringContaining('No picture for R01')]);
