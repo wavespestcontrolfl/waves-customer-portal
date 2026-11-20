@@ -34,7 +34,8 @@
 // changes it even before the routes render. So every rule here judges both
 // pages. The staff rules apply while either is a staff page (staffTab), and
 // a page that never reloads by itself bars the reload whether it is in view
-// or at the address.
+// or at the address. A page whose code is missing reloads only while the
+// address still names it: after Back, its reload would open the next page.
 //
 // A part opens in place, so the page around it can hold unsaved work in
 // component state that no hold names. So a staff tab used on the page in
@@ -58,7 +59,7 @@
 
 import { isAdminPath } from './adminBookmarkMeta';
 import {
-  browserOffline, isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
+  blockersBesideWork, isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
 } from './portalReload';
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
@@ -266,8 +267,10 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
 // loop), 'storage' when session storage is blocked (no one-shot guard),
 // 'page-use' when the tab was used on this page (its retry screen asks
 // first, as the preload error would), 'manual' on a page that never reloads
-// by itself, or 'offline' while the browser reports itself offline (a reload
-// would open an error page). Null when it can.
+// by itself, or what else holds the tab: a registered hold's name, or
+// 'offline' while the browser reports itself offline (blockersBesideWork in
+// lib/portalReload.js). The wait for open work ends none of them, so the page
+// does not wait while one stands, as a page move does not. Null when it can.
 function selfReloadRuledOut() {
   try {
     if (chunkReloadAttempted()) return 'reloaded';
@@ -276,7 +279,7 @@ function selfReloadRuledOut() {
   }
   if (usedOnThisStaffPage()) return 'page-use';
   if (staffSelfReloadBarred()) return 'manual';
-  return browserOffline() ? 'offline' : null;
+  return blockersBesideWork()[0] ?? null;
 }
 
 // Whether a screen for missing staff code (App.jsx, components/LazyPanel.jsx)
@@ -299,17 +302,23 @@ export function missingCodeIsNewVersion(newer, offline) {
 // A staff page whose code is missing (App.jsx): waits for open work, as a
 // page move does, then reloads once, as for a stale chunk, when nothing holds
 // the tab. It waits only when a reload can follow; otherwise its screen comes
-// at once. Resolves why it did not reload: 'reloaded' first, whatever holds
-// the tab (after the one reload a missing page is an outage, so its screen
-// offers the connection retry); then what holds the tab; then the other
-// reasons of selfReloadRuledOut; or 'moved' when the page closed meanwhile.
+// at once. It reloads only the page at the address it started at. Back moves
+// the address on at once, but the routes keep this page in view until the
+// next page's code loads: a reload then would open the next page and spend
+// the one reload on it. Resolves why it did not reload: 'reloaded' first,
+// whatever holds the tab (after the one reload a missing page is an outage,
+// so its screen offers the connection retry); then what holds the tab; then
+// the other reasons of selfReloadRuledOut; or 'moved' when the page closed
+// meanwhile or the address names another page. Its screen then shows until
+// the next page comes into view.
 export async function reloadForMissingCode({
   current = () => true,
   reload = () => window.location.reload(),
   now,
 } = {}) {
+  const address = window.location.pathname;
   if (!selfReloadRuledOut()) await waitForWork({ now });
-  if (!current()) return 'moved';
+  if (!current() || window.location.pathname !== address) return 'moved';
   // From here to the reload, all in one turn: no work can start and no hold
   // can register between the last look and the reload. The wait can also
   // outlast a use of the page or another reload.

@@ -659,9 +659,10 @@ describe('on a staff page', () => {
     renderInBoundary(lazyWithRetry(missingChunk));
     renderInBoundary(lazy(missingChunk));
     // The staff retry screen, not the customer one, whose Try Again reloads
-    // at once: its Retry names the held work first.
-    const retries = await screen.findAllByRole('button', { name: 'Retry' });
-    expect(retries).toHaveLength(2);
+    // at once: its Retry names the held work first. The two pages decide
+    // apart, and findAll resolves on the first, so wait for both.
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(2));
+    const retries = screen.getAllByRole('button', { name: 'Retry' });
     tap(retries[0]);
     expect(screen.getByText('A card payment is still going through.')).toBeInTheDocument();
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
@@ -860,6 +861,52 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  // Back moves the address on at once, but the routes keep the page in view
+  // until the next page's code loads. A reload then would open the next
+  // page, not this one, and spend the one reload on it.
+  test('Back while a page whose code is missing waits for open work: the address names the next page, so the wait ends with the retry screen and no reload', async () => {
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const read = target.fetch('/api/admin/auth/me');
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
+      let navigate;
+      function Navigator() {
+        navigate = useNavigate();
+        return null;
+      }
+      const Blog = lazyWithRetry(missingChunk);
+      const Customers = lazy(() => new Promise(() => {}));
+      render(
+        <MemoryRouter initialEntries={['/admin/customers', '/admin/blog']} initialIndex={1} future={{ v7_startTransition: true }}>
+          <PortalUpdateGate fallback={<div>Gate placeholder</div>}>
+            <Navigator />
+            <Suspense fallback={<div>Loading the page</div>}>
+              <Routes>
+                <Route path="/admin/blog" element={<Blog />} />
+                <Route path="/admin/customers" element={<Customers />} />
+              </Routes>
+            </Suspense>
+          </PortalUpdateGate>
+        </MemoryRouter>,
+      );
+      expect(await screen.findByText('Loading...')).toBeInTheDocument();
+      // Back: the address names Customers at once; Blog stays in view while
+      // the Customers page's code loads.
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
+      act(() => { navigate(-1); });
+      expect(screen.getByText('Loading...')).toBeInTheDocument();
+      pending[0]({ headers: new Headers() });
+      await read;
+      expect(await screen.findByText('Check your connection and try again.')).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    } finally {
+      uninstall();
+    }
+  });
+
   test('a request the move already waited out is not waited for again: the page whose code is missing names it at once', async () => {
     const pending = [];
     const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
@@ -884,6 +931,23 @@ describe('on a staff page', () => {
 
   test('offline, a page whose code is missing does not wait for a request still open: an offline tab cannot reload by itself, so its retry screen comes at once', async () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const read = target.fetch('/api/admin/dashboard');
+      const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 500); });
+      await expect(Promise.race([reloadForMissingCode({ reload }), waited])).resolves.toBe('request');
+      expect(reload).not.toHaveBeenCalled();
+      pending[0]({ headers: new Headers() });
+      await read;
+    } finally {
+      uninstall();
+    }
+  });
+
+  test('held work rules the reload out before the wait, as at a page move: with a request still open, a page whose code is missing names it at once', async () => {
+    holding = true;
     const pending = [];
     const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
     const uninstall = installPortalVersionWatch({ target });

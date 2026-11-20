@@ -103,16 +103,20 @@ function workBlockers() {
   return [...(savesInFlight() > 0 ? ['saving'] : []), ...(reads > 0 ? ['request'] : [])];
 }
 
-// Everything that stops a reload right now: the work above, then each
-// registered hold's name, then 'offline' when the browser reports itself
-// offline (a reload then opens an error page). The automatic reload and the
-// Reload bar both read it; the bar names each item before it reloads.
+// What stops a reload besides open work: each registered hold's name, then
+// 'offline' when the browser reports itself offline (a reload then opens an
+// error page). A wait for open work ends none of them, so neither a page move
+// nor a page whose code is missing (staleChunkReload.js) waits while one
+// stands.
+export function blockersBesideWork() {
+  return [...reloadHoldNames(), ...(browserOffline() ? ['offline'] : [])];
+}
+
+// Everything that stops a reload right now: the work above, then the rest
+// (blockersBesideWork). The automatic reload and the Reload bar both read it;
+// the bar names each item before it reloads.
 export function reloadBlockers() {
-  return [
-    ...workBlockers(),
-    ...reloadHoldNames(),
-    ...(browserOffline() ? ['offline'] : []),
-  ];
+  return [...workBlockers(), ...blockersBesideWork()];
 }
 
 // The first of them, or null.
