@@ -2278,6 +2278,36 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({ id: 'cust-9', city: 'Venice' });
     });
 
+    // Pre-push P1 on c49372bb7d, its other half: phase 1 reads the trusted view of the profile, as the list does, but it
+    // writes over that profile, so a staff-verified pin keeps no city there. Here the review verified the primary
+    // property's pin; the customers row has none and no ZIP is typed, so phase 1 does not keep the whole profile (that
+    // match reads the row's own pin) and writes the typed address. A refused place on file (Punta Gorda) is not kept.
+    test('a staff-verified pin on the primary property only, no ZIP typed: phase 1 writes over the profile and keeps no refused place', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const address = { address_line1: '123 Palm Ave', address_line2: null, city: 'Punta Gorda', state: 'FL', zip: '33950' };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, ...address, phone: '9415550101', latitude: null, longitude: null,
+      });
+      gateState.reviewLive = true;
+      firstResults.customer_properties = { id: 'property-9', customer_id: 'cust-9', active: true, is_primary: true, ...address, latitude: 27.4, longitude: -82.5 };
+      firstResults.customer_geocode_reviews = {
+        customer_id: 'cust-9', status: 'verified', reason: 'staff_verified',
+        address_snapshot: ['123 Palm Ave', null, 'Punta Gorda', 'FL', '33950'], latitude: 27.4, longitude: -82.5,
+      };
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+
+      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Laurel, FL' });
+
+      expect(booked.statusCode).toBe(200);
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(['Laurel']);
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({ id: 'cust-9', city: 'Laurel' });
+    });
+
     // Pre-push P1 on 63e29d5511: phase 1 kept the profile's city for any typed address that matched the profile, with
     // the funnel off too, so it could undo a validated correction. A profile that wrongly says Punta Gorda (a place the
     // area check refuses) kept that city after a served town typed in its shared ZIP passed the check, and the profile
