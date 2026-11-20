@@ -190,6 +190,27 @@ describe('lookup profile carries the roof reads', () => {
 });
 
 describe('Charlotte roof words follow the primary building', () => {
+  it('parser: a different roof on the primary building moves the evidence, not roofType', () => {
+    // Building 2 (larger) is the primary; the parcel's first Roofing row is the
+    // small building 1's shingle roof, which keeps feeding roofType as before.
+    const html = charlotteDetail('Composition Shingle')
+      .replace('</tr>\n  </table>\n  <table class="prctable"><caption class="blockcaption">Building Component Information</caption>',
+        '</tr>\n    <tr><td>2</td><td>SINGLE FAMILY RES</td><td>2.5</td><td>0100</td><td>1999</td><td>1999</td><td>1</td><td>0</td><td>4</td><td>8</td><td>3100</td><td>3100</td><td>3900</td></tr>\n  </table>\n  <table class="prctable"><caption class="blockcaption">Building Component Information</caption>')
+      .replace('</tr>\n  </table>`', '</tr>')
+      .concat('');
+    const withRow2 = html.replace(/<\/table>\s*$/, '  <tr><td>2</td><td>210</td><td>Clay Barrel Tile</td><td>Roofing</td><td>0</td><td>100</td><td>1999</td><td>1999</td><td>Construction Component</td></tr>\n  </table>');
+    expect(withRow2).toContain('<td>2</td><td>210</td>');
+    expect(withRow2).toContain('<td>3100</td>');
+    const parsed = _private.parseCharlottePaoRecord({
+      address: '300 Test St, Port Charlotte, FL 33954',
+      search: { parcelId: '1', situsAddress: '300 TEST ST', city: 'Port Charlotte', zipCode: '33954' },
+      detailHtml: withRow2,
+      ownership: null,
+    });
+    expect(parsed.roofType).toBe('SHINGLE');
+    expect(parsed.countyRoofRaw).toEqual({ material: 'Clay Barrel Tile', structure: null, source: 'charlotte' });
+    expect(parsed.roofStyleHint).toBe('barrel_tile');
+  });
   const rows = [
     { 'Bld #': '1', Category: 'Roofing', Description: 'Composition Shingle' },
     { 'Bld #': '2', Category: 'Roofing', Description: 'Clay Barrel Tile' },
@@ -198,8 +219,11 @@ describe('Charlotte roof words follow the primary building', () => {
     expect(_private.findCharlottePrimaryRoofing(rows, { 'Building Number': '2' })).toBe('Clay Barrel Tile');
     expect(_private.findCharlottePrimaryRoofing(rows, { 'Building Number': '1' })).toBe('Composition Shingle');
   });
-  it('falls back to the parcel\'s first Roofing row when no row names the building', () => {
-    expect(_private.findCharlottePrimaryRoofing(rows, { 'Building Number': '7' })).toBe('Composition Shingle');
+  it('never borrows a row numbered for another building', () => {
+    expect(_private.findCharlottePrimaryRoofing(rows, { 'Building Number': '7' })).toBe('');
+    expect(_private.findCharlottePrimaryRoofing([...rows, { 'Bld #': '', Category: 'Roofing', Description: 'Metal' }], { 'Building Number': '7' })).toBe('Metal');
+  });
+  it('keeps the parcel\'s first Roofing row when the record names no primary building', () => {
     expect(_private.findCharlottePrimaryRoofing(rows, {})).toBe('Composition Shingle');
   });
 });

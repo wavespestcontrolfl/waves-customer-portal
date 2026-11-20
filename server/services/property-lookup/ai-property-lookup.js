@@ -4549,7 +4549,7 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
     stories: coerceStoriesValue(primaryBuilding.Floors, { commercial: commercialSized }),
     propertyType,
     constructionMaterial: normalizeCountyConstruction(findCharlotteComponentDescription(componentRows, 'Exterior Walls')),
-    roofType: normalizeCountyRoof(findCharlottePrimaryRoofing(componentRows, primaryBuilding)),
+    roofType: normalizeCountyRoof(findCharlotteComponentDescription(componentRows, 'Roofing')),
     ...countyRoofDetail('charlotte', findCharlottePrimaryRoofing(componentRows, primaryBuilding), null),
     source,
     confidence: 'high',
@@ -4603,16 +4603,18 @@ function findCharlotteComponentDescription(rows, category) {
   return match?.Description || '';
 }
 
-// The roof component of the building the record was priced from: on a
-// multi-building parcel the component table lists every building ("Bld #"),
-// so the roof words follow the primary building's "Building Number" and fall
-// back to the parcel's first Roofing row only when no row names that building.
+// The roof words of the building the record was priced from, for the
+// roof-style evidence only (roofType keeps the parcel's first Roofing row, so
+// existing quotes do not move). On a multi-building parcel the component table
+// lists every building ("Bld #"): read the primary building's own row, else an
+// unnumbered row; a row numbered for another building is never borrowed. With
+// no primary Building Number the parcel's first Roofing row stands, as before.
 function findCharlottePrimaryRoofing(rows, primaryBuilding) {
   const buildingNumber = String(primaryBuilding?.['Building Number'] ?? '').trim();
-  const own = buildingNumber
-    ? rows.filter((row) => String(row['Bld #'] ?? '').trim() === buildingNumber)
-    : [];
-  return findCharlotteComponentDescription(own, 'Roofing') || findCharlotteComponentDescription(rows, 'Roofing');
+  if (!buildingNumber) return findCharlotteComponentDescription(rows, 'Roofing');
+  const bld = (row) => String(row['Bld #'] ?? '').trim();
+  return findCharlotteComponentDescription(rows.filter((row) => bld(row) === buildingNumber), 'Roofing')
+    || findCharlotteComponentDescription(rows.filter((row) => bld(row) === ''), 'Roofing');
 }
 
 function coerceCharlotteOwnershipLotSize(ownership) {
