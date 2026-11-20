@@ -7574,13 +7574,10 @@ function initScheduledJobs() {
       (isEnabled('promiseChaserBell') && isEnabled('callCommitments'))
         ? runExclusive('promise-chaser-bell', () => require('./promise-chaser-bell').sweepPromiseChasers())
         : Promise.resolve(0),
-      // GATE_MISSED_CALL_REPUSH: one more admin push for a missed-call bell
-      // still unread 30 minutes on, in office hours. Gate-checked here so
-      // dark means no module load; the sweep stamps repushed_at atomically,
-      // so overlapping instances cannot send twice.
-      isEnabled('missedCallRepush')
-        ? Promise.resolve().then(() => require('./missed-call-repush').sweepMissedCallRepush())
-        : Promise.resolve(0),
+      // One more admin push for a missed-call bell still unread 30 minutes on,
+      // in office hours. The sweep stamps repushed_at atomically, so
+      // overlapping instances cannot send twice.
+      Promise.resolve().then(() => require('./missed-call-repush').sweepMissedCallRepush()),
     ]);
     results.forEach((result, index) => {
       if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'repeat-caller', 'missed-call-text-back', 'promise-chaser', 'missed-call-repush'][index]} sweep failed: ${result.reason.message}`);

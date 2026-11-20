@@ -5203,7 +5203,10 @@ assessed-neighbor sample/range that back the admin estimator's home-size
 estimate for an unassessed vacant parcel) and MINUS the staff-only
 `permitBuildingFacts` block (the home's own building permit number, issue/CO
 dates and plan figures behind the admin estimator's new-construction home-size
-estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
+estimate; `GATE_LOOKUP_PERMIT_FACTS`) and MINUS the staff-only roof-style
+evidence (`countyRoofRaw`, `roofStyleHint`, `roofTileStyle`: the county's own
+roof words and the barrel-vs-flat tile reads, owner 2026-11-19, data only and
+not yet priced), with a story count the permit filled
 (`storiesSource: 'permit'`) returned to the default (`stories: 1`,
 `storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
 the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
@@ -7407,9 +7410,7 @@ a clash or a raced edit) books the re-service exactly as before. GET and
 `/api/public/moving/:token` (GET, plus `POST /:token/check` and
 `POST /:token/submit`; the moving page the office sends a customer who is
 moving, by email from the Customer 360 Moving card or by text from the
-Communications composer, always on a staff click). Dark behind
-`GATE_MOVING_FLOW` (strict `'true'`, read per request): off, every route is
-the generic 404 before any DB read. 48-hex token format gate on
+Communications composer, always on a staff click). 48-hex token format gate on
 `customer_moves.token`; a malformed, unknown or closed move is the same
 generic 404. Privacy headers (`Cache-Control: private, no-store`,
 `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) on every
@@ -7438,7 +7439,7 @@ alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
 receipt sentences. It changes no visit, price, property or primary address
 and sends nothing to a customer.
 Move pause (moving PR 2b, owner Q4, 2026-11-02): while `GATE_MOVING_PAUSE`
-is on (strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the
+is on (strict `'true'`, read per request), the
 receipt of a submit with no checked address on file and a move-out date
 follows the customer's billing lane (`customer-moves.js` `pauseLane`): a
 customer billed per visit reads that the visits pause after the move-out
@@ -7483,7 +7484,7 @@ accept right after it locks the estimate row, for every branch including the
 one-time accept (stale = the generic 404), and the converter for every other
 accept path (409 `MOVE_ESTIMATE_STALE`, rolled back). A new-home estimate is
 never a multi-property group member or anchor. While `GATE_MOVING_ESTIMATE` is on
-(strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the submitted,
+(strict `'true'`, read per request), the submitted,
 in-area move linked to the estimate (`customer_moves.estimate_id`,
 `moveForEstimate`) limits the first visit: `available-slots` / `find-slots`
 offer no day before the move-in date (the rolling window opens on it, a

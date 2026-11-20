@@ -2,8 +2,7 @@
 // schema removed after the suite; the bell delivery (triggerNotification) is
 // mocked. Pins the robodialer-wave rule of the missed-call bell (owner
 // 2026-10-20 "yes"): a GBP line, under 30 s, no voicemail, 3+ unknown numbers
-// from one 6-digit block in 14 days. Gate on = bell row written, push quiet;
-// gate off = the bell rings as before and the call is stamped for the shadow read.
+// from one 6-digit block in 14 days. The bell row is written and the push is quiet.
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -85,7 +84,7 @@ jest.setTimeout(30000);
   // The next trigger call reports `stats`, and whether it wrote the bell row, as the real one does.
   const reports = (stats, written = stats.bellWritten) => triggerNotification.mockImplementationOnce(async (key, payload, opts) => { opts?.onBell?.(written); return stats; });
 
-  test('gate on: the third number of a block on a GBP line keeps its bell row, sends no push, and settles', async () => {
+  test('the third number of a block on a GBP line keeps its bell row, sends no push, and settles', async () => {
     await earlierWave();
     const row = call('+19415550303', 10);
     await database('call_log').insert(row);
@@ -138,7 +137,7 @@ jest.setTimeout(30000);
     expect((await stored(row)).metadata.missed_call_spam_wave).toBeUndefined();
   });
 
-  test('a block wave and a burst together, both gates on, are stamped block_quiet', async () => {
+  test('a block wave and a burst together are stamped block_quiet', async () => {
     const gbp = { to_phone: GBP_LINE, duration_seconds: 24 };
     await database('call_log').insert([call('+19415550101', 120, gbp), call('+19415550202', 90, gbp)]);
     const row = call('+19415550303', 10, gbp);
@@ -146,18 +145,6 @@ jest.setTimeout(30000);
     expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
     expect(await triggerNotification.mock.calls[0][2].beforePush({ dispatching: false })).toBe(false);
     expect((await stored(row)).metadata.missed_call_spam_wave).toBe('block_quiet');
-  });
-
-  test('gate off: the wave call still rings, stamped for the shadow read', async () => {
-    isEnabled.mockImplementation((name) => name !== 'missedCallSpamWave' && name !== 'missedCallSpamBurst');
-    await earlierWave();
-    const row = call('+19415550303', 10);
-    await database('call_log').insert(row);
-    expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
-    expect(triggerNotification).toHaveBeenCalledTimes(1);
-    const { metadata } = await stored(row);
-    expect(metadata.missed_call_spam_wave_shadow).toBe(true);
-    expect(metadata.missed_call_spam_wave).toBeUndefined();
   });
 
   test('not a wave: two numbers in the block, an office line, 30 s or more, an older block call, or a customer phone slot', async () => {
@@ -301,20 +288,19 @@ jest.setTimeout(30000);
     await database('call_log').insert(row);
     expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
-    expect((await stored(row)).metadata.missed_call_spam_wave_shadow).toBeUndefined();
+    expect((await stored(row)).metadata.missed_call_spam_wave).toBeUndefined();
   });
   // Burst: rotating prefixes, so no 6-digit block repeats. Three different
   // first-time unknown numbers on one line inside 24 h, 15 s or more, within 1 s.
-  describe('robodialer burst (GATE_MISSED_CALL_SPAM_BURST)', () => {
+  describe('robodialer burst', () => {
     const burstCall = (fromPhone, minutesAgo, extra = {}) => call(fromPhone, minutesAgo, { to_phone: OFFICE_LINE, duration_seconds: 53, ...extra });
     // Two earlier members from different blocks, then the call judged.
     async function twoMembers(extra = {}) {
       await database('call_log').insert([burstCall('+19415550101', 120, extra), burstCall('+17275550202', 90, extra)]);
     }
     const burstRow = (extra = {}) => burstCall('+13525550303', 10, extra);
-    const onlyBurst = (name) => name === 'missedCallSpamBurst' || name === 'missedCallUnknownCallers';
 
-    test('gate on: the third first-time number on a line, 53 s each, keeps its bell row, sends no push, and settles', async () => {
+    test('the third first-time number on a line, 53 s each, keeps its bell row, sends no push, and settles', async () => {
       await twoMembers();
       const row = burstRow();
       await database('call_log').insert(row);
@@ -351,33 +337,6 @@ jest.setTimeout(30000);
       expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
       const { beforePush } = triggerNotification.mock.calls[0][2];
       expect(await beforePush({ dispatching: false })).toBe(true);
-    });
-
-    test('gate off: the burst call still rings, stamped missed_call_spam_burst_shadow only', async () => {
-      isEnabled.mockImplementation((name) => name !== 'missedCallSpamBurst');
-      await twoMembers();
-      const row = burstRow();
-      await database('call_log').insert(row);
-      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
-      expect(triggerNotification).toHaveBeenCalledTimes(1);
-      const { metadata } = await stored(row);
-      expect(metadata.missed_call_spam_burst_shadow).toBe(true);
-      expect(metadata.missed_call_spam_wave_shadow).toBeUndefined();
-      expect(metadata.missed_call_spam_wave).toBeUndefined();
-      expect(await triggerNotification.mock.calls[0][2].beforePush({ dispatching: false })).toBe(true);
-    });
-
-    test('the burst gate alone quiets a call that is also a block wave; the block shadow is stamped', async () => {
-      isEnabled.mockImplementation(onlyBurst);
-      const gbp = { to_phone: GBP_LINE, duration_seconds: 24 };
-      await database('call_log').insert([burstCall('+19415550101', 120, gbp), burstCall('+19415550202', 90, gbp)]);
-      const row = burstCall('+19415550303', 10, gbp);
-      await database('call_log').insert(row);
-      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
-      expect(await triggerNotification.mock.calls[0][2].beforePush({ dispatching: false })).toBe(false);
-      const { metadata } = await stored(row);
-      expect(metadata.missed_call_spam_wave).toBe('burst_quiet');
-      expect(metadata.missed_call_spam_wave_shadow).toBe(true);
     });
 
     test('only the call itself and earlier members count: two members is no burst, the third makes one', async () => {
