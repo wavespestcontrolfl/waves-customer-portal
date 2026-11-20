@@ -123,10 +123,15 @@ function resultsVisitSkip({ serviceLine, completedCount, gateOn = reviewAskResul
   if (!min || !Number.isFinite(completedCount)) return null;
   return completedCount < min ? "results_not_yet" : null;
 }
-// Lines (lawn_care, tree_shrub) one visit's service name belongs to. A combined name counts for each.
-function resultsVisitLines(name) {
-  const { toQualifyingKeys } = require("./waveguard-existing-services");
-  return toQualifyingKeys(name).filter((k) => RESULTS_VISIT_MIN[k]);
+// Visit outcomes that mean no treatment was performed (the completion service's own list).
+const RESULTS_VISIT_UNPERFORMED = new Set(["inspection_only", "customer_declined", "incomplete"]);
+// Lines (lawn_care, tree_shrub) one visit belongs to, by catalog identity (service_type plus the
+// joined catalog key and name). A combined visit counts for each; a commercial row counts for none.
+function resultsVisitLines(row) {
+  const { qualifyingKeysForRow } = require("./waveguard-existing-services");
+  const { isCommercialServiceRow } = require("./self-booking-plan-sync");
+  if (isCommercialServiceRow(row)) return [];
+  return qualifyingKeysForRow(row).filter((k) => RESULTS_VISIT_MIN[k]);
 }
 // Completed visits per line that come BEFORE cur: an earlier day, or the same day and earlier
 // in compareSameDayVisits order (an indeterminate same-day order counts nothing, so it asks).
@@ -136,31 +141,73 @@ function resultsVisitPriorCounts(rows, cur, lines) {
   for (const r of rows) {
     const day = etDayWindow(r.scheduled_date, 0).anchorStr;
     if (day > curDay || (day === curDay && compareSameDayVisits(r, cur) >= 0)) continue;
-    for (const k of resultsVisitLines(r.service_type)) if (k in counts) counts[k] += 1;
+    for (const k of resultsVisitLines(r)) if (k in counts) counts[k] += 1;
   }
   return counts;
 }
-// The skip reason for one recurring visit, or null. Counts the customer's earlier completed
-// recurring visits of each line the visit belongs to (callbacks are not visits) plus this
-// visit. Asks when ANY of its lines is at its threshold. Never throws; a failed read asks.
-async function resultsVisitSkipForVisit(customerId, visitId) {
-  if (!reviewAskResultsVisitOn() || !visitId) return null;
+// service_records.structured_notes by visit id, notes parsed.
+async function resultsVisitNotesByVisit(visitIds) {
+  const byVisit = new Map();
+  if (!visitIds.length) return byVisit;
+  const recs = await db("service_records").whereIn("scheduled_service_id", visitIds).select("scheduled_service_id", "structured_notes");
+  for (const r of recs) {
+    const list = byVisit.get(r.scheduled_service_id) || [];
+    list.push(structuredNotesObject(r.structured_notes));
+    byVisit.set(r.scheduled_service_id, list);
+  }
+  return byVisit;
+}
+// One visit's own verdict: the skip reason, or null to ask.
+async function resultsVisitSkipOne(customerId, visitId) {
+  const cur = await db("scheduled_services as s").leftJoin("services as sv", "s.service_id", "sv.id").where("s.id", visitId)
+    .first("s.service_type", "s.scheduled_date", "s.window_start", "s.created_at", "s.is_recurring", "s.is_callback", "sv.service_key", "sv.name as service_name");
+  if (!cur || cur.is_recurring !== true || !cur.scheduled_date) return null;
+  const lines = resultsVisitLines(cur);
+  if (!lines.length) return null;
+  const rows = await db("scheduled_services as s").leftJoin("services as sv", "s.service_id", "sv.id")
+    .where({ "s.customer_id": customerId, "s.status": "completed", "s.is_recurring": true })
+    .where("s.id", "!=", visitId)
+    .whereRaw("s.is_callback IS DISTINCT FROM true")
+    .where("s.scheduled_date", "<=", etDayWindow(cur.scheduled_date, 0).anchorStr)
+    .select("s.id", "s.service_type", "s.scheduled_date", "s.window_start", "s.created_at", "sv.service_key", "sv.name as service_name");
+  // Only performed treatments count: a visit whose every linked record says incomplete, declined
+  // or inspection only is not one.
+  const notes = await resultsVisitNotesByVisit(rows.map((r) => r.id));
+  const performed = rows.filter((r) => {
+    const list = notes.get(r.id) || [];
+    return !list.length || list.some((n) => !RESULTS_VISIT_UNPERFORMED.has(n.visitOutcome));
+  });
+  const prior = resultsVisitPriorCounts(performed, cur, lines);
+  const self = cur.is_callback === true ? 0 : 1;
+  const skips = lines.map((k) => resultsVisitSkip({ serviceLine: k, completedCount: prior[k] + self, gateOn: true }));
+  return skips.every(Boolean) ? "results_not_yet" : null;
+}
+// The visits closed together with this one (a combined completion packet), this visit first.
+async function resultsVisitPacketMembers(visitId) {
   try {
-    const cur = await db("scheduled_services").where({ id: visitId })
-      .first("service_type", "scheduled_date", "window_start", "created_at", "is_recurring", "is_callback");
-    if (!cur || cur.is_recurring !== true || !cur.scheduled_date) return null;
-    const lines = resultsVisitLines(cur.service_type);
-    if (!lines.length) return null;
-    const rows = await db("scheduled_services")
-      .where({ customer_id: customerId, status: "completed", is_recurring: true })
-      .where("id", "!=", visitId)
-      .whereRaw("is_callback IS DISTINCT FROM true")
-      .where("scheduled_date", "<=", etDayWindow(cur.scheduled_date, 0).anchorStr)
-      .select("service_type", "scheduled_date", "window_start", "created_at");
-    const prior = resultsVisitPriorCounts(rows, cur, lines);
-    const self = cur.is_callback === true ? 0 : 1;
-    const skips = lines.map((k) => resultsVisitSkip({ serviceLine: k, completedCount: prior[k] + self, gateOn: true }));
-    return skips.every(Boolean) ? "results_not_yet" : null;
+    const own = await db("visit_completion_packet_items").where({ scheduled_service_id: visitId }).first("packet_id");
+    if (!own?.packet_id) return [visitId];
+    const items = await db("visit_completion_packet_items").where({ packet_id: own.packet_id }).select("scheduled_service_id");
+    return [...new Set([visitId, ...items.map((i) => i.scheduled_service_id).filter(Boolean)])];
+  } catch {
+    return [visitId];
+  }
+}
+// The skip reason for one recurring visit, or null. Every member of a combined completion is
+// judged and the ask stays when ANY member qualifies (order never matters). A recorded
+// "customer asked for the link" (the param, or a member record's customerRequestedReview) always
+// asks. Never throws; a failed read asks. Every path calls this one helper.
+async function resultsVisitSkipForVisit(customerId, visitId, { customerRequested = null } = {}) {
+  if (!reviewAskResultsVisitOn() || !visitId || customerRequested) return null;
+  try {
+    const ids = await resultsVisitPacketMembers(visitId);
+    const notes = await resultsVisitNotesByVisit(ids);
+    const asked = [...notes.values()].flat().some((n) => n.customerRequestedReview && typeof n.customerRequestedReview === "object");
+    if (asked) return null;
+    for (const id of ids) {
+      if (!(await resultsVisitSkipOne(customerId, id))) return null;
+    }
+    return "results_not_yet";
   } catch (err) {
     logger.warn(`[review] results-visit count failed (customerId=${customerId}): ${err.message}`);
     return null;
@@ -168,8 +215,8 @@ async function resultsVisitSkipForVisit(customerId, visitId) {
 }
 // The same rule for the paths that know a service record, not a visit (the legacy single ask
 // and the link riding the completion text). A missing visit link asks as today.
-async function resultsVisitSkipForRecord({ customerId, serviceRecordId = null, scheduledServiceId = null }) {
-  if (!reviewAskResultsVisitOn()) return null;
+async function resultsVisitSkipForRecord({ customerId, serviceRecordId = null, scheduledServiceId = null, customerRequested = null }) {
+  if (!reviewAskResultsVisitOn() || customerRequested) return null;
   try {
     let visitId = scheduledServiceId;
     if (!visitId && serviceRecordId) {
@@ -1462,7 +1509,7 @@ const ReviewService = {
    * the full cadence right after treatment. Fail-open to the default plan on
    * lookup errors: a wrong-but-bounded cadence beats no ask.
    */
-  async resolveSequencePlanForEnrollment({ customerId, serviceRecordId = null, scheduledServiceId = null, _attempt = 0 }) {
+  async resolveSequencePlanForEnrollment({ customerId, serviceRecordId = null, scheduledServiceId = null, customerRequested = null, _attempt = 0 }) {
     // Owner-named multi-treatment jobs (2026-08-05: "we should treat
     // cockroach different than one time pest, as we should bed bug") — the
     // follow-up visit IS a treatment, so the review ask waits for it. Other
@@ -1839,7 +1886,7 @@ const ReviewService = {
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
         }
         if (svc.is_recurring === true) {
-          const resultsSkip = await resultsVisitSkipForVisit(customerId, svc.id);
+          const resultsSkip = await resultsVisitSkipForVisit(customerId, svc.id, { customerRequested });
           if (resultsSkip) return { skip: resultsSkip };
           return { plan: OUTREACH.RECURRING_SEQUENCE_PLAN };
         }
@@ -1875,7 +1922,7 @@ const ReviewService = {
       // blip here would otherwise permanently lose the deferred cadence.
       if (_attempt < 1) {
         await new Promise((r) => setTimeout(r, 250));
-        return this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId, _attempt: _attempt + 1 });
+        return this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId, customerRequested, _attempt: _attempt + 1 });
       }
       logger.warn(`[review] plan resolution failed (customerId=${customerId}): ${err.message}`);
       return { error: true };
@@ -1944,7 +1991,7 @@ const ReviewService = {
     if (!isEnabled("reviewSequences")) {
       // GATE_REVIEW_ASK_RESULTS_VISIT: the automatic legacy ask follows the same rule.
       if (triggeredBy === "auto") {
-        const resultsSkip = await resultsVisitSkipForRecord({ customerId, serviceRecordId, scheduledServiceId });
+        const resultsSkip = await resultsVisitSkipForRecord({ customerId, serviceRecordId, scheduledServiceId, customerRequested });
         if (resultsSkip) {
           logger.info(`[review] Post-service ask skipped (customerId=${customerId} reason=${resultsSkip})`);
           return { started: false, reason: resultsSkip };
@@ -1986,7 +2033,7 @@ const ReviewService = {
       // Per-type cadence plan (owner spec 2026-08-05): recurring = one ask,
       // one-time = full cadence, multi-treatment = one after the first visit
       // then the cadence after the final one (middle visits send nothing).
-      const resolved = await this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId });
+      const resolved = await this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId, customerRequested });
       if (resolved.error) {
         // Fail toward FEWER sends: enrolling on a guessed plan risks a
         // 3-touch cadence where one ask (or none) was owed. The payment/
@@ -7065,6 +7112,8 @@ const ReviewService = {
           customerId: seq.customer_id,
           serviceRecordId: seq.service_record_id,
           scheduledServiceId: seq.scheduled_service_id,
+          // A recorded "customer asked for the link" never takes the results-visit skip.
+          customerRequested: seq.customer_requested || null,
         });
         if (re.error) {
           // Defer, never send on a possibly-stale plan (codex #3235 r19 P1):
