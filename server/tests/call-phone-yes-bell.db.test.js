@@ -28,6 +28,7 @@ const { randomUUID } = require('crypto');
 const { bannerAfterWrite, __private: { skipReason } } = require('../services/bell-banners');
 const Compose = require('../services/admin-alert-compose');
 const Bell = require('../services/call-phone-yes-bell');
+const { lockTriageCall } = require('../utils/triage-locks');
 const NotificationService = require('../services/notification-service');
 const { etDateString, formatETDayDate, parseETDateTime } = require('../utils/datetime-et');
 const {
@@ -663,6 +664,9 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       // The catalog decides which visits are pest visits; the ring holds it as the tap does (the whole table, so any
       // catalog write, here one that leaves the row as it was).
       ['a catalog edit', {}, () => ['services', catalogRowId, { name: pool.raw('name') }]],
+      // The call's triage lock, which every card writer takes first: the ring takes it without waiting, as the tap does,
+      // so one busy call never holds up the pass for the other cards.
+      ["a change that holds the call's triage lock", {}, (card) => (conn) => lockTriageCall(conn, card.callLogId)],
     ])("%s: in flight, the card rings nothing this run; after the ring's read, the change waits for its commit", async (_label, setup, changeOf) => {
       const perTest = trx;
       try {
@@ -673,8 +677,8 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
         trx = perTest;
         mockConn = perTest;
       }
-      const [table, rowId, change] = changeOf(made);
-      const write = (conn) => conn(table).where({ id: rowId }).update(change);
+      const change = changeOf(made);
+      const write = typeof change === 'function' ? change : (conn) => conn(change[0]).where({ id: change[1] }).update(change[2]);
       const listed = { id: made.id, call_log_id: made.callLogId };
 
       // The change in flight on another connection (not committed): the ring's read skips the card at once.

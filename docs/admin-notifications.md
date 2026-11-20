@@ -759,7 +759,8 @@ Phone-yes card bell (owner 2026-11-18 "ok go", phone-yes step 1, page v4; under 
 `server/services/call-phone-yes-bell.js`, run by the phone-yes sweep (every 10 minutes while the gate is on, after its filing and its
 moot close), rings the bell once for each `call_phone_yes` card when it is filed, and once more while the card is open and time runs
 short: an open estimate on the card expires within 24 hours, or the soonest visit to come that keeps the card open (a pest visit the
-call booked, on the calendar and not linked to an estimate) starts within 48 hours. Only a visit still to come (`pending`,
+call booked, on the calendar and not linked to an estimate) starts within 48 hours, the edge included (a card filed at the edge
+rings the time-short bell alone). Only a visit still to come (`pending`,
 `confirmed`, `en_route`) makes time short: a visit parked for a new slot (`rescheduled`, which keeps its old date and time), under
 way or done keeps the card open but is no time to ring for. Only a card with status `open` whose evidence
 still matches it rings or is rewritten: the pass reads the card's state again under the lock (`cardState`), and a card with a
@@ -787,8 +788,9 @@ caller's words (headline, why, detail or metadata), as the SMS reader's review b
 can hold a gate code or a card number, no screen catches every form, and the why reaches a phone's lock screen. The why says the
 caller said yes to pay per application and names the visit day; `detail` holds the card's summary and points to the card in
 Triage, which shows the words. Each card rings in a transaction of its own that holds its call's
-triage lock (`lockTriageCall`, which every card writer takes first) and reads the card and its evidence again there, so a card the
-tap accepts, a person claims or a customer's accept changes while the pass runs rings nothing. A customer's own accept takes no
+triage lock (the lock every card writer takes first; the ring takes it without waiting, as the tap does, so a card whose call
+another change holds rings nothing this run and one busy call never holds up the pass) and reads the card and its evidence again
+there, so a card the tap accepts, a person claims or a customer's accept changes while the pass runs rings nothing. A customer's own accept takes no
 triage lock, so the ring also holds every row it reads FOR SHARE to its commit, as the tap does (`holdCardRows`: the customer's row,
 whose numbers decide which unlinked calls are theirs, their estimates, their calls in the window the card's check reads, by id
 the booking call and the call the yes came from (the check reads both by id, also when a resend moved the window past them), the

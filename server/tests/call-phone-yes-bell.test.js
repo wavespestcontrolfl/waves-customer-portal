@@ -19,10 +19,12 @@ const at = (hours) => new Date(NOW.getTime() + hours * HOUR);
 describe('when time runs short', () => {
   test.each([
     ['an estimate that expires in 23 hours', { expiresAt: at(23) }, 'estimate_expires'],
+    ['an estimate that expires in exactly 24 hours (the edge counts)', { expiresAt: at(24) }, 'estimate_expires'],
     ['an estimate that expires in 25 hours', { expiresAt: at(25) }, null],
     ['an estimate that already expired', { expiresAt: at(-1) }, null],
-    // Wed, Nov 25 at 9:00 AM Eastern is 47 hours away; 11:00 AM is 49.
+    // Wed, Nov 25 at 9:00 AM Eastern is 47 hours away; 10:00 AM is exactly 48; 11:00 AM is 49.
     ['a visit that starts in 47 hours', { visit: { scheduled_date: '2026-11-25', window_start: '09:00:00' } }, 'visit_soon'],
+    ['a visit that starts in exactly 48 hours (the edge counts)', { visit: { scheduled_date: '2026-11-25', window_start: '10:00:00' } }, 'visit_soon'],
     ['a visit that starts in 49 hours', { visit: { scheduled_date: '2026-11-25', window_start: '11:00:00' } }, null],
     ['a visit with no start, counted from the start of its day (38 hours)', { visit: { scheduled_date: '2026-11-25', window_start: null } }, 'visit_soon'],
     ['a visit that already started', { visit: { scheduled_date: '2026-11-23', window_start: '08:00:00' } }, null],

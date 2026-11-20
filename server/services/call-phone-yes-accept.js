@@ -765,15 +765,22 @@ async function ringOpenCards(now) {
 
 // An open card read again under its call's triage lock (the lock every card writer takes first), with the times that
 // make it urgent, read by the clock after the lock (`now`: a visit may start, or an estimate expire, while the pass
-// waits for it). `hold`: a call in the word's window still owes a read, or the card's own yes is being read again (its
-// `yes_rechecking` mark, which the moot pass sets; a resend can move the window past that call), so the card rings
-// nothing new until the read ends (the read may take the yes back, and the tap refuses meanwhile); its open row still
-// follows the card. A read ends within OWED_READ_HOURS. Null once the card is no
-// longer open (the tap accepted it, or a person claimed, resolved or dismissed it), while a row it reads is busy
-// (holdCardRows), and while its evidence says something the card does not show yet (cardState: a close or a refresh
-// the next run writes).
+// works through earlier cards). `hold`: a call in the word's window still owes a read, or the card's own yes is being
+// read again (its `yes_rechecking` mark, which the moot pass sets; a resend can move the window past that call), so the
+// card rings nothing new until the read ends (the read may take the yes back, and the tap refuses meanwhile); its open
+// row still follows the card. A read ends within OWED_READ_HOURS. Null once the card is no longer open (the tap
+// accepted it, or a person claimed, resolved or dismissed it), while its call or a row it reads is busy (the triage
+// lock and holdCardRows, both taken without waiting), and while its evidence says something the card does not show yet
+// (cardState: a close or a refresh the next run writes).
 async function openCardNow(trx, listed) {
-  await lockTriageCall(trx, listed.call_log_id);
+  // The call's triage lock, taken without waiting as the tap takes it: a card whose call another change holds rings
+  // nothing this run, so one busy call never holds up the pass for the other cards.
+  try {
+    await lockNoWaitOrStop(trx, [TRIAGE_LOCK_NAMESPACE, listed.call_log_id], 'call_busy');
+  } catch (err) {
+    if (err.phoneYesRefusal) return null;
+    throw err;
+  }
   const card = await trx('triage_items').where({ id: listed.id, reason_code: REASON_CODE, status: 'open' })
     .first('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload', 'summary');
   const held = card && await holdCardRows(trx, card);

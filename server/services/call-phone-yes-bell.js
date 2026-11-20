@@ -61,13 +61,13 @@ function visitStart(visit) {
 }
 
 // Why time runs short, or null: an open estimate on the card expires within 24 hours, or the card's visit starts within
-// 48. A time already past is not short.
+// 48, the edge included (a card filed at the edge rings the time-short bell alone). A time already past is not short.
 function dueReason({ expiresAt, visit, now }) {
   const left = (at) => (at ? at.getTime() - now.getTime() : null);
   const expiresIn = left(expiresAt ? new Date(expiresAt) : null);
-  if (expiresIn > 0 && expiresIn < ESTIMATE_DUE_HOURS * HOUR_MS) return 'estimate_expires';
+  if (expiresIn > 0 && expiresIn <= ESTIMATE_DUE_HOURS * HOUR_MS) return 'estimate_expires';
   const startsIn = left(visitStart(visit));
-  return startsIn > 0 && startsIn < VISIT_DUE_HOURS * HOUR_MS ? 'visit_soon' : null;
+  return startsIn > 0 && startsIn <= VISIT_DUE_HOURS * HOUR_MS ? 'visit_soon' : null;
 }
 
 // The key a card rings now, or null: the time-short key once time runs short, else the filed key, each at most once, and
@@ -218,7 +218,8 @@ async function writtenKeys(cardIds) {
  * each { id, status, call_log_id }. `readCard(trx, listed)`: an open card read again under its call's triage lock (the
  * lock every card writer takes first), with the times that make it urgent, the clock it read them by after the lock,
  * and whether a call in its window still owes a read ({ card, expiresAt, several, visit, now, hold }), or null once it
- * is no longer open, while a row it reads is busy, or while its evidence says something it does not show yet. A held
+ * is no longer open, while its call or a row it reads is busy (taken without waiting, so one busy call never holds up
+ * the pass), or while its evidence says something it does not show yet. A held
  * card rings nothing new; its open row still follows the card. Each open card rings in a transaction of its own that
  * holds that lock, so a card the tap accepts or a person claims while the pass runs rings nothing. With the Bell switch
  * off (bellSwitchOn) nothing rings, and open rows are still rewritten. A card's filed row closes in the commit that
