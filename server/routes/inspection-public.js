@@ -2167,7 +2167,7 @@ async function provisionLinkedCustomer(trx, {
     // truck rule, such as Sarasota, needs no kept city); with the funnel off
     // no zone is read from it.
     const listCity = zoneFallbackCity(storedCustRow, resolved.address, resolved.location);
-    const { zone: cityZone, fromCustomer } = [listCity, funnelOn()].every(Boolean)
+    const { zone: cityZone, fromCustomer } = funnelOn()
       ? await leadBookingZone(trx, zoneFunnelInputs(resolved.address), listCity) : {};
     const city = fromCustomer && isFunnelZone(cityZone) ? listCity : resolved.address.city;
     const after = {
