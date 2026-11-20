@@ -383,8 +383,8 @@ customer's message by this rule.
    marked them read). A text promise the run only took off a customer's alert that stayed open goes back on that
    alert without a ring (`restoreSmsCommitmentAlerts`); when a person has closed that alert since, the promise's
    next overdue check rings a fresh one.
-   Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF";
-   `GATE_ALERT_QUIET_FALL_OFF`): a second policy of the same module, `runAdminAlertQuietPolicy` in
+   Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF"):
+   a second policy of the same module, `runAdminAlertQuietPolicy` in
    `server/services/admin-alert-retention.js`. It shares the nightly policy's candidates, activity stamps, `RERING`
    registry, version-fenced writer and cursor helpers, and differs in cadence (its own cron, every 10 minutes, its own
    lock and its own cursor key) and rules. An open bell row with no new activity for 72 hours is marked done
@@ -592,10 +592,10 @@ existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id
 `notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
 second banner, and no second bell row is written.
 
-Lead call-back reminder banner (owner 2026-11-05, "remind"; gate `GATE_LEAD_CALL_REMINDER`, dark): two kinds of lead
+Lead call-back reminder banner (owner 2026-11-05, "remind"): two kinds of lead
 bell reach only the portal bell. A "Missed call request" bell (`lead-call-reply-missed:<callLogId>`, a press-1 ring nobody
 answered) and a night call-back bell (`lead-call-text-followup:<requestId>`, raised by `lead-call-text-followup.js`
-`raiseLeadBell`) send no banner. With the gate on, the alert-relevance sweep (every 10 minutes, after its closes) runs
+`raiseLeadBell`) send no bell banner of their own. The alert-relevance sweep (every 10 minutes, after its closes) runs
 `server/services/lead-call-reminder.js`. A bell of those kinds that is still open one business hour after its latest
 event (the follow-up SLA's clock, 8 AM to 8 PM ET) sends ONE banner (`lead_call_reminder`, the Missed call sound) when
 nobody has reached the lead since. "Reached" uses the shared contact witnesses after that event: a person's text, a call
@@ -606,7 +606,7 @@ body and link, led by "Reminder: nobody has reached this lead yet.", `pushOnly` 
 The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in one statement fenced on the row being open
 and unchanged since it was read, so a row sends at most one banner. The stamp is not a ring, so the 3-day quiet fall-off
 still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
-still waits for a call") or by unsetting the gate. It sends nothing to a lead.
+still waits for a call"). It sends nothing to a lead.
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
