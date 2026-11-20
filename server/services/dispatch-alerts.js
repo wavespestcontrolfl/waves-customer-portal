@@ -42,6 +42,50 @@ const EVENT_RESOLVED = 'dispatch:alert_resolved';
 const ROOM = 'dispatch:admins';
 
 const VALID_SEVERITIES = ['info', 'warn', 'critical'];
+const ALERT_COLUMNS = ['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by'];
+
+function sameInstant(left, right) {
+  if (left == null || right == null) return false;
+  if (left === right) return true;
+  const leftTime = new Date(left).getTime();
+  const rightTime = new Date(right).getTime();
+  return Number.isFinite(leftTime) && leftTime === rightTime;
+}
+
+async function emitCreatedIfPersisted(row) {
+  const persisted = await db('dispatch_alerts')
+    .where({ id: row.id })
+    .whereNull('resolved_at')
+    .first(ALERT_COLUMNS);
+  if (persisted) emitAlert(persisted);
+}
+
+async function emitResolvedRowsIfPersisted(rows) {
+  if (!rows.length) return;
+  const expectedById = new Map(rows.map((row) => [String(row.id), row]));
+  const persistedRows = await db('dispatch_alerts')
+    .whereIn('id', rows.map((row) => row.id))
+    .whereNotNull('resolved_at')
+    .select(ALERT_COLUMNS);
+  persistedRows.forEach((persisted) => {
+    const expected = expectedById.get(String(persisted.id));
+    if (expected && sameInstant(persisted.resolved_at, expected.resolved_at)) emitResolved(persisted);
+  });
+}
+
+async function emitResolvedIfPersisted(row) {
+  await emitResolvedRowsIfPersisted([row]);
+}
+
+function deferVerifiedBroadcast(trx, effect) {
+  // Installed Knex fulfills executionPromise after rollback() without an
+  // Error, including ROLLBACK TO SAVEPOINT. Waiting for the whole transaction
+  // chain is therefore only an ordering fence; the committed-state read in
+  // `effect` is what proves that the requested create/resolve really landed.
+  require('../utils/trx-commit-promise').afterCommit(trx, () => Promise.resolve()
+    .then(effect)
+    .catch((err) => logger.error(`[dispatch-alerts] committed-state broadcast check failed: ${err.message}`)));
+}
 
 /**
  * Create a dispatch alert and broadcast it to dispatch:admins.
@@ -98,7 +142,7 @@ async function createAlert({ type, severity, techId, jobId, payload, trx } = {})
   if (trx) {
     const row = await doWrite(trx);
     if (trx.executionPromise) {
-      require('../utils/trx-commit-promise').afterCommit(trx, () => emitAlert(row));
+      deferVerifiedBroadcast(trx, () => emitCreatedIfPersisted(row));
     } else {
       logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
       emitAlert(row);
@@ -166,13 +210,8 @@ async function createAlertOnce({
   if (trx) {
     const result = await doWrite(trx);
     if (result.created && result.row) {
-      // Outermost commit, not a savepoint release (same rule resolveAlert follows,
-      // codex #3590 r14): a caller may run this insert in a savepoint.
-      const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
-      if (commitPromise) {
-        commitPromise.then(() => emitAlert(result.row)).catch(() => {
-          // Outer rollback. Suppress the emit so no phantom alert reaches dispatch.
-        });
+      if (trx.executionPromise) {
+        deferVerifiedBroadcast(trx, () => emitCreatedIfPersisted(result.row));
       } else {
         logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
         emitAlert(result.row);
@@ -288,7 +327,7 @@ async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
     const row = await doWrite(trx);
     if (!row) return null;
     if (trx.executionPromise) {
-      require('../utils/trx-commit-promise').afterCommit(trx, () => emitResolved(row));
+      deferVerifiedBroadcast(trx, () => emitResolvedIfPersisted(row));
     } else {
       logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
       emitResolved(row);
@@ -371,9 +410,7 @@ async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
   if (trx) {
     rows = await doWrite(trx);
     if (trx.executionPromise) {
-      trx.executionPromise.then(() => rows.forEach(emitResolved)).catch(() => {
-        // Outer rollback. Suppress emits for rows that did not commit.
-      });
+      deferVerifiedBroadcast(trx, () => emitResolvedRowsIfPersisted(rows));
     } else {
       logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting bulk resolves inline (test harness?)');
       rows.forEach(emitResolved);

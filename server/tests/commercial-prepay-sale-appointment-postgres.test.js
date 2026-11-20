@@ -212,7 +212,7 @@ postgres('commercial setup sale records preserve the appointment choice', () => 
     return row.id;
   }
 
-  async function bookedRoot({ customerId, estimateId = null }) {
+  async function bookedRoot({ customerId, estimateId = null, pendingSetupFee = 55 }) {
     const id = randomUUID();
     await trx('scheduled_services').insert({
       id,
@@ -225,7 +225,7 @@ postgres('commercial setup sale records preserve the appointment choice', () => 
       status: 'confirmed',
       source_estimate_id: estimateId,
       estimated_price: 165,
-      pending_setup_fee: 55,
+      pending_setup_fee: pendingSetupFee,
       is_recurring: true,
       recurring_pattern: 'quarterly',
     });
@@ -273,37 +273,25 @@ postgres('commercial setup sale records preserve the appointment choice', () => 
     const result = await convert(estimateId);
 
     const before = await saleFor(result.draftInvoiceId);
-    expect(before).toEqual(expect.objectContaining({
-      claim: expect.objectContaining({
-        invoice_id: result.draftInvoiceId,
-        scheduled_service_id: null,
-        estimate_id: estimateId,
-      }),
-      term: expect.objectContaining({
-        prepay_invoice_id: result.draftInvoiceId,
-        source_estimate_id: estimateId,
-      }),
-      invoice: expect.objectContaining({ id: result.draftInvoiceId, customer_id: customerId }),
-    }));
+    expect(before).toMatchObject({
+      estimateId, amount: 55,
+      term: { prepay_invoice_id: result.draftInvoiceId, source_estimate_id: estimateId },
+      invoice: { id: result.draftInvoiceId, customer_id: customerId },
+    });
 
-    // These are the same real claim-resolution and one-way anchor operations
-    // the admin booking writer runs after a later estimate-linked booking.
-    const rootId = await bookedRoot({ customerId, estimateId });
+    // These are the same claim lookup and one-way anchoring operations the
+    // booking writer runs when a customer comes back and selects a visit.
+    const rootId = await bookedRoot({ customerId, estimateId, pendingSetupFee: null });
     const plans = require('../services/secure-appointment-plans');
     const settled = await plans.settledSetupClaimForEstimate(trx, estimateId);
-    expect(settled).toMatchObject({ id: before.claim.id, invoice_id: result.draftInvoiceId });
-    await expect(plans.anchorSetupFeeClaim(trx, { claimId: settled.id, anchorId: rootId }))
-      .resolves.toBe(true);
+    expect(settled).toMatchObject({ invoice_id: result.draftInvoiceId, scheduled_service_id: null });
+    await plans.anchorSetupFeeClaim(trx, { claimId: settled.id, anchorId: rootId });
+    expect(await saleFor(result.draftInvoiceId)).toMatchObject({ estimateId, amount: 55 });
 
-    const after = await saleFor(result.draftInvoiceId);
-    expect(after).toEqual(expect.objectContaining({
-      claim: expect.objectContaining({
-        id: before.claim.id,
-        invoice_id: result.draftInvoiceId,
-        scheduled_service_id: rootId,
-      }),
-      invoice: expect.objectContaining({ id: result.draftInvoiceId }),
-    }));
+    await trx('invoices').where({ id: result.draftInvoiceId }).update({ status: 'refunded', paid_at: null });
+    const invoice = require('../services/invoice');
+    await invoice.restoreRetiredSetupFeeClaimForPrepay(result.draftInvoiceId, trx, { sourceEstimateId: estimateId });
+    expect(await saleFor(result.draftInvoiceId)).toMatchObject({ invoice: { id: result.draftInvoiceId }, estimateId, amount: 55 });
   });
 
   test('the real converter does not label a booked or explicitly adopted setup as unbooked', async () => {
@@ -347,7 +335,7 @@ postgres('commercial setup sale records preserve the appointment choice', () => 
     const unbooked = await postCustomer(unbookedCustomerId, 'annual-prepay-invoice', draftRouteBody());
     expect(unbooked.status).toBe(201);
     expect(await saleFor(unbooked.body.invoice.id)).toEqual(expect.objectContaining({
-      claim: expect.objectContaining({ invoice_id: unbooked.body.invoice.id }),
+      estimateId: null, amount: 99,
       term: expect.objectContaining({ prepay_invoice_id: unbooked.body.invoice.id }),
       invoice: expect.objectContaining({ id: unbooked.body.invoice.id, customer_id: unbookedCustomerId }),
     }));

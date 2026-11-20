@@ -117,7 +117,9 @@ async function seedOriginal({ status = 'paid', paymentIntentId = null, unbookedS
   });
   await require('../services/secure-appointment-plans').recordSetupFeeClaimForInvoice(trx, {
     invoiceId: ids.invoiceId, estimateId: ids.estimateId, amount: 55,
-    unbookedSaleCustomerId: unbookedSale ? ids.customerId : null,
+  });
+  if (unbookedSale) await require('../services/commercial-prepay-sale-record').recordUnbookedSale(trx, {
+    invoiceId: ids.invoiceId, estimateId: ids.estimateId, customerId: ids.customerId, setupAmount: 55,
   });
   return ids;
 }
@@ -193,6 +195,9 @@ postgres('commercial prepay Dispatch review observes only recovered receipt proo
   test('acknowledgement survives replay and an opposite episode supersedes it exactly once', async () => {
     const firstPi = `pi_returned_${randomUUID().slice(0, 12)}`;
     const ids = await seedOriginal({ status: 'refunded', paymentIntentId: firstPi });
+    // A later booking's refund can consume the claim and restore the setup
+    // to a visit. Both receipt episodes still belong to this original sale.
+    await trx('setup_fee_claims').where({ invoice_id: ids.invoiceId }).delete();
     await insertCardPayment(ids, {
       paymentIntentId: firstPi,
       status: 'refunded',
@@ -245,14 +250,14 @@ postgres('commercial prepay Dispatch review observes only recovered receipt proo
     });
     await insertCardPayment(ids, { paymentIntentId: pi, status: 'refunded', refundStatus: 'full', refundAmount: 55 });
     await require('../services/secure-appointment-plans').recordSetupFeeClaimForInvoice(trx, {
-      invoiceId: ids.invoiceId, estimateId: ids.estimateId, amount: 55, unbookedSaleCustomerId: ids.customerId,
+      invoiceId: ids.invoiceId, estimateId: ids.estimateId, amount: 55,
     });
     await expect(require('../services/commercial-prepay-dispatch-review').reconcileInvoice(trx, ids.invoiceId))
       .resolves.toBeNull();
     expect(await reviews(ids.invoiceId)).toHaveLength(0);
   });
 
-  test.each(['claimId', 'customerId'])('a sale record referring to another %s cannot open a card', async (field) => {
+  test.each(['estimateId', 'customerId'])('a sale record referring to another %s cannot open a card', async (field) => {
     const pi = `pi_wrong_sale_${randomUUID()}`;
     const ids = await seedOriginal({ status: 'refunded', paymentIntentId: pi });
     const audit = trx('audit_log').where({ action: 'commercial_setup_sold_without_visit', resource_id: ids.invoiceId });

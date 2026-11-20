@@ -382,14 +382,18 @@ jobs:
                   'tests/customer-geocode-review-visit-lock-order-postgres.test.js',
                   'tests/geocoder-service-locations-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, SERVICE_GEOCODE_TEST_DATABASE_URL: `${base}${name}` } });
+                // Dispatch receipt and sale writers exercise real money paths in this isolated database.
+                run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
+                  'tests/commercial-prepay-dispatch-review-postgres.test.js', 'tests/commercial-prepay-sale-appointment-postgres.test.js',
+                  'tests/commercial-prepay-stripe-reversal-postgres.test.js', 'tests/commercial-prepay-deposit-refund-proof-postgres.test.js',
+                  'tests/dispatch-alerts-transaction-broadcast-postgres.test.js'],
+                  { cwd: 'server', env: { ...process.env, DATABASE_URL: `${base}${name}`, WAVES_LOCAL_DEV: '1', WAVES_WORKTREE_ID: name.slice('waves_qa_'.length) } });
                 // Suites that accept only a private waves_qa_ database (sweep #7246 B1).
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
                   'tests/aeo-measurement-db.test.js', 'tests/completion-read-recovery-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, AEO_TEST_DATABASE_URL: `${base}${name}`, COMPLETION_READ_TEST_DATABASE_URL: `${base}${name}` } });
                 // Managed-QA suites: the local-dev interlock, with this database as the worktree's own.
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
-                  'tests/commercial-prepay-dispatch-review-postgres.test.js',
-                  'tests/commercial-prepay-sale-appointment-postgres.test.js',
                   'tests/callback-bridge-postgres.test.js', 'tests/staff-onboarding-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, DATABASE_URL: `${base}${name}`, WAVES_LOCAL_DEV: '1', WAVES_WORKTREE_ID: name.slice('waves_qa_'.length), CALLBACK_BRIDGE_POSTGRES: '1', WAVES_STAFF_DOCUMENT_TEST_DB: '1' } });
               } finally { await client.query(`DROP DATABASE "${name}" WITH (FORCE)`); }

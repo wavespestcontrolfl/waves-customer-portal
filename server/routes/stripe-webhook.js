@@ -3837,6 +3837,15 @@ async function handleChargeRefunded(charge) {
                 .where({ id: invId })
                 .whereIn('status', ['paid', 'processing'])
                 .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+              // Observe the returned-money state in THIS transaction. A
+              // refund.failed event can arrive immediately after Stripe emits
+              // charge.refunded; keeping the review beside the payment +
+              // invoice writes means the bounce waits on this transaction and
+              // can only record the later restored episode after this one is
+              // durable. Run once per owned allocation, not just for the
+              // arbitrary row returned from this combined branch.
+              await require('../services/commercial-prepay-dispatch-review')
+                .reconcileInvoice(trx, invId);
               const combinedHandCents = await handPartsPaidCents(trx, invId);
               if (combinedHandCents > 0) mixedRefunds.push({ invoiceId: invId, handCents: combinedHandCents });
             } else {
@@ -4108,6 +4117,12 @@ async function handleChargeRefunded(charge) {
           }).returning('*');
           result = marker;
         }
+        // Same money boundary as the refund stamp, invoice terminalization,
+        // returned credit, and (for a reordered webhook) durable marker. A
+        // refund.failed event must not restore the invoice before the returned
+        // episode has ever been observed.
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, invId);
       }
     }
     return result;
@@ -8301,8 +8316,21 @@ async function handleDisputeClosed(dispute) {
             }
             continue;
           }
-          const finalRowMeta = JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status });
           const invId = meta.invoice_id || meta.dispute_invoice_id || null;
+          // This branch is reached only after the Stripe charge proved the
+          // dispute covers the entire combined charge. Each real per-invoice
+          // row therefore lost its complete allocation. Persist that exact
+          // allocation proof for the receipt reader; payer-statement rows are
+          // intentionally outside commercial invoice review.
+          const disputeFullPayment = status === 'lost' && !!invId && !row.statement_id;
+          const finalRowMeta = JSON.stringify({
+            ...meta,
+            dispute_id: dispute.id,
+            dispute_final: status,
+            ...(status === 'lost' && invId && !row.statement_id
+              ? { dispute_full_payment: disputeFullPayment }
+              : {}),
+          });
           if (status === 'won' || status === 'warning_closed') {
             // PRE-SETTLEMENT marker won (codex r6 P0): the marker fenced the
             // settle (which recorded an orphan), so flipping it to 'paid'
@@ -8626,6 +8654,8 @@ async function handleDisputeClosed(dispute) {
             if (lostDisputeOwnsInvoice) {
               await require('../services/annual-prepay-renewals')
                 .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null });
+              await require('../services/commercial-prepay-dispatch-review')
+                .reconcileInvoice(db, invId);
             }
           }
         }
@@ -9009,11 +9039,26 @@ async function handleDisputeClosed(dispute) {
         const fresh = await trx('payments').where({ id: payment.id }).forUpdate().first();
         const freshMeta = parsePaymentMeta(fresh);
         const priorStatus = String(fresh?.status || '').toLowerCase();
+        const disputeInvoiceId = extraMeta?.dispute_invoice_id || freshMeta.dispute_invoice_id || null;
+        // For a normal invoice charge the payments row is the invoice-owned
+        // Stripe allocation. Equality (not >=) is the durable proof that this
+        // LOST dispute returned that whole allocation. Partial disputes stay
+        // explicit false. Payer statement money never enters this receipt
+        // proof, even if a legacy row happens to carry invoice-shaped metadata.
+        const allocationCents = Math.round((Number(fresh?.amount) || 0) * 100);
+        const disputeFullPayment = !fresh?.statement_id && !!disputeInvoiceId
+          && allocationCents > 0 && Number(dispute.amount) === allocationCents;
         await trx('payments').where({ id: payment.id }).update({
           status: 'disputed',
           ...(priorStatus === 'disputed' ? {} : { updated_at: new Date() }),
           failure_reason: `Dispute lost — $${amount} returned to customer`,
-          metadata: JSON.stringify({ ...freshMeta, dispute_id: dispute.id, dispute_final: status, ...(extraMeta || {}) }),
+          metadata: JSON.stringify({
+            ...freshMeta,
+            dispute_id: dispute.id,
+            dispute_final: status,
+            ...(extraMeta || {}),
+            ...(!fresh?.statement_id && disputeInvoiceId ? { dispute_full_payment: disputeFullPayment } : {}),
+          }),
         });
         return freshMeta;
       };
@@ -9061,6 +9106,10 @@ async function handleDisputeClosed(dispute) {
             && !lockedLostInvoice.stripe_payment_intent_id
             && String(lockedLostInvoice.status || '').toLowerCase() === 'overdue'
             && freshMeta.dispute_invoice_id === lostInvoice.id);
+          if (lostDisputeOwnedInvoice) {
+            await require('../services/commercial-prepay-dispatch-review')
+              .reconcileInvoice(trx, lostInvoice.id);
+          }
         });
       } else {
         await db.transaction((trx) => writeLostFinal(trx));

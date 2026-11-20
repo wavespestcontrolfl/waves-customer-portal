@@ -6336,10 +6336,14 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
           await plans.retireCoverageOnlySetupClaim(trx, {
             customerId: customer.id,
             coverageServiceType,
-            noFirstVisitPromised: !firstVisitDate && !firstVisitWindowStart,
             invoiceId: invoice.id,
             amount: setupFeeAmount,
           });
+          if (!firstVisitDate && !firstVisitWindowStart) {
+            await require('../services/commercial-prepay-sale-record').recordUnbookedCoverageSale(trx, {
+              invoiceId: invoice.id, customerId: customer.id, coverageServiceType, setupAmount: setupFeeAmount,
+            });
+          }
         }
       }
       appliedDepositCredit = Number(invoice?.applied_deposit_credit) || 0;

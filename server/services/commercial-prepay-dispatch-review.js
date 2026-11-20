@@ -44,13 +44,12 @@ async function updateReview(conn, context, state) {
 async function reconcileOriginalInvoice(conn, invoiceId) {
   const original = await require('./commercial-prepay-sale-record').findUnbookedSale(conn, invoiceId);
   if (!original) return null;
-  const { claim, term, invoice } = original;
+  const { invoice, estimateId, amount } = original;
   const state = await readReceiptState(conn, invoice);
   await updateReview(conn, {
     sourceInvoiceId: invoice.id,
     customerId: invoice.customer_id,
-    estimateId: claim.estimate_id || term.source_estimate_id || null,
-    amount: Number(claim.amount),
+    estimateId, amount,
   }, state);
   return state;
 }

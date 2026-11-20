@@ -387,10 +387,18 @@ async function readReceiptState(conn, invoice) {
   const money = payments.filter((payment) => payment.status === 'paid' || fullRefund(payment));
   const valued = money.map((payment) => ({ payment, amounts: paymentAmounts(payment) }));
   const depositCents = invoiceDepositCreditCents(invoice);
-  if (depositCents > 0
-    && !(await require('./estimate-deposits').invoiceDepositCreditIsBacked(
-      invoice, conn, { exactSourceBinding: true },
-    ))) return 'unconfirmed';
+  const deposits = require('./estimate-deposits');
+  const depositBacked = depositCents > 0
+    ? await deposits.invoiceDepositCreditIsBacked(invoice, conn, { exactSourceBinding: true })
+    : true;
+  const depositReturn = depositCents > 0
+    ? await deposits.readInvoiceDepositCreditReturn(invoice, conn)
+    : null;
+  // A live receipt needs the exact current allocation. A refunded receipt may
+  // instead use the immutable before-image written by the same transaction
+  // that made the deposit reusable; an unbound partial allocation supplies
+  // neither and stays unknown.
+  if (depositCents > 0 && !depositBacked && !depositReturn) return 'unconfirmed';
   const requiredCents = requiredInvoicePrincipalCents(invoice) + depositCents;
   const credit = await committedCreditEvidence(conn, invoice, requiredCents);
   if (valued.some(({ amounts }) => amounts == null) || credit == null) return 'unconfirmed';
@@ -398,19 +406,38 @@ async function readReceiptState(conn, invoice) {
   const paidCents = paid.reduce((sum, row) => sum + row.amounts.netBaseCents, 0);
   const collected = require('./annual-prepay-renewals')._private.invoiceTermStatus(invoice) === 'active';
   if (collected && requiredCents > 0
+    && depositBacked
     && paidCents + credit.committedCents + depositCents === requiredCents) return 'active';
-  if (!paid.length && credit.prepaidReversed) return 'cancelled';
+  if (depositCents === 0 && !paid.length && credit.prepaidReversed) return 'cancelled';
   const refundedBaseCents = valued.filter(({ payment }) => fullRefund(payment))
     .reduce((sum, row) => sum + row.amounts.baseCents, 0);
   if (!refundedBaseCents || paid.length) return 'unconfirmed';
   const missing = requiredCents - refundedBaseCents;
-  if (missing === 0) return 'cancelled';
-  if (missing > 0 && invoice.status === 'refunded') {
+  if (missing < 0) return 'unconfirmed';
+  if (depositCents === 0 && missing === 0) return 'cancelled';
+  if (invoice.status === 'refunded') {
     const providerTimes = money.filter(fullRefund).map((row) => millis(row.created_at));
     if (providerTimes.every((at) => at != null)) {
       const providerStartedAt = Math.min(...providerTimes);
       const providerCompletedAt = Math.max(...providerTimes);
-      const matching = credit.refundEpisodes.filter((episode) => episode.cents === missing
+      // payments.updated_at is the refund ledger timestamp written by every
+      // full-refund path; created_at is the original collection time. The
+      // immutable deposit return must belong to this refund episode, not just
+      // post-date the charge it may have been released against previously.
+      const refundTimes = money.filter(fullRefund)
+        .map((row) => millis(row.updated_at) ?? millis(row.created_at));
+      if (refundTimes.some((at) => at == null)) return 'unconfirmed';
+      const refundCompletedAt = Math.max(...refundTimes);
+      // The deposit return must cover this invoice's whole deposit share and
+      // occur no earlier than this provider-refund episode. An older release
+      // (or one attached to another invoice) cannot complete a later refund.
+      const returnedDepositCents = depositReturn?.returnedCents || 0;
+      if (depositCents > 0 && (depositBacked || returnedDepositCents !== depositCents
+        || depositReturn.returnedAt < refundCompletedAt)) return 'unconfirmed';
+      const creditMissing = missing - returnedDepositCents;
+      if (creditMissing === 0) return 'cancelled';
+      if (creditMissing < 0) return 'unconfirmed';
+      const matching = credit.refundEpisodes.filter((episode) => episode.cents === creditMissing
         && episode.appliedAt <= providerStartedAt && episode.returnedAt >= providerCompletedAt);
       if (matching.length === 1) return 'cancelled';
     }
