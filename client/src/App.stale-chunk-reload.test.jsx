@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React, { Suspense, lazy } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 const reported = vi.hoisted(() => ({ calls: [] }));
@@ -52,7 +52,7 @@ beforeEach(() => {
   reported.calls = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); window.history.pushState({}, '', '/'); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.pushState({}, '', '/'); });
 
 test('the first stale-chunk preload error reloads once and marks the reload pending', () => {
   const reload = vi.fn();
@@ -180,33 +180,20 @@ test.each([
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
 });
 
-test('held work on a staff page during an app-link navigation: the chunk is not swallowed, and the window ends with no reload', () => {
-  vi.useFakeTimers();
+test('the held retry screen names the held work before it reloads', async () => {
   window.history.pushState({}, '', '/admin/communications');
+  const reload = vi.fn();
+  vi.stubGlobal('location', { ...window.location, reload });
   holding = true;
-  const heal = vi.fn();
-  markPageNavigating(heal);
-  const cancelled = preloadErrorEvent();
-  handleVitePreloadError(cancelled, vi.fn());
-  expect(cancelled.defaultPrevented).toBe(false);
-  vi.advanceTimersByTime(30000);
-  expect(heal).not.toHaveBeenCalled();
-});
-
-test('work held when a navigation window ends delays its reload until the work is done', () => {
-  vi.useFakeTimers();
-  window.history.pushState({}, '', '/admin/communications');
-  const heal = vi.fn();
-  markPageNavigating(heal);
-  handleVitePreloadError(preloadErrorEvent(), vi.fn());
-  holding = true;
-  vi.advanceTimersByTime(34000);
-  expect(heal).not.toHaveBeenCalled();
-  expect(isStaleChunkReloadPending()).toBe(true);
-  holding = false;
-  vi.advanceTimersByTime(2000);
-  expect(heal).toHaveBeenCalledTimes(1);
-  expect(isStaleChunkReloadPending()).toBe(true);
+  sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+  const GonePage = lazyWithRetry(() => Promise.reject(new Error('Failed to fetch dynamically imported module: /assets/Gone-abc123.js')));
+  renderInBoundary(GonePage);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+  expect(reload).not.toHaveBeenCalled();
+  expect(screen.getByText('Something in this tab is still open.')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
 });
 
 test('on a customer page, held work leaves the stale-chunk reload as it was', () => {

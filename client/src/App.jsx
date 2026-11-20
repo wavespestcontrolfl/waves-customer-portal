@@ -2,7 +2,7 @@ import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import { CHUNK_RELOAD_FLAG, isStaleChunkReloadPending, markStaleChunkReloadPending } from './lib/staleChunkReload';
-import { PortalUpdateBar, PortalUpdateGate } from './components/PortalUpdate';
+import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload } from './components/PortalUpdate';
 import { staffReloadBlocker } from './lib/portalReload';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
@@ -292,6 +292,8 @@ function showReloadToast() {
 // a friendly retry beats the blank screen the rethrow used to produce.
 function ChunkLoadFallback() {
   const operatorPath = /^\/(admin|tech)(\/|$)/.test(window.location.pathname);
+  // Held work can be why this staff tab kept its old code: Retry names it first.
+  const { named, heldText, tryReload } = useHoldAwareReload(null, clearChunkReloadFlag);
   if (!operatorPath) {
     return (
       <CustomerFailureScreen
@@ -314,21 +316,25 @@ function ChunkLoadFallback() {
           Couldn&rsquo;t load this page
         </div>
         <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
-          Check your connection and try again.
+          {named ? heldText : 'Check your connection and try again.'}
         </div>
         <button
-          onClick={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
+          onClick={tryReload}
           style={{
             minHeight: 42, padding: '0 18px', background: COLORS.glassNavy, color: '#fff',
             border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700,
             fontFamily: FONTS.heading, cursor: 'pointer',
           }}
         >
-          Retry
+          {named ? 'Reload anyway' : 'Retry'}
         </button>
       </div>
     </div>
   );
+}
+
+function clearChunkReloadFlag() {
+  sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
 }
 
 // Route-level Suspense placeholder. One element for every lazy page instead
