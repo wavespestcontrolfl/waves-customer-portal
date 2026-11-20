@@ -1562,4 +1562,17 @@ describe('monthly cap policy (owner 2026-11-20 D4)', () => {
     }]);
     expect(csv).toContain('"over monthly cap - not paid"');
   });
+
+  const storedRow = (value) => () => ({ where: () => ({ first: async () => (value === undefined ? undefined : { value }) }) });
+
+  test('getPolicyStrict: a missing row or a legacy object has no cap; a garbled row or a read error throws', async () => {
+    expect((await ReviewIncentives.getPolicyStrict(storedRow(undefined))).monthlyCapCount).toBeNull();
+    expect((await ReviewIncentives.getPolicyStrict(storedRow('{"amountCents":500}'))).monthlyCapCount).toBeNull();
+    expect((await ReviewIncentives.getPolicyStrict(storedRow({ monthlyCapCount: 15 }))).monthlyCapCount).toBe(15);
+    for (const bad of ['{nope', '[]', '"x"', '', 'null']) {
+      await expect(ReviewIncentives.getPolicyStrict(storedRow(bad))).rejects.toMatchObject({ code: 'review_policy_malformed' });
+    }
+    const failing = () => ({ where: () => ({ first: async () => { throw new Error('connection lost'); } }) });
+    await expect(ReviewIncentives.getPolicyStrict(failing)).rejects.toThrow('connection lost');
+  });
 });

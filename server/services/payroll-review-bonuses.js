@@ -24,7 +24,7 @@ const { STAFF_TIME_ZONE, staffWeekStartForWorkDate } = require('../utils/staff-t
 // Only the sources the Reviews page shows and pays ('google_review'); legacy review_request
 // payouts stay out of payroll as they stay out of the Reviews page's mark-paid.
 const {
-  PAYOUT_ELIGIBLE_SOURCES, getPolicyStrict, overCapPayoutIds, lockTechnicianCap,
+  PAYOUT_ELIGIBLE_SOURCES, getPolicyStrict, overCapPayoutIds, lockPayoutRows, lockTechnicianCap,
 } = require('./review-incentives');
 
 const SOURCE_TYPE = 'review_incentive_payout';
@@ -47,18 +47,19 @@ async function readOpenLines(trx, lock) {
   return query;
 }
 
-/** The payouts the open lines point at, keyed by id, locked FOR UPDATE when `lock` is set. */
-async function readLinePayouts(trx, lines, lock) {
+const lineIds = (lines) => lines.map((line) => line.source_id).filter((id) => UUID_RE.test(id));
+
+/** The payouts the open lines point at, keyed by id. Lock them first (lockPayoutRows) when it matters. */
+async function readLinePayouts(trx, lines) {
   if (!lines.length) return new Map();
   const query = trx('review_incentive_payouts as p')
-    .whereIn('p.id', lines.map((line) => line.source_id).filter((id) => UUID_RE.test(id)))
+    .whereIn('p.id', lineIds(lines))
     .select([...PAYOUT_COLUMNS, earnedOnSql(trx)]);
-  if (lock) query.forUpdate('p');
   return new Map((await query).map((row) => [row.id, row]));
 }
 
-/** Every earned payout of a W-2 technician up to weekEnd, locked FOR UPDATE when `lock` is set. */
-async function readCandidates(trx, weekEnd, lock) {
+/** Every earned payout of a W-2 technician up to weekEnd. Lock them first (lockPayoutRows) when it matters. */
+async function readCandidates(trx, weekEnd) {
   const query = trx('review_incentive_payouts as p')
     .join('technicians as t', 't.id', 'p.technician_id')
     .where('p.status', 'earned')
@@ -68,7 +69,6 @@ async function readCandidates(trx, weekEnd, lock) {
     .whereRaw('(p.earned_at AT TIME ZONE ?)::date <= ?::date', [STAFF_TIME_ZONE, weekEnd])
     .orderBy([{ column: 'p.earned_at' }, { column: 'p.id' }])
     .select([...PAYOUT_COLUMNS, earnedOnSql(trx)]);
-  if (lock) query.forUpdate('p');
   return query;
 }
 
@@ -143,11 +143,22 @@ async function addMissingLines(trx, candidates, overCap) {
 async function syncReviewBonusLines(trx, { weekEnd, lock = false, actorId = null } = {}) {
   if (!payLinesOn()) return { removed: 0, added: 0 };
   const importing = importOn();
-  // A failed policy read stops the sync: it must never read as "no cap" (owner 2026-11-20 D4).
-  const { monthlyCapCount: cap } = await getPolicyStrict(trx);
   const lines = await readOpenLines(trx, lock);
-  const linePayouts = await readLinePayouts(trx, lines, lock);
-  const candidates = importing ? await readCandidates(trx, weekEnd, lock) : [];
+  // One lock order on every path (owner 2026-11-20 D4): the full id set (the lines' payouts and the
+  // candidates), locked in ONE statement ordered by id, before any technician lock. A candidate that
+  // lands after this read is not in the snapshot and waits for the next sync.
+  let snapshotIds = null;
+  if (lock) {
+    const seen = importing ? await readCandidates(trx, weekEnd) : [];
+    snapshotIds = new Set((await lockPayoutRows(trx, [...lineIds(lines), ...seen.map((payout) => payout.id)])).map((row) => row.id));
+  }
+  const linePayouts = await readLinePayouts(trx, lines);
+  const candidates = importing
+    ? (await readCandidates(trx, weekEnd)).filter((payout) => !snapshotIds || snapshotIds.has(payout.id))
+    : [];
+  // The cap policy is read only when this sync can add lines. A failed read stops the sync: it must
+  // never read as "no cap" (owner 2026-11-20 D4). With the import off, payroll never reads it.
+  const cap = importing ? (await getPolicyStrict(trx)).monthlyCapCount : null;
   const overCap = importing ? await decideOverCap(trx, cap, { lines, linePayouts, candidates }) : new Set();
   const removedIds = await dropStaleLines(trx, { lines, payouts: linePayouts, dropAll: !importing, overCap });
   const addedIds = importing ? await addMissingLines(trx, candidates, overCap) : [];
@@ -169,7 +180,7 @@ async function syncReviewBonusLines(trx, { weekEnd, lock = false, actorId = null
  * rows, then each technician's cap lock, and refuse the finalize if one of the payouts is over the cap.
  */
 async function guardMonthlyCap(trx, ids, technicianIds, changedError) {
-  await trx('review_incentive_payouts').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+  await lockPayoutRows(trx, ids);
   const { monthlyCapCount: cap } = await getPolicyStrict(trx);
   if (!cap) return;
   await lockTechnicianCap(trx, technicianIds);

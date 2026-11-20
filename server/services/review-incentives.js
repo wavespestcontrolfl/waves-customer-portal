@@ -167,12 +167,37 @@ async function getPolicy(conn = db) {
 }
 
 /**
- * The policy for a payment decision. Unlike getPolicy it THROWS on a database error: a failed read
- * must stop the payment, never read as "no cap". Only a confirmed missing setting row is the default.
+ * The policy for a payment decision. Unlike getPolicy it THROWS on a database error and on a stored
+ * row that is not a decodable policy object (malformed JSON, an array, a scalar): a failed or garbled
+ * read must stop the payment, never read as "no cap". Only a missing row, or a valid legacy object
+ * without monthlyCapCount, is uncapped.
  */
 async function getPolicyStrict(conn = db) {
   const row = await conn('system_settings').where({ key: POLICY_KEY }).first();
-  return parsePolicy(row?.value);
+  if (!row) return { ...DEFAULT_POLICY };
+  let decoded = row.value;
+  try {
+    if (typeof decoded === 'string') decoded = JSON.parse(decoded);
+  } catch {
+    decoded = null;
+  }
+  if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
+    throw operationalError('The review bonus policy is stored in a form that cannot be read', 500, 'review_policy_malformed');
+  }
+  return parsePolicy(decoded);
+}
+
+/**
+ * Locks the given payout rows FOR UPDATE in ONE statement ordered by id, and returns them. Every path
+ * that pays a review bonus takes its full id set through here before any technician lock, so two paths
+ * can never hold rows the other needs in a different order (owner 2026-11-20 D4).
+ */
+async function lockPayoutRows(conn, ids) {
+  const unique = [...new Set(ids)];
+  if (!unique.length) return [];
+  return conn('review_incentive_payouts')
+    .whereIn('id', unique).orderBy('id').forUpdate()
+    .select('id', 'technician_id', 'source', 'status');
 }
 
 /**
@@ -189,7 +214,14 @@ async function lockTechnicianCap(conn, technicianIds) {
 }
 
 async function savePolicy(policyPatch = {}, conn = db) {
-  const current = await getPolicy(conn);
+  // A failed read must not overwrite a stored cap with the defaults; a garbled row is replaced.
+  let current;
+  try {
+    current = await getPolicyStrict(conn);
+  } catch (err) {
+    if (err.code !== 'review_policy_malformed') throw err;
+    current = { ...DEFAULT_POLICY };
+  }
   const policy = parsePolicy({ ...current, ...policyPatch });
   const now = new Date();
   await conn('system_settings')
@@ -1619,7 +1651,8 @@ async function getDashboard(options = {}) {
     ? asDate(options.periodStart)
     : new Date(Date.now() - days * DAY_MS);
   const periodEnd = options.periodEnd ? asDate(options.periodEnd) : new Date();
-  const policy = options.policy || await getPolicy(conn);
+  // Strict: a failed settings read must never show over-cap bonuses as pending (owner 2026-11-20 D4).
+  const policy = options.policy || await getPolicyStrict(conn);
   const startsAt = programStart(policy);
   const effectivePeriodStart = startsAt && startsAt > periodStart ? startsAt : periodStart;
 
@@ -1768,9 +1801,8 @@ async function markPaid(ids = [], options = {}) {
   // One transaction (owner 2026-11-20 D4): lock the rows, then each technician's cap lock, rank, and
   // update only the rows that rank inside the cap under the technician they were ranked under.
   return conn.transaction(async (trx) => {
-    const rows = await trx('review_incentive_payouts')
-      .whereIn('id', cleanIds).where('source', 'google_review').whereNot('status', 'paid')
-      .orderBy('id').forUpdate().select('id', 'technician_id');
+    const rows = (await lockPayoutRows(trx, cleanIds))
+      .filter((row) => row.source === 'google_review' && row.status !== 'paid');
     if (!rows.length) return { updated: 0, skippedOverCap: 0 };
     const technicianIds = [...new Set(rows.map((row) => row.technician_id).filter(Boolean))];
     await lockTechnicianCap(trx, technicianIds);
@@ -1844,6 +1876,7 @@ module.exports = {
   markPaid,
   overCapPayoutIds,
   getPolicyStrict,
+  lockPayoutRows,
   lockTechnicianCap,
   toCsv,
   __private: {

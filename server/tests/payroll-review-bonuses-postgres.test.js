@@ -33,7 +33,9 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { markPaid, savePolicy, getDashboard, overCapPayoutIds } = require('../services/review-incentives');
+const {
+  markPaid, savePolicy, getDashboard, overCapPayoutIds, getPolicyStrict, lockPayoutRows,
+} = require('../services/review-incentives');
 const { markPayoutsPaid } = require('../services/payroll-review-bonuses');
 
 jest.setTimeout(60000);
@@ -490,6 +492,61 @@ postgres('payroll review bonus import', () => {
         .syncReviewBonusLines(inner, { weekEnd: '2026-09-20', lock: true }))).rejects.toThrow(/system_settings/);
       await trx.raw('alter table system_settings_unreadable rename to system_settings');
       expect(await importedLines()).toHaveLength(0);
+    });
+
+    const POLICY_ROW = { key: 'review_incentives.policy', category: 'reviews', description: 'Sample policy' };
+    const storePolicy = async (value) => {
+      await trx('system_settings').where({ key: POLICY_ROW.key }).del();
+      await trx('system_settings').insert({ ...POLICY_ROW, value });
+    };
+
+    it('a stored policy that cannot be decoded stops the payment; a missing row or a legacy object does not', async () => {
+      const id = await readyTech('Sample Alpha');
+      const a = await payout(id, '2026-09-15T15:00:00Z');
+      const b = await payout(id, '2026-09-16T15:00:00Z');
+      for (const bad of ['{not json', '[1,2]', '"15"', '']) {
+        await storePolicy(bad);
+        await expect(getPolicyStrict(trx)).rejects.toMatchObject({ code: 'review_policy_malformed' });
+        await expect(markPaid([a], { conn: trx, paidBy: ADMIN_ID })).rejects.toMatchObject({ code: 'review_policy_malformed' });
+        expect((await payoutRow(a)).status).toBe('earned');
+      }
+      await trx('system_settings').where({ key: POLICY_ROW.key }).del();
+      expect((await getPolicyStrict(trx)).monthlyCapCount).toBeNull();
+      await storePolicy(JSON.stringify({ enabled: true, amountCents: 500 }));
+      expect((await getPolicyStrict(trx)).monthlyCapCount).toBeNull();
+      expect(await markPaid([a], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 1, skippedOverCap: 0 });
+      // savePolicy replaces a garbled row instead of failing, and keeps a stored cap when it can read it.
+      await storePolicy('{not json');
+      expect((await savePolicy({ monthlyCapCount: 1 }, trx)).monthlyCapCount).toBe(1);
+      expect(await markPaid([b], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
+    });
+
+    it('the dashboard and the CSV export fail when the policy cannot be read', async () => {
+      await readyTech('Sample Alpha');
+      await trx.raw('alter table system_settings rename to system_settings_unreadable');
+      await expect(trx.transaction((inner) => getDashboard({ conn: inner, days: 30 }))).rejects.toThrow(/system_settings/);
+      await trx.raw('alter table system_settings_unreadable rename to system_settings');
+    });
+
+    it('with the import off, payroll never reads the review policy and still drops stale lines', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      const bonus = await payout(id, '2026-09-16T15:00:00Z');
+      const created = await draft(W1);
+      expect(await lineIds()).toEqual([bonus]);
+      delete process.env.GATE_PAYROLL_REVIEW_BONUS_IMPORT;
+      await trx.raw('alter table system_settings rename to system_settings_unreadable');
+      const recomputed = await recompute(created.body.run.id);
+      await trx.raw('alter table system_settings_unreadable rename to system_settings');
+      expect(recomputed.status).toBe(200);
+      expect(await lineIds()).toEqual([]);
+    });
+
+    it('lockPayoutRows locks the whole id set in one statement, ordered by id', async () => {
+      const id = await readyTech('Sample Alpha');
+      const ids = [await payout(id, '2026-09-15T15:00:00Z'), await payout(id, '2026-09-16T15:00:00Z'), await payout(id, '2026-09-17T15:00:00Z')];
+      const locked = await lockPayoutRows(trx, [...ids, ids[0]]);
+      expect(locked.map((row) => row.id)).toEqual([...ids].sort());
     });
 
     it('the dashboard marks over-cap rows, leaves them out of pending, and reports the cap', async () => {
