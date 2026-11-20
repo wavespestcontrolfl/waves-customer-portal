@@ -49,11 +49,12 @@ class FakeResponse {
     // A fetched response keeps its URL, through clone() and Cache Storage; one
     // the worker builds has none. Only a test passes `url`, for the first kind.
     this.url = init.url || '';
+    this.redirected = Boolean(init.redirected);
   }
   clone() {
     // The real Response throws once its body is locked by a consumer.
     if (this.bodyUsed) throw new TypeError('Response body is already used');
-    return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate, url: this.url });
+    return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate, url: this.url, redirected: this.redirected });
   }
   async text() { if (this.gate) await this.gate; this.bodyUsed = true; return String(this.body); }
   async json() { return JSON.parse(await this.text()); }
@@ -392,10 +393,7 @@ describe('service-worker private link pages', () => {
   // request keeps its URL), and no offline shell served in its place (that
   // shell carries another page's headers, without no-referrer).
   const token = 'a'.repeat(64);
-  const offerPaths = [
-    `/careers/offer/${token}`, `/Careers/Offer/${token}/`, `/careers/%6Fffer/${token}`, `/careers/offer/${token}//`,
-    `/login?next=%2Fcareers%2Foffer%2F${token}`, `/welcome#/careers/offer/${token}`,
-  ];
+  const offerPaths = [`/careers/offer/${token}`, `/Careers/Offer/${token}/`, `/careers/%6Fffer/${token}`, `/careers/offer/${token}//`];
 
   it('leaves a job-offer URL to the browser in every request mode, online and offline', async () => {
     const cache = fakeCache();
@@ -472,34 +470,48 @@ describe('service-worker private link pages', () => {
     expect([...worker.cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v13-private-links', 'waves-customer-v14-next']);
   });
 
-  // A stored response keeps the URL it came from, and a followed redirect can
-  // end on an offer link under any other key. Every write checks the final URL.
-  it('stores no response whose final URL is a job-offer link or an API call, whatever URL asked for it', async () => {
+  // A stored response keeps the URL it came from and a stored request keeps
+  // its own, so the link could sit in a query, a fragment or a redirect's
+  // target. The worker stores no such URL: every entry is rebuilt without its
+  // URL, under a key with no query or fragment, and a redirected response is
+  // served but not stored.
+  it('stores no URL that could carry the link: no query or fragment key, no response URL, no redirected response', async () => {
     const cache = fakeCache();
     const worker = loadWorker(cache);
-    const privateUrls = [
-      `https://portal.test/careers/offer/${token}`, `https://portal.test/Careers/Offer/${token}/`,
-      `https://portal.test/careers/%6Fffer/${token}`, `https://portal.test/API/public/careers/offer/${token}`,
-      `https://www.portal.test/careers/offer/${token}`, `https://portal.test/login?next=%2FCareers%2Foffer%2F${token}`,
-    ];
-    for (const [i, finalUrl] of privateUrls.entries()) {
-      worker.setFetch(async () => new FakeResponse('body', { url: finalUrl }));
-      const { response } = await worker.dispatchFetch(`/go/${i}`, { mode: 'cors' });
-      expect(response.url).toBe(finalUrl); // still served to the page
-      const { response: asset } = await worker.dispatchFetch(`/assets/chunk-${i}.js`, { mode: 'cors' });
-      expect(asset.url).toBe(finalUrl);
+    const nested = [`/careers/./offer/${token}`, `/careers/x/../offer/${token}`, `/Careers/Offer/${token}`];
+    for (const [i, inner] of nested.entries()) {
+      const path = `/login?next=${encodeURIComponent(inner)}`;
       worker.setFetch(async (request) => (String(request.url).includes('/assets/')
         ? fakeResponse('asset')
-        : new FakeResponse(shellHtml(['/assets/index-AAA.js']), { url: finalUrl })));
-      await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+        : new FakeResponse(shellHtml([`/assets/index-${i}.js`]), { url: `https://portal.test${path}` })));
+      const { response } = await worker.dispatchFetch(path, { mode: 'navigate' });
+      expect(response.url).toBe(`https://portal.test${path}`); // the page still loads
     }
-    await tick();
-    expect([...cache.store.keys()]).toEqual([]);
-    // Any other final URL is stored as before.
+    expect(await (await cache.match('/')).text()).toContain('index-2');
+    // A shell whose asset answers with a redirect is not stored either.
+    worker.setFetch(async (request) => (String(request.url).includes('/assets/')
+      ? new FakeResponse('asset', { url: `https://portal.test/careers/offer/${token}`, redirected: true })
+      : fakeResponse(shellHtml(['/assets/index-9.js']))));
+    await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+    expect(await (await cache.match('/')).text()).toContain('index-2');
+    for (const inner of nested) {
+      for (const path of [`/go?next=${inner}`, `/assets/chunk.js?next=${inner}`, `/manifest.json#${inner}`]) {
+        const { response } = await worker.dispatchFetch(path, { mode: 'cors' });
+        expect(response).toBeUndefined(); // no respondWith: the browser fetches it
+      }
+    }
+    const offerUrl = `https://portal.test/careers/offer/${token}`;
+    worker.setFetch(async () => new FakeResponse('body', { url: offerUrl, redirected: true }));
+    for (const path of ['/go/1', '/assets/chunk-1.js']) {
+      const { response } = await worker.dispatchFetch(path, { mode: 'cors' });
+      expect(response.url).toBe(offerUrl); // served, not stored
+    }
     worker.setFetch(async () => new FakeResponse('{}', { url: 'https://portal.test/manifest.json' }));
     await worker.dispatchFetch('/manifest.json', { mode: 'cors' });
     await tick();
-    expect([...cache.store.keys()]).toEqual(['https://portal.test/manifest.json']);
+    const keys = [...cache.store.keys()].map(url => url.replace('https://portal.test', ''));
+    expect(keys.filter(key => !/^\/assets\/index-\d\.js$/.test(key)).sort()).toEqual(['/', '/manifest.json']);
+    expect([...cache.store.values()].map(response => response.url).filter(Boolean)).toEqual([]);
   });
 
   it('still serves and refreshes the shell for every other page', async () => {

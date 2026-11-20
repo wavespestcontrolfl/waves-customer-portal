@@ -98,6 +98,25 @@ describe('redactOfferLinks', () => {
       .toBe(`Here it is: ${portalUrl(`/careers/offer/${TOKEN}`)} thanks`);
   });
 
+  // The token is the credential wherever it appears: a copy in the link's own query or fragment, or anywhere else in
+  // the text, is hidden too. An unrelated 64-hex value stays.
+  test('hides every other copy of a token it found on an offer path, and only those', () => {
+    const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
+    const ref = 'f'.repeat(64);
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${TOKEN}`;
+    for (const tail of [`?ref=${TOKEN}`, `#${TOKEN}`, `?ref=${TOKEN.toUpperCase()}&x=${ref}`, `?r=%63%64${TOKEN.slice(2)}`]) {
+      const text = `Your offer: ${link}${tail} thanks`;
+      expect(redactOfferLinks(text)).toBe(`Your offer: ${HIDDEN_LINK} thanks`);
+      expect(offerLinkTokens(text)).toEqual([TOKEN]);
+    }
+    const text = `Your offer: ${link} (code ${TOKEN}, ref ${ref}) <a href="https://x.test/?t=${TOKEN}">x</a>`;
+    const stored = redactOfferLinks(text);
+    expect(stored).toBe(`Your offer: https://portal.wavespestcontrol.com/careers/offer/${OFFER_LINK_HIDDEN} (code ${OFFER_LINK_HIDDEN} ref ${ref}) <a href="${OFFER_LINK_HIDDEN}">x</a>`);
+    expect(offerLinkTokens(text)).toEqual([TOKEN]);
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: offerLinkTokens(text) }, stored))
+      .toBe(`Your offer: ${link} (code ${OFFER_LINK_HIDDEN} ref ${ref}) <a href="${OFFER_LINK_HIDDEN}">x</a>`);
+  });
+
   test('pins only the token on the offer path: a 64-hex query value beside it stays and is not pinned', () => {
     const ref = 'f'.repeat(64);
     const sent = `https://portal.wavespestcontrol.com/careers/offer/${TOKEN}?ref=${ref}`;

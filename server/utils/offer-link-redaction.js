@@ -22,6 +22,10 @@
  *   /careers/offer/<64-hex token> (a repeated slash read as one) is replaced as a whole by the standard link with the
  *   token hidden, once for each such token in the order they appear, so the replay can rebuild each one as the link
  *   the page opens. Only those tokens are pinned: another 64-hex value (a query value) is not a link.
+ * - Any other copy of a token found on an offer path anywhere in the text: the token is the credential wherever it
+ *   appears. A unit whose reader's text still holds one after the steps above (a copy in the link's own query or
+ *   fragment, or anywhere else) is replaced as a whole: by the standard hidden link for each offer-path token it holds,
+ *   or by the bare marker when it holds none. The bare marker is not a link, so the replay leaves it as it is.
  * An /careers/interview/ link is not on that path and is left alone. Out of reach of any pattern: a token a person has to
  * put back together from pieces (split by spaces, or by a line break in plain text); no browser opens that as a link.
  */
@@ -111,8 +115,15 @@ function offerTokensOf(unit) {
   return [...found].sort((a, b) => at(a) - at(b));
 }
 
-// One pass, unit by unit, so each hidden link and its token keep the same order for redaction and for pinning.
+// First the tokens on an offer path anywhere in the text. Then one pass, unit by unit, so each hidden link and its token
+// keep the same order for redaction and for pinning.
 function scan(text) {
+  const linked = new Set();
+  for (const unit of text.match(UNIT_RE) || []) {
+    for (const match of unit.matchAll(SENT_LINK_RE)) linked.add(match[2].toLowerCase());
+    for (const token of offerTokensOf(unit)) linked.add(token);
+  }
+  if (!linked.size) return { redacted: text, tokens: [] };
   const tokens = [];
   const redacted = text.replace(UNIT_RE, (unit) => {
     const sent = [];
@@ -120,15 +131,16 @@ function scan(text) {
       sent.push(token.toLowerCase());
       return `${path}${HIDDEN}`;
     });
-    if (!offerTokensOf(kept).length) {
+    const seen = readable(kept);
+    if (!offerTokensOf(kept).length && ![...linked].some((token) => seen.includes(token))) {
       tokens.push(...sent);
       return kept;
     }
     const found = offerTokensOf(unit);
     tokens.push(...found);
-    const links = found.map(() => portalUrl(`/careers/offer/${HIDDEN}`)).join(' ');
+    const hidden = found.length ? found.map(() => portalUrl(`/careers/offer/${HIDDEN}`)).join(' ') : HIDDEN;
     const quoted = /^=\s*(["'])/.exec(unit);
-    return quoted ? `${quoted[0]}${links}${quoted[1]}` : links;
+    return quoted ? `${quoted[0]}${hidden}${quoted[1]}` : hidden;
   });
   return { redacted, tokens };
 }

@@ -353,7 +353,6 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   // is never superseded: the worker needs a shell.
   if (await isSuperseded()) throw new Error('Shell refresh superseded by a newer navigation');
   if (!shellResponse.ok) throw new Error(`Shell request failed (${shellResponse.status})`);
-  if (!storable(shellResponse)) throw new Error('Shell not stored: its URL is an API call or a job-offer link');
 
   const html = await shellResponse.clone().text();
   const assets = shellAssetUrls(html);
@@ -366,7 +365,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   const assetResponses = await Promise.all(assets.map(async assetUrl => {
     const response = await fetch(new Request(assetUrl, { cache: 'reload' }));
     if (!response.ok) throw new Error(`Shell asset failed (${response.status}): ${assetUrl}`);
-    if (!storable(response)) throw new Error(`Shell asset not stored: it ended on an API call or a job-offer link: ${assetUrl}`);
+    if (response.redirected) throw new Error(`Shell asset redirected: ${assetUrl}`);
     return [assetUrl, response];
   }));
   // Fetched with the assets, not after the commit: a later deploy would
@@ -434,7 +433,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
       if (previousShell) await putShell(cache, previousShell.clone(), previousBuildId).catch(() => {});
     };
     try {
-      await putShell(cache, shellResponse.clone(), buildId);
+      await putShell(cache, withoutUrl(shellResponse.clone()), buildId);
       if (!supersedable) await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } }));
     } catch (err) {
       await restorePreviousShell();
@@ -632,13 +631,13 @@ function isApiPath(pathname) {
   return pathname.toLowerCase().startsWith('/api/');
 }
 
-// A URL that is, or carries, a job-offer link (the applicant's private
-// signing link): its text, percent-decoded (repeatedly) and in any letter
-// case, holds "careers/offer/" anywhere: path, query or fragment. The page
-// router matches each percent-decoded segment in any case, so every spelling
-// of the page it opens is caught, and so is a link carried in a query.
-function carriesOfferLink(url) {
-  let text = `${url.pathname}${url.search}${url.hash}`;
+// A job-offer link page: its path is the applicant's private signing link.
+// The page router matches each percent-decoded segment in any case, so the
+// path is read percent-decoded (repeatedly) and in any letter case, and any
+// path that holds "careers/offer/" counts. The browser resolves dot segments
+// before a request reaches the worker.
+function isOfferLinkPath(pathname) {
+  let text = pathname;
   for (let pass = 0; pass < 4; pass += 1) {
     let next;
     try {
@@ -652,20 +651,16 @@ function carriesOfferLink(url) {
   return text.toLowerCase().includes('careers/offer/');
 }
 
-// The one rule for every response this worker stores from the network. A
-// stored response keeps the URL it came from, and a followed redirect can
-// end on another page than the one it is stored under. So its final URL, on
-// any origin, must be neither an API call nor a URL that carries a job-offer
-// link. A response the worker builds itself has no URL.
-function storable(response) {
-  if (!response || !response.ok) return false;
-  if (!response.url) return true;
-  try {
-    const url = new URL(response.url);
-    return !isApiPath(url.pathname) && !carriesOfferLink(url);
-  } catch {
-    return false;
-  }
+// The storage rule. A stored response keeps the URL it came from, and a
+// stored request keeps its own, so either could hold a job-offer link: a
+// redirect's target, a query or a fragment. So every response this worker
+// stores is rebuilt without its URL, and it is stored only under a key with
+// no query or fragment: the shell under '/' (from any page), and any other
+// same-origin GET under its own path, when that response was not redirected
+// (its body is another URL's). A request with a query or fragment that is
+// not a page load is left to the browser. tagWithBuild rebuilds assets too.
+function withoutUrl(response) {
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 self.addEventListener('fetch', event => {
@@ -680,12 +675,10 @@ self.addEventListener('fetch', event => {
   if (event.request.mode === 'navigate' || event.request.destination === 'document') {
     event.waitUntil(sweepOlderCaches().catch(() => {}));
   }
-  // Nor a URL that carries a job-offer link, in any request mode. A stored
-  // response or request keeps its URL, so the link would sit in Cache
-  // Storage; and an offline shell served in its place would carry another
-  // page's headers, without no-referrer. The browser fetches it, with the
-  // server's privacy headers.
-  if (carriesOfferLink(url)) return;
+  // Nor a job-offer link page, in any request mode: an offline shell served
+  // in its place would carry another page's headers, without no-referrer.
+  // The browser fetches it, with the server's privacy headers.
+  if (isOfferLinkPath(url.pathname)) return;
 
   // HTML navigation requests: network-first with offline fallback.
   // ALWAYS return a Response (never undefined) so iOS standalone PWAs
@@ -727,6 +720,9 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+  // Any other request with a query or fragment: its key would keep them.
+  if (url.search || url.hash) return;
+
   // Hashed assets (/assets/index-CRewFOq2.js) — immutable, so cache on first
   // use; pruneStaleAssets evicts them once the shell moves to a newer build.
   if (url.pathname.startsWith('/assets/')) {
@@ -755,7 +751,7 @@ self.addEventListener('fetch', event => {
           return cached;
         }
         return fetch(event.request).then(response => {
-          if (storable(response)) {
+          if (response.ok && !response.redirected) {
             const clone = response.clone();
             // Tag the chunk with the build it was loaded for, so the prune
             // keeps it with that build's shell instead of guessing from HTML.
@@ -786,9 +782,9 @@ self.addEventListener('fetch', event => {
   // Everything else (manifest, icons, etc.) — network first, cache fallback
   event.respondWith(
     fetch(event.request).then(response => {
-      if (storable(response)) {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+      if (response.ok && !response.redirected) {
+        const copy = withoutUrl(response.clone());
+        caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
       }
       return response;
     }).catch(() => caches.match(event.request))

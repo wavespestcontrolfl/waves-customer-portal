@@ -8642,14 +8642,19 @@ between `?` and `#` read as a path). A unit that holds `/careers/offer/<64-hex t
 is stored as the standard link with the token hidden, once per such token in source order. A test checks every link
 that Node's WHATWG URL parser opens as the signing page across a grid of dot segments, empty segments, encoded
 delimiters and backslashes. The same scan pins only those tokens (a 64-hex query value beside them is not pinned),
-so a held text replays each one as the standard link. The service worker never handles an offer URL, in any
-request mode, nor any URL that carries one in its query or fragment (`client/public/sw.js` `carriesOfferLink`: the
-URL's text, percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the server
-routes `/API/` as `/api/`): it stores nothing, because a stored response or request keeps its URL. It stores a
-network response only when its final URL, after any redirect, carries no offer link and is no API call (`storable`). Its
-cache has a new name (`waves-customer-v13-private-links`), so activation drops the older worker's bucket whole, offer
-links included, before the worker claims a page, and each page load drops any older bucket found again
-(`sweepOlderCaches`). It never serves its offline shell in the page's place, so the browser always fetches the page with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
+so a held text replays each one as the standard link. Any other copy of a token found on an offer path, anywhere in
+the text (the link's own query or fragment, or another word), is hidden too: that unit is stored as the standard link
+for each offer-path token it holds, or as the bare marker when it holds none, which the replay leaves as it is. The
+service worker never handles an offer page, in any request mode (`client/public/sw.js` `isOfferLinkPath`: the path,
+percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the
+server routes `/API/` as `/api/`). It stores no URL that could carry the link, because a stored response or request
+keeps its URL: every entry is rebuilt without its URL (`withoutUrl`, `tagWithBuild`) and stored under a key with no
+query or fragment (the shell under `/`, any other same-origin GET under its own path), and a redirected response is
+served but not stored. A request with a query or fragment that is not a page load is left to the browser. Its cache
+has a new name (`waves-customer-v13-private-links`), so activation drops the older worker's bucket whole, offer links
+included, before the worker claims a page, and each page load drops any older bucket found again
+(`sweepOlderCaches`). It never serves its offline shell in the page's place, so the browser always fetches the page
+with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
 behind the gates. GET returns `{state:'open'|'signed'|'declined'|'date_requested', firstName, jobTitle, startDate,
 hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{name,title,sentOn}, expiresAt,
 textConsent, version, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the

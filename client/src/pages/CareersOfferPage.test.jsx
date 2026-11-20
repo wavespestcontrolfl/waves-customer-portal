@@ -573,7 +573,7 @@ describe('CareersOfferPage — open state', () => {
   it('shows the signing date in Eastern time', async () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedAt: '2026-12-13T00:00:00.000Z' })));
     renderPage();
-    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\./)).toBeInTheDocument();
+    expect(await screen.findByText(/^This offer was signed on Sat, Dec 12, 2026\./)).toBeInTheDocument();
   });
 
   it('re-reads the offer when signing answers 502; the name on record is this signature in any letter case and spacing', async () => {
@@ -627,10 +627,13 @@ describe('CareersOfferPage — open state', () => {
 });
 
 describe('CareersOfferPage — other states', () => {
-  it('shows the signed message on a return visit', async () => {
+  // Anyone with the link may open a signed offer, so the page names the signer
+  // and the date; "You signed" is only for the tab that sent that signature.
+  it('names the signer and the date on a return visit, never "You signed"', async () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'Jordan Rivera', signedAt: '2026-12-12T13:15:00.000Z' })));
     renderPage();
-    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\. Welcome to Waves\. Sam will contact you about your first day\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
   });
 

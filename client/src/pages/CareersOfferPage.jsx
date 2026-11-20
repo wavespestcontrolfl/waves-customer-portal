@@ -210,14 +210,16 @@ function ClosedState({ data }) {
   );
 }
 
-// signedElsewhere: the signature on record is not one this tab sent (a 409, or
-// a read after a lost reply, shows it under another name). Say so, with the
-// name on record once a read brings it.
-function resultMessage(data, signedElsewhere) {
+// signer: who signed, as far as this page can tell. 'self': this tab sent the
+// name on record. 'other': a 409, or a read after a lost reply, shows another
+// name. 'record': the page opened on a signed offer, so it cannot tell who is
+// reading; it names the signer and the date, never "you".
+function resultMessage(data, signer) {
   const who = ownerFirstName(data);
   if (data.state === 'signed') {
     const when = formatLongInstant(data.signedAt);
-    const lead = signedElsewhere ? `This offer was already signed${data.signedName ? ` by ${data.signedName}` : ''}` : 'You signed this offer';
+    const by = data.signedName ? ` by ${data.signedName}` : '';
+    const lead = { self: 'You signed this offer', other: `This offer was already signed${by}`, record: `This offer was signed${by}` }[signer];
     return `${lead}${when ? ` on ${when}` : ''}. Welcome to Waves. ${who} will contact you about your first day.`;
   }
   if (data.state === 'date_requested') {
@@ -227,7 +229,7 @@ function resultMessage(data, signedElsewhere) {
 }
 
 // signed / declined / date_requested: the answer the applicant already gave.
-function ResultState({ data, signedElsewhere }) {
+function ResultState({ data, signer }) {
   return (
     <Column>
       <div style={EYEBROW}>Waves</div>
@@ -238,7 +240,7 @@ function ResultState({ data, signedElsewhere }) {
             You asked to start on {formatLongDate(data.requestedStartDate)}.
           </p>
         )}
-        <p style={BODY_STYLE} role="status">{resultMessage(data, signedElsewhere)}</p>
+        <p style={BODY_STYLE} role="status">{resultMessage(data, signer)}</p>
       </BrandCard>
     </Column>
   );
@@ -835,10 +837,12 @@ function OfferPage({ token }) {
   }
   if (CLOSED_STATES.includes(data.state)) return <ClosedState data={data} />;
   if (ANSWERED_STATES.includes(data.state)) {
-    // Opened as signed: this is the signer's return visit. Seen open first: the
-    // signature is this tab's only when its name is the one this tab sent.
-    const signedElsewhere = firstState !== 'signed' && !sameName(sentName, data.signedName);
-    return <ResultState data={data} signedElsewhere={signedElsewhere} />;
+    // Opened as signed: anyone with the link may be reading, so the page names
+    // the signer. Seen open first: the signature is this tab's only when its
+    // name is the one this tab sent.
+    let signer = 'record';
+    if (firstState !== 'signed') signer = sameName(sentName, data.signedName) ? 'self' : 'other';
+    return <ResultState data={data} signer={signer} />;
   }
   return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} onSign={setSentName} />;
 }
