@@ -65,24 +65,38 @@ router.get('/:token', offerLimiter, handle('view', async (req) => {
   return body ? { body } : { notFound: true };
 }));
 
-router.post('/:token/text-consent', offerLimiter, handle('text consent', (req) => JobOffers.setTextConsent(req.params.token, req.body && req.body.consent, req.body && req.body.version)));
+// The applicant's answers. The page posts them under /v2, each with the version of the offer it shows. A server from
+// before the version (#8012) has no /v2 route, so a page that read a version never posts an answer to a handler that
+// ignores it: in a mixed deploy or a rollback the post answers 404, writes nothing, and the page reads the offer again.
+// The paths without /v2 run the same handlers with the same check, for a tab that opened the page from before /v2
+// (#8091 posts there, always with its version).
+const textConsent = handle('text consent', (req) => JobOffers.setTextConsent(req.params.token, req.body && req.body.consent, req.body && req.body.version));
 
-router.post('/:token/accept', offerLimiter, handle('accept', (req) => JobOffers.acceptOffer(req.params.token, {
+const accept = handle('accept', (req) => JobOffers.acceptOffer(req.params.token, {
   signedName: req.body && req.body.signedName,
   version: req.body && req.body.version,
   ip: req.ip,
   userAgent: req.get('user-agent'),
-})));
+}));
 
-router.post('/:token/date-request', offerLimiter, handle('date request', (req) => JobOffers.requestDate(req.params.token, {
+const dateRequest = handle('date request', (req) => JobOffers.requestDate(req.params.token, {
   requestedStartDate: req.body && req.body.requestedStartDate,
   note: req.body && req.body.note,
   version: req.body && req.body.version,
-})));
+}));
 
-router.post('/:token/decline', offerLimiter, handle('decline', (req) => JobOffers.declineOffer(req.params.token, {
+const decline = handle('decline', (req) => JobOffers.declineOffer(req.params.token, {
   reason: req.body && req.body.reason,
   version: req.body && req.body.version,
-})));
+}));
+
+router.post('/:token/v2/text-consent', offerLimiter, textConsent);
+router.post('/:token/v2/accept', offerLimiter, accept);
+router.post('/:token/v2/date-request', offerLimiter, dateRequest);
+router.post('/:token/v2/decline', offerLimiter, decline);
+router.post('/:token/text-consent', offerLimiter, textConsent);
+router.post('/:token/accept', offerLimiter, accept);
+router.post('/:token/date-request', offerLimiter, dateRequest);
+router.post('/:token/decline', offerLimiter, decline);
 
 module.exports = router;

@@ -31,6 +31,7 @@ import {
   formatLongDate,
   formatLongInstant,
   formatSentOn,
+  hasOfferFacts,
   payLine,
   signedNameValid,
   tomorrowET,
@@ -107,6 +108,9 @@ const ERROR_BANNER_STYLE = {
 
 const REFRESH_ERROR = 'We could not refresh this offer. Check your connection and try again.';
 const NOT_SAVED_ERROR = 'That did not go through. Please try again.';
+// This page and the server do not match (OfferPage `outdated`): trying again cannot help,
+// and a reload loads the page the server serves now.
+const OUTDATED_ERROR = 'This page is out of date. Please reload it and try again.';
 const CONNECTION_ERROR = 'Could not save that. Check your connection and try again.';
 // A send whose reply was lost: it may still go through, so it is not called failed.
 const LOST_ERROR = 'We could not confirm that. Check your connection and try again.';
@@ -124,9 +128,11 @@ function offerUrl(token, suffix = '') {
 
 // A reply that cannot be read is not a failure: the write may have committed.
 // Only a non-OK status is a clean refusal; a lost or unreadable OK reply throws
-// so the caller re-reads the offer.
+// so the caller re-reads the offer. Every answer goes to the /v2 routes, which
+// check the version it carries; a server from before the version has none, so
+// in a mixed deploy or a rollback the answer gets a 404 and writes nothing.
 async function postJson(token, suffix, payload) {
-  const res = await fetch(offerUrl(token, suffix), {
+  const res = await fetch(offerUrl(token, `/v2${suffix}`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -315,7 +321,12 @@ function TermsSection({ terms }) {
   );
 }
 
-function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, onRefused, onInvalid, locked }) {
+// A text-choice save reply that may have committed without saying what it stored
+// (as checkDefinite for the answers): a gateway error, or a 200 without the
+// choice and the version.
+const unclearSave = (res) => res.status >= 500 || (res.ok && !(hasVersion(res.body) && typeof res.body.textConsent === 'boolean'));
+
+function TextConsent({ token, initial, version, snapshot, onPending, onStale, onUnknown, onSnapshot, onRefused, onInvalid, onRead, locked }) {
   const [checked, setChecked] = useState(Boolean(initial));
   // The offer's version the choice is made on: the page's copy, which each
   // read and each save brings up to date. The server refuses a change made
@@ -324,26 +335,39 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
   const versionRef = useRef(version);
   const [saving, setSaving] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
+  // Set once a resend of a save whose reply was lost met a 404: CallUsLine.
+  const [stuck, setStuck] = useState(false);
   const [error, setError] = useState('');
+  // The choice a 409 refused while the offer may still be open. "That did not go
+  // through" shows only while the box does not show it, so the line goes when a
+  // later read shows that choice stored (another tab saved it).
+  const [refused, setRefused] = useState(null);
+  // A 409 refuses this request, not what is stored: an earlier save of the same
+  // choice whose reply was lost may have landed. So the refused choice waits
+  // here until the page applies a read after it (the read after the 409, or
+  // Check again when that read fails), and only then can the line show.
+  const refusal = useRef(null);
   // The choice the applicant just made, while its save has no answer yet. It
   // survives a failed read, and Try again sends it again.
   const wanted = useRef(null);
   // True once a save of that choice lost its reply: it may still land, so a
   // later refusal (a 429, say) says nothing about what is stored.
   const lostSave = useRef(false);
-  // A change the server refused (409) while the offer could not be read
-  // after it. The read that Try again makes says the change did not go
-  // through when the stored choice is not this one.
-  const refused = useRef(null);
 
   // A fresh read of the offer (another tab changed the choice, or an action
   // re-read the offer) carries the stored choice. Show it, unless a choice
-  // made here is still waiting for its answer.
+  // made here is still waiting for its answer. `snapshot` is the page's copy
+  // of the offer: a new one comes with every read or answer the page applies,
+  // also one that stores the same values.
   useEffect(() => {
     if (wanted.current !== null) return;
     setChecked(Boolean(initial));
     versionRef.current = version;
-  }, [initial, version]);
+    if (refusal.current !== null) {
+      setRefused(refusal.current);
+      refusal.current = null;
+    }
+  }, [initial, version, snapshot]);
 
   // After a write whose reply was lost, ask the server what it stored. Signing
   // stays locked until the stored choice is the one the applicant made. The read
@@ -354,19 +378,18 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
     setSaving(true);
     onPending(true);
     try {
-      const body = await readOffer(token);
+      const body = await onRead(); // OfferPage `read`: a read that does not match the page marks it out of date
       const stored = Boolean(body.textConsent);
       if (body.state === 'open' && wanted.current !== null && stored !== wanted.current) {
         setUnconfirmed(true);
         return;
       }
-      const notSaved = body.state === 'open' && refused.current !== null && stored !== refused.current;
       wanted.current = null;
-      refused.current = null;
       lostSave.current = false;
       setChecked(stored);
       setUnconfirmed(false);
-      setError(notSaved ? NOT_SAVED_ERROR : '');
+      setStuck(false);
+      setError('');
       onPending(false);
       onSnapshot(body);
     } catch (err) {
@@ -379,12 +402,13 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
 
   const toggle = async (next) => {
     wanted.current = next;
-    refused.current = null;
     setChecked(next);
     setSaving(true);
     onPending(true);
     setUnconfirmed(false);
     setError('');
+    setRefused(null);
+    refusal.current = null;
     let res;
     try {
       res = await postJson(token, '/text-consent', { consent: next, version: versionRef.current });
@@ -393,16 +417,24 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
       await confirm();
       return;
     }
-    if (res.status >= 500 || (res.ok && !(hasVersion(res.body) && typeof res.body.textConsent === 'boolean'))) {
+    if (unclearSave(res)) {
       // A gateway error can arrive after the write committed, and a save whose
       // reply lacks the choice or the version cannot be applied: ask the server.
       lostSave.current = true;
       await confirm();
       return;
     }
-    if (lostSave.current && !res.ok && res.status !== 404 && res.status !== 409) {
+    if (lostSave.current && !res.ok && res.status !== 409) {
       // Refused, but an earlier save of this choice may still have landed: keep
-      // the choice and the lock until a save or a read settles it.
+      // the choice and the lock until a save or a read settles it. A 404 (a
+      // server without the /v2 routes, or a dead link) says nothing about that
+      // save, so the page reads at once: the read shows a choice that landed,
+      // or a dead link, and otherwise keeps the choice and the lock.
+      if (res.status === 404) {
+        setStuck(true);
+        await confirm();
+        return;
+      }
       setUnconfirmed(true);
       setSaving(false);
       return;
@@ -410,26 +442,29 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
     // A definite answer: the server took the choice or refused it.
     wanted.current = null;
     lostSave.current = false;
+    setStuck(false);
     if (res.ok) {
       const stored = Boolean(res.body.textConsent);
       setChecked(stored);
       onSnapshot({ textConsent: stored, version: res.body.version }); // the page's copy follows, so a later read can correct the box
     } else setChecked(!next);
-    if (res.status === 404) onInvalid();
-    else if (res.status === 409) {
-      // The 409 says where the offer stands, or the page reads it.
-      const after = onRefused(res.body) ? 'changed' : await onStale();
-      if (after === 'failed') {
-        // The offer changed but the new state could not be read: stay locked.
-        refused.current = next;
-        setUnconfirmed(true);
-        setSaving(false);
-        return;
+    if (res.status === 404 || res.status === 409) {
+      // A 409 says where the offer stands, or the page reads it. A 404 is read
+      // again before the link counts as dead, and an open read then marks the
+      // page out of date (OfferPage `recheck`). If that read fails, the page
+      // locks every answer until a read works: its Check again reads with this
+      // status, so a 404 still counts there.
+      // After a 409 the next read the page applies decides the line: it says the
+      // change did not go through only if the stored choice is another one, so
+      // no one signs on a choice that was never saved, and no one is told a
+      // saved choice failed.
+      if (res.status === 409) refusal.current = next;
+      const after = res.status === 409 && onRefused(res.body) ? 'changed' : await onStale(res.status);
+      if (after === 'failed') onUnknown(res.status);
+      if (after === 'changed' || after === 'outdated') {
+        refusal.current = null;
+        setRefused(null);
       }
-      // Still open: the change was made on an older read and refused. The box
-      // now shows the stored choice; say so, so no one signs on a choice that
-      // was never saved.
-      if (after === 'open') setError(NOT_SAVED_ERROR);
     } else if (!res.ok) setError(res.body?.error || CONNECTION_ERROR);
     setSaving(false);
     onPending(false);
@@ -450,12 +485,29 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
       {unconfirmed && (
         <div style={ERROR_BANNER_STYLE} role="alert">
           We could not confirm that choice. Check your connection and try again.
+          {stuck && <CallUsLine />}
           <div style={{ marginTop: 8 }}>
             <BrandButton variant="secondary" disabled={saving} onClick={() => (wanted.current === null ? confirm() : toggle(wanted.current))}>Try again</BrandButton>
           </div>
         </div>
       )}
+      {refused !== null && checked !== refused && <div style={ERROR_BANNER_STYLE} role="alert">{NOT_SAVED_ERROR}</div>}
       {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
+    </div>
+  );
+}
+
+// This page and the server do not match (OfferPage `outdated`). Every answer stays locked;
+// a reload loads the page the server serves now. It shows only while no send is unresolved,
+// so a reload never drops an answer whose outcome is not known yet.
+function OutdatedBanner({ outdated, unresolved }) {
+  if (!outdated || unresolved) return null;
+  return (
+    <div style={ERROR_BANNER_STYLE} role="alert">
+      {OUTDATED_ERROR}
+      <div style={{ marginTop: 8 }}>
+        <BrandButton variant="secondary" onClick={() => window.location.reload()}>Reload page</BrandButton>
+      </div>
     </div>
   );
 }
@@ -484,13 +536,28 @@ function NoteField({ id, label, value, onChange, disabled }) {
 // Each action sends the version of the offer on screen, the text box's choice
 // included: a change since then (another tab) is refused with the offer still
 // open, so the page reads it again and the applicant answers on what it shows.
-function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUnknown }) {
+// Shown once a resend of a send whose reply was lost met a server without its
+// route (404): Try again may never work there, and a reload would drop the send
+// while it may still land, so the applicant can call and the office checks what
+// the server stored. The send stays the only action meanwhile.
+function CallUsLine() {
+  return (
+    <p style={{ margin: '8px 0 0' }}>
+      If this keeps happening, call us at{' '}
+      <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: 'inherit', fontWeight: 700, whiteSpace: 'nowrap' }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
+      {' '}and we will check it for you.
+    </p>
+  );
+}
+
+function useOfferAction({ token, onApplied, onRefused, onReload, onRecheck, onUnknown }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  // The last send whose reply was lost ({ suffix, payload }). It may still go
-  // through, so until a resend of it gets a definite answer it is the only
-  // thing the applicant can do (a repeat is refused, and its 409 names the
-  // answer), and no other action can race it.
+  // The last send whose reply was lost ({ suffix, payload, notFound }). It may
+  // still go through, so until a resend of it gets a definite answer it is the
+  // only thing the applicant can do (a repeat is refused, and its 409 names the
+  // answer), and no other action can race it. notFound: a resend met a 404
+  // (CallUsLine); it stays until the send has a definite answer.
   const [lost, setLost] = useState(null);
 
   const run = useCallback(async (suffix, payload) => {
@@ -500,25 +567,31 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
     try {
       const res = await postJson(token, suffix, payload);
       checkDefinite(res, suffix); // a reply that may have committed throws: handled below
-      if (lost && !res.ok && res.status !== 404 && res.status !== 409) {
-        // Refused before the offer was checked (a 429, a 400): the lost send
-        // may still land. Keep it the only action, and read in case it has.
-        // A 400 refuses the same payload as invalid, so the lost send was
-        // refused too or ended long ago (a date that passed at midnight): an
-        // open read then frees the fields for a new value.
-        setError(res.body?.error || '');
+      if (lost && !res.ok && res.status !== 409) {
+        // Refused before the offer was checked: a 429, a 400, or a 404 from a
+        // server without the /v2 routes (a mixed deploy or a rollback) while
+        // the lost send may still wait for the offer. The lost send may still
+        // land. Keep it the only action, and read in case it has (a 404 read
+        // shows a dead link). A 400 refuses the same payload as invalid, so
+        // the lost send was refused too or ended long ago (a date that passed
+        // at midnight): an open read then frees the fields for a new value.
+        if (res.status !== 404) setError(res.body?.error || '');
+        else setLost({ ...lost, notFound: true }); // the banner also offers a call (CallUsLine)
         const after = await onReload();
         if (res.status === 400 && after === 'open') setLost(null);
         return;
       }
-      setLost(null); // a definite answer
-      if (res.status === 404) return onInvalid();
-      if (res.status === 409) {
-        // The 409 says where the offer stands: the page shows it at once, so
-        // a failed read cannot leave the old offer on screen.
-        if (onRefused(res.body)) return;
-        const after = await onReload();
-        if (after === 'failed') onUnknown();
+      setLost(null); // a definite answer: a 409, or a 404 with no lost send, wrote nothing
+      if (res.status === 404 || res.status === 409) {
+        // A 409 says where the offer stands: the page shows it at once, so a
+        // failed read cannot leave the old offer on screen. A 404 is read
+        // again before the link counts as dead: in a mixed deploy or a
+        // rollback, a server without the /v2 routes answers 404 for a live
+        // offer, and the read, which every server answers, tells which (an
+        // open offer marks the page out of date: OfferPage `recheck`).
+        if (res.status === 409 && onRefused(res.body)) return;
+        const after = await onRecheck(res.status);
+        if (after === 'failed') onUnknown(res.status);
         else if (after === 'open') setError(NOT_SAVED_ERROR);
         return;
       }
@@ -530,17 +603,17 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
     } catch {
       // No answer, a gateway error, or an unreadable reply. A read shows an
       // answer that already landed; otherwise only a resend is offered.
-      setLost({ suffix, payload });
+      setLost({ ...lost, suffix, payload }); // a resend that fails again keeps notFound
       await onReload();
     } finally {
       setBusy(false);
     }
-  }, [busy, lost, token, onApplied, onRefused, onReload, onInvalid, onUnknown]);
+  }, [busy, lost, token, onApplied, onRefused, onReload, onRecheck, onUnknown]);
 
   const retry = useCallback(() => (lost ? run(lost.suffix, lost.payload) : undefined), [lost, run]);
   // frozen: the send's own fields are fixed while it is in flight or lost, so
   // a resend sends what the applicant sees.
-  return { busy, error, setError, run, lost: Boolean(lost), retry, frozen: busy || Boolean(lost) };
+  return { busy, error, setError, run, lost: Boolean(lost), stuck: Boolean(lost?.notFound), retry, frozen: busy || Boolean(lost) };
 }
 
 function LostBanner({ action }) {
@@ -548,6 +621,7 @@ function LostBanner({ action }) {
   return (
     <div style={ERROR_BANNER_STYLE} role="alert">
       {LOST_ERROR}
+      {action.stuck && <CallUsLine />}
       <div style={{ marginTop: 8 }}>
         <BrandButton variant="secondary" disabled={action.busy} onClick={action.retry}>
           {action.busy ? 'Trying…' : 'Try again'}
@@ -629,12 +703,15 @@ function SignBlock({ name, onName, onAccept, busy, saving, frozen }) {
   );
 }
 
-function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onOwnAnswer }) {
+function OpenOffer({ token, data, outdated, onApplied, onRefused, onReload, onRecheck, onInvalid, onRead, onOwnAnswer }) {
   const [name, setName] = useState('');
   const [panel, setPanel] = useState('none'); // none | date | decline
-  const [unknown, setUnknown] = useState(false);
+  // 0, or the status (404, 409) of a refusal whose re-read failed: the page does
+  // not know where the offer stands, and Check again reads with that status, so
+  // a 404 still marks the page out of date when the offer reads open.
+  const [unknown, setUnknown] = useState(0);
   const [rechecking, setRechecking] = useState(false);
-  const markUnknown = useCallback(() => setUnknown(true), []);
+  const markUnknown = useCallback((status) => setUnknown(status), []);
   const accept = useOfferAction({
     token,
     onApplied: (b, sent) => {
@@ -647,7 +724,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
     },
     onRefused,
     onReload,
-    onInvalid,
+    onRecheck,
     onUnknown: markUnknown,
   });
   const dateReq = useOfferAction({
@@ -658,7 +735,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
     },
     onRefused,
     onReload,
-    onInvalid,
+    onRecheck,
     onUnknown: markUnknown,
   });
   const decline = useOfferAction({
@@ -669,22 +746,29 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
     },
     onRefused,
     onReload,
-    onInvalid,
+    onRecheck,
     onUnknown: markUnknown,
   });
   const [consentPending, setConsentPending] = useState(false);
   // The last write may or may not have gone through and the offer could not be
   // read: every action stays locked until a read works.
+  // A read the page cannot use marks it out of date instead: its reload offer
+  // replaces Check again, which would only read the same answer again.
   const recheck = async () => {
     setRechecking(true);
-    const after = await onReload();
+    const after = await onRecheck(unknown);
     setRechecking(false);
-    if (after === 'open') setUnknown(false);
+    if (after === 'open' || after === 'outdated') setUnknown(0);
   };
-  // Locks every action and the text box: a send in flight, a send whose reply
-  // was lost, or a refusal whose refresh failed.
-  const blocked = accept.frozen || dateReq.frozen || decline.frozen || unknown;
+  // A send in flight, or one whose reply was lost.
+  const frozen = accept.frozen || dateReq.frozen || decline.frozen;
+  // Locks every action and the text box: such a send, a refusal whose refresh
+  // failed, or a page out of date.
+  const blocked = frozen || unknown || outdated;
   const anyBusy = blocked || consentPending;
+  // A send whose outcome is not known yet (the text choice's included): the
+  // page offers no reload meanwhile.
+  const unresolved = frozen || consentPending;
 
   return (
     <Column>
@@ -700,7 +784,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} version={data.version} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} locked={blocked} />
+        <TextConsent token={token} initial={data.textConsent} version={data.version} snapshot={data} onPending={setConsentPending} onStale={onRecheck} onUnknown={markUnknown} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} onRead={onRead} locked={blocked} />
         <SignBlock
           name={name}
           onName={setName}
@@ -713,7 +797,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
         />
         {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
         <LostBanner action={accept} />
-        {unknown && (
+        {unknown > 0 && (
           <div style={ERROR_BANNER_STYLE} role="alert">
             {REFRESH_ERROR}
             <div style={{ marginTop: 8 }}>
@@ -723,6 +807,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
             </div>
           </div>
         )}
+        <OutdatedBanner outdated={outdated} unresolved={unresolved} />
 
         <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
           <BrandButton fullWidth variant="secondary" disabled={anyBusy} onClick={() => setPanel(panel === 'date' ? 'none' : 'date')}>
@@ -779,17 +864,27 @@ const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 // Every applicant write carries the offer's version (server/services/job-offers.js
 // changedSince). An open offer read, or a text-choice save, that does not carry
 // one (a server from before the version) is never applied, so the page's
-// version is never lost: the read counts as failed, and the save is checked
-// with a read. Signing stays locked until a read carries a version.
+// version is never lost: the read offers a reload (readOffer), and the save is
+// checked with a read. Signing stays locked until a read carries a
+// version.
 const hasVersion = (body) => typeof body?.version === 'string' && body.version.length > 0;
 // The states the offer read answers. A read with any other state, or an open
-// one without its version, its text choice or the Terms, is not shown (a
-// failed read): only an explicit open state that carries all three shows the
-// signing controls, so no one signs without seeing the Terms and the choice.
+// one without its version, its text choice, the Terms or a term of the offer
+// (hasOfferFacts), is not shown (readOffer): only an explicit open state
+// that carries all of them shows the signing controls, so no one signs without
+// seeing the Terms, the choice and every term of the offer. The page checks
+// what it shows, so an answer merged into it is checked too.
 const OFFER_STATES = ['open', 'signed', 'declined', 'date_requested', 'expired', 'withdrawn', 'superseded'];
 const hasTerms = (body) => typeof body.terms?.markdown === 'string' && body.terms.markdown.trim() !== '';
-const signable = (body) => hasVersion(body) && typeof body.textConsent === 'boolean' && hasTerms(body);
+const signable = (body) =>
+  hasVersion(body) && typeof body.textConsent === 'boolean' && hasTerms(body) && hasOfferFacts(body);
 const usableOffer = (body) => OFFER_STATES.includes(body?.state) && (body.state !== 'open' || signable(body));
+// A read from a server that does not match this page: an open offer without its
+// version (a server from before it) or a state the page does not know (a server
+// newer than this page). Reading again gets the same answer; a reload loads the
+// page the server serves now.
+const incompatible = (body) =>
+  typeof body?.state === 'string' && (!OFFER_STATES.includes(body.state) || (body.state === 'open' && !hasVersion(body)));
 // The answer each action's success names. A 200 that names any other is a
 // reply that cannot be read: the page reads the offer, as for a lost reply.
 const ANSWER_STATE = { '/accept': 'signed', '/date-request': 'date_requested', '/decline': 'declined' };
@@ -809,6 +904,14 @@ async function readOffer(token) {
   }
   if (!res.ok) throw new Error('temporary');
   const body = await res.json();
+  if (incompatible(body)) {
+    // Not a failed read: the page offers a reload (OfferPage `error` 'outdated'
+    // on the first read, `outdated` after it). Any other read the page cannot
+    // use (an open offer missing a term it shows) is a failed read.
+    const err = new Error('outdated');
+    err.outdated = true;
+    throw err;
+  }
   if (!usableOffer(body)) throw new Error('temporary');
   return body;
 }
@@ -834,11 +937,19 @@ function OfferPage({ token }) {
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null); // null | 'notfound' | 'temporary'
+  // null | 'notfound' | 'temporary' | 'outdated' (a first read the page cannot
+  // use: reading again gets the same answer, and only a reload can help).
+  const [error, setError] = useState(null);
   // The answer this tab's own action got from the server ('signed', 'declined'
   // or 'date_requested'), or null: only that answer is told in the first person.
   const [ownAnswer, setOwnAnswer] = useState(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  // Set when this page and the server do not match: an answer met a server
+  // without its route (a definite 404 while the offer still reads open), or a
+  // read came from a server that does not match (readOffer, through `read`). Trying again
+  // cannot help, so every answer stays locked and the page offers a reload,
+  // which loads the page the server serves now. Only a reload clears it.
+  const [outdated, setOutdated] = useState(false);
   const seq = useRef(0);
 
   useEffect(() => {
@@ -854,27 +965,54 @@ function OfferPage({ token }) {
       })
       .catch((err) => {
         if (cancelled || mine !== seq.current) return;
-        setError(err.notFound ? 'notfound' : 'temporary');
+        if (err.notFound) setError('notfound');
+        else setError(err.outdated ? 'outdated' : 'temporary');
         setLoading(false);
       });
     return () => { cancelled = true; };
   }, [token, loadAttempt]);
 
+  // Every read after the first goes through here, whichever path asks (a
+  // refresh, or the text choice's check after a lost reply), so a read from a
+  // server that does not match this page always marks it out of date.
+  const read = useCallback(async () => {
+    try {
+      return await readOffer(token);
+    } catch (err) {
+      if (err.outdated) setOutdated(true);
+      throw err;
+    }
+  }, [token]);
+
   // The offer changed on the server (409) or a reply was lost: read it again.
   // Resolves 'changed' when the page now shows a state other than open,
-  // 'open' when the offer is still open, 'failed' when it could not be read.
+  // 'open' when the offer is still open, 'outdated' when the read came from a
+  // server that does not match this page, and 'failed' when it could not be read.
   const reload = useCallback(async () => {
     const mine = ++seq.current;
     try {
-      const body = await readOffer(token);
+      const body = await read();
       if (mine !== seq.current) return 'changed';
       setData(body);
       return body.state === 'open' ? 'open' : 'changed';
     } catch (err) {
       if (mine === seq.current && err.notFound) setError('notfound');
-      return 'failed';
+      return err.outdated ? 'outdated' : 'failed';
     }
-  }, [token]);
+  }, [read]);
+
+  // The read after an answer the server refused without saying where the
+  // offer stands (a 409 that names no state, or a 404). A 404 wrote nothing,
+  // and every server answers the read: a 404 read shows the dead link, and an
+  // offer still open means the server lacks the route this page posted to.
+  // Not used after a lost reply: that send may still land on a server that has
+  // the route, so its resend stays the only action (useOfferAction).
+  const recheck = useCallback(async (status) => {
+    const after = await reload();
+    if (status !== 404 || after !== 'open') return after;
+    setOutdated(true);
+    return 'outdated';
+  }, [reload]);
 
   const applied = useCallback((patch) => {
     seq.current += 1;
@@ -901,6 +1039,15 @@ function OfferPage({ token }) {
 
   if (loading) return <LoadingState />;
   if (error === 'notfound') return <NotValidState />;
+  if (error === 'outdated') {
+    return (
+      <Column>
+        <div style={EYEBROW}>Waves</div>
+        <h1 style={H1_STYLE}>Your job offer</h1>
+        <OutdatedBanner outdated unresolved={false} />
+      </Column>
+    );
+  }
   if (error === 'temporary' || !usableOffer(data)) {
     return <Column><PublicLoadError resource="offer link" onRetry={() => setLoadAttempt((a) => a + 1)} /></Column>;
   }
@@ -908,5 +1055,5 @@ function OfferPage({ token }) {
   if (ANSWERED_STATES.includes(data.state)) {
     return <ResultState data={data} own={ownAnswer === data.state} />;
   }
-  return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} onOwnAnswer={setOwnAnswer} />;
+  return <OpenOffer token={token} data={data} outdated={outdated} onApplied={applied} onRefused={refused} onReload={reload} onRecheck={recheck} onInvalid={invalid} onRead={read} onOwnAnswer={setOwnAnswer} />;
 }

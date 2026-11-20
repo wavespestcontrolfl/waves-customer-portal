@@ -962,9 +962,10 @@ async function lockByToken(trx, token) {
 // save the page last applied, the text-consent choice included. A change since then (another tab's consent save, a
 // save that landed late) refuses the write with the state still open (409), so the page reads the offer again and the
 // applicant answers on what it now shows. A signature, a date request or a decline therefore never fixes a consent
-// choice the applicant did not see. The page always sends it. A body without one is the contract these routes served
-// before the version, and it is answered as before.
-const changedSince = (offer, version) => version !== undefined && version !== iso(offer.updated_at);
+// choice the applicant did not see. The page always sends it, and a write without one is refused the same way, so no
+// write skips the check (a text choice equal to the stored one and an identical replay of a signature write nothing,
+// so they answer as for any resend). The page posts under /v2, which no server from before the version has.
+const changedSince = (offer, version) => version !== iso(offer.updated_at);
 const CHANGED = Object.freeze({ refused: true, body: Object.freeze({ state: 'open' }) });
 
 const refusal = (state, offer) => ({
@@ -975,7 +976,7 @@ const refusal = (state, offer) => ({
 });
 
 /**
- * POST /:token/text-consent. `version` is the offer's version from the read the choice was made on. A save can land
+ * POST /:token/v2/text-consent. `version` is the offer's version from the read the choice was made on. A save can land
  * late (its reply was lost and the page saved the same choice again), so a change made from an older version is
  * refused: it cannot undo a later choice. A choice that is already stored writes nothing.
  */
@@ -1005,7 +1006,25 @@ function parseSignedName(value) {
 
 const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 
-/** POST /:token/accept. `version`: see changedSince. */
+/** POST /:token/v2/accept. `version`: see changedSince. */
+// The terms a signature binds, as the page shows them, by the page's own rule (offerFormat.hasOfferFacts and
+// exactAmount, which this mirrors): the job, a real start date, an hourly rate as a number of whole cents (at least one
+// cent), the week, who they report to, pay day and the Terms, and a pay step only with both its rate and its date (no
+// raise: both null). buildSnapshot freezes a checked draft with numeric rates, so a gap here is a bug; the check holds
+// for every client, a tab from before the page's own check included.
+const textFact = (value) => typeof value === 'string' && value.trim() !== '';
+const centsFact = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0.01
+  && /^\d+\.\d{2}$/.test(value.toFixed(2)) && Number(value.toFixed(2)) === value;
+
+function signableSnapshot(snapshot) {
+  const s = snapshot || {};
+  const noStep = s.stepRate === null && s.stepEffectiveOn === null;
+  return textFact(s.jobTitle) && textFact(s.hoursLine) && textFact(s.reportTo) && textFact(s.payDayLine)
+    && isYmd(s.startDate) && centsFact(s.hourlyRate)
+    && (noStep || (centsFact(s.stepRate) && isYmd(s.stepEffectiveOn)))
+    && Boolean(s.terms) && textFact(s.terms.markdown);
+}
+
 async function acceptOffer(token, { signedName, version, ip, userAgent }) {
   const name = parseSignedName(signedName);
   const result = await db.transaction(async (trx) => {
@@ -1021,6 +1040,12 @@ async function acceptOffer(token, { signedName, version, ip, userAgent }) {
     if (state !== 'open') return refusal(state, offer);
     if (!name) return { invalid: 'Type your full name to sign.' };
     if (changedSince(offer, version)) return CHANGED;
+    // A frozen offer missing a term it shows is never signed: the same 409 with no write, and the page's read of it
+    // shows the load error.
+    if (!signableSnapshot(asObject(offer.snapshot))) {
+      logger.warn(`[job-offers] signature refused: offer ${offer.id} lacks a term the page shows`);
+      return CHANGED;
+    }
     return { body: await signOffer(trx, offer, { name, ip, userAgent, now: found.now }), forBell: offer };
   });
   if (result.forBell) await bell('signed', result.forBell, null);
@@ -1053,7 +1078,7 @@ async function moveApplication(trx, applicationId, { to, note, extra }) {
   });
 }
 
-/** POST /:token/date-request. `version`: see changedSince. */
+/** POST /:token/v2/date-request. `version`: see changedSince. */
 async function requestDate(token, { requestedStartDate, note, version }) {
   const result = await db.transaction(async (trx) => {
     const found = await lockByToken(trx, token);
@@ -1077,7 +1102,7 @@ async function requestDate(token, { requestedStartDate, note, version }) {
   return result;
 }
 
-/** POST /:token/decline. `version`: see changedSince. */
+/** POST /:token/v2/decline. `version`: see changedSince. */
 async function declineOffer(token, { reason, version }) {
   const result = await db.transaction(async (trx) => {
     const found = await lockByToken(trx, token);
