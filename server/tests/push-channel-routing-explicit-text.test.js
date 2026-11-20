@@ -1,14 +1,9 @@
-// GATE_APP_FIRST_ANY_DEVICE, owner 2026-11-04: "only the customer can change back to
+// Owner 2026-11-04: "only the customer can change back to
 // text, if they prefer". The channel columns are seeded with 'sms', so a stored 'sms'
 // vetoes the app notice only when the customer's explicit-choice marker is true.
-// Email and Both veto as before; Gate off leaves the old rules byte for byte.
+// Email and Both veto as before.
 
 const { _test } = require('../services/messaging/push-channel-routing');
-
-const ENV = 'GATE_APP_FIRST_ANY_DEVICE';
-let saved;
-beforeEach(() => { saved = process.env[ENV]; process.env[ENV] = 'true'; });
-afterEach(() => { if (saved === undefined) delete process.env[ENV]; else process.env[ENV] = saved; });
 
 // Chainable knex stub; a fixture may be a row, an Error, or a function of the LAST where() arg.
 // Records the columns each first() asked for.
@@ -45,7 +40,7 @@ const ROUTED = [
   ['deposit_receipt', 'payment_receipt_channel', 'payment_receipt_channel_explicit'],
 ];
 
-describe('gate on: the customer\'s own Text choice keeps the text', () => {
+describe('the customer\'s own Text choice keeps the text', () => {
   test.each(ROUTED)('%s: an explicit sms vetoes the app notice', async (type, col, marker) => {
     await expect(eligible(type, { [col]: 'sms', [marker]: true })).resolves.toBe(false);
   });
@@ -64,14 +59,10 @@ describe('gate on: the customer\'s own Text choice keeps the text', () => {
     }
   });
 
-  test('the marker is read with the channel, only when the gate is on', async () => {
+  test('the marker is read with the channel', async () => {
     const asked = [];
     await eligible('tech_arrived', { tech_arrived_channel: 'sms' }, asked);
     expect(asked[0]).toEqual(['tech_arrived_channel', 'tech_arrived_channel_explicit']);
-    delete process.env[ENV];
-    const askedOff = [];
-    await eligible('tech_arrived', { tech_arrived_channel: 'sms' }, askedOff);
-    expect(askedOff[0]).toEqual(['tech_arrived_channel']);
   });
 
   test('an explicit Text choice is read from the account PRIMARY profile, not the selected property', async () => {
@@ -114,15 +105,5 @@ describe('gate on: the customer\'s own Text choice keeps the text', () => {
     // payment_issue keeps its own pre-existing explicit-Text veto.
     await expect(eligible('payment_failure', { payment_issue_channel: 'sms' })).resolves.toBe(false);
     await expect(eligible('billing_reminder', { billing_channel: 'sms' })).resolves.toBe(true);
-  });
-});
-
-describe('gate off: nothing changes', () => {
-  beforeEach(() => { delete process.env[ENV]; });
-
-  test.each(ROUTED)('%s: a stored sms with the marker true still routes exactly as before', async (type, col, marker) => {
-    await expect(eligible(type, { [col]: 'sms', [marker]: true })).resolves.toBe(true);
-    await expect(eligible(type, { [col]: 'sms' })).resolves.toBe(true);
-    await expect(eligible(type, { [col]: 'email' })).resolves.toBe(false);
   });
 });

@@ -46,7 +46,7 @@ const probe = (extras = {}) => findConflictingVisits({
 
 describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
   let database;
-  const gates = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_DRIVE_TIME_CALIBRATION'];
+  const gates = ['GATE_ADMIN_ARRIVAL_WINDOWS'];
   const saved = Object.fromEntries(gates.map(k => [k, process.env[k]]));
   beforeAll(() => {
     gates.forEach(k => { process.env[k] = 'true'; });

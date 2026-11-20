@@ -444,6 +444,11 @@ router.get('/', async (req, res, next) => {
         // (review edit / re-attribution) is refused, not posted as free text.
         draftToken: isDraftReply(r.review_reply) && r.auto_reply_draft && stripDraftPrefix(r.review_reply).trim() === String(r.auto_reply_draft).trim()
           ? AutoReply.reviewFingerprint(r) : null,
+        // The draft in the slot is machine-authored: an Agent Ops draft, or
+        // an attempt from an AI draft the sync restored after an uncertain
+        // post. "Use Draft" sends it back (fromAgentDraft), so the publisher
+        // checks the app name strictly (owner 2026-11-19).
+        draftFromAgent: isDraftReply(r.review_reply) && r.auto_reply_version === 'agent_ops',
         // Identity of the review CONTENT the browser is showing; every editor
         // submission sends it back so text written for the old review is
         // refused after a reviewer rewrite the sync recorded meanwhile.
@@ -514,13 +519,17 @@ router.get('/', async (req, res, next) => {
 // publish → persist → audit); a human may replace an existing Google reply.
 router.post('/:id/reply', async (req, res, next) => {
   try {
-    const { replyText, draftToken, groundingToken, expectedReply, expectedDraft, expectedReview } = req.body;
+    const { replyText, draftToken, groundingToken, fromAgentDraft, expectedReply, expectedDraft, expectedReview } = req.body;
     if (!replyText) return res.status(400).json({ error: 'Reply text required' });
     const result = await ReplyPublisher.publishReviewReply({
       reviewId: req.params.id,
       text: replyText,
       actor: { type: 'admin', adminUserId: req.technicianId || null },
       allowOverwrite: true,
+      // A draft or grounding token, or a restored agent draft, marks text
+      // that started from an AI or Agent Ops draft (Use Draft, AI Reply),
+      // edited or not: the publisher checks the app name strictly.
+      fromDraft: Boolean((typeof draftToken === 'string' && draftToken) || (typeof groundingToken === 'string' && groundingToken) || fromAgentDraft === true),
       // A human posting closes out a pending/posted auto-reply state on the
       // row; a never-queued row keeps NULL.
       autoFields: AutoReply.manualReplyCloseFields(db),

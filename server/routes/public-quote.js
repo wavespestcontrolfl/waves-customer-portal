@@ -2,7 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, exceptClosedWebFormLead } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
 const { whereLiveCourtship } = require('../services/lead-courtship');
 const { heardAboutFromBody, heardAboutFillIfEmpty } = require('../services/heard-about');
@@ -237,6 +237,82 @@ function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) 
   if (Number(t.homeSqFt) > 0) return perStory(t.homeSqFt);
   if (Number(t.livingAreaSqFt) > 0) return perStory(t.livingAreaSqFt);
   return null;
+}
+
+// Pool and pool-cage features for the website quote. GATE_CAGE_TWO_SIZES (owner
+// 2026-11-19, "hold"): a cage that today's four sizes call Large or Oversized keeps
+// its manual-quote hold. One invariant: the cage size and the hold come from the best
+// evidence under THIS request's gate state (the gate is read lazily, per request; a
+// whole-module mock without the reader reads as off). The size policy is
+// property-lookup/cage-sizes.js. `trusted` is the server's own cache-only re-read when
+// it decided the cage (YES or NO); it beats the client's profile, which only an API
+// caller can hand-build (the website forms echo the lookup unchanged).
+//  - Gate on: price the two-size answer; hold the four-size answer's Large and
+//    Oversized. A client with no decided poolCage (omitted, POSSIBLE, UNKNOWN) takes the
+//    re-read's cage answer, so it prices like an explicit answer; a YES or an explicit
+//    negative from the client stands.
+//  - Gate off: a profile with its own poolCageLegacySize key (a two-size profile from
+//    before a rollback) prices its four-size answer, the re-read first. Any other
+//    profile is today's code exactly.
+function websiteCageFeatures(ep, trustedTurf) {
+  const twoSizesOn = require('../config/feature-gates').cageTwoSizesLive?.() === true;
+  const clientCage = ep.poolCage === 'YES' || ep.poolCage === true;
+  const pool = ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES';
+  return twoSizesOn
+    ? twoSizeCageFeatures(ep, decidedCage(trustedTurf), { pool, clientCage })
+    : fourSizeCageFeatures(ep, decidedCage(trustedTurf), { pool, clientCage });
+}
+
+// Gate off. A profile with its own poolCageLegacySize key is a two-size profile from
+// before a rollback: price its four-size answer, the re-read first, and inherit the
+// re-read's cage when the client has no decided answer. Any other profile is today's code exactly.
+function fourSizeCageFeatures(ep, trusted, { pool, clientCage }) {
+  const { fourSizeOf } = require('../services/property-lookup/cage-sizes');
+  if (Object.prototype.hasOwnProperty.call(ep, 'poolCageLegacySize')) {
+    const four = fourSizeOf(trusted) || fourSizeOf(ep);
+    // A client with no decided answer inherits the re-read's decided cage, as the gate-on path does.
+    const trustedCage = clientCageUndecided(ep, clientCage) && String(trusted?.poolCage).toUpperCase() === 'YES';
+    const poolCage = clientCage || trustedCage;
+    // No cage, no size: the engine reads a Large size as a hold even without a cage.
+    return { pool: pool || trustedCage, poolCage, poolCageSize: poolCage && four ? four.toLowerCase() : undefined };
+  }
+  const own = String(ep.poolCageSize || '').toLowerCase();
+  return {
+    pool,
+    poolCage: clientCage,
+    poolCageSize: ['small', 'medium', 'large', 'oversized'].includes(own) ? String(ep.poolCageSize).toLowerCase() : undefined,
+  };
+}
+
+// Gate on: price the two-size answer, hold the four-size answer's Large and
+// Oversized. A client with no decided poolCage takes the re-read's cage answer, so it
+// prices like an explicit YES (a held cage is held, a Medium one is charged); a YES or
+// an explicit negative from the client stands.
+function twoSizeCageFeatures(ep, trusted, { pool, clientCage }) {
+  const { fourSizeOf, twoSizeOf, isHeldFourSize } = require('../services/property-lookup/cage-sizes');
+  const four = fourSizeOf(trusted) || fourSizeOf(ep);
+  const trustedCage = clientCageUndecided(ep, clientCage) && String(trusted?.poolCage).toUpperCase() === 'YES';
+  const poolCage = clientCage || trustedCage;
+  const size = twoSizeOf(trusted) ?? twoSizeOf(ep);
+  return {
+    pool: pool || trustedCage,
+    poolCage,
+    // No cage, no size: the engine reads a Large size as a hold even without a cage.
+    poolCageSize: poolCage && size ? size.toLowerCase() : undefined,
+    ...(poolCage && isHeldFourSize(four) ? { poolCageReview: true } : {}),
+  };
+}
+
+// True when the client gave no decided cage answer: not a YES (clientCage) and not an
+// explicit negative (NO in any case, or false). Omitted, POSSIBLE, UNKNOWN or any other
+// value is undecided, so the server re-read's decided answer applies.
+function clientCageUndecided(ep, clientCage) {
+  return !clientCage && ep.poolCage !== false && String(ep.poolCage ?? '').trim().toUpperCase() !== 'NO';
+}
+
+// The server's re-read, only when it decided the cage (YES or NO).
+function decidedCage(trustedTurf) {
+  return ['YES', 'NO'].includes(String(trustedTurf?.poolCage).toUpperCase()) ? trustedTurf : null;
 }
 
 function isPublicCommercialQuote(body = {}, enriched = {}) {
@@ -1711,11 +1787,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       isCommercial: commercialDetected,
       commercialSubtype: commercialSubtype || ep.commercialSubtype || null,
       features: {
-        pool: ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES',
-        poolCage: ep.poolCage === 'YES' || ep.poolCage === true,
-        poolCageSize: ['small', 'medium', 'large', 'oversized'].includes(String(ep.poolCageSize || '').toLowerCase())
-          ? String(ep.poolCageSize).toLowerCase()
-          : undefined,
+        ...websiteCageFeatures(ep, trustedTurf),
         shrubs: (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined,
         trees: (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined,
         complexity: (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined,
@@ -2360,10 +2432,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // the answer and its prompt are judged on the same pre-write row.
       Object.assign(updateFields, heardAboutFillIfEmpty(db, wizardHeardAbout));
       const RETURNING = ['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'];
+      // A web-form lead reaches this route only through the quiz hand-off,
+      // and keeps the hand-off's rule on this write too (still open, not
+      // commercial): the lead webhook returns its id before the property
+      // lookup has judged it. A refused lead matches zero rows, like a wrong
+      // id, and this run files its own quote_wizard lead below.
       const ownRow = () => db('leads')
         .where({ id: leadId })
         .whereNull('deleted_at')
-        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()]);
+        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+        .modify(exceptClosedWebFormLead);
       // The normal wizard flow mints a 'new' row at the property-lookup
       // stage and hands its token here, so this is where a repeat through
       // the documented flow is first fully typed (codex #3834 r7 P1). And a
@@ -2481,7 +2559,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         }
       }
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
-        await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
+        // Fills an EMPTY source only, judged in the write itself: a source
+        // the office set since the ownership write above is kept.
+        await db('leads').where({ id: lead.id }).whereNull('lead_source_id').update({ lead_source_id: sourceMeta.leadSourceId });
       }
     }
     // Same inquiry submitted again without the lead token (a fresh browser
@@ -2529,7 +2609,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
             : extractedData,
         }),
-      }).returning(['id']);
+      }).returning(['id', 'lead_type']); // lead_type: the new-lead bell below marks only the wizard's own row
       lead = rows[0];
     }
     // The label was computed from a read of the target; if the office closed
@@ -2860,7 +2940,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
 
       if (customerId) {
-        await db('leads').where({ id: lead.id }).update({ customer_id: customerId });
+        // The office's convert or close also writes this column. A web-form
+        // lead (the quiz hand-off) it acted on since this run's ownership
+        // write keeps the customer that action gave it (0 rows here).
+        await db('leads').where({ id: lead.id }).modify(exceptClosedWebFormLead).update({ customer_id: customerId });
       }
     } catch (e) {
       logger.error(`[public-quote] Customer upsert failed: ${e.message}`);
@@ -3662,7 +3745,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`}${duplicateOfLeadId ? ' · repeat of an open lead (filed as duplicate)' : ''}`,
-        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : {}) } }
+        // createdLead: the lead is this wizard run's own row (lead_type quote_wizard: inserted above, or minted by its
+        // property-lookup stage), not a repeat filed as a duplicate, nor a voicemail or inbound-call lead the prefill
+        // token attached this form to. The new-lead re-alert (new-lead-reminder.js intakeMarked) then counts a person's
+        // contact from the lead's creation, not only from this bell, and only within 15 minutes of that creation.
+        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : { createdLead: lead.lead_type === 'quote_wizard' }) } }
       );
     } catch (e) {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);
@@ -4440,11 +4527,14 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     }
 
     // leadId + email match = good-enough public auth (customer just typed the
-    // email in the same session). Avoids any-id-overwrite abuse.
+    // email in the same session). Avoids any-id-overwrite abuse. Never a
+    // web-form lead: its id reaches a visitor only through the quiz hand-off,
+    // and no page of the hand-off calls this route.
     const lead = await db('leads')
       .where({ id: leadId })
       .whereNull('deleted_at')
       .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
+      .whereRaw("lead_type IS DISTINCT FROM 'form_submission'")
       .first();
     if (!lead) return res.status(404).json({ error: 'Lead not found.' });
 

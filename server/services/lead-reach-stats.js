@@ -171,7 +171,7 @@ async function sidOwnersOf(conn, calls) {
 
 // Who a batch of Gmail SENT rows belongs to, Map(row id -> customer id, AMBIGUOUS, or null). Email
 // sync leaves customer_id empty on mail sent from the office, so the owner comes from the same two
-// linkages as email-customer-link.js resolveEmailCustomerLink, read for the whole batch in two set
+// linkages as email-customer-link.js emailCustomerLink, read for the whole batch in two set
 // queries: (a) customers linked to inbound rows of the send's Gmail thread, (b) active customers whose
 // own email is a recipient. More than one distinct customer is ambiguous, never a guess. This is the
 // resolver's linkage without its thread-reach refinement (threadSendReachesCustomer), so it can only

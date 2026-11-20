@@ -1,7 +1,6 @@
 /**
- * GET /api/admin/ads/health — the read-only Ad health card (GATE_ADS_HEALTH_CARD, owner 2026-11-04 option A).
- * Gate off (anything but the exact string 'true'): 404 and the health service never runs. Same owner-only guard as
- * the rest of the ads router.
+ * GET /api/admin/ads/health — the read-only Ad health card (owner 2026-11-04 option A).
+ * Same owner-only guard as the rest of the ads router.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -50,30 +49,13 @@ async function get(path) {
   return { status: res.status, body: json || {} };
 }
 
-const ORIGINAL = process.env.GATE_ADS_HEALTH_CARD;
 beforeEach(() => {
   mockCurrentRole = 'admin';
   mockBuildAdsHealth.mockReset();
-  delete process.env.GATE_ADS_HEALTH_CARD;
-});
-afterAll(() => {
-  if (ORIGINAL === undefined) delete process.env.GATE_ADS_HEALTH_CARD;
-  else process.env.GATE_ADS_HEALTH_CARD = ORIGINAL;
 });
 
 describe('GET /api/admin/ads/health', () => {
-  test.each([undefined, 'false', 'TRUE', '1', 'shadow'])('gate %p: 404 and the service never runs', async (value) => {
-    if (value !== undefined) process.env.GATE_ADS_HEALTH_CARD = value;
-
-    const res = await get('/api/admin/ads/health');
-
-    expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: 'ads_health_off' });
-    expect(mockBuildAdsHealth).not.toHaveBeenCalled();
-  });
-
-  test('gate on: answers the service payload', async () => {
-    process.env.GATE_ADS_HEALTH_CARD = 'true';
+  test('answers the service payload', async () => {
     const payload = { generatedAt: '2026-11-05T05:40:00.000Z', google: { configured: false }, uploads: {}, timeline: [], notes: [] };
     mockBuildAdsHealth.mockResolvedValue(payload);
 
@@ -85,7 +67,6 @@ describe('GET /api/admin/ads/health', () => {
   });
 
   test('is owner-only like the rest of the ads router', async () => {
-    process.env.GATE_ADS_HEALTH_CARD = 'true';
     mockCurrentRole = 'technician';
 
     expect((await get('/api/admin/ads/health')).status).toBe(403);

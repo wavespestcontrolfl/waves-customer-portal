@@ -16,8 +16,8 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
   // House mix names per the 2026-09-27 ruling (#5049): Talstar P → Atticus
-  // Talak 7.9 F, bare surfactant → LESCO 90/10. Ids kept so assertions hold.
-  { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  // Talak 7.9 F, then (owner 2026-11-18) LESCO Crosscheck Plus; bare surfactant → LESCO 90/10. Ids kept so assertions hold.
+  { id: 'talstar', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
   { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Bait' },
 ];
@@ -41,6 +41,8 @@ function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = 
         service,
         products,
         existingRecord: null,
+        // Room under the yearly Taurus label limit, so the house mix keeps Taurus.
+        taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 },
       };
     }
     if (path.endsWith('/tech-rating-allowed')) return rating;
@@ -60,10 +62,10 @@ describe('FastCompleteSheet', () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
-    expect(await screen.findByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /Taurus SC — 1.6 fl oz/ })).toBeTruthy();
     // A liquid's bare "oz" is a fluid ounce, and a dose under 1 fl oz reads in
     // measuring spoons (0.25 fl oz = 1½ tsp) — never in mL.
-    expect(screen.getByRole('button', { name: /Atticus Talak 7\.9 F — 4 fl oz/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /LESCO Crosscheck Plus — 4 fl oz/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant — 1½ tsp/ })).toBeTruthy();
   });
 
@@ -94,7 +96,7 @@ describe('FastCompleteSheet', () => {
 
     // Deselect every default product — now nothing is selected at all.
     fireEvent.click(screen.getByRole('button', { name: /Taurus SC/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Atticus Talak 7\.9 F/ }));
+    fireEvent.click(screen.getByRole('button', { name: /LESCO Crosscheck Plus/ }));
     fireEvent.click(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant/ }));
     expect(screen.getByText('Select at least one product.')).toBeTruthy();
     expect(submit.disabled).toBe(true);
@@ -136,10 +138,10 @@ describe('FastCompleteSheet', () => {
     const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
     const taurus = body.products.find((p) => p.productId === 'taurus');
     expect(taurus).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 140, areaUnit: 'linear_ft', applicationArea: 'Outside' });
-    // At perimeter spray the shared resolver gives the 4-oz house default
-    // rate — what the full form seeds. The amount keeps the fl oz the tile
+    // At perimeter spray the shared resolver gives the house mix's own rate
+    // for Taurus (1.6 oz, the mix's total) — what the full form seeds. The amount keeps the fl oz the tile
     // showed: a liquid is never recorded in a bare oz.
-    expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz', amountUnit: 'fl_oz' });
+    expect(taurus).toMatchObject({ rate: 1.6, rateUnit: 'oz', amountUnit: 'fl_oz' });
     expect(taurus.targets).toEqual(['Ants', 'Palmetto bugs']);
     expect(body.products.map((p) => p.productId).sort()).toEqual(['surfactant', 'talstar', 'taurus']);
   }, 15000);
@@ -182,10 +184,11 @@ describe('FastCompleteSheet', () => {
     const taurus = body.products.find((p) => p.productId === 'taurus');
     // The unit follows the method, as the full form's resolver seeds it: at
     // spot treatment Taurus's per-basis label (fl oz/gal) records fl oz.
-    expect(taurus).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz', applicationMethod: 'spot_treatment' });
-    // The rate is resolved at the method actually sent: spot treatment
-    // takes the catalog label band's low end in its own unit.
-    expect(taurus).toMatchObject({ rate: 0.2, rateUnit: 'fl_oz/gal' });
+    expect(taurus).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz', applicationMethod: 'spot_treatment' });
+    // The rate is resolved at the method actually sent, in the label's own
+    // unit; the house Taurus row is the house mix's concentration (1.6 fl oz
+    // in 4 gal = 0.4 fl oz/gal), not the label band's low end.
+    expect(taurus).toMatchObject({ rate: 0.4, rateUnit: 'fl_oz/gal' });
     expect(body.expectedVisit).toEqual({
       customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1',
       serviceType: 'Pest Control Re-Service', scheduledDate: '2026-09-26', address: { line1: '123 Main St' },
@@ -439,7 +442,7 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByRole('button', { name: 'High' })).toBeTruthy();
   });
 
-  test('the 4-oz house default at perimeter spray is never flagged over the label', async () => {
+  test('the house default at perimeter spray is never flagged over the label', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
@@ -447,9 +450,9 @@ describe('FastCompleteSheet', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
     fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
-    // The house default is 4 oz in the tank, not Taurus's 0.2-0.8 fl oz per
-    // gallon label, so there is no label maximum to be over.
-    expect(screen.getByLabelText('Taurus SC rate').value).toBe('4');
+    // The house default is the mix's 1.6 oz in the tank, not Taurus's 0.2-0.8
+    // fl oz per gallon label, so there is no label maximum to be over.
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('1.6');
     expect(screen.queryByText(/label max/)).toBeNull();
   });
 
@@ -459,8 +462,9 @@ describe('FastCompleteSheet', () => {
 
     await screen.findByRole('button', { name: /Taurus SC/ });
     fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
-    // Spot treatment resolves Taurus's label band 0.2-0.8 fl oz/gal.
-    expect(screen.getByLabelText('Taurus SC rate').value).toBe('0.2');
+    // Spot treatment resolves Taurus's label band 0.2-0.8 fl oz/gal; the house
+    // row opens at the house mix's 0.4 fl oz/gal.
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('0.4');
     expect(screen.queryByText(/label max/)).toBeNull();
     fireEvent.change(screen.getByLabelText('Taurus SC rate'), { target: { value: '1.2' } });
     expect(screen.getByText('> label max 0.8')).toBeTruthy();

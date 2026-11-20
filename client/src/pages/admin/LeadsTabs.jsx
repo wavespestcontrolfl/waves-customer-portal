@@ -39,6 +39,7 @@ import {
   UiSurface,
 } from "../../components/ui";
 import { leadAddressUnverifiedNotice } from "../../lib/leadAddressUnverified";
+import { quizAnswerLine } from "../../lib/leadQuizAnswers";
 import { etDateString, formatETDateTime } from "../../lib/timezone";
 import { isConsultationVisit } from "../../lib/consultationVisit";
 import ConsultationStatsPanel from "./ConsultationStatsPanel";
@@ -2419,15 +2420,28 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         ].filter(Boolean);
                                         const timelineLabel =
                                           TIMELINE_LABELS[ex.timeline];
+                                        const quizLine = quizAnswerLine(
+                                          ex.quiz,
+                                        );
                                         if (
                                           !ex.pain_points &&
                                           !ex.preferred_date_time &&
                                           !timelineLabel &&
+                                          !quizLine &&
                                           quoteFlags.length === 0
                                         )
                                           return null;
                                         return (
                                           <>
+                                            {quizLine && (
+                                              <div>
+                                                {quizLine.name}
+                                                {quizLine.answers ? ":" : ""}{" "}
+                                                <span className="text-zinc-900">
+                                                  {quizLine.answers}
+                                                </span>
+                                              </div>
+                                            )}
                                             {timelineLabel && (
                                               <div>
                                                 Wants service:{" "}

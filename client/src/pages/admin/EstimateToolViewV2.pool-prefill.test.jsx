@@ -6,6 +6,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import EstimateToolViewV2 from './EstimateToolViewV2';
 
+// The full editor renders slowly on a loaded runner (same setting as the dead-animal and misting suites).
+vi.setConfig({ testTimeout: 30000 });
+
 vi.mock('../../components/admin/EstimateSendDialog', () => ({ useEstimateSend: () => vi.fn() }));
 
 const ADDRESS = '500 Example Court, Venice, FL 34285';
@@ -145,5 +148,35 @@ describe('lookup cage size prefill', () => {
     await lookUp();
     await waitFor(() => expect(sizeBox()).toHaveValue('OVERSIZED'));
     expect(await pricedProfile()).toMatchObject({ poolCageSize: 'OVERSIZED' });
+  });
+
+  // GATE_CAGE_TWO_SIZES (owner 2026-11-19): the lookup says meta.poolCageTwoSizes.
+  it('two sizes: the box offers Medium and Large only, and the lookup\'s Large fills and prices', async () => {
+    lookupMeta = { poolCageTwoSizes: true };
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Pest Control', exact: true }));
+    await lookUp();
+    const sizeBox = screen.getByLabelText('Pool Cage Size');
+    expect([...sizeBox.options].map((o) => o.value)).toEqual(['MEDIUM', 'LARGE']);
+    expect([...sizeBox.options].map((o) => o.textContent)).toEqual(['Medium (+$8)', 'Large (+$12)']);
+    expect(sizeBox).toHaveValue('LARGE');
+    expect(await pricedProfile()).toMatchObject({ poolCage: 'YES', poolCageSize: 'LARGE' });
+  });
+
+  // A reopened estimate keeps its saved Small or Oversized listed (cage-two-sizes.test.jsx). A size a
+  // lookup fills is NOT saved: with two sizes on, a stale Small or Oversized reads as Medium or Large.
+  it('two sizes: a lookup-filled Small or Oversized (a lookup from before the flip) reads Medium or Large', async () => {
+    lookupMeta = { poolCageTwoSizes: true };
+    for (const [filled, expected] of [['OVERSIZED', 'LARGE'], ['SMALL', 'MEDIUM']]) {
+      cageSize = filled;
+      render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Pest Control', exact: true }));
+      await lookUp();
+      const sizeBox = screen.getByLabelText('Pool Cage Size');
+      await waitFor(() => expect(sizeBox).toHaveValue(expected));
+      expect([...sizeBox.options].map((o) => o.value)).toEqual(['MEDIUM', 'LARGE']);
+      expect(await pricedProfile()).toMatchObject({ poolCageSize: expected });
+      cleanup();
+    }
   });
 });

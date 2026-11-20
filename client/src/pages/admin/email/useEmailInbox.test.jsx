@@ -109,7 +109,7 @@ describe("useEmailInbox reclassify and attachment feedback", () => {
     expect(result.current.actionFeedback).toEqual({ error: true, message: "Could not reclassify the email. Try again." });
   });
 
-  it("offers no label list unless the server says the pick gate is on", async () => {
+  it("offers no label list when the server sends none or cannot be read", async () => {
     const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
     await flush();
     expect(result.current.reclassifyLabels).toEqual([]);
@@ -119,8 +119,8 @@ describe("useEmailInbox reclassify and attachment feedback", () => {
     expect(unreadable.current.reclassifyLabels).toEqual([]);
   });
 
-  it("loads the label list when the gate is on and posts the picked label", async () => {
-    handlers["/api/admin/email/reclassify-options"] = () => json({ enabled: true, categories: ["lead_inquiry", "spam"] });
+  it("loads the label list and posts the picked label", async () => {
+    handlers["/api/admin/email/reclassify-options"] = () => json({ categories: ["lead_inquiry", "spam"] });
     handlers["/api/admin/email/message/m1/reclassify"] = () => json({ classification: { category: "spam", confidence: 1 } });
     const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
     await flush();

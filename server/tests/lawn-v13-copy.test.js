@@ -349,7 +349,12 @@ describe('the service outline bullets with GATE_LAWN_V13 on name treatment categ
           const bullets = outlineService.customerProtocolBullets(visit);
           expect({ grass, month: visit.month, any: bullets.length > 0 }).toEqual({ grass, month: visit.month, any: true });
           for (const bullet of bullets) {
-            expect(ALLOWED.some((label) => bullet.startsWith(`${label} may be relevant`))).toBe(true);
+            if (bullet.startsWith('Insect scouting ')) {
+              expect(visit.month).toBe('May');
+              expect(bullet).toContain('treatment is only as needed after evidence is found');
+            } else {
+              expect(ALLOWED.some((label) => bullet.startsWith(`${label} may be relevant`))).toBe(true);
+            }
             for (const name of recipeNames) expect(bullet.toLowerCase()).not.toContain(name.toLowerCase().split(' ')[0] === 'lesco' ? name.toLowerCase() : name.toLowerCase().split(' ')[0]);
             expect(bullet).not.toMatch(/\d|fl oz|per 1,?000|lb\b|—/i);
           }

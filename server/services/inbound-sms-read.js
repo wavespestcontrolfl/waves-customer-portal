@@ -15,9 +15,13 @@
  * recent legacy-only rows).
  */
 const db = require('../models/db');
+const { phoneIdentityKey } = require('../utils/phone');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
-const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+const { excludeRecruitingSmsLog, hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
+const {
+  inboundSmsReceiptProjectionSql, phoneIdentitySql, canonicalSmsAddressProjectionSql, canonicalSmsLegacyLinkSql,
+} = require('./sms-response-policy');
 
 const LEGACY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -227,7 +231,6 @@ async function markInboundSmsRead({
   // #4623): the display query hides them, so the write must too, or a
   // technician opening the customer part of a shared thread would clear the
   // owner's unread applicant reply.
-  const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
   const q = () => hideRecruitingThreadsFromNonAdmin(db('messages').where({ channel: 'sms', direction: 'inbound' }), { techRole: role }, 'message_type')
     .andWhere(function unreadOnly() { this.where({ is_read: false }).orWhereNull('is_read'); })
     .andWhere(scope);
@@ -280,6 +283,90 @@ async function markInboundSmsRead({
 
   return { updated, notificationsCleared };
 }
+
+// The inbox's Mark all read (owner 2026-11-19): every unread inbound text the
+// inbox can show, created up to readBefore (the newest text the caller's list
+// showed, never later than now), through the one writer above, so the legacy
+// mirror, backlog-marker strip and bell clear are the same as a thread read.
+// The client's stamp is millisecond-rounded, so the cutoff takes the whole
+// millisecond (PostgreSQL keeps microseconds). Office roles only: the route
+// refuses a technician, who reads one thread at a time through the scoped
+// /messages/read check. `excludePhones` is the
+// inbox log's own internal-phone exclusion (either side of the thread, or the
+// customer's phone). Recruiting replies are read on the Recruiting page, never
+// by an inbox-wide read.
+async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, excludePhones = [], contactPhone = null } = {}) {
+  if (!(readBefore instanceof Date) || Number.isNaN(readBefore.getTime())) {
+    throw new Error('readBefore required when marking every text read');
+  }
+  // `contactPhone`: one inbox row's Mark read: that sender's texts across every
+  // business line and page, up to the row's newest text, under the same rules.
+  // Other phones sharing the conversation stay as they are.
+  const senderKey = contactPhone === null ? null : phoneIdentityKey(contactPhone);
+  if (contactPhone !== null && !senderKey) throw new Error('contactPhone must be a phone number');
+  const cutoff = nextMillisecondBoundary(new Date(Math.min(readBefore.getTime(), Date.now())));
+  // The inbox shows a text at its effective time (an opt-out receipt can date
+  // it earlier than the row), so the cutoff compares that same time.
+  const receipt = inboundSmsReceiptProjectionSql({ messageAlias: 'm', legacyAlias: 'legacy', receiptAlias: 'r' });
+  // A blocked sender is hidden from the inbox (and the badge), so its texts
+  // keep their read state for the day it is unblocked. The sender is the
+  // inbox's per-text identity (/log): the linked legacy row's sender first,
+  // as a customer's two phones can share one conversation.
+  const address = canonicalSmsAddressProjectionSql({ messageAlias: 'm', conversationAlias: 'c', customerAlias: 'cu', legacyAlias: 'legacy' });
+  const ids = await db('messages as m')
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
+    .joinRaw(`LEFT JOIN LATERAL (${canonicalSmsLegacyLinkSql({ messageAlias: 'm', conversationAlias: 'c' })}) legacy ON true`)
+    .joinRaw(receipt.joinSql)
+    .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
+    // A backlog reset read a text and tagged it for rollback; the writer strips
+    // that tag, so a later rollback cannot reopen a text staff marked read. A
+    // read text whose bell is still live (an earlier read committed, then its
+    // bell step failed) joins too, so a retry finishes that bell.
+    .andWhere(function unreadOrUnfinished() {
+      this.where({ 'm.is_read': false }).orWhereNull('m.is_read')
+        .orWhereRaw("jsonb_exists(COALESCE(m.metadata, '{}'::jsonb), 'backlog_reset')")
+        .orWhereIn('m.twilio_sid', function liveBells() {
+          this.select(db.raw("n.metadata->'payload'->>'twilioSid'")).from('notifications as n')
+            .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms' }).whereNull('n.read_at');
+        });
+    })
+    .whereRaw(`${receipt.effectiveCreatedAtSql} < ?`, [cutoff])
+    // An inbox-wide read leaves recruiting replies for the Recruiting page; one
+    // sender's row reads them as opening the thread does, for the roles that
+    // see them.
+    .modify((q) => {
+      if (!senderKey) excludeRecruitingSmsLog(q, 'm.message_type');
+      else hideRecruitingThreadsFromNonAdmin(q, { techRole: role }, 'm.message_type');
+    })
+    .modify((q) => { if (senderKey) q.whereRaw(`${address.peerSql} = ?`, [senderKey]); })
+    .modify((q) => {
+      for (const phone of excludePhones) {
+        // Null-safe on every side: a thread with no stored business line (its
+        // text or legacy row names the line) still counts on the badge, so
+        // Mark all read must reach it.
+        q.where((b) => b.whereNot('c.our_endpoint_id', phone).orWhereNull('c.our_endpoint_id'))
+          .where((b) => b.whereNot('c.contact_phone', phone).orWhereNull('c.contact_phone'))
+          .where((b) => b.whereNot('cu.phone', phone).orWhereNull('cu.phone'));
+      }
+    })
+    .whereNotExists(function blockedSender() {
+      // A digitless legacy block normalizes to '' like a text with no number; it blocks nothing (as on screen).
+      this.select(1).from('blocked_numbers as b').whereRaw(`${phoneIdentitySql('b.number')} <> ''`)
+        .whereRaw(`${phoneIdentitySql('b.number')} = ${address.peerSql}`);
+    })
+    .pluck('m.id');
+  // The writer binds each id (and its SIDs); batches keep a long backlog
+  // under PostgreSQL's bind-parameter limit.
+  const total = { updated: 0, notificationsCleared: 0 };
+  for (let i = 0; i < ids.length; i += MARK_ALL_BATCH) {
+    const done = await markInboundSmsRead({ messageIds: ids.slice(i, i + MARK_ALL_BATCH), adminUserId, role });
+    total.updated += done.updated;
+    total.notificationsCleared += done.notificationsCleared;
+  }
+  return total;
+}
+const MARK_ALL_BATCH = 500;
 
 // 3b. Customer-thread cross-clear: threads with nothing left unread
 // (unified AND recent legacy-only rows), through the notification service.
@@ -335,4 +422,4 @@ async function customerIdsInScope(ids, convs) {
   return db('conversations').whereIn('id', [...convIds]).whereNotNull('customer_id').distinct('customer_id').pluck('customer_id');
 }
 
-module.exports = { markInboundSmsRead, countUnreadInboundSms, retargetOrClearUnknownSenderBell };
+module.exports = { markInboundSmsRead, markAllInboundSmsRead, countUnreadInboundSms, retargetOrClearUnknownSenderBell };

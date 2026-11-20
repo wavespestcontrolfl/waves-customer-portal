@@ -1,4 +1,4 @@
-// Email Reclassify with a staff-picked label (GATE_EMAIL_RECLASSIFY_PICK).
+// Email Reclassify with a staff-picked label.
 // Route-level: no network, no real DB. The auto-action, the quarantine cancel
 // and the sender unblock are mocked so the test can name exactly which run.
 const mockState = { emails: [], inserts: [], insertError: null, blocked: null };
@@ -71,7 +71,6 @@ beforeEach(() => {
   mockState.blocked = { id: 'block-1' };
   classifyEmailContent.mockResolvedValue({ ...aiResult, category: 'customer_request', confidence: 0.8 });
 });
-afterEach(() => { delete process.env.GATE_EMAIL_RECLASSIFY_PICK; });
 
 const post = async (body) => {
   const res = await fetch(`http://127.0.0.1:${server.address().port}/api/admin/email/message/${EMAIL_ID}/reclassify`, {
@@ -91,26 +90,7 @@ it('keeps every failure_mode inside the ai_incidents column (60 chars)', () => {
   expect(`email:${EMAIL_ID}:classification`.length).toBeLessThanOrEqual(64);
 });
 
-describe('gate off', () => {
-  it('ignores a label in the body: the AI runs, no incident is stored', async () => {
-    const res = await post({ classification: 'lead_inquiry' });
-    expect(res.status).toBe(200);
-    expect(res.body.classification).toMatchObject({ category: 'customer_request', confidence: 0.8 });
-    expect(classifyEmailContent).toHaveBeenCalledTimes(1);
-    expect(emailUpdate()).toHaveLength(1);
-    expect(emailUpdate()[0]).toMatchObject({ classification: 'customer_request', classification_confidence: 0.8 });
-    expect(JSON.parse(emailUpdate()[0].extracted_data)).toEqual({ ...aiResult, category: 'customer_request', confidence: 0.8 });
-    expect(mockState.inserts).toEqual([]);
-  });
-
-  it('gives the picker nothing to show', async () => {
-    expect(await get('/reclassify-options')).toEqual({ status: 200, body: { enabled: false } });
-  });
-});
-
-describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_EMAIL_RECLASSIFY_PICK = 'true'; });
-
+describe('staff label pick', () => {
   it('a block-list spam stamp is not an AI verdict: the pick sets the label and stores no incident (Codex #7623 r1)', async () => {
     mockState.emails = [{ ...quarantinedSpam(), classification_confidence: null, extracted_data: null, auto_action: 'blocked_sender_trashed', quarantined_at: null }];
     const res = await post({ classification: 'customer_request' });
@@ -131,7 +111,7 @@ describe('gate on', () => {
   });
 
   it('offers the classifier label list', async () => {
-    expect(await get('/reclassify-options')).toEqual({ status: 200, body: { enabled: true, categories: EMAIL_CATEGORIES } });
+    expect(await get('/reclassify-options')).toEqual({ status: 200, body: { categories: EMAIL_CATEGORIES } });
   });
 
   it('without a label still runs the AI, as today', async () => {

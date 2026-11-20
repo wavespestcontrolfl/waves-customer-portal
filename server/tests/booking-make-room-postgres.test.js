@@ -88,7 +88,9 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     await mockConn('technicians').insert({ id: techId, name: 'Synthetic room tech', employment_status: 'active', field_dispatchable: true });
     visits = [
       { name: 'a', hour: 8, dLat: 0, dLng: 0.05 },
-      { name: 'b', hour: 9, dLat: 0, dLng: 0.2 },
+      // ~10 miles east: far enough to save drive over the noon and 3 PM times, near enough that the drive clock's per-leg
+      // overhead still lets the chain keep every moved stop's arrival window (0.2 degrees east did not).
+      { name: 'b', hour: 9, dLat: 0, dLng: 0.16 },
       { name: 'c', hour: 10, dLat: 0.1, dLng: 0 },
       { name: 'd', hour: 11, dLat: 0.12, dLng: 0 },
       { name: 'e', hour: 13, dLat: 0.13, dLng: 0.01 },
@@ -134,7 +136,7 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
   const visitOf = (name) => visits.find((v) => v.name === name);
   const FREE = () => [{ date: DAY, windowStart: '12:00', techId }, { date: DAY, windowStart: '15:00', techId }];
   const admit = (slot) => slot.date === DAY && slot.windowStart >= '09:00' && slot.windowStart <= '16:00';
-  const PIN = { lat: HQ.lat + 0.005, lng: HQ.lng + 0.2 };
+  const PIN = { lat: HQ.lat + 0.005, lng: HQ.lng + 0.16 };
   // Each test reads the WHOLE check, so it gets a test-sized budget and must finish. Production's 4-second budget
   // is about a slow page, and it has its own tests (booking-make-room.test.js). CI's database is shared by two suite
   // halves at once: on 2026-11-08 (#7766's run) a busy check ran out of the 4 seconds before the hour under test,
@@ -209,6 +211,75 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     await mockConn('reschedule_log').where({ scheduled_service_id: visitOf('c').id }).del();
     // Nothing but the log row and the test's own reschedule_log row was written.
     expect(await starts()).toEqual(before);
+    expect(sentAnything()).toEqual([]);
+  });
+
+  test('the locked proof counts a same-tech booked visit after its old hold stamp expires, without changing the offer read or expired unclaimed holds', async () => {
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    const { findMakeRoomOffers, verifyMakeRoomHour } = require('../services/scheduling/booking-make-room');
+    const estimateId = randomUUID();
+    const blockerCustomerId = randomUUID();
+    const blockerId = randomUUID();
+    const otherTechId = randomUUID();
+    await mockConn('technicians').insert({ id: otherTechId, name: 'Synthetic other room tech', employment_status: 'active', field_dispatchable: true });
+    await mockConn('estimates').insert({ id: estimateId, status: 'sent', service_interest: 'Pest Control' });
+    await mockConn('customers').insert({
+      id: blockerCustomerId,
+      first_name: 'Roomblockerzq',
+      last_name: 'Fixturezq',
+      email: `${blockerCustomerId}@example.invalid`,
+      phone: '+19415552999',
+      address_line1: '299 Room Test Lane',
+      city: 'Test City',
+      zip: '00000',
+      active: true,
+      pipeline_stage: 'active_customer',
+    });
+    await mockConn('scheduled_services').insert({
+      id: blockerId,
+      customer_id: blockerCustomerId,
+      source_estimate_id: estimateId,
+      technician_id: techId,
+      scheduled_date: DAY,
+      service_type: 'Quarterly Pest Control Service',
+      status: 'confirmed',
+      window_start: '12:00',
+      window_end: '13:00',
+      estimated_duration_minutes: 60,
+      is_recurring: true,
+      recurring_parent_id: randomUUID(),
+      customer_confirmed: true,
+      reservation_expires_at: mockConn.raw("NOW() - INTERVAL '1 minute'"),
+      lat: HQ.lat + 0.125,
+      lng: HQ.lng,
+      route_order: 5,
+    });
+
+    const NEXT = '2097-06-11';
+    const proofArgs = {
+      conn: mockConn, date: DAY, startMin: 9 * 60, techId, durationMinutes: 60, point: PIN, estimateId,
+      admit, placement: async () => true, now: NOW, budgetMs: 60000,
+    };
+    const { hours, report } = await findMakeRoomOffers({
+      estimateId, pool: [{ date: NEXT, windowStart: '12:00', techId }], coords: PIN, durationMinutes: 60,
+      dateFrom: DAY, dateTo: NEXT, admit, placement: proofArgs.placement, now: NOW, conn: mockConn, budgetMs: 60000,
+    });
+    expect(report).toMatchObject({ error: null, timedOut: false, offerOnly: true });
+    expect(hours.map((hour) => `${hour.date} ${hour.start}`)).toEqual([`${DAY} 09:00`]);
+
+    await expect(verifyMakeRoomHour(proofArgs)).resolves.toEqual({ reason: 'fixed_hold' });
+
+    // The write proof keeps the established technician scope.
+    await mockConn('scheduled_services').where({ id: blockerId }).update({ technician_id: otherTechId });
+    await expect(verifyMakeRoomHour(proofArgs)).resolves.toMatchObject({
+      moves: expect.arrayContaining([{ id: visitOf('d').id, from: '11:00', to: '12:00', widthMin: 60 }]),
+    });
+
+    // Expiry still releases an unclaimed hold, even on the requested technician.
+    await mockConn('scheduled_services').where({ id: blockerId }).update({ technician_id: techId, customer_id: null });
+    await expect(verifyMakeRoomHour(proofArgs)).resolves.toMatchObject({
+      moves: expect.arrayContaining([{ id: visitOf('d').id, from: '11:00', to: '12:00', widthMin: 60 }]),
+    });
     expect(sentAnything()).toEqual([]);
   });
 

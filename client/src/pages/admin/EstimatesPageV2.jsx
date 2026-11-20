@@ -24,7 +24,7 @@ import React, {
   useMemo,
   useRef,
 } from "react";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { useIntelligenceBarActions } from "../../hooks/useIntelligenceBarPageData";
 import {
@@ -49,12 +49,13 @@ import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineCo
 import WinLossSlicesCard from "./WinLossSlicesCard";
 import SourcePerformanceCard from "./SourcePerformanceCard";
 import PipelineAnalytics, {
-  isCallTodayEstimate,
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
   isPickReasonEstimate,
-  lastEngagementMs,
+  isSentGroupEstimate,
 } from "./PipelineAnalytics";
+// The Call today rule's one home, shared with the 9 AM push.
+import { isCallTodayEstimate, lastEngagementMs } from "@estimate-call-today";
 import {
   FollowUpModalV2,
   DeclineModalV2,
@@ -281,6 +282,46 @@ const CALL_LIST_MATCHERS = {
   call_today: (e) => isCallTodayEstimate(e),
   pick_reason: (e) => isPickReasonEstimate(e),
 };
+// The list filter, with ?view=call_today (the 9 AM push links here) selecting "Call today". Any other value does
+// nothing. The list takes the parameter once and drops it from the URL (replace: no new history entry), so a later
+// filter change, a refresh, or leaving and coming back is not pinned to it. The effect watches the URL, so the link
+// also works on a list that is already open. The third value counts the links taken on an open list: each one clears
+// the search, date filter and page (useClearControlsOnCallTodayLink), so nothing left from earlier hides a row the push
+// counted, and reloads the rows (with the filter already on Call today, the filter alone would not). The link a list
+// opens on belongs to the mount: its controls start clear and its own fetch loads it. Each navigation (location.key) is
+// taken once, so an effect replay (React StrictMode) never counts a link twice.
+function useCallTodayLinkFilter() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { key: navigationKey } = useLocation();
+  const linked = searchParams.get("view") === "call_today";
+  const [filter, setFilter] = useState(linked ? "call_today" : "all");
+  const [linksTaken, setLinksTaken] = useState(0);
+  const takenNavigation = useRef(linked ? navigationKey : null);
+  useEffect(() => {
+    if (!linked) return;
+    if (takenNavigation.current !== navigationKey) {
+      takenNavigation.current = navigationKey;
+      setFilter("call_today");
+      setLinksTaken((n) => n + 1);
+    }
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("view");
+      return next;
+    }, { replace: true });
+  }, [linked, navigationKey, setSearchParams]);
+  return [filter, setFilter, linksTaken];
+}
+// Each Call today link the list takes clears the controls that narrow it beyond the filter. Called after the paging
+// hook, with the state setters (stable) and the paging page setter (stable, a useState setter).
+function useClearControlsOnCallTodayLink(linksTaken, { setSearch, setDate, setPage }) {
+  useEffect(() => {
+    if (!linksTaken) return;
+    setSearch("");
+    setDate("all");
+    setPage(1);
+  }, [linksTaken, setSearch, setDate, setPage]);
+}
 function withCallListChips(chips, afterKey) {
   const at = chips.findIndex((c) => c.key === afterKey);
   if (at < 0) return [...chips, ...CALL_LIST_CHIPS];
@@ -358,6 +399,9 @@ function v3ChipMatches(e, chip) {
   if (chip === "closed")
     return e.status === "accepted" || e.status === "declined";
   if (chip === "action") {
+    // Never a self-serve quote nobody delivered (undeliveredSelfServe): the
+    // zero-follow-up contract.
+    if (e.undeliveredSelfServe) return false;
     if (e.status === "expired") return true;
     if (e.status === "viewed" && e.viewedAt) {
       const hrs = (Date.now() - new Date(e.viewedAt).getTime()) / 3.6e6;
@@ -394,12 +438,8 @@ function estimateMatchesFilter(e, filter) {
     return e._class === "won" || (!!e.archivedAt && e.status === "accepted");
   if (filter === "drafts")
     return e._class === "needs_estimate" || e._class === "ready_to_send";
-  if (filter === "sent_group")
-    return (
-      e._class === "awaiting" ||
-      e._class === "follow_up" ||
-      e._class === "scheduled"
-    );
+  // The Sent tile's rows (the tile counts the same predicate).
+  if (filter === "sent_group") return isSentGroupEstimate(e);
   if (filter === "follow_up_overdue") return isFollowUpOverdueEstimate(e);
   if (filter === "going_cold") return isGoingColdEstimate(e);
   if (Object.hasOwn(CALL_LIST_MATCHERS, filter)) return CALL_LIST_MATCHERS[filter](e);
@@ -2046,7 +2086,7 @@ function EstimatePipelineViewV2({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("newest");
@@ -2126,12 +2166,14 @@ function EstimatePipelineViewV2({
     estimates,
     refresh: refreshEstimates,
   });
+  // A Call today link taken on the open list (callTodayLinksTaken) loads it fresh too: with the filter already
+  // selected, the filter alone does not change, and the rows the push counted may have moved since the last load.
   useEffect(() => {
     refreshEstimates();
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates, estimatesRefresh]);
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
   const archiveEstimate = useCallback(
     async (e) => {
       if (
@@ -2351,6 +2393,11 @@ function EstimatePipelineViewV2({
     deepLinkEstimateId,
     deepLinkToken,
   );
+  useClearControlsOnCallTodayLink(callTodayLinksTaken, {
+    setSearch,
+    setDate: setDateRange,
+    setPage: paging.setPage,
+  });
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
@@ -2951,16 +2998,19 @@ function EstimatePipelineViewV2({
                           </Button>
                         )}
 
-                        {(e.status === "sent" || e.status === "viewed") && (
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            className="w-full sm:w-auto whitespace-nowrap"
-                            onClick={() => setFollowUpTarget(e)}
-                          >
-                            Follow Up
-                          </Button>
-                        )}
+                        {/* Never on a self-serve quote nobody delivered: the
+                            zero-follow-up contract. Sending it clears the flag. */}
+                        {["sent", "viewed"].includes(e.status) &&
+                          !e.undeliveredSelfServe && (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              className="w-full sm:w-auto whitespace-nowrap"
+                              onClick={() => setFollowUpTarget(e)}
+                            >
+                              Follow Up
+                            </Button>
+                          )}
 
                         {/* Schedule a verbal "yes" before formal acceptance: books
                             the visit and records the win on book (POST /admin/schedule
@@ -4117,7 +4167,7 @@ function EstimatesMobileListView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -4160,7 +4210,8 @@ function EstimatesMobileListView({
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates, estimatesRefresh]);
+    // A Call today link taken on the open list loads it fresh, as on desktop.
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
   const markEstimateAccepted = useCallback(
     async (e) => {
       // A commercial proposal win auto-creates the customer when none is linked.
@@ -4391,9 +4442,10 @@ function EstimatesMobileListView({
   }, [estimates, v3Flag]);
   const filterOptions = mobileFilterOptions(v3Flag, filterCounts);
 
-  // Reset filter when the v3 flag flips; keep chronological ordering stable.
+  // Reset filter when the v3 flag flips; keep chronological ordering stable. "Call today" is in both chip
+  // sets, so it stays: the flag loads after mount and must not undo the 9 AM push link (useCallTodayLinkFilter).
   useEffect(() => {
-    setFilter("all");
+    setFilter((current) => (current === "call_today" ? current : "all"));
   }, [v3Flag]);
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
@@ -4406,6 +4458,11 @@ function EstimatesMobileListView({
     deepLinkEstimateId,
     deepLinkToken,
   );
+  useClearControlsOnCallTodayLink(callTodayLinksTaken, {
+    setSearch,
+    setDate: setDateFilter,
+    setPage: paging.setPage,
+  });
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,

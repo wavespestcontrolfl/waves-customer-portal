@@ -106,6 +106,17 @@ function skip(reason, extra = {}) {
   return { requested: false, action: 'skipped', reason, ...extra };
 }
 
+// Why this visit can no longer take a card link (null = it still can). The
+// funnel below and the schedule panel's GET /:id/card-request read this one
+// rule, so the panel never offers a send the funnel can only refuse (owner
+// 2026-11-19: three taps on an on-site visit each came back "not live").
+function visitCardLinkClosedReason(visit) {
+  if (!LIVE_VISIT_STATUSES.includes(visit.status)) return `visit_not_live:${visit.status}`;
+  const dateOnly = callBookingDateOnly(visit.scheduled_date);
+  if (dateOnly && dateOnly < etDateString(new Date())) return 'visit_in_past';
+  return null;
+}
+
 // BOTH dark levers — the env gate AND the active secure_appointment_card
 // template. Admin surfaces use this to decide whether to OFFER the send
 // action at all (Codex #2921 P2): while the lane is dark, an offered
@@ -633,12 +644,11 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'service_id', 'card_link_sent_at', 'estimated_price', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
     if (!visit) return skip('visit_not_found');
     if (!visit.customer_id) return skip('no_customer');
-    if (!LIVE_VISIT_STATUSES.includes(visit.status)) return skip(`visit_not_live:${visit.status}`);
+    const closedReason = visitCardLinkClosedReason(visit);
+    if (closedReason) return skip(closedReason);
     // The invite's fee clause, handed back on inline links so the composer
     // renders the same disclosure this funnel would text.
     const feeLine = visitCarriesCancelFee(visit) ? cancelFeeLine() : '';
-    const dateOnly = callBookingDateOnly(visit.scheduled_date);
-    if (dateOnly && dateOnly < etDateString(new Date())) return skip('visit_in_past');
 
     // Owner directive 2026-07-30: the card ask only goes out for visits with
     // a real dollar amount. NULL price = manual quote pending (never $0 —
@@ -4114,6 +4124,7 @@ async function settleAppointmentNoShowFee(paymentIntent) {
 module.exports = {
   replaceSecureCardIntent,
   requestCardForAppointment,
+  visitCardLinkClosedReason,
   isAppointmentCardRequestEnabled,
   isSecureCardLaneReady,
   loadSecureCardPageData,

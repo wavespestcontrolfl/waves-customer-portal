@@ -72,12 +72,7 @@
  * below. A missed call (customer_missed_call) is NOT in the table: its one owner
  * is missed-call-bell.js (retireCalledBackMissedCalls, every 2 minutes), which
  * judges the same contact facts. A new text from a known
- * sender rewrites the sender's one thread bell and rings it again (the refresh clears done and the retired stamp). An
- * unknown sender's text bell (no customer on file) is judged only under
- * GATE_PROMISE_PHONE_MATCH_CLOSE (the `unknown_sms` class, by the sender's phone):
- * it closes once a person's delivered reply, or a call a person placed or answered
- * and spoke on, reached that phone after the sender's LATEST text; an automated
- * reply never counts. With that gate off it stays a person's to close. Two other customer-contact bells are in it by owner
+ * sender rewrites the sender's one thread bell and rings it again (the refresh clears done and the retired stamp). Two other customer-contact bells are in it by owner
  * ruling (2026-10-03), each closed only by the record that answers it: the
  * promise-chaser bell once the promise it chases is closed, and a portal chat
  * hand-off about adding a service once an estimate is handed off to that
@@ -126,11 +121,6 @@
  *     bell's latest event (bellEventAt: a re-rung bell's `rungAt`). The add-a-service chat keeps its
  *     estimate rule, and also closes on this contact. The confirmed-email-change bell
  *     (`portal-chat-email-change:`) is never judged: its answer is the account change.
- * One more carries its OWN three-state gate, so it can run in shadow: a class (`gate`)
- * is not offered at all while its gate is off, except to the re-arm pass, so turning
- * a gate off puts back what it closed; a single reason (a contact rule answering
- * `{ reason, mode }`) is silent while its mode is off and only recorded while it is
- * `shadow`.
  *   - Two more portal classes (owner 2026-11-01). A portal request
  *     bell (category `service`, `doneWhen: 'request_answered'`, a request id and a customer id) closes on the
  *     same person contact after the bell as the chat hand-off. An add-service request bell (trigger
@@ -158,9 +148,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { adminAlertRelevanceLive } = require('../config/feature-gates');
-// GATE_PROMISE_PHONE_MATCH_CLOSE, read at call time and guarded like the other late-added readers: a test that mocks
-// feature-gates without it reads off.
-const promisePhoneMatchCloseMode = () => require('../config/feature-gates').promisePhoneMatchCloseMode?.() ?? 'off';
 const { etDateString } = require('../utils/datetime-et');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 // The dedupeKey prefix call-last-name-lookup.js gives its suggestion (its
@@ -177,9 +164,6 @@ const CUSTOMER_QUOTE_FORM_PREFIX = 'customer-quote-form:';
 // (sms-reply-alert-delivery.js threadBellKey). Repeated, not imported (it pulls
 // in the webhook's delivery code); a test pins the two together.
 const SMS_THREAD_PREFIX = 'sms-thread:';
-// The dedupeKey prefix of an unknown sender's text bell (sms-reply-alert-delivery.js ringSmsReplyBell: `sms-reply:<sid>`).
-// Repeated, not imported, for the same reason; a test pins the two together.
-const UNKNOWN_SMS_PREFIX = 'sms-reply:';
 
 // The dedupeKey prefix of the unfinished-booking bells (portal-unfinished-bookings.js KEY_PREFIX). Repeated, not
 // imported: that module reads the database at load. A test pins the two together.
@@ -334,16 +318,13 @@ function askedAtOf(row, meta = parseMeta(row.metadata)) {
 }
 
 const TEXT_NOTE_CLASS = 'text_note_checked';
-const UNKNOWN_SMS_CLASS = 'unknown_sms';
 const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered', 'customer_quote_form']);
 // (portal_add_service_request has no contact witness; its estimate boundary is askedAtOf, in loadQuoteHandoffs.)
 
 // The classes that judge a text from a sender with no customer on file, and what each names (needs the text's sid).
-// The tracking-line row (new_lead) names the text it shows; the unknown sender's text bell (sms-reply:<sid>) also
-// carries the flag the rule reads. Any other class gets nothing, so such a text is not judged.
+// The tracking-line row (new_lead) names the text it shows. Any other class gets nothing, so such a text is not judged.
 const UNKNOWN_SENDER_REFS = {
   tracking_text: (sid) => sid && { sid, customerId: null },
-  [UNKNOWN_SMS_CLASS]: (sid) => sid && { sid, customerId: null, unknownSender: true },
 };
 
 // What a customer-contact bell is about, for the witnesses: the text, call or
@@ -357,12 +338,8 @@ function contactRefs(kind, row, data, cls) {
     const key = String(refs.meta.dedupeKey || '');
     const customerId = key.startsWith(SMS_THREAD_PREFIX) ? uuidOrNull(key.slice(SMS_THREAD_PREFIX.length)) : uuidOrNull(first(payload.threadId, params.get('thread')));
     const sid = first(params.get('message'), payload.twilioSid);
-    // An unknown sender's sms_reply bell (no customer on file) is judged only by its own class (unknown_sms,
-    // GATE_PROMISE_PHONE_MATCH_CLOSE). Its emitter keeps a row per 4-hour window and suppresses a second text inside
-    // it, so the anchor (its first text) cannot stand for the latest text: the witnesses also read the sender's newest
-    // inbound text, and only a reply after THAT closes it. Otherwise it stays a person's to close; the 30-day
-    // retention sweep closes it if nobody does. A tracking-line text row (new_lead,
-    // the tracking_text class) names the text it shows, so that text anchors it and its sender's number is the
+    // An unknown sender's sms_reply bell (no customer on file) is not judged. A tracking-line text row (new_lead, the
+    // tracking_text class) names the text it shows, so that text anchors it and its sender's number is the
     // subject (the witnesses resolve the number from the text).
     // A text from a sender with no customer on file: only the classes that name one judge it (UNKNOWN_SENDER_REFS).
     if (!customerId) return UNKNOWN_SENDER_REFS[cls.key]?.(sid);
@@ -1062,22 +1039,6 @@ function textAnswered(s) {
   return 'Answered, or no reply needed';
 }
 
-// An unknown sender's text bell (GATE_PROMISE_PHONE_MATCH_CLOSE, owner 2026-11-04 "FOR ALL COMUNNICATION LINES"): a
-// person's delivered reply, or a call a person placed or answered and spoke on, reached the sender's phone after the
-// sender's LATEST text (the bell's anchor is the first text of a 4-hour window). Only a person counts: an automated
-// reply, the Messages reader's "no reply needed" and a texting assistant's reply never close it. Answered with the
-// gate's own mode, so it can run in shadow.
-function unknownTextAnswered(s) {
-  const c = s.contact;
-  const mode = promisePhoneMatchCloseMode();
-  if (!c || !c.unknownSender || mode === 'off') return null;
-  const floor = Math.max(c.anchor.getTime(), c.lastInboundAt ? new Date(c.lastInboundAt).getTime() : 0);
-  const after = (at) => !!at && new Date(at).getTime() > floor;
-  if (after(c.textAt)) return { reason: 'Answered by text', mode };
-  if (after(c.backAt) || after(c.inAt)) return { reason: 'Answered by a call', mode };
-  return null;
-}
-
 // A staff action for the text's customer after the text ("Stuck Alert Fixes" F1: a visit a person
 // booked in the admin, or a payment a person recorded, within 24 hours, by customer id).
 let staffActionReasons;
@@ -1161,7 +1122,7 @@ function customerQuoteFormAnswered(s) {
 function portalItemAnswered(s) {
   const c = s.contact;
   const reason = c ? personContactReason(c) : null;
-  return reason ? { reason, mode: 'true' } : null;
+  return reason || null;
 }
 
 // An unfinished-booking bell: finished once the estimate was accepted, declined or
@@ -1323,12 +1284,6 @@ const CLASSES = [
     contactRule: customerQuoteFormAnswered, rearm: false,
   },
   // Customer-initiated contact bells (owner 2026-10-24), keyed by the emitter's trigger.
-  { // notification-triggers.js sms_reply, an unknown sender (sms-reply:<sid>, one row per 4-hour window). Own gate
-    // (GATE_PROMISE_PHONE_MATCH_CLOSE). Listed BEFORE inbound_sms, which would otherwise take
-    // the row and (with the gate off) judge nothing.
-    key: UNKNOWN_SMS_CLASS, categories: ['inbound_sms'], triggerKey: 'sms_reply', prefix: UNKNOWN_SMS_PREFIX,
-    gate: promisePhoneMatchCloseMode, contact: 'sms', contactRule: unknownTextAnswered,
-  },
   { // notification-triggers.js sms_reply. A known sender's texts share ONE row
     // (sms-thread:<customer>) that a new text rewrites, bumps and rings again,
     // which also clears the done fields and the retired stamp (notification-
@@ -1385,38 +1340,23 @@ const CLASSES = [
   },
 ];
 
-// One row's verdict. `reason` closes it now (the always-on rule, or a contact rule whose
-// mode is `true`); `would` is what a contact rule says while its own mode is `shadow`,
-// recorded and never acted on. A contact rule is silent when its witnesses did not load.
-//
-// Own gates (owner 2026-10-29): a class with a `gate` reader judges nothing while it reads
-// 'off' and only records (`would`) while it reads 'shadow'. A contact rule may answer
-// `{ reason, mode }` instead of a string: its reason then follows its own mode (off =
-// silent, shadow = recorded only), so a new reason can run in shadow. A plain string
-// closes.
-const NONE = Object.freeze({ reason: null, would: null });
+// One row's verdict: `reason` closes it now (null = nothing to close). A contact rule is silent when its witnesses
+// did not load.
+const NONE = Object.freeze({ reason: null });
 function judge(cls, s) {
-  const own = cls.gate ? cls.gate() : 'true';
-  if (own === 'off') return NONE;
   const base = cls.rule ? cls.rule(s) : null;
-  if (base) return own === 'true' ? { reason: base, would: null } : { reason: null, would: base };
+  if (base) return { reason: base };
   if (!cls.contactRule) return NONE;
-  const extra = cls.contactRule(s);
-  if (!extra) return NONE;
-  const { reason, mode } = typeof extra === 'string' ? { reason: extra, mode: 'true' } : extra;
-  if (mode === 'off') return NONE;
-  return mode === 'true' ? { reason, would: null } : { reason: null, would: reason };
+  const reason = cls.contactRule(s);
+  return reason ? { reason } : NONE;
 }
 
 // The class a row belongs to, or null. Category first, then the emitter's
-// dedupeKey prefix / trigger / extra metadata test. A class with its own `gate` exists only
-// while that gate is on; the re-arm pass asks for them in every mode (`anyMode`) so a gate
-// switched back off puts back what it closed.
-function classify(row, { anyMode = false } = {}) {
+// dedupeKey prefix / trigger / extra metadata test.
+function classify(row) {
   const meta = parseMeta(row.metadata);
   const dedupeKey = String(meta.dedupeKey || '');
-  return CLASSES.find((c) => (!c.gate || anyMode || c.gate() !== 'off')
-    && c.categories.includes(row.category)
+  return CLASSES.find((c) => c.categories.includes(row.category)
     && (!c.prefix || dedupeKey.startsWith(c.prefix))
     && (!c.triggerKey || meta.triggerKey === c.triggerKey)
     && (!c.match || c.match(meta, row))) || null;
@@ -1442,7 +1382,6 @@ function candidateQuery(cursor) {
     .whereRaw("metadata->'retired' IS NULL")
     .where((q) => {
       for (const c of CLASSES) {
-        if (c.gate && c.gate() === 'off') continue;
         q.orWhere((cq) => {
           cq.whereIn('category', c.categories);
           if (c.doneWhen) cq.whereRaw("metadata->>'doneWhen' = ?", [c.doneWhen]);
@@ -1633,7 +1572,7 @@ async function rearmRelevantAgain(now, todayET) {
     const data = await loadSubjects(judged.map((j) => j.bell));
     for (const { row, bell } of judged) {
       try {
-        const cls = classify(bell, { anyMode: true });
+        const cls = classify(bell);
         if (!cls || cls.rearm === false) continue;
         const subject = subjectFor(bell, data, todayET);
         // Witnesses that failed to load are no verdict: leave the row as it is.
@@ -1656,46 +1595,22 @@ async function rearmRelevantAgain(now, todayET) {
 // one starts over. In-process: a restart simply starts over.
 let resumeAfter = null;
 
-// A rule in shadow (a contact rule's own gate set to `shadow`): one audit_log row per bell per class per
-// Eastern day for what that rule would close. The bell, its metadata
-// and its read / done state are untouched (the emitters compare metadata on a
-// refresh and the retire's version fence reads it). Advisory: a failed write is
-// logged, never fatal.
-async function recordWouldClose(items, now, todayET) {
-  if (!items.length) return 0;
-  try {
-    const { auditAlertWouldClose } = require('./audit-log');
-    return await auditAlertWouldClose({
-      et_day: todayET,
-      items: items.map(({ row, cls, reason }) => ({ notification_id: row.id, alert_class: cls.key, reason, judged_at: now.toISOString() })),
-    });
-  } catch (err) {
-    logger.warn(`[alert-relevance] could not record ${items.length} would-close verdict(s): ${errSummary(err)}`);
-    return 0;
-  }
-}
-
 // One row of a batch. The batch read is a first pass: only a row that looks
-// moved on pays for the fresh recheck that actually retires it. A shadow
-// verdict (a rule's own gate set to `shadow`) is only collected: an open row is
-// recorded, a person's own Done is not ours to judge there.
-async function sweepRow(row, cls, subject, { now, todayET, byClass, shadowed }) {
+// moved on pays for the fresh recheck that actually retires it.
+async function sweepRow(row, cls, subject, { now, todayET, byClass }) {
   const verdict = judge(cls, subject);
-  if (verdict.would) {
-    if (!row.done_at) shadowed.push({ row, cls, reason: verdict.would });
-    return;
-  }
   if (verdict.reason && await retireIfStillMovedOn(row, cls, todayET, now)) byClass[cls.key] = (byClass[cls.key] || 0) + 1;
 }
 
-async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
+// `clock` (tests): the fresh clock the two lead reminders ask their hours with at each stamp and dispatch; omitted, the
+// real time. `now` stays the sweep's own time for everything else.
+async function runAdminAlertRelevanceSweep({ now = new Date(), clock } = {}) {
   if (!adminAlertRelevanceLive()) return { skipped: true, reason: 'switch_off' };
   const todayET = etDateString(now);
   // First, so a row put back is judged again by the retire pass below.
   const rearmed = await rearmRelevantAgain(now, todayET);
   const byClass = {};
   let scanned = 0;
-  let wouldClose = 0;
   let cursor = resumeAfter;
   resumeAfter = null;
   for (let page = 0; page < MAX_PAGES; page += 1) {
@@ -1705,28 +1620,24 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
     scanned += rows.length;
     if (rows.length === PAGE_SIZE && page === MAX_PAGES - 1) resumeAfter = cursor;
     const data = await loadSubjects(rows);
-    const shadowed = [];
     for (const row of rows) {
       try {
         const cls = classify(row);
-        if (cls) await sweepRow(row, cls, subjectFor(row, data, todayET), { now, todayET, byClass, shadowed });
+        if (cls) await sweepRow(row, cls, subjectFor(row, data, todayET), { now, todayET, byClass });
       } catch (err) {
         logger.warn(`[alert-relevance] notification ${row.id} skipped: ${errSummary(err)}`);
       }
     }
-    wouldClose += await recordWouldClose(shadowed, now, todayET);
     if (rows.length < PAGE_SIZE) break;
   }
   const retired = Object.values(byClass).reduce((a, b) => a + b, 0);
   if (retired) logger.info(`[alert-relevance] retired ${retired} of ${scanned} unread alert(s): ${JSON.stringify(byClass)}`);
   if (rearmed) logger.info(`[alert-relevance] put back ${rearmed} alert(s) whose subject is relevant again`);
-  if (wouldClose) logger.info(`[alert-relevance] shadow: recorded ${wouldClose} alert(s) the customer-contact rules would close`);
-  const anyShadow = promisePhoneMatchCloseMode() === 'shadow';
   const lateReRung = await lateReRingPass(now);
   const estimateReRung = await estimateReRingPass(now);
   const bookingsRaised = await unfinishedBookingsPass(now);
-  const leadCallReminders = await leadCallReminderPass(now);
-  return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}), ...(lateReRung ? { lateReRung } : {}), ...(estimateReRung ? { estimateReRung } : {}), ...(bookingsRaised ? { bookingsRaised } : {}), ...(leadCallReminders ? { leadCallReminders } : {}) };
+  const reminders = await reminderPasses(now, clock);
+  return { skipped: false, scanned, retired, byClass, rearmed, ...(lateReRung ? { lateReRung } : {}), ...(estimateReRung ? { estimateReRung } : {}), ...(bookingsRaised ? { bookingsRaised } : {}), ...reminders };
 }
 
 // Portal items past their one business hour ring once more (portal-late-rering.js).
@@ -1764,15 +1675,34 @@ async function unfinishedBookingsPass(now) {
   }
 }
 
-// GATE_LEAD_CALL_REMINDER: a lead's call request (a missed press-1 ring, a night call-back bell) still open after one
+// A lead's call request (a missed press-1 ring, a night call-back bell) still open after one
 // business hour sends ONE phone banner (lead-call-reminder.js). After the closes above, so a bell this run just closed
-// sends nothing. Off: nothing is read or written. A failure is logged and never fails the sweep.
-async function leadCallReminderPass(now) {
-  if (!require('../config/feature-gates').leadCallReminderLive?.()) return null;
+// sends nothing. A failure is logged and never fails the sweep.
+async function leadCallReminderPass(now, clock) {
   try {
-    return (await require('./lead-call-reminder').runLeadCallReminder({ now })).reminded || null;
+    return (await require('./lead-call-reminder').runLeadCallReminder({ now, ...(clock ? { clock } : {}) })).reminded || null;
   } catch (err) {
     logger.warn(`[alert-relevance] the lead call reminder pass failed: ${errSummary(err)}`);
+    return null;
+  }
+}
+
+// The two reminder passes below, as the fields the sweep's result carries (a pass that sent nothing adds none).
+async function reminderPasses(now, clock) {
+  const leadCallReminders = await leadCallReminderPass(now, clock);
+  const newLeadRealerts = await newLeadRealertPass(now, clock);
+  return { ...(leadCallReminders ? { leadCallReminders } : {}), ...(newLeadRealerts ? { newLeadRealerts } : {}) };
+}
+
+// New-lead re-alert (new-lead-reminder.js; owner 2026-11-19): an open new-lead or repeat-form bell nobody has reached gets
+// ONE more phone push at 15 business minutes (Monday to Saturday, 8 AM to 6 PM ET). No gate: the push goes to admin users
+// only. After the closes above, so a bell this run just closed sends nothing. A failure is logged and never fails the sweep.
+async function newLeadRealertPass(now, clock) {
+  try {
+    const out = await require('./new-lead-reminder').runNewLeadReminder({ now, ...(clock ? { clock } : {}) });
+    return out.pushed ? { pushed: out.pushed } : null;
+  } catch (err) {
+    logger.warn(`[alert-relevance] the new-lead re-alert pass failed: ${errSummary(err)}`);
     return null;
   }
 }

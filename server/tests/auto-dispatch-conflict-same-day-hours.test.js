@@ -27,13 +27,12 @@ const { probeMoveConflicts } = require('../services/rebooker');
 const { currentConflict } = require('../services/auto-dispatch/current-conflict');
 const { findValidCandidateSlots } = require('../services/auto-dispatch/candidate-slots');
 
-const ENV = ['GATE_AUTO_DISPATCH_SHARED_MODEL', 'GATE_SCHEDULING_CAPACITY', 'GATE_DRIVE_TIME_CALIBRATION'];
+const ENV = ['GATE_AUTO_DISPATCH_SHARED_MODEL', 'GATE_SCHEDULING_CAPACITY'];
 const saved = {};
 beforeAll(() => ENV.forEach((k) => { saved[k] = process.env[k]; }));
 afterAll(() => ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }));
 beforeEach(() => {
   jest.clearAllMocks();
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   delete process.env.GATE_SCHEDULING_CAPACITY;
   process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
   // Another customer's stop 09:30-10:30 on every probed date: the hours 09:00 and 10:00 are taken.

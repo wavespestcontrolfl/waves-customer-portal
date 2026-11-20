@@ -427,7 +427,7 @@ describe('loadLeadReachStats', () => {
     expect(await run({ ended_at: new Date(at(14.5)) })).toMatchObject({ reachedWithin: 1 });
   });
 
-  // Round 4, finding 4: resolveEmailCustomerLink's own guard, shared.
+  // Round 4, finding 4: emailCustomerLink's own guard, shared.
   test('a sent email whose Cc/Bcc were never captured is no evidence', async () => {
     const addr = 'pat.fixture@example.invalid';
     const mine = lead(1, { email: addr, phone: '+19415550301' });

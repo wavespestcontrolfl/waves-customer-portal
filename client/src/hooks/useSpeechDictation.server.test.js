@@ -277,6 +277,201 @@ describe("useSpeechDictation with server dictation on", () => {
     await waitFor(() => expect(result.current.mode).toBe("speech"));
   });
 
+  // Owner 2026-11-06 10:49: the server got the request headers and no audio, and the IB mic showed "Load failed".
+  // The recording is kept and the person is asked; it is never sent again on its own (a lost answer was already paid).
+  const failFirstPost = (fetchMock, failure) => {
+    const answer = fetchMock.getMockImplementation();
+    let posts = 0;
+    fetchMock.mockImplementation(async (url, opts) => {
+      if (opts?.method === "POST" && ++posts === 1) return failure();
+      return answer(url, opts);
+    });
+  };
+  // By default the mic's field can always take the words, so it asks the resend question.
+  const recordAndStop = async (onTranscript, options = { resendWanted: () => true }) => {
+    const { result } = renderHook(() => useSpeechDictation(onTranscript, options));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    await act(async () => { result.current.toggle(); });
+    return result;
+  };
+
+  it("a send with no answer (iOS 'Load failed') asks to send the same recording again; yes sends it and the words land", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    failFirstPost(fetchMock, () => { throw new TypeError("Load failed"); });
+    await recordAndStop(onTranscript);
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."));
+    expect(confirm).toHaveBeenCalledWith("The words did not come back. Send the recording again?");
+    const [first, second] = postsTo(fetchMock).map(([, o]) => o.body.get("audio"));
+    expect(second.size).toBe(first.size);
+    expect(postsTo(fetchMock)).toHaveLength(2);
+    expect(onTranscript).toHaveBeenCalledTimes(1);
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it("a 2xx answer cut off before its words is not read as silence: it asks the same way", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    failFirstPost(fetchMock, () => ({ ok: true, status: 200, json: async () => { throw new TypeError("Load failed"); } }));
+    await recordAndStop(onTranscript);
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(postsTo(fetchMock)).toHaveLength(2);
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it("a mic without resendWanted (no check of its field's limits) shows the error and asks nothing", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    failFirstPost(fetchMock, () => { throw new TypeError("Load failed"); });
+    await recordAndStop(onTranscript, {});
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(postsTo(fetchMock)).toHaveLength(1);
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
+
+  it("no to the question: no second send, no words and no error box", async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    failFirstPost(fetchMock, () => { throw new TypeError("Load failed"); });
+    const result = await recordAndStop(onTranscript);
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.uploading).toBe(false));
+    expect(postsTo(fetchMock)).toHaveLength(1);
+    expect(onTranscript).not.toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it("a page hidden when the send fails is asked only once it is visible again, so the recording is not lost", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    let visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    try {
+      failFirstPost(fetchMock, () => { visibility = "hidden"; throw new TypeError("Load failed"); });
+      const result = await recordAndStop(onTranscript);
+      await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      expect(confirm).not.toHaveBeenCalled();
+      // `uploading` holds while the question waits: callers lock their field on it (the SMS
+      // composer refuses every recipient change while it is true), so the words keep their draft.
+      expect(result.current.uploading).toBe(true);
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."));
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(postsTo(fetchMock)).toHaveLength(2);
+      await waitFor(() => expect(result.current.uploading).toBe(false));
+    } finally {
+      delete document.visibilityState;
+    }
+  });
+
+  it("a mic unmounted while the question waits for the page lets the recording go at once", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const fetchMock = stubServer();
+    let visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    const removed = vi.spyOn(document, "removeEventListener");
+    try {
+      failFirstPost(fetchMock, () => { visibility = "hidden"; throw new TypeError("Load failed"); });
+      const { result, unmount } = renderHook(() => useSpeechDictation(vi.fn(), { resendWanted: () => true }));
+      await waitFor(() => expect(result.current.mode).toBe("upload"));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      removed.mockClear();
+      unmount();
+      // the wait's listener comes off with the unmount, not when the page comes back
+      await waitFor(() => expect(removed).toHaveBeenCalledWith("visibilitychange", expect.any(Function)));
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(confirm).not.toHaveBeenCalled();
+      expect(postsTo(fetchMock)).toHaveLength(1);
+      expect(alert).not.toHaveBeenCalled();
+    } finally {
+      removed.mockRestore();
+      delete document.visibilityState;
+    }
+  });
+
+  it("the login changed before the question: no resend with the new login, the error is shown", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const fetchMock = stubServer();
+    failFirstPost(fetchMock, () => { localStorage.setItem("waves_admin_token", "other-staff-jwt"); throw new TypeError("Load failed"); });
+    await recordAndStop(vi.fn());
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(postsTo(fetchMock)).toHaveLength(1);
+  });
+
+  it("the login changed while the question was open: yes sends nothing with the new login", async () => {
+    const confirm = vi.fn(() => { localStorage.setItem("waves_admin_token", "other-staff-jwt"); return true; });
+    vi.stubGlobal("confirm", confirm);
+    const fetchMock = stubServer();
+    failFirstPost(fetchMock, () => { throw new TypeError("Load failed"); });
+    await recordAndStop(vi.fn());
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(postsTo(fetchMock)).toHaveLength(1);
+  });
+
+  it("the login changed while recording: the clip is not sent with the new login and no words land", async () => {
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    localStorage.setItem("waves_admin_token", "other-staff-jwt");
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(false));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(postsTo(fetchMock)).toHaveLength(0);
+    expect(onTranscript).not.toHaveBeenCalled();
+    expect(result.current.uploading).toBe(false);
+  });
+
+  it("the login changed while a send was in flight: its words are not put in the box", async () => {
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    const answer = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (url, opts) => {
+      if (opts?.method === "POST") localStorage.setItem("waves_admin_token", "other-staff-jwt");
+      return answer(url, opts);
+    });
+    const result = await recordAndStop(onTranscript);
+    await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
+    await waitFor(() => expect(result.current.uploading).toBe(false));
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
+
+  it("a refusal (the server answered) is shown and never offers a resend", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    stubServer({ clip: { ok: false, status: 502, json: async () => ({ error: "Transcription unavailable. Type instead." }) } });
+    await recordAndStop(vi.fn());
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: Transcription unavailable. Type instead."));
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
   it("a speech session started before the server answered is stopped by its own tap", async () => {
     let answer;
     stubServer({ available: () => new Promise((r) => { answer = r; }) });

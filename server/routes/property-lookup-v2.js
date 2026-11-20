@@ -3079,6 +3079,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     ),
     foundationType: inferFoundation(rc, ai),
     roofType: mergeField(rc?.roofType, ai?.roofMaterial, 'UNKNOWN'),
+    // Roof-style evidence for a later barrel-vs-flat tile price (owner
+    // 2026-11-19). Read-only: the county's own words (roofType above folds
+    // them into TILE), the style hint derived from them, and the photo's
+    // style read (only meaningful beside a TILE read). Nothing prices off these.
+    ...roofStyleEvidence(rc, ai),
     garageType: rc?.garageType || '',
     garageSpaces: rc?.garageSpaces || 0,
     hasAttachedGarage: detectAttachedGarage(rc),
@@ -3104,6 +3109,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     poolCageSize: classifyPoolCageSize(rc?.poolCageSqft) || normalizePoolCageSize(ai?.poolCageSize, ai?.poolCage),
     poolCageSizeInferred: !rc?.poolCageSqft
       && ai?.poolCage === 'YES' && !['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(String(ai?.poolCageSize || '').toUpperCase()),
+    // GATE_CAGE_TWO_SIZES only: the four-size answer, for the website hold.
+    ...(cageTwoSizesLive() ? { poolCageLegacySize: poolCageLegacySize(rc, ai) } : {}),
     // County permit evidence (positive-only; _poolPermits rides the cached
     // record). A permit proves a pool/cage the annual roll hasn't caught up
     // to; absence proves nothing — open-permit layers, new-construction-only
@@ -4263,6 +4270,14 @@ function classifyAge(yearBuilt) {
   return 'MODERN';
 }
 
+function roofStyleEvidence(rc, ai) {
+  return {
+    countyRoofRaw: rc?.countyRoofRaw || null,
+    roofStyleHint: rc?.roofStyleHint || null,
+    roofTileStyle: ai?.roofMaterial === 'TILE' ? (ai.roofTileStyle || null) : null,
+  };
+}
+
 function mergeField(rcValue, aiValue, fallback) {
   // Property records take priority if they have data; satellite AI fills gaps.
   if (rcValue && rcValue !== 'UNKNOWN') return rcValue;
@@ -4310,19 +4325,43 @@ function poolRecordContext(propertyRecord) {
 // sqft is on the tax roll, so the classification becomes deterministic.
 // Positive-only: no cage row never downgrades a vision-detected cage
 // (attached lanais are sometimes rolled into the building areas).
+//
+// GATE_CAGE_TWO_SIZES (owner 2026-11-19, "cage 1000"): two sizes, Medium up to
+// 1,000 sq ft and Large above. Read at call time; `?.()` so a whole-module
+// feature-gates mock without the reader reads as off. The engine still reads
+// all four sizes (saved estimates keep their price).
+const cageTwoSizesLive = () => require('../config/feature-gates').cageTwoSizesLive?.() === true;
+// The size policy lives in one module (property-lookup/cage-sizes.js).
+const {
+  fourBandCageSize, twoSizeFromArea, fourToTwo,
+} = require('../services/property-lookup/cage-sizes');
+
 function classifyPoolCageSize(sqft) {
-  if (!Number.isFinite(sqft) || sqft <= 0) return null;
-  if (sqft < 300) return 'SMALL';
-  if (sqft <= 600) return 'MEDIUM';
-  if (sqft <= 900) return 'LARGE';
-  return 'OVERSIZED';
+  return cageTwoSizesLive() ? twoSizeFromArea(sqft) : fourBandCageSize(sqft);
 }
 
-
-function normalizePoolCageSize(value, poolCage) {
+function normalizePoolCageSizeFourSizes(value, poolCage) {
   const raw = String(value || '').toUpperCase();
   if (['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(raw)) return raw;
   return poolCage === 'YES' ? 'MEDIUM' : 'NONE';
+}
+
+// The satellite answer. The AI prompt still answers four sizes; with two sizes
+// on, Small, Medium and Large read Medium (an old Large, 600 to 900 sq ft, is
+// now Medium) and only Oversized reads Large. This also covers a stored answer
+// rebuilt on a cache hit.
+function normalizePoolCageSize(value, poolCage) {
+  const size = normalizePoolCageSizeFourSizes(value, poolCage);
+  return cageTwoSizesLive() ? (fourToTwo(size) || size) : size;
+}
+
+// Two sizes on only: the four-size answer today's rule gives, so the website
+// quote can keep holding a cage the four sizes call Large or Oversized.
+// Undefined with the gate off (the key is then absent from the profile).
+function poolCageLegacySize(rc, ai) {
+  if (!cageTwoSizesLive()) return undefined;
+  return fourBandCageSize(rc?.poolCageSqft)
+    || normalizePoolCageSizeFourSizes(ai?.poolCageSize, ai?.poolCage);
 }
 
 function inferFoundation(rc, ai) {
@@ -5372,6 +5411,26 @@ function isAssociationCommercialJob({ commercialRiskType = null, commercialSubty
     || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
 }
 
+// The Seal scope pick of the admin estimate tool, as services.exclusion fields: {} without a Whole home
+// pick. The pick passes through; the estimate engine makes the one GATE_EXCLUSION_WHOLE_HOME decision.
+function wholeHomeSealFields(options, home) {
+  return options.exclSealScope === 'whole_home' ? { sealScope: 'whole_home', ...home } : {};
+}
+
+// The Roof style pick of the admin estimate tool, as services.exclusion fields: {} without a pick. The pick passes
+// through (the feet only with Barrel tile); the estimate engine makes the one GATE_EXCLUSION_ROOF_STYLE_PRICING decision.
+function roofStyleFields(options) {
+  // Only a missing, null or empty pick is "not confirmed"; any other value (a number, object, boolean) passes through
+  // so the engine's validation refuses it (EXCLUSION_ROOF_STYLE_INVALID) instead of the route silently dropping it.
+  const style = options.exclRoofStyle;
+  if (style === undefined || style === null || style === '') return {};
+  if (style !== 'barrel_tile') return { roofStyle: style };
+  const { parseBarrelEaveFt, invalidBarrelEaveFtError } = require('../services/estimate-roof-style-replay');
+  const barrelEaveFt = parseBarrelEaveFt(options.exclBarrelEaveFt);
+  if (barrelEaveFt === null) throw invalidBarrelEaveFtError();
+  return { roofStyle: style, barrelEaveFt };
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -5990,9 +6049,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     };
   }
   if (sel.has('EXCLUSION')) {
+    // Whole-home seal (GATE_EXCLUSION_WHOLE_HOME, dark): an all-zero count still prices the home-size
+    // minimum, so the pick alone selects the V2 shape. Gate off = the field is never read.
+    const wholeHomeSeal = wholeHomeSealFields(o, { homeSqFt, stories, roofType: p.roofType });
+    // Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, dark). The pick is ALWAYS carried to the engine, on the legacy and the
+    // V2 shape alike (it makes the one gate decision and sets the effective guarantee roof type). The pick NEVER changes the
+    // shape: it is decided exactly as without a pick, by counts or a whole-home seal. No pick = the field is never read.
+    const roofStyle = roofStyleFields(o);
     const hasV2Fields = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
       o.exclStandardBirdBox || o.exclTileHighBirdBox || o.exclCustomBirdBox ||
-      o.exclMeshSoftLF || o.exclMeshConcreteLF);
+      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope);
     if (hasV2Fields) {
       services.exclusion = {
         pricingVersion: 'v2',
@@ -6005,6 +6071,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         meshConcreteLF: o.exclMeshConcreteLF || 0,
         waiveInspection: !!o.exclWaiveInspection,
         urgency, afterHours,
+        ...wholeHomeSeal,
+        ...roofStyle,
       };
     } else {
       services.exclusion = {
@@ -6013,6 +6081,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         advanced: o.exclAdvanced || 0,
         waiveInspection: !!o.exclWaiveInspection,
         urgency, afterHours,
+        ...roofStyle,
       };
     }
   }
@@ -6423,6 +6492,10 @@ router.post('/calculate-estimate', async (req, res) => {
         if (verdict.eligible) mapped.offerTiersAvailable = true;
       }
     } catch (_) { /* a convenience flag; the save decides */ }
+    // GATE_CAGE_TWO_SIZES: tell the tool its Pool Cage Size box offers two sizes
+    // even with no property lookup on this estimate. Present only while the gate
+    // is on, so gate-off shapes are unchanged. Never a price field.
+    if (cageTwoSizesLive()) mapped.poolCageTwoSizes = true;
     // The linked member's current services at the tier this quote moves
     // them to, for staff to tick (owner 2026-10-30 option B). Read-only; a
     // failure only leaves the list off.
@@ -6677,8 +6750,16 @@ function dropInvalidOptionalHedgeRead(normalized) {
   if (v != null && !(Number.isFinite(v) && v >= 0)) delete normalized.estimatedHedgeLinearFt;
 }
 
+// Optional, tile-only read (owner 2026-11-19): a missing answer stays missing,
+// any present value outside the enum becomes UNKNOWN.
+function normalizeRoofTileStyle(value) {
+  const text = String(value ?? '').trim().toUpperCase();
+  return ['BARREL', 'FLAT'].includes(text) ? text : 'UNKNOWN';
+}
+
 function normalizeSatelliteAnalysis(analysis = {}) {
   const normalized = { ...analysis };
+  if (normalized.roofTileStyle != null) normalized.roofTileStyle = normalizeRoofTileStyle(normalized.roofTileStyle);
   if (normalized.imperviousSurfacePercent == null && normalized.imperviosSurfacePercent != null) {
     normalized.imperviousSurfacePercent = normalized.imperviosSurfacePercent;
   }
@@ -6727,6 +6808,7 @@ Return ONLY valid JSON with these fields:
   "fenceType": "NONE" | "PRIVACY_WOOD" | "PRIVACY_VINYL" | "CHAIN_LINK" | "ALUMINUM" | "PARTIAL" | "UNKNOWN",
   "fenceNotes": "string",
   "roofMaterial": "TILE" | "SHINGLE" | "METAL" | "FLAT" | "UNKNOWN",
+  "roofTileStyle": "BARREL" | "FLAT" | "UNKNOWN" (ONLY when roofMaterial is TILE, otherwise omit it: BARREL = rounded S-shaped or half-pipe tile rows whose open ends show at the eave, FLAT = flat interlocking concrete tiles with a smooth, even surface),
   "roofNotes": "string",
   "constructionVisible": "CBS" | "WOOD_FRAME" | "METAL" | "BRICK" | "UNKNOWN",
   "shrubDensity": "LIGHT" | "MODERATE" | "HEAVY" (density of ornamental shrubs/hedges in the landscape beds: LIGHT = sparse foundation plantings with open mulch between them, MODERATE = typical SWFL foundation beds, HEAVY = packed hedges or mass plantings, or beds wrapping most of the home),
@@ -6828,5 +6910,6 @@ module.exports._private = {
   // (ops/agents/satellite-vision-model-bakeoff.js) so a model is scored
   // against the same validator the lookup applies.
   normalizeSatelliteAnalysis,
+  normalizeRoofTileStyle,
   isValidSatelliteVisionAnalysis,
 };

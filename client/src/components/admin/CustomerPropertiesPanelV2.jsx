@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import PropertyServiceAreas from "../tech/PropertyServiceAreas";
+import PropertyFertilizerMap from "../tech/PropertyFertilizerMap";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import { Input, inputStyles, useUiDensity, Select, Button, Card, CardBody, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../ui";
 import { OCCUPANCY_OPTIONS, RELATIONSHIP_OPTIONS } from "../../lib/contact-roles";
@@ -447,6 +448,8 @@ export default function CustomerPropertiesPanelV2({
                 )}
                 </div>
                 {canEdit && serviceAreasEnabled && <PropertyServiceAreas customerId={customerId} propertyId={p.id} refreshToken={refreshToken} disabled={writeBusy} />}
+                {canEdit && p.active !== false && <PropertyFertilizerMap disabled={writeBusy}
+                  endpoint={`/admin/customers/${customerId}/properties/${p.id}/areas/fertilizer-map`} />}
               </div>
             ))}
             {properties.length === 0 && (

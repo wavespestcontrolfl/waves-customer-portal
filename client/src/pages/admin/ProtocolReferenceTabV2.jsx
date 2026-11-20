@@ -561,8 +561,8 @@ export function ProtocolMixCard({
               {item.raw}
             </div>
             <div className="mt-1 flex gap-1.5 flex-wrap">
-              {item.conditional && (
-                <Badge tone="neutral">{checked ? "Selected" : "Optional"}</Badge>
+              {(item.fieldHold || item.conditional) && (
+                <Badge tone="neutral">{item.fieldHold ? "On hold" : checked ? "Selected" : "Optional"}</Badge>
               )}
               {!item.matched &&
                 (item.taskLine ? (
@@ -754,7 +754,7 @@ export function ProtocolMixCard({
           <div className="text-12 text-ink-secondary leading-normal mb-4">
             {plan.visit?.objective || "No objective available for this visit."}
           </div>{" "}
-          {!hasAnyMix && !plan.blocks?.length && (
+          {!hasAnyMix && !plan.equipment?.carrierGalPer1000 && !plan.blocks?.length && (
             <div className="mb-3 text-12 text-ink-tertiary">
               Area mix, material cost and tank amounts appear once calibrated
               equipment is selected.

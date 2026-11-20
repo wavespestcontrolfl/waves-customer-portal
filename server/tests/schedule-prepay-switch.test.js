@@ -195,6 +195,9 @@ function stubTables({
       return q;
     });
     q.whereNotIn = jest.fn(() => q);
+    // The pay-page lane asks whether an invoice row carries a recorded payment.
+    let notNullCol = null;
+    q.whereNotNull = jest.fn((col) => { notNullCol = col; return q; });
     q.whereIn = jest.fn((col, vals) => {
       stubTables.whereIns.push({ table, col, vals });
       return q;
@@ -241,7 +244,8 @@ function stubTables({
         if (byVisit) return liveOnVisit;
         const rows = Array.isArray(invoices) ? invoices : [];
         if (whereId != null) {
-          return rows.find((r) => String(r.id) === String(whereId)) || invoicesById[String(whereId)];
+          const row = rows.find((r) => String(r.id) === String(whereId)) || invoicesById[String(whereId)];
+          return notNullCol && row && row[notNullCol] == null ? undefined : row;
         }
         return rows[0];
       }
@@ -893,6 +897,124 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
     const out = await router.runPrepaySwitch({ visitId: 'svc-1', switchLane: true, actor: {}, auditSource: 'Intelligence Bar switch', expected });
     expect(out).toMatchObject({ httpStatus: 409, drift: true });
     expect(stubTables.casCalls.length).toBe(0);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+});
+
+// The invoice pay page's plan choice (GATE_PAY_PLAN_CHOICE, owner 2026-11-19)
+// runs this same preview and this same switch with payPageInvoiceId. What it
+// changes — and only for that caller — is tested here: the first invoice has
+// been delivered, its visit may already be completed and still counts as visit
+// 1 of the year, and the choice voids nothing ("keep it payable").
+describe('invoice pay page plan choice — the switch with payPageInvoiceId', () => {
+  const PAST_DATE = etDateString(addETDays(new Date(), -10));
+  // The first invoice as the customer reads it on /pay/:token: delivered,
+  // viewed, with the PaymentIntent that page opened.
+  const DELIVERED_INVOICE = {
+    ...ACCEPT_INVOICE, status: 'viewed', sent_at: '2026-11-01T15:00:00Z', stripe_payment_intent_id: 'pi_open',
+  };
+  const COMPLETED_VISIT = { ...ACCEPTED_SERIES_VISIT, status: 'completed', scheduled_date: PAST_DATE };
+  const payPage = { switchLane: true, payPageInvoiceId: 'inv-1' };
+  let termSpy;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    mockLockOverlap.mockResolvedValue(undefined);
+    mockCreateInvoice.mockResolvedValue({ id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok', total: 512 });
+    termSpy = jest.spyOn(AnnualPrepayRenewals, 'createTermForAnnualPrepay').mockResolvedValue({ id: 'term-1' });
+    stubTables({ visit: COMPLETED_VISIT, invoices: [DELIVERED_INVOICE] });
+  });
+  afterEach(() => termSpy.mockRestore());
+
+  test('a delivered first invoice whose visit is already completed prices the year from that visit’s own date', async () => {
+    const out = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, payPage);
+    expect(out.eligible).toBe(true);
+    expect(out.prepayTotal).toBe(512);
+    expect(out.setupFee).toEqual({ amount: 99, waivedWithPrepay: true });
+    // The year starts on the completed visit, so coverage counts it as
+    // visit 1; no first-visit promise is recorded for a date that has passed.
+    expect(out.termStart).toBe(PAST_DATE);
+    expect(out.mintPayload.termStart).toBe(PAST_DATE);
+    expect(out.mintPayload.firstVisitDate).toBeUndefined();
+    // The prepay's note names the first invoice: the link the payment
+    // follow-through closes it by.
+    expect(out.mintPayload.note).toContain('pay page of invoice WPC-2026-0345.');
+  });
+
+  test('the same delivered invoice and completed visit stay refused for every other caller', async () => {
+    const out = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, { switchLane: true });
+    expect(out.eligible).toBe(false);
+  });
+
+  test('only the invoice the customer is reading carries the choice', async () => {
+    const out = await router.computeAnnualPrepayPreview(
+      { scheduledServiceId: 'svc-1' }, db, { switchLane: true, payPageInvoiceId: 'inv-other' },
+    );
+    expect(out.eligible).toBe(false);
+  });
+
+  test.each([
+    ['money already collected', { status: 'paid', paid_at: '2026-11-02T15:00:00Z' }],
+    ['a part payment', { amount_paid: '50.00' }],
+    ['applied account credit', { credit_applied: '25.00' }],
+    ['a third-party payer', { payer_id: 'payer-1' }],
+    ['a charge beyond the accepted plan', { line_items: [...ACCEPT_INVOICE.line_items, { description: 'Wasp nest removal', amount: 75 }] }],
+  ])('%s on the first invoice still withholds the choice', async (_label, patch) => {
+    stubTables({ visit: COMPLETED_VISIT, invoices: [{ ...DELIVERED_INVOICE, ...patch }] });
+    const out = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, payPage);
+    expect(out.eligible).toBe(false);
+  });
+
+  test('a bait-station setup is never offered here: the prepay carries it, it is not waived', async () => {
+    stubTables({
+      visit: { ...COMPLETED_VISIT, service_type: 'Rodent Bait Stations' },
+      invoices: [{
+        ...DELIVERED_INVOICE,
+        line_items: [
+          { description: 'Bait Station Setup — one-time setup fee', amount: 99 },
+          { description: 'First service application', amount: 128 },
+        ],
+      }],
+    });
+    const out = await router.computeAnnualPrepayPreview({ scheduledServiceId: 'svc-1' }, db, payPage);
+    expect(out.eligible).toBe(false);
+    expect(out.blockReason).toMatch(/bait-station setup/i);
+  });
+
+  test('choosing the year mints the prepay and its term and leaves the first invoice payable', async () => {
+    const out = await router.runPrepaySwitch({
+      visitId: 'svc-1', acknowledgeNoticedAmount: false, actor: {}, auditSource: 'invoice pay page', ...payPage,
+    });
+    expect(out.httpStatus).toBeUndefined();
+    expect(out.invoice.id).toBe('inv-prepay');
+    // Nothing voided, no superseded-by marker written: the first invoice is
+    // untouched until the prepay is paid.
+    expect(out.voided).toEqual([]);
+    expect(stubTables.casCalls.length).toBe(0);
+    expect(mockVoidInvoice).not.toHaveBeenCalled();
+    expect(stubTables.updates.filter((u) => u.table === 'invoices' && u.patch.notes)).toEqual([]);
+    expect(mockCreateInvoice.mock.calls[0][0].lineItems).toEqual([
+      expect.objectContaining({ unit_price: 512, category: 'Annual prepay' }),
+    ]);
+    expect(mockCreateInvoice.mock.calls[0][0].notes).toBe(
+      'Annual prepay chosen on the pay page of invoice WPC-2026-0345. Paying this closes that invoice.',
+    );
+    expect(termSpy.mock.calls[0][0]).toMatchObject({
+      sourceEstimateId: 'est-1', prepayInvoiceId: 'inv-prepay', termStart: PAST_DATE, coverageVisitCount: 4,
+    });
+    expect(mockSendInvoice).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a paid payments row', { recordedPayment: { id: 'pay-1' } }],
+    ['an out-of-band part payment stamped on the row (amount_paid still 0)', { invoices: [{ ...DELIVERED_INVOICE, payment_recorded_at: '2026-11-10T15:00:00Z' }] }],
+  ])('%s on the first invoice refuses the pick and mints nothing', async (_label, stub) => {
+    stubTables({ visit: COMPLETED_VISIT, invoices: [DELIVERED_INVOICE], ...stub });
+    const out = await router.runPrepaySwitch({
+      visitId: 'svc-1', acknowledgeNoticedAmount: false, actor: {}, auditSource: 'invoice pay page', ...payPage,
+    });
+    expect(out.httpStatus).toBe(409);
+    expect(out.httpBody.error).toMatch(/recorded payment/i);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 });

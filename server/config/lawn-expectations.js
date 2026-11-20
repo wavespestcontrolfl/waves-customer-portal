@@ -162,6 +162,8 @@ const PRODUCT_CLASS_ENTRIES = [
   ['Atticus Talak', FAMILY.INSECTICIDE],
   ['Atticus Talak 7.9 F', FAMILY.INSECTICIDE],
   ['Talak 7.9 F', FAMILY.INSECTICIDE],
+  // Owner ruling 2026-11-18: LESCO Crosscheck Plus (bifenthrin) is the house bifenthrin now; the Talak names above stay for old records.
+  ['LESCO Crosscheck Plus', FAMILY.INSECTICIDE],
   // "Talstar P" is the office's name for Talak (bifenthrin, 96 oz); 9 confirmed
   // lawn visits in the 10-02 P13 replay carried it unmapped.
   ['Talstar P', FAMILY.INSECTICIDE],

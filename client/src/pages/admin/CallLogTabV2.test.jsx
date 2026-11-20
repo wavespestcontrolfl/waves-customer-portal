@@ -368,3 +368,32 @@ describe("CallLogTabV2 call history load failure", () => {
     expect(screen.queryByText("Call history could not load.")).not.toBeInTheDocument();
   });
 });
+
+// The main site's web-only line (+19412542617) is a Waves line no sender picker
+// offers (CommunicationsPage.jsx REPLY_LINE_NUMBERS). A call to it with the
+// caller ID withheld has no one to call back: the callback must never target
+// the Waves line itself.
+describe("CallLogTabV2 callback target on a reply-only Waves line", () => {
+  const call = (id, fromPhone) => ({
+    id, direction: "inbound", from_phone: fromPhone, to_phone: "+19412542617",
+    answered_by: "missed", created_at: new Date().toISOString(),
+  });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes("route-calibration") || String(url).includes("/admin/call-recordings/stats")
+        ? {}
+        : { calls: [call("call-withheld", null), call("call-known", "+19415550123")] },
+    })));
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("offers Call back and Text back only for the caller whose number is known", async () => {
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Call back" })).toHaveLength(1));
+    expect(screen.getAllByRole("button", { name: "Text back" })).toHaveLength(1);
+  });
+});

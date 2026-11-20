@@ -567,6 +567,9 @@ function PostEditor({ post, onBack, onUpdate }) {
             Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
             "Content-Type": "application/json",
           },
+          // The server plans from the saved post type and refuses an unsaved
+          // type change that would change the picture rules.
+          body: JSON.stringify({ post_type: editing.post_type || null }),
         },
       );
       const d = await r.json().catch(() => ({}));

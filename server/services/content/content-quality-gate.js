@@ -20,10 +20,10 @@
  *                         source_internal_link, redaction_passed,
  *                         (FAQPage schema NOT required — deprecated May 7 2026)
  *     refresh             improvement_over_prior,
- *                         redaction_passed (GATE_CONTENT_PII_ALL_LANES)
+ *                         redaction_passed
  *     supporting-blog     hub_link_present, 2+ city mentions,
  *                         FAQ section, voice-match score,
- *                         redaction_passed (GATE_CONTENT_PII_ALL_LANES)
+ *                         redaction_passed
  *     metadata-rewrite    length bounds, primary keyword in title,
  *                         no duplicate title across site
  *
@@ -165,10 +165,9 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
-    // GATE_CONTENT_PII_ALL_LANES (security audit run 3, fix E): a refresh
-    // body (including model-researched web text) got no deterministic
-    // phone/email/name/address scan. Weight 0 so the threshold above is
-    // unchanged; a no-op while the gate is dark.
+    // Security audit run 3, fix E: a refresh body (including
+    // model-researched web text) gets the deterministic phone/email/name/
+    // address scan. Weight 0 so the threshold above is unchanged.
     { name: 'redaction_passed', weight: 0, isHard: true, evaluate: checkRedactionPassedAllLanes },
     // Citability backfill only (isCitabilityBackfillBrief): every planned
     // gap must clear and no trait the live page already had may be lost
@@ -189,9 +188,9 @@ const PAGE_TYPE_CHECKS = {
     // them. As a 6-pt soft miss, a hubless draft scores 51 >= 42 and
     // auto-publishes — the exact A1 first-batch failure shape.
     { name: 'hub_link_present', weight: 6, isHard: true, evaluate: checkHubLinkPresent },
-    // GATE_CONTENT_PII_ALL_LANES (security audit run 3, fix E): the blog body
-    // only got a phone/email scan (seo-completion-gate), never names or street
-    // addresses. Weight 0 keeps the 51 threshold; a no-op while the gate is dark.
+    // Security audit run 3, fix E: the blog body gets the names and street
+    // address scan too, beyond the phone/email scan in seo-completion-gate.
+    // Weight 0 keeps the 51 threshold.
     { name: 'redaction_passed', weight: 0, isHard: true, evaluate: checkRedactionPassedAllLanes },
     // Tip seeder topics (tips with facts, owner 2026-10-24, decision 2): the
     // general post for a town-titled pairing must come back general. A title
@@ -1132,13 +1131,9 @@ function checkNextStepsRedacted(draft, brief) {
 }
 
 // The body privacy check for the lanes that did not carry it before
-// (supporting-blog, refresh). Dark until GATE_CONTENT_PII_ALL_LANES is
-// 'true', read at call time. A failure is a hard failure, so the draft
+// (supporting-blog, refresh). A failure is a hard failure, so the draft
 // parks for review through the existing path and never publishes.
 function checkRedactionPassedAllLanes(draft) {
-  if (!require('../../config/feature-gates').contentPiiAllLanesLive()) {
-    return { ok: true, reason: 'content_pii_all_lanes_gate_dark' };
-  }
   return checkRedactionPassed(draft, { allowPairs: approvedEntityPairs() });
 }
 
@@ -1163,6 +1158,18 @@ const PUBLIC_BODIES = [
   'Florida Fish and Wildlife Conservation Commission', 'Florida Medical Entomology Laboratory', 'National Weather Service',
 ];
 
+// Sources the 2026-11-18 customer-question briefs cite by name (CQ09 cites
+// the FTC, and a post spells the name out). They add their own word pairs but
+// no "the <first word>" pair: "the federal" would clear "The Federal family",
+// a surname with no agency named (pre-push audit). A sentence that opens "The
+// Federal Trade Commission" still holds the draft for review, as it did before
+// this list; the briefs never open a sentence with "The" and a capitalized
+// word. North Carolina State University is not listed: the briefs cite NC
+// State Extension, and its "carolina state" pair would clear a person's name.
+const PUBLIC_BODIES_NO_ARTICLE_PAIR = [
+  'NC State Extension', 'Pennsylvania State University Extension', 'Federal Trade Commission',
+];
+
 function approvedCompetitorNames() {
   const { COMPETITORS, OWNER_APPROVED_AUTOPUBLISH_IDS } = require('./competitor-facts');
   return COMPETITORS
@@ -1181,14 +1188,15 @@ function approvedCompetitorNames() {
 function approvedEntityPairs() {
   const pairs = new Set();
   const words = (name) => String(name).toLowerCase().split(/\s+/).filter(Boolean);
-  for (const name of [...approvedCompetitorNames(), ...PUBLIC_BODIES]) {
+  for (const name of [...approvedCompetitorNames(), ...PUBLIC_BODIES, ...PUBLIC_BODIES_NO_ARTICLE_PAIR]) {
     const w = words(name);
     for (let i = 0; i + 1 < w.length; i += 1) pairs.add(`${w[i]} ${w[i + 1]}`);
   }
   // "The University of Florida ..." opens a sentence, and the redactor reads
   // the capitalized "The University" as a pair. Public bodies only: some
   // competitor names start with a surname ("Massey", "Turner"), and "The
-  // Massey family" must still hold the draft.
+  // Massey family" must still hold the draft. PUBLIC_BODIES_NO_ARTICLE_PAIR
+  // is left out on purpose (see its comment).
   for (const name of PUBLIC_BODIES) {
     const w = words(name);
     if (w.length > 1) pairs.add(`the ${w[0]}`);

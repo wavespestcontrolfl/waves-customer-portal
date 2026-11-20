@@ -1,17 +1,37 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../hooks/useIsMobile", () => ({ default: () => true }));
+// The Settings row shows the shared answer of the page's newest try; the
+// tests set that answer through this stand-in for the module's store.
+const readinessStore = vi.hoisted(() => {
+  const listeners = new Set();
+  return {
+    value: null,
+    listeners,
+    set(value) { this.value = value; listeners.forEach((listener) => listener()); },
+  };
+});
+vi.mock("../../lib/fieldView", async (importOriginal) => ({
+  ...(await importOriginal()),
+  warmFieldViewLanding: vi.fn(async () => true),
+  fieldViewReadiness: () => readinessStore.value,
+  subscribeFieldViewReadiness: (listener) => {
+    readinessStore.listeners.add(listener);
+    return () => { readinessStore.listeners.delete(listener); };
+  },
+}));
 vi.mock("../../hooks/useFeatureFlag", () => ({
   useFeatureFlag: () => false,
   refetchFlags: vi.fn(),
 }));
 
 import MorePage from "./MorePage";
+import { warmFieldViewLanding } from "../../lib/fieldView";
 import { AdminNavigationProvider } from '../../hooks/useAdminNavigation';
 import { clearEmailDrafts, loadEmailDrafts, setEmailSending, updateEmailDrafts } from "../../lib/emailDrafts";
 
@@ -30,7 +50,7 @@ function renderMore(role = "admin", navigation = true, name) {
   );
 }
 
-afterEach(() => { cleanup(); clearEmailDrafts(); localStorage.clear(); });
+afterEach(() => { cleanup(); clearEmailDrafts(); localStorage.clear(); warmFieldViewLanding.mockClear(); readinessStore.value = null; });
 
 describe("MorePage — the mobile Settings tab", () => {
   it('is the one phone menu: every page that is not a bottom tab, with no row named after a tab (owner 2026-10-29)', () => {
@@ -124,5 +144,114 @@ describe("MorePage — the mobile Settings tab", () => {
     const leaving = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(leaving);
     expect(leaving.defaultPrevented).toBe(false);
+  });
+
+  describe("Field view switch", () => {
+    it("shows for an admin, off by default, with the one-line explanation", () => {
+      renderMore("admin");
+      const toggle = screen.getByRole("switch", { name: "Field view" });
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByText("Opens on Today. Today takes the Dashboard tab.")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Today", exact: true })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Dashboard", exact: true })).not.toBeInTheDocument();
+    });
+
+    it("saves on this phone and swaps Dashboard and Today in the page list", () => {
+      renderMore("admin");
+      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
+      expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "true");
+      expect(JSON.parse(localStorage.getItem("waves_admin_navigation:fixture")).fieldView).toBe(true);
+      expect(screen.getByRole("link", { name: "Dashboard", exact: true })).toHaveAttribute("href", "/admin/dashboard");
+      expect(screen.queryByRole("link", { name: "Today", exact: true })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
+      expect(JSON.parse(localStorage.getItem("waves_admin_navigation:fixture")).fieldView).toBe(false);
+    });
+
+    // Pre-push P1 (round 4): a switch this phone could not save does not move.
+    it("says why the switch did not move when this phone cannot save it", () => {
+      renderMore("admin");
+      const setItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = () => { throw new Error("QuotaExceededError"); };
+      try {
+        fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
+      } finally { Storage.prototype.setItem = setItem; }
+      expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByText("Not saved on this phone: its storage is full or blocked. Field view stays off.")).toHaveAttribute("role", "alert");
+      expect(warmFieldViewLanding).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
+      expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "true");
+      expect(screen.queryByText(/Not saved on this phone/)).not.toBeInTheDocument();
+    });
+
+    // Pre-push P1 (rounds 5 to 9): turning it on readies Today's code for an
+    // open with no signal, and the row shows the newest try's answer while
+    // the switch is on. Only the row's own tries count here (`again`); the
+    // session's try is the provider's test.
+    const rowTries = () => warmFieldViewLanding.mock.calls.filter(([options]) => options?.again === true).length;
+    const answer = (value) => act(() => { readinessStore.set(value); });
+    const notReady = () => screen.queryByText("Today is not ready for no signal yet. Open Today once with signal.");
+
+    it("turning it on readies Today's code, and says nothing when that worked", async () => {
+      renderMore("admin");
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      expect(rowTries()).toBe(1);
+      answer(true);
+      expect(notReady()).not.toBeInTheDocument();
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      expect(rowTries()).toBe(1);
+    });
+
+    it("says when Today's code is not on the phone, until the switch turns off", async () => {
+      renderMore("admin");
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      answer(false);
+      expect(notReady()).toHaveAttribute("role", "status");
+      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
+      expect(notReady()).not.toBeInTheDocument();
+    });
+
+    // Pre-push P1 (round 9): a later automatic try (the worker took control,
+    // the signal returned) answers for the row too.
+    it("shows the newest try's answer: a try that runs, or one that worked, clears the line", async () => {
+      renderMore("admin");
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      answer(false);
+      expect(notReady()).toBeInTheDocument();
+      answer(null);
+      expect(notReady()).not.toBeInTheDocument();
+      answer(false);
+      answer(true);
+      expect(notReady()).not.toBeInTheDocument();
+    });
+
+    // Pre-push P1 (round 9): another tab can turn the switch off.
+    it("says nothing while the switch is off, also when another tab turned it off", async () => {
+      renderMore("admin");
+      answer(false);
+      expect(notReady()).not.toBeInTheDocument();
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      expect(notReady()).toBeInTheDocument();
+      const key = "waves_admin_navigation:fixture";
+      localStorage.setItem(key, JSON.stringify({ ...JSON.parse(localStorage.getItem(key)), fieldView: false }));
+      act(() => { window.dispatchEvent(new StorageEvent("storage", { key })); });
+      expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "false");
+      expect(notReady()).not.toBeInTheDocument();
+    });
+
+    it("says nothing when this page cannot tell (the dev server has no file list)", async () => {
+      renderMore("admin");
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      expect(rowTries()).toBe(1);
+      answer(null);
+      expect(notReady()).not.toBeInTheDocument();
+    });
+
+    it("never shows for a technician or with no navigation context", () => {
+      renderMore("technician");
+      expect(screen.queryByRole("switch", { name: "Field view" })).not.toBeInTheDocument();
+      cleanup();
+      renderMore("admin", false);
+      expect(screen.queryByRole("switch", { name: "Field view" })).not.toBeInTheDocument();
+    });
   });
 });

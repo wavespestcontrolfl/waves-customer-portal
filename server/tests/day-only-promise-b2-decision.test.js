@@ -124,9 +124,16 @@ describe('dayOnlyMoveDecision: every condition alone', () => {
   }));
 
   test('the cutoff boundary is exact', withGate('true', async () => {
-    const at = (h) => new Date(NOW.getTime() + h * 3600000);
-    expect(await decide(ok(), { intent: 'day', newStartAt: at(DAY_PROMISE_CUTOFF_HOURS) })).toBe(false);
-    expect(await decide(ok(), { intent: 'day', newStartAt: at(DAY_PROMISE_CUTOFF_HOURS + 0.01) })).toBe(true);
+    // 11:50 PM ET: 24.25 h later is 12:05 AM two ET days on, so only the cutoff decides.
+    const now = new Date('2026-11-11T04:50:00Z');
+    const at = (h) => new Date(now.getTime() + h * 3600000);
+    expect(await decide(ok(), { intent: 'day', now, newStartAt: at(DAY_PROMISE_CUTOFF_HOURS) })).toBe(false);
+    expect(await decide(ok(), { intent: 'day', now, newStartAt: at(DAY_PROMISE_CUTOFF_HOURS + 0.01) })).toBe(true);
+  }));
+
+  test('a move to tomorrow on the ET calendar names the window, even beyond the cutoff', withGate('true', async () => {
+    // NOW is Tue 9:00 AM ET; Wed 5:00 PM ET is 32 h out.
+    expect(await decide(ok(), { intent: 'day', newStartAt: new Date('2026-11-11T22:00:00Z'), newDate: '2026-11-11' })).toBe(false);
   }));
 
   test('a missing or invalid start: false', withGate('true', async () => {

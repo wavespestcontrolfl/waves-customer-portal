@@ -21,6 +21,8 @@
 //                  when the start hour or the next one reads above `mph` (`orMore`: at `mph` too), from
 //                  the spray-drift section of the use Waves makes of it. `services` limits it to the
 //                  services that line is for (Cyper TC's line covers on-grade termite sprays only).
+//                  A label with a line for each use lists them, the stricter first: the first line
+//                  whose `services` match the visit (or that names none) applies.
 //   heavyRain      Florida's fertilizer line "Do not apply if heavy rain is expected" (owner 2026-10-30):
 //                  the forecast gives no rain amount, so heavy rain is the start hour's forecast words
 //                  ("heavy rain", "thunderstorms") with its rain chance on the same tiers: a caution
@@ -38,6 +40,20 @@ const DRY_4H = 'Avoid making applications when rainfall is expected before the p
 const LABEL_RAIN_RULES = Object.freeze({
   '53883-279': { product: 'Taurus SC', label: '053883-00279-20200617.pdf', duringRain: { page: 16, quote: 'Do not make treatments during times of precipitation.' } },
   '91234-145': { product: 'Atticus Talak 7.9 F', label: '083520-00003-20130321.pdf', olderLabel: true, duringRain: { page: 3, quote: 'Do not make applications during rain.' } },
+  // Read 2026-11-18 from the label PDF the catalog row's label_url names (SiteOne item D00001542; PDF pages). Owner 2026-11-18:
+  // LESCO Crosscheck Plus is the house bifenthrin now; the Talak rule above stays for old records and leftover stock.
+  '10404-120': {
+    product: 'LESCO Crosscheck Plus',
+    label: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/d00001542-label/d00001542-label.pdf',
+    read: '2026-11-18',
+    duringRain: { page: 7, quote: 'Do not make applications during rain.' },
+    dryBeforeRain: { hours: 4, page: 7, quote: DRY_4H },
+    // Pre-construction termite work (page 32) has its own, stricter line; every other use reads page 5.
+    wind: [
+      { mph: 10, services: /\btermite\b/i, page: 32, quote: 'Do not make on-grade applications when sustained wind speeds are above 10 mph (at application site) at nozzle end height.', text: 'no on-grade spraying above 10 mph' },
+      { mph: 15, page: 5, quote: 'Do not apply when wind speed exceeds 15 MPH.' },
+    ],
+  },
   '101563-6': { product: 'Delta Dust', label: '000432-00772-20141014.pdf', olderLabel: true, duringRain: { page: 5, quote: 'Do not make applications during rain.' } },
   '100-1066': {
     product: 'Demand CS',

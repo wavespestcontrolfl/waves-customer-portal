@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "notes": "Reviewed links from a Pest Insider lead fact to the live blog post that states its claim (pest-insider/posts.js). path = the post's slug (its URL path on the website); file = its source in the website repo (wavespestcontrol-astro); states = one sentence copied exactly from that file that states the fact's claim. A fact with no entry has no post yet and cannot lead an issue. Read each post against the fact's quotes before adding an entry.",
+  "posts": {
+    "A01": {
+      "path": "/pest-control/get-rid-of-ants/",
+      "file": "src/content/blog/pest-control/get-rid-of-ants.md",
+      "states": "Colony estimates range from 8,000 to 3 million ants."
+    },
+    "A02": {
+      "path": "/termite/bugs-that-look-like-termites/",
+      "file": "src/content/blog/termite/bugs-that-look-like-termites.mdx",
+      "states": "UF/IFAS says Florida carpenter ants nest in existing voids or excavate only soft materials such as rotten or pithy wood and Styrofoam, and that they will not excavate nesting galleries in sound wood."
+    },
+    "D01": {
+      "path": "/pest-control/get-rid-of-roof-rats-lakewood-ranch/",
+      "file": "src/content/blog/pest-control/get-rid-of-roof-rats-lakewood-ranch.md",
+      "states": "SSWEC120 says roof rats prefer to nest above ground, including in the skirts of old fronds on palm trees, and use tree branches and utility lines to reach food and enter buildings."
+    },
+    "D02": {
+      "path": "/pest-control/get-rid-of-mice/",
+      "file": "src/content/blog/pest-control/get-rid-of-mice.md",
+      "states": "The CDC says \"mice can fit through a hole the width of a pencil (1/4 inch or 6 millimeters in diameter)\" ([CDC](https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html))."
+    },
+    "D03": {
+      "path": "/pest-control/get-rid-of-mice/",
+      "file": "src/content/blog/pest-control/get-rid-of-mice.md",
+      "states": "The CDC's rule is that you should not sweep or vacuum rodent urine, droppings or nesting material."
+    },
+    "L01": {
+      "path": "/lawn-care/salt-tolerant-grass-coastal-venice-fl/",
+      "file": "src/content/blog/lawn-care/salt-tolerant-grass-coastal-venice-fl.mdx",
+      "states": "The upside: SL385 says reclaimed water carries nitrogen, phosphorus and potassium, and it can supply part of the nitrogen and all of the phosphorus turfgrass needs."
+    },
+    "L02": {
+      "path": "/lawn-care/overwatering-lawn-vs-underwatering/",
+      "file": "src/content/blog/lawn-care/overwatering-lawn-vs-underwatering.mdx",
+      "states": "Use the three signs: blades folded lengthwise, a blue-gray cast, and footprints that stay visible. That is the trigger."
+    },
+    "L03": {
+      "path": "/lawn-care/overwatering-lawn-vs-underwatering/",
+      "file": "src/content/blog/lawn-care/overwatering-lawn-vs-underwatering.mdx",
+      "states": "Dollarweed and sedges thrive where soil stays wet."
+    },
+    "L04": {
+      "path": "/lawn-care/rust-fungus-lawn-north-port-fl/",
+      "file": "src/content/blog/lawn-care/rust-fungus-lawn-north-port-fl.mdx",
+      "states": "LH051 says to water in the early morning, between 2 and 8 a.m., when dew is already on the grass, so the sprinklers don't stretch out the time the leaves stay wet."
+    },
+    "L05": {
+      "path": "/lawn-care/mowing-height-by-grass-type/",
+      "file": "src/content/blog/lawn-care/mowing-height-by-grass-type.mdx",
+      "states": "Standard cultivars like Floratam at 3.5–4 inches."
+    },
+    "L09": {
+      "path": "/lawn-care/large-patch-fungus-lakewood-ranch-fl/",
+      "file": "src/content/blog/lawn-care/large-patch-fungus-lakewood-ranch-fl.mdx",
+      "states": "UF/IFAS lists large patch as a November-to-May disease that shows up when temperatures stay below 80°F and is normally not seen in summer."
+    },
+    "L10": {
+      "path": "/lawn-care/get-rid-of-chinch-bugs-bradenton-fl/",
+      "file": "src/content/blog/lawn-care/get-rid-of-chinch-bugs-bradenton-fl.md",
+      "states": "Per the [UF/IFAS southern chinch bug profile](https://ask.ifas.ufl.edu/publication/IN383), injury usually shows up first in water-stressed areas along the edges of the lawn or where the grass grows in full sun."
+    },
+    "M01": {
+      "path": "/mosquito/mosquitoes-breeding-in-patio-drains/",
+      "file": "src/content/blog/mosquito/mosquitoes-breeding-in-patio-drains.mdx",
+      "states": "Some eggs wait longer: the CDC says Aedes eggs can survive drying out for up to 8 months, so scrub containers, don't just rinse them."
+    },
+    "O01": {
+      "path": "/lawn-care/fertilizer-blackout-sarasota-county/",
+      "file": "src/content/blog/lawn-care/fertilizer-blackout-sarasota-county.md",
+      "states": "The City of Sarasota and the City of Venice follow the same rules, Longboat Key has its own version, and **North Port's lawn blackout starts earlier, on April 1**."
+    },
+    "O02": {
+      "path": "/lawn-care/fertilizer-blackout-sarasota-county/",
+      "file": "src/content/blog/lawn-care/fertilizer-blackout-sarasota-county.md",
+      "states": "Sarasota County's blackout is fixed at June 1 to September 30, and North Port's at April 1 to September 30, regardless of rainfall."
+    },
+    "O03": {
+      "path": "/lawn-care/rain-gauge-irrigation-schedule-venice-fl/",
+      "file": "src/content/blog/lawn-care/rain-gauge-irrigation-schedule-venice-fl.mdx",
+      "states": "UF/IFAS says Florida law has required a rain sensor or soil-moisture shut-off device on irrigation systems installed since 1991, and suggests setting a rain sensor to stop irrigation after 1/2 to 3/4 inch of rain."
+    },
+    "O04": {
+      "path": "/lawn-care/soil-moisture-meter-overwatering-lawn-lakewood-ranch-fl/",
+      "file": "src/content/blog/lawn-care/soil-moisture-meter-overwatering-lawn-lakewood-ranch-fl.mdx",
+      "states": "Lawn and landscape watering is limited to once a week, on a day set by the last digit of your address, and the district says to \"always refer to your city or county regulations first.\""
+    },
+    "P02": {
+      "path": "/pest-control/palm-fronds-touching-roof-rats/",
+      "file": "src/content/blog/pest-control/palm-fronds-touching-roof-rats.mdx",
+      "states": "Gardening Solutions calls hurricane pruning harmful and says hurricane-cut palms were more likely to have their crowns snapped off by the wind."
+    },
+    "P04": {
+      "path": "/tree-shrub/ganoderma-butt-rot-palms-lakewood-ranch-fl/",
+      "file": "src/content/blog/tree-shrub/ganoderma-butt-rot-palms-lakewood-ranch-fl.mdx",
+      "states": "The UF/IFAS wording is direct: \"There are currently no cultural or chemical controls for preventing the disease or for curing the disease once the palm is infected.\""
+    },
+    "R01": {
+      "path": "/pest-control/cockroach-types-southwest-florida/",
+      "file": "src/content/blog/pest-control/cockroach-types-southwest-florida.mdx",
+      "states": "UF/IFAS says the larger roaches are generally found outdoors and become indoor problems when they migrate or are carried inside, and that outdoor cockroaches do not survive well indoors. Often, UF says, removing an outdoor roach from the house is all the control it needs."
+    },
+    "R02": {
+      "path": "/pest-control/can-cockroaches-bite/",
+      "file": "src/content/blog/pest-control/can-cockroaches-bite.mdx",
+      "states": "UF says German cockroaches survive only about 12 days with food but no water, and about 42 days with water and no food."
+    },
+    "R03": {
+      "path": "/pest-control/tiny-cockroach/",
+      "file": "src/content/blog/pest-control/tiny-cockroach.mdx",
+      "states": "ENY-214 says German cockroaches can first get into a home in infested grocery bags, and that children can carry roaches home from school in book bags and lunch containers."
+    },
+    "S01": {
+      "path": "/pest-control/get-rid-of-brown-recluse-spiders/",
+      "file": "src/content/blog/pest-control/get-rid-of-brown-recluse-spiders.md",
+      "states": "UF/IFAS points out that many unconfirmed recluse bites are reported in Florida every year, yet \"not one specimen of brown recluse spider has ever been collected in Tampa.\""
+    },
+    "S02": {
+      "path": "/pest-control/honeybee-vs-yellow-jacket/",
+      "file": "src/content/blog/pest-control/honeybee-vs-yellow-jacket.mdx",
+      "states": "Yellow jackets *feel* worse in practice because a single wasp can sting you several times in a row, and its alarm pheromone recruits nest-mates."
+    },
+    "T01": {
+      "path": "/termite/drywood-termites-bradenton-fl/",
+      "file": "src/content/blog/termite/drywood-termites-bradenton-fl.md",
+      "states": "[drywood termites](/termite/get-rid-of-drywood-termites/) live entirely within the wood they’re eating."
+    },
+    "T02": {
+      "path": "/termite/termite-swarmers/",
+      "file": "src/content/blog/termite/termite-swarmers.md",
+      "states": "**Formosan subterranean termite:** [early April to late June](https://ask.ifas.ufl.edu/publication/IN278), shortly after sunset, with peak swarming in May. UF/IFAS adds that the alates are attracted to lights."
+    },
+    "T03": {
+      "path": "/pest-control/seasonal-pest-calendar-sarasota-fl/",
+      "file": "src/content/blog/pest-control/seasonal-pest-calendar-sarasota-fl.md",
+      "states": "Per [UF/IFAS](https://ask.ifas.ufl.edu/publication/IN369), its flights run from early December to early February, and this one swarms in the evening."
+    }
+  }
+}
