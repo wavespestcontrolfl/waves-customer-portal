@@ -409,6 +409,10 @@ const TERMITICIDE_METADATA_FIELDS = [
   'concentrationLabel',
   'trenchDepthFt',
   'concreteVolumePadPct',
+  // The trench line's finished gallons and the concrete volume pad's share of them, an allowance beyond the applied volume
+  // (pre-push audit at the sixteenth push).
+  'finishedGallons',
+  'concreteVolumePadGallons',
   'productSurcharge',
   'baseInstallPrice',
   'warrantyTier',

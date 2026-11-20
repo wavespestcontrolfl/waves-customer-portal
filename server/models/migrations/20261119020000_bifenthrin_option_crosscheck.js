@@ -13,10 +13,10 @@
  * (its overlays read (products || product_costs)[key] || row[key]), so the quote follows whichever one the bridge reads.
  * A product is rewritten only while it still holds the Talak values, or has no label of its own and carries another bottle's
  * figures or name, a Talak warning included (pre-push audit at the twelfth push). A name is read before any figure: one with no
- * label of its own that names Crosscheck Plus (its catalog name, the camelCase alias first, as db-bridge reads it, by a name the
- * engine resolves to Crosscheck Plus) is an admin's own Crosscheck Plus product, so its figures stay and only a Talak warning on it
- * moves (pre-push audits at the fourteenth and fifteenth pushes; another Crosscheck product, LESCO Crosscheck G, is another
- * bottle). db-bridge sets only a non-empty label, so such a product shows the code's label, which this change moves to
+ * label of its own that names Crosscheck Plus (its catalog name, the camelCase alias first, as db-bridge reads it, by the engine's
+ * own rule, the one its label check reads) is an admin's own Crosscheck Plus product, so its figures stay and only a Talak warning
+ * on it moves (pre-push audits at the fourteenth to sixteenth pushes; another Crosscheck product, LESCO Crosscheck G, or a bare
+ * "Cross Check", is another bottle). db-bridge sets only a non-empty label, so such a product shows the code's label, which this change moves to
  * Crosscheck Plus: left as it is, it would quote another bottle's cost under Crosscheck Plus's name and label check. That is the
  * admin seed's Talak product (41.57 / 96 with its rate fields: what ensureTable in routes/admin-pricing-config.js inserted from
  * 2026-10-25 until this change, when it creates the table), with or without an admin's edits since, and an admin's price for that
@@ -809,15 +809,13 @@ const holds = (product, values) => Object.entries(values).every(([k, v]) => isDe
 // code's Crosscheck Plus product (pre-push audit at the twelfth push). See the header.
 const BOTTLE_FIELDS = ['container_cost', 'container_oz', 'catalog_product_name', 'package_label'];
 const ownLabel = (product) => typeof product.label === 'string' && product.label.trim() !== '';
-// The names the engine resolves to Crosscheck Plus (service-pricing.js, its pre-slab and trenching product aliases), by its token
-// rule. Another Crosscheck product (LESCO Crosscheck G) is another bottle (pre-push audit at the fifteenth push).
-const CROSSCHECK_PLUS_NAMES = ['crosscheck', 'crosscheck_plus', 'lesco_crosscheck_plus', 'cross_check', 'cross_check_plus', 'lesco_cross_check_plus'];
-const nameToken = (name) => String(name ?? '').trim().toLowerCase().replace(/[\s/-]+/g, '_').replace(/_+/g, '_');
 // A product with no label of its own whose catalog name, as db-bridge reads it (the camelCase alias first), names Crosscheck Plus:
 // an admin's own Crosscheck Plus product, whatever its figures (pre-push audit at the fourteenth push: an override naming LESCO
-// Crosscheck Plus at an admin's $45 was repriced to $30.90).
-const namesCrosscheckPlus = (product) => !ownLabel(product)
-  && CROSSCHECK_PLUS_NAMES.includes(nameToken(product.catalogProductName ?? product.catalog_product_name));
+// Crosscheck Plus at an admin's $45 was repriced to $30.90). The name is read by the engine's own rule, the one its label check
+// reads, so a product kept here is one an operator can confirm (pre-push audits at the fifteenth and sixteenth pushes: LESCO
+// Crosscheck G, or a bare "Cross Check", is another bottle).
+const namesCrosscheckPlus = (product) => !ownLabel(product) && require('../../services/pricing-engine/service-pricing')
+  .namesCrosscheckPlus({ catalogProductName: product.catalogProductName ?? product.catalog_product_name });
 const carriesOtherBottle = (product, plan) => !ownLabel(product) && (SHADOWING_ALIASES.some((alias) => product[alias] !== undefined)
   || BOTTLE_FIELDS.some((field) => field in plan.to && product[field] !== undefined && !isDeepStrictEqual(product[field], plan.to[field]))
   || (Array.isArray(product.warnings) && product.warnings.some((warning) => plan.from.warnings.includes(warning))));

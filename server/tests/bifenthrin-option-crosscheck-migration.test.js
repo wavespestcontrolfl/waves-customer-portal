@@ -1337,12 +1337,40 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
 
     // Only a name the engine resolves to Crosscheck Plus counts: another Crosscheck product is another bottle, and moves (pre-push
     // audit at the fifteenth push: LESCO Crosscheck G kept its own cost under the trench's Crosscheck Plus label).
+    // The name is read by the engine's own rule, the one its label check reads: a bare "Cross Check" is not Crosscheck Plus there,
+    // so it moves too, and an override kept as Crosscheck Plus takes a label check through db-bridge (pre-push audit at the sixteenth
+    // push: one kept here never counted the operator's check).
     test('an override that names another Crosscheck product moves to Crosscheck Plus', async () => {
       const other = { catalog_product_name: 'LESCO Crosscheck G', container_cost: 45 };
-      const db = world({ preslab: preslabRow(other, PROD_PRESLAB_PRODUCT), trench: trenchRow(other, PROD_TRENCH_PRODUCT), catalog: [], vendors: [] });
+      const bare = { catalog_product_name: 'Cross Check', container_cost: 45 };
+      const db = world({ preslab: preslabRow(other, bare), trench: trenchRow(other, PROD_TRENCH_PRODUCT), catalog: [], vendors: [] });
       await migration.up(fakeKnex(db));
       expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual(CROSSCHECK_PRESLAB);
+      expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual(CROSSCHECK_PRESLAB);
       expect(productOf(db, 'onetime_trenching', 'talstar_p')).toEqual({ catalog_product_name: 'LESCO Crosscheck G', ...CROSSCHECK_TRENCH });
+    });
+
+    test('through the bridge: an override kept as Crosscheck Plus counts the operator\'s label check', async () => {
+      const kept = { catalogProductName: 'Crosscheck Plus', containerCost: 45 };
+      const db = world({ preslab: preslabRow(kept, { catalog_product_name: 'Cross Check', container_cost: 45 }), catalog: [], vendors: [] });
+      await migration.up(fakeKnex(db));
+      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual(kept);
+      let bridge;
+      let pricing;
+      jest.isolateModules(() => {
+        bridge = require('../services/pricing-engine/db-bridge');
+        pricing = require('../services/pricing-engine/service-pricing');
+      });
+      const data = rowOf(db, 'onetime_preslab');
+      const bridgeDb = (table) => ({ select: async () => (table === 'pricing_config' ? [{ config_key: 'onetime_preslab', data }] : []) });
+      bridgeDb.schema = { hasTable: async (table) => table === 'pricing_config' };
+      jest.spyOn(console, 'log').mockImplementation(() => {});
+      expect(await bridge.syncConstantsFromDB(bridgeDb)).toBe(true);
+      for (const productKey of ['talstar_p', 'bifen_it']) {
+        const line = pricing.pricePreSlabTermiticide({ slabSqFt: 6832 }, { productKey, labelConfirmed: true, labelBottle: 'lesco_crosscheck_plus' });
+        expect(line).toMatchObject({ labelConfirmed: true });
+        expect(line.manualReviewReasons).not.toContain('label_confirmation_required');
+      }
     });
 
     // Only another bottle's figures or name move a product with no label of its own: one with none, or with Crosscheck Plus's own,

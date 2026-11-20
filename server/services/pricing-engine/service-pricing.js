@@ -10534,6 +10534,8 @@ module.exports = {
   resolvePalmCount,
   normalizeTrenchingTermiticideProduct,
   normalizeTrenchingApplicationRate,
+  // The migration 20261119020000 reads a Crosscheck Plus name by this same rule (pre-push audit at the sixteenth push).
+  namesCrosscheckPlus,
   resolveBoraCareSqFt,
   resolvePreSlabSqFt,
   normalizePreSlabTermiticideProduct,

@@ -895,6 +895,9 @@ describe('termite measurement overrides and safeguards', () => {
     expect(mappedTrench.productKey).toBe('termidor_sc');
     expect(mappedTrench.applicationRate).toBe('high');
     expect(mappedTrench.trenchDepthFt).toBe(1.5);
+    // The stored line keeps the finished gallons and the concrete pad's share of them apart (pre-push audit at the sixteenth push).
+    expect(mappedTrench).toMatchObject({ finishedGallons: trench.finishedGallons, concreteVolumePadGallons: trench.concreteVolumePadGallons });
+    expect(mappedTrench.concreteVolumePadGallons).toBeGreaterThan(0);
     expect(mappedTrench.productSurcharge).toBeGreaterThan(0);
     expect(mappedTrench.warrantyTier).toBe('five_year_repair_retreat');
     expect(mappedTrench.warrantyAdder).toBeGreaterThan(0);
