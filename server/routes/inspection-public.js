@@ -794,7 +794,8 @@ const customerAddressFields = (cust) => ({
 });
 
 // `address`: the booking address ({line1, line2, city, state, zip}) on every list a customer is OFFERED; the
-// south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. Commit and re-validation rebuilds omit it.
+// south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. The commit and re-validation rebuilds pass it too:
+// per truck (owner rule B) they drop the same openings as the list (zone-day-funnel.js dropOtherTruckDays).
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;

@@ -1918,7 +1918,7 @@ describe('POST /:token commit', () => {
     // now: a verified unlinked lead reusing an existing property whose own
     // stored coordinates differ from the lead's pre-lock resolution (round
     // 11/13), re-validated AFTER the transaction commits.
-    test('a verified lead reusing a matched profile at a different stored location books the REFRESHED slot\'s own technician, never the pre-lock one', async () => {
+    test('a verified lead reusing a matched profile at a different stored location books the REFRESHED slot\'s own technician and the profile\'s own address, never the pre-lock ones', async () => {
       firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -1929,7 +1929,8 @@ describe('POST /:token commit', () => {
         .mockResolvedValueOnce(slotAtMatched); // post-phase-1 re-validation at the matched row's own location
       const existingCustomer = {
         id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
-        address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        // The match is street + zip, so the profile's city on file can differ from the one the lead typed.
+        address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
         latitude: 27.1, longitude: -82.2, // in the service box but far from the default mockGeocode location — matched via zip, not coords
       };
       seedPhoneHousehold(existingCustomer);
@@ -1947,6 +1948,12 @@ describe('POST /:token commit', () => {
       expect(bookingArgs.slot_end).toBe('09:45');
       expect(res.body.visit.window.end).toBe('09:45');
       expect(res.body.endLabel).toBe('9:45 AM');
+      // Owner rule B per truck: the re-validation and the visit's zone read the address of the location they book (the
+      // profile's own city on file), never the typed one, so the far-south check and the zone stamp agree with it.
+      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject({
+        zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton',
+      });
+      expect(bookingArgs.callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
