@@ -194,23 +194,50 @@ async function probeVisitRefusal(conn, svc) {
   return (profile?.requiresProject || profile?.projectBacked) ? 'project_backed' : null;
 }
 
+// No other row on the visit stood before a completion mint when `invoice` was
+// paid: `rows` are completionInvoicesOnVisits' (every live row, plus a
+// refunded one; void and canceled rows collected nothing), and a row made
+// after the invoice's `paid_at` does not count. With no `paid_at` (a card
+// probe before the payment) every other row counts.
+function onlyBillWhenPaid(rows, invoice) {
+  const paidAt = invoice.paid_at ? new Date(invoice.paid_at).getTime() : NaN;
+  return rows.every((row) => String(row.id) === String(invoice.id) || new Date(row.created_at).getTime() > paidAt);
+}
+
 // GATE_REPORT_AFTER_PAY's `onlyInvoice` (issuedCloseoutVisitRefusal), asked
-// by the resolver and again by the completion's locked recheck: true only for
-// an arrived visit paid on its own day with the gate on, when no other row on
-// the visit stood before a completion mint at the payment (every live row,
-// plus a refunded one: completionInvoicesOnVisits; void and canceled rows
-// collected nothing). A row made after the payment (`paid_at`) does not count.
-// Like the prepayment proof, the verdict comes from durable stamps, so the
-// payment, a redelivered webhook, the visit-day sweep and the lock all reach
-// the same one, and a held visit stays held for its day (pre-push audit round
-// 4). An invoice with no `paid_at` (a card probe before the payment) counts
-// every other row.
+// by the resolver, again by the completion's locked recheck and by the
+// record_payment settlement fence: true only for an arrived visit paid on its
+// own day with the gate on, when the paid invoice was the visit's only bill
+// (onlyBillWhenPaid). Like the prepayment proof, the verdict comes from
+// durable stamps, so the payment, a redelivered webhook, the visit-day sweep
+// and the lock all reach the same one, and a held visit stays held for its
+// day (pre-push audit round 4).
 async function paidInvoiceIsVisitsOnlyBill(conn, { visit, invoice, today, trigger }) {
   if (trigger !== 'paid' || !isArrivedVisitStatus(visit.status) || dateOnly(visit.scheduled_date) !== today || !reportAfterPayLive()) return false;
-  const paidAt = invoice.paid_at ? new Date(invoice.paid_at).getTime() : NaN;
+  const { completionInvoicesOnVisits } = require('./completion-invoice-candidate');
+  return onlyBillWhenPaid(await completionInvoicesOnVisits(conn, [visit.id]), invoice);
+}
+
+// GATE_REPORT_AFTER_PAY (pre-push audit round 5): the payment a visit is held
+// on, or null: an invoice settled on the visit's own ET day (`paid_at`) while
+// it was the visit's only bill. A bill added after that payment is the
+// office's: the completion reuses this invoice and never the newer row (so it
+// never charges or texts a pay link for the later bill), and no other
+// invoice's closeout closes the visit (`visit_paid_on_other_invoice`), so the
+// visit completes on its payment, as a close at the payment would have. From
+// durable stamps, not the visit's status, so a resumed completion (its visit
+// already committed completed) and the next day's sweep read the same row.
+// Gate off: null.
+async function reportAfterPayPaidInvoice(conn, visit) {
+  if (!reportAfterPayLive()) return null;
+  const day = dateOnly(visit.scheduled_date);
+  const sameDay = (await conn('invoices').where({ scheduled_service_id: visit.id })
+    .whereIn('status', SETTLED_INVOICE_STATUSES).whereNotNull('paid_at').orderBy('paid_at', 'desc'))
+    .filter((row) => etDateString(new Date(row.paid_at)) === day);
+  if (!sameDay.length) return null;
   const { completionInvoicesOnVisits } = require('./completion-invoice-candidate');
   const rows = await completionInvoicesOnVisits(conn, [visit.id]);
-  return rows.every((row) => String(row.id) === String(invoice.id) || new Date(row.created_at).getTime() > paidAt);
+  return sameDay.find((row) => onlyBillWhenPaid(rows, row)) || null;
 }
 
 // The visit this invoice bills, or null with the reason it was left alone.
@@ -240,15 +267,20 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // today, and a visit nobody arrived at closes only on an invoice settled
   // or delivered after its day.
   // GATE_REPORT_AFTER_PAY holds an arrived visit paid on its own day that this
-  // invoice alone billed when it was paid (`onlyInvoice`).
+  // invoice alone billed when it was paid (`onlyInvoice`), and an arrived
+  // visit held on another invoice's payment closes on that payment only, in
+  // either sweep (`heldOn`, pre-push audit round 5).
   let issuedDay;
   let onlyInvoice;
+  let heldOn = null;
   try {
     issuedDay = await issuedDayForInvoice(conn, invoice, trigger);
     onlyInvoice = await paidInvoiceIsVisitsOnlyBill(conn, { visit: svc, invoice, today, trigger });
+    if (isArrivedVisitStatus(svc.status)) heldOn = await reportAfterPayPaidInvoice(conn, svc);
   } catch (err) {
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
   }
+  if (heldOn && String(heldOn.id) !== String(invoice.id)) return leaveOpen('visit_paid_on_other_invoice');
   // onlyInvoice is true only for a visit the gate holds.
   const deferred = deferSameDay && onlyInvoice;
   const refusedByState = deferred ? null : issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay, onlyInvoice });
@@ -402,8 +434,8 @@ function retryableVisitFilter(q, today, settledSql) {
 // anything the rule does not admit:
 //  - every `visit_*` reason of issuedCloseoutVisitRefusal and the resolver
 //    (visit_in_future, visit_en_route, visit_scheduled_today, visit_prepaid,
-//    visit_timer_running, and the historical visit_on_site that every
-//    arrived visit got before 2026-10-04);
+//    visit_timer_running, visit_paid_on_other_invoice, and the historical
+//    visit_on_site that every arrived visit got before 2026-10-04);
 //  - a race under the completion's row lock (`issued_visit_*`);
 //  - a failure: `error`, or any 5xx the completion RETURNED rather than
 //    threw (a failed profile / prepay read answers 503 with its own code).
@@ -658,10 +690,7 @@ async function loadRetryCandidates(conn, today, sinceDays) {
     .whereIn('i.status', [...SETTLED_INVOICE_STATUSES, ...DELIVERED_INVOICE_STATUSES])
     .whereRaw(`${ISSUED_AT_SQL} >= ?`, [new Date(Date.now() - sinceDays * 86400000)])
     .where((q) => retryableVisitFilter(q, today, "i.status IN ('paid', 'prepaid')"))
-    // Settled candidates first: a visit with a paid and a delivered invoice
-    // closes on the paid one, as a close on the payment would have (a visit
-    // GATE_REPORT_AFTER_PAY held can gain a bill after its payment).
-    .orderByRaw("i.status IN ('paid', 'prepaid') DESC, i.id")
+    .orderBy('i.id')
     .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
       conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
 }
@@ -1024,6 +1053,7 @@ module.exports = {
   isArrivedVisitStatus,
   issuedCloseoutVisitRefusal,
   paidInvoiceIsVisitsOnlyBill,
+  reportAfterPayPaidInvoice,
   approvedVisitChanged,
   invoiceIssuedDay,
   issuedDayForInvoice,

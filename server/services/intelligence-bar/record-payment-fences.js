@@ -16,7 +16,9 @@
  *         - the ET day is not the day the card showed (midnight passed), or the visit the card said the payment would complete has
  *           been edited since (edit time, scheduled date, service type) or is gone, or a technician started its job timer since (the
  *           closeout's own visitJobTimerRunning: a running timer leaves the visit open, so the promised closeout would not happen;
- *           not for a close deferred past the visit's day by GATE_REPORT_AFTER_PAY, which the retry sweep runs and checks then);
+ *           not for a close deferred past the visit's day by GATE_REPORT_AFTER_PAY, which the retry sweep runs and checks then), or
+ *           a bill was added on that visit or voided since, so GATE_REPORT_AFTER_PAY would hold a visit the card said closes now,
+ *           or close one the card said stays open today;
  *         - an annual-prepay term resolves to the invoice (its tag, its visit's term as the anchor, or a term whose
  *           prepay_invoice_id is this invoice): those settle a prepaid term and stay on the Invoices page.
  *       A lookup that throws aborts the settlement: nothing is recorded (fail closed).
@@ -38,6 +40,7 @@ const DRIFT_TEXT = 'The invoice changed after the confirmation card was shown �
 const DATE_TEXT = 'The day changed after the confirmation card was shown, so the payment would be recorded as of a different day — nothing was recorded';
 const VISIT_TEXT = 'The linked visit changed after the confirmation card was shown — nothing was recorded';
 const TIMER_TEXT = 'A technician started the visit timer since this card; try again after the visit — nothing was recorded';
+const BILLS_TEXT = 'A bill on the linked visit was added or voided after the confirmation card was shown, so the visit would not close as the card said — nothing was recorded';
 const ANNUAL_TEXT = 'This is an annual-plan invoice — nothing was recorded. Record the payment from the Invoices page.';
 
 const drift = (message) => Object.assign(new Error(message), { statusCode: 409, isOperational: true, drift: true });
@@ -84,6 +87,12 @@ function settlementFenceFor(pin) {
     // The ledger row and the invoice note are stamped with the ET day the settlement runs on: never a different day than the card's.
     if (pin.paymentDate !== etDateString()) throw drift(DATE_TEXT);
     if (pin.closeout && !(await closeoutVisitUnchanged(database, pin.closeout))) throw drift(VISIT_TEXT);
+    // GATE_REPORT_AFTER_PAY (pre-push audit round 5): the card's same-day verdict, asked again on this handle. A bill added on the
+    // visit since the card would close it at once, though the card said it stays open today; one voided since would hold it, though the
+    // card said it closes now (paidInvoiceIsVisitsOnlyBill, the resolver's own question; false with the gate off).
+    if (pin.closeout && Boolean(pin.closeout.deferred) !== await require('../invoice-issued-closeout').paidInvoiceIsVisitsOnlyBill(database, {
+      visit: { id: pin.closeout.visitId, status: pin.closeout.status, scheduled_date: pin.closeout.date }, invoice: row, today: etDateString(), trigger: 'paid',
+    })) throw drift(BILLS_TEXT);
     // A job timer started after the card leaves no mark on the visit row, yet the closeout leaves a visit with a running timer open: the
     // promised closeout would silently not happen. The closeout's own predicate, on the same handle. Not for a deferred close
     // (GATE_REPORT_AFTER_PAY): it runs after the visit's day, and the retry sweep checks the timer then.

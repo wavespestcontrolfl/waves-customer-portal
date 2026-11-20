@@ -10750,6 +10750,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     }
     let existingCompletionInvoice = null;
+    let reportAfterPayHeld = null;
     // A REFUNDED invoice on THIS visit (codex #3456): the suppressor
     // above skips it (it collects nothing), but a fresh mint beside it is
     // unsafe while its refund can still bounce — so it blocks the mint via
@@ -10772,6 +10773,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { id: issuedInvoiceCloseout.invoiceId, scheduled_service_id: svc.id });
         } else {
           existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
+        }
+        // GATE_REPORT_AFTER_PAY (pre-push audit round 5): a visit held on its
+        // same-day payment completes on that invoice, here and in the
+        // pre-minted lookup below, never on a bill added after the payment,
+        // which stays the office's (reportAfterPayPaidInvoice; null with the
+        // gate off).
+        if (!issuedInvoiceCloseout) {
+          reportAfterPayHeld = await require('../services/invoice-issued-closeout').reportAfterPayPaidInvoice(db, svc);
+          if (reportAfterPayHeld) existingCompletionInvoice = reportAfterPayHeld;
         }
         if (!existingCompletionInvoice && !issuedInvoiceCloseout) {
           existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
@@ -11262,6 +11272,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           preMintedInvoice = issuedInvoiceCloseout
             ? existingCompletionInvoice
             : await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
+          // GATE_REPORT_AFTER_PAY: the held payment pinned above, never a
+          // bill added after it.
+          if (reportAfterPayHeld) preMintedInvoice = reportAfterPayHeld;
           // Refunded-invoice reconciliation wins here too (pre-push P0): when
           // a newer refunded invoice beat an older live row above, this lookup
           // would fetch that same older row again and its pay link would be

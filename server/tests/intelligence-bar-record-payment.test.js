@@ -16,14 +16,14 @@ jest.mock('../services/invoice-manual-payment', () => ({
 jest.mock('../routes/admin-invoices', () => ({ recordPaymentFromBar: jest.fn(), getInvoiceDeliveryRecipients: jest.fn() }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn() }));
 jest.mock('../services/invoice-prepay', () => ({ resolveInvoiceTermId: jest.fn() }));
-jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: jest.fn(), visitJobTimerRunning: jest.fn(async () => false) }));
+jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: jest.fn(), visitJobTimerRunning: jest.fn(async () => false), paidInvoiceIsVisitsOnlyBill: jest.fn(async () => false) }));
 
 const db = require('../models/db');
 const Invoices = require('../routes/admin-invoices');
 const { partPaymentRefusal } = require('../services/invoice-manual-payment');
 const { rowIsSelfPayDue } = require('../services/open-balance');
 const { resolveInvoiceTermId } = require('../services/invoice-prepay');
-const { issuedCloseoutTarget, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
+const { issuedCloseoutTarget, visitJobTimerRunning, paidInvoiceIsVisitsOnlyBill } = require('../services/invoice-issued-closeout');
 const { etDateString } = require('../utils/datetime-et');
 const tools = require('../services/intelligence-bar/record-payment-tools');
 const { executeRecordPaymentTool, RECORD_PAYMENT_TOOLS, cardLines } = tools;
@@ -496,17 +496,24 @@ describe('confirm', () => {
         issuedCloseoutTarget.mockResolvedValue(deferred);
         state.scheduled_services.push(visitRow({ status: 'on_site' }));
         visitJobTimerRunning.mockImplementation(async () => true);
+        paidInvoiceIsVisitsOnlyBill.mockImplementation(async () => true);
         try {
           const fence = await fenceOf();
           expect(fence.closeoutTarget).toBe('visit-77');
           expect(fence.closeoutVisit).toEqual({ serviceType: 'Pest Control', date: '2099-01-01', status: 'on_site' });
           await expect(fence(db)).resolves.toBe(true);
           expect(visitJobTimerRunning).not.toHaveBeenCalled();
+          // The card's verdict is asked again on the fence's handle (pre-push audit round 5): the carded visit as the card showed it.
+          expect(paidInvoiceIsVisitsOnlyBill).toHaveBeenLastCalledWith(db, expect.objectContaining({ visit: { id: 'visit-77', status: 'on_site', scheduled_date: '2099-01-01' }, trigger: 'paid' }));
+          // A bill added on the visit since the card: the payment would close the visit at once, so it is refused.
+          paidInvoiceIsVisitsOnlyBill.mockImplementationOnce(async () => false);
+          await expect(fence(db)).rejects.toMatchObject({ statusCode: 409, drift: true, message: expect.stringMatching(/^A bill on the linked visit was added or voided after the confirmation card was shown/) });
           // Between the card and Confirm the visit must still read as the card showed it.
           state.scheduled_services[0].updated_at = new Date('2099-01-01T10:00:00Z');
           await expect(fence(db)).rejects.toMatchObject({ statusCode: 409, drift: true });
         } finally {
           visitJobTimerRunning.mockImplementation(async () => false);
+          paidInvoiceIsVisitsOnlyBill.mockImplementation(async () => false);
           delete db.schema;
         }
       });

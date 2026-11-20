@@ -263,6 +263,40 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     } finally { await cleanup(f); }
   });
 
+  // GATE_REPORT_AFTER_PAY (pre-push audit round 5): a visit the gate held open on its same-day payment completes on that
+  // payment. A bill the office adds after the payment is newer, so the newest-row lookup would take it: the completion
+  // would link it to the record and text its pay link or charge a saved card for a visit already paid.
+  test('report after pay: the completion of a held visit reuses the paid invoice; a bill added after the payment stays unlinked, with no pay link and no charge', async () => {
+    const saved = process.env.GATE_REPORT_AFTER_PAY;
+    process.env.GATE_REPORT_AFTER_PAY = 'true';
+    const { chargeInvoiceWithSavedCard } = require('../services/stripe');
+    chargeInvoiceWithSavedCard.mockClear();
+    const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
+    try {
+      // The technician arrived, then the customer paid: the payment left the visit open for its report.
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site', arrived_at: new Date(), check_in_time: new Date() });
+      const { paid_at: paidAt } = await mockPg('invoices').where({ id: f.invoiceId }).first('paid_at');
+      const laterId = randomUUID();
+      await mockPg('invoices').insert({ id: laterId, customer_id: f.customerId, scheduled_service_id: f.serviceId, invoice_number: `TST-${laterId.slice(0, 8)}`,
+        token: randomUUID().replace(/-/g, ''), status: 'draft', total: 45, subtotal: 45, service_date: etDateString(new Date()), service_type: LAWN_TYPE,
+        created_at: new Date(new Date(paidAt).getTime() + 60000),
+        line_items: JSON.stringify([{ description: 'Fixture add-on', amount: 45, quantity: 1, unit_price: 45 }]) });
+      const out = await complete(f, {});
+      expect(out.status).toBe(200);
+      const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id');
+      const byId = Object.fromEntries((await invoicesOf(f)).map((row) => [row.id, row]));
+      expect(Object.keys(byId).sort()).toEqual([f.invoiceId, laterId].sort());
+      expect(byId[f.invoiceId]).toMatchObject({ status: 'paid', service_record_id: record.id });
+      expect(byId[laterId]).toMatchObject({ status: 'draft', service_record_id: null });
+      expect(textsWithPayLink()).toEqual([]);
+      expect(out.body.invoicePaymentActionRequired).toBe(false);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;
+      await cleanup(f);
+    }
+  });
+
   test('extra form fields beside the invoice field do not change the branch (the full form posts more than a sheet does)', async () => {
     const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
     try {
