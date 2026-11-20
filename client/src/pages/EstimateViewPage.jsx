@@ -4802,13 +4802,17 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
   // needs a time, and a bare scroll back to the times read as the page
   // starting over (a customer gave up and phoned in).
   const pickTime = kind === 'pick_time';
+  // 'stale_quote': the server refused the customer's own plan quote as
+  // changed. No time fixes that, so the banner gives the server's reason and
+  // a link back to the portal for a fresh quote, never "Refresh times".
+  const staleQuote = kind === 'stale_quote';
   return (
     <div role="status" style={{
       background: '#fff4e5', borderRadius: 12, padding: 16,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, color: COLORS.navy }}>
-        {pickTime ? (
+        {staleQuote ? (note || 'This quote changed since it was created — please go back to your portal for a current quote.') : pickTime ? (
           <>
             <strong>Pick a visit time below to approve your plan.</strong>{' '}
             Starting later? Use &ldquo;Can&apos;t find a date?&rdquo; under the times, or call{' '}
@@ -4821,7 +4825,16 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
             ? 'Your time-slot hold expired — pick a time again to finish signing up.'
             : note || "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
-      {onRetry ? (
+      {staleQuote ? (
+        <a
+          href="/"
+          style={{
+            display: 'inline-block', marginTop: 12, padding: '8px 16px',
+            background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
+            borderRadius: 8, fontSize: 14, fontWeight: 600,
+          }}
+        >Back to your Waves portal</a>
+      ) : onRetry ? (
         <button
           type="button"
           onClick={onRetry}
@@ -6440,6 +6453,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The server's reason for a slot_conflict recovery that is not a taken
   // slot (a visit before the move-in date); null keeps the default copy.
   const [deadHoldNote, setDeadHoldNote] = useState(null);
+  // The server's reason when it refused the customer's own plan quote as
+  // changed (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED). No time on
+  // this page can accept that quote, so its banner stays up and links back
+  // to the portal for a fresh quote; null = no such refusal.
+  const [staleQuoteNote, setStaleQuoteNote] = useState(null);
   // Recovery releases the hold and re-reads the contract. Until BOTH land,
   // `data.estimate.acceptance` still describes the dead hold, so leaving the
   // payment buttons live let a customer re-adopt the very hold being deleted
@@ -8421,6 +8439,17 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // preference and plan selections, and surface the server's
             // call-the-office message instead of a slot-picker retry loop.
             throw new Error(body.error || 'We couldn\'t confirm this plan\'s pricing online — please call the office and we\'ll finish it for you.');
+          }
+          if (body.code === 'RESTART_STATE_CHANGED' || body.code === 'PLAN_START_STATE_CHANGED') {
+            // The customer's own plan quote no longer fits the account, or
+            // staff changed it (docs/public-route-contracts.md). No new time
+            // or reload can accept it, so the slot-conflict recovery below
+            // offered "Refresh times" on a dead quote (codex pre-push P1).
+            // Release the hold like the no-booking refusals do, and keep a
+            // banner that links back to the portal for a fresh quote.
+            setStaleQuoteNote(body.error || 'This quote changed since it was created — please go back to your portal for a current quote.');
+            recoverFromDeadHold('configure');
+            return;
           }
           if (/estimate is no longer active/i.test(body.error || '')) {
             setCtaPhase('configure');
@@ -10751,7 +10780,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   );
 
   // A stuck recovery outranks the phase-specific banners: it is the reason
-  // the options on screen may be wrong (codex r10 P2).
+  // the options on screen may be wrong (codex r10 P2). A refused plan quote
+  // comes next: no time or retry on this page can accept it, so the way
+  // forward is a fresh quote from the portal (codex pre-push P1).
   const slotIssueBanner = recoveryStuck ? (
     <SlotIssueBanner
       kind="stale_hold"
@@ -10759,6 +10790,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ? ctaPhase
         : 'configure', ctaPhase === 'slot_conflict' ? deadHoldNote : null)}
     />
+  ) : staleQuoteNote ? (
+    <SlotIssueBanner kind="stale_quote" note={staleQuoteNote} />
   ) : ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
     <SlotIssueBanner
       kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}

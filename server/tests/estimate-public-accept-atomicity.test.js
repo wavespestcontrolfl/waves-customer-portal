@@ -2364,6 +2364,17 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 
+  test('a one-time request on a restart quote with the option on gets the changed refusal, not restart_quote_frozen (codex pre-push P1)', async () => {
+    resetStore(restartEstimate({ id: 'est-restart-8', token: 'tok-restart-8-x0123456789', show_one_time_option: true }));
+    db.__state.tables.customers = [churnedCustomer()];
+    const res = await putAccept('tok-restart-8-x0123456789', { serviceMode: 'one_time' });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+    expect(res.data.error).toMatch(/restart quote changed since it was created/);
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
   test('a still-churned customer passes the revalidation and the accept commits', async () => {
     resetStore(restartEstimate({ id: 'est-restart-3', token: 'tok-restart-3-x0123456789' }));
     db.__state.tables.customers = [churnedCustomer()];

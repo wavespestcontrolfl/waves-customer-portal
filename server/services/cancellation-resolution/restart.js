@@ -1098,10 +1098,10 @@ function staffChangedDeliveryOptions(estimate) {
   return !!(estimate?.show_one_time_option || estimate?.bill_by_invoice);
 }
 
-// The refusal such a quote gets, by source, or null. The accept route answers it before its slot and
-// payment checks: invoice mode skips the slot pick, so the slot check would ask for a visit time
-// instead of sending the customer back to the portal (codex pre-push P1). Both locked re-checks
-// answer it again.
+// The refusal such a quote gets, by source, or null. The accept route answers it before it checks any
+// field of the request body: invoice mode skips the slot pick, and a one-time restart request reads
+// as restart_quote_frozen, so a later answer would not send the customer back to the portal (codex
+// pre-push P1 x2). Both locked re-checks answer it again.
 const STAFF_CHANGED_REFUSALS = Object.freeze({
   plan_restart: Object.freeze({ code: 'RESTART_STATE_CHANGED', message: 'This restart quote changed since it was created — please reopen "Restart my plan" for a current quote.' }),
   plan_start: Object.freeze({ code: 'PLAN_START_STATE_CHANGED', message: 'This estimate changed since it was created — please go back to your portal for a current price.' }),
