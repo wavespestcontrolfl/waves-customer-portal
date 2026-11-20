@@ -704,7 +704,11 @@ describe('publishReviewReply', () => {
     state.rows[0].auto_reply_claimed_until = '2099-01-01T00:00:00.000Z';
     const { reviewFingerprint } = require('../services/review-reply/fingerprint');
     const fingerprint = reviewFingerprint(state.rows[0]);
-    await ibTimeout();
+    let claimAtPut;
+    await ibTimeout({ duringPut: () => { claimAtPut = state.rows[0].auto_reply_claimed_until; } });
+    // The runner's claim was already gone when the PUT went out: it cannot
+    // store over the row while Google's PUT is in flight.
+    expect(claimAtPut).toBeNull();
     // The clearing sync hands this text back to a person as a [DRAFT] (never
     // the automatic lane), or marks it posted once Google shows it.
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null });
@@ -730,6 +734,19 @@ describe('publishReviewReply', () => {
     Object.assign(state.rows[0], { auto_reply_status: 'drafted', auto_reply_reason: null, auto_reply_draft: 'Hi Dana, pipeline words.', review_reply: '[DRAFT] Hi Dana, pipeline words.', reply_updated_at: null });
     await ibTimeout();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', review_reply: null, reply_updated_at: null });
+  });
+
+  test('an Intelligence Bar post refuses before the PUT when a runner stored a draft over the row during the live read', async () => {
+    state.rows[0].auto_reply_status = null;
+    state.rows[0].auto_reply_claimed_until = '2099-01-01T00:00:00.000Z';
+    mockGbp.getReview.mockImplementationOnce(async () => {
+      Object.assign(state.rows[0], { auto_reply_status: 'drafted', auto_reply_draft: 'Runner words.', review_reply: '[DRAFT] Runner words.' });
+      return { reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } };
+    });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'ib' } }))
+      .rejects.toMatchObject({ code: CODES.STALE, status: 409 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'drafted', review_reply: '[DRAFT] Runner words.' });
   });
 
   test('an Intelligence Bar timeout records nothing when the row changed during the PUT (the change wins)', async () => {

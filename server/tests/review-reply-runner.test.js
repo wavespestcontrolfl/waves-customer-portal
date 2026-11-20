@@ -1752,8 +1752,15 @@ describe('admin actions', () => {
     state.rows = [row({ id: 'hu', auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] ' + human, auto_reply_draft: null })];
     mockPublish.mockImplementationOnce(async ({ reviewId }) => { const r = state.rows.find((x) => x.id === reviewId); Object.assign(r, { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_claimed_until: null }); throw new ReviewReplyError('google_uncertain', 'timed out', { status: 502 }); });
     await expect(Runner.postNow('hu', { type: 'admin' }, { expectedDraft: human })).rejects.toMatchObject({ code: 'google_uncertain' });
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: human });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: human, auto_reply_version: 'human' });
     expect(state.rows[0].auto_reply_drafted_at).toBeTruthy();
+    // The review the text was attempted for: a reviewer edit during the park
+    // (the sync keeps the park through it) makes Post now refuse the text.
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toEqual({ fingerprint: Runner.reviewFingerprint(state.rows[0]), accountFingerprint: null });
+    const parked = { ...state.rows[0] };
+    state.rows = [{ ...parked, review_text: 'Edited: they missed the garage' }];
+    await expect(Runner.postNow('hu', { type: 'admin' }, { expectedDraft: human })).rejects.toMatchObject({ code: 'stale_claim', message: expect.stringMatching(/review or its customer link changed/) });
+    state.rows = [parked];
     // The next sync sees the human text live on Google → ours, posted (Retract stays available).
     expect(Runner.syncReplyFields(state.rows[0], { owner_reply: human, owner_reply_updated_at: '2026-08-27T15:00:00Z' }, { now: new Date('2026-08-27T15:05:00Z') }))
       .toMatchObject({ review_reply: human, auto_reply_status: 'posted', auto_reply_reason: null, auto_reply_published_at: '2026-08-27T15:00:00Z' });

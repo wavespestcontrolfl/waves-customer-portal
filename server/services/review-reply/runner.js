@@ -1240,7 +1240,12 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         await db('google_reviews').where({ id: reviewId }).update({
           auto_reply_draft: existing,
           ...(humanDraft
-            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: restoredDraft ? JSON.stringify(textGrounding || null) : null, auto_reply_drafted_at: new Date().toISOString() }
+            // The review this text was attempted for: a restored attempt's
+            // recorded grounding, else the review as this claim read it (the
+            // claim guard refused any change before the PUT). A person's
+            // words carry no account facts. The next restore or Post now
+            // checks it (manualAttemptMoved).
+            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: JSON.stringify(restoredDraft && textGrounding ? textGrounding : { fingerprint: reviewFingerprint(row), accountFingerprint: null }), auto_reply_drafted_at: new Date().toISOString() }
             : { auto_reply_version: row.auto_reply_version || null, auto_reply_mode: row.auto_reply_mode || null, auto_reply_drafted_at: row.auto_reply_drafted_at || new Date().toISOString(), auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
         }).catch(() => {});
         throw err;

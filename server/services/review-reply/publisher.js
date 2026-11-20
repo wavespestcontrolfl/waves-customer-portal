@@ -526,6 +526,22 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           }
         }
       }
+      if (allowOverwrite || actor.type === 'ib') {
+        // A person's attempt (editor or Intelligence Bar) takes the row from
+        // the automatic runner BEFORE the PUT, as a compare-and-set on the
+        // status and reply slot the claim read: a runner that claimed it
+        // mid-draft can no longer store over the row while Google's PUT is
+        // in flight, so a timed-out attempt's record still finds the row it
+        // read. A row that changed since the checks refuses here, before
+        // anything reaches Google.
+        const fence = db('google_reviews').where({ id: reviewId });
+        if (prePutState.status == null) fence.whereNull('auto_reply_status'); else fence.where('auto_reply_status', prePutState.status);
+        if (prePutState.slot == null) fence.whereNull('review_reply'); else fence.where('review_reply', prePutState.slot);
+        const fenced = await fence.update({ auto_reply_claimed_until: null });
+        if (!(Array.isArray(fenced) ? fenced.length : fenced)) {
+          throw new ReviewReplyError(CODES.STALE, 'This review changed while the reply was being checked — reload it and try again.', { status: 409 });
+        }
+      }
       try {
         await withDeadline((signal) => gbp.replyToReview(resourceName, replyText, review.location_id, { signal }), 'GBP replyToReview');
       } catch (e) {
