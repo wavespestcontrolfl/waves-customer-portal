@@ -391,13 +391,16 @@ function RouteFallback({ label = 'Loading...' }) {
 function MissingPageCode() {
   const [blocker, setBlocker] = useState(null);
   const newVersion = missingCodeIsNewVersion(useNewerBuild(), useBrowserOffline());
+  // The path of the route whose code is missing, as the router rendered it.
+  // Back can move the address on before this effect starts.
+  const { pathname } = useLocation();
   useEffect(() => {
     let current = true;
-    reloadForMissingCode({ current: () => current }).then((reason) => {
+    reloadForMissingCode({ pathname, current: () => current }).then((reason) => {
       if (current && reason) setBlocker(reason);
     });
     return () => { current = false; };
-  }, []);
+  }, [pathname]);
   if (!blocker) return <RouteFallback label={newVersion ? 'Loading the new version...' : 'Loading...'} />;
   return <ChunkLoadFallback newVersion={newVersion} />;
 }

@@ -35,7 +35,7 @@
 // pages. The staff rules apply while either is a staff page (staffTab), and
 // a page that never reloads by itself bars the reload whether it is in view
 // or at the address. A page whose code is missing reloads only while the
-// address still names it: after Back, its reload would open the next page.
+// address names its route: after Back, its reload would open the next page.
 //
 // A part opens in place, so the page around it can hold unsaved work in
 // component state that no hold names. So a staff tab used on the page in
@@ -57,7 +57,7 @@
 // reopened (chunkReloadAttempted): a route can load in parts, and the part
 // that loads clears the one-shot flag before the part still missing fails.
 
-import { isAdminPath } from './adminBookmarkMeta';
+import { isAdminPath, routerPath } from './adminBookmarkMeta';
 import {
   blockersBesideWork, isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
 } from './portalReload';
@@ -302,23 +302,28 @@ export function missingCodeIsNewVersion(newer, offline) {
 // A staff page whose code is missing (App.jsx): waits for open work, as a
 // page move does, then reloads once, as for a stale chunk, when nothing holds
 // the tab. It waits only when a reload can follow; otherwise its screen comes
-// at once. It reloads only the page at the address it started at. Back moves
-// the address on at once, but the routes keep this page in view until the
-// next page's code loads: a reload then would open the next page and spend
-// the one reload on it. Resolves why it did not reload: 'reloaded' first,
-// whatever holds the tab (after the one reload a missing page is an outage,
-// so its screen offers the connection retry); then what holds the tab; then
-// the other reasons of selfReloadRuledOut; or 'moved' when the page closed
-// meanwhile or the address names another page. Its screen then shows until
-// the next page comes into view.
+// at once. `pathname`: the path of the route whose code is missing, as the
+// router rendered it (App.jsx). It reloads only while the address names that
+// route, as the routes match a path, before and after the wait. Back moves
+// the address on at once, even before this page's effect starts, but the
+// routes keep this page in view until the next page's code loads: a reload
+// then would open the next page and spend the one reload on it. With no
+// `pathname`, it never reloads. Resolves why it did not reload: 'moved' when
+// the address names another page, or the page closed during the wait; then
+// 'reloaded', whatever holds the tab (after the one reload a missing page is
+// an outage, so its screen offers the connection retry); then what holds the
+// tab; then the other reasons of selfReloadRuledOut. The screen for 'moved'
+// shows until the next page comes into view.
 export async function reloadForMissingCode({
+  pathname,
   current = () => true,
   reload = () => window.location.reload(),
   now,
 } = {}) {
-  const address = window.location.pathname;
+  const atPage = () => routerPath(window.location.pathname) === routerPath(pathname);
+  if (!atPage()) return 'moved';
   if (!selfReloadRuledOut()) await waitForWork({ now });
-  if (!current() || window.location.pathname !== address) return 'moved';
+  if (!current() || !atPage()) return 'moved';
   // From here to the reload, all in one turn: no work can start and no hold
   // can register between the last look and the reload. The wait can also
   // outlast a use of the page or another reload.

@@ -61,13 +61,16 @@ function swallowedImport() {
   return Promise.resolve(undefined);
 }
 
+// A page as App.jsx renders it: inside the router, at the address.
 function renderInBoundary(Page) {
   return render(
-    <PageErrorBoundary>
-      <Suspense fallback={<div>Suspended</div>}>
-        <Page />
-      </Suspense>
-    </PageErrorBoundary>,
+    <MemoryRouter initialEntries={[window.location.pathname]}>
+      <PageErrorBoundary>
+        <Suspense fallback={<div>Suspended</div>}>
+          <Page />
+        </Suspense>
+      </PageErrorBoundary>
+    </MemoryRouter>,
   );
 }
 
@@ -857,8 +860,62 @@ describe('on a staff page', () => {
   });
 
   test('a page that closed during the wait does not reload', async () => {
-    await expect(reloadForMissingCode({ current: () => false, reload })).resolves.toBe('moved');
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', current: () => false, reload })).resolves.toBe('moved');
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  // Back can move the address on even before the page's effect starts, while
+  // the routes still show the page whose code is missing.
+  test('Back before a page whose code is missing starts: the routes show it, but the address names the next page, so it does not reload', async () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
+    const Blog = lazyWithRetry(missingChunk);
+    render(
+      <MemoryRouter initialEntries={['/admin/blog']}>
+        <PageErrorBoundary>
+          <Suspense fallback={<div>Suspended</div>}>
+            <Routes>
+              <Route path="/admin/blog" element={<Blog />} />
+            </Routes>
+          </Suspense>
+        </PageErrorBoundary>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('Check your connection and try again.')).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  });
+
+  // A link's path stays as written in the router, while the browser encodes
+  // the address. Both name the same page, as the routes match a path.
+  test('an address the browser encoded names the same page as its route, so a page whose code is missing still reloads once', async () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog/caf%C3%A9', reload });
+    const Post = lazyWithRetry(missingChunk);
+    render(
+      <MemoryRouter initialEntries={['/admin/blog/café']}>
+        <PageErrorBoundary>
+          <Suspense fallback={<div>Suspended</div>}>
+            <Routes>
+              <Route path="/admin/blog/:slug" element={<Post />} />
+            </Routes>
+          </Suspense>
+        </PageErrorBoundary>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
+  });
+
+  test('once the address names another page, the page whose code is missing does not wait for open work', async () => {
+    const target = { fetch: () => new Promise(() => {}) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      target.fetch('/api/admin/dashboard');
+      const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 500); });
+      await expect(Promise.race([reloadForMissingCode({ pathname: '/admin/blog', reload }), waited])).resolves.toBe('moved');
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      uninstall();
+    }
   });
 
   // Back moves the address on at once, but the routes keep the page in view
@@ -917,7 +974,7 @@ describe('on a staff page', () => {
       let t = 0;
       await expect(reloadForNewBuild({ reload, now: () => (t += 20000) })).resolves.toBe('request');
       const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 500); });
-      await expect(Promise.race([reloadForMissingCode({ reload }), waited])).resolves.toBe('request');
+      await expect(Promise.race([reloadForMissingCode({ pathname: '/admin/dashboard', reload }), waited])).resolves.toBe('request');
       expect(reload).not.toHaveBeenCalled();
       // The stalled state ends once no work is open, so later tests start
       // clean.
@@ -937,7 +994,7 @@ describe('on a staff page', () => {
     try {
       const read = target.fetch('/api/admin/dashboard');
       const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 500); });
-      await expect(Promise.race([reloadForMissingCode({ reload }), waited])).resolves.toBe('request');
+      await expect(Promise.race([reloadForMissingCode({ pathname: '/admin/dashboard', reload }), waited])).resolves.toBe('request');
       expect(reload).not.toHaveBeenCalled();
       pending[0]({ headers: new Headers() });
       await read;
@@ -954,7 +1011,7 @@ describe('on a staff page', () => {
     try {
       const read = target.fetch('/api/admin/dashboard');
       const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 500); });
-      await expect(Promise.race([reloadForMissingCode({ reload }), waited])).resolves.toBe('request');
+      await expect(Promise.race([reloadForMissingCode({ pathname: '/admin/dashboard', reload }), waited])).resolves.toBe('request');
       expect(reload).not.toHaveBeenCalled();
       pending[0]({ headers: new Headers() });
       await read;
@@ -967,14 +1024,14 @@ describe('on a staff page', () => {
     // Queued first, so it runs after the wait's last look at open work and
     // before the page goes on.
     queueMicrotask(() => { holding = true; });
-    await expect(reloadForMissingCode({ reload })).resolves.toBe('card-payment');
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('card-payment');
     expect(reload).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
   });
 
   test('without session storage there is no one-shot guard, so the tab never reloads by itself; no reload ran, so its screen can say new version', async () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage blocked'); });
-    await expect(reloadForMissingCode({ reload })).resolves.toBe('storage');
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('storage');
     nameNewerBuild();
     renderInBoundary(lazyWithRetry(missingChunk));
     expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
@@ -988,7 +1045,7 @@ describe('on a staff page', () => {
     try {
       target.fetch('/api/admin/dashboard');
       const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 500); });
-      await expect(Promise.race([reloadForMissingCode({ reload }), waited])).resolves.toBe('request');
+      await expect(Promise.race([reloadForMissingCode({ pathname: '/admin/dashboard', reload }), waited])).resolves.toBe('request');
       expect(reload).not.toHaveBeenCalled();
     } finally {
       uninstall();
