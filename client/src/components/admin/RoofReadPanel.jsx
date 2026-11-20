@@ -247,7 +247,9 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   const [showOnEstimate, setShowOnEstimate] = useState(true);
   // True only after staff click the checkbox here: an untouched checkbox follows the server, so a save from this panel
   // never reverses a hide choice another tab made.
-  const [hideEdited, setHideEdited] = useState(false);
+  const [hideEdited, setHideEditedState] = useState(false);
+  const hideEditedRef = useRef(false);
+  const setHideEdited = (v) => { hideEditedRef.current = v; setHideEditedState(v); };
   const [pointsEdited, setPointsEdited] = useState(false);
   const [pointsState, setPointsState] = useState({ busy: false, msg: "", err: "" });
   // The county photo: points are placed on it, so nothing can be added until it has loaded.
@@ -352,7 +354,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
       }
       setResult((prev) => ({ ...prev, read: body.read }));
       // An untouched checkbox follows the server (another tab may have hidden the points).
-      if (!hideEdited) setShowOnEstimate(!body.read.hide_on_estimate);
+      if (!hideEditedRef.current) setShowOnEstimate(!body.read.hide_on_estimate);
       // What the server holds now, then clear the edited markers.
       setCount(body.read.tech_final_count == null ? "" : String(body.read.tech_final_count));
       setTechFlags(techFlagsFrom(body.read));
@@ -366,7 +368,9 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
 
   const read = phase === "ok" ? result?.read : null;
   const imageLoaded = imageState === "loaded";
-  const editable = !!estimateId && !pointsState.busy && imageLoaded;
+  // A read whose AI answer did not work (tier unknown) is never reopened and the server refuses points on it.
+  const readUsable = read?.tier !== "unknown";
+  const editable = !!estimateId && !pointsState.busy && imageLoaded && readUsable;
   const atMax = points.length >= MAX_POINTS;
   // A suggestion stays hidden while any point, saved or not, names it as its source, even after the point moved or changed type.
   const suggestions = read ? suggestionsFrom(read).filter((sg) => !points.some((p) => p.source === sg.key)) : [];
@@ -505,6 +509,11 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
           )}
           <div className="space-y-2" data-testid="roof-read-points">
             <p className="text-14 text-zinc-400 font-medium">Points the tech confirmed</p>
+            {!readUsable && (
+              <p className="text-14 text-zinc-600" role="alert" data-testid="roof-read-points-unusable">
+                This roof read did not work. Read the roof again before adding points.
+              </p>
+            )}
             <p className="text-14 text-zinc-600">
               Tap a faded letter to confirm it, or tap the photo to add a point. Drag a point to move it, or select it and press the arrow keys.
               The customer estimate shows only the points confirmed here.

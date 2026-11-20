@@ -120,6 +120,7 @@ router.patch('/:id/tech-count', async (req, res, next) => {
     return res.json({ read });
   } catch (err) {
     if (err.code === 'crop_mismatch') return res.status(400).json({ error: 'These points were not drawn on this roof photo' });
+    if (err.code === 'read_not_usable') return res.status(400).json({ error: 'This roof read did not work. Read the roof again before adding points.' });
     logger.error(`[admin-roof-entry-read] tech count failed: ${err.message}`);
     return next(err);
   }

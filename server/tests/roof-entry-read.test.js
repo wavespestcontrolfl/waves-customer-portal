@@ -1455,6 +1455,14 @@ describe('saveTechCount pins', () => {
     expect(mockRows[0].tech_final_count).toBeNull();
   });
 
+  it.each(['failed', 'pending'])('refuses points on a %s read with read_not_usable and writes nothing', async (status) => {
+    mockRows[0].status = status;
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, count: 3 })).rejects.toMatchObject({ code: 'read_not_usable' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].crop_lat).toBeNull();
+    expect(mockRows[0].tech_final_count).toBeNull();
+  });
+
   it('clears the points with null, and keeps the stored crop centre', async () => {
     await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
     const read = await svc.saveTechCount(READ_A, { pins: null });
@@ -1623,6 +1631,14 @@ describe('PATCH /:id/tech-count with points', () => {
     expect(res.json).toEqual({ error: 'These points were not drawn on this roof photo' });
     expect(mockRows[0].tech_pins).toBeNull();
     expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
+  it('answers 400 with the read-again message for points on a failed read, and writes nothing', async () => {
+    mockRows[0].status = 'failed';
+    const res = await patch({ pins: PINS, crop: CROP });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'This roof read did not work. Read the roof again before adding points.' });
+    expect(mockRows[0].tech_pins).toBeNull();
   });
 
   it('answers 404 for an unknown read, and keeps a technician out', async () => {

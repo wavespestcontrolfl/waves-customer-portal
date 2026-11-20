@@ -717,8 +717,13 @@ async function saveTechCount(id, { count, flags, pins, crop, hideOnEstimate } = 
   const where = { id };
   if (pins === null) patch.tech_pins = null;
   else if (pins !== undefined) {
-    const row = await db(TABLE).where({ id }).first('id', 'image_source', 'lookup_key');
+    const row = await db(TABLE).where({ id }).first('id', 'image_source', 'lookup_key', 'status');
     if (!row) return null;
+    // Only a finished read can carry points: the customer estimate shows points from 'done' rows only, and a failed read
+    // is never reopened (the next tap reads again), so points saved on it would be lost.
+    if (row.status !== STATUS_DONE) {
+      throw Object.assign(new Error('This roof read did not finish'), { code: 'read_not_usable' });
+    }
     if (!isCentre(crop) || lookupKey({ source: row.image_source, lat: crop.lat, lng: crop.lng }) !== row.lookup_key) {
       throw Object.assign(new Error('These points were not drawn on this roof photo'), { code: 'crop_mismatch' });
     }

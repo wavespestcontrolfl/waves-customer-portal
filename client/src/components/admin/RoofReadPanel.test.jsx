@@ -657,6 +657,26 @@ describe("saving only what changed", () => {
     expect(patches()).toHaveLength(0);
   });
 
+  it("locks the points editor on a read whose AI answer did not work, and says to read again", async () => {
+    await opened(READ({ tier: "unknown", flags: {}, tech_pins: null }));
+    expect(screen.getByTestId("roof-read-points-unusable")).toHaveTextContent("This roof read did not work. Read the roof again before adding points.");
+    expect(screen.getByTestId("roof-read-add-point")).toBeDisabled();
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    expect(screen.queryAllByTestId("roof-read-point")).toHaveLength(0);
+  });
+
+  it("applies a checkbox click made while a count save is in flight (the late answer does not undo it)", async () => {
+    await opened();
+    let finish;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "2" } });
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    fireEvent.click(screen.getByRole("checkbox", SHOW));
+    finish(await reply({ read: READ({ tech_final_count: 2, hide_on_estimate: false, tech_pins: SAVED }) }));
+    await screen.findByText("Saved.");
+    expect(screen.getByRole("checkbox", SHOW)).not.toBeChecked();
+  });
+
   it("lets an untouched checkbox follow a hide choice another tab saved, and never reverses it", async () => {
     await opened();
     expect(screen.getByRole("checkbox", SHOW)).toBeChecked();
