@@ -25,6 +25,7 @@ const {
 } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
+const { carriesReportNote } = require('../services/service-report/technician-report-copy');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { applyReportIdentitySnapshotToLegacyPdf, readReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
@@ -102,6 +103,14 @@ function getVisitDuration(service) {
     if (diffMs > 0) return Math.round(diffMs / 60000);
   }
   return null;
+}
+
+// A record with no technician's own note prints the merged structured_notes
+// list, then the AI report's (each stored as a list or as one value).
+function mergedReportList(structuredNotes, aiReport, key) {
+  return [structuredNotes?.[key], aiReport?.[key]]
+    .filter(Boolean)
+    .flatMap((value) => (Array.isArray(value) ? value : [value]));
 }
 
 function generateServiceReportPDF(customer, service, products, res, extra = {}) {
@@ -403,15 +412,17 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // not customer-facing (see the same classification in routes/services.js),
   // and dumping every key/value put raw internal flags on a customer PDF.
   // ══════════════════════════════════════════════════════
-  const observations = [];
-  if (structuredNotes?.observations) {
-    const obs = Array.isArray(structuredNotes.observations) ? structuredNotes.observations : [structuredNotes.observations];
-    observations.push(...obs);
-  }
-  if (aiReport?.observations) {
-    const obs = Array.isArray(aiReport.observations) ? aiReport.observations : [aiReport.observations];
-    observations.push(...obs);
-  }
+  // A record that carries the technician's own note (carriesReportNote, on
+  // the stored value, so stored notes that cannot be read count too) prints
+  // the web report's lists (report-data.js buildProtocolPayload): only what
+  // the completion form recorded, each value screened as it renders. The
+  // merged structured_notes.observations / recommendations fold in raw
+  // [Found] / [Next] lines of technician_notes, and no reviewed path prints
+  // ai_report (AGENTS.md, report egress; docs/public-route-contracts.md).
+  const formLists = carriesReportNote(service.structured_notes)
+    ? require('../services/service-report/report-data').buildProtocolPayload(service)
+    : null;
+  const observations = formLists ? [...formLists.observations] : mergedReportList(structuredNotes, aiReport, 'observations');
 
   if (observations.length) {
     if (y > 620) y = addContinuationPage();
@@ -428,15 +439,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WHAT WE RECOMMEND — property-specific tips
   // ══════════════════════════════════════════════════════
-  const recommendations = [];
-  if (structuredNotes?.recommendations) {
-    const recs = Array.isArray(structuredNotes.recommendations) ? structuredNotes.recommendations : [structuredNotes.recommendations];
-    recommendations.push(...recs);
-  }
-  if (aiReport?.recommendations) {
-    const recs = Array.isArray(aiReport.recommendations) ? aiReport.recommendations : [aiReport.recommendations];
-    recommendations.push(...recs);
-  }
+  const recommendations = formLists ? [...formLists.recommendations] : mergedReportList(structuredNotes, aiReport, 'recommendations');
   if (service.irrigation_recommendation) {
     try {
       const irr = typeof service.irrigation_recommendation === 'string' ? JSON.parse(service.irrigation_recommendation) : service.irrigation_recommendation;

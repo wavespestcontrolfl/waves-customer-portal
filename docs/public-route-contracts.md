@@ -3100,7 +3100,12 @@ cannot be read as stored, never an object it rebuilt around its frozen facts,
 so it reads them as the live report does. The PDF
 key hashes the summary as it prints, and on such a record it always carries
 `-rn` (just before any `-fson`/`-fsoff` part), summary or not. The visit notes on the
-other surfaces (`customerSafeVisitNotes`) run the same rule. The payload adds
+other surfaces (`customerSafeVisitNotes`) run the same rule. The Documents API
+PDF (`routes/documents.js` `generateServiceReportPDF`, at the signed-in
+`/api/documents/service-report/:serviceRecordId` and the shared
+`/api/documents/shared/:token`) prints such a record's observation and
+recommendation lists from `buildProtocolPayload` (the form's screened values
+above), never the merged `structured_notes` lists or `ai_report`. The payload adds
 one key and no query parameter: `summaryIsOwnNote: true`, present only when
 `summary` is the note (on such a record a `technician_report` summary is always
 the note). The page's Visit Summary and the PDF print that summary as stored
@@ -6607,7 +6612,9 @@ server-rendered page reads the same pack, so the two paths cannot drift.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,
-`no-store`).
+`no-store`; a visit that carries the technician's own note prints the
+web report's screened form lists, never the merged note lists or
+`ai_report`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
 terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
