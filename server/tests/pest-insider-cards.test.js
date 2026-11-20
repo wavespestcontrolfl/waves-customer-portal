@@ -185,7 +185,7 @@ describe('Waves colors only', () => {
   });
 
   test('the drawing scripts write no color of their own: every color comes from WAVES_COLORS', () => {
-    for (const file of ['ops/agents/pest-insider-cards.js', 'ops/agents/pest-insider-heroes.js', 'ops/agents/pest-insider-motion.js']) {
+    for (const file of ['ops/agents/pest-insider-cards.js', 'ops/agents/pest-insider-heroes.js', 'ops/agents/pest-insider-motion.js', 'ops/agents/pest-insider-parts.js']) {
       const src = fs.readFileSync(path.join(__dirname, '../..', file), 'utf8');
       expect({ file, colors: src.match(/#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(\s*[\d.]/gi) }).toEqual({ file, colors: null });
     }
