@@ -27,10 +27,13 @@ const home = (over) => ({ permit_no: `H-${Math.random().toString(36).slice(2, 10
 
 describeDb('Builders list (PostgreSQL)', () => {
   beforeAll(async () => {
+    // Only this worktree's own QA database, or CI's: another worktree's database would have its permit rows deleted
+    // (inside a transaction that is rolled back) and its writes blocked until the rollback.
     const url = new URL(process.env.DATABASE_URL);
-    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    const ownedQa = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
-    if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
+    if (!ownedQa && !ciTest) throw new Error('Use this worktree\'s private QA database or the isolated CI database');
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
     mockPg = database;
   });
