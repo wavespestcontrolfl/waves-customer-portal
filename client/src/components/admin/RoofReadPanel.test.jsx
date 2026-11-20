@@ -5,7 +5,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import RoofReadPanel, { ROOF_TYPES, roofSpotFrom, roofSpotSnapped } from "./RoofReadPanel";
+import RoofReadPanel, { ROOF_TYPES, roofSpotFrom, roofAddressDoubtful } from "./RoofReadPanel";
 
 const SPOT = { lat: 27.46, lng: -82.57, county: "Manatee" };
 const EST = "11111111-1111-4111-8111-111111111111";
@@ -124,7 +124,7 @@ describe("an ok read", () => {
   });
 
   it("saves the tech's count and flags with the PATCH and shows the saved values beside the AI read", async () => {
-    render(<RoofReadPanel spot={SPOT} />);
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
     tap();
     await screen.findByTestId("roof-read-result");
     fetchMock.mockImplementationOnce((url, init) => reply({ read: READ({ tech_final_count: 4, tech_final_flags: JSON.parse(init.body).flags }) }));
@@ -147,7 +147,7 @@ describe("an ok read", () => {
       status: "ok", cached: true, image_url: IMAGE,
       read: READ({ tech_final_count: 1, tech_final_flags: { gable_vents: "unsure", chimney_or_flue: "no", plumbing_vent_stacks: "yes" } }),
     }));
-    render(<RoofReadPanel spot={SPOT} />);
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
     tap();
     await screen.findByTestId("roof-read-result");
     expect(screen.getByTestId("roof-read-saved-gable_vents")).toHaveTextContent("Unsure");
@@ -161,34 +161,70 @@ describe("an ok read", () => {
     expect(JSON.parse(patch[1].body)).toEqual({ count: 6 });
   });
 
-  it("sends a touched flag over the saved ones, so an untouched unsure is sent back as it was", async () => {
+  it("sends only the touched flag, and no count when the count was not edited", async () => {
     fetchMock.mockImplementationOnce(() => reply({
       status: "ok", cached: true, image_url: IMAGE,
-      read: READ({ tech_final_flags: { gable_vents: "unsure" } }),
+      read: READ({ tech_final_count: 1, tech_final_flags: { gable_vents: "unsure" } }),
     }));
-    render(<RoofReadPanel spot={SPOT} />);
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
     tap();
     await screen.findByTestId("roof-read-result");
-    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_final_flags: { gable_vents: "unsure", chimney_or_flue: "yes" } }) }));
+    expect(screen.getByLabelText("Entry points the tech counted")).toHaveValue(1);
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_final_count: 1, tech_final_flags: { gable_vents: "unsure", chimney_or_flue: "yes" } }) }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Tech saw: Chimney or flue" }));
     fireEvent.click(screen.getByTestId("roof-read-save"));
     await screen.findByText("Saved.");
     const patch = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
-    expect(JSON.parse(patch[1].body)).toEqual({ flags: { gable_vents: "unsure", chimney_or_flue: "yes" } });
+    // The untouched saved unsure and the unedited count stay out of the body: the server merges the rest.
+    expect(JSON.parse(patch[1].body)).toEqual({ flags: { chimney_or_flue: "yes" } });
+    expect(screen.getByTestId("roof-read-saved-gable_vents")).toHaveTextContent("Unsure");
     expect(screen.getByTestId("roof-read-saved-chimney_or_flue")).toHaveTextContent("Yes");
   });
 
+  it("cannot save until the estimate has an id, and says so", async () => {
+    const { rerender } = render(<RoofReadPanel spot={SPOT} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    expect(screen.getByTestId("roof-read-save")).toBeDisabled();
+    expect(screen.getByTestId("roof-read-save-first")).toHaveTextContent("Save the estimate first to record the tech's count.");
+    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "2" } });
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+    rerender(<RoofReadPanel spot={SPOT} estimateId={EST} />);
+    expect(screen.getByTestId("roof-read-save")).not.toBeDisabled();
+    expect(screen.queryByTestId("roof-read-save-first")).toBeNull();
+  });
+
+  it("locks the count, the checkboxes and Save while a save is pending", async () => {
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    let finish;
+    fetchMock.mockImplementationOnce(() => new Promise((r) => { finish = () => r({ ok: true, status: 200, json: async () => ({ read: READ({ tech_final_count: 2 }) }) }); }));
+    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "2" } });
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    await waitFor(() => expect(screen.getByTestId("roof-read-save")).toBeDisabled());
+    expect(screen.getByLabelText("Entry points the tech counted")).toBeDisabled();
+    for (const { label } of ROOF_TYPES) expect(screen.getByRole("checkbox", { name: `Tech saw: ${label}` })).toBeDisabled();
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
+    finish();
+    await screen.findByText("Saved.");
+    expect(screen.getByLabelText("Entry points the tech counted")).not.toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Tech saw: Gable vents" })).not.toBeDisabled();
+  });
+
   it("sends nothing when there is no count and no touched entry point", async () => {
-    render(<RoofReadPanel spot={SPOT} />);
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
     tap();
     await screen.findByTestId("roof-read-result");
     fireEvent.click(screen.getByTestId("roof-read-save"));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Enter a count or change an entry point/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Change the count or an entry point first/);
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
   });
 
   it("refuses a count that is not a whole number from 0 to 500 without sending it", async () => {
-    render(<RoofReadPanel spot={SPOT} />);
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
     tap();
     await screen.findByTestId("roof-read-result");
     for (const bad of ["-1", "2.5", "501"]) {
@@ -216,7 +252,7 @@ describe("an ok read", () => {
 
 describe("a snapped neighbour", () => {
   it("offers no read and says to fix the address", async () => {
-    render(<RoofReadPanel spot={null} snapped />);
+    render(<RoofReadPanel spot={null} addressDoubt />);
     expect(screen.getByTestId("roof-read-snapped")).toHaveTextContent("The map point may be a neighbour's house. Fix the address first.");
     expect(screen.queryByTestId("roof-read-button")).toBeNull();
     expect(screen.queryByTestId("roof-read-no-spot")).toBeNull();
@@ -225,15 +261,20 @@ describe("a snapped neighbour", () => {
 
   it("is read from the lookup's snappedRecord marker, on the audit or on the record", () => {
     const good = { propertyRecord: { latitude: 27.5, longitude: -82.5, county: "Manatee" } };
-    expect(roofSpotSnapped(good)).toBe(false);
+    expect(roofAddressDoubtful(good)).toBe(false);
     for (const data of [
       { ...good, addressAudit: { snappedRecord: { typed: "10", record: "12" } } },
       { propertyRecord: { ...good.propertyRecord, _addressAudit: { snappedRecord: { typed: "10", record: "12" } } } },
     ]) {
-      expect(roofSpotSnapped(data)).toBe(true);
+      expect(roofAddressDoubtful(data)).toBe(true);
       expect(roofSpotFrom(data)).toBeNull();
     }
     expect(roofSpotFrom({ ...good, addressAudit: { hasExactMatch: true } })).not.toBeNull();
+    // An address verify flag on the lookup's profile blocks it too; other flags do not.
+    const flagged = { ...good, enriched: { fieldVerifyFlags: [{ field: "homeSqFt", reason: "x" }, { field: "address", reason: "Verify the address" }] } };
+    expect(roofAddressDoubtful(flagged)).toBe(true);
+    expect(roofSpotFrom(flagged)).toBeNull();
+    expect(roofAddressDoubtful({ ...good, enriched: { fieldVerifyFlags: [{ field: "homeSqFt" }] } })).toBe(false);
   });
 });
 

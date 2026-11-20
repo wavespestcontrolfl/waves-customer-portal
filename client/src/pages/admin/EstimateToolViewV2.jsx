@@ -66,7 +66,7 @@ import {
 import { formatCalendarDate, moveEstimateForm } from "../../lib/moveEstimateForm";
 import { MISTING_FORM_DEFAULTS, NO_MISTING, defaultMistingLabel, mistingOption, readMistingAvailability } from "../../lib/mosquitoMisting";
 import MistingLayoutDesigner from "../../components/admin/MistingLayoutDesigner";
-import RoofReadPanel, { roofSpotFrom, roofSpotSnapped } from "../../components/admin/RoofReadPanel";
+import RoofReadPanel, { roofSpotFrom, roofAddressDoubtful } from "../../components/admin/RoofReadPanel";
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
@@ -4170,7 +4170,7 @@ export default function EstimateToolViewV2({
         poolCageTwoSizes: data.meta?.poolCageTwoSizes === true,
         // The home's map point and county, for the staff roof read.
         roofSpot: roofSpotFrom(data),
-        roofSnapped: roofSpotSnapped(data),
+        roofAddressDoubt: roofAddressDoubtful(data),
       });
       setCageTwoSizes(data.meta?.poolCageTwoSizes === true);
       setVerifySaveState({});
@@ -8571,7 +8571,7 @@ export default function EstimateToolViewV2({
                       // belongs to the pre-draft context, so staff tap again and get this estimate's own copy.
                       key={`${roofReadEpoch}|${form.address}|${form.customerId || ""}|${form.leadId || ""}|${form.propertyId || ""}|${savedId || editMode?.id || ""}|${lookupMeta?.roofSpot?.lat ?? ""},${lookupMeta?.roofSpot?.lng ?? ""}`}
                       spot={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.roofSpot || null : null}
-                      snapped={lookupMeta?.address === String(form.address || "").trim() && lookupMeta?.roofSnapped === true}
+                      addressDoubt={lookupMeta?.address === String(form.address || "").trim() && lookupMeta?.roofAddressDoubt === true}
                       estimateId={savedId || editMode?.id || null}
                       customerId={form.customerId || null}
                     />

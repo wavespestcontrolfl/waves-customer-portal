@@ -30,18 +30,20 @@ const reply = (body, status = 200) => ({
 let fetchMock;
 let waveguardRow;
 let snapped;
+let verifyFlag;
 beforeEach(() => {
   localStorage.setItem("waves_admin_token", "qa-token");
   vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.spyOn(window, "alert").mockImplementation(() => {});
   waveguardRow = { data: {}, roofEntryRead: true };
   snapped = false;
+  verifyFlag = false;
   fetchMock = vi.fn((url, init) => {
     const path = String(url);
     if (path.includes("/admin/pricing-config/rodent_waveguard")) return Promise.resolve(reply(waveguardRow));
     if (path.endsWith("/estimator/property-lookup")) {
       return Promise.resolve(reply({
-        enriched: { homeSqFt: 2000, lotSqFt: 9000, stories: 1 },
+        enriched: { homeSqFt: 2000, lotSqFt: 9000, stories: 1, ...(verifyFlag ? { fieldVerifyFlags: [{ field: "address", reason: "Verify the address", priority: "HIGH" }] } : {}) },
         propertyRecord: { latitude: 27.3, longitude: -82.4, _parcel: { county: "Sarasota" } },
         ...(snapped ? { addressAudit: { snappedRecord: { typed: "400", record: "402 Example Court" } } } : {}),
         errors: [],
@@ -120,6 +122,9 @@ describe("resets", () => {
     fireEvent.click(await screen.findByTestId("roof-read-button"));
     await screen.findByTestId("roof-read-result");
     expect(JSON.parse(roofPosts()[0][1].body).estimate_id).toBeUndefined();
+    // The read may run pre-draft, but the tech's count needs a saved estimate.
+    expect(screen.getByTestId("roof-read-save")).toBeDisabled();
+    expect(screen.getByTestId("roof-read-save-first")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Generate Estimate", exact: true }));
     fireEvent.click(await screen.findByRole("button", { name: "Save draft", exact: true }));
     const next = await screen.findByRole("button", { name: /Next estimate \(keep services\)/ });
@@ -129,9 +134,20 @@ describe("resets", () => {
     fireEvent.click(await screen.findByTestId("roof-read-button"));
     await screen.findByTestId("roof-read-result");
     expect(JSON.parse(roofPosts()[1][1].body).estimate_id).toEqual(expect.any(String));
+    expect(screen.getByTestId("roof-read-save")).not.toBeDisabled();
     fireEvent.click(next);
     await waitFor(() => expect(screen.queryByTestId("roof-read-result")).toBeNull());
     expect(roofPosts()).toHaveLength(2);
+  });
+
+  it("offers no read when the lookup raises an address verify flag", async () => {
+    verifyFlag = true;
+    renderNew();
+    tickExclusion();
+    await lookUp();
+    expect(await screen.findByTestId("roof-read-snapped")).toBeInTheDocument();
+    expect(screen.queryByTestId("roof-read-button")).toBeNull();
+    expect(roofPosts()).toHaveLength(0);
   });
 
   it("offers no read for a snapped neighbour's address", async () => {

@@ -28,17 +28,19 @@ const MAX_TECH_COUNT = 500;
 // A missing, blank or null coordinate is NaN, never 0.
 const coordinate = (v) => (typeof v === "number" || (typeof v === "string" && v.trim()) ? Number(v) : NaN);
 
-// The lookup's own marker that the geocoder snapped the typed house number to another premise (set on
-// addressAudit, and on the record's _addressAudit): the map point is then a neighbour's house.
-export function roofSpotSnapped(data) {
+// The lookup doubts the address: the geocoder snapped the typed house number to another premise (marker on
+// addressAudit, and on the record's _addressAudit), or the lookup raised an address verify flag
+// (enriched.fieldVerifyFlags, field "address"). The map point may then be a neighbour's house.
+export function roofAddressDoubtful(data) {
   const record = data?.propertyRecord || data?.rentcast || null;
-  return !!(data?.addressAudit?.snappedRecord || record?._addressAudit?.snappedRecord);
+  const flagged = Array.isArray(data?.enriched?.fieldVerifyFlags) && data.enriched.fieldVerifyFlags.some((f) => f?.field === "address");
+  return !!(data?.addressAudit?.snappedRecord || record?._addressAudit?.snappedRecord || flagged);
 }
 
-// Where the lookup put the home: coordinates and county, or null when either is missing or the point is a snapped neighbour.
+// Where the lookup put the home: coordinates and county, or null when either is missing or the lookup doubts the address.
 export function roofSpotFrom(data) {
   const record = data?.propertyRecord || data?.rentcast || null;
-  if (roofSpotSnapped(data)) return null;
+  if (roofAddressDoubtful(data)) return null;
   const lat = coordinate(data?.satellite?.lat ?? record?.latitude);
   const lng = coordinate(data?.satellite?.lng ?? record?.longitude);
   const county = record?._parcel?.county || record?.county || "";
@@ -95,14 +97,15 @@ function RoofImage({ url, read }) {
   );
 }
 
-export default function RoofReadPanel({ spot, snapped = false, estimateId = null, customerId = null }) {
+export default function RoofReadPanel({ spot, addressDoubt = false, estimateId = null, customerId = null }) {
   const [phase, setPhase] = useState("idle");
   const [problem, setProblem] = useState("");
   const [result, setResult] = useState(null);
   const [count, setCount] = useState("");
   const [techFlags, setTechFlags] = useState(() => techFlagsFrom(null));
-  // Entry types the tech ticked or cleared since the read was loaded or last saved. Only these are sent.
+  // What the tech changed since the read was loaded or last saved. Only edited fields are sent.
   const [touched, setTouched] = useState({});
+  const [countEdited, setCountEdited] = useState(false);
   const [saveState, setSaveState] = useState({ busy: false, msg: "", err: "" });
   const mounted = useRef(true);
   useEffect(() => {
@@ -111,7 +114,7 @@ export default function RoofReadPanel({ spot, snapped = false, estimateId = null
   }, []);
 
   async function readRoof() {
-    if (phase === "loading" || !spot || snapped) return;
+    if (phase === "loading" || !spot || addressDoubt) return;
     setPhase("loading");
     setProblem("");
     try {
@@ -144,6 +147,7 @@ export default function RoofReadPanel({ spot, snapped = false, estimateId = null
         setCount(body.read.tech_final_count == null ? "" : String(body.read.tech_final_count));
         setTechFlags(techFlagsFrom(body.read));
         setTouched({});
+        setCountEdited(false);
         setSaveState({ busy: false, msg: "", err: "" });
         setPhase("ok");
         return;
@@ -159,21 +163,20 @@ export default function RoofReadPanel({ spot, snapped = false, estimateId = null
 
   async function saveTech() {
     const read = result?.read;
-    if (!read || saveState.busy) return;
-    const trimmed = count.trim();
+    if (!read || saveState.busy || !estimateId) return;
+    const trimmed = countEdited ? count.trim() : "";
     if (trimmed !== "" && !(/^\d+$/.test(trimmed) && Number(trimmed) <= MAX_TECH_COUNT)) {
       setSaveState({ busy: false, msg: "", err: `Count must be a whole number from 0 to ${MAX_TECH_COUNT}.` });
       return;
     }
     const touchedKeys = ROOF_TYPES.map((t) => t.key).filter((key) => touched[key]);
     if (trimmed === "" && !touchedKeys.length) {
-      setSaveState({ busy: false, msg: "", err: "Enter a count or change an entry point first." });
+      setSaveState({ busy: false, msg: "", err: "Change the count or an entry point first." });
       return;
     }
-    // The server replaces the saved flags with what it is sent, so the ticked ones go over what is already saved:
-    // an untouched saved value (including unsure) is sent back as it was. A count-only save sends no flags at all.
+    // The server merges the flags into the saved ones and writes the count only when sent, so only edited fields go.
     const flags = touchedKeys.length
-      ? { ...(read.tech_final_flags || {}), ...Object.fromEntries(touchedKeys.map((key) => [key, techFlags[key] ? "yes" : "no"])) }
+      ? Object.fromEntries(touchedKeys.map((key) => [key, techFlags[key] ? "yes" : "no"]))
       : null;
     setSaveState({ busy: true, msg: "", err: "" });
     try {
@@ -193,6 +196,7 @@ export default function RoofReadPanel({ spot, snapped = false, estimateId = null
       setResult((prev) => ({ ...prev, read: body.read }));
       setTechFlags(techFlagsFrom(body.read));
       setTouched({});
+      setCountEdited(false);
       setSaveState({ busy: false, msg: "Saved.", err: "" });
     } catch {
       if (mounted.current) setSaveState({ busy: false, msg: "", err: "Could not reach the server. Try again." });
@@ -207,17 +211,17 @@ export default function RoofReadPanel({ spot, snapped = false, estimateId = null
         Staff only. Reads the county aerial photo for likely rodent entry points. Each new read is a paid model call, and a read of this roof
         from the last 90 days is reused at no cost. Nothing here reaches the customer.
       </p>
-      {snapped && (
+      {addressDoubt && (
         <p className="text-14 text-zinc-600" data-testid="roof-read-snapped">
           The map point may be a neighbour's house. Fix the address first.
         </p>
       )}
-      {!spot && !snapped && (
+      {!spot && !addressDoubt && (
         <p className="text-14 text-zinc-600" data-testid="roof-read-no-spot">
           Look up the address first. The read needs the home's map point and county.
         </p>
       )}
-      {spot && !snapped && phase !== "ok" && (
+      {spot && !addressDoubt && phase !== "ok" && (
         <div>
           <Button variant="secondary" size="sm" onClick={readRoof} loading={phase === "loading"} disabled={phase === "loading"} data-testid="roof-read-button">
             {phase === "idle" ? "Read the roof" : phase === "loading" ? "Reading" : "Try again"}
@@ -252,6 +256,7 @@ export default function RoofReadPanel({ spot, snapped = false, estimateId = null
                     id={`roof-read-tech-${key}`}
                     aria-label={`Tech saw: ${label}`}
                     checked={!!techFlags[key]}
+                    disabled={saveState.busy}
                     onChange={() => {
                       setTechFlags((f) => ({ ...f, [key]: !f[key] }));
                       setTouched((t) => ({ ...t, [key]: true }));
@@ -262,12 +267,15 @@ export default function RoofReadPanel({ spot, snapped = false, estimateId = null
             })}
           </div>
           <Field label="Entry points the tech counted" id="roof-read-tech-count" className="mb-2">
-            <Input type="number" inputMode="numeric" min="0" max={String(MAX_TECH_COUNT)} step="1" value={count} onChange={(e) => setCount(e.target.value)} />
+            <Input type="number" inputMode="numeric" min="0" max={String(MAX_TECH_COUNT)} step="1" value={count} disabled={saveState.busy} onChange={(e) => { setCount(e.target.value); setCountEdited(true); }} />
           </Field>
           <div className="flex items-center gap-3">
-            <Button variant="secondary" size="sm" onClick={saveTech} loading={saveState.busy} disabled={saveState.busy} data-testid="roof-read-save">
+            <Button variant="secondary" size="sm" onClick={saveTech} loading={saveState.busy} disabled={saveState.busy || !estimateId} data-testid="roof-read-save">
               Save the tech's count
             </Button>
+            {!estimateId && (
+              <span className="text-14 text-zinc-600" data-testid="roof-read-save-first">Save the estimate first to record the tech's count.</span>
+            )}
             {saveState.msg && <span className="text-14 text-zinc-600" role="status">{saveState.msg}</span>}
             {saveState.err && <span className="text-14 text-zinc-600" role="alert">{saveState.err}</span>}
           </div>

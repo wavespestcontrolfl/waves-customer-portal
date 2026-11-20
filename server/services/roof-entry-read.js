@@ -635,11 +635,15 @@ async function runRead(input) {
   return pending;
 }
 
-/** The technician's own final count and per-type flags, kept beside the AI read to compare them later. */
+/**
+ * The technician's own final count and per-type flags, kept beside the AI read to compare them later. Only what is sent
+ * changes: the count is written only when sent, and the flags are merged over the saved ones, never replaced.
+ */
 async function saveTechCount(id, { count, flags }) {
   const patch = {};
   if (count !== undefined) patch.tech_final_count = count;
-  if (flags !== undefined) patch.tech_final_flags = JSON.stringify(flags);
+  // Merged in SQL in one statement, so two saves of different types (or two tabs) keep both; a type sent again is replaced.
+  if (flags !== undefined) patch.tech_final_flags = db.raw("COALESCE(tech_final_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify(flags)]);
   const [row] = await db(TABLE).where({ id }).update(patch).returning('*');
   return row ? publicRead(row) : null;
 }
