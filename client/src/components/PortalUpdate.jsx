@@ -34,7 +34,7 @@ export function PortalUpdateGate({ fallback, children }) {
     // The stale-chunk reload follows the same rule (lib/staleChunkReload.js),
     // from this render on: the new page's code can fail before the move is
     // in view.
-    notePageMove(from, pathname);
+    notePageMove(from, pathname, origin);
     setGate({ pathname, origin, from, reloading: reloadDueAtMove(pathname, Date.now(), from) });
   }
   // A layout effect, so that no tap comes between the move and this note.

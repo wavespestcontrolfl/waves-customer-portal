@@ -45,11 +45,14 @@
 // A reload closes the page in view and opens the address. While a move is
 // not yet in view the two differ: the address changes first, and Back
 // changes it even before the routes render. So every rule here judges both
-// pages. The staff rules apply while either is a staff page, or a page that
-// a move from a field page opened (staffTab), and a page that never reloads
-// by itself bars the reload whether it is in view or at the address. A page whose code is missing reloads only while the
-// address names that page: after Back, its reload would open the next page.
-// Two paths name one page when they decode alike, case kept (samePage).
+// pages. The staff rules apply while either is a staff page, or a page that a
+// move from a field page opened (staffTab), and a page that never reloads by
+// itself bars the reload whether it is in view or at the address. A redirect
+// continues the move it ends, so until the move's last page is in view, the
+// page the move started on counts too (moveUnderWayFrom). A page whose code
+// is missing reloads only while the address names that page: after Back, its
+// reload would open the next page. Two paths name one page when they decode
+// alike, case kept (samePage).
 //
 // A page can hold unsaved work in component state that no hold names. So a
 // staff tab used on the page in view since it came into view (watchPageUse)
@@ -94,7 +97,7 @@ export function isChunkError(err) {
 // navigation never committed keeps placeholders before it reloads.
 const NAVIGATION_WINDOW_MS = 30000;
 
-const NO_MOVE = { from: null, to: null };
+const NO_MOVE = { from: null, to: null, origin: null };
 
 let reloadPending = false;
 let navigatingUntil = 0;
@@ -118,26 +121,25 @@ function samePage(a, b) {
 // PortalUpdateGate (components/PortalUpdate.jsx) notes each page move: `to`
 // the page it opens, `from` the page it leaves as #8121's rule judges it (a
 // redirect continues the move it ends, so Today -> /admin -> the dashboard
-// still leaves Today). It notes the move as it renders, before the new
-// page's code starts to load, and again once the move is in view. React can
-// drop a render: Back can undo a move while the new page's code loads. So a
-// rendered move counts only on the page it opens; elsewhere the move in view
-// does.
-export function notePageMove(from, to) {
-  renderedMove = { from, to };
+// still leaves Today), and `origin` the page the move started on, before any
+// redirect. It notes the move as it renders, before the new page's code
+// starts to load, and again once the move is in view. React can drop a
+// render: Back can undo a move while the new page's code loads. So a rendered
+// move counts only on the page it opens; elsewhere the move in view does.
+export function notePageMove(from, to, origin = from) {
+  renderedMove = { from, to, origin };
 }
 
-// A move in view also ends the use of the page it left
-// (usedOnThisStaffPage): the move remounted the routes, so nothing unsaved
-// stays from that use, and Back to that page opens it unused. A move React dropped
-// leaves the page and its use. A move in view away from the path the one
-// reload reopened, to another page (samePage), also ends that reload's
-// count, path and flag (chunkReloadAttempted); nothing else does. A move can
-// load nothing: React.lazy keeps a page it loaded, the More page is in the
-// entry bundle, and the reopened page may still fail. While a reload is
-// under way, the flag must reach the page load it opens. During an outage a
-// page the tab then opens can take one more reload; after it, that page
-// shows its retry screen.
+// A move in view also ends the use of the page it left (usedOnThisStaffPage):
+// the move remounted the routes, so nothing unsaved stays from that use, and
+// Back to that page opens it unused. A move React dropped leaves the page and
+// its use. A move in view away from the path the one reload reopened, to
+// another page (samePage), also ends that reload's count, path and flag
+// (chunkReloadAttempted); nothing else does. A move can load nothing:
+// React.lazy keeps a page it loaded, the More page is in the entry bundle,
+// and the reopened page may still fail. While a reload is under way, the flag
+// must reach the page load it opens. During an outage a page the tab then
+// opens can take one more reload; after it, that page shows its retry screen.
 export function notePageInView(from, to) {
   shownMove = { from, to };
   usedPath = null;
@@ -161,17 +163,29 @@ function pageInView() {
   return shownMove.to ?? window.location.pathname;
 }
 
-// Whether the staff rules apply: in Waves Admin, which can open a customer
-// link such as a report in its own webview, and elsewhere while the page in
-// view or the address is a staff page, or a page that a move from a field
-// page opened. Neither ever reloads by itself (see the top of this file). A redirect continues the
-// move it ends (PortalUpdateGate): after Back from Today to /recap/:token,
-// the report it redirects to asks for its code once the redirect is in view,
-// and that code keeps the staff rules. App.jsx and LazyPanel.jsx ask it too,
-// for a page or a part whose code is missing.
+// The page that the move under way started on, until the move's last page is
+// in view; else null. A redirect continues the move it ends
+// (PortalUpdateGate): after Back from the dashboard to /recap/:token, the
+// redirect is in view when the report it redirects to asks for its code, and
+// the move from the dashboard still asks for that code. For a move with no
+// redirect, that page is the page in view.
+function moveUnderWayFrom() {
+  const { to, origin } = renderedMove;
+  return to == null || samePage(to, shownMove.to) ? null : origin;
+}
+
+// Whether the staff rules apply (see the top of this file): in Waves Admin,
+// which can open a customer link such as a report in its own webview; while
+// the page in view or the address is a staff page, or a page that a move from
+// a field page opened, which never reloads by itself; and while a move that
+// started on a staff page is under way, through its redirects too
+// (moveUnderWayFrom). App.jsx and LazyPanel.jsx ask it too, for a page or a
+// part whose code is missing.
 export function staffTab() {
-  return isWavesAdminApp() || [pageInView(), window.location.pathname]
-    .some((pathname) => isAdminPath(pathname) || isFieldPath(moveFromFor(pathname)));
+  return isWavesAdminApp()
+    || isAdminPath(moveUnderWayFrom())
+    || [pageInView(), window.location.pathname]
+      .some((pathname) => isAdminPath(pathname) || isFieldPath(moveFromFor(pathname)));
 }
 
 // Runs `load`, an import asked for on a staff tab: a page's code

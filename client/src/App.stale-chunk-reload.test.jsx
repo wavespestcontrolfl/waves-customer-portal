@@ -837,6 +837,70 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  // A redirect continues the move it ends, from any staff page. Back from
+  // the dashboard to /recap/:token, which redirects to /report/:token: the
+  // report asks for its code once the redirect is in view, and the move from
+  // the dashboard still asks for it (moveUnderWayFrom). That code keeps the
+  // staff rules: the page waits for the save in flight, then reloads once.
+  test('Back from the dashboard to a link that redirects to a customer page whose code is missing: the page waits for a save in flight, then reloads once', async () => {
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const save = target.fetch('/api/admin/customers/c1/notes', { method: 'POST' });
+      let failReport;
+      const move = renderGate(['/recap/abc', '/admin/dashboard'], {
+        transitions: true,
+        pages: {
+          '/recap/:token': RecapLink,
+          '/report/:token': lazyWithRetry(() => new Promise((_, reject) => { failReport = reject; })),
+        },
+      });
+      // The address the redirect leaves: the browser's names the report.
+      vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+      move(-1);
+      await waitFor(() => expect(failReport).toBeDefined());
+      const stale = preloadErrorEvent();
+      handleVitePreloadError(stale, reload);
+      expect(stale.defaultPrevented).toBe(false);
+      await act(async () => { failReport(new TypeError('Failed to fetch dynamically imported module: /assets/ReportViewPage-old.js')); });
+      expect(await screen.findByText('Loading...')).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+      pending[0]({ headers: new Headers() });
+      await save;
+      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+      expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
+    } finally {
+      uninstall();
+    }
+  });
+
+  // Once its last page is in view, a move from a staff page ends the staff
+  // rules, unless it left a field page: code that a customer page asks for
+  // after that reloads at once, as on main, while the page that a move from
+  // Today opened keeps the field bar.
+  test('once a move from the dashboard to a customer page is in view, a missing chunk there reloads at once, as on main', () => {
+    notePageInView(null, '/admin/dashboard');
+    notePageMove('/admin/dashboard', '/report/abc');
+    notePageInView('/admin/dashboard', '/report/abc');
+    vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('a customer page that Back from Today opened keeps the field bar once in view: a later missing chunk there reloads nothing', () => {
+    notePageInView(null, '/admin/today');
+    notePageMove('/admin/today', '/report/abc');
+    notePageInView('/admin/today', '/report/abc');
+    vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   // A redirect continues the move it ends (PortalUpdateGate). Back from Today
   // to /recap/:token, which redirects to /report/:token, opens both from
   // Today. The report asks for its code once the redirect is in view, and
