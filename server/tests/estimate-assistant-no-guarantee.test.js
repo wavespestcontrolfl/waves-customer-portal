@@ -389,114 +389,91 @@ describe('estimate assistant no-guarantee context', () => {
     expect(context.guarantees).toMatchObject({ recurringTermsEligible: false, recurring: null });
   });
 
-  test.each(['pricing', 'saved'])('%s: a whole-home exclusion states its included re-entry guarantee and renewal price (flag only)', (source) => {
-    const row = { service: 'rodent_exclusion', label: 'Rodent Exclusion — Whole-home seal minimum', amount: 595, price: 595,
-      includesReentryGuarantee: true, reentryGuaranteeMonths: 12, guaranteeRenewalPrice: 249, detail: 'Lifetime rodent-free guarantee' };
-    const input = (item) => ({
-      estimate: { onetime_total: 595 },
-      estData: { result: { oneTime: { items: source === 'saved' ? [item] : [] } } },
-      pricingBundle: { anchorOneTimePrice: 595, oneTimeBreakdown: { items: source === 'pricing' ? [item] : [] } },
-      noGuaranteeClaims: true,
-    });
-    const context = buildEstimateAssistantContext(input(row));
-    expect(context.oneTime.items[0].purchasedTerms).toEqual([
-      'Includes a 1-year re-entry guarantee: if a rodent gets back in through the work we sealed, Waves reseals and traps at no extra charge.',
-      'Renew the guarantee yearly for $249.',
-    ]);
-    const answer = answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context);
-    expect(answer).toContain('1-year re-entry guarantee');
-    expect(answer).toContain('$249');
-    expect(answer).not.toMatch(/lifetime/i);
-    // Fail closed: the same row with no flag (or a false one) carries no guarantee terms.
-    for (const flagged of [{ includesReentryGuarantee: undefined }, { includesReentryGuarantee: false }]) {
-      const bare = buildEstimateAssistantContext(input({ ...row, ...flagged }));
-      expect(bare.oneTime.items[0].purchasedTerms || []).toEqual([]);
-      expect(answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', bare)).not.toContain('1-year re-entry guarantee');
-    }
-  });
-
-  test('a current spot exclusion row clears an older snapshot\'s whole-home guarantee with the same label', () => {
-    const label = 'Rodent Exclusion — Wire Mesh Points';
-    const current = { service: 'rodent_exclusion', label, amount: 150, price: 150, detail: '2 standard @ $75/pt' };
-    const older = { ...current, includesReentryGuarantee: true, guaranteeRenewalPrice: 199 };
-    const context = buildEstimateAssistantContext({
+  describe('the included whole-home re-entry guarantee (stated only from CURRENT saved result rows)', () => {
+    const BULLET = 'Includes a 1-year re-entry guarantee: if a rodent gets back in through the work we sealed, Waves reseals and traps at no extra charge.';
+    const wholeHome = (label, renewal = 249) => ({ service: 'rodent_exclusion', label, amount: 150, price: 150,
+      includesReentryGuarantee: true, reentryGuaranteeMonths: 12, guaranteeRenewalPrice: renewal });
+    const spot = (label) => ({ service: 'rodent_exclusion', label, amount: 150, price: 150 });
+    const ASK = 'Is re-entry covered by a guarantee?';
+    const build = ({ result, engineResult, estData, bundleItems = [] } = {}) => buildEstimateAssistantContext({
       estimate: { onetime_total: 150 },
-      estData: {
-        result: { oneTime: { items: [current] } },
-        engineResult: { oneTime: { items: [older] } },
-      },
-      pricingBundle: { anchorOneTimePrice: 150 },
+      estData: estData || { result, engineResult },
+      pricingBundle: { anchorOneTimePrice: 150, oneTimeBreakdown: { items: bundleItems } },
       noGuaranteeClaims: true,
     });
-    const rows = context.oneTime.items.filter((row) => row.label === label);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].purchasedTerms || []).toEqual([]);
-    expect(answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context)).not.toContain('1-year re-entry guarantee');
-  });
+    const entries = (context) => (context.guarantees.serviceTerms || []).filter((entry) => entry.terms.includes(BULLET));
+    const rowTerms = (context) => context.oneTime.items.flatMap((row) => row.purchasedTerms || []);
 
-  test('an exclusion removed from the estimate takes its older whole-home guarantee with it', () => {
-    const older = { service: 'rodent_exclusion', label: 'Rodent Exclusion', amount: 595, price: 595, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
-    for (const current of [
-      { oneTime: { items: [{ service: 'rodent_trapping', label: 'Rodent Trapping', amount: 350, price: 350 }] } },
-      { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] } },
-    ]) {
-      const context = buildEstimateAssistantContext({
-        estimate: { monthly_total: 55 },
-        estData: { result: current, engineResult: { oneTime: { items: [older] } } },
-        pricingBundle: { frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 55, annual: 660 }] },
-      });
-      const terms = [...(context.oneTime?.items || []), ...(context.services || [])].flatMap((row) => row.purchasedTerms || []);
-      expect(terms).toEqual([]);
-      expect(answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context)).not.toContain('1-year re-entry guarantee');
-    }
-  });
-
-  test('a frozen pricing-bundle snapshot never beats the CURRENT saved exclusion row', () => {
-    const snapshot = { service: 'rodent_exclusion', label: 'Rodent Exclusion — Wire Mesh Points', amount: 150, price: 150,
-      includesReentryGuarantee: true, guaranteeRenewalPrice: 199 };
-    const currentSpot = { service: 'rodent_exclusion', label: snapshot.label, amount: 150, price: 150 };
-    const currentWhole = { ...currentSpot, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
-    const build = (saved) => buildEstimateAssistantContext({
-      estimate: { onetime_total: 150 },
-      estData: { result: { oneTime: { items: saved } } },
-      pricingBundle: { anchorOneTimePrice: 150, oneTimeBreakdown: { items: [snapshot] } },
-      noGuaranteeClaims: true,
+    test('a whole-home row and a spot row in one estimate: one entry, the whole-home renewal, nothing on the spot row', () => {
+      const context = build({ result: { oneTime: { items: [wholeHome('Rodent Exclusion — Whole-home seal minimum', 249), spot('Rodent Exclusion — Bird Boxes')] } } });
+      expect(entries(context)).toEqual([{
+        service: 'Rodent Exclusion — Whole-home seal minimum',
+        terms: [BULLET, 'Renew the guarantee yearly for $249.'],
+      }]);
+      expect(rowTerms(context)).toEqual([]);
+      const answer = answerEstimateQuestionFallback(ASK, context);
+      expect(answer).toContain('Whole-home seal minimum: Includes a 1-year re-entry guarantee');
+      expect(answer).toContain('$249');
+      expect(answer).not.toContain('Bird Boxes:');
     });
-    const terms = (context) => context.oneTime.items.flatMap((row) => row.purchasedTerms || []);
-    const answer = (context) => answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context);
 
-    // Current spot seal: the snapshot's guarantee and old renewal are not promised.
-    const spot = build([currentSpot]);
-    expect(terms(spot)).toEqual([]);
-    expect(answer(spot)).not.toContain('1-year re-entry guarantee');
-    expect(answer(spot)).not.toContain('$199');
-    // Current exclusion removed from the saved result: also nothing.
-    const removed = build([{ service: 'rodent_trapping', label: 'Rodent Trapping', amount: 350, price: 350 }]);
-    expect(terms(removed)).toEqual([]);
-    // Current whole-home row: its own renewal price replaces the snapshot's.
-    const whole = build([currentWhole]);
-    expect(terms(whole)).toContain('Renew the guarantee yearly for $249.');
-    expect(terms(whole)).not.toContain('Renew the guarantee yearly for $199.');
-    // No saved rows at all (inputs-only, replayed live): the priced row's own evidence stands.
-    const inputsOnly = buildEstimateAssistantContext({
-      estimate: { onetime_total: 150 },
-      estData: {},
-      pricingBundle: { anchorOneTimePrice: 150, oneTimeBreakdown: { items: [snapshot] } },
-      noGuaranteeClaims: true,
+    test('a mirrored copy of the same saved row is one entry (mapped and nested shapes)', () => {
+      const row = wholeHome('Rodent Exclusion — Wire Mesh Points');
+      const context = build({ result: { oneTime: { items: [row], specItems: [{ ...row }] }, results: { oneTime: { items: [{ ...row }] } } } });
+      expect(entries(context)).toHaveLength(1);
     });
-    expect(terms(inputsOnly)).toContain('Renew the guarantee yearly for $199.');
-  });
 
-  test('the flag on a non-exclusion row gives no Ask Waves terms', () => {
-    const row = { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, price: 650, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
-    const context = buildEstimateAssistantContext({
-      estimate: { onetime_total: 650 },
-      estData: { result: { oneTime: { items: [row] } } },
-      pricingBundle: { anchorOneTimePrice: 650, oneTimeBreakdown: { items: [row] } },
-      noGuaranteeClaims: true,
+    test('bundle and snapshot rows never carry guarantee terms, even when flagged', () => {
+      const snapshot = wholeHome('Rodent Exclusion — Wire Mesh Points', 199);
+      const context = build({ result: { oneTime: { items: [spot(snapshot.label)] } }, bundleItems: [snapshot] });
+      expect(entries(context)).toEqual([]);
+      expect(rowTerms(context)).toEqual([]);
+      const answer = answerEstimateQuestionFallback(ASK, context);
+      expect(answer).not.toContain('1-year re-entry guarantee');
+      expect(answer).not.toContain('$199');
     });
-    expect(context.oneTime.items[0].purchasedTerms || []).toEqual([]);
-    expect(answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context)).not.toContain('1-year re-entry guarantee');
+
+    test('a current whole-home row states its own renewal, not the snapshot\'s', () => {
+      const label = 'Rodent Exclusion — Wire Mesh Points';
+      const context = build({ result: { oneTime: { items: [wholeHome(label, 249)] } }, bundleItems: [wholeHome(label, 199)] });
+      expect(entries(context).map((entry) => entry.terms[1])).toEqual(['Renew the guarantee yearly for $249.']);
+    });
+
+    test('a recurring-only saved result, or an exclusion removed, states none (older roots and bundle included)', () => {
+      const older = { oneTime: { items: [wholeHome('Rodent Exclusion')] } };
+      const bundleItems = [wholeHome('Rodent Exclusion')];
+      for (const result of [
+        { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] } },
+        { oneTime: { items: [{ service: 'rodent_trapping', label: 'Rodent Trapping', amount: 350, price: 350 }] } },
+      ]) {
+        const context = build({ result, engineResult: older, bundleItems });
+        expect(entries(context)).toEqual([]);
+        expect(answerEstimateQuestionFallback(ASK, context)).not.toContain('1-year re-entry guarantee');
+      }
+      // A server-repriced result that removed every service is authoritative even when it prices nothing.
+      const emptied = build({ estData: { pricingAuthorityAtLock: 'SERVER', result: { oneTime: { items: [] } }, engineResult: older }, bundleItems });
+      expect(entries(emptied)).toEqual([]);
+    });
+
+    test('no saved result at all (inputs-only replay) states none, even with a flagged priced row', () => {
+      const context = build({ estData: {}, bundleItems: [wholeHome('Rodent Exclusion')] });
+      expect(entries(context)).toEqual([]);
+      expect(answerEstimateQuestionFallback(ASK, context)).not.toContain('1-year re-entry guarantee');
+      const bare = build({ estData: { oneTime: { items: [wholeHome('Rodent Exclusion')] } } });
+      expect(entries(bare)).toEqual([]);
+    });
+
+    test('an older engineResult never states it while the current result has the exclusion without the flag', () => {
+      const label = 'Rodent Exclusion — Wire Mesh Points';
+      const context = build({ result: { oneTime: { items: [spot(label)] } }, engineResult: { oneTime: { items: [wholeHome(label)] } } });
+      expect(entries(context)).toEqual([]);
+    });
+
+    test('the flag on a non-exclusion row, or no flag, states none', () => {
+      const bedBug = { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, price: 650, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
+      expect(entries(build({ result: { oneTime: { items: [bedBug] } } }))).toEqual([]);
+      expect(entries(build({ result: { oneTime: { items: [{ ...wholeHome('Rodent Exclusion'), includesReentryGuarantee: false }] } } }))).toEqual([]);
+    });
   });
 
   test.each(['pricing', 'saved'])('%s purchased warranty scope survives without allowing arbitrary warranty prose', (source) => {

@@ -8,12 +8,13 @@ const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { GUARANTEE_COPY, resolveOneTimeServiceCopy } = require('./estimate-one-time-copy');
+const { storedEstimateContainer, exclusionRowsIn } = require('./estimate-result-container');
 const {
   collapseMirroredRows,
   hasPurchasedTrenchingWarranty,
+  hasIncludedReentryGuarantee,
   includedReentryPurchasedTerms,
   isPreSlabTreatmentItem,
-  isRodentExclusionRow,
   preSlabExtendedWarrantySelected,
   preSlabSelectedWarrantyPart,
   preSlabWarrantyDecision,
@@ -477,22 +478,20 @@ function purchasedTermsForRow(item) {
   return (copy?.includes || []).filter((line) => GUARANTEE_COPY.test(line));
 }
 
-// A whole-home exclusion row's included guarantee, as the row's service-specific terms (nothing without the flag).
-// An exclusion row without it projects an explicit [] (authoritative, like a removed trenching warranty): the
-// merge then clears a same-label whole-home row an older snapshot still carries.
-function includedReentryProjection(item) {
-  const purchasedTerms = includedReentryPurchasedTerms(item);
-  return isRodentExclusionRow(item) ? { purchasedTerms } : {};
-}
-
-// The priced rows (the pricing bundle, possibly a frozen send snapshot) never state the included guarantee on their
-// own once the estimate has CURRENT saved rows: a current exclusion row without it (a spot seal) or no current
-// exclusion row at all (removed) clears it, and a current whole-home row's own terms (renewal price) replace the
-// snapshot's. An estimate with no saved rows (inputs-only, replayed live) keeps the priced rows' evidence.
-function reconcileIncludedGuarantee(pricedRows, currentSavedRows) {
-  if (!currentSavedRows.length) return pricedRows;
-  const currentTerms = currentSavedRows.find((row) => isRodentExclusionRow(row) && row.purchasedTerms?.length)?.purchasedTerms || [];
-  return pricedRows.map((row) => (isRodentExclusionRow(row) ? { ...row, purchasedTerms: currentTerms } : row));
+// The included 1-year re-entry guarantee (whole-home exclusion), stated ONLY from the estimate's CURRENT saved result
+// rows (the authoritative container): one entry per flagged saved row, built from THAT row's own renewal price. No
+// pricing-bundle, snapshot or older-root row ever carries it; a saved result with no flagged row (recurring-only, spot
+// seal, exclusion removed) or no saved result at all (inputs-only) states nothing (fail closed).
+function includedReentryEntries(estData) {
+  const container = storedEstimateContainer(estData);
+  const seen = new Set();
+  return (container ? exclusionRowsIn(container) : []).filter(hasIncludedReentryGuarantee).flatMap((row) => {
+    const entry = { service: cleanText(row.label || row.name) || 'Rodent Exclusion', terms: includedReentryPurchasedTerms(row) };
+    const key = `${entry.service}|${entry.terms.join('|')}`.toLowerCase();
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [entry];
+  });
 }
 
 function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
@@ -579,7 +578,6 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         ...(trenchingServiceIdentity(item) === 'termite_trenching'
           ? { purchasedTerms: purchasedTermsForRow(evidence) }
           : {}),
-        ...includedReentryProjection(item),
         ...preSlabProjectionFields(item, preSlabEvidence),
         ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
@@ -624,7 +622,6 @@ function oneTimeRowsFromResult(result = {}) {
         label: cleanText(item.label || item.displayName || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
-        ...includedReentryProjection(item),
         ...preSlabProjectionFields(item),
         ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
@@ -666,10 +663,7 @@ function oneTimeRowsFromEstimateData(estData = {}) {
   const currentRows = projectedCurrent.map((row) => (isPreSlabTreatmentItem(row)
     ? { ...row, ...preSlabProjectionFields(row, reconcilePricedPreSlabWarrantyEvidence(row, evidenceGroups, {}, projectedCurrent)) }
     : row));
-  // An older root never lends the included re-entry guarantee: it is stated only from the CURRENT
-  // evidence, so an exclusion removed from the estimate takes its guarantee with it.
-  const fallbackRows = roots.slice(1).flatMap(oneTimeRowsFromResult)
-    .map((row) => (isRodentExclusionRow(row) ? { ...row, purchasedTerms: [] } : row));
+  const fallbackRows = roots.slice(1).flatMap(oneTimeRowsFromResult);
   const mergedRows = mergeOneTimeServiceRows(currentRows, fallbackRows);
   return mergedRows.map((row) => {
     if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
@@ -927,8 +921,7 @@ function buildEstimateAssistantContext({
     { allowFallbackOnly: pricingRecurringRows.length === 0 },
   );
   const oneTimeEvidenceGroups = oneTimeEvidenceGroupsFromEstimateData(parsedData);
-  const currentSavedOneTimeRows = currentOneTimeRowsFromEstimateData(parsedData);
-  const pricedOneTimeRows = reconcileIncludedGuarantee(oneTimeRowsFromPricing(pricingBundle, oneTimeEvidenceGroups), currentSavedOneTimeRows);
+  const pricedOneTimeRows = oneTimeRowsFromPricing(pricingBundle, oneTimeEvidenceGroups);
   const oneTimeServices = mergeOneTimeServiceRows(
     pricedOneTimeRows,
     oneTimeRowsFromEstimateData(parsedData),
@@ -937,7 +930,7 @@ function buildEstimateAssistantContext({
   // result. oneTimeRowsFromEstimateData also keeps rows only an older
   // engineResult retains; those were removed and must never be advertised.
   const currentOneTimeKeys = new Set(
-    [...pricedOneTimeRows, ...currentSavedOneTimeRows].map(oneTimeRowScopeKey),
+    [...pricedOneTimeRows, ...currentOneTimeRowsFromEstimateData(parsedData)].map(oneTimeRowScopeKey),
   );
   const oneTimeTotal = Number(pricingBundle.anchorOneTimePrice || estimate.onetime_total || estimate.onetimeTotal);
   const hasOneTimeValue = (Number.isFinite(oneTimeTotal) && oneTimeTotal > 0) || oneTimeServices.length > 0;
@@ -1090,7 +1083,7 @@ function buildEstimateAssistantContext({
       ? guarantees
       : {
         ...guarantees,
-        serviceTerms: serviceTermsFromRows(
+        serviceTerms: [...serviceTermsFromRows(
           [
             servicesContext, recurringServicesContext, oneTimeItemsContext || [],
             // Termite rows the display merge left out (a raw engine row behind
@@ -1111,7 +1104,7 @@ function buildEstimateAssistantContext({
               return selectedMode === 'recurring' ? [RECURRING_PLAN_TERMS] : [];
             },
           },
-        ),
+        ), ...includedReentryEntries(parsedData)],
       },
     contact: COMPANY,
   };

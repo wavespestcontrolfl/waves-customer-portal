@@ -231,5 +231,5 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
 const proposalIsAuthoritative = (data) => data?.proposal?.enabled === true;
 
 module.exports = {
-  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedMistingRows, storedRodentExclusionRows,
+  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedMistingRows, storedRodentExclusionRows, exclusionRowsIn,
 };
