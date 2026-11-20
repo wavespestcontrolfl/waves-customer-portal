@@ -4568,19 +4568,17 @@ function whereSweepCandidate(qb) {
         // (or the Twilio transcription webhook if that fired first); either
         // way it tracks recording-land time, not call-start time, so it's a
         // tighter gate than created_at for long calls.
+        // The stuck-transcript fallback (transcription_status pending, no
+        // text; 2026-04-28) is gone. Every row it could still admit is owned
+        // by another branch (NULL / pending here, a retry state by its capped
+        // branch, a stale claim by the stale branch) or must never be swept:
+        // a settled processed / voicemail / spam row, which the ordinary
+        // claim would run through the paid pipeline again on every tick, a
+        // live claim, a *_creation_failed row (pre-push Codex P1, rounds 2
+        // and 6). Production, all time: no row that only it admitted.
         this.where(function () {
           this.whereNull('processing_status')
-            .orWhere('processing_status', 'pending')
-            .orWhere(function () {
-              // A stuck transcript on a row no retry lane owns. The retry
-              // states have their own capped branches below; admitted here
-              // too, an at-cap one came back every tick, the claim refused
-              // it, and it took one of the 20 slots, and an
-              // extraction_failed one skipped its 7-day creation fence
-              // (pre-push Codex P1).
-              this.where('transcription_status', 'pending').whereNull('transcription')
-                .whereRaw("processing_status IS DISTINCT FROM 'no_transcription' AND processing_status IS DISTINCT FROM 'extraction_failed'");
-            });
+            .orWhere('processing_status', 'pending');
         })
         .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
       })
@@ -25815,8 +25813,7 @@ const CallRecordingProcessor = {
    */
   async processAllPending() {
     // Eligibility: a row needs (re)processing if it has a recording AND any of:
-    //   - processing_status NULL/pending OR transcription_status='pending' AND transcription
-    //     IS NULL (fresh — gated by a 10-min CDN-settle age window so the cron can't beat
+    //   - processing_status NULL/pending (fresh — gated by a 10-min CDN-settle age window so the cron can't beat
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
     //   - processing_status='no_transcription' with retry budget left (extraction_attempts

@@ -13,6 +13,7 @@ const { listForCall, refreshFulfillment, buildCallOutcomes, anchorEvidence } = r
 // The processor's own retry predicate (attempt cap + age window), so the
 // phase below never promises a retry the sweep will not make (Codex r9 P2).
 const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, SWEEP_MIN_SECONDS, sweepLengthOk } = require('../config/call-extraction-retry');
+const { isInternalCallSource } = require('./voice-agent/relay-protocol');
 
 function parseJson(value, fallback = null) {
   if (value == null) return fallback;
@@ -26,16 +27,29 @@ function addressText(addr) {
   return parts.length ? parts.join(', ') : (addr.raw_text || null);
 }
 
-// The two retry lanes' state, in one place: under the attempt cap (and, for
-// extraction_failed, inside the 7-day creation window) a lane retries the
-// row unless a reason below applies, so the panel agrees with the ops queue
-// and the agent-control runs. The sweep retries a row from its recording,
-// over 10 s (a retry state keeps that floor, gate on or off), or the masked
-// transcript of a PAN-quarantined row after a failed extraction (no floor).
-// A quarantined row keeps no recording, and GATE_LIVE_CALL_BACKUP_TRANSCRIPT's
-// live-text pass skips it, so nothing else retries it. A row with no
-// recording and no quarantine keeps its old reading: that live-text pass
-// may retry it.
+// Recording recovery (recoverMissingRecentRecordings in
+// call-recording-processor.js) looks a missing recording up at Twilio only
+// for an answered inbound call over 10 s, under 7 days old, that is not an
+// internal call; a test pins this twin to that query.
+// GATE_LIVE_CALL_BACKUP_TRANSCRIPT's live-text pass works only from that
+// lookup's misses.
+const LOOKUP_MIN_SECONDS = 10;
+const LOOKUP_MAX_AGE_DAYS = 7;
+function recordingLookupOwed(call, now = Date.now()) {
+  return call.direction === 'inbound' && call.status === 'completed' && !isInternalCallSource(call.source)
+    && Number(call.duration_seconds) > LOOKUP_MIN_SECONDS
+    // No creation time is never inside the window (NaN compares false).
+    && now - Date.parse(call.created_at) < LOOKUP_MAX_AGE_DAYS * 864e5;
+}
+
+// The two retry lanes' state, in one place, so the panel agrees with the ops
+// queue and the agent-control runs. Under the attempt cap (and, for
+// extraction_failed, inside the 7-day creation window) the sweep retries a
+// row from its recording, over 10 s (a retry state keeps that floor, gate on
+// or off), or the masked transcript of a PAN-quarantined row after a failed
+// extraction (no floor). A row with no recording and no quarantine has no
+// pass scheduled: it waits on recording recovery while that still looks the
+// recording up. Anything else is terminal, and only Reprocess tries again.
 function retryLaneState(status, call) {
   const attempts = Number(call.extraction_attempts || 0);
   const what = status === 'no_transcription' ? 'Transcription produced nothing' : 'Extraction failed';
@@ -44,16 +58,27 @@ function retryLaneState(status, call) {
   }
   const pan = String(parseJson(call.transcription_metadata, {})?.pan_detected) === 'true';
   const recording = !!String(call.recording_url || '').trim();
-  // The first reason that applies; none = a lane retries it.
+  const tried = `${what} (attempt ${attempts || 1})`;
+  // A recording lookup is not a scheduled pass: recovery may find the
+  // recording (the sweep then retries it) or, with the live-text backup on,
+  // fall back to the call's live text, or find nothing (pre-push Codex P1,
+  // rounds 5 and 6). A quarantined row is never looked up.
+  if (!recording && !pan && recordingLookupOwed(call)) {
+    return {
+      phase: 'waiting_for_recording',
+      retryable: false,
+      detail: `${tried}; there is no recording yet. The sweep looks for it at Twilio until the call is ${LOOKUP_MAX_AGE_DAYS} days old.`,
+    };
+  }
+  // The first reason that applies; none = the sweep retries it.
   // Date.parse: no creation time is never "too old" (NaN compares false).
   const stop = [
     [status === 'extraction_failed' && Date.now() - Date.parse(call.created_at) > EXTRACTION_RETRY_WINDOW_DAYS * 864e5,
       `the call is older than ${EXTRACTION_RETRY_WINDOW_DAYS} days, so the sweep no longer retries it`],
-    [pan && !recording && !(status === 'extraction_failed' && call.transcription != null),
+    [!recording && !(status === 'extraction_failed' && pan && call.transcription != null),
       'there is no recording to retry, so the sweep does not retry it'],
     [recording && !pan && !sweepLengthOk(call), `the recording is ${SWEEP_MIN_SECONDS} seconds or less, so the sweep does not retry it`],
   ].find(([applies]) => applies);
-  const tried = `${what} (attempt ${attempts || 1})`;
   return stop
     ? { phase: 'failed', retryable: false, detail: `${tried}; ${stop[1]} — Reprocess to try again.` }
     : { phase: 'failed_retrying', retryable: true, detail: `${tried}; the sweep retries automatically.` };

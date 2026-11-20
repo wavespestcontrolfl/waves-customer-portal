@@ -148,15 +148,13 @@ describe('the sweep query text', () => {
     expect(src.split('.where(function sweepStillSelects() { if (opts.sweep) whereSweepCandidate(this); })')).toHaveLength(2);
   });
 
-  test('the stuck-transcript fallback leaves the retry states to their own capped branches', async () => {
-    // Pre-push Codex P1: an empty transcription leaves transcription_status
-    // pending, so an at-cap no_transcription row matched this fallback every
-    // tick; the claim refused it and it took one of the 20 slots.
-    const FALLBACK = `"transcription_status" = 'pending' and "transcription" is null and processing_status IS DISTINCT FROM 'no_transcription' AND processing_status IS DISTINCT FROM 'extraction_failed'`;
+  test('no stuck-transcript fallback: the fresh branch takes only NULL / pending, the retry branches keep the cap', async () => {
+    // Pre-push Codex P1, rounds 2 and 6: the fallback (transcription_status pending, no text) admitted an
+    // at-cap no_transcription row every tick and a settled voicemail or spam row the claim would run again.
     for (const value of [undefined, 'true']) {
       const sql = await withGate(value, () => processor.pendingCandidatesQuery().toString());
-      expect(sql).toContain(FALLBACK);
-      // The retry branches keep the cap.
+      expect(sql).not.toContain('"transcription_status"');
+      expect(sql).toContain(`("processing_status" is null or "processing_status" = 'pending') and "updated_at" < NOW() - INTERVAL '10 minutes'`);
       expect(sql).toContain(`"processing_status" = 'no_transcription' and COALESCE(extraction_attempts, 0) < 3`);
     }
   });
@@ -176,9 +174,10 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   const SID_SHORT_RETRY = sid('s6'); // 8 s, 1 try, 2 h old: a retry state keeps the 10-second floor, gate on or off
   const SID_LONG_AT_CAP = sid('s7'); // 60 s, 3 tries: never a candidate, gate on or off
   const SID_SHORT_DIED = sid('s8'); // 8 s, its first pass claimed it 30 min ago and stopped beating: a deploy killed the pass
-  // 8 s voicemail whose transcript was never stored: it matches the stuck-transcript
-  // fallback and the claim accepts a voicemail row, so the gate must never run it again.
-  const SID_SHORT_VOICEMAIL = sid('s9');
+  // Voicemail rows whose transcript was never stored (transcription_status pending, no text). The
+  // ordinary claim accepts a voicemail row, so the sweep must never select or claim them again.
+  const SID_SHORT_VOICEMAIL = sid('s9'); // 8 s
+  const SID_LONG_VOICEMAIL = sid('sc'); // 60 s: the old stuck-transcript fallback took it after 10 minutes
   // A card number was read on the call: the quarantine nulled recording_url and kept the masked
   // transcript (a placeholder here, no digits). The sweep has no length floor for such a row.
   const PAN_QUARANTINED = {
@@ -190,7 +189,7 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   const SID_PAN_RETRY = sid('sa'); // 4 s, extraction failed once: the sweep's masked-transcript branch takes it, gate on or off
   const SID_PAN_FINISHED = sid('sb'); // 4 s, a timer finished it as voicemail: never swept, and a sweep pass's claim refuses it
   const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP, SID_SHORT_DIED, SID_SHORT_VOICEMAIL,
-    SID_PAN_RETRY, SID_PAN_FINISHED];
+    SID_PAN_RETRY, SID_PAN_FINISHED, SID_LONG_VOICEMAIL];
   const REC = 'RE' + '9'.repeat(32);
   const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
 
@@ -233,6 +232,7 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
       processing_status: 'processing', processing_started_at: minutesAgo(30), processing_heartbeat_at: minutesAgo(30),
     });
     await insertCall(SID_SHORT_VOICEMAIL, { seconds: 8, createdMinutesAgo: 120, updatedMinutesAgo: 60, processing_status: 'voicemail' });
+    await insertCall(SID_LONG_VOICEMAIL, { seconds: 60, createdMinutesAgo: 120, updatedMinutesAgo: 60, processing_status: 'voicemail' });
     await insertCall(SID_PAN_RETRY, { seconds: 4, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...PAN_QUARANTINED, processing_status: 'extraction_failed', extraction_attempts: 1 });
     await insertCall(SID_PAN_FINISHED, { seconds: 4, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...PAN_QUARANTINED, processing_status: 'voicemail' });
   });
@@ -242,7 +242,7 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     await db.destroy();
   });
 
-  test('gate off: only the long call and the quarantined retry are swept, as before; a long call at the attempt cap takes no slot', async () => {
+  test('gate off: only the long call and the quarantined retry are swept; a long call at the attempt cap or a long settled voicemail takes no slot', async () => {
     await withGate(undefined, async () => {
       expect(await candidates()).toEqual([SID_LONG, SID_PAN_RETRY].sort());
     });
@@ -254,12 +254,14 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     });
   });
 
-  // The ordinary claim accepts a voicemail row, and a quarantined row has no length floor: the
-  // claim's re-check of the whole candidate rule is what refuses these (pre-push Codex P1, rounds 4-5).
+  // A timer can finish a selected row before its turn. The ordinary claim accepts a voicemail row, and a
+  // quarantined row has no length floor: the claim's re-check of the whole candidate rule is what
+  // refuses these (pre-push Codex P1, rounds 4-6).
   test.each([
-    ['a short call', SID_SHORT_VOICEMAIL],
-    ['a card-number-quarantined call', SID_PAN_FINISHED],
-  ])('a sweep pass refuses %s a timer finished while it waited, gate on or off, and changes nothing', async (_what, target) => {
+    ['a short voicemail with a stuck transcript', SID_SHORT_VOICEMAIL],
+    ['a long voicemail with a stuck transcript', SID_LONG_VOICEMAIL],
+    ['a card-number-quarantined voicemail', SID_PAN_FINISHED],
+  ])('a sweep pass refuses %s, gate on or off, and changes nothing', async (_what, target) => {
     for (const value of [undefined, 'true']) {
       await withGate(value, async () => {
         const out = await processor.processRecording(target, { sweep: true });
