@@ -121,8 +121,16 @@ describe('parseInspectionRows', () => {
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
       address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-11-16',
-      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2 },
+      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2, violation35: 1, visitNumber: 1 },
     });
+  });
+
+  test('a visit number of 0, or blank, is not known: stored as null, so a re-read of a later file fills it', () => {
+    const row = (number) => inspRow({ visit: '9012' }).replace('"34208","1","1","Food"', `"34208","1","${number}","Food"`);
+    expect(row('0')).toContain('"34208","1","0","Food"');
+    const visitNumber = (number) => svc.parseInspectionRows(parseDbprCsv(inspCsv([row(number)])))[0].detail.visitNumber;
+    for (const number of ['0', '00', '', ' ']) expect(visitNumber(number)).toBeNull();
+    expect(visitNumber('2')).toBe(2);
   });
 });
 
@@ -294,6 +302,7 @@ describe('syncRestaurantProspects', () => {
   test.each([
     ['Business (DBA-Does Business As) Name', '7fdinspi.csv', 'inspection'],
     ['Location Address', '7fdinspi.csv', 'inspection'],
+    ['Visit Number', '7fdinspi.csv', 'inspection'],
     ['Business Name', 'newfood.csv', 'new_license'],
     ['Location Street Address', 'newfood.csv', 'new_license'],
     ['Primary Phone Number', 'chgownr_food.csv', 'owner_change'],

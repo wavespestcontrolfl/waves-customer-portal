@@ -24,6 +24,8 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     phone: null, seats: null, event_date: '2026-11-10', detail: { disposition: 'Warning Issued' }, ...over,
   });
   const rows = () => db('restaurant_prospects').where('source_key', 'like', `t-${RUN}-%`);
+  // The read a page's answer is saved for, as pendingInspections gives it: the row's id, count and visit number.
+  const readOf = (row) => ({ id: row.id, violation35: row.detail.violation35 ?? null, visitNumber: row.detail.visitNumber ?? null });
 
   beforeAll(() => {
     const target = new URL(process.env.DATABASE_URL);
@@ -104,7 +106,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   test('a re-read refreshes last_seen_at and never touches an answer, findings or attempts', async () => {
     await svc.upsertRecords([rec(2)]);
     const [row] = await rows().where({ source_key: key(2) });
-    await svc.saveReport(row.id, { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
+    await svc.saveReport(readOf(row), { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
     await db('restaurant_prospects').where({ id: row.id }).update({ detail_attempts: 2, last_seen_at: '2026-01-01T00:00:00Z' });
     await svc.upsertRecords([rec(2, { detail: { disposition: 'changed' } })]);
     const [after] = await rows().where({ id: row.id });
@@ -114,11 +116,61 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(new Date(after.last_seen_at).getTime()).toBeGreaterThan(new Date('2026-01-01T00:00:00Z').getTime());
   });
 
+  test('a re-read fills the count and the visit number; an unanswered row takes the higher count and the file\'s visit number', async () => {
+    await svc.upsertRecords([rec(20), rec(21)]);
+    const [answered] = await rows().where({ source_key: key(21) });
+    await svc.saveReport(readOf(answered), { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
+    await svc.upsertRecords([
+      rec(20, { detail: { disposition: 'changed', violation35: 2, visitNumber: 1 } }),
+      rec(21, { detail: { disposition: 'changed', violation35: 1, visitNumber: 2 } }),
+    ]);
+    const detail = async (n) => (await rows().where({ source_key: key(n) }))[0].detail;
+    expect(await detail(20)).toEqual({ disposition: 'Warning Issued', violation35: 2, visitNumber: 1 });
+    expect(await detail(21)).toEqual({ disposition: 'Warning Issued', violation35: 1, visitNumber: 2, findings: [{ code: '35A-02-8', text: 'Flies' }] });
+    // An answered row keeps them.
+    await svc.upsertRecords([rec(21, { detail: { disposition: 'changed', violation35: 3, visitNumber: 1 } })]);
+    expect((await detail(21)).violation35).toBe(1);
+    expect((await detail(21)).visitNumber).toBe(2);
+    // An unanswered row takes a higher count (compared as numbers: 10 over 5), never a lower one, and the file's visit
+    // number; a blank in the file erases nothing, and nothing else changes.
+    await svc.upsertRecords([rec(20, { detail: { disposition: 'changed', violation35: 5, visitNumber: 3 } })]);
+    expect(await detail(20)).toEqual({ disposition: 'Warning Issued', violation35: 5, visitNumber: 3 });
+    await svc.upsertRecords([rec(20, { detail: { disposition: 'changed', violation35: 10, visitNumber: 1 } })]);
+    await svc.upsertRecords([rec(20, { detail: { disposition: 'changed', violation35: 2, visitNumber: null } })]);
+    expect(await detail(20)).toEqual({ disposition: 'Warning Issued', violation35: 10, visitNumber: 1 });
+    // A blank visit number (JSON null) is filled when a later file has it.
+    await svc.upsertRecords([rec(22, { detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: null } })]);
+    await svc.upsertRecords([rec(22, { detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 1 } })]);
+    expect(await detail(22)).toEqual({ disposition: 'Warning Issued', violation35: 1, visitNumber: 1 });
+  });
+
+  test('a visit listed twice in one file keeps the highest count and the last visit number its copies give', async () => {
+    const copy = (violation35, visitNumber, disposition) => rec(6, { detail: { disposition, violation35, visitNumber } });
+    expect(await svc.upsertRecords([copy(2, 1, 'first'), copy(1, null, 'last')])).toBe(1);
+    const [row] = await rows().where({ source_key: key(6) });
+    expect(row.detail).toEqual({ disposition: 'last', violation35: 2, visitNumber: 1 });
+  });
+
+  test('saveReport saves only while the row holds the count and visit number the page was read with', async () => {
+    await svc.upsertRecords([rec(5, { detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 1 } })]);
+    const [row] = await rows().where({ source_key: key(5) });
+    const read = readOf(row);
+    // A file re-read raises the count after the read began: no save, and the row waits for a later read.
+    await svc.upsertRecords([rec(5, { detail: { disposition: 'Warning Issued', violation35: 2, visitNumber: 1 } })]);
+    expect(await svc.saveReport(read, { pestEvidence: false, findings: [] })).toBe(false);
+    expect((await rows().where({ id: row.id }))[0].pest_evidence).toBeNull();
+    // Another visit number: no save either.
+    expect(await svc.saveReport({ ...read, violation35: 2, visitNumber: 2 }, { pestEvidence: false, findings: [] })).toBe(false);
+    // Read again with the row's values, it saves.
+    expect(await svc.saveReport({ ...read, violation35: 2 }, { pestEvidence: false, findings: [] })).toBe(true);
+    expect((await rows().where({ id: row.id }))[0].pest_evidence).toBe(false);
+  });
+
   test('saveReport does not overwrite an answer already written', async () => {
     await svc.upsertRecords([rec(3)]);
     const [row] = await rows().where({ source_key: key(3) });
-    await svc.saveReport(row.id, { pestEvidence: false, findings: [] });
-    await svc.saveReport(row.id, { pestEvidence: true, findings: [{ code: '35A-01-8', text: 'x' }] });
+    expect(await svc.saveReport(readOf(row), { pestEvidence: false, findings: [] })).toBe(true);
+    expect(await svc.saveReport(readOf(row), { pestEvidence: true, findings: [{ code: '35A-01-8', text: 'x' }] })).toBe(false);
     const [after] = await rows().where({ id: row.id });
     expect(after.pest_evidence).toBe(false);
     expect(after.detail.findings).toEqual([]);
@@ -131,18 +183,30 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(found.map((r) => r.business_name)).toEqual(['SAMPLE DINER TWO']);
   });
 
-  test('pending reads only unanswered inspections under 3 attempts inside the window, newest first', async () => {
+  test('pending reads only unanswered first visits under 3 attempts inside the window, newest first', async () => {
+    const first = (violation35) => ({ disposition: 'Warning Issued', violation35, visitNumber: 1 });
     await svc.upsertRecords([
-      rec(10, { event_date: '2026-11-01' }), rec(11, { event_date: '2026-11-15' }), rec(12, { event_date: '2026-09-01' }),
-      rec(13, { event_date: '2026-11-16' }), rec(14, { event_date: '2026-11-17', kind: 'new_license' }),
+      rec(10, { event_date: '2026-10-21', detail: first(1) }),
+      rec(11, { event_date: '2026-11-15', detail: first(2) }),
+      rec(12, { event_date: '2026-09-01', detail: first(1) }),
+      rec(13, { event_date: '2026-11-16', detail: first(1) }), rec(14, { event_date: '2026-11-17', kind: 'new_license' }),
+      // A callback, and a row stored before the visit number was kept: the parser answers for neither.
+      rec(15, { event_date: '2026-11-18', detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 2 } }),
+      rec(16, { event_date: '2026-11-19' }),
     ]);
     const stored = await rows();
     const id = (n) => stored.find((r) => r.source_key === key(n)).id;
     await db('restaurant_prospects').where({ id: id(13) }).update({ detail_attempts: 3 });
     await svc.bumpAttempts(id(10));
-    const pending = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100 });
-    const mine = pending.filter((p) => [10, 11, 12, 13, 14].some((n) => p.id === id(n)));
+    const pending = async () => (await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100 }))
+      .filter((p) => [10, 11, 12, 13, 14, 15, 16].some((n) => p.id === id(n)));
+    const mine = await pending();
     expect(mine.map((p) => p.id)).toEqual([id(11), id(10)]);
+    // The file's count and visit number ride along with the visit's date.
+    expect(mine.map((p) => [p.violation35, p.visitNumber, p.visitDate])).toEqual([[2, 1, '2026-11-15'], [1, 1, '2026-10-21']]);
+    // The old row becomes eligible once a re-read of the file fills its visit number.
+    await svc.upsertRecords([rec(16, { event_date: '2026-11-19', detail: first(1) })]);
+    expect((await pending()).map((p) => p.id)).toEqual([id(16), id(11), id(10)]);
     const [one] = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 1 });
     expect(one).toBeDefined();
     expect((await rows().where({ id: id(10) }))[0].detail_attempts).toBe(1);
