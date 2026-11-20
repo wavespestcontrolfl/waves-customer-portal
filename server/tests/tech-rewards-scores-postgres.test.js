@@ -470,6 +470,24 @@ describe('tech rewards scores input checks', () => {
       expect(await scores.readOnTime(tech, WINDOW)).toBe(50);
     });
 
+    test('onTime: the 24 hours start at completion, not at the creation of a reused record', async () => {
+      // an incomplete record from 3 days earlier, completed later through the recap rail
+      const record = await visit(tech, { created_at: ts('2026-04-07T15:00:00Z'), recap_sms_sent_at: ts('2026-04-10T15:00:00Z') });
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-10T16:00:00Z') }); // 1 h after completion
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+      await db('email_messages').del();
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-11T16:30:00Z') }); // 25.5 h after completion
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(0);
+      // linked to a visit: the visit's completed_at anchors it the same way
+      await db('email_messages').del();
+      await db('service_records').del();
+      const svc = await scheduled(tech);
+      await db('scheduled_services').where({ id: svc.id }).update({ completed_at: ts('2026-04-10T15:00:00Z') });
+      const linked = await visit(tech, { scheduled_service_id: svc.id, created_at: ts('2026-04-07T15:00:00Z') });
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${linked.id}:primary`, status: 'sent', sent_at: ts('2026-04-10T16:00:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+    });
+
     test('onTime: an unlinked record (its visit was deleted) honors its own frozen waiver', async () => {
       const snap = (report, notice) => ({ v: 1, source: 'catalog', requiresServiceReport: report, requiresApplicationLog: false, requiresCustomerSignature: false,
         requiresCustomerNotice: notice, requiresLicense: false, requiredPhotoCount: 0 });

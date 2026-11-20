@@ -12,7 +12,7 @@
  * Definitions (a window is two ET calendar dates, both days included)
  *   onTime       Of the technician's completed service_records with a service_report_v1 report dated
  *                in the window, the share whose customer report went out within REPORT_ON_TIME_HOURS
- *                of the record being created. Everything about delivery comes from ONE reader,
+ *                of the visit becoming complete (the completion anchor of the completion-record detectors). Everything about delivery comes from ONE reader,
  *                completion-record-invariants.js deliveryEvidenceForRecords, which applies the same
  *                decisions as the completion-record detectors: the canonical sibling, the frozen
  *                closeout requirements with the legacy catalog fallback, backfill and delivery
@@ -225,7 +225,8 @@ async function readOnTime(rawTechnicianId, window, conn = db) {
     const found = evidence.get(String(row.id).toLowerCase());
     if (found.exempt) continue;
     owed += 1;
-    const deadline = new Date(row.created_at).getTime() + limitMs;
+    // the window starts when the visit became complete (a record reused by the pest-recap rail keeps its old created_at)
+    const deadline = (found.completedAt || new Date(row.created_at)).getTime() + limitMs;
     if (found.firstConfirmedSendAt && found.firstConfirmedSendAt.getTime() <= deadline) onTime += 1;
     else if (found.confirmedWithoutTime) return null; // may have gone out on time: unknown, not late
   }

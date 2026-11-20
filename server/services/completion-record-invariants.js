@@ -487,7 +487,11 @@ const EVIDENCE_EXEMPT_SQL = `
          CASE WHEN ss.id IS NULL THEN ${OWN_SNAPSHOT_WAIVES(['requiresServiceReport'])}
               ELSE EXISTS (SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
                             WHERE (${CANONICAL_NOT_OWED('requiresServiceReport')}) IS TRUE)
-         END AS report_waived
+         END AS report_waived,
+         -- when the visit last became complete (COMPLETED_MARKER_AT: a reused record keeps its old created_at)
+         CASE WHEN ss.id IS NULL THEN GREATEST(r.created_at, COALESCE(r.recap_sms_sent_at, r.created_at))
+              ELSE (SELECT ${COMPLETED_MARKER_AT} FROM (${CANONICAL_SIBLING}) canonical)
+         END AS completed_at
     FROM service_records r
     LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id
    WHERE r.id = ANY(string_to_array(?, ',')::uuid[])`;
@@ -588,11 +592,12 @@ function foldSendRows(rows, out) {
  *                          on a visit whose report is waived too (a required report email is still owed)
  *   firstConfirmedSendAt   the earliest readable time of any confirmed send (Date) or null
  *   confirmedWithoutTime   some confirmed send has no readable time (stored time missing or malformed)
+ *   completedAt            when the visit last became complete (COMPLETED_MARKER_AT, the detectors' own anchor)
  * A record with no evidence at all is { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false }.
  */
 async function deliveryEvidenceForRecords(recordIds, knex = db) {
   const ids = [...new Set((recordIds || []).map((id) => String(id).toLowerCase()))];
-  const out = new Map(ids.map((id) => [id, { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false }]));
+  const out = new Map(ids.map((id) => [id, { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false, completedAt: null }]));
   if (!ids.length) return out;
   const [exempt, sends] = await Promise.all([
     knex.raw(EVIDENCE_EXEMPT_SQL, [ids.join(',')]),
@@ -602,6 +607,7 @@ async function deliveryEvidenceForRecords(recordIds, knex = db) {
   for (const row of exempt.rows) {
     const id = String(row.record_id).toLowerCase();
     out.get(id).exempt = row.exempt === true;
+    out.get(id).completedAt = row.completed_at ? new Date(row.completed_at) : null;
     if (row.report_waived === true) reportWaived.add(id);
   }
   const { blocked, summaryPair, confirmed } = foldSendRows(sends.rows, out);
