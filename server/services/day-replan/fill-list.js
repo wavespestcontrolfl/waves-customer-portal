@@ -84,14 +84,17 @@ async function openEstimates(conn, now) {
 /**
  * The block's best fit, or null (routeFits come least added drive first): the visit runs inside the block, from the
  * van's arrival (or the window's start, when the van is early) to its end on the modeled route (the window's length
- * when the route gave no end).
+ * when the route gave no end). `length` is the visit as booked (its window: the catalog length); `onSiteMin` is the
+ * route plan's minutes on site, which can be shorter (owner 2026-11-19: the visit row is 1 hour, the plan keeps its
+ * own minutes).
  */
 function fitInside(block, routeFits) {
   for (const fit of routeFits) {
+    const length = toMin(fit.windowEnd) - toMin(fit.windowStart);
     const startMin = Math.max(toMin(fit.windowStart), toMin(fit.estimatedArrival));
-    const endMin = fit.estimatedDeparture ? toMin(fit.estimatedDeparture) : startMin + toMin(fit.windowEnd) - toMin(fit.windowStart);
+    const endMin = fit.estimatedDeparture ? toMin(fit.estimatedDeparture) : startMin + length;
     if (startMin >= block.start && endMin <= block.start + block.min) {
-      return { windowStart: String(fit.windowStart).slice(0, 5), startMin, endMin, length: endMin - startMin,
+      return { windowStart: String(fit.windowStart).slice(0, 5), startMin, endMin, length, onSiteMin: endMin - startMin,
         addedDriveMin: Math.max(0, Math.round(fit.addedDriveMinutes)) };
     }
   }

@@ -187,12 +187,13 @@ describe('a fit inside the block', () => {
     const late = { windowStart: '09:00', windowEnd: '10:00', estimatedArrival: '09:40', addedDriveMinutes: 3 };
     const early = { windowStart: '09:00', windowEnd: '10:00', estimatedArrival: '08:50', addedDriveMinutes: 5.5 };
     // Arriving at 9:40, the visit ends at 10:40, past the block: the next fit is taken.
-    expect(_internals.fitInside(block, [late, early])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 600, length: 60, addedDriveMin: 6 });
+    expect(_internals.fitInside(block, [late, early])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 600, length: 60, onSiteMin: 60, addedDriveMin: 6 });
     // The offered window stays 9:00 when the van comes at 9:40.
-    expect(_internals.fitInside({ start: 9 * 60, min: 100 }, [late])).toEqual({ windowStart: '09:00', startMin: 580, endMin: 640, length: 60, addedDriveMin: 3 });
-    // The modeled end: 45 minutes on site in a 60-minute window (owner planning minutes) fits a 50-minute block.
+    expect(_internals.fitInside({ start: 9 * 60, min: 100 }, [late])).toEqual({ windowStart: '09:00', startMin: 580, endMin: 640, length: 60, onSiteMin: 60, addedDriveMin: 3 });
+    // The modeled end: 45 minutes on site in a 60-minute visit (owner planning minutes) fits a 50-minute block. The visit
+    // as booked stays 60 minutes.
     const planned = { ...early, estimatedArrival: '09:00', estimatedDeparture: '09:45', addedDriveMinutes: 2 };
-    expect(_internals.fitInside({ start: 9 * 60, min: 50 }, [planned])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 585, length: 45, addedDriveMin: 2 });
+    expect(_internals.fitInside({ start: 9 * 60, min: 50 }, [planned])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 585, length: 60, onSiteMin: 45, addedDriveMin: 2 });
     expect(_internals.fitInside({ start: 9 * 60, min: 44 }, [planned])).toBeNull();
     expect(_internals.fitInside({ start: 9 * 60 + 1, min: 120 }, [early])).toBeNull();
     expect(_internals.fitInside(block, [{ ...early, addedDriveMinutes: -0.4 }]).addedDriveMin).toBe(0);
@@ -215,7 +216,7 @@ describe('fillList', () => {
     expect(lines[0].addedDriveMin).toBeLessThan(lines[1].addedDriveMin);
     expect(lines[1].addedDriveMin).toBeLessThan(lines[2].addedDriveMin);
     for (const line of lines) {
-      expect(line).toMatchObject({ name: `Pat ${line.estimateId}`, label: 'Pest Control', length: 60, endMin: line.startMin + 60 });
+      expect(line).toMatchObject({ name: `Pat ${line.estimateId}`, label: 'Pest Control', length: 60, onSiteMin: 60, endMin: line.startMin + 60 });
       expect(line.startMin).toBeGreaterThanOrEqual(9 * 60);
       expect(line.endMin).toBeLessThanOrEqual(13 * 60);
     }

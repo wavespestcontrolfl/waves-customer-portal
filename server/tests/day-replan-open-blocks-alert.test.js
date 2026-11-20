@@ -152,13 +152,18 @@ describe('the fill list (fill-list.js): open estimates that fit a listed block',
   const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
   // The offered window is the hour the visit starts in: the van may come after it.
   const line = (estimateId, startMin, addedDriveMin, extra = {}) => ({ estimateId, name: `Pat ${estimateId}`, label: 'Pest Control', length: 60,
-    windowStart: hhmm(Math.floor(startMin / 60) * 60), startMin, endMin: startMin + 60, addedDriveMin, ...extra });
+    onSiteMin: 60, windowStart: hhmm(Math.floor(startMin / 60) * 60), startMin, endMin: startMin + 60, addedDriveMin, ...extra });
   const fill = { checked: 4, fitted: 2, noLocation: 1, unread: 1, byBlock: [[line('e1', 560, 4)], [line('e2', 720, 9), line('e1', 780, 12, { name: null })]] };
 
   test('each block carries its technician id, planned or by the hour grid', () => {
     expect(sum.blocks.map((b) => b.techId)).toEqual([TECH, TECH]);
     const grid = _internals.summarize([], new Map(), [{ day: '2026-11-19', technician_id: TECH, stops: 0, blocks: [{ kind: 'hours', start: 480, min: 540, before: null }] }]);
     expect(grid.blocks[0]).toMatchObject({ techId: TECH, grid: true });
+  });
+
+  test('a visit the route plan keeps shorter on site says both: the visit as booked and the minutes on site', () => {
+    const planned = { ...fill, byBlock: [[line('e1', 560, 4, { onSiteMin: 35, endMin: 595 })], []] };
+    expect(_internals.detailText(sum, planned)).toContain('  - Open estimate, Pat e1 (Pest Control, 1 h visit, 35 min on site): +4 min drive, finishes 9:55 AM');
   });
 
   test('the lines sit under their block, then the fill list\'s own line', () => {
