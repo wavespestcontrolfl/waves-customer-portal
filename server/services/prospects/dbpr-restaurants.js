@@ -358,20 +358,26 @@ async function loadFile(kind, fetchText, now) {
   // with nothing in it yet: it passes here, and readProblem fails it once a read of the new year has held a row. A
   // file whose rows all fall outside the area is fine.
   if (!rowsRead && !/-07-0[1-7]$/.test(today)) throw new Error('empty file');
-  // Malformed rows over a tenth of the rows that count mean a changed format (a new date format, rows of a new
-  // width), not a stray row: the file fails, even beside good rows. With no good row, one malformed row fails it. The
-  // rows that count are the good and malformed ones: malformed counts rows in the area and rows that cannot be placed
-  // (a wrong width); a row outside the area never counts, whatever its date. A file whose rows all fall outside the
-  // area, or whose good rows cite nothing, succeeds. Each file holds the whole year, so a later good read still
-  // writes every row.
-  if (counts.malformed > (counts.valid + counts.malformed) * MALFORMED_SHARE) throw new Error('too many malformed rows');
   // Rows without one readable date up to today leave nothing to measure the file by (a cut file of rows outside the
   // area, say): it fails. Only a header alone, above, reads with no fiscal year.
   if (rowsRead && !years.size) throw new Error('no dated row');
   // The fiscal year most rows fall in (null for a header alone) and that year's newest date, so a stray date of
   // another year never moves a file or makes it look fresh.
   const [fiscalYear, year] = [...years].sort((a, b) => b[1].rows - a[1].rows)[0] || [null, null];
-  return { records, malformed: counts.malformed, rowsRead, fiscalYear, newest: year && year.newest };
+  // A row in the area dated in another fiscal year is a stray date (a mistyped one, or a file the state started over
+  // late). Stored, it would stay wrong (a known key only refreshes last_seen_at), so like a date after today it is
+  // malformed and not kept; the file of its own year stores it.
+  const kept = records.filter((record) => fiscalYearOf(record.event_date) === fiscalYear);
+  counts.malformed += records.length - kept.length;
+  counts.valid -= records.length - kept.length;
+  // Malformed rows over a tenth of the rows that count mean a changed format (a new date format, rows of a new
+  // width), not a stray row: the file fails, even beside good rows. With no good row, one malformed row fails it. The
+  // rows that count are the good and malformed ones: malformed counts rows in the area and rows that cannot be placed
+  // (a wrong width) or that are dated in another fiscal year; a row outside the area never counts, whatever its date. A file whose rows all fall outside the
+  // area, or whose good rows cite nothing, succeeds. Each file holds the whole year, so a later good read still
+  // writes every row.
+  if (counts.malformed > (counts.valid + counts.malformed) * MALFORMED_SHARE) throw new Error('too many malformed rows');
+  return { records: kept, malformed: counts.malformed, rowsRead, fiscalYear, newest: year && year.newest };
 }
 
 // The first day (July 1) of the fiscal year a day (YYYY-MM-DD) falls in.

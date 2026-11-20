@@ -423,10 +423,18 @@ describe('syncRestaurantProspects', () => {
     store = makeStore();
     reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
     // July 6, 2027, and the state has not started the file over: its rows are last year's, one stray date aside.
+    // The stray row is malformed and not stored: stored, its date could never be corrected.
     const late = [...Array.from({ length: 19 }, (_, i) => inspRow({ visit: String(9001 + i), date: '06/28/2027' })), inspRow({ visit: '9101', date: '07/02/2027' })];
     fetchText = makeFetch({ ...licFiles('07/02/2027'), '7fdinspi.csv': () => inspCsv(late) });
-    expect((await sync({ fetchText, store, now: new Date('2027-07-06T15:36:00Z') })).failures).toBe(0);
+    const lateRead = await sync({ fetchText, store, now: new Date('2027-07-06T15:36:00Z') });
+    expect(lateRead.failures).toBe(0);
+    expect(lateRead.files.inspection).toEqual({ kept: 19, malformed: 1, upserted: 19 });
+    expect(upserts.map((r) => r.source_key)).not.toContain('9101');
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
+    // The state corrects the date: the same visit, now June 30, is stored with it.
+    late[19] = inspRow({ visit: '9101', date: '06/30/2027' });
+    expect((await sync({ fetchText, store, now: new Date('2027-07-06T15:36:00Z') })).files.inspection).toEqual({ kept: 20, malformed: 0, upserted: 20 });
+    expect(upserts.filter((r) => r.source_key === '9101').map((r) => r.event_date)).toEqual(['2027-06-30']);
     // Started over: 3 rows of the new year are its first measure, not a short read.
     fetchText = makeFetch({ ...licFiles('07/12/2027'), '7fdinspi.csv': () => visitsCsv(3, '07/06/2027') });
     const restarted = await sync({ fetchText, store, now: new Date('2027-07-13T15:36:00Z') });
@@ -515,7 +523,7 @@ describe('syncRestaurantProspects', () => {
     const june = [...Array.from({ length: 19 }, (_, i) => inspRow({ visit: String(9001 + i), date: '06/28/2027' })), inspRow({ visit: '9101', date: '07/15/2027' })];
     fetchText = makeFetch({ ...licFiles('07/19/2027'), '7fdinspi.csv': () => inspCsv(june) });
     const result = await sync({ fetchText, store, now: new Date('2027-07-20T15:36:00Z') });
-    expect(result.files.inspection).toEqual({ kept: 20, malformed: 0, upserted: 20, stale: true });
+    expect(result.files.inspection).toEqual({ kept: 19, malformed: 1, upserted: 19, stale: true });
     expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is stale: no row from the last 14 days (newest 2027-06-28)');
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
   });
