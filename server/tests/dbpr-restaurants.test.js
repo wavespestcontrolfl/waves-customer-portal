@@ -71,7 +71,9 @@ describe('parseInspectionRows', () => {
       inspRow({ visit: '' }),
       inspRow({ visit: '9105', licenseId: '1234567890123' }),
     ]));
-    expect(svc.parseInspectionRows(rows).map((r) => [r.source_key, r.license_id])).toEqual([['9101', '5001']]);
+    const counts = { malformed: 0 };
+    expect(svc.parseInspectionRows(rows, counts).map((r) => [r.source_key, r.license_id])).toEqual([['9101', '5001']]);
+    expect(counts.malformed).toBe(5);
   });
 
   test('keeps only code-35 visits in the three counties outside Punta Gorda, with trimmed headers and a plain date', () => {
@@ -115,6 +117,20 @@ describe('parseLicenseRows and the phone rule', () => {
       detail: { applicationType: 'Plan Review and Initial (COMBO SEAT)' },
     });
     expect(out[1].seats).toBeNull();
+  });
+
+  test('an application number longer than the key column is skipped and counted, never cut', () => {
+    const rows = parseDbprCsv(licCsv([
+      licRow({ app: 'A'.repeat(40) }), licRow({ app: 'A'.repeat(41) }), licRow({ app: '' }), licRow({ app: '7009', county: 'Polk' }),
+    ]));
+    const counts = { malformed: 0 };
+    expect(svc.parseLicenseRows(rows, 'new_license', counts).map((r) => r.source_key)).toEqual(['A'.repeat(40)]);
+    expect(counts.malformed).toBe(2);
+  });
+
+  test('a seat count too big for the integer column is left blank, so its batch still inserts', () => {
+    const rows = parseDbprCsv(licCsv([licRow({ seats: '999999999' }), licRow({ app: '7002', seats: '9999999999' })]));
+    expect(svc.parseLicenseRows(rows, 'new_license').map((r) => r.seats)).toEqual([999999999, null]);
   });
 
   test('ownership change: the phone sits under Mailing County Code and is picked by shape', () => {
@@ -236,7 +252,7 @@ describe('syncRestaurantProspects', () => {
     const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
     expect(upserts.map((r) => `${r.kind}:${r.source_key}`)).toEqual(['inspection:9001', 'new_license:7001', 'owner_change:7001']);
     expect(result).toMatchObject({ failures: 0, reportsRead: 0, reportsFailed: 0 });
-    expect(result.files.inspection).toEqual({ kept: 1, upserted: 1 });
+    expect(result.files.inspection).toEqual({ kept: 1, malformed: 0, upserted: 1 });
   });
 
   test('reads reports for the last 45 days, newest first, at most 100, one request a second', async () => {
@@ -273,7 +289,7 @@ describe('syncRestaurantProspects', () => {
     expect(store.bumpAttempts.mock.calls.map(([id]) => id)).toEqual(['a', 'b', 'c']);
     expect(store.saveReport.mock.calls.map(([id]) => id)).toEqual(['d']);
     expect(fetchText.mock.calls.filter(([u]) => u.includes('inspectionDetail.asp'))).toHaveLength(3);
-    expect(result).toMatchObject({ reportsRead: 1, reportsFailed: 3 });
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 3 });
   });
 
   test('a failed download is logged by count, other files still load, and nothing throws', async () => {
@@ -296,6 +312,37 @@ describe('syncRestaurantProspects', () => {
     expect(result).toMatchObject({ failures: 1, reportsRead: 0, reportsFailed: 0 });
     expect(store.saveReport.mock.calls.map(([id]) => id)).toEqual(['a']);
     expect(store.bumpAttempts).not.toHaveBeenCalled();
+  });
+
+  test('a run where every report read fails is a failed run', async () => {
+    store = makeStore([{ id: 'a', source_key: '9000', license_id: '5001' }, { id: 'b', source_key: '9001', license_id: '5001' }]);
+    fetchText = jest.fn(async (url) => (url.includes('inspectionDetail.asp') ? '<html>a changed page</html>' : files[url.split('/').pop()]()));
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(result).toMatchObject({ failures: 1, reportsRead: 0, reportsFailed: 2 });
+  });
+
+  test('rows skipped for a bad key are counted per file, and the log carries the count only', async () => {
+    store = makeStore([]);
+    fetchText = makeFetch({ 'newfood.csv': () => licCsv([licRow({ app: '7001' }), licRow({ app: 'X'.repeat(41) })]) });
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(result.failures).toBe(0);
+    expect(result.files.new_license).toEqual({ kept: 1, malformed: 1, upserted: 1 });
+    expect(logger.info.mock.calls.map((c) => c[0]).join('\n')).toMatch(/new_license=1\(1 malformed\)/);
+  });
+
+  test.each([
+    ['Business (DBA-Does Business As) Name', '7fdinspi.csv', 'inspection'],
+    ['Location Address', '7fdinspi.csv', 'inspection'],
+    ['Business Name', 'newfood.csv', 'new_license'],
+    ['Location Street Address', 'newfood.csv', 'new_license'],
+    ['Primary Phone Number', 'chgownr_food.csv', 'owner_change'],
+  ])('a renamed stored column (%s in %s) refuses that file whole, so blanks are never stored', async (column, name, kind) => {
+    store = makeStore([]);
+    fetchText = makeFetch({ [name]: () => files[name]().replace(`"${column}"`, `"${column} (renamed)"`) });
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(result.files[kind]).toEqual({ failed: true });
+    expect(result.failures).toBe(1);
+    expect(upserts.some((r) => r.kind === kind)).toBe(false);
   });
 
   test('a file without a column the parsers need is refused whole, and the other files still load', async () => {

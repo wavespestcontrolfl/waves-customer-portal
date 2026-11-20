@@ -33,14 +33,28 @@ const FILES = {
   new_license: 'newfood.csv',
   owner_change: 'chgownr_food.csv',
 };
-// Every column a parser needs to keep, place or look up a row. A file without one is refused whole: no License ID
-// would store inspections whose report can never be read, and no city or ZIP would let Punta Gorda rows through.
+// Every column a parser reads. A file without one is refused whole: no License ID would store inspections whose
+// report can never be read, no city or ZIP would let Punta Gorda rows through, and a renamed name, address or phone
+// column would store blanks that no later file repairs (a known key only refreshes last_seen_at). A blank value in
+// one row is still allowed. The two license files share one layout.
 const PLACE_COLUMNS = ['Location City', 'Location Zip Code'];
+const LICENSE_COLUMNS = [
+  'Application Number', 'Application Type', 'Application Approval Date', 'License Number', 'License Type Code',
+  'Business Name', 'Location Street Address', 'Location Address Line 2', ...PLACE_COLUMNS, 'Location County',
+  'Primary Phone Number', 'Secondary Phone Number', 'Mailing County Code', 'Number of Seats',
+];
 const REQUIRED_COLUMNS = {
-  inspection: ['County Name', ...PLACE_COLUMNS, 'Inspection Date', 'Inspection Visit ID', 'License ID', 'Violation 35'],
-  new_license: ['Application Number', 'Application Approval Date', 'Location County', ...PLACE_COLUMNS],
-  owner_change: ['Application Number', 'Application Approval Date', 'Location County', ...PLACE_COLUMNS],
+  inspection: [
+    'County Name', ...PLACE_COLUMNS, 'Location Address', 'Business (DBA-Does Business As) Name', 'License Number',
+    'License Type Code', 'License ID', 'Inspection Visit ID', 'Inspection Date', 'Inspection Type',
+    'Inspection Disposition', 'Number of High Priority Violations', 'Violation 35',
+  ],
+  new_license: LICENSE_COLUMNS,
+  owner_change: LICENSE_COLUMNS,
 };
+// restaurant_prospects.source_key is varchar(40). A longer key is skipped, never cut: two cut keys could merge two
+// applications, and one value too long would make PostgreSQL refuse its whole insert batch.
+const KEY_MAX = 40;
 
 const FILE_TIMEOUT_MS = 60 * 1000;
 const REPORT_TIMEOUT_MS = 15 * 1000;
@@ -94,13 +108,18 @@ function pickPhone(row) {
   return null;
 }
 
-const wholeNumber = (v) => (/^\d+$/.test(String(v || '').trim()) ? Number(String(v).trim()) : null);
+// At most 9 digits, so a seat count always fits the integer column (one value out of range would refuse its whole
+// insert batch).
+const wholeNumber = (v) => (/^\d{1,9}$/.test(String(v || '').trim()) ? Number(String(v).trim()) : null);
 
 // The report page's two ids are digits only (reportUrl builds the address from nothing else).
 const ID_RE = /^\d{1,12}$/;
 
-/** Inspection rows -> one record per visit that cited violation 35, in the three counties. */
-function parseInspectionRows(rows) {
+/**
+ * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row in the area with a
+ * bad id or date is skipped and counted in counts.malformed.
+ */
+function parseInspectionRows(rows, counts = { malformed: 0 }) {
   const out = [];
   for (const row of rows) {
     if (!inServiceArea(row['County Name'], row['Location City'], row['Location Zip Code'])) continue;
@@ -110,14 +129,17 @@ function parseInspectionRows(rows) {
     const eventDate = parseUsDate(row['Inspection Date']);
     // A row without both report ids is left out: its report could never be read, and once stored it would block a
     // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
-    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate) continue;
+    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate) {
+      counts.malformed += 1;
+      continue;
+    }
     out.push({
       kind: 'inspection',
       source_key: sourceKey,
       license_number: clean(row['License Number'], 40),
       license_id: licenseId,
       license_type_code: clean(row['License Type Code'], 20),
-      business_name: clean(row['Business Name'] || row['Business (DBA-Does Business As) Name'], 200),
+      business_name: clean(row['Business (DBA-Does Business As) Name'], 200),
       address: clean(row['Location Address'], 200),
       city: clean(row['Location City'], 80),
       zip: clean(row['Location Zip Code'], 10),
@@ -135,13 +157,19 @@ function parseInspectionRows(rows) {
   return out;
 }
 
-/** New-license or ownership-change rows (same layout) -> one record per application in the three counties. */
-function parseLicenseRows(rows, kind) {
+/**
+ * New-license or ownership-change rows (same layout) -> one record per application in the three counties. A row in
+ * the area with no application number, or one longer than the key column, is skipped and counted in counts.malformed.
+ */
+function parseLicenseRows(rows, kind, counts = { malformed: 0 }) {
   const out = [];
   for (const row of rows) {
     if (!inServiceArea(row['Location County'], row['Location City'], row['Location Zip Code'])) continue;
     const sourceKey = clean(row['Application Number']);
-    if (!sourceKey) continue;
+    if (!sourceKey || sourceKey.length > KEY_MAX) {
+      counts.malformed += 1;
+      continue;
+    }
     out.push({
       kind,
       source_key: sourceKey,
@@ -258,14 +286,17 @@ async function loadFile(kind, fetchText) {
   const rows = parseDbprCsv(text);
   const missing = REQUIRED_COLUMNS[kind].filter((c) => !rows.length || !(c in rows[0]));
   if (missing.length) throw new Error('unexpected file layout');
-  return kind === 'inspection' ? parseInspectionRows(rows) : parseLicenseRows(rows, kind);
+  const counts = { malformed: 0 };
+  const records = kind === 'inspection' ? parseInspectionRows(rows, counts) : parseLicenseRows(rows, kind, counts);
+  return { records, malformed: counts.malformed };
 }
 
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
-      const records = dedupeByKey(await loadFile(kind, deps.fetchText));
-      result.files[kind] = { kept: records.length, upserted: await deps.store.upsertRecords(records) };
+      const { records, malformed } = await loadFile(kind, deps.fetchText);
+      const unique = dedupeByKey(records);
+      result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
     } catch (err) {
       result.failures += 1;
       result.files[kind] = { failed: true };
@@ -303,6 +334,12 @@ async function readReports(deps, result, now) {
       await deps.store.bumpAttempts(pending[i].id);
     }
   }
+  // Every read failing (the site down, or a changed page) is a failed run, not a quiet week. Some failed reads beside
+  // a good one are not.
+  if (result.reportsFailed > 0 && result.reportsRead === 0) {
+    result.failures += 1;
+    logger.warn(`[dbpr-prospects] every report read failed (${result.reportsFailed})`);
+  }
 }
 
 /**
@@ -323,7 +360,8 @@ async function syncRestaurantProspects(deps = {}) {
     logger.warn(`[dbpr-prospects] sync stopped early (${err.code || err.name})`);
   }
   result.elapsedMs = Date.now() - started;
-  const counts = Object.entries(result.files).map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}`).join(' ');
+  const counts = Object.entries(result.files)
+    .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${f.malformed ? `(${f.malformed} malformed)` : ''}`).join(' ');
   logger.info(`[dbpr-prospects] ${counts} reportsRead=${result.reportsRead} reportsFailed=${result.reportsFailed} pestFound=${result.pestFound} failures=${result.failures} ${result.elapsedMs}ms`);
   return result;
 }
