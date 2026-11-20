@@ -119,7 +119,9 @@ const wholeNumber = (v) => (/^\d{1,9}$/.test(String(v || '').trim()) ? Number(St
 const ID_RE = /^\d{1,12}$/;
 
 // csv-parse keeps a row cut short, with only the cells it has. Such a row is skipped and counted: stored, it would
-// keep blanks that no later file repairs. An empty cell is a cell, so it passes.
+// keep blanks that no later file repairs. An empty cell is a cell, so it passes. The parsers test this before the
+// area, as a row cut before its county cannot be placed at all. Each row in the area is then checked whole and,
+// when it passes, counted as good (counts.valid), cited or not: loadFile fails a file with no good row in the area.
 function hasEveryColumn(row, kind) {
   return REQUIRED_COLUMNS[kind].every((column) => column in row);
 }
@@ -129,24 +131,26 @@ function hasEveryColumn(row, kind) {
  * cut short (checked before violation 35, which a short row can lack), or a code-35 row with a bad id or date, is
  * skipped and counted in counts.malformed.
  */
-function parseInspectionRows(rows, counts = { malformed: 0 }) {
+function parseInspectionRows(rows, counts = { malformed: 0, valid: 0 }) {
   const out = [];
   for (const row of rows) {
-    if (!inServiceArea(row['County Name'], row['Location City'], row['Location Zip Code'])) continue;
     if (!hasEveryColumn(row, 'inspection')) {
       counts.malformed += 1;
       continue;
     }
-    if (!(Number(row['Violation 35']) > 0)) continue;
+    if (!inServiceArea(row['County Name'], row['Location City'], row['Location Zip Code'])) continue;
     const sourceKey = clean(row['Inspection Visit ID']);
     const licenseId = clean(row['License ID'], 40);
     const eventDate = parseUsDate(row['Inspection Date']);
+    const cited = wholeNumber(row['Violation 35']);
     // A row without both report ids is left out: its report could never be read, and once stored it would block a
     // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
-    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate) {
+    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || cited === null) {
       counts.malformed += 1;
       continue;
     }
+    counts.valid += 1;
+    if (!(cited > 0)) continue;
     out.push({
       kind: 'inspection',
       source_key: sourceKey,
@@ -177,16 +181,21 @@ function parseInspectionRows(rows, counts = { malformed: 0 }) {
  * is skipped and counted in counts.malformed: once stored, a known key only refreshes last_seen_at, so a corrected
  * copy in a later file could never fill it in.
  */
-function parseLicenseRows(rows, kind, counts = { malformed: 0 }) {
+function parseLicenseRows(rows, kind, counts = { malformed: 0, valid: 0 }) {
   const out = [];
   for (const row of rows) {
-    if (!inServiceArea(row['Location County'], row['Location City'], row['Location Zip Code'])) continue;
-    const sourceKey = clean(row['Application Number']);
-    const eventDate = parseUsDate(row['Application Approval Date']);
-    if (!hasEveryColumn(row, kind) || !sourceKey || sourceKey.length > KEY_MAX || !eventDate) {
+    if (!hasEveryColumn(row, kind)) {
       counts.malformed += 1;
       continue;
     }
+    if (!inServiceArea(row['Location County'], row['Location City'], row['Location Zip Code'])) continue;
+    const sourceKey = clean(row['Application Number']);
+    const eventDate = parseUsDate(row['Application Approval Date']);
+    if (!sourceKey || sourceKey.length > KEY_MAX || !eventDate) {
+      counts.malformed += 1;
+      continue;
+    }
+    counts.valid += 1;
     out.push({
       kind,
       source_key: sourceKey,
@@ -259,7 +268,7 @@ const defaultStore = { upsertRecords };
 
 async function loadFile(kind, fetchText) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
-  const counts = { malformed: 0 };
+  const counts = { malformed: 0, valid: 0 };
   const records = [];
   let rowsRead = 0;
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
@@ -272,9 +281,9 @@ async function loadFile(kind, fetchText) {
   // A header with no rows is a download cut short, not a quiet week, so the file fails. (A file whose rows all fall
   // outside the area is fine. The first file of a fiscal year can also be empty: a run on July 1 reads as failed.)
   if (!rowsRead) throw new Error('empty file');
-  // Rows in the area that all fail to parse mean a changed format (a new date format, say), not a quiet week: the
-  // file fails. A file whose rows all fall outside the area still succeeds.
-  if (!records.length && counts.malformed) throw new Error('every row in the area malformed');
+  // Malformed rows and not one good row in the area mean a changed format (a new date format, say), not a quiet
+  // week: the file fails. A file whose rows all fall outside the area, or whose good rows cite nothing, succeeds.
+  if (!counts.valid && counts.malformed) throw new Error('no good row in the area');
   return { records, malformed: counts.malformed };
 }
 

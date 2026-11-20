@@ -68,6 +68,23 @@ describe('parseInspectionRows', () => {
     expect(counts.malformed).toBe(1);
   });
 
+  test('a row cut before its county is counted, never passed over as outside the area', () => {
+    const short = inspRow({ visit: '9002' }).split(',').slice(0, 2).join(','); // ends at County Number
+    const counts = { malformed: 0, valid: 0 };
+    expect(svc.parseInspectionRows(parseDbprCsv(inspCsv([inspRow(), short])), counts).map((r) => r.source_key)).toEqual(['9001']);
+    expect(counts).toEqual({ malformed: 1, valid: 1 });
+  });
+
+  test('every row in the area is checked whole, cited or not; a good one counts as good', () => {
+    const rows = parseDbprCsv(inspCsv([
+      inspRow({ visit: '9201', v35: 0 }), inspRow({ visit: '9202', v35: 0, date: '2026-10-20' }), inspRow({ visit: '9203', v35: '' }),
+      inspRow({ visit: '9204', county: 'Polk', date: '2026-10-20' }),
+    ]));
+    const counts = { malformed: 0, valid: 0 };
+    expect(svc.parseInspectionRows(rows, counts)).toEqual([]);
+    expect(counts).toEqual({ malformed: 2, valid: 1 });
+  });
+
   test('leaves out a row without both digit-only report ids, so a corrected copy in a later file can still enter', () => {
     const rows = parseDbprCsv(inspCsv([
       inspRow({ visit: '9101' }),
@@ -139,10 +156,11 @@ describe('parseLicenseRows and the phone rule', () => {
 
   test('a row cut short is skipped and counted; an empty cell is still a cell', () => {
     const short = licRow({ app: '7002' }).split(',').slice(0, 27).join(','); // ends at Location County
-    const rows = parseDbprCsv(licCsv([licRow({ app: '7001', seats: '' }), short]));
-    const counts = { malformed: 0 };
+    const noCounty = licRow({ app: '7003' }).split(',').slice(0, 26).join(','); // ends before Location County
+    const rows = parseDbprCsv(licCsv([licRow({ app: '7001', seats: '' }), short, noCounty]));
+    const counts = { malformed: 0, valid: 0 };
     expect(svc.parseLicenseRows(rows, 'new_license', counts).map((r) => [r.source_key, r.seats])).toEqual([['7001', null]]);
-    expect(counts.malformed).toBe(1);
+    expect(counts).toEqual({ malformed: 2, valid: 1 });
   });
 
   test('a seat count too big for the integer column is left blank, so its batch still inserts', () => {
@@ -272,6 +290,14 @@ describe('syncRestaurantProspects', () => {
     const result = await svc.syncRestaurantProspects({ fetchText, store });
     expect(result.failures).toBe(1);
     expect(result.files).toMatchObject({ new_license: { failed: true }, owner_change: { kept: 1, malformed: 1 } });
+  });
+
+  test('good inspections that cite nothing, beside a malformed row, are a quiet week, not a failed file', async () => {
+    store = makeStore();
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9301', v35: 0 }), inspRow({ visit: '9302', date: 'not a date' })]) });
+    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(result.failures).toBe(0);
+    expect(result.files.inspection).toEqual({ kept: 0, malformed: 1, upserted: 0 });
   });
 
   test('a file without a column the parsers need is refused whole, and the other files still load', async () => {
