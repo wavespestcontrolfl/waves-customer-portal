@@ -223,10 +223,12 @@ async function loadParkedReviews({ database = db } = {}) {
     .whereNull('missing_since')
     .modify((q) => whereNeedsRealReply(q))
     // google_uncertain / persist_failed: our reply may already be live on
-    // Google. Those parks ring their own "needs reconciling" bell, and the
-    // sync records a live reply when it reads one, so they are not listed as
-    // "no reply".
+    // Google. reconcile_failed: Google already shows an owner reply that was
+    // not recorded here. Those parks ring their own "needs reconciling" bell,
+    // and the sync records a live reply when it reads one, so they are not
+    // listed as "no reply".
     .modify((q) => whereNoReconcilePark(q))
+    .where((q) => q.whereNull('auto_reply_reason').orWhereNot('auto_reply_reason', 'reconcile_failed'))
     .orderByRaw('review_created_at ASC NULLS LAST, id ASC')
     .select('id', 'reviewer_name', 'review_created_at', 'location_id');
   const locationNames = new Map(WAVES_LOCATIONS.map((l) => [l.id, l.name]));

@@ -182,9 +182,10 @@ maybeDescribe('monday review bell (live Postgres)', () => {
         await review({ reviewer_name: '_stats' });
         await review({ location_id: 'retired-office' });
         await review({ auto_reply_status: 'queued' });
-        // Our reply may already be live on Google: these have their own "needs reconciling" bell.
+        // A reply may already be live on Google: these have their own "needs reconciling" bell.
         await review({ auto_reply_reason: 'google_uncertain' });
         await review({ auto_reply_reason: 'persist_failed' });
+        await review({ auto_reply_reason: 'reconcile_failed' });
         const after = await Review._private.loadParkedReviews();
         expect(after.count - before.count).toBe(2);
         // Only this case's rows: the shared CI database may hold other parked reviews.

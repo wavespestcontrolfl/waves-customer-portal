@@ -8,7 +8,7 @@ const mockNotify = jest.fn(async () => ({}));
 const mockAccountFacts = jest.fn(async () => null);
 const mockVerify = jest.fn(() => null);
 const mockGbp = { isLocationConfigured: jest.fn(async () => true) };
-const state = { rows: [], raws: [] };
+const state = { rows: [], raws: [], updates: [] };
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/google-business', () => mockGbp);
@@ -95,6 +95,7 @@ jest.mock('../models/db', () => {
       async first(...cols) { return agg ? aggregate(hits()) : hits()[0] || null; },
       update(patch) {
         const hits = state.rows.filter((r) => filters.every((f) => f(r)));
+        state.updates.push({ patch, ids: hits.map((r) => r.id) });
         hits.forEach((r) => Object.assign(r, patch));
         // knex: await -> the count; .returning(cols) -> the updated rows.
         const result = Promise.resolve(hits.length);
@@ -160,6 +161,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   state.rows = [];
   state.raws = [];
+  state.updates = [];
   state.migration = { migration_time: '2026-08-27T12:00:00Z' };
   Runner._resetRolloutCutoffCache();
   delete process.env.GATE_REVIEW_AUTO_REPLY;
@@ -659,6 +661,52 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows.find((r) => r.id === 'old-f-racing')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', review_reply: `[DRAFT] ${GOOD_DRAFT.text}` });
     const expiredBells = mockNotify.mock.calls.filter((c) => c[3]?.metadata?.reason === 'retry_expired');
     expect(expiredBells.map((c) => c[3].metadata.reviewId)).toEqual(['old-f', 'old-f-racing']);
+  });
+
+  test('an expired retry parks in ONE statement (draft slot + pending bell stamp) that misses when the row changed after it was read', async () => {
+    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
+    state.rows = [
+      row({ id: 'a', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text }),
+      row({ id: 'b', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: 'Hi Dana,\n\nAn older draft.' }),
+    ];
+    // While a's bell rings, a publish retry re-drafts b and fails again: new draft, new error, still failed.
+    // A new object, so the sweep's snapshot of b keeps the values it read, as a real SELECT would.
+    mockNotify.mockImplementationOnce(async () => { state.rows[1] = { ...state.rows[1], auto_reply_draft: GOOD_DRAFT.text, auto_reply_error: 'GBP 503' }; return {}; });
+    await Runner.expireOverAgeQueued();
+    const parks = state.updates.filter((u) => u.patch.auto_reply_status === 'parked' && u.ids.length);
+    expect(parks).toHaveLength(1);
+    // The park, the draft in the empty slot and the pending stamp land together; a crash before the bell leaves the stamp for the failed-bell sweep.
+    expect(parks[0]).toMatchObject({ ids: ['a'], patch: { auto_reply_reason: 'retry_expired', review_reply: `[DRAFT] ${GOOD_DRAFT.text}`, auto_reply_error: 'bell_failed:retry_expired:1' } });
+    // The bell rang, so its stamp is gone.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_error: null });
+    // b changed after it was read: the statement missed, so the older draft never reached the reply slot.
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: 'failed', review_reply: null });
+    await Runner.expireOverAgeQueued();
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'retry_expired', review_reply: `[DRAFT] ${GOOD_DRAFT.text}`, auto_reply_error: 'GBP 503' });
+  });
+
+  test('an expired reconcile_failed retry keeps its reason and rings "needs reconciling": Google already shows a reply', async () => {
+    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
+    state.rows = [row({ id: 'rc', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_draft: GOOD_DRAFT.text })];
+    await Runner.expireOverAgeQueued();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed' });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    const [, title, body, opts] = mockNotify.mock.calls[0];
+    expect(title).toBe('Review reply needs reconciling');
+    expect(body).toContain('Google shows a reply to this review that was not recorded here.');
+    expect(opts).toMatchObject({ link: '/admin/reviews?responded=all&review=rc', metadata: { reason: 'reconcile_failed', needsAction: true } });
+  });
+
+  test('a reconciliation that still fails on the last attempt parks as reconcile_failed, not google_failed', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 2 })];
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('reconcile_failed', 'Google shows an owner reply but recording it failed: connection reset', { status: 503 }));
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 3 });
+    const bell = mockNotify.mock.calls.find((c) => c[3]?.metadata?.reason === 'reconcile_failed');
+    expect(bell[1]).toBe('Review reply needs reconciling');
+    expect(bell[2]).toContain('not recorded here (Google shows an owner reply but recording it failed: connection reset)');
   });
 
   test('a failed live-reply reconciliation retries instead of closing the row as already_replied (codex r74)', async () => {
