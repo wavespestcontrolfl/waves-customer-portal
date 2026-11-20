@@ -224,7 +224,9 @@ async function loadParkedReviews({ database = db } = {}) {
   const rows = await database('google_reviews')
     .where('auto_reply_status', 'parked')
     .whereIn('location_id', WAVES_LOCATIONS.map((l) => l.id))
-    .where((q) => q.whereNull('reviewer_name').orWhereNot('reviewer_name', '_stats'))
+    // The Reviews page's own predicate (routes/admin-reviews.js): the list never names a review the linked page
+    // hides (SQL "!=" leaves out a row with no reviewer name, as the page does).
+    .where('reviewer_name', '!=', '_stats')
     .where((q) => q.where('dismissed', false).orWhereNull('dismissed'))
     .whereNull('missing_since')
     .modify((q) => whereNeedsRealReply(q))
@@ -371,7 +373,8 @@ function composeReview(lists) {
     action,
     why,
     severity: 'needs-you',
-    link: '/admin/dashboard',
+    // One list opens its own page (list 5: Reviews); several open the dashboard.
+    link: n === 1 && lists[0].link ? lists[0].link : '/admin/dashboard',
     subject: { type: 'check', id: SUBJECT_ID },
     doneWhen: 'reviewed',
     who: 'person',

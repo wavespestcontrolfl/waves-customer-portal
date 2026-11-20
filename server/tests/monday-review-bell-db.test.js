@@ -180,6 +180,7 @@ maybeDescribe('monday review bell (live Postgres)', () => {
         await review({ dismissed: true });
         await review({ missing_since: ago(1) });
         await review({ reviewer_name: '_stats' });
+        await review({ reviewer_name: null }); // the Reviews page hides a review with no name, so the list does too
         await review({ location_id: 'retired-office' });
         await review({ auto_reply_status: 'queued' });
         // A reply may already be on Google for these: listed with "check Google first". No park reason drops off the list.

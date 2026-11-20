@@ -105,6 +105,14 @@ describe('one alert for a busy week', () => {
     expect(alert.link).toBe('/admin/dashboard');
     expect(alert.metadata).toMatchObject({ area: 'System', severity: 'needs-you', who: 'person', doneWhen: 'reviewed' });
   });
+
+  test('a bell with one list opens that list\'s page: parked reviews only opens Reviews', () => {
+    const { spec } = composeReview(buildLists({
+      alerts: { count: 0, headlines: [] }, promises: { count: 0 }, drafts: { count: 0, total: 0 }, visits: { count: 0, priced: 0 },
+      parked: { count: 2, entries: [{ name: 'Dana Whitfield', at: new Date('2026-11-13T15:00:00Z'), location: 'Lakewood Ranch', checkGoogle: false }, { name: 'Lee Park', at: new Date('2026-11-14T15:00:00Z'), location: 'Venice', checkGoogle: false }] },
+    }));
+    expect(composeAdminAlert(spec).link).toBe('/admin/reviews');
+  });
 });
 
 describe('last week, zero weeks, and the same day', () => {
