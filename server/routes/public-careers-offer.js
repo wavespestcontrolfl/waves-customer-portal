@@ -69,6 +69,7 @@ router.post('/:token/text-consent', offerLimiter, handle('text consent', (req) =
 
 router.post('/:token/accept', offerLimiter, handle('accept', (req) => JobOffers.acceptOffer(req.params.token, {
   signedName: req.body && req.body.signedName,
+  version: req.body && req.body.version,
   ip: req.ip,
   userAgent: req.get('user-agent'),
 })));
@@ -76,10 +77,12 @@ router.post('/:token/accept', offerLimiter, handle('accept', (req) => JobOffers.
 router.post('/:token/date-request', offerLimiter, handle('date request', (req) => JobOffers.requestDate(req.params.token, {
   requestedStartDate: req.body && req.body.requestedStartDate,
   note: req.body && req.body.note,
+  version: req.body && req.body.version,
 })));
 
 router.post('/:token/decline', offerLimiter, handle('decline', (req) => JobOffers.declineOffer(req.params.token, {
   reason: req.body && req.body.reason,
+  version: req.body && req.body.version,
 })));
 
 module.exports = router;

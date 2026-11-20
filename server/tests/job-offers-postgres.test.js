@@ -68,6 +68,9 @@ jest.setTimeout(120000);
     }
   }
 
+  // The version a read of the link shows: what the page sends back with each answer.
+  const shownVersion = async (token) => (await JobOffers.publicView(token)).version;
+
   // Saves the default draft and presses Send on exactly the preview the draft's hash names.
   async function sendNew(app) {
     const draft = await JobOffers.saveDraft(app.id, {}, actor());
@@ -240,7 +243,7 @@ jest.setTimeout(120000);
       const sent = await sendNew(app);
       const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
       const wanted = addStaffWorkDays(JobOffers.suggestStartDate(), 14);
-      const result = await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks' });
+      const result = await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks', version: await shownVersion(token) });
       expect(result.body).toEqual({ state: 'date_requested' });
       const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested' }, actor());
       expect(revised.startDate).toBe(wanted);
@@ -324,7 +327,7 @@ jest.setTimeout(120000);
       test('signing records the signature, hires the applicant, raises one bell, and a replay never signs twice', async () => {
         expect(await JobOffers.acceptOffer(token, { signedName: 'Jordan' })).toMatchObject({ invalid: expect.any(String) });
         expect(await JobOffers.acceptOffer(token, { signedName: '  ' })).toMatchObject({ invalid: expect.any(String) });
-        const signed = await JobOffers.acceptOffer(token, { signedName: '  Jordan   Rivera ', ip: '203.0.113.9', userAgent: 'TestAgent/1.0' });
+        const signed = await JobOffers.acceptOffer(token, { signedName: '  Jordan   Rivera ', ip: '203.0.113.9', userAgent: 'TestAgent/1.0', version: await shownVersion(token) });
         expect(signed.body).toMatchObject({ state: 'signed' });
         const row = await root('job_offers').where({ id: offer.id }).first();
         expect(row).toMatchObject({ status: 'accepted', signed_name: 'Jordan Rivera', signed_ip: '203.0.113.9', signed_user_agent: 'TestAgent/1.0' });
@@ -360,7 +363,7 @@ jest.setTimeout(120000);
         expect(await JobOffers.requestDate(token, { requestedStartDate: saturday })).toMatchObject({ invalid: expect.any(String) });
         expect(await JobOffers.requestDate(token, { requestedStartDate: '2020-01-06' })).toMatchObject({ invalid: expect.any(String) });
         const monday = addStaffWorkDays(JobOffers.suggestStartDate(), 7);
-        const result = await JobOffers.requestDate(token, { requestedStartDate: monday, note: 'My notice ends later' });
+        const result = await JobOffers.requestDate(token, { requestedStartDate: monday, note: 'My notice ends later', version: await shownVersion(token) });
         expect(result.body).toEqual({ state: 'date_requested' });
         const row = await root('job_offers').where({ id: offer.id }).first();
         expect(row).toMatchObject({ status: 'date_requested', date_request_note: 'My notice ends later' });
@@ -372,7 +375,7 @@ jest.setTimeout(120000);
       });
 
       test('declining withdraws the application with the applicant as the actor, and rings once', async () => {
-        const result = await JobOffers.declineOffer(token, { reason: 'Took another job' });
+        const result = await JobOffers.declineOffer(token, { reason: 'Took another job', version: await shownVersion(token) });
         expect(result.body).toEqual({ state: 'declined' });
         const appRow = await root('job_applications').where({ id: app.id }).first();
         expect(appRow.status).toBe('withdrawn');
@@ -380,6 +383,30 @@ jest.setTimeout(120000);
         expect((await root('job_offers').where({ id: offer.id }).first()).decline_reason).toBe('Took another job');
         expect(mockRaise).toHaveBeenCalledTimes(1);
         expect(mockRaise.mock.calls[0][1].action).toBe('Jordan Rivera declined the job offer');
+      });
+
+      // Another tab saved a text choice after this page read the offer. A sign, a date request or a decline made on the
+      // older read (or with no version) is refused with the offer still open and writes nothing, so none of them fixes a
+      // choice the applicant did not see; made on the version the page now shows, the sign goes through.
+      test('a sign, date request or decline made on an older read is refused and writes nothing', async () => {
+        const first = await shownVersion(token);
+        const on = await JobOffers.setTextConsent(token, true, first);
+        expect(on.body.version).not.toBe(first);
+        const monday = addStaffWorkDays(JobOffers.suggestStartDate(), 7);
+        for (const stale of [first, undefined]) {
+          expect(await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version: stale })).toEqual({ refused: true, body: { state: 'open' } });
+          expect(await JobOffers.requestDate(token, { requestedStartDate: monday, version: stale })).toEqual({ refused: true, body: { state: 'open' } });
+          expect(await JobOffers.declineOffer(token, { reason: 'Changed my mind', version: stale })).toEqual({ refused: true, body: { state: 'open' } });
+        }
+        expect(await root('job_offers').where({ id: offer.id }).first()).toMatchObject({
+          status: 'sent', signed_at: null, signed_name: null, declined_at: null, date_requested_at: null,
+        });
+        expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
+        expect(mockRaise).not.toHaveBeenCalled();
+        expect(await shownVersion(token)).toBe(on.body.version);
+        const signed = await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version: on.body.version });
+        expect(signed.body).toMatchObject({ state: 'signed' });
+        expect((await root('job_offers').where({ id: offer.id }).first()).text_consent_at).toBeTruthy();
       });
 
       test('past its expiry the offer reads expired before any sweep, and nothing can be signed', async () => {
@@ -493,11 +520,13 @@ jest.setTimeout(120000);
     test('accepted (hired) and declined (withdrawn) applications cannot get another draft', async () => {
       const signedApp = await newApplication();
       const signed = (await sendNew(signedApp)).offer;
-      await JobOffers.acceptOffer((await root('job_offers').where({ id: signed.id }).first()).token, { signedName: 'Jordan Rivera' });
+      const signedToken = (await root('job_offers').where({ id: signed.id }).first()).token;
+      expect((await JobOffers.acceptOffer(signedToken, { signedName: 'Jordan Rivera', version: await shownVersion(signedToken) })).body).toMatchObject({ state: 'signed' });
       await expect(JobOffers.saveDraft(signedApp.id, {}, actor())).rejects.toMatchObject({ status: 409, code: 'APPLICATION_CLOSED' });
       const declinedApp = await newApplication();
       const declined = (await sendNew(declinedApp)).offer;
-      await JobOffers.declineOffer((await root('job_offers').where({ id: declined.id }).first()).token, {});
+      const declinedToken = (await root('job_offers').where({ id: declined.id }).first()).token;
+      expect((await JobOffers.declineOffer(declinedToken, { version: await shownVersion(declinedToken) })).body).toEqual({ state: 'declined' });
       await expect(JobOffers.saveDraft(declinedApp.id, {}, actor())).rejects.toMatchObject({ status: 409, code: 'APPLICATION_CLOSED' });
     });
 
@@ -519,8 +548,11 @@ jest.setTimeout(120000);
         const sent = (await sendNew(app)).offer;
         const token = (await root('job_offers').where({ id: sent.id }).first()).token;
         const revision = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'sent' }, actor());
-        if (answer === 'accept') await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera' });
-        else await JobOffers.declineOffer(token, {});
+        const version = await shownVersion(token);
+        const result = answer === 'accept'
+          ? await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version })
+          : await JobOffers.declineOffer(token, { version });
+        expect(result.body).toMatchObject({ state: answer === 'accept' ? 'signed' : 'declined' });
         expect((await root('job_offers').where({ id: revision.id }).first()).status).toBe('withdrawn');
         expect((await root('job_offers').where({ id: sent.id }).first()).status).toBe(answer === 'accept' ? 'accepted' : 'declined');
       }
@@ -554,7 +586,8 @@ jest.setTimeout(120000);
       const first = await JobOffers.saveDraft(app.id, { stepEffectiveOn: addStaffWorkDays(JobOffers.stepDateFor(JobOffers.suggestStartDate()), 7) }, actor());
       const sent = (await JobOffers.sendOffer(app.id, first.id, actor(), first.draftHash)).offer;
       const token = (await root('job_offers').where({ id: sent.id }).first()).token;
-      await JobOffers.requestDate(token, { requestedStartDate: sent.startDate }); // asks for the very same day
+      expect((await JobOffers.requestDate(token, { requestedStartDate: sent.startDate, version: await shownVersion(token) })).body)
+        .toEqual({ state: 'date_requested' }); // asks for the very same day
       const revised = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'date_requested', startDate: sent.startDate }, actor());
       expect(revised.stepEffectiveOn).toBe(sent.stepEffectiveOn);
       const edited = await JobOffers.saveDraft(app.id, { hoursLine: 'Four 10-hour days', draftId: revised.id, draftHash: revised.draftHash }, actor());

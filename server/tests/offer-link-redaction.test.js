@@ -12,6 +12,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+const { createHash } = require('crypto');
+const { decodeHTML } = require('entities');
 const { redactOfferLinks, offerLinkTokens, OFFER_LINK_HIDDEN } = require('../utils/offer-link-redaction');
 const { portalUrl } = require('../utils/portal-url');
 
@@ -117,6 +119,30 @@ describe('redactOfferLinks', () => {
       .toBe(`Your offer: ${link} (code ${OFFER_LINK_HIDDEN} ref ${ref}) <a href="${OFFER_LINK_HIDDEN}">x</a>`);
   });
 
+  // A reader sees a shown or copied link run together: a <wbr> or a <span> inside it, or a quoted reply that wraps it,
+  // drops out. Each piece of a found token is hidden (the marker in the first unit, nothing in the rest) and the tags
+  // stay. A link found only that way is not pinned, and its marker never forms the link the replay rebuilds.
+  test('hides a link or a copy split by markup, spaces or line breaks, and keeps the markup', () => {
+    const token = createHash('sha256').update('split').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const sent = `https://portal.wavespestcontrol.com/careers/offer/${OFFER_LINK_HIDDEN}`;
+    const cases = [
+      [`<p><a href="${link}">Read your offer</a></p><p>${link.slice(0, 80)}<wbr>${link.slice(80)}</p>`,
+        `<p><a href="${sent}">Read your offer</a></p><p>${OFFER_LINK_HIDDEN}<wbr></p>`, [token]],
+      [`<td><a href="${link}">${link.slice(0, 90)}<span style="color:#123">${link.slice(90)}</span></a></td>`,
+        `<td><a href="${sent}">${OFFER_LINK_HIDDEN}<span style="color:#123"></span></a></td>`, [token]],
+      [`<p>Your link: ${link.slice(0, 75)}<wbr>${link.slice(75)}</p>`, `<p>Your link: ${OFFER_LINK_HIDDEN}<wbr></p>`, []],
+      [`Thanks!\n\n> Your offer:\n> ${link.slice(0, 70)}\n> ${link.slice(70)}\n> See you`,
+        `Thanks!\n\n> Your offer:\n> ${OFFER_LINK_HIDDEN}\n> \n> See you`, []],
+      [`Your offer: ${link} code ${token.slice(0, 32)} ${token.slice(32)} ok`, `Your offer: ${sent} code ${OFFER_LINK_HIDDEN}  ok`, [token]],
+    ];
+    for (const [text, stored, pinned] of cases) {
+      expect(redactOfferLinks(text)).toBe(stored);
+      expect(offerLinkTokens(text)).toEqual(pinned);
+      expect(redactOfferLinks(stored)).toBe(stored);
+    }
+  });
+
   test('pins only the token on the offer path: a 64-hex query value beside it stays and is not pinned', () => {
     const ref = 'f'.repeat(64);
     const sent = `https://portal.wavespestcontrol.com/careers/offer/${TOKEN}?ref=${ref}`;
@@ -204,6 +230,50 @@ describe('every link a browser opens as the signing page is stored without its t
     }
     expect(opened).toBeGreaterThan(1000); // the parser opens most of them, so the check is not empty
   }, 60000);
+});
+
+// What a reader can see in stored text, run together: once as plain text, once with the tags an email does not show
+// dropped. Both decoded, quote markers and white space dropped, lowercase.
+function readerViews(text) {
+  const read = (value) => {
+    let out = value.replace(/^>+ ?/gm, '');
+    for (let pass = 0; pass < 4; pass += 1) {
+      const next = decodeHTML(out).replace(/(?:%[0-9a-f]{2})+/gi, (m) => {
+        try { return decodeURIComponent(m); } catch { return m; }
+      });
+      if (next === out) break;
+      out = next;
+    }
+    return out.normalize('NFKC').replace(/\s|\p{Cf}/gu, '').toLowerCase();
+  };
+  return [read(text), read(text.replace(/<!--[\s\S]*?-->|<[^>]*>/g, ''))];
+}
+
+describe('a found token split anywhere is hidden in every piece', () => {
+  // A token that does not repeat, as a real one does not. Every split point inside it, with each separator a reader
+  // skips: markup an email shows nothing for, a space, a line break, a quoted reply's wrap, an invisible character.
+  // The link split alone, beside the whole link in an href, and as a plain copy.
+  const token = createHash('sha256').update('split grid').digest('hex');
+  const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+  const at = link.length - 64;
+  const SEPARATORS = ['<wbr>', '<span>', '</span><span style="x">', '<!-- -->', ' ', '\n', '\n> ', '&#8203;', '%E2%80%8B'];
+
+  test('in every split, the stored text shows no piece run together into the token', () => {
+    let checked = 0;
+    for (let cut = 1; cut < 64; cut += 1) {
+      for (const sep of SEPARATORS) {
+        const split = `${link.slice(0, at + cut)}${sep}${link.slice(at + cut)}`;
+        const copy = `${token.slice(0, cut)}${sep}${token.slice(cut)}`;
+        const texts = [`<p>Your offer: ${split}</p>`, `<p><a href="${link}">Read it</a> or copy ${split}</p>`, `Open ${link} (code ${copy})`];
+        for (const text of texts) {
+          const stored = redactOfferLinks(text);
+          for (const view of readerViews(stored)) expect(view).not.toContain(token);
+          checked += 1;
+        }
+      }
+    }
+    expect(checked).toBe(63 * SEPARATORS.length * 3);
+  });
 });
 
 describe('the deferred replay body', () => {

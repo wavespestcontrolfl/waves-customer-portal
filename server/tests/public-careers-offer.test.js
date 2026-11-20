@@ -91,17 +91,20 @@ describe('GET /:token', () => {
 });
 
 describe('the actions', () => {
-  test('accept passes the typed name, the IP and the user agent', async () => {
-    const res = await call(`/${TOKEN}/accept`, 'POST', { signedName: 'Jordan Rivera' }, { 'user-agent': 'TestAgent/1.0' });
+  test('accept passes the typed name, the version on screen, the IP and the user agent', async () => {
+    const res = await call(`/${TOKEN}/accept`, 'POST', { signedName: 'Jordan Rivera', version: '2026-12-01T14:00:00.000Z' }, { 'user-agent': 'TestAgent/1.0' });
     expect(res).toMatchObject({ status: 200, body: { state: 'signed' } });
-    expect(mockService.acceptOffer).toHaveBeenCalledWith(TOKEN, expect.objectContaining({ signedName: 'Jordan Rivera', userAgent: 'TestAgent/1.0', ip: expect.any(String) }));
+    expect(mockService.acceptOffer).toHaveBeenCalledWith(TOKEN, {
+      signedName: 'Jordan Rivera', version: '2026-12-01T14:00:00.000Z', userAgent: 'TestAgent/1.0', ip: expect.any(String),
+    });
   });
 
   test('date-request, decline and text-consent pass their body fields', async () => {
-    await call(`/${TOKEN}/date-request`, 'POST', { requestedStartDate: '2027-01-11', note: 'Notice runs out' });
-    expect(mockService.requestDate).toHaveBeenCalledWith(TOKEN, { requestedStartDate: '2027-01-11', note: 'Notice runs out' });
-    await call(`/${TOKEN}/decline`, 'POST', { reason: 'Took another job' });
-    expect(mockService.declineOffer).toHaveBeenCalledWith(TOKEN, { reason: 'Took another job' });
+    const version = '2026-12-01T14:00:00.000Z';
+    await call(`/${TOKEN}/date-request`, 'POST', { requestedStartDate: '2027-01-11', note: 'Notice runs out', version });
+    expect(mockService.requestDate).toHaveBeenCalledWith(TOKEN, { requestedStartDate: '2027-01-11', note: 'Notice runs out', version });
+    await call(`/${TOKEN}/decline`, 'POST', { reason: 'Took another job', version });
+    expect(mockService.declineOffer).toHaveBeenCalledWith(TOKEN, { reason: 'Took another job', version });
     await call(`/${TOKEN}/text-consent`, 'POST', { consent: true, version: '2026-12-01T14:00:00.000Z' });
     expect(mockService.setTextConsent).toHaveBeenCalledWith(TOKEN, true, '2026-12-01T14:00:00.000Z');
   });

@@ -469,6 +469,9 @@ function NoteField({ id, label, value, onChange, disabled }) {
 // Shared submit wrapper for the three actions: one in-flight request at a
 // time, a 404 means the link is dead, a 409 means the offer changed under the
 // applicant (re-read it), a lost response is re-checked before saying failed.
+// Each action sends the version of the offer on screen, the text box's choice
+// included: a change since then (another tab) is refused with the offer still
+// open, so the page reads it again and the applicant answers on what it shows.
 function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUnknown }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -660,7 +663,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onS
           frozen={accept.frozen}
           onAccept={() => {
             onSign(name.trim());
-            accept.run('/accept', { signedName: name.trim() });
+            accept.run('/accept', { signedName: name.trim(), version: data.version });
           }}
         />
         {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
@@ -692,7 +695,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onS
             locked={anyBusy}
             error={dateReq.error}
             onCancel={() => setPanel('none')}
-            onSubmit={(payload) => dateReq.run('/date-request', payload)}
+            onSubmit={(payload) => dateReq.run('/date-request', { ...payload, version: data.version })}
           />
         )}
         <LostBanner action={dateReq} />
@@ -703,7 +706,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onS
             locked={anyBusy}
             error={decline.error}
             onCancel={() => setPanel('none')}
-            onSubmit={(payload) => decline.run('/decline', payload)}
+            onSubmit={(payload) => decline.run('/decline', { ...payload, version: data.version })}
           />
         )}
         <LostBanner action={decline} />

@@ -26,8 +26,16 @@
  *   appears. A unit whose reader's text still holds one after the steps above (a copy in the link's own query or
  *   fragment, or anywhere else) is replaced as a whole: by the standard hidden link for each offer-path token it holds,
  *   or by the bare marker when it holds none. The bare marker is not a link, so the replay leaves it as it is.
- * An /careers/interview/ link is not on that path and is left alone. Out of reach of any pattern: a token a person has to
- * put back together from pieces (split by spaces, or by a line break in plain text); no browser opens that as a link.
+ * - A link or a copy split over several units. A reader sees the text run together: markup, spaces and line breaks drop
+ *   out of a link that is shown or copied (a <wbr> or a <span> inside it, a quoted reply that wraps it). So the reader's
+ *   text of the units is also read joined, with nothing between them: once with every unit, as plain text shows it, and
+ *   once with the units outside tags only, as an email shows it. There "careers" may end a longer word, and the token is
+ *   the 64 hex after "offer/" whatever follows. A token on an offer path there counts as found, and each found token
+ *   split over several units is hidden in all of them: the bare marker in the first (or the standard hidden link for
+ *   an offer-path token that unit holds whole, as above) and nothing in the rest. Tags and spaces stay, so the bare
+ *   marker never forms the hidden link the replay rebuilds.
+ * An /careers/interview/ link is not on that path and is left alone. Out of reach: a token mixed with other visible
+ * characters (a dash every few letters), which a person has to edit to use.
  */
 
 const { decodeHTML } = require('entities');
@@ -39,6 +47,8 @@ const TOKEN_SEGMENT_RE = /^([0-9a-f]{64})(?![0-9a-f])/;
 // The route word, also after punctuation that opens the unit ("(careers", url=careers); a host such as x.careers is not.
 const CAREERS_SEGMENT_RE = /(?:^|[^a-z0-9.-])careers$/;
 const UNIT_RE = /=\s*(?:"[^"]*"|'[^']*')|(?:(?!=\s*["'])[^\s<>])+/g;
+// An HTML tag or comment: the units inside it (its name and attributes) are not text a reader sees.
+const TAG_RE = /<!--[\s\S]*?-->|<[!/?]?[a-z][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/gi;
 
 function percentDecode(seq) {
   try {
@@ -63,7 +73,7 @@ function readable(unit) {
 // one too), and an empty segment is kept. A segment that opens with a 64-hex token right after "careers" and "offer"
 // holds a token; empty segments between those are passed over, as a reader reads "//" as "/". Each stack entry keeps
 // the last two named segments at its depth, so the walk stays linear.
-function pathTokens(segments, { single, double, name }) {
+function pathTokens(segments, { single, double, name, careers = CAREERS_SEGMENT_RE, token: tokenRe = TOKEN_SEGMENT_RE }) {
   const tokens = [];
   const stack = [];
   for (const raw of segments) {
@@ -71,7 +81,7 @@ function pathTokens(segments, { single, double, name }) {
     else if (!single(raw)) {
       const segment = name(raw);
       const [last, before] = stack.at(-1) || ['', ''];
-      const token = last === 'offer' && CAREERS_SEGMENT_RE.test(before) && TOKEN_SEGMENT_RE.exec(segment);
+      const token = last === 'offer' && careers.test(before) && tokenRe.exec(segment);
       if (token) tokens.push(token[1]);
       stack.push(segment ? [segment, last] : [last, before]);
     }
@@ -88,6 +98,9 @@ const BROWSER = {
 };
 // A reader: the text is already decoded, so only plain dots count.
 const READER = { single: (s) => s === '.', double: (s) => s === '..', name: (s) => s };
+// A reader of the joined text (see joinedViews): words run together there, so "careers" may end a longer word (a host
+// such as x.careers still does not count), and the token is the first 64 hex after "offer/" whatever follows.
+const JOINED = { ...READER, careers: /(?:^|[^.-])careers$/, token: /^([0-9a-f]{64})/ };
 
 // The path segments a browser opens from `text`: tabs and line breaks dropped, backslashes read as slashes, cut at the
 // first "?" or "#".
@@ -98,8 +111,7 @@ function browserSegments(text) {
 }
 
 // The offer tokens a unit holds in any reading, each once, in the order they appear in the reader's text.
-function offerTokensOf(unit) {
-  const seen = readable(unit);
+function offerTokensOf(unit, seen = readable(unit)) {
   // Decoding and folding never remove the letters of "careers" or "offer", so a unit whose reader's text lacks either
   // holds no token in any reading.
   if (!seen.includes('careers') || !seen.includes('offer')) return [];
@@ -115,34 +127,115 @@ function offerTokensOf(unit) {
   return [...found].sort((a, b) => at(a) - at(b));
 }
 
-// First the tokens on an offer path anywhere in the text. Then one pass, unit by unit, so each hidden link and its token
-// keep the same order for redaction and for pinning.
-function scan(text) {
-  const linked = new Set();
-  for (const unit of text.match(UNIT_RE) || []) {
-    for (const match of unit.matchAll(SENT_LINK_RE)) linked.add(match[2].toLowerCase());
-    for (const token of offerTokensOf(unit)) linked.add(token);
+// The units of `text` in order: each with where it starts, its reader's text, and whether it sits inside a tag.
+function unitsOf(text) {
+  const tags = [...text.matchAll(TAG_RE)].map((m) => [m.index, m.index + m[0].length]);
+  let t = 0;
+  return [...text.matchAll(UNIT_RE)].map((m) => {
+    while (t < tags.length && tags[t][1] <= m.index) t += 1;
+    return { text: m[0], at: m.index, seen: readable(m[0]), inTag: t < tags.length && tags[t][0] <= m.index };
+  });
+}
+
+// The reader's text of the units run together, with nothing between them, so a link or a token split by markup,
+// spaces or line breaks reads as one: once with every unit (plain text), once with the units outside tags only (an
+// email as it shows). Each view keeps where each unit's text starts and ends in it.
+function joinedViews(units) {
+  return [units, units.filter((u) => !u.inTag)].map((list) => {
+    let text = '';
+    const spans = list.map((u) => {
+      const start = text.length;
+      text += u.seen;
+      return { u, start, end: text.length };
+    });
+    return { text, spans };
+  });
+}
+
+function joinedTokens({ text }) {
+  if (!text.includes('careers') || !text.includes('offer')) return [];
+  return text.split(/[?#]/).flatMap((part) => pathTokens(part.split('/'), JOINED));
+}
+
+// The spans of a view that the text from `from` to `to` overlaps (spans are in order and touch end to start).
+function overlapping(spans, from, to) {
+  let lo = 0;
+  let hi = spans.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (spans[mid].end <= from) lo = mid + 1;
+    else hi = mid;
   }
-  if (!linked.size) return { redacted: text, tokens: [] };
-  const tokens = [];
-  const redacted = text.replace(UNIT_RE, (unit) => {
+  const out = [];
+  for (let k = lo; k < spans.length && spans[k].start < to; k += 1) out.push(spans[k]);
+  return out;
+}
+
+// Each found token split over several units of a view: the first of those units is marked 'first', the rest 'rest'.
+// A token whole inside one unit is left to that unit's own reading.
+function splitMarks(views, linked) {
+  const marks = new Map();
+  for (const { text, spans } of views) {
+    for (const token of linked) {
+      for (let at = text.indexOf(token); at !== -1; at = text.indexOf(token, at + 1)) {
+        const parts = overlapping(spans, at, at + token.length);
+        if (parts.length < 2) continue;
+        parts.forEach(({ u }, k) => {
+          if (k === 0) marks.set(u.at, 'first');
+          else if (!marks.has(u.at)) marks.set(u.at, 'rest');
+        });
+      }
+    }
+  }
+  return marks;
+}
+
+// One unit as stored. Unmarked: the link as sent keeps its host with the token hidden, and a unit with no other offer
+// link and no copy of a found token stays. Otherwise the unit is replaced as a whole: by the standard hidden link for
+// each offer-path token it holds (pinned in order), else by the bare marker, or by nothing for the later parts of a
+// split token.
+function storedUnit(u, mark, linked, tokens) {
+  if (!mark) {
     const sent = [];
-    const kept = unit.replace(SENT_LINK_RE, (m, path, token) => {
+    const kept = u.text.replace(SENT_LINK_RE, (m, path, token) => {
       sent.push(token.toLowerCase());
       return `${path}${HIDDEN}`;
     });
-    const seen = readable(kept);
-    if (!offerTokensOf(kept).length && ![...linked].some((token) => seen.includes(token))) {
+    const seen = kept === u.text ? u.seen : readable(kept);
+    if (!offerTokensOf(kept, seen).length && ![...linked].some((token) => seen.includes(token))) {
       tokens.push(...sent);
       return kept;
     }
-    const found = offerTokensOf(unit);
-    tokens.push(...found);
-    const hidden = found.length ? found.map(() => portalUrl(`/careers/offer/${HIDDEN}`)).join(' ') : HIDDEN;
-    const quoted = /^=\s*(["'])/.exec(unit);
-    return quoted ? `${quoted[0]}${hidden}${quoted[1]}` : hidden;
-  });
-  return { redacted, tokens };
+  }
+  const found = offerTokensOf(u.text, u.seen);
+  tokens.push(...found);
+  let hidden = mark === 'rest' ? '' : HIDDEN;
+  if (found.length) hidden = found.map(() => portalUrl(`/careers/offer/${HIDDEN}`)).join(' ');
+  const quoted = /^=\s*(["'])/.exec(u.text);
+  return quoted ? `${quoted[0]}${hidden}${quoted[1]}` : hidden;
+}
+
+// First the tokens on an offer path anywhere in the text, unit by unit and in the joined views. Then one pass, unit by
+// unit, so each hidden link and its token keep the same order for redaction and for pinning.
+function scan(text) {
+  const units = unitsOf(text);
+  const views = joinedViews(units);
+  const linked = new Set();
+  for (const u of units) {
+    for (const match of u.text.matchAll(SENT_LINK_RE)) linked.add(match[2].toLowerCase());
+    for (const token of offerTokensOf(u.text, u.seen)) linked.add(token);
+  }
+  for (const view of views) for (const token of joinedTokens(view)) linked.add(token);
+  if (!linked.size) return { redacted: text, tokens: [] };
+  const marks = splitMarks(views, linked);
+  const tokens = [];
+  let redacted = '';
+  let last = 0;
+  for (const u of units) {
+    redacted += text.slice(last, u.at) + storedUnit(u, marks.get(u.at), linked, tokens);
+    last = u.at + u.text.length;
+  }
+  return { redacted: redacted + text.slice(last), tokens };
 }
 
 function redactOfferLinks(text) {

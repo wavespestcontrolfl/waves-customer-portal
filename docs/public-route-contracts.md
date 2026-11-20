@@ -8645,6 +8645,9 @@ delimiters and backslashes. The same scan pins only those tokens (a 64-hex query
 so a held text replays each one as the standard link. Any other copy of a token found on an offer path, anywhere in
 the text (the link's own query or fragment, or another word), is hidden too: that unit is stored as the standard link
 for each offer-path token it holds, or as the bare marker when it holds none, which the replay leaves as it is. The
+units' reader text is also read run together (once with every unit, once with the units outside tags only), so a link
+or a copy split by markup, spaces or line breaks (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is
+found and hidden in every piece: the marker in the first unit, nothing in the rest, the tags kept. The
 service worker never handles an offer page, in any request mode (`client/public/sw.js` `isOfferLinkPath`: the path,
 percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the
 server routes `/API/` as `/api/`). It stores no URL that could carry the link, because a stored response or request
@@ -8666,11 +8669,14 @@ GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` ->
 `version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with
 no write, and a change made from any other version answers 409 `{state:'open'}`, so a save that lands late (its reply
 was lost and the page saved the same choice again) cannot undo a later choice (on that 409 the page reads the offer,
-shows the stored choice and says "That did not go through. Please try again."); `accept {signedName}` (trimmed,
+shows the stored choice and says "That did not go through. Please try again."); `accept {signedName, version}` (trimmed,
 3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
-'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500)}` -> `{state:'date_requested'}`; `decline {reason? (<= 500)}` ->
-`{state:'declined'}`. Each acts only from state `open`; any other state answers 409 with the current state body (an
-identical replay of a signature answers 200 with the stored signature). Every action runs in one transaction that
+'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500), version}` -> `{state:'date_requested'}`; `decline {reason?
+(<= 500), version}` -> `{state:'declined'}`. Each answer carries the `version` the page shows, the text choice included,
+and a change since then (another tab's text choice) answers the same 409 `{state:'open'}` with no write, so a signature,
+a date request or a decline never fixes a text choice the applicant did not see. Each acts only from state `open`; any
+other state answers 409 with the current state body (an identical replay of a signature answers 200 with the stored
+signature). Every action runs in one transaction that
 locks the application row, then the offer row, and re-reads the state under the lock, so a double tap or a replay
 cannot sign twice. Accept records the IP, user agent and a signature hash (sha256 of the snapshot hash, the Terms
 content hash, the typed name and the signing instant), moves the application to `hired` and raises an owner bell;
