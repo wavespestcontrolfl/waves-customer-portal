@@ -206,7 +206,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty, reverseGeocodeLocality } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
-const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough } = require('../services/service-area');
+const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isServedSouthHillsboroughTown } = require('../services/service-area');
 const { isExcludedLocality, isExcludedZip, isPuntaGordaSharedZip } = require('../services/excluded-localities');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
@@ -869,14 +869,20 @@ const customerAddressFields = (cust) => ({
 // there named the old street, and its zone would drop another truck's opening the booking admits (pre-push P1 on
 // 1ef6ba1b16). Phase 1 makes the profile it books this lead's trusted one, so a retry's list reads that profile.
 // Nor for a place the area check refuses (Punta Gorda), which phase 1 never keeps, unless a staff-verified pin keeps
-// the whole profile (pre-push P1 on f6c3fdc9e9). zoneFallbackCity is that city, the one phase 1 may keep: the
-// commit's zone re-check compares with it, and phase 1 keeps only it.
+// the whole profile (pre-push P1 on f6c3fdc9e9). Nor when the typed address names a served South Hillsborough town,
+// by city or ZIP: the area check may admit it by that name alone, so phase 1 keeps the typed city (pre-push P1 on
+// c49372bb7d: a kept Venice at a Hillsborough pin failed the next area check). zoneFallbackCity is that city, the one
+// phase 1 may keep: the commit's zone re-check compares with it, and phase 1 keeps only it. Phase 1 reads it from
+// the same trusted view of the profile as the list (its pin can be the primary property's), and with `rewritten`,
+// since it then writes over the profile: no staff-verified pin keeps the city there.
 // `bookedCity`: the commit's re-check runs after phase 1, so it passes the city on file of the profile phase 1
 // booked, the city createSelfBooking falls back to, in place of that prediction: a sibling phase 1 reused keeps its
 // own city, even a place the area check refuses.
-const zoneFallbackCity = (customer, address, coords) => (
+const zoneFallbackCity = (customer, address, coords, { rewritten = false } = {}) => (
   customer && profileMatchesAddress(customer, address, coords)
-    && (customer.verified_by_review || !isExcludedLocality(customer.city)) ? customer.city : null
+    && ((customer.verified_by_review && !rewritten) || !(isExcludedLocality(customer.city)
+      || isServedSouthHillsboroughTown({ cities: [address.city], zips: address.zip ? [address.zip] : [] })))
+    ? customer.city : null
 );
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, bookedCity }) {
   const booking = require('./booking');
@@ -2165,11 +2171,15 @@ async function provisionLinkedCustomer(trx, {
     // this commit, its refusal's times and every retry (owner rule B,
     // pre-push P1s on 850a6a79f0 and 7a682696f6). A place the area check
     // refuses (Punta Gorda) is never kept: the typed address passed that
-    // check. Every other address takes the typed city, the validated
+    // check. Nor is any city kept over a typed South Hillsborough town,
+    // which the area check may admit by its name. Every other address takes
+    // the typed city, the validated
     // correction (pre-push P1s on 63e29d5511 and f344681474: a zone with no
     // truck rule, such as Sarasota, needs no kept city); with the funnel off
-    // no zone is read from it.
-    const listCity = zoneFallbackCity(storedCustRow, resolved.address, resolved.location);
+    // no zone is read from it. The match reads the trusted view of the row
+    // (freshCustRow), as the list does: its pin can be the primary
+    // property's (pre-push P1 on c49372bb7d).
+    const listCity = zoneFallbackCity(freshCustRow, resolved.address, resolved.location, { rewritten: true });
     const { zone: cityZone, fromCustomer } = funnelOn()
       ? await leadBookingZone(trx, zoneFunnelInputs(resolved.address), listCity) : {};
     const city = fromCustomer && isFunnelZone(cityZone) ? listCity : resolved.address.city;

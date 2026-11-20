@@ -2201,11 +2201,15 @@ describe('POST /:token commit', () => {
     // and a staff-verified pin keeps the profile as it is. The booking falls back to its own row's city, the one its lock fences, and its
     // slot guard asks about the zone the list offered, for the truck that list gave the hour; createSelfBooking stamps
     // that zone (booking-confirm-signed-offer.test.js).
+    // Pre-push P1 on c49372bb7d: with no ZIP typed, only a pin matches the profile, and the list reads the primary
+    // property's pin (the trusted view) where the customers row has none. Phase 1 reads that same view, so it keeps the
+    // city the list read.
     test.each([
-      ['in no zone, phase 1 keeps the profile\'s city', 'Laurel', false, ['Nokomis']],
-      ['in no zone, a staff-verified pin keeps the profile as it is', 'Laurel', true, []],
-      ['in the zone, phase 1 writes the typed city', 'Venice', false, ['Venice']],
-    ])('a typed address %s: one build, and the hour books with the truck its list offered', async (_label, typedCity, reviewed, cityWrites) => {
+      ['in no zone, phase 1 keeps the profile\'s city', 'Laurel', false, ['Nokomis'], false],
+      ['in no zone, a staff-verified pin keeps the profile as it is', 'Laurel', true, [], false],
+      ['in the zone, phase 1 writes the typed city', 'Venice', false, ['Venice'], false],
+      ['in no zone with no ZIP, at the primary property\'s pin only, phase 1 keeps the profile\'s city', 'Laurel', false, ['Nokomis'], true],
+    ])('a typed address %s: one build, and the hour books with the truck its list offered', async (_label, typedCity, reviewed, cityWrites, pinOnProperty) => {
       Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
       listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
@@ -2214,11 +2218,14 @@ describe('POST /:token commit', () => {
       const address = { address_line1: '123 Palm Ave', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34209' };
       seedPhoneHousehold({
         id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, ...address, phone: '9415550101',
-        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+        // the default mockGeocode pin: the location does not move (on the primary property only, the row has none)
+        latitude: pinOnProperty ? null : 27.4, longitude: pinOnProperty ? null : -82.5,
       });
-      if (reviewed) {
+      if (reviewed || pinOnProperty) {
         gateState.reviewLive = true;
         firstResults.customer_properties = { id: 'property-9', customer_id: 'cust-9', active: true, is_primary: true, ...address, latitude: 27.4, longitude: -82.5 };
+      }
+      if (reviewed) {
         firstResults.customer_geocode_reviews = {
           customer_id: 'cust-9', status: 'verified', reason: 'staff_verified',
           address_snapshot: ['123 Palm Ave', null, 'Nokomis', 'FL', '34209'], latitude: 27.4, longitude: -82.5,
@@ -2233,7 +2240,8 @@ describe('POST /:token commit', () => {
         }] }],
       }));
 
-      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: `123 Palm Ave, ${typedCity}, FL 34209` });
+      const typedZip = pinOnProperty ? [] : ['34209'];
+      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: [`123 Palm Ave, ${typedCity}, FL`, ...typedZip].join(' ') });
 
       expect(booked.statusCode).toBe(200);
       expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(cityWrites);
@@ -2241,7 +2249,7 @@ describe('POST /:token commit', () => {
       const booking = mockCreateSelfBooking.mock.calls[0][0];
       expect(booking).toMatchObject({ slot_start: '09:00', technician_id: 'tech-2', authedCustomer: { id: 'cust-9', city: cityWrites[0] || 'Nokomis' } });
       const zoneAddress = booking.callbackVisit.zoneAddress(booking.authedCustomer);
-      expect(zoneAddress).toEqual({ address: `123 Palm Ave, ${typedCity}, FL, 34209`, city: typedCity });
+      expect(zoneAddress).toEqual({ address: ['123 Palm Ave', typedCity, 'FL', ...typedZip].join(', '), city: typedCity });
       const { zone } = await require('../services/slot-zone').leadBookingZone(db, zoneAddress, booking.authedCustomer.city);
       expect(zone).toMatchObject({ id: 'zone-v' });
       const trx = jest.fn();
@@ -2277,11 +2285,14 @@ describe('POST /:token commit', () => {
     // refused place. Pre-push P1 on f344681474: a zone with no truck rule (Sarasota) does not keep it either. With the
     // funnel off, nothing reads a zone, phase 1 included. Pre-push P1 on f6c3fdc9e9: the list read the refused city's
     // zone all the same, and with only the other truck free it showed no time; it reads the city phase 1 may keep now
-    // (zoneFallbackCity), so it offers tech-1's hour, and that hour books.
+    // (zoneFallbackCity), so it offers tech-1's hour, and that hour books. Pre-push P1 on c49372bb7d: a typed Wimauma
+    // (a South Hillsborough town) passes the Hillsborough area check by its name alone, here with a Venice ZIP; a
+    // kept Venice would fail the next check at that pin, so phase 1 writes Wimauma and the list reads no fallback.
     test.each([
       ['with the funnel off', false, 'Nokomis', 'Laurel', '34209', 'Sarasota'],
       ['and a profile city the area check refuses', true, 'Punta Gorda', 'Charlotte Harbor', '33980', 'Charlotte'],
       ['and a profile city in a zone with no truck rule', true, 'Sarasota', 'Bee Ridge', '34233', 'Sarasota'],
+      ['and a typed South Hillsborough town the area check admits by its name alone', true, 'Venice', 'Wimauma', '34285', 'Hillsborough County'],
     ])('a typed city in no zone at the profile\'s address, %s: phase 1 writes the typed city', async (_label, funnel, storedCity, typedCity, zip, county) => {
       Object.assign(mockFarSouthGates, { perTruck: true, funnel });
       const zoneReads = jest.fn(() => [
@@ -3907,20 +3918,31 @@ describe('profileAffirmativelyDiffers unit coverage (Codex P2, PR #5064, :1168 "
   });
 });
 
-// The city a list reads as the zone fallback, the one phase 1 may keep (pre-push P1s on 1ef6ba1b16 and f6c3fdc9e9):
-// the trusted profile's city only for its own property, and never a place the area check refuses, unless a
-// staff-verified pin keeps the whole profile (phase 1 then writes nothing).
+// The city a list reads as the zone fallback, the one phase 1 may keep (pre-push P1s on 1ef6ba1b16, f6c3fdc9e9 and
+// c49372bb7d): the trusted profile's city only for its own property, never a place the area check refuses, and never
+// over a typed South Hillsborough town (by city or ZIP), which the area check may admit by that name, unless a
+// staff-verified pin keeps the whole profile (phase 1 then writes nothing). Phase 1 reads it with `rewritten` (it
+// writes over the profile), so no staff-verified pin keeps the city there.
 describe('zoneFallbackCity (the city a list reads, as phase 1 keeps it)', () => {
   const property = { address_line1: '123 Palm Ave', address_line2: null, state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
   const typed = { line1: '123 Palm Ave', line2: null, city: 'Charlotte Harbor', state: 'FL', zip: '34209' };
+  const wimauma = { ...typed, city: 'Wimauma' };
+  const southZip = { ...typed, city: 'Laurel', zip: '33598' };
+  const verifiedVenice = { ...property, city: 'Venice', verified_by_review: true };
   test.each([
-    ['the profile\'s own property', 'Nokomis', { ...property, city: 'Nokomis' }],
-    ['another street', null, { ...property, address_line1: '9 Other St', city: 'Nokomis' }],
-    ['no trusted customer', null, null],
-    ['a place the area check refuses', null, { ...property, city: 'Punta Gorda' }],
-    ['a place the area check refuses, under a staff-verified pin', 'Punta Gorda', { ...property, city: 'Punta Gorda', verified_by_review: true }],
-  ])('%s: %s', (_label, expected, customer) => {
-    expect(inspectionPublicRouter._test.zoneFallbackCity(customer, typed, { lat: 27.4, lng: -82.5 })).toBe(expected);
+    ['the profile\'s own property', 'Nokomis', { ...property, city: 'Nokomis' }, typed, {}],
+    ['another street', null, { ...property, address_line1: '9 Other St', city: 'Nokomis' }, typed, {}],
+    ['no trusted customer', null, null, typed, {}],
+    ['a place the area check refuses', null, { ...property, city: 'Punta Gorda' }, typed, {}],
+    ['a place the area check refuses, under a staff-verified pin', 'Punta Gorda', { ...property, city: 'Punta Gorda', verified_by_review: true }, typed, {}],
+    ['a refused place under a staff-verified pin, written over by phase 1', null, { ...property, city: 'Punta Gorda', verified_by_review: true }, typed, { rewritten: true }],
+    ['a typed South Hillsborough town', null, { ...property, city: 'Venice' }, wimauma, {}],
+    ['a typed South Hillsborough ZIP', null, { ...property, city: 'Venice', zip: '33598' }, southZip, {}],
+    ['a typed South Hillsborough town, under a staff-verified pin', 'Venice', verifiedVenice, wimauma, {}],
+    ['a typed South Hillsborough town under a staff-verified pin, written over by phase 1', null, verifiedVenice, wimauma, { rewritten: true }],
+    ['a staff-verified pin, written over by phase 1', 'Nokomis', { ...property, city: 'Nokomis', verified_by_review: true }, typed, { rewritten: true }],
+  ])('%s: %s', (_label, expected, customer, address, opts) => {
+    expect(inspectionPublicRouter._test.zoneFallbackCity(customer, address, { lat: 27.4, lng: -82.5 }, opts)).toBe(expected);
   });
 });
 

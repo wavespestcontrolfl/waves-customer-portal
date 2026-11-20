@@ -7680,7 +7680,10 @@ the far-south zone of a typed address that matches the profile, so the
 booking, a refusal's fresh times and the retry read the zone the list read.
 Any other typed address writes its own city: a city the funnel does not need,
 a city in a zone with no truck rule (Sarasota), a place the area check refuses
-(that booking then reads no zone), and, with the funnel off, every city. A profile phase one corrects in place to another
+(that booking then reads no zone), a typed address that names a served South
+Hillsborough town by city or ZIP (the area check may admit it by that name
+alone), and, with the funnel off, every city. Phase one judges the match on the
+same view of the profile as the list (its pin can be the primary property's). A profile phase one corrects in place to another
 typed address takes that address's city for all three: the city on file
 named the old address. With the funnel on, the booking transaction also refuses with
 `CUSTOMER_CHANGED_RETRY` when the customer's address changed after its zone read it, and the
@@ -7690,8 +7693,9 @@ page gets the answer an account change under the booking fence already gets:
 `POST /:token/availability`, `POST /:token/find-slots`, the new_lead email
 times and a refused booking's list) reads the same fallback when the address
 is that customer's own property (the same street and unit, and ZIP or pin) and
-the city is one phase one keeps (never a place the area check refuses, unless a
-staff-verified pin keeps the whole profile), so a list never offers an hour that
+the city is one phase one keeps (never a place the area check refuses, nor over
+a typed South Hillsborough town, unless a staff-verified pin keeps the whole
+profile), so a list never offers an hour that
 zone refuses, nor hides one the booking admits. For another street the city on
 file named the old address: phase one books it on a corrected or another profile
 with its own city, and makes that profile the trusted one, so a retry's list
