@@ -127,6 +127,9 @@ describe('tech rewards scores input checks', () => {
       t.uuid('customer_id');
       t.text('status');
       t.text('service_type');
+      t.text('service_line');
+      t.text('protocol_name');
+      t.integer('area_serviced_sqft');
       t.date('service_date').notNullable();
       t.boolean('is_callback');
       t.string('report_template_version');
@@ -503,6 +506,28 @@ describe('tech rewards scores input checks', () => {
       expect(await scores.readOnTime(tech, WINDOW)).toBe(0);
     });
 
+    test('onTime: a delivered-only email counts as a confirmed send, so it keeps a consent-blocked report-waived record owed', async () => {
+      const snap = { v: 1, source: 'catalog', requiresServiceReport: false, requiresApplicationLog: false, requiresCustomerSignature: false,
+        requiresCustomerNotice: true, requiresLicense: false, requiredPhotoCount: 0 };
+      const record = await visit(tech, { structured_notes: { completionSmsStatus: 'blocked', closeoutRequirements: snap } });
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull(); // blocked text + report waived: nothing owed
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'delivered', sent_at: null,
+        queued_at: ts('2026-04-10T15:01:00Z'), delivered_at: ts('2026-04-10T15:05:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100); // a report email did go out: owed, and on time
+    });
+
+    test('onTime: a delivered-only email from an earlier closeout does not block the exemption of the current one', async () => {
+      const snap = { v: 1, source: 'catalog', requiresServiceReport: false, requiresApplicationLog: false, requiresCustomerSignature: false,
+        requiresCustomerNotice: true, requiresLicense: false, requiredPhotoCount: 0 };
+      const record = await visit(tech, { structured_notes: { completionSmsStatus: 'blocked', closeoutRequirements: snap } }); // completed 2026-04-10T15:00Z
+      const email = (queued, delivered) => db('email_messages').del().then(() => db('email_messages').insert({
+        idempotency_key: `service_report_ready:${record.id}:primary`, status: 'delivered', sent_at: null, queued_at: ts(queued), delivered_at: ts(delivered) }));
+      await email('2026-04-05T10:00:00Z', '2026-04-06T10:00:00Z'); // wholly before the window: an earlier closeout's
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull(); // still exempt: nothing owed
+      await email('2026-04-10T15:01:00Z', '2026-04-10T15:05:00Z'); // inside this closeout's window: a send of this one
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+    });
+
     test('onTime: a delivered email with no send time is judged by its queued..delivered bounds', async () => {
       const record = await visit(tech); // completed 2026-04-10T15:00Z: window 14:00 that day .. 15:00 next day
       const key = `service_report_ready:${record.id}:primary`;
@@ -535,9 +560,12 @@ describe('tech rewards scores input checks', () => {
 
     test('audit: match share of audited visits in the window months', async () => {
       expect(await scores.readAudit(tech, WINDOW)).toBeNull();
-      const add = async (month, result, technicianId = tech) => db('tech_protocol_audits').insert({
-        technician_id: technicianId, scheduled_service_id: (await scheduled(technicianId)).id, audit_month: month, result,
-      });
+      // a mark counts while it matches its visit's current completed record (same technician, same month)
+      const add = async (month, result, technicianId = tech) => {
+        const svc = await scheduled(technicianId);
+        await visit(technicianId, { scheduled_service_id: svc.id, service_date: month, service_type: 'Lawn Care Treatment' });
+        return db('tech_protocol_audits').insert({ technician_id: technicianId, scheduled_service_id: svc.id, audit_month: month, result });
+      };
       await add('2026-03-01', 'match');
       await add('2026-04-01', 'match');
       await add('2026-05-01', 'mismatch');
@@ -545,6 +573,29 @@ describe('tech rewards scores input checks', () => {
       await add('2026-04-01', 'mismatch', other); // other tech
       expect(await scores.readAudit(tech, WINDOW)).toBe(66.67);
       expect(await scores.readAudit(tech, { from: '2026-03-15', to: '2026-03-20' })).toBe(100); // audit month 2026-03-01 holds the 15th
+    });
+
+    test('audit: a mark stops counting once its visit moved to another technician or month, or its record was replaced; a deleted visit keeps it', async () => {
+      const mark = async (result, fields = {}) => {
+        const svc = await scheduled(tech);
+        const record = await visit(tech, { scheduled_service_id: svc.id, service_date: '2026-04-10', service_type: 'Lawn Care Treatment' });
+        await db('tech_protocol_audits').insert({ technician_id: tech, scheduled_service_id: svc.id, audit_month: '2026-04-01', result, ...fields });
+        return { svc, record };
+      };
+      const kept = await mark('match');
+      const moved = await mark('mismatch');
+      const month = await mark('mismatch');
+      const replaced = await mark('mismatch');
+      const gone = await mark('match');
+      expect(await scores.readAudit(tech, WINDOW)).toBe(40); // 2 of 5
+      await db('service_records').where({ id: moved.record.id }).update({ technician_id: other });
+      await db('service_records').where({ id: month.record.id }).update({ service_date: '2026-05-02' });
+      await db('service_records').insert({ technician_id: tech, customer_id: randomUUID(), status: 'completed', service_type: 'Lawn Care',
+        service_date: '2026-04-12', scheduled_service_id: replaced.svc.id, created_at: new Date(Date.now() + 60000) }); // made after the mark
+      await db('tech_protocol_audits').where({ scheduled_service_id: gone.svc.id }).update({ scheduled_service_id: null }); // the visit row was deleted
+      expect(await scores.readAudit(tech, WINDOW)).toBe(100); // kept (match) + deleted visit (match): the three mismatches left the score
+      expect(await scores.readAudit(other, WINDOW)).toBeNull(); // the moved visit is not counted for the new technician until re-marked
+      expect(kept.svc.id).toBeTruthy();
     });
 
     test('callbacks: callbacks per 100 visits, 0 per 100 = 100, 10 per 100 or more = 0', async () => {
@@ -755,7 +806,9 @@ describe('tech rewards scores input checks', () => {
     async function seedAllParts() {
       const a = await visit(tech);
       await db('service_report_deliveries').insert({ service_record_id: a.id, status: 'sent', sent_at: ts('2026-04-10T16:00:00Z') });
-      await db('tech_protocol_audits').insert({ technician_id: tech, scheduled_service_id: (await scheduled(tech)).id, audit_month: '2026-04-01', result: 'match' });
+      const audited = await scheduled(tech);
+      await visit(tech, { scheduled_service_id: audited.id, report_template_version: null, service_type: 'Lawn Care Treatment' }); // no report owed: only the audit's visit
+      await db('tech_protocol_audits').insert({ technician_id: tech, scheduled_service_id: audited.id, audit_month: '2026-04-01', result: 'match' });
       await db('equipment_checks').insert({ technician_id: tech, checked_at: ts('2026-04-08T14:00:00Z') });
       await db('tech_owner_ratings').insert({ technician_id: tech, period_month: '2026-04-01', rating: 80 });
     }

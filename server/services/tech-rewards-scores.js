@@ -23,7 +23,8 @@
  *                never late). No confirmed send counts as not on time. bi-tech-scorecard.js
  *                carries no on-time rule; the 24 hours is this module's own, in one constant.
  *   audit        Share of the technician's tech_protocol_audits rows with result 'match',
- *                for audit months in the window.
+ *                for audit months in the window. A row counts only while it matches its visit's current
+ *                record (same technician and month, no newer replacement record), at most five per month: see tech-protocol-audit.js.
  *   callbacks    callbacksPer100 = callbacks credited to the technician (the source-visit
  *                credit bi-tech-scorecard.js uses: callbackCreditByTechnician) per 100
  *                completed non-callback visits in the window (a customer_declined visit performed no service, so it is
@@ -38,14 +39,13 @@ const db = require('../models/db');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const calc = require('./tech-rewards-calc');
 const { callbackCreditByTechnician, PERFORMED_OUTCOME_SQL, VISIT_IS_CALLBACK_SQL } = require('./callback-credit');
-const { deliveryEvidenceForRecords } = require('./completion-record-invariants');
+const { deliveryEvidenceForRecords, CLOSEOUT_SLACK_MS } = require('./completion-record-invariants');
+const { countedMarks } = require('./tech-protocol-audit');
 
 const { DEFAULT_WEIGHTS, DEFAULT_CUT_LINES, seasonWindow, weightedScore, scoreBand } = calc;
 
 // A report is on time when it went out within this many hours of the completion record.
 const REPORT_ON_TIME_HOURS = 24;
-// A send may land a little before the visit's completion stamp (the stamp is written after the completion commits).
-const CLOSEOUT_SLACK_MS = 60 * 60000;
 // Callbacks per 100 visits at which the callbacks part reaches 0.
 const CALLBACK_RATE_AT_ZERO = 10;
 
@@ -253,14 +253,9 @@ async function readOnTime(rawTechnicianId, window, conn = db) {
 async function readAudit(rawTechnicianId, window, conn = db) {
   const technicianId = requireTechnician(rawTechnicianId);
   const { from, to } = requireWindow(window);
-  const row = (await conn.raw(
-    `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE result = 'match') AS matched
-       FROM tech_protocol_audits
-      WHERE technician_id = ? AND audit_month >= ?::date AND audit_month <= ?::date`,
-    [technicianId, monthStart(from), to],
-  )).rows[0];
-  const total = toCount(row?.total);
-  return total ? percent(toCount(row.matched), total) : null;
+  // Only a mark that still matches its visit's current record counts, at most five per month (tech-protocol-audit.js).
+  const counted = await countedMarks(technicianId, { fromMonth: monthStart(from), toMonth: to }, conn);
+  return counted.length ? percent(counted.filter((mark) => mark.result === 'match').length, counted.length) : null;
 }
 
 async function readCallbacks(rawTechnicianId, window, conn = db) {
