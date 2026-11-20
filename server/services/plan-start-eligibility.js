@@ -1,16 +1,28 @@
-// May the app price, or offer, a NEW residential plan for this customer with
-// nobody watching?
+// Does a record of this account stand against a NEW residential plan that the
+// app would price, or offer, with nobody watching?
 //
-// planStartBlocker(database, customerId) answers null when no record in the
-// database stands against it, or the first reason that does:
+// planStartBlocker(database, customerId) answers null when none of the records
+// it reads stands against it, or the first reason that does:
 //   'not_live'    no such customer, an inactive account, or a deleted one
 //   'commercial'  a commercial account or property (never a residential plan)
 //   'has_plan'    the customer already holds a plan (customerHoldsPlan below)
 // A failed read THROWS. An outage is never "nothing stands against it": the
 // caller is a job that tries again, or a pricer that must return no price.
 //
-// It is a rule about the records of the account at the moment of the call. It
-// does not decide who gets an offer on a given day (a former plan customer, a
+// What it reads: the customers row, and the plan records of that ONE account
+// (customerHoldsPlan below lists them). What it does not read:
+// - another account of the same person or home (a duplicate profile, a payer,
+//   a family link);
+// - an estimate that is still open (an accept writes the tier, the lane and
+//   the series, and those are read);
+// - termite_bonds, customer_contracts, payment_plans. A bond rides the
+//   quarterly station check, whose recurring visits are read; a bond alone is
+//   a warranty with a renewal date (no tier count, no bundle discount). A
+//   contract is the signing workflow of a service. A payment plan is the
+//   instalments of an invoice.
+//
+// It is a rule about those records at the moment of the call. It does not
+// decide who gets an offer on a given day (a former plan customer, a
 // complaint, an open estimate, the wait after a job): those are the sender's
 // rules. It takes no lock: a caller that writes (an accept, a mint) keeps its
 // own guard at the write.
