@@ -127,17 +127,32 @@ it('a quote staff are sending right now (409 delivery_in_flight) shows the serve
   }
 });
 
-it('a start whose answer was lost asks once more and opens the quote; it never files a request (codex pre-push P1)', async () => {
+const lostAnswer = () => new TypeError('Failed to fetch');
+const gatewayError = () => Object.assign(new Error('Request failed (502)'), { status: 502 });
+it.each([
+  ['no answer', lostAnswer],
+  ['a gateway error', gatewayError],
+])('a start that gets %s files nothing, never repeats on its own, and asks for a new tap, which opens the quote the first call made (codex pre-push P1s)', async (_label, failure) => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   const assign = vi.fn();
   const original = window.location;
   Object.defineProperty(window, 'location', { configurable: true, value: { ...original, assign } });
+  const alerts = [];
+  const onDialog = (event) => alerts.push(event.detail.message);
+  window.addEventListener('waves:customer-dialog', onDialog);
   try {
-    // The first mint committed, but its answer never arrived; the second tap hands back the same quote.
+    // The first mint committed, but its answer never arrived. A repeat the card made on its own could
+    // land after another tab's newer quote and replace it, so only the customer's new tap asks again.
     api.startPlan
-      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(failure())
       .mockResolvedValueOnce({ ok: true, url: '/estimate/tok123', estimateId: 'e1', reused: true });
     await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    await waitFor(() => expect(alerts).toHaveLength(1));
+    expect(alerts[0]).toMatch(/could not confirm your estimate/);
+    expect(api.startPlan).toHaveBeenCalledOnce();
+    expect(api.createRequest).not.toHaveBeenCalled();
+    // The new tap hands back the quote the first call made.
     fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
     await screen.findByRole('button', { name: 'Open it now' });
     expect(api.startPlan).toHaveBeenCalledTimes(2);
@@ -145,32 +160,9 @@ it('a start whose answer was lost asks once more and opens the quote; it never f
     expect(assign).toHaveBeenCalledWith('/estimate/tok123');
     expect(api.createRequest).not.toHaveBeenCalled();
   } finally {
+    window.removeEventListener('waves:customer-dialog', onDialog);
     Object.defineProperty(window, 'location', { configurable: true, value: original });
     vi.useRealTimers();
-  }
-});
-
-const lostAnswer = () => new TypeError('Failed to fetch');
-const gatewayError = () => Object.assign(new Error('Request failed (502)'), { status: 502 });
-it.each([
-  ['no answer twice', lostAnswer, lostAnswer],
-  ['a gateway error twice', gatewayError, gatewayError],
-  // The first call may have made a quote, so the repeat's refusal must not file a request either.
-  ['no answer, then a refusal of the repeat', lostAnswer, () => Object.assign(new Error('The price changed since you last looked. Please check the new price.'), { status: 409, code: 'offer_changed' })],
-])('a start that gets %s tells the customer to tap again and files no request (codex pre-push P1)', async (_label, first, second) => {
-  api.startPlan.mockRejectedValueOnce(first()).mockRejectedValueOnce(second());
-  const alerts = [];
-  const onDialog = (event) => alerts.push(event.detail.message);
-  window.addEventListener('waves:customer-dialog', onDialog);
-  try {
-    await priceIt(priced(OFFER));
-    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
-    await waitFor(() => expect(alerts).toHaveLength(1));
-    expect(alerts[0]).toMatch(/could not confirm your estimate/);
-    expect(api.startPlan).toHaveBeenCalledTimes(2);
-    expect(api.createRequest).not.toHaveBeenCalled();
-  } finally {
-    window.removeEventListener('waves:customer-dialog', onDialog);
   }
 });
 

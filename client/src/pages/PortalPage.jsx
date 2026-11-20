@@ -11100,10 +11100,12 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
 
   // Opens the priced estimate (pick a time, save a card there). A pricing or eligibility refusal,
   // or a refusal before the mint ran (a 4xx with no code), falls back to today's request, so the
-  // customer never hits a dead end. A failure with no sure answer asks once more (a repeat hands
-  // back the quote the first call may have made) and never files a request, so one tap never
-  // makes both a quote and a request. Off while a new answer loads (the option on screen is the
-  // old answer's) and while an earlier start still mints (codex pre-push P1s).
+  // customer never hits a dead end. A failure with no sure answer files nothing and asks for a new
+  // tap, which hands back the quote the first call may have made: one tap never makes both a quote
+  // and a request. The card never repeats a start on its own, because a late repeat would replace
+  // a quote another tab made since and free its slot hold (codex pre-push P1). Off while a new
+  // answer loads (the option on screen is the old answer's) and while an earlier start still mints
+  // (codex pre-push P1s).
   //
   // Everything stays with the tap's own session (codex pre-push P0/P1): the API client answers a
   // request whose session changed while it waited, so a late reply could hand this account's
@@ -11118,14 +11120,12 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     setMinting(true);
     setStartingPlan(true);
     const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;
-    const start = () => api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
     let out = null;
     let refusal = null;
     try {
-      out = await start();
+      out = await api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
     } catch (err) {
       if (startRefused(err)) refusal = err;
-      else if (seq === planStartSeq.current && tapSessionActive()) out = await start().catch(() => null);
     } finally {
       setMinting(false);
     }
