@@ -6985,7 +6985,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged, paidInvoiceIsVisitsOnlyBill } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged, reportAfterPayHold } = require('../services/invoice-issued-closeout');
             // A closeout approved on a card (record_payment) carries the visit's facts as the card showed them: the LOCKED row must still
             // match (service type, scheduled date, status, edit time), or the visit is left open for a person (the payment stays recorded).
             if (issuedInvoiceCloseout.expectedVisit && approvedVisitChanged(lockedSvcRow, issuedInvoiceCloseout.expectedVisit)) {
@@ -7000,24 +7000,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // (on_site) visit closes on a past day or on money received
             // today; a visit nobody has reached never closes today (owner
             // ruling 2026-10-04).
-            // GATE_REPORT_AFTER_PAY (pre-push audit round 4): the only-bill
-            // verdict is re-read in this transaction, under the visit's mint
-            // lock, from the LOCKED invoice's stamp: a second bill voided
-            // since the resolver's read leaves the visit held, as the
-            // payment's own verdict would.
+            // GATE_REPORT_AFTER_PAY: the visit's recorded hold, read again
+            // under the visit's mint lock (the payment's closeout records a
+            // hold under the same lock). A hold on another invoice's payment
+            // leaves the visit for that payment (pre-push audit round 7: the
+            // locked check read only this invoice); a hold on this payment
+            // keeps the visit open for the rest of its day.
             const lockedToday = etDateString();
-            const lockedOnlyInvoice = await paidInvoiceIsVisitsOnlyBill(trx, {
-              visit: { id: svc.id, status: lockedSvcRow?.status, scheduled_date: lockedDay },
-              invoice: lockedIssuedInvoice,
-              today: lockedToday,
-              trigger: issuedInvoiceCloseout.trigger,
-            });
+            const lockedHold = await reportAfterPayHold(trx, svc.id);
+            if (lockedHold && String(lockedHold.id) !== String(lockedIssuedInvoice.id)) {
+              throw Object.assign(new Error('visit held on another invoice\'s payment during the issued-invoice closeout'), { code: 'issued_visit_paid_on_other_invoice' });
+            }
             const lockedRefusal = lockedDay !== serviceDateOnly(svc.scheduled_date)
               ? 'visit_moved'
               : issuedCloseoutVisitRefusal(lockedSvcRow?.status, lockedDay, {
                 today: lockedToday,
                 trigger: issuedInvoiceCloseout.trigger,
-                onlyInvoice: lockedOnlyInvoice,
+                heldForReport: Boolean(lockedHold),
                 // The prepayment proof (lockedIssuedDay): a
                 // visit nobody arrived at closes only on an invoice settled /
                 // delivered after its day — re-decided here against the
@@ -9450,6 +9449,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
             reason: err.refusal || null,
           } });
         }
+        if (err && err.code === 'issued_visit_paid_on_other_invoice') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit is held for its report on another invoice\'s payment — it completes on that payment, and stays open.',
+            code: 'issued_visit_paid_on_other_invoice',
+          } });
+        }
         if (err && err.code === 'issued_visit_in_progress') {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: 409, body: {
@@ -10750,19 +10756,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     }
     let existingCompletionInvoice = null;
-    // GATE_REPORT_AFTER_PAY (pre-push audit rounds 5-6): the payment this
-    // visit is held on (reportAfterPayPaidInvoice: paid on the visit's day
-    // after its technician arrived, while it was the only bill; null with the
-    // gate off). Both invoice lookups below reuse it, never a bill added after
-    // the payment, which stays the office's. Read before any invoice is linked
-    // or reused, and FAIL CLOSED: without it those lookups could link, text a
-    // pay link for, or charge the later bill. A failure releases the attempt
-    // for resume and 503s, as the refunded-invoice check below does. An
-    // issued-invoice closeout pins its own invoice.
+    // GATE_REPORT_AFTER_PAY: the payment this visit is held on, as its
+    // payment's closeout recorded it (linkReportAfterPayHold; null with the
+    // gate off or no live hold). It is linked to this record here, by the
+    // statement that re-checks it under the invoice's row lock (still settled
+    // with the same payment, still on this visit), so a payment undone before
+    // the link leaves nothing held and the lookups below choose as with the
+    // gate off (pre-push audit round 7). Both invoice lookups below reuse it,
+    // never a bill added after the payment, which stays the office's. Read
+    // before any invoice is linked or reused, and FAIL CLOSED: without it those
+    // lookups could link, text a pay link for, or charge the later bill. A
+    // failure releases the attempt for resume and 503s, as the
+    // refunded-invoice check below does. An issued-invoice closeout pins its
+    // own invoice.
     let reportAfterPayHeld = null;
     if (!packetEffects && !systemQuietCloseout && !issuedInvoiceCloseout) {
       try {
-        reportAfterPayHeld = await require('../services/invoice-issued-closeout').reportAfterPayPaidInvoice(db, svc);
+        reportAfterPayHeld = await require('../services/invoice-issued-closeout').linkReportAfterPayHold(db, {
+          visitId: svc.id, serviceRecordId: record.id, technicianId: svc.technician_id || null,
+        });
       } catch (heldErr) {
         logger.error(`[dispatch] held-payment check FAILED for ${svc.id} — closeout NOT finalized: ${heldErr.message}`);
         const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, heldErr);

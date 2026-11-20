@@ -14,7 +14,11 @@ jest.mock('../models/db', () => {
 });
 const mockCompleteScheduledService = jest.fn(async () => ({ status: 200, body: { success: true } }));
 jest.mock('../services/complete-scheduled-service', () => ({ completeScheduledService: (...a) => mockCompleteScheduledService(...a) }));
-jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => ({})) }));
+// GATE_REPORT_AFTER_PAY's hold is state the closeout reads back, so that one row is written for real; every other audit row is
+// only recorded as a call.
+jest.mock('../services/audit-log', () => ({
+  recordAuditEvent: jest.fn(async (event) => (event?.action === 'visit.report_after_pay_held' ? jest.requireActual('../services/audit-log').recordAuditEvent(event) : ({}))),
+}));
 // Outage injection for the two pre-completion probes: a test may replace
 // the packet-ownership assert or the profile resolver for one call.
 const mockProbe = { packetAssert: null, profile: null, profileCalls: [] };
@@ -96,24 +100,17 @@ describe('backfillCompletionPlan same-day switch', () => {
     }
   });
 
-  test('report after pay (GATE_REPORT_AFTER_PAY, owner 2026-11-19): a payment on the visit day no longer closes an arrived visit it alone bills; a past day still does', () => {
-    const rule = (status, day, trigger, onlyInvoice) => issuedCloseoutVisitRefusal(status, day, { today: '2040-03-04', trigger, onlyInvoice });
-    mockGate.reportAfterPay = true;
-    try {
-      expect(rule('on_site', '2040-03-04', 'paid', true)).toBe('visit_scheduled_today');
-      expect(rule('on_site', '2040-03-04', 'sent', true)).toBe('visit_scheduled_today');
-      expect(rule('on_site', '2040-03-03', 'paid', true)).toBeNull();
-      expect(rule('on_site', '2040-03-03', 'sent', true)).toBeNull();
-      // A visit nobody arrived at keeps the prepayment rule.
-      expect(rule('confirmed', '2040-03-04', 'paid', true)).toBe('visit_scheduled_today');
-      // Another invoice on the visit (pre-push audit round 3), or no answer at all (the completion's locked recheck): the
-      // payment closes it, as with the gate off.
-      expect(rule('on_site', '2040-03-04', 'paid', false)).toBeNull();
-      expect(rule('on_site', '2040-03-04', 'paid')).toBeNull();
-    } finally {
-      mockGate.reportAfterPay = false;
-    }
-    expect(rule('on_site', '2040-03-04', 'paid', true)).toBeNull();
+  test('report after pay (GATE_REPORT_AFTER_PAY, owner 2026-11-19): a visit a payment holds stays open on its day; a past day closes it', () => {
+    const rule = (status, day, trigger, heldForReport) => issuedCloseoutVisitRefusal(status, day, { today: '2040-03-04', trigger, heldForReport });
+    expect(rule('on_site', '2040-03-04', 'paid', true)).toBe('visit_scheduled_today');
+    expect(rule('on_site', '2040-03-04', 'sent', true)).toBe('visit_scheduled_today');
+    expect(rule('on_site', '2040-03-03', 'paid', true)).toBeNull();
+    expect(rule('on_site', '2040-03-03', 'sent', true)).toBeNull();
+    // A visit nobody arrived at keeps the prepayment rule.
+    expect(rule('confirmed', '2040-03-04', 'paid', true)).toBe('visit_scheduled_today');
+    // Not held (another invoice on the visit, no hold recorded, or no answer at all): the payment closes it, as with the gate off.
+    expect(rule('on_site', '2040-03-04', 'paid', false)).toBeNull();
+    expect(rule('on_site', '2040-03-04', 'paid')).toBeNull();
   });
 
   test('the panel rule stays past-only; the internal issued-invoice trigger admits today, never the future', () => {
@@ -144,8 +141,8 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   // for a send-triggered closeout; the same-day rule has its own assertions
   // in the resolver test below, which date their visit to TODAY explicitly.
   const YESTERDAY = '2040-03-03';
-  // GATE_REPORT_AFTER_PAY holds a visit paid on its own day AFTER its technician arrived (paymentHeldVisit, pre-push audit
-  // round 6): the held fixtures arrive at 9:00 AM ET and are paid at 10:00 AM ET, both on TODAY.
+  // GATE_REPORT_AFTER_PAY: the held fixtures arrive at 9:00 AM ET and are paid at 10:00 AM ET, both on TODAY. The hold itself is
+  // what the payment's closeout records, read back by every reader; no reader reads these stamps.
   const ARRIVED_AT = new Date(`${TODAY}T14:00:00Z`);
   const PAID_AT = new Date(`${TODAY}T15:00:00Z`);
 
@@ -920,60 +917,100 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(await trx('invoices').where({ id: draft.id }).first()).toMatchObject({ status: 'draft', service_record_id: null });
   });
 
-  test('report after pay: on the visit day the sweep admits a settled invoice whose visit carried another invoice at the payment, never one its invoice alone billed (a void row, or a bill made after the payment, does not count)', async () => {
-    const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
+  // The visit-day sweep skips only a visit with a live hold. Any other arrived visit with a settled invoice is admitted, and its
+  // closeout decides as the payment's own would have: it records the hold when the paid invoice is the visit's only bill (a void
+  // row does not count) and closes the visit when another bill is on it, as with the gate off.
+  test('report after pay: on the visit day the sweep skips a visit with a live hold and admits the others: the closeout holds a visit its paid invoice alone bills and closes one with another bill on it', async () => {
+    const { retryIssuedInvoiceCloseouts, reportAfterPayHold } = require('../services/invoice-issued-closeout');
     mockGate.reportAfterPay = true;
-    const paidAt = PAID_AT;
-    const before = new Date(paidAt.getTime() - 3600000);
-    const after = new Date(paidAt.getTime() + 60000);
-    const settled = (svc) => invoice({ status: 'paid', paid_at: paidAt, created_at: before, scheduled_service_id: svc.id, date: TODAY });
+    const settled = (svc) => invoice({ status: 'paid', paid_at: PAID_AT, scheduled_service_id: svc.id, date: TODAY });
     const shared = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
     const paid = await settled(shared);
-    await invoice({ status: 'draft', created_at: before, scheduled_service_id: shared.id, date: TODAY });
+    await invoice({ status: 'draft', scheduled_service_id: shared.id, date: TODAY });
     const alone = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
-    await settled(alone);
-    await invoice({ status: 'void', created_at: before, scheduled_service_id: alone.id, date: TODAY });
-    const later = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
-    await settled(later);
-    await invoice({ status: 'draft', created_at: after, scheduled_service_id: later.id, date: TODAY });
-    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 1, retried: 1, closed: 1 });
+    const aloneInv = await settled(alone);
+    await invoice({ status: 'void', scheduled_service_id: alone.id, date: TODAY });
+    // Held at its payment; a bill added since does not end the hold.
+    const held = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
+    const heldInv = await settled(held);
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: heldInv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_scheduled_today' });
+    await invoice({ status: 'draft', scheduled_service_id: held.id, date: TODAY });
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 2, retried: 2, closed: 1 });
     expect(mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout])).toEqual([[shared.id, { invoiceId: paid.id, trigger: 'paid' }]]);
+    expect((await reportAfterPayHold(trx, alone.id))?.id).toBe(aloneInv.id);
+    expect((await reportAfterPayHold(trx, held.id))?.id).toBe(heldInv.id);
+    expect(await reportAfterPayHold(trx, shared.id)).toBeNull();
   });
 
-  // Pre-push audit round 6: the hold belongs to the payment, not to the visit's state when it is read. Only a payment made on the
-  // visit's own day after its technician arrived holds the visit: a prepayment made before the arrival, a payment on an earlier
-  // day, or one on a later day (an overdue visit paid the next day) is a payment the rule never held. The payment's closeout, the visit-day sweep, the held payment the completion reuses and the
-  // Dispatch row's flag all read the same stamps.
-  test('report after pay: only a payment made on the visit\'s own day after its technician arrived holds the visit; one made before the arrival or on another day does not, in every reader', async () => {
-    const { retryIssuedInvoiceCloseouts, reportAfterPayPaidInvoice, reportAfterPayHeldVisitIds } = require('../services/invoice-issued-closeout');
+  // Pre-push audit rounds 6-7: the hold belongs to the payment, decided once by its closeout and recorded; no reader re-derives it
+  // from the visit's or the invoice's stamps, which can change after the payment (the completion backdates an arrival; a webhook
+  // stamps its processing time). A payment whose closeout ran before the technician arrived (a prepayment), or on another day,
+  // records nothing. The record is live only while its invoice still carries that payment on the visit: undone, or paid again,
+  // the hold ends and every reader acts as with the gate off. The resolver, the completion's held invoice, the visit-day sweep
+  // and the Dispatch flag all read the record. Gate off: every reader ignores it.
+  test('report after pay: the hold is decided once by the payment\'s closeout and read from its record by every reader; a prepayment or another day records nothing; an undone or repeated payment ends it', async () => {
+    const { retryIssuedInvoiceCloseouts, reportAfterPayHold, reportAfterPayHeldVisitIds } = require('../services/invoice-issued-closeout');
     mockGate.reportAfterPay = true;
+    const pay = (inv, at = PAID_AT) => trx('invoices').where({ id: inv.id }).update({ status: 'paid', paid_at: at });
+    const closeout = (inv, today = TODAY) => closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today });
     const held = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
-    const heldInv = await invoice({ status: 'paid', paid_at: PAID_AT, created_at: ARRIVED_AT, scheduled_service_id: held.id, date: TODAY });
-    // Paid at 10:00 AM ET; the technician arrived at 10:30 AM: a prepayment.
-    const paidFirst = await visit({ status: 'on_site', date: TODAY, arrived_at: new Date(PAID_AT.getTime() + 1800000) });
-    const paidFirstInv = await invoice({ status: 'paid', paid_at: PAID_AT, created_at: ARRIVED_AT, scheduled_service_id: paidFirst.id, date: TODAY });
-    // Paid the day before the visit.
-    const paidEarlier = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
-    const paidEarlierInv = await invoice({ status: 'paid', paid_at: new Date(`${YESTERDAY}T15:00:00Z`), created_at: new Date(`${YESTERDAY}T14:00:00Z`), scheduled_service_id: paidEarlier.id, date: TODAY });
-    // Yesterday's visit, its technician there yesterday, paid today: after the arrival, but not on the visit's own day.
+    const heldInv = await invoice({ status: 'sent', scheduled_service_id: held.id, date: TODAY });
+    await pay(heldInv);
+    expect(await closeout(heldInv)).toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: held.id });
+    // Paid while nobody had arrived: its closeout leaves the visit open as a prepayment and records nothing. The arrival stamp
+    // written later, even one backdated before the payment, changes nothing.
+    const prepaid = await visit({ status: 'confirmed', date: TODAY });
+    const prepaidInv = await invoice({ status: 'sent', scheduled_service_id: prepaid.id, date: TODAY });
+    await pay(prepaidInv);
+    expect(await closeout(prepaidInv)).toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: prepaid.id });
+    await trx('scheduled_services').where({ id: prepaid.id }).update({ status: 'completed', arrived_at: ARRIVED_AT });
+    // Yesterday's visit, paid today: its closeout closes it.
     const paidLate = await visit({ status: 'on_site', date: YESTERDAY, arrived_at: new Date(`${YESTERDAY}T14:00:00Z`) });
-    const paidLateInv = await invoice({ status: 'paid', paid_at: PAID_AT, created_at: new Date(`${YESTERDAY}T14:30:00Z`), scheduled_service_id: paidLate.id, date: YESTERDAY });
-    expect(await resolveVisitForIssuedInvoice(trx, heldInv, { today: TODAY, trigger: 'paid' })).toMatchObject({ svc: null, reason: 'visit_scheduled_today' });
-    expect((await resolveVisitForIssuedInvoice(trx, paidFirstInv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(paidFirst.id);
-    expect((await resolveVisitForIssuedInvoice(trx, paidEarlierInv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(paidEarlier.id);
-    expect((await resolveVisitForIssuedInvoice(trx, paidLateInv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(paidLate.id);
-    expect((await reportAfterPayPaidInvoice(trx, held))?.id).toBe(heldInv.id);
-    expect(await reportAfterPayPaidInvoice(trx, paidFirst)).toBeNull();
-    expect(await reportAfterPayPaidInvoice(trx, paidEarlier)).toBeNull();
-    expect(await reportAfterPayPaidInvoice(trx, paidLate)).toBeNull();
-    expect([...await reportAfterPayHeldVisitIds(trx, [held.id, paidFirst.id, paidEarlier.id, paidLate.id])]).toEqual([String(held.id)]);
-    // The visit-day sweep agrees: it closes the three the rule never held and leaves the held one for its technician.
-    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 3, retried: 3, closed: 3 });
-    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([paidFirst.id, paidEarlier.id, paidLate.id].sort());
-    // Gate off: nothing is held.
+    const paidLateInv = await invoice({ status: 'sent', scheduled_service_id: paidLate.id, date: YESTERDAY });
+    await pay(paidLateInv);
+    expect(await closeout(paidLateInv)).toMatchObject({ closed: true, visitId: paidLate.id });
+    // The completion (mocked here) marks it completed.
+    await trx('scheduled_services').where({ id: paidLate.id }).update({ status: 'completed' });
+    expect(recordAuditEvent.mock.calls.filter(([event]) => event.action === 'visit.report_after_pay_held').map(([event]) => [event.resource_id, event.metadata.invoiceId]))
+      .toEqual([[held.id, String(heldInv.id)]]);
+    expect((await reportAfterPayHold(trx, held.id))?.id).toBe(heldInv.id);
+    expect(await reportAfterPayHold(trx, prepaid.id)).toBeNull();
+    expect(await reportAfterPayHold(trx, paidLate.id)).toBeNull();
+    expect([...await reportAfterPayHeldVisitIds(trx, [held.id, prepaid.id, paidLate.id])]).toEqual([String(held.id)]);
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 0, retried: 0, closed: 0 });
+    // Gate off: every reader ignores the record, and the payment's closeout closes the visit, as before the gate.
     mockGate.reportAfterPay = false;
-    expect(await reportAfterPayPaidInvoice(trx, held)).toBeNull();
+    expect(await reportAfterPayHold(trx, held.id)).toBeNull();
     expect((await reportAfterPayHeldVisitIds(trx, [held.id])).size).toBe(0);
+    expect((await resolveVisitForIssuedInvoice(trx, heldInv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(held.id);
+    mockGate.reportAfterPay = true;
+    // Undone: the record names a payment the invoice no longer carries, so nothing is held.
+    await trx('invoices').where({ id: heldInv.id }).update({ status: 'sent', paid_at: null });
+    expect(await reportAfterPayHold(trx, held.id)).toBeNull();
+    expect((await reportAfterPayHeldVisitIds(trx, [held.id])).size).toBe(0);
+    // Paid again: the old record is not this payment's; the new payment's closeout decides again and records its own.
+    const repaidAt = new Date(PAID_AT.getTime() + 3600000);
+    await pay(heldInv, repaidAt);
+    expect(await reportAfterPayHold(trx, held.id)).toBeNull();
+    expect(await closeout(heldInv)).toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: held.id });
+    expect(await reportAfterPayHold(trx, held.id)).toMatchObject({ id: heldInv.id, hold_paid_at_ms: String(repaidAt.getTime()) });
+    // Refunded: the invoice keeps its paid_at, but a refunded payment holds nothing.
+    await trx('invoices').where({ id: heldInv.id }).update({ status: 'refunded' });
+    expect(await reportAfterPayHold(trx, held.id)).toBeNull();
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId)).toEqual([paidLate.id]);
+  });
+
+  // The record_payment card's pin outranks the hold: a payment whose card named another visit, or none, leaves this visit for a
+  // person (approved_target_mismatch, which the sweeps never retry) and records no hold on it, though the payment would hold it.
+  test('report after pay: a payment whose card named another visit records no hold on this one', async () => {
+    const { reportAfterPayHold } = require('../services/invoice-issued-closeout');
+    mockGate.reportAfterPay = true;
+    const svc = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
+    const inv = await invoice({ status: 'paid', paid_at: PAID_AT, scheduled_service_id: svc.id, date: TODAY });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY, approvedTarget: 'none' }))
+      .toMatchObject({ closed: false, reason: 'approved_target_mismatch', visitId: svc.id });
+    expect(await reportAfterPayHold(trx, svc.id)).toBeNull();
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
   });
 
   // Pre-push audit round 4: a bill made after the payment must not end the hold the payment (and the record_payment card)
@@ -1028,6 +1065,8 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     }).returning('id').then((r) => r.map((x) => x.id ?? x));
     const svc = await visit({ status: 'on_site', date: TODAY, arrived_at: ARRIVED_AT });
     const child = await invoice({ status: 'paid', paid_at: paidAt, created_at: new Date(paidAt.getTime() - 3600000), payer_statement_id: statementId, scheduled_service_id: svc.id, date: TODAY });
+    // The settlement runs each child's closeout: the child is the visit's only bill, so it records the hold.
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: child.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_scheduled_today' });
     const madeAfter = new Date(paidAt.getTime() + 60000);
     const later = await invoice({ status: 'sent', sent_at: madeAfter, created_at: madeAfter, scheduled_service_id: svc.id, date: TODAY });
     expect(await resolveVisitForIssuedInvoice(trx, later, { today: '2040-03-05', trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_paid_on_other_invoice' });

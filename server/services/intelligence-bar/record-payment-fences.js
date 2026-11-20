@@ -89,9 +89,10 @@ function settlementFenceFor(pin) {
     if (pin.closeout && !(await closeoutVisitUnchanged(database, pin.closeout))) throw drift(VISIT_TEXT);
     // GATE_REPORT_AFTER_PAY (pre-push audit round 5): the card's same-day verdict, asked again on this handle. A bill added on the
     // visit since the card would close it at once, though the card said it stays open today; one voided since would hold it, though the
-    // card said it closes now (paidInvoiceIsVisitsOnlyBill, the resolver's own question; false with the gate off).
-    if (pin.closeout && Boolean(pin.closeout.deferred) !== await require('../invoice-issued-closeout').paidInvoiceIsVisitsOnlyBill(database, {
-      visit: { id: pin.closeout.visitId, status: pin.closeout.status, scheduled_date: pin.closeout.date }, invoice: row, today: etDateString(), trigger: 'paid',
+    // card said it closes now (reportAfterPayWouldHold, the question the payment's closeout asks again when it records the hold; false
+    // with the gate off).
+    if (pin.closeout && Boolean(pin.closeout.deferred) !== await require('../invoice-issued-closeout').reportAfterPayWouldHold(database, {
+      visit: { id: pin.closeout.visitId, status: pin.closeout.status, scheduled_date: pin.closeout.date }, invoice: row, today: etDateString(),
     })) throw drift(BILLS_TEXT);
     // A job timer started after the card leaves no mark on the visit row, yet the closeout leaves a visit with a running timer open: the
     // promised closeout would silently not happen. The closeout's own predicate, on the same handle. Not for a deferred close

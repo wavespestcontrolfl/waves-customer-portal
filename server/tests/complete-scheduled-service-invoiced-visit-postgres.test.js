@@ -115,6 +115,7 @@ async function cleanup(f) {
   await mockPg('invoices').where({ customer_id: f.customerId }).update({ service_record_id: null }).catch(() => {});
   await mockPg('service_records').where({ customer_id: f.customerId }).del().catch(() => {});
   await mockPg('invoices').where({ customer_id: f.customerId }).del().catch(() => {});
+  await mockPg('audit_log').where({ resource_type: 'scheduled_services', resource_id: f.serviceId }).del().catch(() => {});
   await mockPg('scheduled_services').where({ customer_id: f.customerId }).del().catch(() => {});
   await mockPg('customer_properties').where({ customer_id: f.customerId }).del().catch(() => {});
   await mockPg('technicians').where({ id: f.techId }).del().catch(() => {});
@@ -144,6 +145,8 @@ async function laterBill(f, createdAt) {
 }
 // The technician arrived at `arrivedAt` (the visit is on site).
 const arrive = (f, arrivedAt) => mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site', arrived_at: arrivedAt, check_in_time: arrivedAt });
+// GATE_REPORT_AFTER_PAY: what the payment's closeout does for the paid invoice: it records the hold when the payment holds the visit.
+const recordHold = (f) => require('../services/invoice-issued-closeout').recordReportAfterPayHold(mockPg, { visitId: f.serviceId, invoiceId: f.invoiceId, today: etDateString(new Date()) });
 const paidAtOf = async (f) => new Date((await mockPg('invoices').where({ id: f.invoiceId }).first('paid_at')).paid_at);
 const completionTexts = () => sendCustomerMessage.mock.calls.map(([input]) => input).filter((input) => input?.purpose === 'service_completion');
 const textsWithPayLink = () => completionTexts().filter((input) => /\/pay\/|pay_url|[?&]pay=|invoice/i.test(`${input.body} ${input.metadata?.templateKey || ''}`));
@@ -284,9 +287,10 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     chargeInvoiceWithSavedCard.mockClear();
     const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
     try {
-      // The technician arrived, then the customer paid: the payment left the visit open for its report.
+      // The technician arrived, then the customer paid: the payment's closeout held the visit open for its report.
       const paidAt = await paidAtOf(f);
       await arrive(f, new Date(paidAt.getTime() - 1800000));
+      expect(await recordHold(f)).toBe(true);
       const laterId = await laterBill(f, new Date(paidAt.getTime() + 60000));
       const out = await complete(f, {});
       expect(out.status).toBe(200);
@@ -304,27 +308,76 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     }
   });
 
-  // Pre-push audit round 6: a payment made before the technician arrived is a prepayment the rule never held, so the completion
-  // does not treat it as the visit's bill: a bill the office adds for the completion is the visit's newest row, as with the gate off.
-  test('report after pay: a payment made before the technician arrived holds nothing: the completion takes the newest bill, as with the gate off', async () => {
+  // Pre-push audit rounds 6-7: a payment whose closeout ran before the technician arrived is a prepayment, and that closeout
+  // records no hold. Nothing later turns it into one: no reader reads the arrival stamp, which the completion itself backdates
+  // from a typed time on site when the visit has no recorded start. So the bill the office adds for the completion is the
+  // visit's newest row, as with the gate off.
+  test('report after pay: a payment made before the technician arrived holds nothing, also when the completion backdates the arrival: the completion takes the newest bill, as with the gate off', async () => {
     const saved = process.env.GATE_REPORT_AFTER_PAY;
     process.env.GATE_REPORT_AFTER_PAY = 'true';
+    const closeout = require('../services/invoice-issued-closeout');
     const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
     try {
-      // Paid a minute ago, the technician arrived 30 s ago, then the office added the bill due at completion.
-      const now = Date.now();
-      await mockPg('invoices').where({ id: f.invoiceId }).update({ paid_at: new Date(now - 60000), created_at: new Date(now - 120000) });
-      await arrive(f, new Date(now - 30000));
-      const laterId = await laterBill(f, new Date(now - 10000));
-      const out = await complete(f, {});
+      // The payment's closeout: nobody has arrived (the visit is confirmed), so nothing is held.
+      expect(await recordHold(f)).toBe(false);
+      const laterId = await laterBill(f, new Date());
+      // The office completes the visit with a typed time on site and no recorded start: the completion stamps an arrival
+      // 90 minutes back, before the payment.
+      const out = await complete(f, { timeOnSite: '01:30:00' });
       expect(out.status).toBe(200);
+      const { arrived_at: arrivedAt } = await mockPg('scheduled_services').where({ id: f.serviceId }).first('arrived_at');
+      expect(new Date(arrivedAt).getTime()).toBeLessThan((await paidAtOf(f)).getTime());
       const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id');
       const byId = Object.fromEntries((await invoicesOf(f)).map((row) => [row.id, row]));
       expect(byId[f.invoiceId]).toMatchObject({ status: 'paid', service_record_id: null });
       expect(byId[laterId]).toMatchObject({ service_record_id: record.id });
+      expect(await closeout.reportAfterPayHold(mockPg, f.serviceId)).toBeNull();
     } finally {
       if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;
       await cleanup(f);
+    }
+  });
+
+  // Pre-push audit round 7: the office can undo the held payment before the completion links it. The completion links the held
+  // invoice by one UPDATE that re-checks it (still settled with the same payment, still on the visit): undone before the
+  // completion, no hold is live, and the completion chooses as with the gate off; undone while the link waits on the invoice row,
+  // the UPDATE re-checks the row the undo committed and links nothing.
+  test('report after pay: an undone payment ends the hold: the completion takes the newest bill, and an undo that commits while the link waits leaves nothing linked', async () => {
+    const saved = process.env.GATE_REPORT_AFTER_PAY;
+    process.env.GATE_REPORT_AFTER_PAY = 'true';
+    const closeout = require('../services/invoice-issued-closeout');
+    const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
+    const g = await seedInvoicedVisit({ invoiceStatus: 'paid' });
+    const undo = await mockPg.transaction();
+    try {
+      for (const fx of [f, g]) {
+        await arrive(fx, new Date((await paidAtOf(fx)).getTime() - 1800000));
+        expect(await recordHold(fx)).toBe(true);
+      }
+      // Undone before the completion.
+      await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'sent', paid_at: null });
+      const laterId = await laterBill(f, new Date());
+      expect(await closeout.reportAfterPayHold(mockPg, f.serviceId)).toBeNull();
+      expect((await complete(f, {})).status).toBe(200);
+      const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id');
+      const byId = Object.fromEntries((await invoicesOf(f)).map((row) => [row.id, row]));
+      expect(byId[f.invoiceId]).toMatchObject({ status: 'sent', service_record_id: null });
+      expect(byId[laterId]).toMatchObject({ service_record_id: record.id });
+      // Undone while the link waits: the undo holds the invoice row, the link's read still sees the payment, and its UPDATE waits.
+      await undo('invoices').where({ id: g.invoiceId }).update({ status: 'sent', paid_at: null });
+      const linking = closeout.linkReportAfterPayHold(mockPg, { visitId: g.serviceId, serviceRecordId: null, technicianId: g.techId });
+      const waiting = async () => Number((await mockPg.raw(`SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE 'update "invoices"%'`)).rows[0].n);
+      for (let i = 0; i < 100 && !(await waiting()); i += 1) await new Promise((resolve) => { setTimeout(resolve, 50); });
+      expect(await waiting()).toBeGreaterThan(0);
+      await undo.commit();
+      expect(await linking).toBeNull();
+      expect(await mockPg('invoices').where({ id: g.invoiceId }).first()).toMatchObject({ status: 'sent', service_record_id: null });
+    } finally {
+      if (!undo.isCompleted()) await undo.rollback();
+      if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;
+      await cleanup(f);
+      await cleanup(g);
     }
   });
 
@@ -340,9 +393,10 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     try {
       const paidAt = await paidAtOf(f);
       await arrive(f, new Date(paidAt.getTime() - 1800000));
+      expect(await recordHold(f)).toBe(true);
       const laterId = await laterBill(f, new Date(paidAt.getTime() + 60000));
       const key = randomUUID();
-      jest.spyOn(closeout, 'reportAfterPayPaidInvoice').mockRejectedValueOnce(new Error('connection reset'));
+      jest.spyOn(closeout, 'linkReportAfterPayHold').mockRejectedValueOnce(new Error('connection reset'));
       const first = await complete(f, {}, key);
       expect(first).toMatchObject({ status: 503, body: { code: 'held_payment_lookup_failed' } });
       expect((await invoicesOf(f)).map((row) => row.service_record_id)).toEqual([null, null]);
