@@ -1,8 +1,6 @@
 /**
  * Weekly restaurant prospect list from Florida's public restaurant files (DBPR; free, no key; owner approval
- * 2026-11-19): the store calls on `restaurant_prospects` and the pure parsers for the three files. The weekly job
- * that downloads the files and calls them is the next change; until it lands, nothing calls this file. It sends
- * nothing and calls no AI.
+ * 2026-11-19). Backend only: it fills `restaurant_prospects` and sends nothing to anyone, calls no AI.
  *
  *   7fdinspi.csv      district 7 inspections, current fiscal year. Kept: visits that cited violation 35 in
  *                     Manatee, Sarasota or Charlotte, outside Punta Gorda (not served; excluded-localities.js).
@@ -10,20 +8,43 @@
  *   chgownr_food.csv  ownership changes statewide. Kept: the same places. In this file the values under
  *                     "Primary Phone Number" and "Mailing County Code" arrive swapped, so a phone is picked by shape.
  *
+ * The state rebuilds the three files each morning, and each holds one fiscal year (July to June): on July 1 they
+ * start over. The year before is not posted as these CSVs. Its archives are statewide XLSX files, checked
+ * 2026-11-20: inspections about 55 MB, new licenses posted about July 9, no ownership-change archive since 2022-23.
+ * Reading them is not worth one day of rows a year. So the schedule (the next change) also runs the job daily on
+ * June 24-30, and at most the last day of June goes unread.
+ *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
- * read yet, true = a 35A finding, false = 35B only. detail_attempts counts failed report reads.
+ * read yet, true = a 35A finding, false = 35B only. The report-page reads that fill it are the next change; until
+ * then every inspection stays NULL.
+ *
+ * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
+ * sync itself never throws. Logs carry counts and elapsed time only, never a business name, address or phone. A read
+ * with under 90% of the rows of the fullest complete read of the same file and fiscal year is short (a download that
+ * stopped early): its rows are written and the run fails (readProblem). That measure is kept in system_settings. A
+ * copy of an older fiscal year than one already read, or a file with no row from the last 14 days, fails the same way.
  */
 
 const db = require('../../models/db');
+const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
+const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
+const { etDateString, etCalendarDaysUntil } = require('../../utils/datetime-et');
 
+const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
+const FILES = {
+  inspection: '7fdinspi.csv',
+  new_license: 'newfood.csv',
+  owner_change: 'chgownr_food.csv',
+};
 // Every column a parser reads. A row without one is skipped and counted (hasEveryColumn): no License ID would store
 // inspections whose report can never be read, no city or ZIP would let Punta Gorda rows through, and a renamed name,
 // address or phone column would store blanks that no later file repairs (a known key only refreshes last_seen_at).
-// An empty cell is still allowed. The two license files share one layout.
+// An empty cell is still allowed. The two license files share one layout. loadFile refuses a whole file whose
+// header lacks one.
 const PLACE_COLUMNS = ['Location City', 'Location Zip Code'];
 const LICENSE_COLUMNS = [
   'Application Number', 'Application Type', 'Application Approval Date', 'License Number', 'License Type Code',
@@ -44,6 +65,7 @@ const REQUIRED_COLUMNS = {
 // applications, and one value too long would make PostgreSQL refuse its whole insert batch.
 const KEY_MAX = 40;
 
+const FILE_TIMEOUT_MS = 60 * 1000;
 const REPORT_MAX_ATTEMPTS = 3;
 const UPSERT_CHUNK = 500;
 
@@ -108,10 +130,10 @@ function hasEveryColumn(row, kind) {
 
 /**
  * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row cut short, or a row
- * in the area with a bad report id, date or violation-35 count, is skipped and counted in counts.malformed; a row in
- * the area that passes counts in counts.valid, cited or not.
+ * in the area with a bad report id, date (or one after `today`, when given) or violation-35 count, is skipped and
+ * counted in counts.malformed; a row in the area that passes counts in counts.valid, cited or not.
  */
-function parseInspectionRows(rows, counts = {}) {
+function parseInspectionRows(rows, counts = {}, today = null) {
   counts.malformed ??= 0;
   counts.valid ??= 0;
   const out = [];
@@ -127,7 +149,7 @@ function parseInspectionRows(rows, counts = {}) {
     const cited = wholeNumber(row['Violation 35']);
     // A row without both report ids is left out: its report could never be read, and once stored it would block a
     // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
-    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || cited === null) {
+    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || (today && eventDate > today) || cited === null) {
       counts.malformed += 1;
       continue;
     }
@@ -159,11 +181,12 @@ function parseInspectionRows(rows, counts = {}) {
 
 /**
  * New-license or ownership-change rows (same layout) -> one record per application in the three counties. A row cut
- * short, or a row in the area with no application number, one longer than the key column, or no real approval date,
- * is skipped and counted in counts.malformed: once stored, a known key only refreshes last_seen_at, so a corrected
- * copy in a later file could never fill it in. A row kept counts in counts.valid.
+ * short, or a row in the area with no application number, one longer than the key column, or no real approval date
+ * (or one after `today`, when given: a mistyped date), is skipped and counted in counts.malformed: once stored, a
+ * known key only refreshes last_seen_at, so a corrected copy in a later file could never fill it in. A row kept
+ * counts in counts.valid.
  */
-function parseLicenseRows(rows, kind, counts = {}) {
+function parseLicenseRows(rows, kind, counts = {}, today = null) {
   counts.malformed ??= 0;
   counts.valid ??= 0;
   const out = [];
@@ -175,7 +198,7 @@ function parseLicenseRows(rows, kind, counts = {}) {
     if (!inServiceArea(row['Location County'], row['Location City'], row['Location Zip Code'])) continue;
     const sourceKey = clean(row['Application Number']);
     const eventDate = parseUsDate(row['Application Approval Date']);
-    if (!sourceKey || sourceKey.length > KEY_MAX || !eventDate) {
+    if (!sourceKey || sourceKey.length > KEY_MAX || !eventDate || (today && eventDate > today)) {
       counts.malformed += 1;
       continue;
     }
@@ -248,7 +271,184 @@ async function bumpAttempts(id) {
   await db('restaurant_prospects').where({ id }).increment('detail_attempts', 1);
 }
 
+// The fullest complete read of each file in its fiscal year, kept in system_settings: how many rows it held and the
+// fiscal year. The job saves it only after every row of a read is stored and only from a read that is not short, so
+// a read cut off by a failed write, a deploy or a short download never becomes the measure.
+const readSettingKey = (kind) => `restaurant_prospects_read_${kind}`;
+
+async function lastRead(kind) {
+  const row = await db('system_settings').where({ key: readSettingKey(kind) }).first('value');
+  try {
+    const value = JSON.parse(row && row.value);
+    // Anything else is no measure: a damaged year would make every later read look stale.
+    const valid = value && /^\d{4}-07-01$/.test(value.fiscalYear) && Number.isInteger(value.rows) && value.rows >= 0;
+    return valid ? { fiscalYear: value.fiscalYear, rows: value.rows } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveRead(kind, read) {
+  const value = JSON.stringify({ fiscalYear: read.fiscalYear, rows: read.rows });
+  await db('system_settings').insert({ key: readSettingKey(kind), value, category: 'prospects' })
+    .onConflict('key').merge({ value, updated_at: db.fn.now() });
+}
+
+// ── Weekly job ──────────────────────────────────────────────────
+
+const defaultStore = { upsertRecords, lastRead, saveRead };
+
+// The row width each file has, as cells minus header names. The inspection file fills every header column. The
+// license files never fill their last two (Base Risk Level, Secondary Risk Level): every row of the 2026-11-20 files
+// has 36 cells under 38 names. Any other width means a cell went missing or crept in and every cell after it moved:
+// a shifted phone, license number or report id would pass every other check. Such a row is malformed, a 38-cell
+// license row too (two stray cells reach 38). So a file that starts to fill the risk levels fails, by the rule
+// below, until this width is changed.
+const ROW_WIDTHS = { inspection: 0, new_license: -2, owner_change: -2 };
+// Malformed rows may be at most this share of the rows that count (loadFile).
+const MALFORMED_SHARE = 0.1;
+
+// The column with each row's own date. The state cuts each file by it: every row of the 2026-11-20 files falls in
+// one fiscal year.
+const DATE_COLUMN = { inspection: 'Inspection Date', new_license: 'Application Approval Date', owner_change: 'Application Approval Date' };
+
+async function loadFile(kind, fetchText, now, last) {
+  const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
+  const counts = { malformed: 0, valid: 0 };
+  const records = [];
+  const today = etDateString(now);
+  let rowsRead = 0;
+  // Each fiscal year's row count and newest date, by the row's own date.
+  const years = new Map();
+  // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
+  const header = await eachDbprCsvRow(text, (row, { cells, columns }) => {
+    rowsRead += 1;
+    if (cells - columns !== ROW_WIDTHS[kind]) {
+      counts.malformed += 1;
+      return;
+    }
+    const day = parseUsDate(row[DATE_COLUMN[kind]]);
+    // A row dated after today (Eastern) is a mistyped date: it never makes a file look fresh or of a later year. The
+    // parsers skip it, counted as malformed only when it is in the area (stored, it would stay wrong).
+    if (day && day <= today) {
+      const year = fiscalYearOf(day);
+      const seen = years.get(year) || { rows: 0, newest: day };
+      years.set(year, { rows: seen.rows + 1, newest: day > seen.newest ? day : seen.newest });
+    }
+    records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts, today) : parseLicenseRows([row], kind, counts, today)));
+  });
+  // A required column missing from the header is renamed or gone. One named twice would take the later cell (a
+  // renamed column could give two applications one key). Either way the whole file is refused.
+  if (REQUIRED_COLUMNS[kind].some((column) => header.filter((name) => name === column).length !== 1)) {
+    throw new Error('unexpected file layout');
+  }
+  // A header with no rows is a download cut short, not a quiet week, so the file fails. The files start over on
+  // July 1, so in the first week of July (Eastern date; it spans the July 4 holiday) a header alone is a new year
+  // with nothing in it yet, until a read of the new year has held a row. A file whose rows all fall outside the area
+  // is fine.
+  if (!rowsRead) {
+    const newYearHasRows = Boolean(last && last.fiscalYear === fiscalYearOf(today) && last.rows > 0);
+    if (!/-07-0[1-7]$/.test(today) || newYearHasRows) throw new Error('empty file');
+  }
+  // Malformed rows over a tenth of the rows that count mean a changed format (a new date format, rows of a new
+  // width), not a stray row: the file fails, even beside good rows. With no good row, one malformed row fails it. The
+  // rows that count are the good and malformed ones: malformed counts rows in the area and rows that cannot be placed
+  // (a wrong width); a row outside the area never counts, whatever its date. A file whose rows all fall outside the
+  // area, or whose good rows cite nothing, succeeds. Each file holds the whole year, so a later good read still
+  // writes every row.
+  if (counts.malformed > (counts.valid + counts.malformed) * MALFORMED_SHARE) throw new Error('too many malformed rows');
+  // Rows without one readable date up to today leave nothing to measure the file by (a cut file of rows outside the
+  // area, say): it fails. Only a header alone, above, reads with no fiscal year.
+  if (rowsRead && !years.size) throw new Error('no dated row');
+  // The fiscal year most rows fall in (null for a header alone) and that year's newest date, so a stray date of
+  // another year never moves a file or makes it look fresh.
+  const [fiscalYear, year] = [...years].sort((a, b) => b[1].rows - a[1].rows)[0] || [null, null];
+  return { records, malformed: counts.malformed, rowsRead, fiscalYear, newest: year && year.newest };
+}
+
+// The first day (July 1) of the fiscal year a day (YYYY-MM-DD) falls in.
+function fiscalYearOf(day) {
+  const [year, month] = day.split('-').map(Number);
+  return `${month >= 7 ? year : year - 1}-07-01`;
+}
+
+// Each file holds one fiscal year and only grows until the state starts it over, so a full read holds at least about
+// as many rows as the fullest complete read of the same year (the measure). A download that stopped early but ends on
+// a whole row passes every check in loadFile. So a complete read also fails when (readProblem):
+//   stale   its fiscal year is earlier than the measure's (an older copy, a cache say), or no row is from the last
+//           14 days (a frozen file: the state posts every day; this also ends a June file served on into July);
+//   short   it holds under 90% of the measure's rows (under 20 rows in the measure the check waits).
+// Its rows are still written (each one is whole and valid), the run fails in job_health, and the read never becomes
+// the measure, so a download cut at the same place each week fails each week. Every row counts, kept or not. A read
+// belongs to the fiscal year of its rows, so a file the state starts over late is still last year's file. If the
+// state truly removed rows, check the file by hand, then delete the system_settings row
+// restaurant_prospects_read_<kind>: the next read sets the measure again.
+const SHORT_SHARE = 0.9;
+const SHORT_MIN_ROWS = 20;
+const FRESH_DAYS = 14;
+const READ_FLAGS = ['stale', 'short'];
+
+function readProblem(last, read, now) {
+  // A header alone in the first week of July (loadFile) has no year to measure.
+  if (!read.fiscalYear) return null;
+  if (last && read.fiscalYear < last.fiscalYear) {
+    return { flag: 'stale', text: `is stale: its rows are from the fiscal year that began ${read.fiscalYear}, after a read of ${last.fiscalYear}` };
+  }
+  if (!read.newest || etCalendarDaysUntil(read.newest, now) < -FRESH_DAYS) {
+    return { flag: 'stale', text: `is stale: no row from the last ${FRESH_DAYS} days (newest ${read.newest || 'none'})` };
+  }
+  if (last && last.fiscalYear === read.fiscalYear && last.rows >= SHORT_MIN_ROWS && read.rows < last.rows * SHORT_SHARE) {
+    return { flag: 'short', text: `is short: ${read.rows} rows, the fullest complete read had ${last.rows}` };
+  }
+  return null;
+}
+
+async function syncFiles(deps, result) {
+  for (const kind of Object.keys(FILES)) {
+    try {
+      const last = await deps.store.lastRead(kind);
+      const { records, malformed, rowsRead, fiscalYear, newest } = await loadFile(kind, deps.fetchText, deps.now, last);
+      const unique = dedupeByKey(records);
+      result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
+      // The rows are whole and valid, so they are written even when the read fails.
+      const problem = readProblem(last, { fiscalYear, rows: rowsRead, newest }, deps.now);
+      if (problem) {
+        result.failures += 1;
+        result.files[kind][problem.flag] = true;
+        logger.warn(`[dbpr-prospects] ${kind} file ${problem.text}`);
+      } else if (fiscalYear) {
+        // Saved only once every row of this read is stored. Within a year the measure only grows.
+        const rows = last && last.fiscalYear === fiscalYear ? Math.max(last.rows, rowsRead) : rowsRead;
+        await deps.store.saveRead(kind, { fiscalYear, rows });
+      }
+    } catch (err) {
+      result.failures += 1;
+      result.files[kind] = { failed: true };
+      logger.warn(`[dbpr-prospects] ${kind} file failed (${err.code || err.name})`);
+    }
+  }
+}
+
+/**
+ * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
+ * { fetchText, store, now }.
+ * @returns {Promise<{ failures: number, files: object, elapsedMs: number }>}
+ */
+async function syncRestaurantProspects(deps = {}) {
+  const started = Date.now();
+  const result = { failures: 0, files: {}, elapsedMs: 0 };
+  await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
+  result.elapsedMs = Date.now() - started;
+  const counts = Object.entries(result.files)
+    .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${READ_FLAGS.filter((flag) => f[flag]).map((flag) => `(${flag})`).join('')}`
+      + `${f.malformed ? `(${f.malformed} malformed)` : ''}`)
+    .join(' ');
+  logger.info(`[dbpr-prospects] ${counts} failures=${result.failures} ${result.elapsedMs}ms`);
+  return result;
+}
+
 module.exports = {
+  syncRestaurantProspects,
   parseUsDate,
   parseInspectionRows,
   parseLicenseRows,
@@ -257,4 +457,6 @@ module.exports = {
   pendingInspections,
   saveReport,
   bumpAttempts,
+  lastRead,
+  saveRead,
 };

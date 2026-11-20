@@ -34,6 +34,25 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   });
   afterAll(async () => { if (db) await rows().del(); });
 
+  test('lastRead and saveRead keep the newest complete read of a file in system_settings', async () => {
+    const kind = `t${RUN}`; // its own setting key, removed below
+    const settings = () => db('system_settings').where({ key: `restaurant_prospects_read_${kind}` });
+    try {
+      expect(await svc.lastRead(kind)).toBeNull();
+      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 6700 });
+      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 6712 });
+      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 6712 });
+      expect(await settings()).toHaveLength(1);
+      // A value that is not a read is no measure.
+      await settings().update({ value: 'not json' });
+      expect(await svc.lastRead(kind)).toBeNull();
+      await settings().update({ value: JSON.stringify({ fiscalYear: 'later', rows: 5 }) });
+      expect(await svc.lastRead(kind)).toBeNull();
+    } finally {
+      await settings().del();
+    }
+  });
+
   test('the same (kind, source_key) is one row; a different kind with the same key is another', async () => {
     await svc.upsertRecords([rec(1), rec(1, { kind: 'new_license', detail: { applicationType: 'Initial' } })]);
     await svc.upsertRecords([rec(1)]);

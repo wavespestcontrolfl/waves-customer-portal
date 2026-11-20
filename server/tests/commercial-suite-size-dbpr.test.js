@@ -138,6 +138,18 @@ describe('eachDbprCsvRow', () => {
     expect(mostAhead).toBeLessThan(1000);
   }, 60000);
 
+  test('onRow also gets the row\'s cell count and the header\'s: csv-parse leaves the cells past the header out', async () => {
+    const seen = [];
+    await eachDbprCsvRow('"A","B","C"\r\n"1","2","3"\r\n"4","5"\r\n"6","7","8","9","10"\r\n', (row, width) => {
+      seen.push([row, width]);
+    });
+    expect(seen).toEqual([
+      [{ A: '1', B: '2', C: '3' }, { cells: 3, columns: 3 }],
+      [{ A: '4', B: '5' }, { cells: 2, columns: 3 }],
+      [{ A: '6', B: '7', C: '8' }, { cells: 5, columns: 3 }],
+    ]);
+  });
+
   test('an empty file has no header and no rows; an unclosed quote rejects', async () => {
     const rows = [];
     await expect(eachDbprCsvRow('', (row) => rows.push(row))).resolves.toEqual([]);
