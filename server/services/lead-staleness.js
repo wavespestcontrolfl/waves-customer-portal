@@ -275,7 +275,7 @@ function wherePersonContactedAfter(group, after, since) {
     // attachCustomerEmailSends uses; the match itself is mailbox equality
     // (recipientMailboxesSql), so joann@ never answers ann@ and an
     // email-shaped display name never counts. It does not run
-    // resolveEmailCustomerLink (JS, a query per row), so a send that names two
+    // emailCustomerLink (JS, a query per row), so a send that names two
     // customers also counts here; that lead is then parked as before.
     .orWhereExists(function () {
       this.select(1).from('emails as er')

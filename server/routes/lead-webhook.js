@@ -854,6 +854,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // differently when the call side can't record a funnel row.
     let attachedCallLead = false;
     let attachedVia = null;
+    // True only once this submission inserted its own leads row: the new_lead bell below is then that lead's intake
+    // bell (new-lead-reminder.js inquiryOf). An attached form, or a failed insert, leaves it false.
+    let createdLead = false;
     try {
       const webhookStage = {
         ...webhookStageBase,
@@ -933,6 +936,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           ...commercialLeadFields(estimateAutomationReadiness),
         }).returning('*');
         leadRecord = newLead;
+        createdLead = true;
       }
     } catch (leadErr) {
       logger.error(`Lead record creation failed: ${leadErr.message}`);
@@ -1029,6 +1033,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // The bell's Call (alert-call-button.js) dials the lead row's number, or this customer's when the lead row
         // failed and leadId above is the customer id.
         customerId: customer.id,
+        // The lead's intake bell only when this submission created the lead row. A form attached to an open call lead
+        // made no lead: its bell is a later inquiry, judged from the form, never settled by the call that made the lead.
+        createdLead,
       });
       // suppressed counts as HANDLED (internal test customer) — the legacy
       // SMS fallback must not re-create the alert the suppression removed.

@@ -49,7 +49,7 @@ const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staf
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { callEndedAtSql, callStartedAtSql } = require('./sms-pending-conversations');
-const { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
+const { personSentFilter, emailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 
 const PERFORMED_BY = 'Lead contact sync';
@@ -191,7 +191,7 @@ async function staffEmails(dbi, addresses, since) {
     .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at as at');
   const named = await Promise.all(rows.map(async (row) => {
     const recipients = extractEmailAddresses([row.to_address, row.cc_address, row.bcc_address].filter(Boolean).join(','));
-    const linked = await resolveEmailCustomerLink(dbi, row);
+    const { customerId: linked } = await emailCustomerLink(dbi, row);
     return recipients.filter((addr) => addresses.includes(addr))
       .map((addr) => witness('staff_email', 'email', addr, { ...row, customer_id: linked }));
   }));
@@ -366,6 +366,7 @@ module.exports = {
   runLeadContactSync,
   judgeLeads,
   candidateLeadsQuery,
+  openLeadIdentities,
   PERFORMED_BY,
   LOOKBACK_DAYS,
   _test: { usablePhoneKey, leadEmail, resumeAfter: () => resumeAfter, resetResume: () => { resumeAfter = null; } },

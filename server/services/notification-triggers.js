@@ -1495,6 +1495,12 @@ function pushTagFor(triggerKey, payload = {}) {
 // A push that is true for one ET day only expires with that day (push-notifications.js webPushTtl, apns.js, fcm.js): a
 // phone that reconnects days later never shows an old "Call today" count. The end of the day is the next ET midnight.
 function pushExpiryFor(triggerKey, payload = {}) {
+  // The lead reminders' push (lead-reminder-sweep.js): the reminder's close that day, or the bell's late window, whichever
+  // is first, so a phone that comes online later never shows a stale "call this lead".
+  if (triggerKey === 'lead_call_reminder') {
+    const at = Date.parse(payload.expiresAt || '');
+    return Number.isFinite(at) ? { expiresAt: new Date(at).toISOString() } : {};
+  }
   if (triggerKey !== 'estimate_call_today' || !validCalendarDate(payload.day)) return {};
   const nextDay = etDateString(addETDays(parseETDateTime(`${payload.day}T12:00`), 1));
   return { expiresAt: parseETDateTime(`${nextDay}T00:00`).toISOString() };
@@ -1539,7 +1545,7 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, beforeHandoff = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1904,10 +1910,14 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               ...pushExpiryFor(triggerKey, payload),
             };
           },
-          { beforeDispatch, ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
+          // beforeHandoff (optional): the push service's own check before EACH device's handoff (push-notifications.js).
+          // A false answer, or a throw, skips that device and every later one, so a change made while an earlier
+          // device's request runs still stops the rest.
+          { beforeDispatch, ...(typeof beforeHandoff === 'function' ? { beforeHandoff } : {}), ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
         );
         if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
-        if (stats.push?.superseded) stats.push = { sent: 0, skipped: 'superseded_before_push' };
+        // Stopped before any device: nothing went. A fan-out beforeHandoff stopped part way keeps its count.
+        if (stats.push?.superseded && !stats.push.sent) stats.push = { sent: 0, skipped: 'superseded_before_push' };
       }
     } catch (e) {
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
