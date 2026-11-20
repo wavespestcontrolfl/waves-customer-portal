@@ -469,10 +469,14 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   // title can carry a gate or lockbox code. A finding with structured content
   // came from the findings pipeline; a bare title did not, and it is never
   // spoken. The compliance screen below handles banned copy — this handles
-  // where the text CAME FROM.
-  const structuredFindings = findings.filter(
+  // where the text CAME FROM. On a record that carries the technician's own
+  // note, provenFindingRows also screens each title and keeps a stock-detail
+  // row only for a screened label of the record's own form
+  // (finding-provenance.js), as the web report does.
+  const { provenFindingRows } = require('../service-report/finding-provenance');
+  const structuredFindings = provenFindingRows(findings.filter(
     (f) => String((f && f.detail) || '').trim() || String((f && f.recommendation) || '').trim(),
-  );
+  ), record.structured_notes);
   if (structuredFindings.length) {
     // ⭐ THE CAP RUNS AFTER BOTH SCREENS (provenance above, compliance here) —
     // six leading findings whose every speakable field the compliance screen

@@ -764,6 +764,26 @@ describe("the technician's own note on the phone: the stored line decides, as on
     }
   });
 
+  test("a note record's findings are spoken only as the report prints them", async () => {
+    const { STRUCTURED_OBSERVATION_FINDING_DETAIL: STOCK } = require('../../shared/service-completion-observations');
+    const record = noteRecord({ service_type: 'General Service', service_line: 'pest' });
+    record.structured_notes = JSON.stringify({ ...JSON.parse(record.structured_notes), formObservations: ['Yellowjacket'] });
+    primeNamedColumns(record);
+    builders.service_findings = makeBuilder([
+      // A title the screen refuses, with a recommendation the phone would speak on its own.
+      { category: 'observation', severity: 'low', title: 'Safe for pets once dry', detail: null, recommendation: 'Keep pets off the lawn until it dries.' },
+      // The stock detail on a label this record's form does not list.
+      { category: 'observation', severity: 'high', title: 'Fire ant mounds', detail: STOCK, recommendation: null },
+      { category: 'observation', severity: 'high', title: 'Yellowjacket', detail: STOCK, recommendation: null },
+      { category: 'activity', severity: 'low', title: 'Ant trail at the slab', detail: 'A trail along the north wall.', recommendation: null },
+    ]);
+    const out = await executeTool('get_service_report', {}, ctx);
+    expect(out).toContain('Yellowjacket');
+    expect(out).toContain('Ant trail at the slab');
+    expect(out).not.toMatch(/Safe for pets|Keep pets off|Fire ant mounds/);
+    assertNoWrites();
+  });
+
   test('a visit stored as lawn whose service type reads as pest: neither tool speaks the note', async () => {
     for (const tool of ['get_service_report', 'get_service_history']) {
       primeNamedColumns(noteRecord({ service_type: 'Pest Control', service_line: 'lawn' }));

@@ -259,22 +259,26 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
 async function loadLatestVisitFindings(record) {
   if (!record?.id || !require('../config/feature-gates').smsPromptB1Live() || !customerSafeVisitNotes(record)) return null;
   try {
-    // the provenance rule runs in SQL, before the cap, so title-only rows cannot use up the five
+    // the provenance rule runs in SQL, before the cap, so title-only rows cannot use up the five.
+    // Overfetch, then cut after the filters (voice-agent/relay-visit.js does the same): on a record that
+    // carries the technician's own note, provenFindingRows screens each title and keeps a stock-detail row
+    // only for a screened label of the record's own form (finding-provenance.js), as the report does.
     const rows = await db('service_findings').where({ service_record_id: record.id })
       .whereRaw("(btrim(COALESCE(detail, '')) <> '' OR btrim(COALESCE(recommendation, '')) <> '')")
-      .orderBy('created_at').limit(5)
+      .orderBy('created_at').limit(50)
       .select('title', 'detail', 'recommendation', 'severity', 'category');
+    const { provenFindingRows } = require('./service-report/finding-provenance');
     // PROVENANCE, not category (the customer report's own rule, ServiceReportDocument.jsx; voice-agent/relay-visit.js applies the same one):
     // findings synthesized from RAW technician notes are inserted title-only, so a bare title is never shown. Only a row carrying
     // structured detail or recommendation came from the findings pipeline (owner ruling 2026-07-16: internal notes never reach a prompt).
     // The SQL above already enforces it; the check here keeps the rule if a redaction empties a field.
-    const findings = rows.map((r) => ({
+    const findings = provenFindingRows(rows, record.structured_notes).map((r) => ({
       title: redactAccessCodes(r.title) || null,
       detail: redactAccessCodes(r.detail) || null,
       recommendation: redactAccessCodes(r.recommendation) || null,
       severity: r.severity || null,
       category: r.category || null,
-    })).filter((f) => f.title && (String(f.detail || '').trim() || String(f.recommendation || '').trim()));
+    })).filter((f) => f.title && (String(f.detail || '').trim() || String(f.recommendation || '').trim())).slice(0, 5);
     return findings.length ? findings : null;
   } catch (err) {
     logger.warn(`[context-aggregator] latest visit findings read failed: ${err.code || err.name || 'error'}`);

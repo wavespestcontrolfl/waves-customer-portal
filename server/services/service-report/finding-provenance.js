@@ -16,7 +16,11 @@
  * proves a row only when it passes the complete customer-copy screen
  * (customerCopyViolations), as that record's report lists do (report-data
  * buildProtocolPayload). There a row whose only text is the stock detail is
- * the picked label alone, so it stands only as a screened label does.
+ * the picked label alone, so it stands only as a screened label does, and
+ * every row's title passes the same screen, whatever else the row carries:
+ * the title is the technician's words (a picked label, or a free-text
+ * observation), while completion writes only the stock detail or the fixed
+ * "no activity" copy beside it and no recommendation.
  */
 const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
 
@@ -49,7 +53,9 @@ function provenFindingRows(rows, structuredNotes) {
     .filter((label) => !screened || !customerCopyViolations(label).length)
     .map((label) => label.toLowerCase()));
   return (Array.isArray(rows) ? rows : []).filter((row) => {
-    const label = String(row?.title || '').trim().toLowerCase();
+    const title = String(row?.title || '').trim();
+    if (screened && customerCopyViolations(title).length) return false;
+    const label = title.toLowerCase();
     if (screened && stockDetailOnly(row)) return formTitles.has(label);
     return findingHasOwnText(row) || formTitles.has(label);
   });

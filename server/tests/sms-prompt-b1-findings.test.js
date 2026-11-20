@@ -82,3 +82,24 @@ test('an unreadable findings table is no findings, not a failed context; the log
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('XX000'));
   expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('boom');
 });
+
+// The technician's own note (structured_notes.reportNote): its record's findings reach the text as the report prints
+// them (finding-provenance.js provenFindingRows): every title passes the customer-copy screen, and a row whose only
+// text is the stock detail stands only for a label of the record's own form. The cut to five runs after the filters.
+test("on a note record, a refused title or an unlisted stock row is never texted, and the five are cut after the filters", async () => {
+  on();
+  const { STRUCTURED_OBSERVATION_FINDING_DETAIL: STOCK } = require('../../shared/service-completion-observations');
+  const notes = { reportNote: { v: 1, text: 'I treated the perimeter and swept the webs.', source: 'cleaned' }, formObservations: ['Yellowjacket'] };
+  const noteRecord = record({ service_line: 'pest', service_type: 'Quarterly Pest Control', structured_notes: notes });
+  const refused = { title: 'Safe for pets once dry', detail: null, recommendation: 'Keep pets off the lawn until it dries.', severity: 'low', category: 'observation' };
+  const unlisted = { title: 'Fire ant mounds', detail: STOCK, recommendation: null, severity: 'high', category: 'observation' };
+  const listed = { title: 'Yellowjacket', detail: STOCK, recommendation: null, severity: 'high', category: 'observation' };
+  const real = (n) => ({ title: `Ant trail ${n}`, detail: 'A trail along the north wall.', recommendation: null, severity: 'low', category: 'activity' });
+  mockRows.value = [refused, unlisted, listed, real(1), real(2), real(3), real(4), real(5)];
+  const out = await loadLatestVisitFindings(noteRecord);
+  expect(out.map((f) => f.title)).toEqual(['Yellowjacket', 'Ant trail 1', 'Ant trail 2', 'Ant trail 3', 'Ant trail 4']);
+  expect(JSON.stringify(out)).not.toMatch(/Safe for pets|Keep pets off|Fire ant mounds/);
+  // A record with no note keeps the first five rows with their own text, as today.
+  const legacy = await loadLatestVisitFindings(record({ structured_notes: { formObservations: ['Yellowjacket'] } }));
+  expect(legacy.map((f) => f.title)).toEqual(['Safe for pets once dry', 'Fire ant mounds', 'Yellowjacket', 'Ant trail 1', 'Ant trail 2']);
+});

@@ -108,11 +108,18 @@ describe('provenFindingRows', () => {
     expect(provenFindingRows([refused, label], { ...NOTE_RECORD, formObservations }).map((r) => r.id)).toEqual(['f-stock-label']);
     // A label the snapshot does not list proves nothing either.
     expect(provenFindingRows([label], NOTE_RECORD).map((r) => r.id)).toEqual([]);
-    // A recommendation is the row's own text.
-    const recommended = stock('f-stock-rec', 'Safe for pets once dry', { recommendation: 'Keep pets off the lawn until it dries.' });
-    expect(provenFindingRows([recommended], { ...NOTE_RECORD, formObservations }).map((r) => r.id)).toEqual(['f-stock-rec']);
     // A record with no note keeps both rows, as today.
     expect(provenFindingRows([refused, label], { formObservations }).map((r) => r.id)).toEqual(['f-stock-refused', 'f-stock-label']);
+  });
+
+  test("on a note record, a title the screen refuses never prints, whatever else the row carries", () => {
+    const recommended = row('f-rec-refused', 'Safe for pets once dry', { recommendation: 'Keep pets off the lawn until it dries.' });
+    const detailed = row('f-detail-refused', 'Safe for pets once dry', { detail: 'Dry by noon.' });
+    const passing = row('f-rec-ok', 'Seal the slider', { recommendation: 'Replace the weatherstrip.' });
+    expect(provenFindingRows([recommended, detailed, passing, DETAILED], NOTE_RECORD).map((r) => r.id)).toEqual(['f-rec-ok', 'f-detail']);
+    // A record with no note keeps every row with its own text, as today.
+    expect(provenFindingRows([recommended, detailed, passing, DETAILED], {}).map((r) => r.id))
+      .toEqual(['f-rec-refused', 'f-detail-refused', 'f-rec-ok', 'f-detail']);
   });
 });
 

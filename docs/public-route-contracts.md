@@ -510,7 +510,11 @@ the voice relay. On a record that carries the technician's own note
 `customerCopyViolations`, as that record's report lists do. There a row whose
 only text is the stock detail completion writes for a picked label
 (`STRUCTURED_OBSERVATION_FINDING_DETAIL`) is that label alone, so it stands
-only when the label passes the same screen.
+only when the label passes the same screen, and every row's title passes it,
+whatever else the row carries. The texting prompt (`loadLatestVisitFindings`)
+and the voice relay (`get_service_report`) run `provenFindingRows` too, after
+their own rule that a row needs a detail or a recommendation, and cut to their
+limits (5 and 6) after the filters.
 
 Pest rain outlook (owner 2026-10-24; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
@@ -3086,9 +3090,10 @@ completion form recorded (`structured_notes.formProtocolActions`,
 and each value passes `customerCopyViolations` as it renders. Completion writes
 `formProtocolActions` (the picked labels that pass that screen) beside the
 merged `protocolActionsCompleted` on every visit. `findings` drops a row with a
-bare title (no detail, no recommendation; text of only spaces counts as none)
-and a stored row whose only text is the stock detail unless its label passes
-`customerCopyViolations` (`provenFindingRows`, as in the readers above),
+bare title (no detail, no recommendation; text of only spaces counts as none),
+a stored row whose only text is the stock detail unless its label passes
+`customerCopyViolations`, and any row whose title fails that screen
+(`provenFindingRows`, as in the readers above),
 and the render adds no "no activity" row: the completion writes that row from
 the merged lists. The lawn write gate's report build reads stored notes that
 cannot be read as stored, never an object it rebuilt around its frozen facts,
