@@ -184,7 +184,9 @@ function readableEmail(email) {
   const html = typeof email?.body_html === 'string' ? email.body_html : '';
   const read = flatten(decodeEntities(text ?? htmlText(html)));
   const kept = stripQuotedHistory(read);
-  const own = kept.slice(0, Math.min(...HISTORY_HEADERS.map((re) => re.exec(kept)?.index ?? kept.length)));
+  // The headers are matched on the text as one line (same length), so a header wrapped onto two lines still cuts.
+  const oneLine = kept.replace(/\n/g, ' ');
+  const own = kept.slice(0, Math.min(...HISTORY_HEADERS.map((re) => re.exec(oneLine)?.index ?? kept.length)));
   const whole = own.replace(QUOTED_LINE, '').trim();
   const room = MODEL_TEXT_CHARS - subject.length;
   const readCut = own.length === read.length && (text !== null ? text.length >= BODY_TEXT_CHARS : html.length >= BODY_HTML_CHARS);
@@ -407,6 +409,10 @@ function checkAnswer(answer, emailText, receivedAt, cut = false) {
   return { ok: true, endDate, quote, priceIncrease: answer.price_increase };
 }
 
+// The check reads the subject and the body as two sentences, so a date that ends the subject
+// neither labels the body's first word ("April 15" + "Tomorrow only!") nor opens a range with it.
+const FIELD_BREAK = '\n.\n';
+
 /** One model read of one email (its whole body on it). Never throws. */
 async function readOne(client, email) {
   try {
@@ -431,7 +437,7 @@ async function readOne(client, email) {
     // The ledger files both of these as failed calls on its own.
     if (response.stop_reason === 'refusal') return { ok: false, reason: 'refusal' };
     if (response.stop_reason === 'max_tokens') return { ok: false, reason: 'max_tokens' };
-    const read = checkAnswer(parseAnswer(anthropicText(response)), `${subject}\n${body}`, received, cut);
+    const read = checkAnswer(parseAnswer(anthropicText(response)), `${subject}${FIELD_BREAK}${body}`, received, cut);
     if (!read.ok) ledgerCallRejected(response, read.reason === 'invalid_json' ? 'invalid_json' : 'schema_invalid');
     // "No end" on part of an email proves nothing: the end may sit in the part a cap or the <blockquote> drop left out.
     if (read.ok && read.endDate === null && partial) return { ok: false, reason: 'no_end_in_cut_text' };

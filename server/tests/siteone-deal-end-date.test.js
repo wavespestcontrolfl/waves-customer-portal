@@ -119,6 +119,9 @@ describe('readableEmail', () => {
   test('reply history written inline is dropped too, and the read is partial', () => {
     const inline = 'Thanks. On Mon, Apr 13, 2026 at 9:00 AM Sam Rep wrote: Flash sale ends tomorrow.';
     expect(readableEmail({ subject: 'Deal', body_text: inline })).toEqual({ subject: 'Deal', text: 'Thanks.', cut: false, partial: true });
+    // Pre-push audit on 34ab1e253a (P1): a header wrapped onto a second line kept the old offer.
+    const wrapped = 'Thanks. On Mon, Apr 13, 2026 at 9:00 AM,\nSam Rep wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: wrapped })).toEqual({ subject: 'Deal', text: 'Thanks.', cut: false, partial: true });
     // Prose is no header: with no date, time or address before "wrote:", the text stays whole.
     const prose = 'Big savings. On sale now: our rep wrote: ends Friday.';
     expect(readableEmail({ subject: 'Deal', body_text: prose })).toEqual({ subject: 'Deal', text: prose, cut: false, partial: false });
@@ -563,6 +566,16 @@ describe('readDealEndDates', () => {
     expect(found.size).toBe(0);
     expect(mockCreate.mock.calls[0][0].messages[0].content).toBe('Received: 2026-04-15 (US Eastern)\nSubject: Deal 1\n\nThanks for the update.');
     expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 0 of 1 deals read by AI; date patterns kept for 1 quote_not_found');
+  });
+
+  // Pre-push audit on 34ab1e253a (P1): a date that ends the subject labelled the body's first word.
+  test('the subject and the body are two sentences to the check', async () => {
+    const { conn } = fakeConn([{ id: 1, body_text: 'Tomorrow only! Save on mulch.', body_html: null }]);
+    mockCreate.mockResolvedValue(reply('{"end_date": "2026-04-16", "quote": "Tomorrow only", "price_increase": false}'));
+
+    const found = await readDealEndDates(conn, [deal(1, { subject: 'April 15' })]);
+
+    expect(found.get(1)).toEqual({ endDate: '2026-04-16', quote: 'Tomorrow only', priceIncrease: false });
   });
 
   // Pre-push audit on 75797b78e6 (P1): a reply's old subject "ends tomorrow" counted from the reply's day.
