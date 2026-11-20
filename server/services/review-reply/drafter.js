@@ -574,9 +574,12 @@ const OWN_APP_RE = /\b(?:the|our|your)\s+(?:waves\s+(?:pest\s+control\s+)?)?(?:m
 const WAVES_APP_RE = /\b[Tt]he Waves app\b/g;
 const APP_WORD_RE = /\bapps?\b/i;
 const SENTENCE_START_RE = /(?:^|[.!?]["')\]\u2019\u201d]*\s+|\n\s*)$/;
-// Not the bare name when the word goes on: "app-based", "app-to-app", or
-// "app store" (the App Store, or the verb in "let our app store your notes").
-const NAME_GOES_ON_RE = /^(?:[-\w]|\s+store\b)/i;
+// The name ends only at the end of the text, a space or closing punctuation
+// ("app's" passes). Any other next character (a hyphen of any kind, a
+// letter, a digit, a slash) makes a longer word: "app-based", "app‑based"
+// (U+2011), "apps". " store" after it is the App Store, or the verb in "let
+// our app store your notes".
+const NAME_GOES_ON_RE = /^(?:[^\s.,!?;:)\]"'’”…]|\s+store\b)/i;
 const nameAt = (s, at) => (SENTENCE_START_RE.test(s.slice(0, at)) ? 'The Waves app' : 'the Waves app');
 function wavesApp(text) {
   return String(text || '').replace(OWN_APP_RE, (m, at, s) => (NAME_GOES_ON_RE.test(s.slice(at + m.length)) ? m : nameAt(s, at)));

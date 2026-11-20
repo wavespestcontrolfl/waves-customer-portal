@@ -911,7 +911,7 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     // No known article: the rewrite does not guess one (the verifier rejects these).
     const unsure = 'Glad your family finds Waves app helpful, a new Waves Pest Control app is coming, and an app is fine.';
     expect(w(unsure)).toBe(unsure);
-    const same = 'Happy to apply the apps and our application, the App Store, the app-to-app transfer and the app-based tools.';
+    const same = 'Happy to apply the apps and our application, the App Store, the app-to-app transfer, our app\u2011based reminders and the app-based tools.';
     expect(w(same)).toBe(same);
   });
   test('the verifier rejects every "app" that is not part of exactly "the Waves app"', () => {
@@ -947,6 +947,12 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(Drafter.offAppName('Glad it helps. Find us in the Waves App Store.')).toBe('App');
     // The span is the word alone: a hyphenated phone number after it never reaches the stored rejection details.
     expect(Drafter.offAppName('Text the Waves app-941-555-0100 line.')).toBe('app');
+    // Any hyphen makes a longer word, not only the ASCII one: U+2010, U+2011 (non-breaking), a slash too.
+    expect(Drafter.offAppName('Thanks for trying the Waves app\u2011based reminders.')).toBe('app');
+    expect(Drafter.offAppName('Thanks for trying the Waves app\u2010based reminders.')).toBe('app');
+    expect(Drafter.offAppName('Thanks for trying the Waves app/website.')).toBe('app');
+    // The name before closing punctuation or at the end is the name.
+    expect(Drafter.offAppName('Thanks for using the Waves app; glad (and "the Waves app") it helps, the Waves app\u2026 and the Waves app')).toBeNull();
   });
   test('a draft that says "the app" is stored as "the Waves app" on the first attempt', async () => {
     const g = grounding({ text: appReview });
