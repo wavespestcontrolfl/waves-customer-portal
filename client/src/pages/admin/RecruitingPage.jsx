@@ -1115,37 +1115,41 @@ export default function RecruitingPage() {
   // switch to another applicant that is still opening is not cancelled, and it
   // applies only while that applicant is still the one on screen and nothing
   // newer has reached it (a later re-read, or a stage move's answer: refreshSeq).
+  // An explicit open (a list click, a bell link) of the applicant already on screen
+  // is read in place the same way, except that it cancels any other open (the owner
+  // asked for this applicant last) and acknowledges replies, as every open does.
   const openDetail = useCallback(async (id, { refresh = false } = {}) => {
     // An action that finished after the owner opened another applicant: its
     // re-read is for one no longer on screen, and it must not cancel the open
     // applicant's own re-read (refreshSeq).
     if (refresh && detailIdRef.current !== id) return;
+    const inPlace = refresh || detailIdRef.current === id;
     const seq = refresh ? detailSeq.current : ++detailSeq.current;
-    const fresh = refresh ? ++refreshSeq.current : 0;
+    const fresh = inPlace ? ++refreshSeq.current : 0;
+    // Whether this read still decides what the page shows: no other open, no close, and for the applicant on screen no
+    // newer answer (a stage move's, a later re-read).
+    const newest = () => seq === detailSeq.current && (!inPlace || (detailIdRef.current === id && fresh === refreshSeq.current));
     try {
+      // An explicit open of the applicant on screen re-reads the offer card first: a date request or an answer changes
+      // the offer without changing the stage. The offer, then the application, as after an offer action, so the stage
+      // shown is never older than the offer. Another applicant's offer is read when it opens.
+      if (inPlace && !refresh) await reloadOfferFor(id);
       // The page's own re-reads (after an offer action, or a Try again) acknowledge no
       // replies: one that arrived meanwhile may sit behind a dialog. An open reads them.
       const data = await adminFetch(`/admin/careers/${id}${refresh ? "?peek=1" : ""}`);
-      if (seq !== detailSeq.current) return; // superseded or dialog closed
-      if (refresh && (detailIdRef.current !== id || fresh !== refreshSeq.current)) return;
+      if (!newest()) return;
       setDetail(data.application);
       setReplyMedia(data.reply_media || {});
       setSamePhone(data.same_phone || []);
       setDetailRefreshError(null);
-      if (!refresh) {
-        stageWorkflow.resetForNewApplicant();
-        // An explicit open (a list click, a bell link) re-reads the offer card too: a date request or an answer changes
-        // the offer without changing the stage. For another applicant this does nothing; its offer is read on open.
-        reloadOfferFor(id);
-      }
+      // Only another applicant resets the stage workflow: for the one on screen, an open stage dialog, its typed note
+      // and a move in flight all still belong to it.
+      if (!inPlace) stageWorkflow.resetForNewApplicant();
     } catch (err) {
-      if (seq !== detailSeq.current) return;
-      // A failed in-place re-read stays on the detail (the list reload clears the page error).
-      if (refresh) {
-        if (detailIdRef.current === id && fresh === refreshSeq.current) setDetailRefreshError(err.message);
-      } else {
-        setError(err.message);
-      }
+      if (!newest()) return;
+      // A failed in-place read stays on the detail with Try again (the list reload clears the page error).
+      if (inPlace) setDetailRefreshError(err.message);
+      else setError(err.message);
     }
   }, [stageWorkflow, reloadOfferFor]);
 

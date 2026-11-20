@@ -330,6 +330,26 @@ jest.setTimeout(120000);
       expect((await root('job_offers').where({ id: sent.offer.id }).first()).status).toBe('superseded');
     });
 
+    // Signing or declining the offer out closes a revision the owner was drafting meanwhile. That revision is newer but
+    // was never sent: the card shows the offer the applicant answered, and the closed revision is an earlier offer.
+    test.each(['signs', 'declines'])('when the applicant %s while a revision is in draft, the panel shows the answered offer, not the closed revision', async (answer) => {
+      const app = await newApplication();
+      const sent = await sendNew(app);
+      // Every row here is written in one transaction, so all share one created_at. Live, the revision comes in a later
+      // request: the offer was drafted an hour before it.
+      await root('job_offers').where({ id: sent.offer.id }).update({ created_at: new Date(Date.now() - 3600e3) });
+      const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor());
+      const out = answer === 'signs'
+        ? await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera' })
+        : await JobOffers.declineOffer(token, {});
+      expect(out.refused).toBeUndefined();
+      const panel = await JobOffers.adminPanel(app.id, actor());
+      expect(panel.current).toMatchObject({ id: sent.offer.id, status: answer === 'signs' ? 'accepted' : 'declined' });
+      expect(panel.draft).toBeNull();
+      expect(panel.history.map((o) => [o.id, o.status])).toEqual([[revised.id, 'withdrawn']]);
+    });
+
     test('withdraw sends nothing, leaves the application status, and the link says so', async () => {
       const app = await newApplication();
       const sent = await sendNew(app);

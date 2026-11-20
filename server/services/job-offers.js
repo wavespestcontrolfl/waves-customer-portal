@@ -521,6 +521,21 @@ async function presentDraft(conn, row, ownerName, now) {
 }
 
 /** GET /:id/offer */
+// Which of an application's offers (rows newest first) the panel shows where:
+// - out: the offer the applicant can act on (sent / date_requested, not past its expiry); draft: the open draft.
+// - current: out, else the open draft, else the newest offer the applicant received (signed, declined, withdrawn,
+//   replaced or expired), else the newest of any status (a draft closed unsent). A revision that was never sent and
+//   was then closed is newer, but never outranks the offer the applicant received: signing or declining the offer
+//   out closes the revision the owner was drafting.
+// - revision: a revision in progress, the open draft when it is not itself current.
+function panelOffers(rows, now) {
+  const draft = rows.find((r) => r.status === 'draft') || null;
+  const out = rows.find((r) => OUT_STATUSES.includes(r.status) && !expiredByClock(r, now)) || null;
+  const current = out || draft || rows.find((r) => r.sent_at) || rows[0] || null;
+  const revision = draft && draft.id !== current.id ? draft : null; // a draft makes current non-null (out || draft)
+  return { draft, out, current, revision };
+}
+
 async function adminPanel(applicationId, actor, now = new Date()) {
   const application = await loadApplication(db, applicationId);
   const rows = await db('job_offers').where({ application_id: applicationId }).orderBy('created_at', 'desc');
@@ -533,12 +548,7 @@ async function adminPanel(applicationId, actor, now = new Date()) {
     sentByName: (row && names.get(row.sent_by)) || null,
     ...(row && row.status === 'draft' ? { draftHash: draftHashOf(row, hashCtx) } : {}),
   });
-  const draft = rows.find((r) => r.status === 'draft') || null;
-  const out = rows.find((r) => OUT_STATUSES.includes(r.status) && !expiredByClock(r, now)) || null;
-  // current = the offer that is out (sent / date_requested), else the open draft, else the newest of any status.
-  // draft = a revision in progress: the open draft when it is not itself current.
-  const current = out || draft || rows[0] || null;
-  const revision = draft && draft.id !== current.id ? draft : null; // a draft makes current non-null (out || draft)
+  const { draft, out, current, revision } = panelOffers(rows, now);
   // The preview names the reader as the signer only for an owner account (who would send it). The draft hash keeps the
   // reader's own name: for another admin it is only the token their save is checked against, by that same name.
   const signer = actor.ownerAccount ? actor.name : UNNAMED_SIGNER;

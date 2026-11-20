@@ -994,6 +994,44 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(screen.queryByText(/could not be reloaded after the offer change/)).toBeNull();
   });
 
+  // A bell link for the applicant on screen re-reads it in place. A stage move that commits while that read is out is
+  // newer: the read lands after it and must not restore the old stage.
+  it('a bell link read for the applicant on screen that lands after a stage move keeps the moved stage', async () => {
+    let holdRead = false;
+    let releaseRead;
+    const detail = detailFixture({ status: 'offer' });
+    setupFetch(
+      {
+        'GET /admin/careers/app-1': () => {
+          if (!holdRead) return res(200, { application: detail });
+          holdRead = false;
+          // The bell link's read: it read the stage before the move, and it lands after it.
+          return new Promise((resolve) => { releaseRead = () => resolve(res(200, { application: detail })); });
+        },
+        'PATCH /admin/careers/app-1/status': () => res(200, { application: detailFixture({ status: 'reviewed' }), sent: {} }),
+      },
+      { offer: offerPayload({ current: sent }), detail },
+    );
+    function Bell() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/?application=app-1')}>bell</button>;
+    }
+    render(<MemoryRouter><Bell /><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByTestId('offer-card');
+    holdRead = true;
+    fireEvent.click(screen.getByText('bell'));
+    await waitFor(() => expect(releaseRead).toBeDefined());
+    const stage = await openMove();
+    const confirmButton = within(stage).getByRole('button', { name: 'Confirm' });
+    await waitFor(() => expect(confirmButton).not.toBeDisabled());
+    fireEvent.click(confirmButton);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Reviewed' })).toBeNull());
+    releaseRead();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByRole('button', { name: 'Reviewed' })).toBeNull(); // the detail still reads Reviewed
+  });
+
   it('a stage dialog opened while the re-read after an offer action is out holds Confirm when that re-read fails, until Try again reads', async () => {
     let current = offerRecord({ status: 'sent', timeline: [] });
     let holdRead = false;
