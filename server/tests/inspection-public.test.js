@@ -523,10 +523,11 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
       rangeFrom: FUTURE_DATE, rangeTo: FUTURE_DATE, zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton',
     }));
     // The booking uses the profile's own address, so createSelfBooking resolves it from its own customer row, which
-    // its lock fences (pre-push P1 on 5fc5e4d648): the row it is given decides, never a copy read here.
+    // its lock fences (pre-push P1 on 5fc5e4d648): the row it is given decides the address and the city it falls back
+    // to, never a copy read here.
     const row = { address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209' };
-    expect(callbackVisit.zoneAddress(row)).toEqual({ address: '123 Palm Ave, Bradenton, FL, 34209', city: 'Bradenton' });
-    expect(callbackVisit.zoneAddress({ ...row, city: 'Venice' })).toEqual({ address: '123 Palm Ave, Venice, FL, 34209', city: 'Venice' });
+    expect(callbackVisit.zoneAddress(row)).toEqual([{ address: '123 Palm Ave, Bradenton, FL, 34209', city: 'Bradenton' }, 'Bradenton']);
+    expect(callbackVisit.zoneAddress({ ...row, city: 'Venice' })).toEqual([{ address: '123 Palm Ave, Venice, FL, 34209', city: 'Venice' }, 'Venice']);
   });
 
   test('bookAssessmentVisit hands an estimate page\'s guard to the booking transaction unchanged', async () => {
@@ -1982,9 +1983,9 @@ describe('POST /:token commit', () => {
       expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject({
         zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton',
       });
-      expect(bookingArgs.callbackVisit.zoneAddress(existingCustomer)).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
+      expect(bookingArgs.callbackVisit.zoneAddress(existingCustomer)).toEqual([{ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' }, 'West Bradenton']);
       // The booking's own row decides, never phase one's copy of it (pre-push P1 on 5fc5e4d648).
-      expect(bookingArgs.callbackVisit.zoneAddress({ ...existingCustomer, city: 'Venice' })).toEqual({ address: '123 Palm Ave, Venice, FL, 34209', city: 'Venice' });
+      expect(bookingArgs.callbackVisit.zoneAddress({ ...existingCustomer, city: 'Venice' })).toEqual([{ address: '123 Palm Ave, Venice, FL, 34209', city: 'Venice' }, 'Venice']);
     });
 
     // Owner rule B per truck (pre-push P1s on e81d7ed7c0, 3e6fd14320 and 3b494d3581): at the SAME pin, a matched
@@ -2015,8 +2016,9 @@ describe('POST /:token commit', () => {
       expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(['Bradenton', 'Bradenton']);
       expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(typed);
       expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe('tech-1');
-      // A typed address: the booking's own row does not change it.
-      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'West Bradenton' })).toEqual({ address: typed.zoneFunnelAddress, city: 'Bradenton' });
+      // A typed address: the booking's own row does not change it, only the city it falls back to (the lead had no
+      // profile before phase 1).
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'West Bradenton' })).toEqual([{ address: typed.zoneFunnelAddress, city: 'Bradenton' }, 'West Bradenton']);
     });
 
     // Owner rule B per truck (pre-push P1 on 46fd83d04f): the typed city is in no zone while the matched profile's city
@@ -2068,7 +2070,7 @@ describe('POST /:token commit', () => {
       expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject({ zoneFunnelAddress: '123 Palm Ave, Laurel, FL, 34209' });
       expect(zoneReads.mock.calls.length > 0).toBe(zoneLookup !== 'none');
       expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe(bookedTech);
-      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'Nokomis' })).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'Nokomis' })).toEqual([{ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' }, 'Nokomis']);
     });
 
     // Pre-push P1 on aa30bd86f1: the page's list for a typed address read its zone from that address alone, while
@@ -2124,7 +2126,11 @@ describe('POST /:token commit', () => {
     // Venice) tech-2 drives south that day, so tech-1's 09:00 goes and the hour is tech-2's; in no zone the builder gives
     // it to tech-1. Phase 1 writes the typed city onto the profile unless a staff-verified pin keeps the profile as it
     // is. Either way the one build read the zone the booking checks, so nothing is re-checked: a second build would only
-    // repeat it and its travel lookups.
+    // repeat it and its travel lookups. Pre-push P1 on 850a6a79f0: the booking does not resolve its zone again from the
+    // city phase 1 wrote. Laurel is in no zone, so it would skip its locked truck check and leave the visit unstamped,
+    // where a later booking cannot count it. It falls back to the city the first build read, and its slot guard asks
+    // about the zone the list offered, for the truck that list gave the hour; createSelfBooking stamps that zone
+    // (booking-confirm-signed-offer.test.js). Another profile falls back to its own city.
     test.each([
       ['in no zone, phase 1 writes its city onto the profile', 'Laurel', false, ['Laurel']],
       ['in no zone, a staff-verified pin keeps the profile\'s city', 'Laurel', true, []],
@@ -2162,7 +2168,16 @@ describe('POST /:token commit', () => {
       expect(booked.statusCode).toBe(200);
       expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(cityWrites);
       expect(mockBuildAvailability.mock.calls.map(([a]) => [a.zoneFunnelCity, a.zoneFunnelCustomerCity])).toEqual([[typedCity, 'Nokomis']]);
-      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ slot_start: '09:00', technician_id: 'tech-2' });
+      const booking = mockCreateSelfBooking.mock.calls[0][0];
+      expect(booking).toMatchObject({ slot_start: '09:00', technician_id: 'tech-2', authedCustomer: { id: 'cust-9', city: cityWrites[0] ?? 'Nokomis' } });
+      const zoneInputs = booking.callbackVisit.zoneAddress(booking.authedCustomer);
+      expect(zoneInputs).toEqual([{ address: `123 Palm Ave, ${typedCity}, FL, 34209`, city: typedCity }, 'Nokomis']);
+      expect(booking.callbackVisit.zoneAddress({ ...booking.authedCustomer, id: 'cust-other', city: 'Sarasota' })[1]).toBe('Sarasota');
+      const { zone } = await require('../services/slot-zone').leadBookingZone(db, ...zoneInputs);
+      expect(zone).toMatchObject({ id: 'zone-v' });
+      const trx = jest.fn();
+      await booking.callbackVisit.slotGuard(trx, { zone });
+      expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, { estimateZone: zone, date: FUTURE_DATE, technicianId: 'tech-2' });
     });
 
     // Pre-push P1 on e88162fc27: with no address typed, the page's retry sends none again, and the next commit's
@@ -2199,7 +2214,7 @@ describe('POST /:token commit', () => {
       expect(first.body).not.toHaveProperty('address_changed'); // the page holds no typed address to drop
       // The commit's own build reads the lead's address, as its list did; no fresh times are built.
       expect(builds()).toEqual([[27.4, 'Sarasota']]);
-      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'Nokomis' })).toEqual({ address: '123 Palm Ave, Sarasota, FL, 34209', city: 'Sarasota' });
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'Nokomis' })).toEqual([{ address: '123 Palm Ave, Sarasota, FL, 34209', city: 'Sarasota' }, 'Nokomis']);
 
       // The page's reload: phase 1 linked the lead to that profile, whose city on file it passes too.
       mockBuildAvailability.mockClear();
@@ -2214,7 +2229,7 @@ describe('POST /:token commit', () => {
       expect(second.statusCode).toBe(200);
       expect(builds()).toEqual([[27.4, 'Nokomis']]);
       const retry = mockCreateSelfBooking.mock.calls[1][0];
-      expect(retry.callbackVisit.zoneAddress(retry.authedCustomer)).toEqual({ address: '123 Palm Ave, Nokomis, FL, 34209', city: 'Nokomis' });
+      expect(retry.callbackVisit.zoneAddress(retry.authedCustomer)).toEqual([{ address: '123 Palm Ave, Nokomis, FL, 34209', city: 'Nokomis' }, 'Nokomis']);
     });
 
     // Pre-push P1s on 903ecc5ff0, 910b741125 and 0cdae8374e: with an address typed, a booking that moved to a matched
@@ -2266,7 +2281,7 @@ describe('POST /:token commit', () => {
       expect(builds()).toEqual([[27.1, 'West Bradenton']]);
       const retry = mockCreateSelfBooking.mock.calls[1][0];
       expect(retry.slot_start).toBe('10:00');
-      expect(retry.callbackVisit.zoneAddress(retry.authedCustomer)).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
+      expect(retry.callbackVisit.zoneAddress(retry.authedCustomer)).toEqual([{ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' }, 'West Bradenton']);
     });
 
     // A moved booking keeps the typed address when the next commit's trusted customer is another profile: without

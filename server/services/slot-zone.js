@@ -117,8 +117,9 @@ async function resolveZoneByCoords(dbc, lat, lng, opts) {
 // the customer's own city on file, the city a visit with no zone stamp is read
 // by later (zone-day-funnel.js zoneStopDays). Returns { zone, fromCustomer }
 // (fromCustomer: the customer's city decided). createSelfBooking checks and
-// stamps this zone with its own customer row; the link builds its re-check and
-// its fresh times from the address that decided. Throws on query failure.
+// stamps this zone with the two inputs the link gives for its own customer row
+// (callbackVisit.zoneAddress); the link builds its re-check and its fresh times
+// from the address that decided. Throws on query failure.
 async function leadBookingZone(dbc, address, customerCity) {
   const zone = await resolveEstimateZone(dbc, address);
   const city = String(customerCity || '').trim().toLowerCase();

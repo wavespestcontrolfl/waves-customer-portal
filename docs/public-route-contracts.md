@@ -7676,7 +7676,9 @@ stamp and its check match the list. A booking at the profile's own address
 reads that address from the booking's own customer row, not from a copy the
 commit read earlier. An address that resolves to no zone takes
 the customer's city on file, as a visit with no zone stamp is read later by its
-customer's city. With the funnel on, the booking transaction also refuses with
+customer's city. A typed address on the profile the commit's first check read
+keeps the city that check read: phase one may write the typed city onto that
+profile, and the booking still checks and stamps the zone its list offered. With the funnel on, the booking transaction also refuses with
 `CUSTOMER_CHANGED_RETRY` when the customer's address changed after its zone read it, and the
 page gets the answer an account change under the booking fence already gets:
 `SLOT_TAKEN` with `address_changed: true`, the address on file and no times, or
