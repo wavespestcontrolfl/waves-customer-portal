@@ -593,8 +593,10 @@ describe('slot reservation helpers', () => {
       ['live unstamped', null, false, { zone: 'venice' }],
       ['live stamped', 'venice', false, {}],
       // Pre-push P1 on 69974e9e5d: a street-only estimate, accepted by a Venice customer: checked in Venice, no stamp.
+      // The customer is read only then, when the hold's own zone is not a funneled one.
       ['live unstamped street-only', null, false, {}, '1 Test Way'],
     ])('accept: a %s hold is checked and graduates with the zone its check read on the row', async (_label, zone, lapsed, stamped, address = ESTIMATE.address) => {
+      const customerRead = jest.fn().mockResolvedValue({ city: 'Venice' });
       const mayTake = jest.fn().mockResolvedValue(true);
       spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
       const chainOf = (first) => {
@@ -617,7 +619,7 @@ describe('slot reservation helpers', () => {
         if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([SARASOTA, VENICE]) };
         if (table === 'technicians') return makeAssignableTechnicianBuilder();
         if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
-        if (table === 'customers') return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ city: 'Venice' }) }) };
+        if (table === 'customers') return { where: jest.fn().mockReturnValue({ first: customerRead }) };
         throw new Error(`unexpected table ${table}`);
       });
       trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -628,6 +630,7 @@ describe('slot reservation helpers', () => {
       const [written] = updateBuilder.update.mock.calls[0];
       expect(written).toMatchObject({ customer_id: 'customer-1', reservation_expires_at: null, ...stamped });
       if (!stamped.zone) expect(written).not.toHaveProperty('zone');
+      expect(customerRead).toHaveBeenCalledTimes(address === ESTIMATE.address ? 0 : 1);
     });
   });
 
