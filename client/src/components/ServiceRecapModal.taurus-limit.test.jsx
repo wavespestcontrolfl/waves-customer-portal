@@ -56,7 +56,7 @@ describe('ServiceRecapModal Taurus yearly limit', () => {
     const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
     const record = (totalAmount) => ({
       id: 'rec-1',
-      products: [{ product_id: 1, product_name: 'Taurus SC', application_rate: '1.6', rate_unit: 'oz', ledger_quantity: totalAmount, ledger_quantity_unit: 'fl_oz' }],
+      products: [{ product_id: 1, product_name: 'Taurus SC', application_rate: '1.6', rate_unit: 'oz', ledger_rows: [{ quantity: totalAmount, quantity_unit: 'fl_oz' }] }],
     });
     render(<ServiceRecapModal service={{ id: 'svc-1', serviceType: 'General Pest Control (Quarterly)' }} request={makeRequest(threeLow, record(3.2))} onClose={() => {}} />);
     await screen.findByRole('button', { name: 'Taurus SC', pressed: true });
@@ -65,6 +65,45 @@ describe('ServiceRecapModal Taurus yearly limit', () => {
     render(<ServiceRecapModal service={{ id: 'svc-1', serviceType: 'General Pest Control (Quarterly)' }} request={makeRequest(threeLow, record(1.6))} onClose={() => {}} />);
     await screen.findByRole('button', { name: 'Taurus SC', pressed: true });
     expect(screen.queryByText("Over the label's yearly Taurus limit at this home.")).toBeNull();
+  });
+
+  test("a reopened recap reads each ledger row's dilution and date: a 0.06% row at a 1.6 oz rate after three 0.03% visits warns", async () => {
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const record = (ledgerRows) => ({
+      id: 'rec-1',
+      products: [{ product_id: 1, product_name: 'Taurus SC', application_rate: '1.6', rate_unit: 'oz', ledger_rows: ledgerRows }],
+    });
+    const warning = "Over the label's yearly Taurus limit at this home.";
+    for (const [ledger, warns] of [
+      [[{ dilution_rate: '0.06%' }], true],
+      [[{ application_date: '2026-10-14' }], true],
+      [[{ dilution_rate: '0.03%', application_date: '2026-10-14' }], false],
+      [[{ application_date: '2026-11-20' }], false],
+      // Two active rows for one product: the count reads the record at its strongest, so a 0.06% row warns.
+      [[{ dilution_rate: '0.03%' }, { dilution_rate: '0.06%' }], true],
+      [[{ dilution_rate: '0.03%' }, { quantity: 1.6, quantity_unit: 'fl_oz' }], false],
+    ]) {
+      render(<ServiceRecapModal service={{ id: 'svc-1', serviceType: 'General Pest Control (Quarterly)' }} request={makeRequest(threeLow, record(ledger))} onClose={() => {}} />);
+      await screen.findByRole('button', { name: 'Taurus SC', pressed: true });
+      expect(Boolean(screen.queryByText(warning))).toBe(warns);
+      cleanup();
+    }
+  });
+
+  test("a recorded mL rate (never shown) is the rate a save restores: 23.7 mL/gal after three 0.03% visits warns", async () => {
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const warning = "Over the label's yearly Taurus limit at this home.";
+    // With a ledger row that records no rate, and with no ledger row at all.
+    for (const ledgerRows of [[{ application_date: '2026-11-21' }], undefined]) {
+      const record = {
+        id: 'rec-1',
+        products: [{ product_id: 1, product_name: 'Taurus SC', application_rate: '23.7', rate_unit: 'ml/gal', ...(ledgerRows ? { ledger_rows: ledgerRows } : {}) }],
+      };
+      render(<ServiceRecapModal service={{ id: 'svc-1', serviceType: 'General Pest Control (Quarterly)' }} request={makeRequest(threeLow, record)} onClose={() => {}} />);
+      await screen.findByRole('button', { name: 'Taurus SC', pressed: true });
+      expect(screen.getByText(warning)).toBeTruthy();
+      cleanup();
+    }
   });
 
   test('room under the label: Taurus stays on the mix and nothing is said', async () => {

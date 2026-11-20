@@ -833,12 +833,16 @@ router.get('/', async (req, res, next) => {
     let query = db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')
+      // The initiating call's dialed number, for the website-only-line rule in
+      // lead-source-evidence.js. twilio_call_sid is unique in call_log.
+      .leftJoin('call_log as lead_call', 'lead_call.twilio_call_sid', 'leads.twilio_call_sid')
       .leftJoin('estimates', 'leads.estimate_id', 'estimates.id')
       .select(
         'leads.*',
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
+        'lead_call.to_phone as call_dialed_phone',
         'estimates.status as estimate_status',
         db.raw("technicians.name as assigned_name"),
       )
@@ -1035,11 +1039,15 @@ router.get('/:id', async (req, res, next) => {
     const lead = await db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')
+      // The initiating call's dialed number, for the website-only-line rule in
+      // lead-source-evidence.js. twilio_call_sid is unique in call_log.
+      .leftJoin('call_log as lead_call', 'lead_call.twilio_call_sid', 'leads.twilio_call_sid')
       .select(
         'leads.*',
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
+        'lead_call.to_phone as call_dialed_phone',
         db.raw("technicians.name as assigned_name"),
       )
       .where('leads.id', req.params.id)
@@ -1668,6 +1676,9 @@ router.post('/:id/send-sms', async (req, res, next) => {
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
+    // A website-only line texts only someone who already called or texted it.
+    const websiteLineBlock = await require('../services/website-line-contact').websiteLineRefusal(fromNumber, lead.phone);
+    if (websiteLineBlock) return res.status(400).json({ error: websiteLineBlock, code: 'WEBSITE_LINE_FIRST_CONTACT' });
 
     // A consultation link inserted here can go stale by the time the
     // operator actually sends (gate flipped off, the lead closed/converted,

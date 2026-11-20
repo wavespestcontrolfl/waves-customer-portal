@@ -17,6 +17,7 @@ const reviewVerdictStamp = (dbh, status) => dbh.raw(
 );
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { websiteLineRefusal } = require('../services/website-line-contact');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const {
   sendManualCustomerSms,
@@ -425,6 +426,23 @@ function releaseUndecidedClaim(draft, fields = {}) {
   return draft.intent === 'estimate_clarify'
     ? releaseClarifyClaim(draft.id, fields)
     : releaseDraftClaim(draft.id, fields);
+}
+
+// A website-only line texts only someone who already called or texted it
+// (services/website-line-contact.js). On a refusal, or a failed read, the
+// claim is released first, so the draft is never stranded.
+async function guardWebsiteLineSend(draft, fromNumber, toPhone, res, releaseFields = {}) {
+  let refusal;
+  try {
+    refusal = await websiteLineRefusal(fromNumber, toPhone);
+  } catch (err) {
+    await releaseUndecidedClaim(draft, releaseFields);
+    throw err;
+  }
+  if (!refusal) return { blocked: false };
+  await releaseUndecidedClaim(draft, releaseFields);
+  res.status(400).json({ error: refusal, code: 'WEBSITE_LINE_FIRST_CONTACT' });
+  return { blocked: true };
 }
 
 async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = false } = {}) {
@@ -845,6 +863,7 @@ router.put('/:id/approve', async (req, res, next) => {
       await releaseUndecidedClaim(draft);
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
+    if ((await guardWebsiteLineSend(draft, fromNumber, toPhone, res)).blocked) return;
     const sendPolicy = sendPolicyForDraft(draft, recipient);
 
     // Clarify dispatch decision runs LAST — there is no await between its
@@ -1001,6 +1020,7 @@ router.put('/:id/revise', async (req, res, next) => {
       await releaseUndecidedClaim(draft, { revised_response: null, final_response: null });
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
+    if ((await guardWebsiteLineSend(draft, fromNumber, toPhone, res, { revised_response: null, final_response: null })).blocked) return;
     const sendPolicy = sendPolicyForDraft(draft, recipient);
 
     const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });

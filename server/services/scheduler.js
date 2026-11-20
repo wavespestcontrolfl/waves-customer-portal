@@ -2163,6 +2163,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY 7:30 AM-7:30 PM — route check, shadow (owner 2026-11-19, "do whatever you reccomend"). Recalculates the
+  // next staffed days from the live schedule and records the room in each route, in route_check_runs. It changes no
+  // visit, budget or message. Every hour, so a booking or a cancellation made during the day shows at the next hour.
+  cron.schedule('30 7-19 * * *', async () => {
+    try {
+      await runExclusive('route-check', async () => {
+        const result = await require('./day-replan/route-check').runRouteCheck();
+        logger.info(`[route-check] ${result.status} slots=${result.totals?.next?.slots ?? 'n/a'}`);
+        // A failed run or a failed read is recorded first; it still counts as a failed run in job health. A second
+        // instance's run of an hour already recorded writes nothing and reports that hour's recorded status.
+        if (result.status !== 'completed') throw new Error(`route check ${result.status} (recorded)`);
+      });
+    } catch (err) {
+      logger.error(`[route-check] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 5:00AM — Auto-Dispatch CATCH-UP (owner 2026-10-26). A deploy that restarts the server during the 4:10 run
   // cuts it off: it moves nothing and nothing re-runs it (2026-09-03,
@@ -6887,7 +6904,7 @@ function initScheduledJobs() {
             .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
           };
           const smsResult = await dispatchScheduledSms(msg, claimMeta, sendReplay,
-          purpose, SCHEDULED_SMS_MAX_ATTEMPTS);
+          purpose, SCHEDULED_SMS_MAX_ATTEMPTS, toPhone);
           if (smsResult.scheduledHold) continue;
           const completedAt = new Date();
           const lawnPipelineRetryAt = claimMeta.entry_point === 'lawn_assessment_notification_deferred'
@@ -7144,9 +7161,10 @@ function initScheduledJobs() {
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
                 // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
-                // So does the pre-send customer-link check (scheduled-sms-delivery.js scheduledLinkRefusal): its reason is the
-                // check's own refusal code, and that function has already raised the office alert.
-                if (['LINKED_VISIT_ENDED', 'CUSTOMER_LINK_REFUSED'].includes(smsResult.code)) {
+                // So do the pre-send customer-link check and the website-line check (scheduled-sms-delivery.js
+                // scheduledLinkRefusal, scheduledWebsiteLineRefusal): the reason is the check's own refusal code, and
+                // that function has already raised the office alert.
+                if (['LINKED_VISIT_ENDED', 'CUSTOMER_LINK_REFUSED', 'WEBSITE_LINE_REFUSED'].includes(smsResult.code)) {
                   await db('sms_log').where({ id: msg.id, status: 'blocked' }).update({
                     metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_code', ?::text, 'blocked_reason', ?::text)", [smsResult.code, String(smsResult.reason || '')]),
                   });

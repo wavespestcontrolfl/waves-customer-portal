@@ -48,6 +48,8 @@ describe('Service Protocol drawer lawn mix', () => {
         { raw: 'Base instruction', selected: true, product: { name: 'Liquid potassium' }, jobMix: { amount: 30, amountUnit: 'fl_oz' }, fullTankMix: { amount: 60, amountUnit: 'fl_oz' } },
       ],
     };
+    // The Plan tab's lawn plan read (GET /admin/treatment-plans/:id), unused by these cases.
+    if (path.includes('/treatment-plans/')) return { plan: { propertyGate: {}, protocol: { base: [], conditional: [] } } };
     throw new Error(`Unexpected request: ${path}`);
   }
 
@@ -145,6 +147,8 @@ describe('Service Protocol drawer bermuda backpack mix order', () => {
       mixingOrder: [{ step: 1, productId: 'pot', productName: 'Liquid potassium', instruction: 'Add the potassium.' }],
       ...(withBermuda ? { bermudaMixingOrder } : {}),
     };
+    // The Plan tab's lawn plan read (GET /admin/treatment-plans/:id), unused by these cases.
+    if (path.includes('/treatment-plans/')) return { plan: { propertyGate: {}, protocol: { base: [], conditional: [] } } };
     throw new Error(`Unexpected request: ${path}`);
   }
   beforeEach(() => {

@@ -22,9 +22,14 @@ describe('day-only promise words and request fields', () => {
   });
 
   it('inside the cutoff, with the reminder off, with an unknown answer, or with no slot: "Tell the customer this time."', () => {
-    // 24.25 h after NOW is Wed 11-11 9:15 AM ET: 9:15 is not beyond it (the server uses <=), 9:30 is.
+    // Tomorrow (Wed 11-11) always names the time, beyond the 24.25 h cutoff too (9:30 AM, 5:00 PM): the day before is today.
     expect(askedTimeHint(false, { ...OK, date: '2026-11-11', start: '09:15' }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
-    expect(askedTimeHint(false, { ...OK, date: '2026-11-11', start: '09:30' }, NOW)).toBe(PHONE_SCRIPT_HINT);
+    expect(askedTimeHint(false, { ...OK, date: '2026-11-11', start: '09:30' }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...OK, date: '2026-11-11', start: '17:00' }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    // The cutoff alone: at 11:50 PM ET, 24.25 h later is 12:05 AM two days on (not beyond it; the server uses <=), 12:15 is.
+    const LATE = new Date('2026-11-11T04:50:00Z');
+    expect(askedTimeHint(false, { ...OK, date: '2026-11-12', start: '00:05' }, LATE)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...OK, date: '2026-11-12', start: '00:15' }, LATE)).toBe(PHONE_SCRIPT_HINT);
     expect(askedTimeHint(false, { ...OK, date: '2026-11-10', start: '15:00' }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
     expect(askedTimeHint(false, { ...OK, reminder24hOn: false }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
     expect(askedTimeHint(false, { ...OK, reminder24hOn: undefined }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);

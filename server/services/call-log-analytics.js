@@ -1,6 +1,7 @@
 const { etParts, parseETDateTime } = require('../utils/datetime-et');
 const { isLikelyE164, isValidNanpNumber, phoneIdentityKey, toE164 } = require('../utils/phone');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { sharedLineNumbers } = require('../config/shared-phone-lines');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 const TIME_ZONE = 'America/New_York';
@@ -133,8 +134,7 @@ function sourceEvidence(row) {
   const registry = registryLine(number);
   const sourceType = String(row?._source_type || '').toLowerCase();
   const name = lineName(row, registry);
-  const sharedNumber = number === TWILIO_NUMBERS.mainLine.number
-    || Object.values(TWILIO_NUMBERS.locations).some((line) => line.number === number);
+  const sharedNumber = sharedLineNumbers(TWILIO_NUMBERS).includes(number);
 
   if (sourceType === 'google_ads' || registry?.type === 'google_ads') {
     return {
@@ -226,10 +226,7 @@ function stripPrivateSourceColumns(row) {
 }
 
 function sourceSortExpression(conn, callAlias = 'cl') {
-  const shared = [
-    TWILIO_NUMBERS.mainLine.number,
-    ...Object.values(TWILIO_NUMBERS.locations).map((line) => line.number),
-  ];
+  const shared = sharedLineNumbers(TWILIO_NUMBERS);
   const google = Object.values(TWILIO_NUMBERS.paidTracking).filter((line) => line.source === 'google_ads').map((line) => line.number);
   const meta = Object.values(TWILIO_NUMBERS.paidTracking).filter((line) => line.source === 'facebook').map((line) => line.number);
   const gbp = Object.values(TWILIO_NUMBERS.gbpTracking).map((line) => line.number);
