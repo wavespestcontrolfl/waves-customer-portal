@@ -11,8 +11,8 @@
  * The state rebuilds the three files each morning, and each holds one fiscal year (July to June): on July 1 they
  * start over. The year before is not posted as these CSVs. Its archives are statewide XLSX files, checked
  * 2026-11-20: inspections about 55 MB, new licenses posted about July 9, no ownership-change archive since 2022-23.
- * Reading them is not worth one day of rows a year. So the schedule (the next change) also runs the job daily on
- * June 24-30, and at most the last day of June goes unread.
+ * Reading them is not worth one day of rows a year. So the job also runs daily on June 24-30 (scheduler.js), and
+ * at most the last day of June goes unread.
  *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
@@ -20,10 +20,12 @@
  * then every inspection stays NULL.
  *
  * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
- * sync itself never throws. Logs carry counts and elapsed time only, never a business name, address or phone. A read
- * with under 90% of the rows of the fullest complete read of the same file and fiscal year is short (a download that
- * stopped early): its rows are written and the run fails (readProblem). That measure is kept in system_settings. A
- * copy of an older fiscal year than one already read, or a file with no row from the last 14 days, fails the same way.
+ * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
+ * elapsed time only, never a business name, address or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true
+ * or on); the scheduler checks it before the run starts, so job_health keeps the last real outcome. A read with under
+ * 90% of the rows of the fullest complete read of the same file and fiscal year is short (a download that stopped
+ * early): its rows are written and the run fails (readProblem). That measure is kept in system_settings. A copy of
+ * an older fiscal year than one already read, or a file with no row from the last 14 days, fails the same way.
  */
 
 const db = require('../../models/db');
@@ -68,6 +70,10 @@ const KEY_MAX = 40;
 const FILE_TIMEOUT_MS = 60 * 1000;
 const REPORT_MAX_ATTEMPTS = 3;
 const UPSERT_CHUNK = 500;
+
+function syncDisabled(env = process.env) {
+  return /^(1|true|on)$/i.test(String(env.DBPR_PROSPECT_SYNC_DISABLED || '').trim());
+}
 
 // ── Parsers (pure) ──────────────────────────────────────────────
 
@@ -463,11 +469,12 @@ async function syncFiles(deps, result) {
 /**
  * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
  * { fetchText, store, now }.
- * @returns {Promise<{ failures: number, files: object, elapsedMs: number }>}
+ * @returns {Promise<{ skipped?: string, failures: number, files: object, elapsedMs: number }>}
  */
 async function syncRestaurantProspects(deps = {}) {
   const started = Date.now();
   const result = { failures: 0, files: {}, elapsedMs: 0 };
+  if (syncDisabled()) return { ...result, skipped: 'disabled' };
   await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
   result.elapsedMs = Date.now() - started;
   const counts = Object.entries(result.files)
@@ -480,6 +487,7 @@ async function syncRestaurantProspects(deps = {}) {
 
 module.exports = {
   syncRestaurantProspects,
+  syncDisabled,
   parseUsDate,
   parseInspectionRows,
   parseLicenseRows,
