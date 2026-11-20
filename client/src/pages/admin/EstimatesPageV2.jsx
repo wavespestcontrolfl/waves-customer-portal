@@ -10,6 +10,7 @@ import {
 //   - POST  /admin/estimates/:id/send
 //   - POST  /admin/estimates/:id/follow-up
 //   - POST  /admin/estimates/:id/mark-accepted
+//   - POST  /admin/estimates/:id/call-outcome  (a Call today row's outcome tap)
 // Scope (post PR #5c):
 //   PR #5a → tab chrome + Pipeline tab (stats bar + filter pills + list rows)
 //   PR #5b → Create Estimate tab now renders EstimateToolViewV2 (monochrome
@@ -55,7 +56,12 @@ import PipelineAnalytics, {
   isSentGroupEstimate,
 } from "./PipelineAnalytics";
 // The Call today rule's one home, shared with the 9 AM push.
-import { isCallTodayEstimate, lastEngagementMs } from "@estimate-call-today";
+import {
+  CALL_OUTCOMES,
+  isCallTodayEstimate,
+  lastEngagementMs,
+} from "@estimate-call-today";
+import { etDateString, formatETDate, formatETTime } from "../../lib/timezone";
 import {
   FollowUpModalV2,
   DeclineModalV2,
@@ -338,49 +344,103 @@ function sortOldestEngagementFirst(rows) {
   const at = (e) => lastEngagementMs(e) ?? Infinity;
   return [...rows].sort((a, b) => at(a) - at(b));
 }
-// A click-to-call answers once the STAFF leg starts, before the customer picks up, so the
-// answered-call proof that takes an offer off Call today (lastCalledAt) lands only after the
-// call ends. While a call placed from Call today is pending, re-read the list quietly once a
-// minute, for at most 15 minutes, and stop as soon as that offer has left Call today.
-export const CALL_WATCH_INTERVAL_MS = 60 * 1000;
-export const CALL_WATCH_MAX_MS = 15 * 60 * 1000;
-export function useCallListWatch({ estimates, refresh }) {
-  const [pending, setPending] = useState(() => new Map());
-  const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
-  const watch = useCallback((id) => {
-    if (id) setPending((prev) => new Map(prev).set(id, Date.now()));
+// Call today outcomes (owner 2026-11-20, D1 A). One tap on a row saves what the call came to (Booked, Call back,
+// Not interested, No answer) with who and when, and the saved outcome takes the row off the list by the shared rule
+// until the customer opens or taps the estimate again. A call placed from the list keeps its row on screen until
+// someone taps an outcome, even after the call connects (the answered call alone takes a row off), so whoever called
+// can log it. "Not interested" also opens the Mark lost box. Only records: the route texts, emails and calls nobody.
+function withoutKey(collection, key) {
+  if (!collection.has(key)) return collection;
+  const next = new collection.constructor(collection);
+  next.delete(key);
+  return next;
+}
+export function useCallOutcomes({ setEstimates, refresh, onNotInterested }) {
+  // estimate id -> when a call to it was placed from the list (ms), until an outcome is tapped
+  const [held, setHeld] = useState(() => new Map());
+  const [saving, setSaving] = useState(() => new Set());
+  const hold = useCallback((id) => {
+    if (id) setHeld((prev) => new Map(prev).set(id, Date.now()));
   }, []);
-  // Every re-read: an offer that left Call today, or whose window ran out, stops its watch.
-  useEffect(() => {
-    if (!pending.size) return;
-    const now = Date.now();
-    const byId = new Map((estimates || []).map((e) => [e.id, e]));
-    const next = new Map(
-      [...pending].filter(
-        ([id, startedAt]) =>
-          now - startedAt < CALL_WATCH_MAX_MS &&
-          byId.has(id) &&
-          isCallTodayEstimate(byId.get(id), now),
-      ),
-    );
-    if (next.size !== pending.size) setPending(next);
-  }, [estimates, pending]);
-  useEffect(() => {
-    if (!pending.size) return undefined;
-    const timer = setInterval(() => {
-      const now = Date.now();
-      setPending((prev) => {
-        const next = new Map(
-          [...prev].filter(([, startedAt]) => now - startedAt < CALL_WATCH_MAX_MS),
+  const onCallToday = useCallback(
+    (e) => {
+      if (isCallTodayEstimate(e)) return true;
+      const placedAt = held.get(e.id);
+      // A held row leaves once anyone logs an outcome for it after the call was placed.
+      return placedAt !== undefined && !(Date.parse(e.lastCallOutcome?.at) >= placedAt);
+    },
+    [held],
+  );
+  const save = useCallback(
+    async (estimate, outcome) => {
+      setSaving((prev) => new Set(prev).add(estimate.id));
+      try {
+        const r = await adminFetch(`/admin/estimates/${estimate.id}/call-outcome`, {
+          method: "POST",
+          body: JSON.stringify({ outcome }),
+        });
+        setHeld((prev) => withoutKey(prev, estimate.id));
+        setEstimates((prev) =>
+          prev.map((e) => (e.id === estimate.id ? { ...e, lastCallOutcome: r.callOutcome } : e)),
         );
-        return next.size === prev.size ? prev : next;
-      });
-      refreshRef.current({ silent: true });
-    }, CALL_WATCH_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [pending.size]);
-  return watch;
+        refresh({ silent: true });
+        if (outcome === "not_interested") onNotInterested(estimate);
+      } catch (err) {
+        window.alert("Could not save the call outcome: " + err.message);
+      } finally {
+        setSaving((prev) => withoutKey(prev, estimate.id));
+      }
+    },
+    [setEstimates, refresh, onNotInterested],
+  );
+  return useMemo(
+    () => ({ hold, onCallToday, save, saving }),
+    [hold, onCallToday, save, saving],
+  );
+}
+// The list filter, with Call today widened to the rows a call from the list still holds.
+function matchesListFilter(e, filter, callOutcomes) {
+  return filter === "call_today"
+    ? callOutcomes.onCallToday(e)
+    : estimateMatchesFilter(e, filter);
+}
+// A row's newest outcome: "No answer · 9:42 AM · Virginia", with the date when it was not today (ET).
+export function callOutcomeLine(callOutcome, now = new Date()) {
+  const label = CALL_OUTCOMES.find((o) => o.key === callOutcome?.outcome)?.label;
+  if (!label || !callOutcome.at) return "";
+  const at = new Date(callOutcome.at);
+  const time = formatETTime(at);
+  const when =
+    etDateString(at) === etDateString(now)
+      ? time
+      : `${formatETDate(at, { month: "short", day: "numeric" })}, ${time}`;
+  return [label, when, callOutcome.by].filter(Boolean).join(" · ");
+}
+// The four outcome buttons on a Call today row.
+export function CallOutcomeButtons({ estimate, onPick, saving = false, className }) {
+  return (
+    <div
+      role="group"
+      aria-label={`Call outcome for ${estimate.customerName || "customer"}`}
+      className={cn("flex flex-wrap items-center gap-1.5", className)}
+    >
+      {CALL_OUTCOMES.map((o) => (
+        <Button
+          key={o.key}
+          size="sm"
+          variant="secondary"
+          className="whitespace-nowrap"
+          disabled={saving}
+          onClick={(evt) => {
+            evt.stopPropagation();
+            onPick(estimate, o.key);
+          }}
+        >
+          {o.label}
+        </Button>
+      ))}
+    </div>
+  );
 }
 function v3ChipMatches(e, chip) {
   if (chip === "all") return true;
@@ -2162,9 +2222,10 @@ function EstimatePipelineViewV2({
         }
       });
   }, []);
-  const watchCall = useCallListWatch({
-    estimates,
+  const callOutcomes = useCallOutcomes({
+    setEstimates,
     refresh: refreshEstimates,
+    onNotInterested: setDeclineTarget,
   });
   // A Call today link taken on the open list (callTodayLinksTaken) loads it fresh too: with the filter already
   // selected, the filter alone does not change, and the rows the push counted may have moved since the last load.
@@ -2379,7 +2440,7 @@ function EstimatePipelineViewV2({
     estimateTableSortFn(sort, tableControlsEnabled),
   );
   const filteredRows = sorted
-    .filter((e) => estimateMatchesFilter(e, filter))
+    .filter((e) => matchesListFilter(e, filter, callOutcomes))
     .filter((e) => estimateMatchesTableSearch(e, search));
   // The Call today list runs oldest open first, whatever the table sort.
   const filtered =
@@ -2794,7 +2855,7 @@ function EstimatePipelineViewV2({
                                       (r?.error || "unknown error"),
                                   );
                                 else if (isCallTodayEstimate(e))
-                                  watchCall(e.id);
+                                  callOutcomes.hold(e.id);
                               } catch (err) {
                                 alert("Call failed: " + err.message);
                               }
@@ -2939,6 +3000,9 @@ function EstimatePipelineViewV2({
                       )}
                       {e.lastCalledAt && (
                         <div>Called {timeAgo(e.lastCalledAt)}</div>
+                      )}
+                      {e.lastCallOutcome && (
+                        <div>{callOutcomeLine(e.lastCallOutcome)}</div>
                       )}
                     </div>
                     {/* Actions — flag toggle + primary status action(s) +
@@ -3346,6 +3410,14 @@ function EstimatePipelineViewV2({
                       message={viewErrors[e.id]}
                       className="w-full"
                     />
+                    {filter === "call_today" && (
+                      <CallOutcomeButtons
+                        estimate={e}
+                        onPick={callOutcomes.save}
+                        saving={callOutcomes.saving.has(e.id)}
+                        className="w-full"
+                      />
+                    )}
                   </Card>
                 );
               })}
@@ -3710,6 +3782,8 @@ export function MobileEstimateRow({
   highlighted = false,
   onPickReason,
   onCalled,
+  onCallOutcome,
+  callOutcomeSaving = false,
 }) {
   const navigate = useNavigate();
   const sendEstimateFromPipeline = useEstimateSend();
@@ -3938,6 +4012,19 @@ export function MobileEstimateRow({
             </div>
           )}
           <EstimateSoldByRow estimate={estimate} onChanged={onSoldByChanged} />
+          {estimate.lastCallOutcome && (
+            <span className="text-ui-body text-ink-tertiary">
+              {callOutcomeLine(estimate.lastCallOutcome)}
+            </span>
+          )}
+          {onCallOutcome && (
+            <CallOutcomeButtons
+              estimate={estimate}
+              onPick={onCallOutcome}
+              saving={callOutcomeSaving}
+              className="mt-1"
+            />
+          )}
         </div>
         {estimate.customerPhone && (
           <Button
@@ -4177,6 +4264,7 @@ function EstimatesMobileListView({
   const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [reasonTarget, setReasonTarget] = useState(null);
+  const [declineTarget, setDeclineTarget] = useState(null);
   const [estimates, setEstimates] = useState([]);
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -4214,9 +4302,10 @@ function EstimatesMobileListView({
         if (requestId === estimatesRequestRef.current) setLoading(false);
       });
   }, []);
-  const watchCall = useCallListWatch({
-    estimates,
+  const callOutcomes = useCallOutcomes({
+    setEstimates,
     refresh: refreshEstimates,
+    onNotInterested: setDeclineTarget,
   });
   useEffect(() => {
     setLoading(true);
@@ -4389,7 +4478,9 @@ function EstimatesMobileListView({
       _class: classifyEstimateForPipeline(e),
     }));
     let list = classified;
-    if (v3Flag) {
+    if (filter === "call_today") {
+      list = list.filter((e) => callOutcomes.onCallToday(e));
+    } else if (v3Flag) {
       list = list.filter((e) => v3ChipMatches(e, filter));
     } else if (filter !== "all") {
       list = list.filter((e) => estimateMatchesFilter(e, filter));
@@ -4438,6 +4529,7 @@ function EstimatesMobileListView({
     sort,
     tableControlsEnabled,
     v3Flag,
+    callOutcomes,
   ]);
   const filterCounts = useMemo(() => {
     if (v3Flag) return v3ChipCounts(estimates, v3Chips());
@@ -4664,8 +4756,10 @@ function EstimatesMobileListView({
               v3Flag={v3Flag}
               onPickReason={setReasonTarget}
               onCalled={(row) => {
-                if (isCallTodayEstimate(row)) watchCall(row.id);
+                if (isCallTodayEstimate(row)) callOutcomes.hold(row.id);
               }}
+              onCallOutcome={filter === "call_today" ? callOutcomes.save : undefined}
+              callOutcomeSaving={callOutcomes.saving.has(e.id)}
             />
           ))}
         </div>
@@ -4728,6 +4822,17 @@ function EstimatesMobileListView({
           onClose={() => setReasonTarget(null)}
           onSaved={() => {
             setReasonTarget(null);
+            refreshEstimates();
+          }}
+        />
+      )}
+      {/* Opened by a Call today row's "Not interested" tap (useCallOutcomes). */}
+      {declineTarget && (
+        <DeclineModalV2
+          estimate={declineTarget}
+          onClose={() => setDeclineTarget(null)}
+          onSaved={() => {
+            setDeclineTarget(null);
             refreshEstimates();
           }}
         />

@@ -900,6 +900,17 @@ describe("isCallTodayEstimate", () => {
     expect(isCallTodayEstimate(viewedOffer(10, { lastCalledAt: null }), NOW_MS)).toBe(true);
   });
 
+  // Owner 2026-11-20 (D1 A): every outcome tapped on the row counts, No answer and Call back too.
+  it.each(["booked", "call_back", "not_interested", "no_answer"])(
+    "drops the offer once a %s outcome is logged after the last engagement, until the customer touches it again",
+    (outcome) => {
+      const logged = (hours) => ({ outcome, at: hoursAgo(hours), by: "Virginia" });
+      expect(isCallTodayEstimate(viewedOffer(10, { lastCallOutcome: logged(3) }), NOW_MS)).toBe(false);
+      expect(isCallTodayEstimate(viewedOffer(10, { lastCallOutcome: logged(20) }), NOW_MS)).toBe(true);
+      expect(isCallTodayEstimate(viewedOffer(10, { lastCallOutcome: null }), NOW_MS)).toBe(true);
+    },
+  );
+
   it("needs a viewed, unarchived offer with a phone", () => {
     expect(isCallTodayEstimate(viewedOffer(10, { customerPhone: "" }), NOW_MS)).toBe(false);
     expect(isCallTodayEstimate(viewedOffer(10, { customerPhone: undefined }), NOW_MS)).toBe(false);
