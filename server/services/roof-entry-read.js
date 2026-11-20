@@ -105,6 +105,7 @@ const PIN_ACTIONS = Object.freeze({ trees_touching_roof: 'trim back' });
 const pinAction = (type) => PIN_ACTIONS[type] || 'seal';
 const MAX_TECH_PINS = 20;
 const MAX_PIN_NOTE = 40;
+const PIN_SOURCE_RE = /^[a-z_]+:\d{1,2}$/;
 const TIER_UNKNOWN = 'unknown';
 const STATUS_DONE = 'done';
 const STATUS_PENDING = 'pending';
@@ -666,6 +667,9 @@ async function runRead(input) {
  * The technician's confirmed points, normalized, or null when the input is not a valid list: at most 20 points, each
  * { x, y } a number from 0 to 1 (a fraction of the crop, as the AI pins), a type from TECH_PIN_TYPES, and an optional
  * plain-text note of at most 40 characters (control characters become spaces; blank = no note). [] is valid (none).
+ * A point may also carry `source`, "<entry type>:<index>" (index into that type's AI pins), naming the AI suggestion it was
+ * confirmed from, so the staff panel keeps that suggestion hidden after the point is moved or retyped. It is kept in the
+ * normalized output when sent, and customerPointsFromRow never passes it on.
  */
 function validateTechPins(pins) {
   if (!Array.isArray(pins) || pins.length > MAX_TECH_PINS) return null;
@@ -683,7 +687,12 @@ function validateTechPins(pins) {
       if (note.length > MAX_PIN_NOTE) return null;
       if (!note) note = null;
     }
-    out.push({ x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000, type, note });
+    const pin = { x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000, type, note };
+    if (p.source != null) {
+      if (typeof p.source !== 'string' || !PIN_SOURCE_RE.test(p.source) || !ENTRY_TYPES.includes(p.source.split(':')[0])) return null;
+      pin.source = p.source;
+    }
+    out.push(pin);
   }
   return out;
 }

@@ -319,6 +319,7 @@ describe("confirmed points", () => {
   const lastBody = () => JSON.parse(patches().at(-1)[1].body);
   const frame = () => screen.getByTestId("roof-read-image");
   // jsdom has no layout: give the photo a 200 x 100 box at the page origin, so a tap at (50, 25) is x 0.25, y 0.25.
+  const loadPhoto = () => fireEvent.load(frame().querySelector("img"));
   const sizeFrame = () => { frame().getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100 }); };
   const opened = async (props = {}, read = READ()) => {
     fetchMock.mockImplementationOnce(() => reply({ status: "ok", cached: false, read, image_url: IMAGE }));
@@ -326,6 +327,7 @@ describe("confirmed points", () => {
     tap();
     await screen.findByTestId("roof-read-result");
     sizeFrame();
+    loadPhoto();
     return view;
   };
   const SAVED = [
@@ -509,7 +511,7 @@ describe("confirmed points", () => {
     fetchMock.mockImplementationOnce(() => reply({
       read: READ({
         hide_on_estimate: true,
-        tech_pins: [{ x: 0.25, y: 0.5, type: "plumbing_vent_stacks", note: "front left" }, { x: 0.25, y: 0.25, type: "other", note: null }],
+        tech_pins: [{ x: 0.25, y: 0.5, type: "plumbing_vent_stacks", note: "front left", source: "plumbing_vent_stacks:0" }, { x: 0.25, y: 0.25, type: "other", note: null }],
       }),
     }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
@@ -518,7 +520,7 @@ describe("confirmed points", () => {
     expect(String(patches()[0][0])).toMatch(new RegExp(`/admin/roof-entry-read/${READ_ID}/tech-count$`));
     expect(lastBody()).toEqual({
       pins: [
-        { x: 0.25, y: 0.5, type: "plumbing_vent_stacks", note: "front left" },
+        { x: 0.25, y: 0.5, type: "plumbing_vent_stacks", note: "front left", source: "plumbing_vent_stacks:0" },
         { x: 0.25, y: 0.25, type: "other", note: null },
       ],
       crop: { lat: 27.46, lng: -82.57 },
@@ -542,7 +544,7 @@ describe("confirmed points", () => {
     expect(screen.getByTestId("roof-read-point-row-1")).toHaveTextContent("1. Gable vents, server");
     expect(screen.queryByTestId("roof-read-point-editor")).toBeNull();
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
-    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/Change a point first/);
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/Change a point or the checkbox first/);
     expect(patches()).toHaveLength(1);
   });
 
@@ -607,5 +609,167 @@ describe("confirmed points", () => {
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/Could not reach the server/);
     expect(screen.getAllByTestId("roof-read-point")).toHaveLength(1);
+  });
+});
+
+describe("saving only what changed", () => {
+  const patches = () => fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH");
+  const lastBody = () => JSON.parse(patches().at(-1)[1].body);
+  const frame = () => screen.getByTestId("roof-read-image");
+  const SHOW = { name: "Show these points on the customer estimate" };
+  const SAVED = [{ x: 0.2, y: 0.3, type: "gable_vents", note: "front left", source: null }];
+  const opened = async (read = READ({ tech_pins: SAVED })) => {
+    fetchMock.mockImplementationOnce(() => reply({ status: "ok", cached: false, read, image_url: IMAGE }));
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    frame().getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100 });
+    fireEvent.load(frame().querySelector("img"));
+  };
+
+  it("sends only hide_on_estimate when only the checkbox changed, with no points and no crop", async () => {
+    await opened();
+    fireEvent.click(screen.getByRole("checkbox", SHOW));
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ hide_on_estimate: true, tech_pins: SAVED }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    expect(lastBody()).toEqual({ hide_on_estimate: true });
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(1);
+  });
+
+  it("sends only the points and crop when only the points changed", async () => {
+    await opened();
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: [...SAVED, { x: 0.5, y: 0.5, type: "other", note: null }] }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    const body = lastBody();
+    expect(Object.keys(body).sort()).toEqual(["crop", "pins"]);
+    expect(body.pins).toHaveLength(2);
+  });
+
+  it("sends nothing and says so when the checkbox is toggled back to what the server holds", async () => {
+    await opened();
+    fireEvent.click(screen.getByRole("checkbox", SHOW));
+    fireEvent.click(screen.getByRole("checkbox", SHOW));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent("Change a point or the checkbox first.");
+    expect(patches()).toHaveLength(0);
+  });
+
+  it("needs the map point to save edited points", async () => {
+    fetchMock.mockImplementationOnce(() => reply({ status: "ok", cached: false, read: READ({ tech_pins: SAVED }), image_url: IMAGE }));
+    const { rerender } = render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    frame().getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100 });
+    fireEvent.load(frame().querySelector("img"));
+    rerender(<RoofReadPanel spot={null} estimateId={EST} />);
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/map point is missing/);
+    expect(patches()).toHaveLength(0);
+  });
+});
+
+describe("a suggestion's link to its confirmed point", () => {
+  const patches = () => fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH");
+  const frame = () => screen.getByTestId("roof-read-image");
+  const opened = async (read = READ()) => {
+    fetchMock.mockImplementationOnce(() => reply({ status: "ok", cached: false, read, image_url: IMAGE }));
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    frame().getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100 });
+    fireEvent.load(frame().querySelector("img"));
+  };
+
+  it("sends the source of a confirmed suggestion, keeps it through a move and a retype, and keeps the suggestion hidden after the save", async () => {
+    await opened();
+    expect(screen.getAllByTestId("roof-read-pin")).toHaveLength(2);
+    // The second AI pin (index 1) is confirmed, then moved and retyped.
+    fireEvent.click(screen.getAllByTestId("roof-read-pin")[1]);
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "chimney_or_flue" } });
+    fireEvent.keyDown(screen.getByTestId("roof-read-point"), { key: "ArrowLeft" });
+    fireEvent.keyDown(screen.getByTestId("roof-read-point"), { key: "ArrowDown" });
+    expect(screen.getAllByTestId("roof-read-pin")).toHaveLength(1);
+    // The point added by tapping the photo has no source.
+    fireEvent.click(frame(), { clientX: 20, clientY: 20 });
+    // The server answers with its own normalized values, source included.
+    fetchMock.mockImplementationOnce((url, init) => reply({
+      read: READ({ tech_pins: JSON.parse(init.body).pins.map((p) => ({ source: null, ...p })) }),
+    }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    const body = JSON.parse(patches()[0][1].body);
+    expect(body.pins).toEqual([
+      { x: 0.74, y: 0.11, type: "chimney_or_flue", note: null, source: "plumbing_vent_stacks:1" },
+      { x: 0.1, y: 0.2, type: "other", note: null },
+    ]);
+    // After the reload from the server's values, the moved and retyped point still hides its suggestion.
+    const suggestions = screen.getAllByTestId("roof-read-pin");
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0].style.left).toBe("25%");
+    fireEvent.click(suggestions[0]);
+    expect(screen.queryAllByTestId("roof-read-pin")).toHaveLength(0);
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(3);
+  });
+
+  it("hides every suggestion named by a saved point's source, and brings it back when that point is removed", async () => {
+    await opened(READ({ tech_pins: [{ x: 0.9, y: 0.9, type: "other", note: null, source: "plumbing_vent_stacks:0" }] }));
+    const suggestions = screen.getAllByTestId("roof-read-pin");
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0].style.left).toBe("75%");
+    fireEvent.click(screen.getByTestId("roof-read-point"));
+    fireEvent.click(screen.getByTestId("roof-read-point-remove"));
+    expect(screen.getAllByTestId("roof-read-pin")).toHaveLength(2);
+  });
+});
+
+describe("the county photo", () => {
+  const frame = () => screen.getByTestId("roof-read-image");
+  const render_ = async () => {
+    render(<RoofReadPanel spot={SPOT} estimateId={EST} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    frame().getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100 });
+  };
+  const SHOW = { name: "Show these points on the customer estimate" };
+
+  it("disables the suggestions, adding a point and the photo until it loads, and says so", async () => {
+    await render_();
+    expect(screen.getByTestId("roof-read-image-loading")).toHaveTextContent("Loading the roof photo…");
+    expect(screen.getByTestId("roof-read-add-point")).toBeDisabled();
+    for (const s of screen.getAllByTestId("roof-read-pin")) expect(s).toBeDisabled();
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    expect(screen.queryAllByTestId("roof-read-point")).toHaveLength(0);
+    // The checkbox is about visibility, not the photo, so it stays usable.
+    expect(screen.getByRole("checkbox", SHOW)).not.toBeDisabled();
+    fireEvent.load(frame().querySelector("img"));
+    expect(screen.queryByTestId("roof-read-image-loading")).toBeNull();
+    expect(screen.getByTestId("roof-read-add-point")).not.toBeDisabled();
+    for (const s of screen.getAllByTestId("roof-read-pin")) expect(s).not.toBeDisabled();
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(1);
+  });
+
+  it("says the photo did not load, keeps points off it, and Try again remounts the same image", async () => {
+    await render_();
+    const first = frame().querySelector("img");
+    fireEvent.error(first);
+    expect(screen.getByTestId("roof-read-image-error")).toHaveTextContent("The roof photo did not load.");
+    expect(screen.queryByTestId("roof-read-image-loading")).toBeNull();
+    expect(screen.getByTestId("roof-read-add-point")).toBeDisabled();
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    expect(screen.queryAllByTestId("roof-read-point")).toHaveLength(0);
+    fireEvent.click(screen.getByTestId("roof-read-image-retry"));
+    const second = frame().querySelector("img");
+    expect(second).not.toBe(first);
+    expect(second).toHaveAttribute("src", IMAGE);
+    expect(screen.getByTestId("roof-read-image-loading")).toBeInTheDocument();
+    fireEvent.load(second);
+    expect(screen.getByTestId("roof-read-add-point")).not.toBeDisabled();
+    // Retrying posts nothing: the read is not paid for again.
+    expect(posts()).toHaveLength(1);
   });
 });

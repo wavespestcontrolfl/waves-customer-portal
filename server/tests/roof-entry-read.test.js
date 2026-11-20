@@ -1369,6 +1369,32 @@ describe('validateTechPins', () => {
     expect(svc.validateTechPins([pin({ note: `${forty}b` })])).toBeNull();
   });
 
+  it('keeps an optional source naming the AI suggestion a point came from, and leaves it out when none is sent', () => {
+    const [withSource, without, nullSource] = svc.validateTechPins([
+      pin({ source: 'gable_vents:0' }), pin(), pin({ source: null }),
+    ]);
+    expect(withSource).toEqual({ x: 0.25, y: 0.5, type: 'gable_vents', note: null, source: 'gable_vents:0' });
+    expect(Object.keys(without)).not.toContain('source');
+    expect(Object.keys(nullSource)).not.toContain('source');
+    // A moved and retyped point keeps naming the suggestion it began as.
+    expect(svc.validateTechPins([pin({ type: 'other', source: 'plumbing_vent_stacks:12' })])[0].source).toBe('plumbing_vent_stacks:12');
+  });
+
+  it.each([
+    ['a type that is not an entry type', 'other:0'],
+    ['an unknown type', 'attic_door:0'],
+    ['no index', 'gable_vents'],
+    ['a three digit index', 'gable_vents:100'],
+    ['a negative index', 'gable_vents:-1'],
+    ['a dash instead of a colon', 'gable_vents-0'],
+    ['upper case', 'Gable_vents:0'],
+    ['trailing text', 'gable_vents:0 '],
+    ['a number', 4],
+    ['an object', { a: 1 }],
+  ])('rejects a source with %s', (_name, source) => {
+    expect(svc.validateTechPins([pin({ source })])).toBeNull();
+  });
+
   it('accepts exactly 20 points and rejects 21', () => {
     expect(svc.validateTechPins(Array.from({ length: 20 }, () => pin()))).toHaveLength(20);
     expect(svc.validateTechPins(Array.from({ length: 21 }, () => pin()))).toBeNull();
@@ -1499,6 +1525,12 @@ describe('cropImageUrl and customerPointsFromRow', () => {
     expect(svc.pinAction('chimney_or_flue')).toBe('seal');
   });
 
+  it('never passes a point source on to the customer estimate', () => {
+    const out = svc.customerPointsFromRow(row({ tech_pins: [{ x: 0.1, y: 0.1, type: 'gable_vents', note: null, source: 'gable_vents:0' }] }));
+    expect(out.pins).toEqual([{ n: 1, x: 0.1, y: 0.1, type: 'gable_vents', label: 'Gable vent', action: 'seal' }]);
+    expect(JSON.stringify(out)).not.toContain('source');
+  });
+
   it('accepts points already parsed (a jsonb column)', () => {
     expect(svc.customerPointsFromRow(row({ tech_pins: [{ x: 0.1, y: 0.1, type: 'gable_vents', note: null }] })).pins[0].label).toBe('Gable vent');
   });
@@ -1541,7 +1573,16 @@ describe('PATCH /:id/tech-count with points', () => {
     expect(mockRows[0].crop_lat).toBe(27.46);
   });
 
-  it('saves the hide flag alone, and clears the points with null', async () => {
+  it('stores and returns a point source, and refuses a bad one with 400', async () => {
+    const res = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'gable_vents:1' }], crop: CROP });
+    expect(res.status).toBe(200);
+    expect(res.json.read.tech_pins).toEqual([{ x: 0.2, y: 0.3, type: 'other', note: null, source: 'gable_vents:1' }]);
+    const bad = await patch({ pins: [{ x: 0.2, y: 0.3, type: 'other', source: 'other:1' }], crop: CROP });
+    expect(bad.status).toBe(400);
+    expect(mockRows[0].tech_pins).toBe(JSON.stringify([{ x: 0.2, y: 0.3, type: 'other', note: null, source: 'gable_vents:1' }]));
+  });
+
+  it('saves the hide flag alone without touching the points, and clears the points with null', async () => {
     await patch({ pins: PINS, crop: CROP });
     const hide = await patch({ hide_on_estimate: true });
     expect(hide.status).toBe(200);

@@ -89,21 +89,21 @@ function techFlagsFrom(read) {
 
 const clamp01 = (n) => Math.min(1, Math.max(0, n));
 const round4 = (n) => Math.round(n * 10000) / 10000;
-const near = (a, b) => Math.abs(a - b) < 0.0006;
 
-// The AI's "yes" pins, as suggestions. x and y are fractions from the top-left of the picture.
+// The AI's "yes" pins, as suggestions. x and y are fractions from the top-left of the picture. A suggestion's key,
+// "<entry type>:<index into that type's AI pins>", is what a confirmed point stores as its source.
 function suggestionsFrom(read) {
   return ROOF_TYPES.flatMap((t) => {
     const entry = read?.flags?.[t.key];
     if (entry?.likely !== "yes") return [];
-    return (entry.pins || []).map((p, i) => ({ key: `${t.key}-${i}`, type: t.key, x: p.x, y: p.y }));
+    return (entry.pins || []).map((p, i) => ({ key: `${t.key}:${i}`, type: t.key, x: p.x, y: p.y }));
   });
 }
 
 // The technician's saved points, each with a local id so a point can be dragged and edited. Ids never leave the panel.
 function pointsFrom(read, nextId) {
   return (Array.isArray(read?.tech_pins) ? read.tech_pins : []).map((p) => ({
-    id: nextId(), x: p.x, y: p.y, type: TYPE_LABELS[p.type] ? p.type : "other", note: p.note || "", from: null,
+    id: nextId(), x: p.x, y: p.y, type: TYPE_LABELS[p.type] ? p.type : "other", note: p.note || "", source: typeof p.source === "string" ? p.source : null,
   }));
 }
 
@@ -113,7 +113,7 @@ const PIN_BASE = "absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 p-0 rounded
 
 // The county crop with the AI's suggestions (faded, with the type letter) and the technician's confirmed points
 // (solid, numbered) on it. The photo is a click target for adding a point; every point is a button.
-function RoofImage({ url, suggestions, points, selectedId, editable, frameRef, onAdd, onConfirm, onSelect, onMove, onNudge, onRemove }) {
+function RoofImage({ url, imageKey, onImageLoad, onImageError, suggestions, points, selectedId, editable, frameRef, onAdd, onConfirm, onSelect, onMove, onNudge, onRemove }) {
   const drag = useRef(null);
   const suppressClick = useRef(false);
   const letters = [...new Set(suggestions.map((s) => s.type))];
@@ -165,7 +165,16 @@ function RoofImage({ url, suggestions, points, selectedId, editable, frameRef, o
         data-testid="roof-read-image"
         onClick={addAt}
       >
-        <img src={url} alt="County aerial photo of the roof" className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none" draggable={false} />
+        <img
+          key={imageKey}
+          ref={(el) => { if (el && el.complete && el.naturalWidth > 0) onImageLoad(); }}
+          src={url}
+          alt="County aerial photo of the roof"
+          className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"
+          draggable={false}
+          onLoad={onImageLoad}
+          onError={onImageError}
+        />
         {suggestions.map((s) => (
           <button
             key={s.key}
@@ -238,6 +247,9 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   const [showOnEstimate, setShowOnEstimate] = useState(true);
   const [pointsEdited, setPointsEdited] = useState(false);
   const [pointsState, setPointsState] = useState({ busy: false, msg: "", err: "" });
+  // The county photo: points are placed on it, so nothing can be added until it has loaded.
+  const [imageState, setImageState] = useState("loading");
+  const [imageTry, setImageTry] = useState(0);
   const pointId = useRef(0);
   const nextId = () => { pointId.current += 1; return `pt${pointId.current}`; };
   const frameRef = useRef(null);
@@ -288,6 +300,8 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
         setShowOnEstimate(!body.read.hide_on_estimate);
         setPointsEdited(false);
         setPointsState({ busy: false, msg: "", err: "" });
+        setImageState("loading");
+        setImageTry(0);
         setPhase("ok");
         return;
       }
@@ -345,19 +359,21 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   }
 
   const read = phase === "ok" ? result?.read : null;
-  const editable = !!estimateId && !pointsState.busy;
+  const imageLoaded = imageState === "loaded";
+  const editable = !!estimateId && !pointsState.busy && imageLoaded;
   const atMax = points.length >= MAX_POINTS;
-  const suggestions = read
-    ? suggestionsFrom(read).filter((sg) => !points.some((p) => p.from === sg.key || (p.type === sg.type && near(p.x, sg.x) && near(p.y, sg.y))))
-    : [];
+  // A suggestion stays hidden while any point, saved or not, names it as its source, even after the point moved or changed type.
+  const suggestions = read ? suggestionsFrom(read).filter((sg) => !points.some((p) => p.source === sg.key)) : [];
+  // Whether the checkbox differs from what the server holds: only then is hide_on_estimate sent.
+  const hideChanged = !!read && !showOnEstimate !== Boolean(read.hide_on_estimate);
   const selected = points.find((p) => p.id === selectedId) || null;
 
   const edited = (fn) => { fn(); setPointsEdited(true); setPointsState((st) => (st.busy ? st : { busy: false, msg: "", err: "" })); };
-  function addPoint(x, y, type = "other", from = null) {
+  function addPoint(x, y, type = "other", source = null) {
     if (!editable || points.length >= MAX_POINTS) return;
     const id = nextId();
     edited(() => {
-      setPoints((list) => (list.length >= MAX_POINTS ? list : [...list, { id, x: round4(x), y: round4(y), type, note: "", from }]));
+      setPoints((list) => (list.length >= MAX_POINTS ? list : [...list, { id, x: round4(x), y: round4(y), type, note: "", source }]));
       setSelectedId(id);
     });
   }
@@ -386,22 +402,27 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   async function savePoints() {
     const rd = result?.read;
     if (!rd || pointsState.busy || !estimateId) return;
-    if (!spot) {
-      setPointsState({ busy: false, msg: "", err: "The map point is missing. Look up the address again." });
+    if (!pointsEdited && !hideChanged) {
+      setPointsState({ busy: false, msg: "", err: "Change a point or the checkbox first." });
       return;
     }
-    if (!pointsEdited) {
-      setPointsState({ busy: false, msg: "", err: "Change a point first." });
+    if (pointsEdited && !spot) {
+      setPointsState({ busy: false, msg: "", err: "The map point is missing. Look up the address again." });
       return;
     }
     setPointsState({ busy: true, msg: "", err: "" });
     try {
       const r = await roofFetch(`/admin/roof-entry-read/${encodeURIComponent(rd.id)}/tech-count`, {
         method: "PATCH",
+        // Only what changed in this panel goes, so a stale tab cannot overwrite points another tab saved.
         body: JSON.stringify({
-          pins: points.map((p) => ({ x: round4(p.x), y: round4(p.y), type: p.type, note: p.note.trim() || null })),
-          crop: { lat: spot.lat, lng: spot.lng },
-          hide_on_estimate: !showOnEstimate,
+          ...(pointsEdited ? {
+            pins: points.map((p) => ({
+              x: round4(p.x), y: round4(p.y), type: p.type, note: p.note.trim() || null, ...(p.source ? { source: p.source } : {}),
+            })),
+            crop: { lat: spot.lat, lng: spot.lng },
+          } : {}),
+          ...(hideChanged ? { hide_on_estimate: !showOnEstimate } : {}),
         }),
       });
       const body = await r.json().catch(() => ({}));
@@ -453,6 +474,9 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
         <div className="space-y-4" data-testid="roof-read-result">
           <RoofImage
             url={result.image_url}
+            imageKey={`${result.image_url}|${imageTry}`}
+            onImageLoad={() => setImageState("loaded")}
+            onImageError={() => setImageState("error")}
             suggestions={suggestions}
             points={points}
             selectedId={selectedId}
@@ -465,6 +489,13 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
             onNudge={nudgePoint}
             onRemove={removePoint}
           />
+          {imageState === "loading" && <p className="text-14 text-zinc-600" role="status" data-testid="roof-read-image-loading">Loading the roof photo…</p>}
+          {imageState === "error" && (
+            <div className="flex items-center gap-3" data-testid="roof-read-image-error">
+              <p className="text-14 text-zinc-600" role="alert">The roof photo did not load.</p>
+              <Button variant="secondary" size="sm" onClick={() => { setImageState("loading"); setImageTry((n) => n + 1); }} data-testid="roof-read-image-retry">Try again</Button>
+            </div>
+          )}
           <div className="space-y-2" data-testid="roof-read-points">
             <p className="text-14 text-zinc-400 font-medium">Points the tech confirmed</p>
             <p className="text-14 text-zinc-600">
@@ -508,8 +539,8 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
               id="roof-read-show-on-estimate"
               label="Show these points on the customer estimate"
               checked={showOnEstimate}
-              disabled={!editable}
-              onChange={() => edited(() => setShowOnEstimate((v) => !v))}
+              disabled={!estimateId || pointsState.busy}
+              onChange={() => { setShowOnEstimate((v) => !v); setPointsState((st) => (st.busy ? st : { busy: false, msg: "", err: "" })); }}
             />
             <div className="flex items-center gap-3 flex-wrap">
               <Button variant="secondary" size="sm" onClick={savePoints} loading={pointsState.busy} disabled={pointsState.busy || !estimateId} data-testid="roof-read-points-save">

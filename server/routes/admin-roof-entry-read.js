@@ -10,13 +10,16 @@
  *         400 { error: 'reference_mismatch' } when both ids are given and the estimate belongs to a different customer.
  *   PATCH /api/admin/roof-entry-read/:id/tech-count the technician's final count, flags and confirmed points
  *         body { count?: int 0-500, flags?: { <entry type>: 'yes' | 'no' | 'unsure' },
- *                pins?: [{ x, y, type, note? }, ...] | null, crop?: { lat, lng }, hide_on_estimate?: boolean } -> { read }
+ *                pins?: [{ x, y, type, note?, source? }, ...] | null, crop?: { lat, lng }, hide_on_estimate?: boolean } -> { read }
  *         At least one of count, flags, pins, hide_on_estimate is required. pins (owner ruling 2026-11-20, choice 4A) are the
  *         points the technician confirmed on the photo, saved whole (null clears them); the customer estimate shows only
  *         these, never the AI read. When pins is a list, crop is required: the crop centre the panel drew on, which must
  *         belong to this read's photo (else 400 { error: 'These points were not drawn on this roof photo' }). An invalid
  *         pins list (over 20 points, x or y outside 0-1, an unknown type, a note over 40 characters) is 400.
- *         hide_on_estimate true keeps the points off the customer estimate.
+ *         source (optional) is "<entry type>:<index into that type's AI pins>", the AI suggestion a point was confirmed from;
+ *         the staff panel uses it to keep that suggestion hidden, and the customer estimate never gets it.
+ *         hide_on_estimate true keeps the points off the customer estimate. Send only what changed: pins and crop only when
+ *         the points were edited, hide_on_estimate only when the checkbox changed (a stale tab then cannot overwrite points).
  *
  * Admin only, like the other admin estimate routes. The gate is this router's first middleware, ahead of the staff
  * login that reads the technicians table: gate off = 404 { enabled: false } from the router, with no route-level
