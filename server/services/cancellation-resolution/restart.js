@@ -618,6 +618,9 @@ function resolveMintDeps(deps) {
     // first call so a restart mint never pulls in the page route.
     sentSnapshotServesAsIs: deps.sentSnapshotServesAsIs
       || ((...args) => require('../../routes/estimate-public').sentSnapshotServesAsIs(...args)),
+    // The scheduler's hold release, for the quotes a replacement archives.
+    releaseEstimateHolds: deps.releaseEstimateHolds
+      || ((args) => require('../slot-reservation').releaseEstimateHolds(args)),
   };
 }
 
@@ -719,7 +722,7 @@ async function mintPricedEstimate({
   assertNotCommercial, nowDate, now, randomBytes, deps, mintDeps,
 }) {
   const {
-    persistence, pricingAi, pricingBundleMatchesEstimateTotals, buildEstimateSendSnapshot,
+    persistence, pricingAi, pricingBundleMatchesEstimateTotals, buildEstimateSendSnapshot, releaseEstimateHolds,
   } = mintDeps;
   const sells = snapshotSells
     || ((bundle, row) => Boolean(bundle) && pricingBundleMatchesEstimateTotals(bundle, row));
@@ -988,12 +991,19 @@ async function mintPricedEstimate({
   // which would put an older price or cancellation scope back in the wild
   // beside the new quote (codex GH r6 P1). Query-shaped (not the limit-10
   // id list) so no straggler row survives; accepted rows are history and
-  // stay.
-  await trx('estimates')
+  // stay. Each archived quote's uncommitted slot holds go in this same
+  // transaction (codex pre-push, GATE_PORTAL_PLAN_START r15): an archived
+  // quote can no longer be booked, so its hold kept a real appointment slot
+  // from other customers until it expired. The scheduler's own predicate
+  // picks the holds; a committed visit is never touched.
+  const archived = await trx('estimates')
     .where({ customer_id: fresh.id, source })
     .whereNull('archived_at')
     .whereNot('status', 'accepted')
-    .update({ archived_at: nowDate, updated_at: nowDate });
+    .update({ archived_at: nowDate, updated_at: nowDate }, ['id']);
+  for (const { id } of archived) {
+    await releaseEstimateHolds({ estimateId: id, database: trx });
+  }
 
   const token = randomBytes(16).toString('hex');
   const [created] = await trx('estimates').insert({

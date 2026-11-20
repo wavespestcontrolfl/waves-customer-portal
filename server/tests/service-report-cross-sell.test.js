@@ -464,6 +464,42 @@ describe('buildReportCrossSell', () => {
     }
   });
 
+  test('the seed reads the whole accepted history, so newer quotes never hide a review marker (GATE_PORTAL_PLAN_START pre-push r15 P0)', async () => {
+    // A cap on the newest dozen rows ran before the acceptance and premises
+    // checks: 13 newer open quotes here, or 13 newer accepted quotes at
+    // another premises, hid the accepted estimate whose field-verification
+    // marker must demote a seeded price. This fake honors where, orderBy
+    // and limit, so a capped read loses the seed.
+    const { loadEstimateSeed } = _private;
+    const HERE = '123 Gulf Dr, Sarasota, FL 34236';
+    const at = (n) => new Date(Date.UTC(2026, 9, 1, n)).toISOString();
+    const inputs = { engineInputs: { homeSqFt: 2100, lotSqFt: 8000, stories: 1 } };
+    const row = (id, address, status, hour, data = inputs) => ({ id, customer_id: 'cust-1', address, status, created_at: at(hour), estimate_data: data });
+    const rows = [
+      row('est-marked', HERE, 'accepted', 0, { ...inputs, fieldVerify: ['lawn_sqft'] }),
+      ...Array.from({ length: 13 }, (_, i) => row(`est-elsewhere-${i}`, '9 Bayshore Rd, Venice, FL 34285', 'accepted', 1 + i)),
+      ...Array.from({ length: 13 }, (_, i) => row(`est-open-${i}`, HERE, i % 2 ? 'sent' : 'declined', 20 + i)),
+    ];
+    const database = () => {
+      const filters = [];
+      let newestFirst = false;
+      let cap = Infinity;
+      const q = {
+        where(criteria) { filters.push(criteria); return q; },
+        orderBy(col, dir) { newestFirst = col === 'created_at' && dir === 'desc'; return q; },
+        limit(n) { cap = n; return q; },
+        async select() {
+          const hit = rows.filter((r) => filters.every((c) => Object.entries(c).every(([k, v]) => r[k] === v)));
+          if (newestFirst) hit.sort((a, b) => b.created_at.localeCompare(a.created_at));
+          return hit.slice(0, cap);
+        },
+      };
+      return q;
+    };
+    const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(HERE);
+    expect(await loadEstimateSeed(database, 'cust-1', street)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+  });
+
   test('an uncorroborated NON-ladder report identity never claims a current plan (PR r13 P2)', async () => {
     // Mosquito occupies no ladder rung, so it was exempt from
     // corroboration — but it still landed in the evidence list, and a

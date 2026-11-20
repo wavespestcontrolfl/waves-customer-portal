@@ -197,7 +197,12 @@ function builder(table) {
   b.forUpdate = () => b;
   b.limit = (n) => { limitN = n; return b; };
   b.first = async () => rows()[0] || null;
-  b.update = async (patch) => { const hit = rows(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
+  // A returning list (the replace step's archive) answers with the updated ids, as pg does.
+  b.update = async (patch, returning) => {
+    const hit = rows();
+    hit.forEach((r) => Object.assign(r, patch));
+    return returning ? hit.map((r) => ({ id: r.id })) : hit.length;
+  };
   b.insert = (row) => {
     const list = (tables[table] ||= []);
     const inserted = { id: `${table}-${list.length + 1}`, created_at: new Date().toISOString(), ...row };
@@ -241,6 +246,7 @@ const CUSTOMER = {
   address_line1: '1 Main St', city: 'Parrish', state: 'FL', zip: '34219', property_type: null,
 };
 const recompute = jest.fn();
+const releaseHolds = jest.fn(async () => ({ released: 0 }));
 function deps(overrides = {}) {
   const pricingAi = require('../services/customer-pricing-ai');
   return {
@@ -257,6 +263,8 @@ function deps(overrides = {}) {
     // Injected so the mint never requires the heavy cross-sell/lookup
     // modules in this suite; the seed and cache-only lookup paths are inert.
     crossSell: { loadEstimateSeed: async () => null },
+    // The scheduler's hold release, recorded: the replace step frees each archived quote's holds.
+    releaseEstimateHolds: releaseHolds,
     propertyLookup: null,
     // Single-premises proof + verified-override probe (codex GH r4): green
     // by default here; the refusal tests override them.
@@ -271,6 +279,7 @@ function deps(overrides = {}) {
 beforeEach(() => {
   db.mockImplementation((table) => builder(table));
   recompute.mockReset();
+  releaseHolds.mockClear();
   recompute.mockResolvedValue({
     recomputed: true,
     serverResult: { engineVersion: 'v9.9', lineItems: [] },
@@ -343,6 +352,7 @@ describe('mintRestartEstimate', () => {
     expect(recompute).toHaveBeenCalledTimes(1);
     expect(tables.estimates).toHaveLength(1);
     expect(tables.estimates[0].archived_at == null).toBe(true);
+    expect(releaseHolds).not.toHaveBeenCalled();
   });
 
   test('a live quote from a PRIOR attempt is never reused — same families re-cancelled re-mint at today\'s price (codex GH r16 P1)', async () => {
@@ -452,7 +462,9 @@ describe('mintRestartEstimate', () => {
       // Accepted rows are history and must survive the sweep.
       { id: 'est-done', customer_id: 'cust-1', source: 'plan_restart', status: 'accepted', token: 'done', expires_at: '2020-01-01', archived_at: null },
     );
-    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });
+    let trx = null;
+    const txDb = { transaction: async (fn) => { trx = fakeTrx(); return fn(trx); } };
+    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: txDb }) });
     expect(result.reused).toBe(false);
     expect(recompute).toHaveBeenCalledTimes(1);
     // Codex GH r6 P1: an expired-but-unarchived restart quote stays
@@ -460,6 +472,9 @@ describe('mintRestartEstimate', () => {
     // mint must retire the whole unaccepted lineage.
     expect(tables.estimates.find((r) => r.id === 'est-old').archived_at).not.toBeNull();
     expect(tables.estimates.find((r) => r.id === 'est-done').archived_at).toBeNull();
+    // The quote it archives frees its slot holds in the same transaction
+    // (codex pre-push r15 P1); an accepted or already-archived quote's do not.
+    expect(releaseHolds.mock.calls).toEqual([[{ estimateId: 'est-old', database: trx }]]);
   });
 
   test('refuses an account that is not cancelled (row re-read under the lock)', async () => {

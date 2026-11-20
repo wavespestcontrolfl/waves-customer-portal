@@ -78,3 +78,19 @@ test('every get_estimate_funnel query leaves out undelivered self-serve quotes, 
       && String(c.args[0]).includes("e.estimate_data #>> '{deliveryState,firstDeliveredAt}'") && String(c.args[0]).includes('IS NOT NULL'))).toBe(true);
   }
 });
+
+test('the funnel\'s viewed stage counts a self-serve quote\'s view only from staff delivery on (codex pre-push r15 P1)', async () => {
+  recorded.length = 0;
+  await executeDashboardTool('get_estimate_funnel', { date_from: '2026-11-01', date_to: '2026-11-19' });
+  const { countableViewAtSql } = require('../services/self-serve-estimates');
+  const stages = recorded.filter((r) => r.method === 'whereRaw' && String(r.args[0]).endsWith(' BETWEEN ? AND ?'));
+  expect(stages.map((r) => r.args[0])).toEqual([
+    'e.sent_at BETWEEN ? AND ?',
+    `${countableViewAtSql('e')} BETWEEN ? AND ?`,
+    'e.accepted_at BETWEEN ? AND ?',
+    'e.declined_at BETWEEN ? AND ?',
+  ]);
+  for (const r of stages) expect(r.args[1]).toEqual(['2026-11-01T00:00:00', '2026-11-19T23:59:59']);
+  // The raw first-view stamp filters nothing on its own.
+  expect(recorded.some((r) => r.method === 'whereBetween' && r.args[0] === 'e.viewed_at')).toBe(false);
+});

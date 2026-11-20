@@ -8,7 +8,9 @@
 // follow-ups, the accepted value) leave it out unless staff really delivered
 // it (deliveryState.firstDeliveredAt). A source-NULL legacy row stays in
 // (whereNotUndeliveredSelfServe, services/self-serve-estimates.js; codex
-// pre-push P1). Only real rows prove the NULL-aware NOT IN and the JSON path.
+// pre-push P1). A delivered one counts as viewed only from its delivery on
+// (countableViewAtSql; codex pre-push r15). Only real rows prove the
+// NULL-aware NOT IN, the JSON path and the guarded timestamp cast.
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => {
@@ -29,6 +31,8 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
   let executeDashboardTool;
   // An old month no migration seed writes estimates in; the assertions are deltas anyway.
   const AT = '2003-02-11T15:00:00Z';
+  const DELIVERED = '2003-02-12T15:00:00Z';
+  const LATER = '2003-02-13T15:00:00Z';
   const SERVICE = 'Fixture self-serve quote';
 
   beforeAll(() => {
@@ -58,11 +62,12 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
       address_line1: '100 Test Lane', city: 'Test City', zip: '00000',
       active: true, pipeline_stage: 'active_customer', monthly_rate: 0,
     });
-    const row = (source, status, estimateData = {}) => ({
+    const row = (source, status, estimateData = {}, lastViewedAt = null) => ({
       id: randomUUID(), customer_id: customerId, source, status, sent_at: AT, viewed_at: AT,
-      accepted_at: status === 'accepted' ? AT : null, service_interest: SERVICE,
+      last_viewed_at: lastViewedAt, accepted_at: status === 'accepted' ? AT : null, service_interest: SERVICE,
       monthly_total: 50, onetime_total: 0, estimate_data: estimateData,
     });
+    const delivered = (firstDeliveredAt) => ({ deliveryState: { firstDeliveredAt } });
     await trx('estimates').insert([
       row(null, 'viewed'), // a legacy staff send: counts
       row('plan_start', 'viewed'), // undelivered self-serve: never counts
@@ -70,6 +75,13 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
       row('plan_start', 'viewed', { deliveryState: { firstDeliveredAt: AT } }), // staff delivered it: counts
       row(null, 'accepted'), // a staff send the customer accepted: counts
       row('plan_start', 'accepted'), // an undelivered self-serve quote the customer accepted
+      // Delivered after the customer's portal look: sent, not viewed ...
+      row('plan_start', 'viewed', delivered(DELIVERED)),
+      row('plan_restart', 'viewed', delivered(DELIVERED)),
+      // ... until a view after the send, which counts.
+      row('plan_start', 'viewed', delivered(DELIVERED), LATER),
+      // An unreadable delivery stamp: sent, no view counted, and no cast error.
+      row('plan_start', 'viewed', delivered('not a date')),
     ]);
   }
 
@@ -79,13 +91,13 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     await seed();
     const after = await funnel();
     const delta = (key) => after.funnel[key] - before.funnel[key];
-    expect(delta('sent')).toBe(3);
-    expect(delta('viewed')).toBe(3);
+    expect(delta('sent')).toBe(7);
+    expect(delta('viewed')).toBe(4);
     expect(delta('accepted')).toBe(1);
-    expect(delta('pending')).toBe(2);
+    expect(delta('pending')).toBe(6);
     expect(after.total_accepted_value - before.total_accepted_value).toBe(50);
     const service = after.by_service.find((s) => s.service === SERVICE);
-    expect(service).toMatchObject({ sent: 3, won: 1, open: 2 });
+    expect(service).toMatchObject({ sent: 7, won: 1, open: 6 });
   });
 
   test('compare_periods counts the same sends; its accepted count still includes a self-serve acceptance', async () => {
@@ -96,7 +108,7 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     await seed();
     const after = await compare();
     const delta = (key) => after.period_a.metrics[key] - before.period_a.metrics[key];
-    expect(delta('estimates_sent')).toBe(3);
+    expect(delta('estimates_sent')).toBe(7);
     expect(delta('estimates_accepted')).toBe(2);
   });
 });

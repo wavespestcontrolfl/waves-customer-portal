@@ -218,7 +218,12 @@ function builder(table) {
   b.forUpdate = () => b;
   b.limit = (n) => { limitN = n; return b; };
   b.first = async () => rows()[0] || null;
-  b.update = async (patch) => { const hit = rows(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
+  // A returning list (the replace step's archive) answers with the updated ids, as pg does.
+  b.update = async (patch, returning) => {
+    const hit = rows();
+    hit.forEach((r) => Object.assign(r, patch));
+    return returning ? hit.map((r) => ({ id: r.id })) : hit.length;
+  };
   b.insert = (row) => {
     const list = (tables[table] ||= []);
     const inserted = { id: `${table}-${list.length + 1}`, created_at: new Date().toISOString(), ...row };
@@ -264,6 +269,7 @@ const CUSTOMER = {
   address_line1: '1 Main St', city: 'Parrish', state: 'FL', zip: '34219', property_type: null,
 };
 const recompute = jest.fn();
+const releaseHolds = jest.fn(async () => ({ released: 0 }));
 // The frozen bundle in the real builder's shape (frequencies[] plus services[], each section with
 // defaultFrequencyKey and frequencies[]): one section for the minted family whose opening entry
 // carries the row's own totals and one treatment row at the per-application price the card
@@ -314,6 +320,8 @@ function deps(overrides = {}) {
     // Injected so the mint never requires the heavy cross-sell/lookup
     // modules in this suite; the seed and cache-only lookup paths are inert.
     crossSell: { loadEstimateSeed: async () => null },
+    // The scheduler's hold release, recorded: the replace step frees each archived quote's holds.
+    releaseEstimateHolds: releaseHolds,
     propertyLookup: null,
     // Single-premises proof + verified-override probe (codex GH r4): green
     // by default here; the refusal tests override them.
@@ -331,6 +339,7 @@ function deps(overrides = {}) {
 beforeEach(() => {
   db.mockImplementation((table) => builder(table));
   recompute.mockReset();
+  releaseHolds.mockClear();
   recompute.mockResolvedValue({
     recomputed: true,
     serverResult: { engineVersion: 'v9.9', lineItems: [] },
@@ -804,6 +813,19 @@ describe('mintPlanStartEstimate', () => {
       expect(next.estimateId).not.toBe(first.estimateId);
       expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
       expect(tables.estimates.find((r) => r.id === next.estimateId).archived_at).toBeFalsy();
+    });
+
+    test('replacing a quote frees its slot holds in the mint\'s own transaction; a reuse frees none (codex pre-push r15 P1)', async () => {
+      // An archived quote can no longer be booked, so a hold it took kept a
+      // real appointment slot from other customers until the hold expired.
+      const first = await mint();
+      await mint();
+      expect(releaseHolds).not.toHaveBeenCalled();
+      let trx = null;
+      const txDb = { transaction: async (fn) => { trx = fakeTrx(); return fn(trx); } };
+      recompute.mockResolvedValue(pricedAs(LAWN_LINE));
+      await mint({ serviceKey: 'lawn_care', optionId: 'lawn-enhanced', shown: shownOf(LAWN_LINE), randomBytes: () => Buffer.from('0123456789abcdef') }, { db: txDb });
+      expect(releaseHolds.mock.calls).toEqual([[{ estimateId: first.estimateId, database: trx }]]);
     });
 
     test('a live quote stored at another address is archived, and the fresh one is minted at today\'s primary premises', async () => {

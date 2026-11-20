@@ -366,10 +366,15 @@ function estimateRequiresFieldVerification(estData) {
 // Fill-only semantics are enforced downstream in resolvePropertyContext.
 async function loadEstimateSeed(database, customerId, scopeStreet) {
   if (!scopeStreet) return null;
+  // Accepted rows only, and all of them (codex pre-push, GATE_PORTAL_PLAN_START
+  // r15): a cap on the newest dozen ran BEFORE the acceptance and premises
+  // checks, so a run of newer quotes (open ones here, or accepted ones at
+  // another premises) hid the accepted estimate whose review markers must
+  // demote a seeded price, and the seed read as absent. The in-loop status
+  // check below keeps the accepted-only rule independent of the query.
   const rows = await database('estimates')
-    .where({ customer_id: customerId })
+    .where({ customer_id: customerId, status: 'accepted' })
     .orderBy('created_at', 'desc')
-    .limit(12)
     .select('id', 'address', 'status', 'estimate_data');
   const linkage = require('../estimate-property-linkage');
   const candidates = [];

@@ -20,7 +20,7 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etW
 // can't sneak past. Add new names here as they come up.
 // Shared so the MRR breakdown + snapshot exclude the same accounts this tool does.
 const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
-const { whereNotUndeliveredSelfServe } = require('../self-serve-estimates');
+const { whereNotUndeliveredSelfServe, countableViewAtSql } = require('../self-serve-estimates');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 const { customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
 const { CANONICAL_SIBLING } = require('../completion-record-invariants');
@@ -145,7 +145,7 @@ period can be: "this_week", "last_week", "this_month", "last_month", "this_quart
   },
   {
     name: 'get_estimate_funnel',
-    description: `Get estimate/sales funnel metrics: sent → viewed → accepted → converted to customer. Shows conversion rates at each stage. Covers estimates staff delivered: a quote the customer opened from the portal is left out unless staff sent it. Use for "what's our close rate?" or "how's the pipeline?"`,
+    description: `Get estimate/sales funnel metrics: sent → viewed → accepted → converted to customer. Shows conversion rates at each stage. Use for "what's our close rate?" or "how's the pipeline?"`,
     input_schema: {
       type: 'object',
       properties: {
@@ -706,24 +706,25 @@ async function getEstimateFunnel(input) {
   // a self-serve quote the customer opened from the portal (plan restart, plan
   // start), whose sent_at is a mint stamp, unless staff really delivered it
   // (whereNotUndeliveredSelfServe, as compare_periods counts sends; codex
-  // pre-push P1). All stages share the cohort, so the rates stay rates; the
-  // tool description says so. compare_periods' accepted count still includes
-  // them (a count with no rate).
-  function stageQuery(stageColumn, status) {
+  // pre-push P1). All stages share the cohort, so the rates stay rates.
+  // compare_periods' accepted count still includes them (a count with no
+  // rate). A delivered one counts as viewed only from its delivery on
+  // (countableViewAtSql; codex pre-push r15): the portal look before the
+  // send is not a viewed send.
+  function stageQuery(instantSql, status) {
     let qb = db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-      .whereNotNull(`e.${stageColumn}`)
-      .whereBetween(`e.${stageColumn}`, [fromTs, toTs])
+      .whereRaw(`${instantSql} BETWEEN ? AND ?`, [fromTs, toTs])
       .where(whereNotUndeliveredSelfServe('e'));
     if (status) qb = qb.where('e.status', status);
     return excludeInternalEstimates(qb);
   }
 
   const [sent, viewed, accepted, declined] = await Promise.all([
-    stageQuery('sent_at').count('* as c').first(),
-    stageQuery('viewed_at').count('* as c').first(),
-    stageQuery('accepted_at', 'accepted').count('* as c').first(),
-    stageQuery('declined_at', 'declined').count('* as c').first(),
+    stageQuery('e.sent_at').count('* as c').first(),
+    stageQuery(countableViewAtSql('e')).count('* as c').first(),
+    stageQuery('e.accepted_at', 'accepted').count('* as c').first(),
+    stageQuery('e.declined_at', 'declined').count('* as c').first(),
   ]);
 
   const totalSent = parseInt(sent?.c || 0);

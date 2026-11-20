@@ -33,4 +33,21 @@ function isUndeliveredSelfServe(source, estimateData) {
     && !estimateData?.deliveryState?.firstDeliveredAt;
 }
 
-module.exports = { SELF_SERVE_ESTIMATE_SOURCES, whereNotUndeliveredSelfServe, isUndeliveredSelfServe };
+// SQL for the instant a row counts as viewed, under `alias` (a code constant).
+// A self-serve quote is opened in the portal before any send, so a later staff
+// send must not turn that look into a viewed send (codex pre-push r15): only a
+// view at or after firstDeliveredAt counts, and the first such view is the
+// earlier of viewed_at and last_viewed_at, as estimate-winloss.js reads it. An
+// unreadable delivery stamp counts no view. Any other row keeps viewed_at.
+function countableViewAtSql(alias) {
+  const stamp = `${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}'`;
+  const delivered = `(CASE WHEN pg_input_is_valid(${stamp}, 'timestamptz') THEN (${stamp})::timestamptz END)`;
+  const fromDelivery = (column) => `CASE WHEN ${alias}.${column} >= ${delivered} THEN ${alias}.${column} END`;
+  const sources = SELF_SERVE_ESTIMATE_SOURCES.map((source) => `'${source}'`).join(', ');
+  return `(CASE WHEN ${alias}.source IN (${sources}) `
+    + `THEN LEAST(${fromDelivery('viewed_at')}, ${fromDelivery('last_viewed_at')}) ELSE ${alias}.viewed_at END)`;
+}
+
+module.exports = {
+  SELF_SERVE_ESTIMATE_SOURCES, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, countableViewAtSql,
+};
