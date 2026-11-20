@@ -1612,6 +1612,13 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       // These rows are committed, on a pool of their own, so a second connection sees them; each test deletes its own.
       let pool; let made = null;
       beforeAll(() => { pool = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } }); });
+      // The deadline for a step that must refuse at once: no lock timeout (it raises 55P03, the code NOWAIT raises, which
+      // the step maps to its refusal), and a statement timeout instead, so a take that waits fails as a cancel (57014).
+      // Long, since it bounds each whole statement: a loaded machine can stretch one past a few seconds.
+      const waitNoLonger = async (conn) => {
+        await conn.raw('SET LOCAL lock_timeout = 0');
+        await conn.raw("SET LOCAL statement_timeout = '30s'");
+      };
       afterAll(async () => { await pool.destroy(); });
       afterEach(async () => {
         if (!made) return;
@@ -1691,8 +1698,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         const accept = await pool.transaction();
         try {
           await other('call_log').where({ id: bookingCallId }).forUpdate().first('id');
-          // A bounded wait: a blocking take would fail as a raw lock timeout, not as call_busy.
-          await accept.raw("SET LOCAL lock_timeout = '2s'");
+          await waitNoLonger(accept);
           await expect(step(accept, { estimate: {} })).rejects.toMatchObject({ phoneYesRefusal: 'call_busy' });
         } finally {
           await accept.rollback();
@@ -1727,8 +1733,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         let accept = await pool.transaction();
         try {
           await other('scheduled_services').where({ id: firstId }).forUpdate().first('id');
-          // A bounded wait: a blocking take would fail as a raw lock timeout, not as visit_busy.
-          await accept.raw("SET LOCAL lock_timeout = '2s'");
+          await waitNoLonger(accept);
           await expect(step(accept, { estimate: ev.estimate })).rejects.toMatchObject({ phoneYesRefusal: 'visit_busy' });
         } finally {
           await accept.rollback();
@@ -1739,7 +1744,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         try {
           // An office edit in flight on the attached staff visit: the step still goes ahead.
           await staffEdit('scheduled_services').where({ id: staffId }).forUpdate().first('id');
-          await accept.raw("SET LOCAL lock_timeout = '2s'");
+          await waitNoLonger(accept);
           await step(accept, { estimate: ev.estimate });
           await expect(pool.transaction(async (later) => {
             await later.raw("SET LOCAL lock_timeout = '300ms'");
