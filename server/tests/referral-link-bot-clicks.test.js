@@ -61,6 +61,9 @@ test.each([
   ['an iMessage link preview', IMESSAGE_PREVIEW],
   ['Googlebot', 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'],
   ['a command-line fetch', 'curl/8.7.1'],
+  ['an uptime monitor', 'Pingdom.com_bot_version_1.4_(http://www.pingdom.com/)'],
+  ['a Node script', 'node-fetch/1.0 (+https://github.com/bitinn/node-fetch)'],
+  ['an axios client', 'axios/1.7.2'],
 ])('%s still redirects and is recorded, but is not a unique click', async (_label, ua) => {
   const res = await click(ua);
   expect(res.status).toBe(302);

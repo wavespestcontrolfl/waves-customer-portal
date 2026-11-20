@@ -17,10 +17,15 @@
  *
  * ADMIN-EDIT SAFETY: each column changes only while it still holds the
  * expected value, as a compare-and-swap (an admin save in between wins).
- * Every changed column gets one audit_log event; down() reverts ONLY tracked
- * columns, and only while they still carry the new value.
+ * Every up() run writes ONE audit_log row naming the columns it changed, even
+ * when it changed none. down() reverts only runs it has not rolled back yet
+ * (each rollback writes a row naming its run), so an up/down/up/down cycle
+ * never reaches back to an earlier run's columns, and only while a column
+ * still carries the new value. audit_log.resource_id is a UUID and this row's
+ * id is an integer, so the id goes in metadata.settings_id.
  */
 
+const { randomUUID } = require('crypto');
 const SWEEP = require('./20260801000001_sms_house_voice_sweep');
 
 const MIGRATION = '20261120090000_referral_step1_settings';
@@ -47,40 +52,50 @@ function parseMeta(value) {
   return typeof value === 'string' ? JSON.parse(value) : value;
 }
 
-async function audit(knex, action, { column, extra = {} }) {
+async function audit(knex, action, metadata) {
   const { recordAuditEvent } = require('../../services/audit-log');
   await recordAuditEvent({
-    actor_type: 'system', action,
-    resource_type: TABLE, resource_id: String(ROW_ID),
-    metadata: { migration: MIGRATION, column, ...extra },
+    actor_type: 'system', action, resource_type: TABLE,
+    metadata: { migration: MIGRATION, settings_id: ROW_ID, ...metadata },
     critical: true, trx: knex,
   });
 }
 
+// This migration's run rows for one action: [{ run_id, columns }].
+async function runRows(knex, action) {
+  const rows = await knex('audit_log').where({ action, resource_type: TABLE }).select('metadata');
+  return rows.map((row) => parseMeta(row.metadata)).filter((meta) => meta.migration === MIGRATION && meta.run_id);
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable(TABLE))) return;
-  const hasAudit = await knex.schema.hasTable('audit_log');
+  const columns = [];
   for (const [column, before, after] of CHANGES) {
     if (!(await knex.schema.hasColumn(TABLE, column))) continue;
     const changed = await knex(TABLE)
       .where({ id: ROW_ID, [column]: before })
       .update({ [column]: after, updated_at: knex.fn.now() });
-    if (changed && hasAudit) await audit(knex, AUDIT_ACTION, { column });
+    if (changed) columns.push(column);
   }
+  if (await knex.schema.hasTable('audit_log')) await audit(knex, AUDIT_ACTION, { run_id: randomUUID(), columns });
 };
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('audit_log')) || !(await knex.schema.hasTable(TABLE))) return;
   const byColumn = new Map(CHANGES.map(([column, before, after]) => [column, { before, after }]));
-  const records = await knex('audit_log').where({ action: AUDIT_ACTION }).select('id', 'resource_type', 'metadata');
-  for (const record of records) {
-    const meta = parseMeta(record.metadata);
-    const pair = byColumn.get(meta.column);
-    if (meta.migration !== MIGRATION || record.resource_type !== TABLE || !pair) continue;
-    const reverted = await knex(TABLE)
-      .where({ id: ROW_ID, [meta.column]: pair.after })
-      .update({ [meta.column]: pair.before, updated_at: knex.fn.now() });
-    if (reverted) await audit(knex, AUDIT_ROLLBACK_ACTION, { column: meta.column, extra: { from_audit_id: record.id } });
+  const rolledBack = new Set((await runRows(knex, AUDIT_ROLLBACK_ACTION)).map((meta) => meta.run_id));
+  for (const run of await runRows(knex, AUDIT_ACTION)) {
+    if (rolledBack.has(run.run_id)) continue;
+    const reverted = [];
+    for (const column of Array.isArray(run.columns) ? run.columns : []) {
+      const pair = byColumn.get(column);
+      if (!pair) continue;
+      const changed = await knex(TABLE)
+        .where({ id: ROW_ID, [column]: pair.after })
+        .update({ [column]: pair.before, updated_at: knex.fn.now() });
+      if (changed) reverted.push(column);
+    }
+    await audit(knex, AUDIT_ROLLBACK_ACTION, { run_id: run.run_id, columns: reverted });
   }
 };
 

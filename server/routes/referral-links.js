@@ -9,6 +9,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('../services/logger');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const { isBotUserAgent: isKnownBotUserAgent } = require('../utils/bot-ua');
 
 // /r mounts OUTSIDE the global /api/ limiter and every hit below writes a
 // referral_clicks row — without a limiter this is an unauthenticated,
@@ -29,14 +30,13 @@ const referralClickLimiter = rateLimit({
 // exactly like an unknown one (redirect home, no DB touch).
 const CODE_RE = /^[A-Za-z0-9_-]{4,32}$/;
 
-// Crawlers and link-preview fetchers (message and social app unfurls, search
-// bots, scripts) are not people: 21 of 62 clicks May-Nov 2026. They still get
-// the redirect and a click row (device_type 'bot'), but never count as a
-// unique click or raise the promoter's click total. An empty user agent is a
-// script, not a phone.
-const BOT_UA_RE = /bot\b|bot\/|crawl|spider|slurp|preview|facebookexternalhit|whatsapp|slack|discord|telegram|skype|curl\/|wget|python|headless|lighthouse/i;
+// Crawlers, link-preview fetchers, scanners and scripts are not people: 21 of
+// 62 clicks May-Nov 2026. They still get the redirect and a click row
+// (device_type 'bot'), but never count as a unique click or raise the
+// promoter's click total. Shared classifier (utils/bot-ua.js), plus one
+// referral rule: an empty user agent is a script, not a phone.
 function isBotUserAgent(ua) {
-  return !ua || BOT_UA_RE.test(ua);
+  return !ua || isKnownBotUserAgent(ua);
 }
 
 // =========================================================================
