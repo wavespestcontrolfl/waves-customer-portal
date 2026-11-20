@@ -279,13 +279,25 @@ postgres('commercial prepay deposit/card refund proof', () => {
     // entry and its real commercial-prepay updater run; only the external
     // Stripe SDK client is synthetic.
     const StripeService = jest.requireActual('../services/stripe');
-    await expect(StripeService.refund(ids.paymentId, {}))
-      .resolves.toEqual(expect.objectContaining({
-        id: ids.paymentId,
-        status: 'refunded',
-        refund_issued_amount: ids.cardAmount,
-      }));
+    const renewals = require('../services/annual-prepay-renewals');
+    const syncTerm = renewals.syncTermForRefundedPayment;
+    let reviewsBeforeTermSync;
+    const sync = jest.spyOn(renewals, 'syncTermForRefundedPayment').mockImplementationOnce(async (...args) => {
+      reviewsBeforeTermSync = await reviews(ids.invoiceId);
+      return syncTerm(...args);
+    });
+    try {
+      await expect(StripeService.refund(ids.paymentId, {}))
+        .resolves.toEqual(expect.objectContaining({
+          id: ids.paymentId,
+          status: 'refunded',
+          refund_issued_amount: ids.cardAmount,
+        }));
+    } finally {
+      sync.mockRestore();
+    }
 
+    expect(reviewsBeforeTermSync).toHaveLength(1);
     expect(mockStripeClient.refunds.create).toHaveBeenCalledWith(
       expect.objectContaining({ payment_intent: ids.paymentIntentId }),
       expect.objectContaining({ idempotencyKey: expect.stringContaining(`refund_pay_${ids.paymentId}_rest_`) }),

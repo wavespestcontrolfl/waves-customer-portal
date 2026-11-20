@@ -252,7 +252,9 @@ describe('handleChargeRefunded full refund — invoice ownership (B03)', () => {
 
     await handleChargeRefunded(fullRefundOf('ch_1', 'pi_1'));
 
-    expect(CustomerCredit.returnAppliedCreditOnRefund).toHaveBeenCalledWith({ invoiceId: 'inv-1', createdBy: 'system:refund_webhook' }, db);
+    expect(CustomerCredit.returnAppliedCreditOnRefund).toHaveBeenCalledWith({
+      invoiceId: 'inv-1', createdBy: 'system:refund_webhook', refundId: 're_1', paymentId: 'pay-1',
+    }, db);
     expect(invoices[0]).toEqual(expect.objectContaining({ status: 'refunded', credit_applied: 0 }));
     expect(payments[0]).toEqual(expect.objectContaining({ status: 'refunded', refund_status: 'full' }));
     expect(termsTouched()).toBe(true);
@@ -292,7 +294,9 @@ describe('handleChargeRefunded full refund — invoice ownership (B03)', () => {
 
     await handleChargeRefunded(fullRefundOf('ch_1', null));
 
-    expect(CustomerCredit.returnAppliedCreditOnRefund).toHaveBeenCalledWith({ invoiceId: 'inv-1', createdBy: 'system:refund_webhook' }, db);
+    expect(CustomerCredit.returnAppliedCreditOnRefund).toHaveBeenCalledWith({
+      invoiceId: 'inv-1', createdBy: 'system:refund_webhook', refundId: 're_1', paymentId: 'pay-1',
+    }, db);
     expect(invoices[0]).toEqual(expect.objectContaining({ status: 'refunded', credit_applied: 0 }));
     expect(termsTouched()).toBe(true);
   });
@@ -329,7 +333,9 @@ describe('handleChargeRefunded full refund — invoice ownership (B03)', () => {
 
     await handleChargeRefunded(fullRefundOf('ch_1', 'pi_1'));
 
-    expect(CustomerCredit.returnAppliedCreditOnRefund).toHaveBeenCalledWith({ invoiceId: 'inv-1', createdBy: 'system:refund_webhook' }, db);
+    expect(CustomerCredit.returnAppliedCreditOnRefund).toHaveBeenCalledWith({
+      invoiceId: 'inv-1', createdBy: 'system:refund_webhook', refundId: 're_1', paymentId: null,
+    }, db);
     expect(invoices[0].status).toBe('refunded');
     expect(payments).toHaveLength(1);
     expect(payments[0]).toEqual(expect.objectContaining({
