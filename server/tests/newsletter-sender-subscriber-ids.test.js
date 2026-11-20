@@ -98,9 +98,16 @@ describe('warmAudienceQuery', () => {
       + ' and lower(opened.email) = lower(newsletter_subscribers.email)'
       + ' and coalesce(opened.occurred_at, opened.created_at) >= ? and coalesce(opened.occurred_at, opened.created_at) <= ?)) order by');
     // The address alone decides: a subscriber-id match would let a former address's open qualify a corrected one.
-    expect(sql.slice(base.sql.length)).not.toMatch(/subscriber_id/);
-    // The send path query opens with its WITH clauses; the main select after them reads two columns.
-    expect(sql).toContain(') select "newsletter_subscribers"."id", "newsletter_subscribers"."customer_id", "newsletter_subscribers"."email" from "newsletter_subscribers" where ');
+    expect(sql.slice(sql.indexOf(' and (exists (select 1 from "sendgrid_webhook_events"'))).not.toMatch(/subscriber_id/);
+    // The send path query opens with its WITH clauses; the main select after them reads the reader's id,
+    // customer link and address, and the customers behind its mailbox from the same read
+    // (withMailboxCustomers: one grouped row per mailbox, joined once).
+    expect(sql).toContain('"mailbox_customers" as materialized (select "linked"."mailbox_key" as "mc_mailbox_key",'
+      + ' array_agg(DISTINCT linked.customer_id) AS mc_customer_ids from (');
+    expect(sql).toContain('from "customers" where "deleted_at" is null and TRIM(COALESCE(email, \'\')) <> \'\') as "linked" group by "linked"."mailbox_key")');
+    expect(sql).toContain(') select "newsletter_subscribers"."id", "newsletter_subscribers"."customer_id", "newsletter_subscribers"."email",'
+      + ' COALESCE(mailbox_customers.mc_customer_ids, \'{}\') AS mailbox_customer_ids from "newsletter_subscribers"'
+      + ' LEFT JOIN mailbox_customers ON mailbox_customers.mc_mailbox_key = (CASE WHEN SPLIT_PART(LOWER(TRIM(newsletter_subscribers.email)), \'@\', 2)');
     expect(sql).toMatch(/order by "newsletter_subscribers"\."id" asc$/);
   });
 });

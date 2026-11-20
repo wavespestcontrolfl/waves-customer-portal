@@ -10,11 +10,11 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/newsletter-subscribers', () => ({ relinkArchivedLinkedSubscribers: jest.fn() }));
-jest.mock('../services/newsletter-sender', () => ({ buildSubscriberQuery: jest.fn(), mailboxCustomerIds: jest.fn() }));
+jest.mock('../services/newsletter-sender', () => ({ buildSubscriberQuery: jest.fn(), withMailboxCustomers: jest.fn() }));
 
 const crypto = require('crypto');
 const NewsletterSubscribers = require('../services/newsletter-subscribers');
-const { buildSubscriberQuery, mailboxCustomerIds } = require('../services/newsletter-sender');
+const { buildSubscriberQuery, withMailboxCustomers } = require('../services/newsletter-sender');
 const {
   isHeldOut, addressKey, isAddressKey, selectIssueAudience, audienceSegmentFilter, WARM_DAYS, HOLDOUT_PERCENT, HOLDOUT_SALT, HOLDOUT_NAME,
 } = require('../services/pest-insider/audience');
@@ -73,7 +73,6 @@ describe('selectIssueAudience', () => {
   function fakeQuery(rows) {
     const q = {
       where: jest.fn((fn) => { captured.where = fn; return q; }),
-      select: jest.fn((...cols) => { captured.select = cols; return q; }),
       orderBy: jest.fn((...args) => { captured.orderBy = args; order.push('query'); return Promise.resolve(rows); }),
     };
     return q;
@@ -84,20 +83,21 @@ describe('selectIssueAudience', () => {
     order = [];
     captured = {};
     NewsletterSubscribers.relinkArchivedLinkedSubscribers.mockImplementation(async () => { order.push('relink'); return 0; });
-    mailboxCustomerIds.mockImplementation(async () => { order.push('mailbox'); return new Map(); });
+    // The sender's join adds each reader's address and the customers behind its mailbox (mailbox_customer_ids).
+    withMailboxCustomers.mockImplementation((query) => { captured.joined = query; return query; });
   });
 
   test('keeps leads and kept customers, drops held-out customers, and counts each', async () => {
-    buildSubscriberQuery.mockReturnValue(fakeQuery([
-      { id: 4, customer_id: KEPT[0], email: 'four@example.invalid' },
-      { id: 7, customer_id: HELD[0], email: 'seven@example.invalid' },
-      { id: 9, customer_id: null, email: 'Nine@Example.invalid' },
-      { id: '12', customer_id: KEPT[1], email: 'twelve@example.invalid' },
-      { id: 15, customer_id: HELD[1], email: 'fifteen@example.invalid' },
+    const query = fakeQuery([
+      { id: 4, customer_id: KEPT[0], email: 'four@example.invalid', mailbox_customer_ids: [KEPT[0]] },
+      { id: 7, customer_id: HELD[0], email: 'seven@example.invalid', mailbox_customer_ids: [HELD[0]] },
+      { id: 9, customer_id: null, email: 'Nine@Example.invalid', mailbox_customer_ids: [KEPT[1]] },
+      { id: '12', customer_id: KEPT[1], email: 'twelve@example.invalid', mailbox_customer_ids: [] },
+      { id: 15, customer_id: HELD[1], email: 'fifteen@example.invalid', mailbox_customer_ids: [HELD[1]] },
       // A lead whose mailbox has a held-out customer behind it (an alias row or a customer email).
-      { id: 20, customer_id: null, email: 'twenty@example.invalid' },
-    ]));
-    mailboxCustomerIds.mockImplementation(async () => new Map([[4, [KEPT[0]]], [9, [KEPT[1]]], [20, [KEPT[1], HELD[0]]]]));
+      { id: 20, customer_id: null, email: 'twenty@example.invalid', mailbox_customer_ids: [KEPT[1], HELD[0]] },
+    ]);
+    buildSubscriberQuery.mockReturnValue(query);
     const audience = await selectIssueAudience({ asOf: new Date('2026-12-02T12:00:00Z') });
     expect(audience).toEqual({
       subscriberIds: [4, 9, 12],
@@ -105,17 +105,17 @@ describe('selectIssueAudience', () => {
       addressKeys: { 4: addressKey('four@example.invalid'), 9: addressKey('nine@example.invalid'), 12: addressKey('twelve@example.invalid') },
       counts: { warm: 6, heldOut: 3, recipients: 3 },
     });
-    // Every warm reader's mailbox is asked, by id.
-    expect(mailboxCustomerIds).toHaveBeenCalledWith([4, 7, 9, 12, 15, 20]);
+    // The warm query itself carries the mailbox's customers, read in the same snapshot as the reader.
+    expect(withMailboxCustomers).toHaveBeenCalledTimes(1);
+    expect(captured.joined).toBe(query);
     expect(buildSubscriberQuery).toHaveBeenCalledWith(null);
-    expect(captured.select).toEqual(['newsletter_subscribers.id', 'newsletter_subscribers.customer_id', 'newsletter_subscribers.email']);
     expect(captured.orderBy).toEqual(['newsletter_subscribers.id', 'asc']);
   });
 
   test('runs the relink sweep before it reads the audience, as the send path does', async () => {
     buildSubscriberQuery.mockReturnValue(fakeQuery([]));
     await selectIssueAudience();
-    expect(order).toEqual(['relink', 'query', 'mailbox']);
+    expect(order).toEqual(['relink', 'query']);
   });
 
   test('asks for an open event on the current address in the SendGrid log, in the 90 days up to asOf', async () => {

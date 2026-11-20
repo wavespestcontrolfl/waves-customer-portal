@@ -35,8 +35,9 @@ const db = require('../models/db');
 // The pre-send archived-link relink sweep (relinkArchivedLinkedSubscribers)
 // runs in its own small transaction (advisory lock + one raw UPDATE) at the
 // top of sendCampaign; nothing stale in these scenarios, so it's a 0-row
-// no-op. A planned issue's per-chunk re-check also asks which customers are
-// behind each mailbox (mailboxCustomerIds): none here unless a test says so.
+// no-op. A planned issue's count and per-chunk re-check read the customers
+// behind each mailbox in their own query (withMailboxCustomers): none here
+// unless a test says so (buildDb's mailboxCustomers).
 db.raw = jest.fn(async () => ({ rowCount: 0, rows: [] }));
 db.transaction = jest.fn(async (cb) => cb({ raw: db.raw }));
 const { recordTouchpoint } = require('../services/conversations');
@@ -61,7 +62,7 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
   const q = {};
   const raws = [];
   ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
-   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'forUpdate',
+   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'joinRaw', 'forUpdate',
    // excludeMarketingOptedOut's pre-filtering CTE (codex #5165) — a no-op
    // chain link here, same as every other query-shape method above.
    'withMaterialized']
@@ -92,7 +93,9 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
   return q;
 }
 
-function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, skipUpdated = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false } = {}) {
+// `mailboxCustomers`: subscriber id -> the customers behind its mailbox, as the
+// planned audience's own query reads them (withMailboxCustomers).
+function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch = null, onSkipUpdate = null, skipUpdated = null, onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false, mailboxCustomers = {} } = {}) {
   const queues = {
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
@@ -106,7 +109,10 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
       ]),
     ],
     newsletter_subscribers: [
-      chain({ count: subscribers.length }),                 // 0-recipient guard
+      // 0-recipient guard: a count, or for a planned audience the rows the plan's rule is applied to.
+      chain({ count: subscribers.length, result: subscribers.map((s) => ({
+        id: s.id, customer_id: s.customer_id ?? null, email: s.email, mailbox_customer_ids: mailboxCustomers[s.id] || [],
+      })) }),
       chain({ result: subscribers }),                       // fetch
       // Per-chunk eligibility re-check right before SendGrid (status='active'
       // + archived-customer anti-join). Selects id AND customer_id — the link
@@ -119,6 +125,7 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
           : ((subscribers.find((s) => s.id === e.id) || {}).customer_id ?? null),
         // The address on file at dispatch: the selected one unless a test moves it.
         email: e.email !== undefined ? e.email : ((subscribers.find((s) => s.id === e.id) || {}).email ?? null),
+        mailbox_customer_ids: mailboxCustomers[e.id] || [],
       })) }),
     ],
     newsletter_send_deliveries: [
@@ -139,6 +146,7 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
       chain({ updated: 1, onUpdate: onCalendarUpdate }),
     ],
   };
+  const subscriberQueries = [...queues.newsletter_subscribers];
   db.mockImplementation((table) => {
     const queue = queues[table];
     if (!queue || !queue.length) {
@@ -146,6 +154,7 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
     }
     return queue.shift();
   });
+  return { guard: subscriberQueries[0], recheck: subscriberQueries[2] };
 }
 
 beforeEach(() => {
@@ -272,7 +281,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
 
   test('a planned issue skips a reader whose mailbox has a held-out customer behind it (an alias row or a customer email)', async () => {
     let skipUpdate = null;
-    buildDb({
+    const { recheck } = buildDb({
       send: {
         id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
         from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
@@ -290,17 +299,35 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
       eligibleAtDispatch: [{ id: 1 }, { id: 2 }],
       skipUpdated: 1,
       onSkipUpdate: (payload) => { skipUpdate = payload; },
+      mailboxCustomers: { 1: [HELD_CUSTOMER], 2: [KEPT_CUSTOMER] },
     });
-    const behind = jest.fn(async () => ({ rows: [{ id: 1, customer_ids: [HELD_CUSTOMER] }, { id: 2, customer_ids: [KEPT_CUSTOMER] }] }));
-    db.raw.mockImplementation(async (sql, bindings) => (String(sql).includes('linked AS') ? behind(sql, bindings) : { rowCount: 0, rows: [] }));
+    // At the 0-recipient guard #1 does not count and #2 does, so the send goes ahead.
 
     const result = await sendCampaign('send-1');
-    db.raw.mockImplementation(async () => ({ rowCount: 0, rows: [] }));
 
-    expect(behind).toHaveBeenCalledWith(expect.any(String), [[1, 2]]);
+    // The batch's re-check reads the mailbox's customers in its own query, not a second one.
+    expect(recheck.joinRaw).toHaveBeenCalledWith(expect.stringContaining('LEFT JOIN mailbox_customers'));
     expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
     expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch' });
     expect(result.skipped_ineligible).toBe(1);
+  });
+
+  test('a planned issue counts by the rule each batch applies: a reader whose address changed since the plan counts nobody, and nothing is claimed', async () => {
+    const { guard } = buildDb({
+      send: {
+        id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: { subscriber_ids: [1], holdout: 'pest-insider', address_keys: { 1: PLANNED_KEYS[1] } }, subject_b: null,
+      },
+      // The only planned reader's address was corrected after the plan.
+      subscribers: [{ id: 1, email: 'a-corrected@example.com', unsubscribe_token: 'tok-a', customer_id: null }],
+    });
+
+    await expect(sendCampaign('send-1')).rejects.toMatchObject({ code: 'EMPTY_SEGMENT' });
+    // The planned count reads rows through the mailbox join; it never takes a bare count.
+    expect(guard.joinRaw).toHaveBeenCalledWith(expect.stringContaining('LEFT JOIN mailbox_customers'));
+    expect(guard.count).not.toHaveBeenCalled();
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
   });
 
   test('a planned issue skips a reader whose address on file changed after the batch was loaded', async () => {
@@ -1610,16 +1637,13 @@ describe('resumeCampaign — preconditions', () => {
     ['has a plan with no address keys', { segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider' } }, 'INCOMPLETE_PLAN'],
     ['has a plan with an empty reader list', { segment_filter: { subscriber_ids: [], holdout: 'pest-insider', address_keys: PLANNED_KEYS } }, 'INCOMPLETE_PLAN'],
     ['has a plan with no reader list', { segment_filter: { holdout: 'pest-insider', address_keys: PLANNED_KEYS } }, 'INCOMPLETE_PLAN'],
-    // A stale claim is not released to 'failed' either: the row stays as it is.
-    ['is a stale sending Waves Pest Insider issue with no plan', {
-      status: 'sending', updated_at: new Date('2026-01-01T00:00:00Z'), newsletter_type: 'pest-insider-monthly', segment_filter: null,
-    }, 'UNPLANNED_AUDIENCE'],
-  ])('resume: a campaign that %s is refused as it stands, before anything is counted, released or claimed', async (_label, fields, code) => {
+  ])('resume: a delivered campaign that %s is refused and keeps its state: nothing is released, reset or claimed', async (_label, fields, code) => {
     const queues = {
       newsletter_sends: [chain({ first: {
         id: 's', status: 'sent', sent_at: new Date('2026-05-01T10:00:00Z'), html_body: '<p>Body</p>', text_body: 'Body',
         subject: 'Hello', subject_b: null, ...fields,
-      } })], // the resume fetch, and nothing else: any count, release or claim would throw
+      } })], // the resume fetch, and nothing else: any release, reset or claim would throw
+      newsletter_send_deliveries: [chain({ count: 2 })], // the ledger count the outcome depends on
     };
     db.mockImplementation((table) => {
       const queue = queues[table];
@@ -1627,7 +1651,47 @@ describe('resumeCampaign — preconditions', () => {
       return queue.shift();
     });
 
-    await expect(resumeCampaign('s')).rejects.toMatchObject({ code });
+    await expect(resumeCampaign('s')).rejects.toMatchObject({ code, audienceRefusal: true });
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+  });
+
+  // A refused audience takes the path stored copy that fails validation takes, so a
+  // stale claim never leaves the campaign stuck in 'sending'.
+  test.each([
+    ['a stale sending issue with a ledger releases its claim to failed', 'sending', 2,
+      { status: 'failed', sending_claim_token: null }, 'its stale send claim was released'],
+    ['a stale sending issue with no ledger returns to draft', 'sending', 0,
+      { status: 'draft', scheduled_for: null, proof_approved_at: null, sending_claim_token: null }, 'returned to draft for editing'],
+    ['a failed issue with no ledger returns to draft', 'failed', 0,
+      { status: 'draft', scheduled_for: null, proof_approved_at: null, sending_claim_token: null }, 'returned to draft for editing'],
+    ['a failed issue with a ledger stays failed', 'failed', 2, null, 'repair its audience and resume again'],
+  ])('resume: a refused audience on %s, and nothing is claimed', async (_label, status, ledger, written, outcome) => {
+    let payload = null;
+    const transition = chain({ updated: 1, onUpdate: (p) => { payload = p; } });
+    const queues = {
+      newsletter_sends: [
+        chain({ first: {
+          id: 's', status, updated_at: new Date('2026-01-01T00:00:00Z'), html_body: '<p>Body</p>', text_body: 'Body',
+          subject: 'Hello', subject_b: null, newsletter_type: 'pest-insider-monthly', segment_filter: null,
+        } }),
+        ...(written ? [transition] : []), // the one lease-guarded transition, and no claim after it
+      ],
+      newsletter_send_deliveries: [chain({ count: ledger })],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const err = await resumeCampaign('s').catch((e) => e);
+    expect(err).toMatchObject({ code: 'UNPLANNED_AUDIENCE', audienceRefusal: true });
+    expect(err.message).toContain(outcome);
+    if (written) {
+      expect(payload).toMatchObject(written);
+      expect(transition.where).toHaveBeenCalledWith(expect.objectContaining({ id: 's', status }));
+      if (status === 'sending') expect(transition.where).toHaveBeenCalledWith('updated_at', '<=', expect.any(Date));
+    }
     expect(mockSendBroadcast).not.toHaveBeenCalled();
   });
 

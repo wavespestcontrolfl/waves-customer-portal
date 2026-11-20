@@ -20,11 +20,11 @@
  * salt, so the same customers are held out every issue. The holdout covers a whole mailbox: a
  * reader is held out when its own customer link, or any customer behind its mailbox (linked to
  * another subscriber row on it, an alias included, or whose own email is on it), is held out
- * (mailboxCustomerIds in the sender). A lead with no customer behind its mailbox is never held
- * out. The plan drops held-out readers, and the sender checks the holdout again right before
- * each batch, on the links at that moment (segment_filter.holdout): a lead that became a
- * held-out customer after the plan, or a relink, never gets the issue, on a first send or a
- * resume.
+ * (withMailboxCustomers in the sender, read in the same query as the reader). A lead with no
+ * customer behind its mailbox is never held out. The plan drops held-out readers, and the
+ * sender checks the holdout again right before each batch, on the links at that moment
+ * (segment_filter.holdout): a lead that became a held-out customer after the plan, or a
+ * relink, never gets the issue, on a first send or a resume.
  *
  * The audience starts from the send path's own subscriber query (buildSubscriberQuery: active,
  * not suppressed, not archived, mailable), after the same archived-link relink sweep the send
@@ -76,13 +76,14 @@ function isAddressKey(value) {
  * The warm readers as a query: every subscriber the send path would mail whose CURRENT address
  * has an open event in the SendGrid webhook log from `since` through `until` (both inclusive,
  * on the open's own time), so a plan made for a past moment counts only the opens before it.
- * Ordered by id; selects the id, the linked customer and the address.
+ * Ordered by id; selects the id, the linked customer, the address and the customers behind the
+ * mailbox (mailbox_customer_ids), in one snapshot.
  */
 function warmAudienceQuery({ since, until }) {
   // Lazy: the sender pulls the whole newsletter stack; the planner loads this only when it runs.
   const db = require('../../models/db');
-  const { buildSubscriberQuery } = require('../newsletter-sender');
-  return buildSubscriberQuery(null)
+  const { buildSubscriberQuery, withMailboxCustomers } = require('../newsletter-sender');
+  return withMailboxCustomers(buildSubscriberQuery(null)
     // Grouped, so the check is ANDed with every send-path rule before it.
     .where(function openedWavesEmail() {
       this.whereExists(function openEvent() {
@@ -93,8 +94,7 @@ function warmAudienceQuery({ since, until }) {
           .whereRaw('coalesce(opened.occurred_at, opened.created_at) >= ?', [since])
           .whereRaw('coalesce(opened.occurred_at, opened.created_at) <= ?', [until]);
       });
-    })
-    .select('newsletter_subscribers.id', 'newsletter_subscribers.customer_id', 'newsletter_subscribers.email')
+    }))
     .orderBy('newsletter_subscribers.id', 'asc');
 }
 
@@ -107,17 +107,15 @@ function warmAudienceQuery({ since, until }) {
 async function selectIssueAudience({ asOf = new Date() } = {}) {
   const db = require('../../models/db');
   const NewsletterSubscribers = require('../newsletter-subscribers');
-  const { mailboxCustomerIds } = require('../newsletter-sender');
 
   await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
   const warm = await warmAudienceQuery({ since: new Date(asOf.getTime() - WARM_DAYS * DAY_MS), until: asOf });
-  const behindMailbox = await mailboxCustomerIds(warm.map((row) => Number(row.id)));
 
   const subscriberIds = [];
   const addressKeys = {};
   let heldOut = 0;
   for (const row of warm) {
-    const customers = [row.customer_id, ...(behindMailbox.get(Number(row.id)) || [])];
+    const customers = [row.customer_id, ...(Array.isArray(row.mailbox_customer_ids) ? row.mailbox_customer_ids : [])];
     if (customers.some((customerId) => isHeldOut(customerId))) {
       heldOut += 1;
     } else {

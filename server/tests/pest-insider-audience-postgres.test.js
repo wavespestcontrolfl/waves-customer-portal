@@ -5,7 +5,7 @@
  * the toSQL shape test cannot: a repeat open inside the window counts when the first open was
  * before it, an open by a former address does not qualify a corrected one, a batch logged late
  * counts by when the open happened, and both window bounds hold. Also the customers behind a
- * mailbox (newsletter-sender mailboxCustomerIds), which the holdout asks.
+ * mailbox (newsletter-sender withMailboxCustomers), which the holdout asks.
  * Self-skips unless DATABASE_URL is set (CI's DB-gated suites step).
  * Safe on a shared database: synthetic rows, asserted by id, removed after.
  */
@@ -26,7 +26,7 @@ const { randomUUID } = require('crypto');
 postgres('warmAudienceQuery (real Postgres)', () => {
   const db = require('../models/db');
   const { warmAudienceQuery } = require('../services/pest-insider/audience');
-  const { mailboxCustomerIds } = require('../services/newsletter-sender');
+  const { withMailboxCustomers } = require('../services/newsletter-sender');
   const DAY = 24 * 60 * 60 * 1000;
   const until = new Date('2026-12-02T12:00:00Z');
   const since = new Date(until.getTime() - 90 * DAY);
@@ -121,12 +121,16 @@ postgres('warmAudienceQuery (real Postgres)', () => {
     expect(warm).toEqual([ids.recent, ids.repeat, ids.mixedCase, ids.atStart, ids.atEnd, ids.legacyRow].sort(byId));
   });
 
-  test('mailboxCustomerIds finds the customer behind a mailbox through an alias row or a customer email', async () => {
-    const behind = await mailboxCustomerIds([ids.aliasLead, ids.aliasLinked, ids.sharedLead, ids.plainLead]);
+  test('withMailboxCustomers reads the customer behind a mailbox through an alias row or a customer email, one row per reader', async () => {
+    const mine = [ids.aliasLead, ids.aliasLinked, ids.sharedLead, ids.plainLead];
+    const rows = await withMailboxCustomers(db('newsletter_subscribers').whereIn('newsletter_subscribers.id', mine));
+    expect(rows.map((row) => row.id).sort((a, b) => a - b)).toEqual([...mine].sort((a, b) => a - b));
+    const behind = new Map(rows.map((row) => [row.id, row.mailbox_customer_ids]));
     expect(behind.get(ids.aliasLead)).toEqual([ids.aliasCustomer]);
     expect(behind.get(ids.aliasLinked)).toEqual([ids.aliasCustomer]);
     expect(behind.get(ids.sharedLead)).toEqual([ids.sharedCustomer]);
     expect(behind.get(ids.plainLead)).toEqual([]);
-    expect(await mailboxCustomerIds([])).toEqual(new Map());
+    // The same snapshot carries the address on file and the customer linked now.
+    expect(rows.find((row) => row.id === ids.aliasLinked)).toMatchObject({ customer_id: ids.aliasCustomer, email: `pialias${tag}+news@gmail.com` });
   });
 });

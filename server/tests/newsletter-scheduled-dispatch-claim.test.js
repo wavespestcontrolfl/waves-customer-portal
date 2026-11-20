@@ -48,17 +48,23 @@ const SEND = {
   proof_approval_email_id: 'email-1',
 };
 
-function chain({ first, rows, returning } = {}) {
+// The planned reader as the sender reads it now (withMailboxCustomers): still at the planned address.
+const PLANNED_ROWS = [{ id: 1, customer_id: null, email: 'a@example.com', mailbox_customer_ids: [] }];
+
+function chain({ first, rows, returning, updated } = {}) {
   const q = {};
   ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereNotExists', 'whereIn',
-    'select', 'orderBy', 'leftJoin', 'join', 'forUpdate',
+    'select', 'orderBy', 'leftJoin', 'join', 'joinRaw', 'forUpdate',
     // excludeMarketingOptedOut's pre-filtering CTE (codex #5165) — a no-op
     // chain link here, same as every other query-shape method above.
     'withMaterialized'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.limit = jest.fn(async () => rows || []);
   q.first = jest.fn(async () => first);
   q.count = jest.fn(() => ({ first: jest.fn(async () => ({ c: 5 })) }));
-  q.update = jest.fn(() => ({ returning: jest.fn(async () => returning || []) }));
+  q.update = jest.fn(() => ({
+    returning: jest.fn(async () => returning || []),
+    then: (resolve, reject) => Promise.resolve(updated ?? 1).then(resolve, reject),
+  }));
   q.then = (resolve, reject) => Promise.resolve(rows || []).then(resolve, reject);
   return q;
 }
@@ -85,7 +91,7 @@ test('the scheduler binds the claim to the version it validated, and an empty cl
   const claim = chain({ returning: [] }); // the row moved on: no row matches the validated version
   wire({
     newsletter_sends: [chain({ rows: [SEND] }), chain({ first: SEND }), claim],
-    newsletter_subscribers: [chain(), chain()],
+    newsletter_subscribers: [chain({ rows: PLANNED_ROWS }), chain({ rows: PLANNED_ROWS })],
   });
 
   const result = await processScheduledSends();
@@ -111,6 +117,9 @@ test('the scheduler returns a Waves Pest Insider issue with no plan to draft wit
 
   expect(result).toEqual({ processed: 0 });
   expect(revert.where).toHaveBeenCalledWith({ id: 'send-pi-1', status: 'scheduled' });
+  // Bound to the version this tick read, as the claim is.
+  expect(revert.where).toHaveBeenCalledWith('updated_at', '<', new Date(READ_AT.getTime() + 1));
+  expect(revert.where).toHaveBeenCalledWith('proof_approved_at', '<', new Date(APPROVED_AT.getTime() + 1));
   expect(revert.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft', proof_approved_at: null }));
   expect(mockTrigger).toHaveBeenCalledTimes(1);
   expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
@@ -120,11 +129,26 @@ test('the scheduler returns a Waves Pest Insider issue with no plan to draft wit
   expect(require('../services/sendgrid-mail').sendBroadcast).not.toHaveBeenCalled();
 });
 
+test('a refused issue that was repaired and queued again since the tick read it is left as it is now, with no alert', async () => {
+  // The bound revert finds no row: the plan was repaired and the issue re-approved in between.
+  const revert = chain({ updated: 0 });
+  wire({
+    newsletter_sends: [chain({ rows: [{ ...SEND, segment_filter: null }] }), chain({ first: { ...SEND, segment_filter: null } }), revert],
+  });
+
+  const result = await processScheduledSends();
+
+  expect(result).toEqual({ processed: 0 });
+  expect(revert.where).toHaveBeenCalledWith('updated_at', '<', new Date(READ_AT.getTime() + 1));
+  expect(mockTrigger).not.toHaveBeenCalled();
+  expect(require('../services/sendgrid-mail').sendBroadcast).not.toHaveBeenCalled();
+});
+
 test('a direct (manual) sendCampaign keeps the legacy draft-or-scheduled claim and reports a lost race as ALREADY_CLAIMED', async () => {
   const claim = chain({ returning: [] });
   wire({
     newsletter_sends: [chain({ first: SEND }), claim],
-    newsletter_subscribers: [chain()],
+    newsletter_subscribers: [chain({ rows: PLANNED_ROWS })],
   });
 
   await expect(sendCampaign('send-pi-1')).rejects.toMatchObject({ code: 'ALREADY_CLAIMED' });
@@ -136,7 +160,7 @@ test('a version-bound claim that finds no row throws VERSION_CHANGED, never ALRE
   const claim = chain({ returning: [] });
   wire({
     newsletter_sends: [chain({ first: SEND }), claim],
-    newsletter_subscribers: [chain()],
+    newsletter_subscribers: [chain({ rows: PLANNED_ROWS })],
   });
 
   await expect(sendCampaign('send-pi-1', { expect: { status: 'scheduled', updatedAt: READ_AT, proofApprovedAt: APPROVED_AT } }))
@@ -151,7 +175,7 @@ test.each([
 ])('a lost version-bound claim on a row now %s reports %s (an edit is not a send race)', async (nowStatus, code) => {
   wire({
     newsletter_sends: [chain({ first: SEND }), chain({ returning: [] }), chain({ first: { status: nowStatus } })],
-    newsletter_subscribers: [chain()],
+    newsletter_subscribers: [chain({ rows: PLANNED_ROWS })],
   });
 
   await expect(sendCampaign('send-pi-1', { expect: { status: 'scheduled', updatedAt: READ_AT, proofApprovedAt: APPROVED_AT } }))
@@ -168,7 +192,7 @@ test.each([
   const claim = chain({ returning: [{ id: SEND.id }] });
   wire({
     newsletter_sends: [chain({ first: edited }), claim],
-    newsletter_subscribers: [chain()],
+    newsletter_subscribers: [chain({ rows: PLANNED_ROWS })],
   });
 
   await expect(sendCampaign('send-pi-1', { expect: { status: 'scheduled', updatedAt: READ_AT, proofApprovedAt: APPROVED_AT } }))
