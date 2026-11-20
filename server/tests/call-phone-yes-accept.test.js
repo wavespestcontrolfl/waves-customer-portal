@@ -78,7 +78,7 @@ describe('wiring', () => {
       "trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().noWait()",
       'await lockCustomerEstimates(trx, customerId);',
       "require('./scheduling/catalog-lock').lockCatalogIdentity(trx)",
-      "trx('scheduled_services').where({ source_call_log_id: bookingCallId }).orderBy('id').forUpdate().noWait()",
+      "visitsCallBooked(trx, bookingCallId, customerId).orderBy('id').forUpdate().noWait()",
       "trx('scheduled_services').where({ id: visit.id }).forUpdate()",
       "require('./call-prepay-choice').liveVisitsOfCall(trx, bookingCallId, customerId)",
       'await callVisitsOnCalendar(trx, bookingCallId, customerId)',

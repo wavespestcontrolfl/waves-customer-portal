@@ -563,14 +563,17 @@ function cardEstimateIds(card) {
 // null to keep it as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of
 // its estimates is not yet declined, archived or deleted: an expiry, a held-back re-send or an accept alone never
 // closes it (the visit is still unlinked). While a call in its window still owes a read, the card shows nothing new.
-// Every visit the call booked that is still on the calendar (any status but cancelled or skipped: also one en route, on
-// site or done), by the call's id and a source_action only a call writes.
-function callVisitsOnCalendar(conn, callLogId, customerId) {
+// Every visit the call booked, any status: by the call's id and a source_action only a call writes (the rows
+// call-prepay-choice.js liveVisitsOfCall reads too). A visit a person booked and the call was only attached to is not one.
+function visitsCallBooked(conn, callLogId, customerId) {
   return conn('scheduled_services')
     .where({ source_call_log_id: callLogId, customer_id: customerId })
-    .whereIn('source_action', require('./call-prepay-choice').callCreatedSourceActions())
-    .whereIn('status', CALENDAR_VISIT_STATUSES)
-    .select('*');
+    .whereIn('source_action', require('./call-prepay-choice').callCreatedSourceActions());
+}
+// Every visit the call booked that is still on the calendar (any status but cancelled or skipped: also one en route, on
+// site or done).
+function callVisitsOnCalendar(conn, callLogId, customerId) {
+  return visitsCallBooked(conn, callLogId, customerId).whereIn('status', CALENDAR_VISIT_STATUSES).select('*');
 }
 
 // `conn`: the global handle, or the close's own transaction when it reads the card again under the lock (a cron job
@@ -1044,11 +1047,11 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     } catch {
       throw stop('catalog_busy');
     }
-    // Every visit this call booked, cancelled and skipped ones too, locked in id order before the counts below: a status
-    // change that brings one back waits for this accept's commit, and one in flight now refuses at once (visit_busy)
-    // instead of a wait while the step holds the accept's locks. The booked visit is one of them.
-    await noWaitOrStop(trx('scheduled_services').where({ source_call_log_id: bookingCallId }).orderBy('id').forUpdate().noWait()
-      .select('id'), 'visit_busy');
+    // Every visit this call booked, cancelled and skipped ones too (the rows both counts below read), locked in id order
+    // before the counts: a status change that brings one back waits for this accept's commit, and one in flight now
+    // refuses at once (visit_busy) instead of a wait while the step holds the accept's locks. The booked visit is one of
+    // them; a visit the call was only attached to is not.
+    await noWaitOrStop(visitsCallBooked(trx, bookingCallId, customerId).orderBy('id').forUpdate().noWait().select('id'), 'visit_busy');
     // The locked visit passes the evaluation's own visit checks again (family, property, price and discounts, invoice,
     // add-ons, series and assessment flags), not only the pin.
     const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();

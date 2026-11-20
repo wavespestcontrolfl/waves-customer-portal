@@ -1700,15 +1700,17 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         }
       });
 
-      test("a status change on another visit the call booked: in flight, the link step refuses at once (visit_busy); after the step, it waits for the accept's commit", async () => {
+      test("a status change on another visit the call booked: in flight, the link step refuses at once (visit_busy); after the step, it waits for the accept's commit; a staff visit only attached to the call never stops the step", async () => {
         const perTest = trx;
-        let ev; let card; let firstId;
+        let ev; let card; let firstId; let staffId;
         try {
           trx = pool;
           mockConn = pool;
           made = await phoneYes();
           // The call's other visit, cancelled: bringing it back would make two visits on the calendar.
           firstId = await visit(made.customerId, made.bookingCallId, { scheduled_date: inDays(5), status: 'cancelled' });
+          // A visit the office booked that the call was attached to: not one the call booked, so neither count reads it.
+          staffId = await visit(made.customerId, made.bookingCallId, { scheduled_date: inDays(20), source_action: 'admin' });
           await expect(sweep()).resolves.toMatchObject({ filed: 1 });
           [card] = await cards(made.bookingCallId);
           ev = await evaluatePhoneYes({ callLogId: made.bookingCallId, customerId: made.customerId });
@@ -1732,8 +1734,12 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
           await accept.rollback();
           await other.rollback();
         }
+        const staffEdit = await pool.transaction();
         accept = await pool.transaction();
         try {
+          // An office edit in flight on the attached staff visit: the step still goes ahead.
+          await staffEdit('scheduled_services').where({ id: staffId }).forUpdate().first('id');
+          await accept.raw("SET LOCAL lock_timeout = '2s'");
           await step(accept, { estimate: ev.estimate });
           await expect(pool.transaction(async (later) => {
             await later.raw("SET LOCAL lock_timeout = '300ms'");
@@ -1741,6 +1747,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
           })).rejects.toMatchObject({ code: '55P03' });
         } finally {
           await accept.rollback();
+          await staffEdit.rollback();
         }
       });
 
