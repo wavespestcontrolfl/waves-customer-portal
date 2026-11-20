@@ -43,7 +43,8 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call bell: robodialer wave on PostgreSQL', () => {
   let database;
   const schema = `missed_call_wave_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'technicians', 'conversations', 'messages', 'inbound_sms_optout_receipts'];
+  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'technicians', 'conversations', 'messages', 'inbound_sms_optout_receipts',
+    'messaging_suppression', 'missed_call_text_claims', 'phone_line_types'];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
@@ -671,12 +672,14 @@ jest.setTimeout(30000);
       ['a reply only in the unified inbox', () => inbox(CALLER, { channel: 'sms', direction: 'inbound', body: 'who is this' })],
       ['a staff row with the number', () => database('technicians').insert({ id: randomUUID(), name: 'Staff Test', phone: CALLER, role: 'technician', employment_status: 'active' })],
       ['a conversation with the number linked to a customer', () => inbox(CALLER, null, { customer_id: LINKED_CUSTOMER })],
+      ['a thread with the number that staff labeled', () => inbox(CALLER, null, { contact_label: 'Test Label' })],
       ['a lead saved for the number', () => lead('727.555.0611')],
       ['a customer saved with the number on a secondary slot', () => database('customers').insert({ id: randomUUID(), first_name: 'Test', service_contact_phone: '727-555-0611', created_at: new Date(), updated_at: new Date() })],
       ['a STOP that left only its opt-out receipt', () => optOutReceipt(new Date())],
+      ['a text the spam block stopped, kept after an unblock', () => database('blocked_call_attempts').insert({ id: randomUUID(), number: CALLER, channel: 'sms', block_type: 'sms_silent', created_at: new Date() })],
       ['a staff reply still sending, its reservation the only row', () => database('sms_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_type: 'manual', message_body: 'Hi, Waves returning your call', status: 'sending', metadata: { manual_send_reservation: true }, created_at: new Date() })],
       ['a reply in a customer thread a promotion moved it to', () => inbox(null, { channel: 'sms', direction: 'inbound', body: 'who is this', metadata: { sms_contact_phone: CALLER } }, { contact_phone: null, unknown_contact: false, customer_id: LINKED_CUSTOMER })],
-    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15, r16, r18, r20)', async (label, lateWrite) => {
+    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15, r16, r18, r20, r21, r22)', async (label, lateWrite) => {
       isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
       await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
       const inserted = judged();
@@ -925,11 +928,11 @@ jest.setTimeout(30000);
     });
 
     // A form-callback bridge rang staff first: its to_phone is the staff cell,
-    // and metadata.leadPhone is the number it then dialed. With the lead
-    // deleted, only the call says staff called the number (pre-push audit r20).
-    test('a lead callback bridge that rang the number from a staff cell means it is never a repeat, its lead deleted (pre-push audit r20)', async () => {
+    // and metadata.leadPhone is the number it then dialed. With the lead row
+    // gone (or its phone changed), only the call says staff called the number
+    // (pre-push audit r20). A soft-deleted lead row counts by itself.
+    test('a lead callback bridge that rang the number from a staff cell means it is never a repeat, its lead row gone (pre-push audit r20)', async () => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
-      await lead('727.555.0611', { deleted_at: new Date() });
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
@@ -938,15 +941,47 @@ jest.setTimeout(30000);
     });
 
     // A STOP whose inbox write failed leaves only its opt-out receipt: no text
-    // log row and no inbox message (pre-push audit r21). One from before the
-    // window does not count, as with texts.
-    test('a STOP that left only its opt-out receipt means it is never a repeat; one from before the window does not count (pre-push audit r21)', async () => {
+    // log row and no inbox message (pre-push audit r21). The receipts table
+    // holds a phone, so a receipt counts at any time, like every row of a
+    // footprint table (pre-push audit r22).
+    test('a STOP that left only its opt-out receipt, even before the window, means it is never a repeat (pre-push audit r21, r22)', async () => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
-      await optOutReceipt(new Date(Date.now() - 20 * 86400 * 1000));
       expect(await repeat(row)).toBe(true);
-      await optOutReceipt(new Date(Date.now() - 3 * 86400 * 1000));
+      await optOutReceipt(new Date(Date.now() - 60 * 86400 * 1000));
+      expect(await repeat(row)).toBe(false);
+    });
+
+    // Our own bookkeeping of a silent call is allowed, in the shape
+    // production's silent callers hold. Any other row of the number in a
+    // table with a phone column counts (pre-push audit r22).
+    test('our own bookkeeping leaves it a repeat; a STOP or a cleared landline mark, a claim not sent, or a text the spam block stopped does not (pre-push audit r22)', async () => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      const landline = { reason: 'non_mobile', source: 'proactive_lookup_landline', active: true, cleared_at: null, captured_body: null };
+      await database('phone_line_types').insert({ phone: CALLER, line_type: 'landline', checked_at: new Date() });
+      await database('messaging_suppression').insert({ phone: CALLER, created_at: new Date(), ...landline });
+      await database('missed_call_text_claims').insert({ phone: CALLER, outcome: 'sent', call_log_id: row.id, created_at: new Date() });
+      await database('blocked_call_attempts').insert({ id: randomUUID(), number: CALLER, channel: 'voice', block_type: 'marchex_shadow', twilio_sid: row.twilio_call_sid, created_at: new Date() });
+      expect(await repeat(row)).toBe(true);
+      for (const mark of [
+        { reason: 'opt_out_keyword', source: 'twilio_webhook_STOP', captured_body: 'STOP' },
+        { active: false, cleared_at: new Date(), source: 'cleared_by:twilio_webhook_exact_keyword' },
+        { captured_body: 'who is this' },
+      ]) {
+        await database('messaging_suppression').where({ phone: CALLER }).update(mark);
+        expect(await repeat(row)).toBe(false);
+        await database('messaging_suppression').where({ phone: CALLER }).update(landline);
+      }
+      for (const outcome of ['dispatching', 'uncertain', 'blocked']) {
+        await database('missed_call_text_claims').where({ phone: CALLER }).update({ outcome });
+        expect(await repeat(row)).toBe(false);
+      }
+      await database('missed_call_text_claims').where({ phone: CALLER }).update({ outcome: 'sent' });
+      expect(await repeat(row)).toBe(true);
+      await database('blocked_call_attempts').insert({ id: randomUUID(), number: '(727) 555-0611', channel: 'sms', block_type: 'sms_silent', created_at: new Date() });
       expect(await repeat(row)).toBe(false);
     });
 
@@ -1082,7 +1117,28 @@ jest.setTimeout(30000);
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
       const mirrorOf = channel === 'voice' ? { twilio_sid: earlier.twilio_call_sid } : {};
-      await inbox(null, { channel, ...mirrorOf, ...message }, { contact_phone: null, unknown_contact: false, ...conversation });
+      await inbox(null, { channel, ...mirrorOf, ...message }, { contact_phone: null, unknown_contact: !conversation.customer_id, ...conversation });
+      expect(await repeat(row)).toBe(false);
+    });
+
+    // Every thread with the number's phone holds a silent caller's thread
+    // shape: no customer, no staff label, email or outside id, open, an
+    // unknown contact, no metadata key (production's 105 threads of unknown
+    // GBP callers, 90 days to 2026-11-19).
+    test.each([
+      ['a staff label', { contact_label: 'Test Label' }],
+      ['an email', { contact_email: 'sample@example.com' }],
+      ['an outside id', { contact_external_id: 'ext-1' }],
+      ['a closed status', { status: 'closed' }],
+      ['a known contact', { unknown_contact: false }],
+      ['a metadata key', { metadata: { pinned: true } }],
+    ])('a thread with the number that has %s means it is never a repeat; a silent thread leaves it one', async (label, change) => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      await inbox(CALLER, null, { status: 'open', metadata: {}, message_count: 0, last_message_at: new Date(), our_endpoint_id: GBP_LINE });
+      expect(await repeat(row)).toBe(true);
+      await database('conversations').where({ contact_phone: CALLER }).update(change);
       expect(await repeat(row)).toBe(false);
     });
 
@@ -1169,26 +1225,66 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(false);
     });
 
-    test('a staff read that fails throws, so the bell pushes (pre-push audit r12)', async () => {
+    // The footprint tables come from the catalog at check time: a table under
+    // a new name, or a new table with a phone column, counts from its first
+    // row (pre-push audit r22). A last 4 cannot name the number; a hashed
+    // column holds the SHA-256 of the E.164 number.
+    test('a staff table under a new name, or a new table with a phone column or its hash, still counts (pre-push audit r12, r22)', async () => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
-      await database('technicians').insert({ id: randomUUID(), name: 'Staff Test', phone: '(941) 555-0199', role: 'technician', employment_status: 'active' });
-      expect(await repeat(row)).toBe(true);
+      await database('technicians').insert({ id: randomUUID(), name: 'Staff Test', phone: '727.555.0611', role: 'technician', employment_status: 'active' });
       await database.raw('ALTER TABLE ??.?? RENAME TO ??', [schema, 'technicians', 'technicians_away']);
       try {
-        await expect(repeat(row)).rejects.toThrow(/technicians/);
+        expect(await repeat(row)).toBe(false);
       } finally {
         await database.raw('ALTER TABLE ??.?? RENAME TO ??', [schema, 'technicians_away', 'technicians']);
       }
+      await database('technicians').del();
+      expect(await repeat(row)).toBe(true);
+      await database.raw('CREATE TABLE ??.?? (id serial PRIMARY KEY, contact_phone text, phone_last4 text, phone_hash text)', [schema, 'sample_contacts']);
+      try {
+        await database.raw('INSERT INTO ??.?? (phone_last4) VALUES (?)', [schema, 'sample_contacts', '0611']);
+        expect(await repeat(row)).toBe(true);
+        await database.raw('INSERT INTO ??.?? (contact_phone) VALUES (?)', [schema, 'sample_contacts', '1 (727) 555-0611']);
+        expect(await repeat(row)).toBe(false);
+        await database.raw('DELETE FROM ??.??', [schema, 'sample_contacts']);
+        expect(await repeat(row)).toBe(true);
+        const hash = require('crypto').createHash('sha256').update('+17275550611').digest('hex');
+        await database.raw('INSERT INTO ??.?? (phone_hash) VALUES (?)', [schema, 'sample_contacts', hash]);
+        expect(await repeat(row)).toBe(false);
+      } finally {
+        await database.raw('DROP TABLE ??.??', [schema, 'sample_contacts']);
+      }
     });
 
-    test('a caller who got through later, is on a live lead or on a customer slot is a real caller', async () => {
+    // A record read that cannot finish in time throws, and the bell pushes
+    // (pre-push audit r12): here another session holds a footprint table locked.
+    test('a record read that cannot finish in time throws, so the bell pushes (pre-push audit r12)', async () => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      const lock = await database.transaction();
+      try {
+        await lock.raw('LOCK TABLE ??.?? IN ACCESS EXCLUSIVE MODE', [schema, 'technicians']);
+        await expect(repeat(row)).rejects.toThrow(/timeout/i);
+      } finally {
+        await lock.rollback();
+      }
+    });
+
+    test('a caller who got through later, or is on any lead or customer slot, a deleted one too, is a real caller (pre-push audit r22)', async () => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
       await lead('(727) 555-0611', { deleted_at: new Date() });
+      expect(await repeat(row)).toBe(false);
+      await database('leads').del();
+      await database('customers').insert({ id: randomUUID(), first_name: 'Test', phone: '7275550611', deleted_at: new Date(), created_at: new Date(), updated_at: new Date() });
+      expect(await repeat(row)).toBe(false);
+      await database('customers').del();
       expect(await repeat(row)).toBe(true);
       await lead('727.555.0611');
       expect(await repeat(row)).toBe(false);

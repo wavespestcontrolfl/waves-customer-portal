@@ -11,6 +11,7 @@
  *                             so a crash mid-delivery never loses the alert)
  *   missed_call_settled_at  — terminal: delivered (or superseded)
  */
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { isSentinelPhone, PHONE_SENTINELS } = require('./external-phone');
@@ -426,16 +427,15 @@ function otherGbpLineSql(row) {
 // check's read and the repeat quiet stamp's update both apply them, so nothing
 // the check read can change before the stamp: a change that lands in between
 // leaves the stamp matching no row, and the push goes (pre-push audit r13,
-// r14). Bounded like the history read (14 days). The conditions:
+// r14). Calls, texts and inbox messages are read in the window of the history
+// read (14 days); the number's inbox threads and the other footprint, at any
+// time. The conditions:
 //  - the history that qualified the call still holds: a prior settled silent
 //    hang-up on another GBP line, or REPEAT_MIN_PRIOR of them on any line
 //    (wherePriorSilentHangup; pre-push audit r17);
 //  - the judged call is still a silent call (a late write can mark it
 //    answered after the bell read it; pre-push audit r10), with no grace test:
 //    the bell itself rings 5 minutes after the terminal status;
-//  - no staff row (technician or admin, any status) has the number's phone,
-//    read from the table itself: the cached staff-sender list answers "not
-//    staff" when its gate is off or its read failed (pre-push audit r12);
 //  - every other call of the number, from the window start on, is a settled
 //    silent hang-up (IS NOT TRUE: a NULL blocks too). A call of the number is
 //    one with the number on a leg: the caller, the dialed number, or the lead
@@ -449,15 +449,10 @@ function otherGbpLineSql(row) {
 //    reply still sending (its reservation, the only row while the provider's
 //    outcome is unknown) or scheduled is contact too, so no reservation filter
 //    applies (pre-push audit r18);
-//  - no STOP from it: the SMS webhook commits a STOP's opt-out receipt (with
-//    the suppression) before it requires the inbox row, so a STOP whose inbox
-//    write failed leaves only inbound_sms_optout_receipts; every other inbound
-//    text waits for its inbox row (routes/twilio-webhook.js). A receipt of the
-//    number in the window is contact (pre-push audit r21);
 //  - in the unified inbox, which the SMS webhook writes first and the text log
 //    only as best effort (pre-push audit r14), nothing in the window but
-//    mirrors of silent calls and our text-back, on threads linked to no
-//    customer. A message is the number's by its own SMS address, else its
+//    mirrors of silent calls and our text-back, on silent threads. A
+//    message is the number's by its own SMS address, else its
 //    thread's phone; a call's mirror is found from the number's calls by the
 //    call's sid, since a voice mirror carries no phone and promoting an
 //    unknown thread to a customer clears the thread's (pre-push audit r16).
@@ -473,11 +468,14 @@ function otherGbpLineSql(row) {
 //    sid still exists and is a silent call, a length only as that call's own
 //    (on production all 267 mirrors of unlinked calls that hold a length are
 //    of recorded calls, and every mirror has its call; pre-push audit r19).
-//    And no thread with the number's phone is linked to a customer, at any
-//    time;
-//  - the number is on no customer slot and no live lead, as in the history
-//    read: staff can save the caller between the check and the stamp
-//    (pre-push audit r15).
+//    A silent thread (SILENT_THREAD_SQL) is linked to no customer and has
+//    no staff label, email or outside id; every thread with the number's
+//    phone, at any time, must be one too;
+//  - no other footprint: no row with the number in any other table that holds
+//    a phone, at any time (whereNoFootprint, below). That covers a staff row
+//    of any role or status (pre-push audit r12), a customer slot or a lead in
+//    any state (r15), a STOP's opt-out receipt (r21), a text the spam block
+//    stopped (r22), and every table added later.
 // The inner reads name call_log without an alias: inside them it is the inner
 // table, and the judged call is excluded by its id.
 const SILENT_MIRROR_COLUMNS = ['id', 'conversation_id', 'channel', 'direction', 'author_type', 'twilio_sid', 'answered_by',
@@ -505,6 +503,20 @@ function inboxSilentSql() {
     + " OR (m.channel = 'sms' AND m.direction = 'outbound' AND m.message_type = 'missed_call_text_back'"
     + " AND COALESCE(m.author_type, 'system') = 'system'))", bindings];
 }
+// A unified-inbox thread (alias c) as a silent caller's thread holds it: only
+// the columns production's threads of unknown GBP callers set, no customer, no
+// contact label, email or outside id, open, an unknown contact, and no
+// metadata key. Read-only census, 2026-11-19: all 105 threads of the 52
+// unknown GBP callers of the 90 days are open unknown contacts with empty
+// metadata and no label, email, outside id or customer; so are all 2,139
+// other unlinked threads that hold a phone. A staff label or email is a
+// person, and a column added later must be listed here to pass.
+const SILENT_THREAD_COLUMNS = ['id', 'channel', 'our_endpoint_id', 'status', 'last_message_at', 'last_inbound_at', 'message_count',
+  'unknown_contact', 'contact_phone', 'metadata', 'created_at', 'updated_at'];
+const SILENT_THREAD_SQL = `(NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(c) - ARRAY[${sqlNames(SILENT_THREAD_COLUMNS)}]::text[]) col WHERE col.value <> 'null'::jsonb)`
+  + " AND COALESCE(c.status, 'open') = 'open' AND c.unknown_contact IS TRUE"
+  + " AND COALESCE(jsonb_typeof(c.metadata), 'null') IN ('null', 'object')"
+  + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(c.metadata) = 'object' THEN c.metadata ELSE '{}'::jsonb END) tk))";
 // The phone a unified-inbox message (alias m, its thread c) is with: its own SMS
 // address first, then its thread's, as admin-alert-contact-witnesses.js and
 // sms-response-policy.js read it.
@@ -522,7 +534,88 @@ function whereCallOfNumber(qb, table, key) {
     .orWhereRaw(`${phoneKeySql(`${table}.to_phone`)} = ?`, [key])
     .orWhereRaw(`${phoneKeySql(`${table}.metadata->>'leadPhone'`)} = ?`, [key]));
 }
-function silentRecordClauses(row, key, at, checkedAt) {
+
+// The rest of the number's footprint. Pre-push rounds 12, 15, 21 and 22 each
+// named one more table that records a person (a staff row, a saved customer or
+// lead, a STOP's opt-out receipt, a text the spam block stopped). On
+// production, 56 phone columns in 48 tables sit outside calls, texts and the
+// inbox. So the record conditions read every table with a phone column, as the
+// catalog lists them at check time: a table added later counts from its first
+// row. A number is silent only with no row in any of them, at any time, except:
+//  - calls, texts and the unified inbox, which the conditions read by their
+//    silent shape (FOOTPRINT_SHAPED_TABLES);
+//  - our own bookkeeping of a silent call, in the shape production's silent
+//    callers hold (FOOTPRINT_ALLOWED_SQL). Read-only census, 2026-11-19: outside
+//    calls, texts and the inbox, the 7 matched numbers have a line-type lookup
+//    (all 7), a non_mobile suppression from that lookup (5) and a text-back
+//    claim whose text went out (2); the 45 other unknown GBP callers of the 90
+//    days have rows in the same three tables and in no other.
+// A phone column is a text column whose name says phone, mobile or msisdn, or
+// is a plain number, caller, recipient or sender column. A hashed one holds
+// the SHA-256 of the E.164 number (compliance-contact-checks.js phoneHash); a
+// last-4 or *_sid column cannot name the number. Owner 2026-11-19 (*A*): what
+// no catalog read can find (a phone inside a JSON field, a column named
+// otherwise, a row tied to a call by its id) is the risk the rule keeps.
+const FOOTPRINT_SHAPED_TABLES = ['call_log', 'sms_log', 'messages', 'conversations'];
+// A row of these tables counts only when this condition holds (alias fp).
+const FOOTPRINT_ALLOWED_SQL = {
+  // The text-back's line-type lookup cache.
+  phone_line_types: 'false',
+  // A landline the lookup or the carrier found (reason non_mobile), still in
+  // force, with no captured text. Any other reason (an opt-out, a wrong
+  // number) is a person's act, and so is a clear: a START or a staff clear
+  // keeps the reason and sets active false and cleared_at
+  // (validators/suppression.js clearSuppression).
+  messaging_suppression: "NOT (fp.reason = 'non_mobile' AND fp.active AND fp.cleared_at IS NULL AND fp.captured_body IS NULL)",
+  // The text-back's one-shot claim (missed-call-text-back.js, its only
+  // writer), once its text went out. In flight, uncertain or blocked counts.
+  missed_call_text_claims: "fp.outcome IS DISTINCT FROM 'sent'",
+  // The Marchex would-block verdict on a call that went through
+  // (middleware/spam-block.js, shadow only): the provider's spam verdict, not
+  // a person. A text or call the spam block stopped counts: it outlives an
+  // unblock, the only trace of that contact (pre-push audit r22).
+  blocked_call_attempts: "NOT (fp.channel = 'voice' AND fp.block_type = 'marchex_shadow')",
+};
+const quoteIdent = (name) => `"${String(name).replace(/"/g, '""')}"`;
+// The footprint tables and their phone columns, from pg_catalog (a domain
+// counts as its base type, as information_schema reports it). A partitioned
+// table is read once, through its parent.
+async function footprintTables() {
+  const { rows } = await db.raw(`SELECT n.nspname::text AS table_schema, c.relname::text AS table_name,
+      array_agg(a.attname::text ORDER BY a.attname::text) AS columns
+    FROM pg_catalog.pg_attribute a
+    JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_type ty ON ty.oid = a.atttypid
+    WHERE n.nspname = current_schema()
+      AND c.relkind IN ('r', 'p') AND NOT c.relispartition
+      AND a.attnum > 0 AND NOT a.attisdropped
+      AND (CASE WHEN ty.typtype = 'd' THEN ty.typbasetype ELSE ty.oid END) IN ('text'::regtype, 'varchar'::regtype, 'bpchar'::regtype)
+      AND (a.attname::text ILIKE '%phone%' OR a.attname::text ILIKE '%mobile%' OR a.attname::text ILIKE '%msisdn%'
+        OR a.attname::text IN ('number', 'from_number', 'to_number', 'caller', 'caller_number', 'contact_number', 'cell', 'recipient', 'sender'))
+      AND a.attname::text NOT ILIKE '%last4%' AND a.attname::text NOT ILIKE '%\\_sid'
+      AND c.relname::text <> ALL(?::text[])
+    GROUP BY 1, 2
+    ORDER BY 2`, [FOOTPRINT_SHAPED_TABLES]).timeout(EXCHANGE_TIMEOUT_MS, { cancel: true });
+  return rows;
+}
+// No row with the number in any footprint table: one NOT EXISTS per table.
+function whereNoFootprint(qb, footprint, key) {
+  const hash = crypto.createHash('sha256').update(`+${key}`, 'utf8').digest('hex');
+  for (const { table_schema: schema, table_name: table, columns } of footprint) {
+    const allowed = Object.prototype.hasOwnProperty.call(FOOTPRINT_ALLOWED_SQL, table) ? FOOTPRINT_ALLOWED_SQL[table] : 'true';
+    qb.whereNotExists(function footprintRow() {
+      this.select(1).from(db.raw('??.?? AS fp', [schema, table]))
+        .where((number) => columns.forEach((column) => (/hash/i.test(column)
+          ? number.orWhereRaw(`fp.${quoteIdent(column)} = ?`, [hash])
+          : number.orWhereRaw(`${phoneKeySql(`fp.${quoteIdent(column)}`)} = ?`, [key]))))
+        .whereRaw(allowed);
+    });
+  }
+  return qb;
+}
+
+function silentRecordClauses(row, key, at, checkedAt, footprint) {
   const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
   const [settledSql, settledBindings] = settledSilentSql(checkedAt);
   const [otherLineSql, otherLines] = otherGbpLineSql(row);
@@ -534,9 +627,6 @@ function silentRecordClauses(row, key, at, checkedAt) {
     .where((qualified) => qualified
       .whereExists(function crossLine() { priorSilent(this).whereRaw(otherLineSql, otherLines); })
       .orWhereExists(function enough() { priorSilent(this).offset(REPEAT_MIN_PRIOR - 1); }))
-    .whereNotExists(function staffPhone() {
-      this.select(1).from('technicians').whereRaw(`${phoneKeySql('technicians.phone')} = ?`, [key]);
-    })
     .whereNotExists(function otherCall() {
       this.select(1).from('call_log')
         .modify((inner) => whereNotSandboxCall(inner))
@@ -553,16 +643,11 @@ function silentRecordClauses(row, key, at, checkedAt) {
           .orWhereRaw(`${phoneKeySql('s.to_phone')} = ?`, [key]))
         .whereRaw("(s.direction = 'outbound' AND s.message_type = 'missed_call_text_back') IS NOT TRUE");
     })
-    .whereNotExists(function optOutReceipt() {
-      this.select(1).from('inbound_sms_optout_receipts as oo')
-        .where('oo.applied_at', '>=', since)
-        .whereRaw(`${phoneKeySql('oo.phone')} = ?`, [key]);
-    })
     .whereNotExists(function inboxMessage() {
       this.select(1).from('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')
         .where('m.created_at', '>=', since)
         .whereRaw(`${MESSAGE_PEER_SQL} = ?`, [key])
-        .whereRaw(`(${inboxSilent} AND c.customer_id IS NULL) IS NOT TRUE`, inboxBindings);
+        .whereRaw(`(${inboxSilent} AND ${SILENT_THREAD_SQL}) IS NOT TRUE`, inboxBindings);
     })
     .whereNotExists(function callMirror() {
       this.select(1).from('call_log as vc')
@@ -570,23 +655,24 @@ function silentRecordClauses(row, key, at, checkedAt) {
         .join('conversations as c', 'c.id', 'm.conversation_id')
         .where('vc.created_at', '>=', since)
         .modify((calls) => whereCallOfNumber(calls, 'vc', key))
-        .whereRaw(`(${inboxSilent} AND c.customer_id IS NULL) IS NOT TRUE`, inboxBindings);
+        .whereRaw(`(${inboxSilent} AND ${SILENT_THREAD_SQL}) IS NOT TRUE`, inboxBindings);
     })
-    .whereNotExists(function linkedConversation() {
+    .whereNotExists(function numberThread() {
       this.select(1).from('conversations as c')
-        .whereNotNull('c.customer_id')
-        .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key]);
+        .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key])
+        .whereRaw(`${SILENT_THREAD_SQL} IS NOT TRUE`);
     })
-    .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
-    .whereRaw(NOT_ON_LIVE_LEAD_SQL);
+    .modify((rest) => whereNoFootprint(rest, footprint, key));
 }
 
 // Read only once the history matched. Returns the record conditions for the
 // stamp, or null. One of our own lines or a staff forward (config, not the
-// database; pre-push audit r11) is never a robocaller.
+// database; pre-push audit r11) is never a robocaller. The footprint tables
+// are read once, so the check and the stamp apply the same list.
 async function recordIsSilent(row, key, at, checkedAt) {
   if (require('../config/twilio-numbers').isInternalNumber(`+${key}`)) return null;
-  const clauses = silentRecordClauses(row, key, at, checkedAt);
+  const footprint = await footprintTables();
+  const clauses = silentRecordClauses(row, key, at, checkedAt, footprint);
   const judged = await db('call_log').where('id', row.id).modify(clauses)
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true }).first('id');
   return judged ? clauses : null;
