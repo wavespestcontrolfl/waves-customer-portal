@@ -140,9 +140,14 @@ async function subscribeOrResubscribe(params = {}) {
 // else the coded error subscribeOrResubscribe throws. The public subscribe
 // route also calls it before its bot check, so a malformed address gets the
 // same 400 whether or not the bot check would drop the request.
+// Only a string is an address: anything else (a JSON array or object from the
+// public form) is refused here, never stringified, so it cannot throw.
 function signupEmailError(email, { strict = true } = {}) {
   if (!email) return Object.assign(new Error('email required'), { code: 'EMAIL_REQUIRED' });
-  const lc = String(email).trim().toLowerCase();
+  if (typeof email !== 'string') {
+    return Object.assign(new Error(strict ? 'valid email required' : 'email required'), { code: 'INVALID_EMAIL' });
+  }
+  const lc = email.trim().toLowerCase();
   if (strict ? !EMAIL_RE.test(lc) : !lc.includes('@')) {
     return Object.assign(new Error(strict ? 'valid email required' : 'email required'), { code: 'INVALID_EMAIL' });
   }

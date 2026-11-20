@@ -4656,7 +4656,7 @@ nothing and applies the same rules. Gate off = the behaviour
 above this note, unchanged)
 — rate-limited, read-only for posts/rss,
 double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text.
-The address check runs first: a missing or malformed `email` answers the signup's own 400
+The address check runs first: a missing, non-string or malformed `email` answers the signup's own 400
 (`signupEmailError` in `newsletter-subscribers.js`) whether or not the bot check would drop the
 body, so a drop is not visible from a bad address. Then the bot check
 (`server/services/newsletter-signup-screen.js`, owner 2026-11-20): a body whose

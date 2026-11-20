@@ -145,6 +145,10 @@ describe('POST /subscribe with the bot check', () => {
     expect(bot).toEqual({ status: 400, body: { error: 'valid email required' } });
     expect(personBad).toEqual(bot);
     expect(await post({ source: 'astro-website' }, null)).toEqual({ status: 400, body: { error: 'email required' } });
+    // A crafted non-string address is a 400, never a throw (500).
+    const crafted = { toString: 'not a function', valueOf: null };
+    expect(await post({ ...person, email: crafted })).toEqual({ status: 400, body: { error: 'valid email required' } });
+    expect(await post({ ...person, email: ['reader@example.com'] })).toEqual({ status: 400, body: { error: 'valid email required' } });
     expect(subscribeOrResubscribe).not.toHaveBeenCalled();
     expect(logger.info).not.toHaveBeenCalled();
   });
