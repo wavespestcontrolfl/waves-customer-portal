@@ -746,6 +746,8 @@ function disclosedSetupFeeQuote(estimateData) {
   return { amount: toCents(fee) / 100, kind: 'waveguard_membership' };
 }
 
+const HAND_CHECK_MESSAGE = 'This one needs a quick hand-check before we can price it online.';
+
 // THE shared mint core (plan restart + plan start — one mechanism, two
 // entries). Runs inside the caller's transaction, under the locks the entry
 // already took (comms advisory lock, then the customers row FOR UPDATE), with
@@ -763,14 +765,15 @@ function disclosedSetupFeeQuote(estimateData) {
 //   matchesLive       (liveEstimateData) => the entry's own scope/identity
 //                     test for reusing a live quote (the core adds the
 //                     cent-exact totals + full-offer fingerprint checks)
-//   strictEvidence    optional (plan start): the estimate block also stores the
+//   strictEvidence    the entry's evidence policy, read once into `strict`.
+//                     True (plan start): the estimate block also stores the
 //                     proven premises key (premisesKey), which reuse and the
 //                     accept compare; evidence the price depends on must
 //                     be readable, else pricing_unavailable: the single-premises
 //                     proof fails on an unresolvable visit link
 //                     (singlePremisesStreet strict) and an unreadable estimate
-//                     seed refuses. Plan restart keeps main's lenient proof and
-//                     best-effort seed.
+//                     seed or turf profile refuses. Omitted (plan restart):
+//                     main's lenient proof and best-effort seed and profile.
 //   assertOffer       optional ({ monthlyTotal, annualTotal, onetimeTotal,
 //                     rawEngineResult }) => throws when the server's price is
 //                     not the offer the entry expects
@@ -784,17 +787,21 @@ function disclosedSetupFeeQuote(estimateData) {
 //   note              (estimateId) => { subject, body } for the timeline
 //   logTag / logDetail / handMessage   wording that stays per-source
 // Returns { estimateId, token, url, reused }.
-async function mintPricedEstimate({
-  trx, fresh, source, families, ownedFamilies, optionFor, estimateBlock, matchesLive, strictEvidence,
-  assertOffer = null, snapshotSells = null, note, logTag, logDetail = '', handMessage,
-  assertNotCommercial, nowDate, now, randomBytes, deps, mintDeps,
-}) {
+async function mintPricedEstimate(args) {
   const {
-    persistence, pricingAi, pricingBundleMatchesEstimateTotals, buildEstimateSendSnapshot, releaseEstimateHolds,
-  } = mintDeps;
-  const sells = snapshotSells
-    || ((bundle, row) => Boolean(bundle) && pricingBundleMatchesEstimateTotals(bundle, row));
-  const toPrice = families.map(pricingKeyFor);
+    trx, fresh, source, families, strictEvidence, assertOffer, snapshotSells, handMessage, logTag, nowDate, deps, mintDeps,
+  } = args;
+  // The evidence policy, selected once by the entry (plan start strict, plan
+  // restart best-effort): readEvidence and the premises proof read `strict`,
+  // and `premisesStamp` is the one place the proven home is stored and compared.
+  const strict = strictEvidence === true;
+  const mint = {
+    ...args,
+    strict,
+    toPrice: families.map(pricingKeyFor),
+    sells: snapshotSells
+      || ((bundle, row) => Boolean(bundle) && mintDeps.pricingBundleMatchesEstimateTotals(bundle, row)),
+  };
 
   // Single-premises proof BEFORE any URL is handed out (codex GH r4 P1):
   // the cancelled-family and residual queries above are scoped by
@@ -805,17 +812,19 @@ async function mintPricedEstimate({
   // cross-sell): a multi-premises profile — or a proof that cannot be
   // evaluated, a missing primary street, or a street without provable
   // locality — is the priced-by-hand 409, never an online price.
-  const crossSell = deps.crossSell || require('../service-report/cross-sell');
-  const linkage = require('../estimate-property-linkage');
   let primaryStreet = null;
   try {
-    primaryStreet = await singlePremisesStreet(trx, fresh, { proof: deps.customerHasOnlyPrimaryPremises, strict: strictEvidence });
+    primaryStreet = await singlePremisesStreet(trx, fresh, { proof: deps.customerHasOnlyPrimaryPremises, strict });
   } catch (err) {
     logger.warn(`[${logTag}] single-premises proof failed for ${fresh.id} — refusing: ${err.message}`);
   }
   if (!primaryStreet) {
     throw new RestartUnavailableError('pricing_unavailable', handMessage);
   }
+  // Plan start also stores the home its price was proven for (codex pre-push P0): a staff address
+  // change rewrites an open quote's address column (customer-address-fanout.js), so the accept and
+  // a reuse compare the account's home with this key as well as with that column.
+  const premisesStamp = strict ? { premisesKey: primaryStreet } : {};
 
   // Any prior lineage rows — the reuse decision itself is deferred until
   // TODAY's inputs have been resolved and priced (below): reusing here
@@ -828,30 +837,60 @@ async function mintPricedEstimate({
     .orderBy('created_at', 'desc')
     .limit(10);
 
-  // Property context: profile first, then the SAME cache-only lookup +
-  // accepted-estimate seed discipline the portal offer surfaces price
-  // under (cross-sell/one-tap). No LIVE lookup spend from a restart tap —
-  // a cached lookup row or a prior accepted estimate for THIS street
-  // supplies the footprint the stored profile lacks.
-  let propertySeed = null;
+  const { propertyContext, propertySeed } = await resolvePropertyEvidence(mint, primaryStreet);
+  const estimateData = buildEstimateData(mint, propertyContext, premisesStamp);
+  const offer = await recomputeOffer(mint, estimateData, propertySeed);
+  // Source-specific offer check on the SERVER's own totals and engine result
+  // (plan_start: every price the customer was shown must still be today's).
+  if (assertOffer) assertOffer({ ...offer.totals, rawEngineResult: offer.raw });
+
+  const reused = await reuseLiveQuote(mint, { priorRows, offer, estimateData, primaryStreet, premisesStamp });
+  if (reused) return reused;
+
+  await retireLineage({ trx, fresh, source, nowDate, releaseEstimateHolds: mintDeps.releaseEstimateHolds });
+  return publishMintedEstimate(mint, { offer, estimateData });
+}
+
+// Evidence the price depends on is read once, under the entry's policy
+// (codex pre-push P0): strict (plan start) fails closed on an unreadable read,
+// because the guards below cannot run without it and cached facts alone could
+// still reproduce the card's price; best-effort (plan restart) logs it and
+// prices on what remains. A read that finds nothing is not a failure.
+async function readEvidence({ logTag, fresh, handMessage }, { what, strict, read }) {
   try {
-    // Savepoint (codex GH r10 P2): the seed is best-effort, but a
-    // statement error raised on the OUTER trx aborts the whole mint
-    // ("current transaction is aborted" on the very next query) — the
-    // nested transaction scopes the rollback to the lookup so the mint
-    // continues on profile/cache evidence as intended.
-    propertySeed = await trx.transaction((sp) => crossSell.loadEstimateSeed(sp, fresh.id, primaryStreet));
+    return await read();
   } catch (err) {
-    // Plan start fails closed (codex pre-push P0): without the seed the
-    // field-verification and tree-count guards below cannot run, and cached
-    // facts alone could still reproduce the card's price. A read that finds
-    // no seed is not a failure.
-    if (strictEvidence) {
-      logger.warn(`[${logTag}] estimate property seed unreadable for ${fresh.id} — refusing: ${err.message}`);
-      throw new RestartUnavailableError('pricing_unavailable', handMessage);
+    if (!strict) {
+      logger.warn(`[${logTag}] ${what} skipped for ${fresh.id}: ${err.message}`);
+      return null;
     }
-    logger.warn(`[${logTag}] estimate property seed skipped for ${fresh.id}: ${err.message}`);
+    logger.warn(`[${logTag}] ${what} unreadable for ${fresh.id} — refusing: ${err.message}`);
+    throw new RestartUnavailableError('pricing_unavailable', handMessage);
   }
+}
+
+// Property context: profile first, then the SAME cache-only lookup +
+// accepted-estimate seed discipline the portal offer surfaces price
+// under (cross-sell/one-tap). No LIVE lookup spend from a restart tap —
+// a cached lookup row or a prior accepted estimate for THIS street
+// supplies the footprint the stored profile lacks. Refuses the mint
+// (pricing_unavailable) on a commercial or unmeasured property and on a
+// verified correction the price did not apply.
+async function resolvePropertyEvidence(mint, primaryStreet) {
+  const {
+    trx, fresh, toPrice, strict, logTag, deps, assertNotCommercial, mintDeps: { pricingAi },
+  } = mint;
+  const crossSell = deps.crossSell || require('../service-report/cross-sell');
+  // Savepoint (codex GH r10 P2): the seed is best-effort, but a
+  // statement error raised on the OUTER trx aborts the whole mint
+  // ("current transaction is aborted" on the very next query) — the
+  // nested transaction scopes the rollback to the lookup so the mint
+  // continues on profile/cache evidence as intended.
+  const propertySeed = await readEvidence(mint, {
+    what: 'estimate property seed',
+    strict,
+    read: () => trx.transaction((sp) => crossSell.loadEstimateSeed(sp, fresh.id, primaryStreet)),
+  });
   // Savepoint-isolated like the seed and prepay lookups (codex GH r23
   // P2): loadTurfProfile's own safeSelect catch returns null on a pg
   // statement error, but the OUTER trx would already be aborted — the
@@ -861,17 +900,12 @@ async function mintPricedEstimate({
   // A plan start reads the profile strictly for a price that reads it (codex pre-push P0): a
   // failed read would price on older fallback measurements that a stored zero-lawn profile
   // rules out. A missing row is not a failure. Restart keeps main's forgiving read.
-  const strictTurf = strictEvidence === true && toPrice.some((key) => TURF_PRICED_KEYS.includes(key));
-  let turfProfile = null;
-  try {
-    turfProfile = await trx.transaction((sp) => pricingAi.loadTurfProfile(sp, fresh.id, { strict: strictTurf }));
-  } catch (err) {
-    if (strictTurf) {
-      logger.warn(`[${logTag}] turf profile unreadable for ${fresh.id} — refusing: ${err.message}`);
-      throw new RestartUnavailableError('pricing_unavailable', handMessage);
-    }
-    logger.warn(`[${logTag}] turf profile skipped for ${fresh.id}: ${err.message}`);
-  }
+  const turfStrict = strict && toPrice.some((key) => TURF_PRICED_KEYS.includes(key));
+  const turfProfile = await readEvidence(mint, {
+    what: 'turf profile',
+    strict: turfStrict,
+    read: () => trx.transaction((sp) => pricingAi.loadTurfProfile(sp, fresh.id, { strict: turfStrict })),
+  });
   // Verified-correction probe discipline (codex GH r4 P1), mirrored from
   // BOTH offer paths (cross-sell report + portal offer): only a USABLE
   // lookup result carries staff's verified overrides folded in, so record
@@ -901,8 +935,7 @@ async function mintPricedEstimate({
   // classified the property commercial — that resolution must refuse,
   // not price through residential defaults.
   assertNotCommercial({ propertyType: propertyContext?.propertyInput?.propertyType }, 'resolved');
-  const missing = pricingAi.missingPropertyFor(toPrice, propertyContext);
-  if (missing) {
+  if (pricingAi.missingPropertyFor(toPrice, propertyContext)) {
     throw new RestartUnavailableError('pricing_unavailable', 'We need a property measurement on file before we can price this online.');
   }
   // No lookup result means any verified correction on this address was NOT
@@ -911,7 +944,7 @@ async function mintPricedEstimate({
   // correction on file makes this the priced-by-hand 409 instead of an
   // exact price on a fact staff already fixed.
   if (!lookupProducedResult) {
-    let correctionsUnapplied = false;
+    let correctionsUnapplied;
     try {
       const probe = deps.hasVerifiedOverrides
         || require('../property-lookup/lookup-cache').hasVerifiedOverrides;
@@ -921,43 +954,54 @@ async function mintPricedEstimate({
       logger.warn(`[${logTag}] verified-override probe failed for ${fresh.id} — refusing: ${err.message}`);
     }
     if (correctionsUnapplied) {
-      throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
+      throw new RestartUnavailableError('pricing_unavailable', HAND_CHECK_MESSAGE);
     }
   }
+  return { propertyContext, propertySeed };
+}
 
+// The estimate_data the server prices: the engine inputs for every family this
+// mint quotes, the entry's own block (with the proven home when strict), and
+// the residual qualifiers.
+function buildEstimateData(mint, propertyContext, premisesStamp) {
+  const {
+    toPrice, ownedFamilies, optionFor, estimateBlock, mintDeps: { pricingAi },
+  } = mint;
   const context = { grassType: propertyContext.grassType, palmCount: propertyContext.palmCount };
-  const services = {};
-  for (const key of toPrice) {
+  const services = Object.assign({}, ...toPrice.flatMap((key) => {
     const option = optionFor(key, pricingAi);
-    if (!option) continue;
-    Object.assign(services, pricingAi.optionServices(option, context));
-  }
+    return option ? [pricingAi.optionServices(option, context)] : [];
+  }));
   if (!Object.keys(services).length) {
     throw new RestartUnavailableError('pricing_unavailable', 'We could not price this plan online.');
   }
-
   const estimateData = {
     engineInputs: { ...propertyContext.propertyInput, services },
     // No follow-up / engagement automation may ever message the customer
     // about an estimate they asked for and are looking at (click-mint
     // doctrine; enforced centrally in estimate-engagement-engine).
     noEngagementAutomation: true,
-    // Plan start also stores the home its price was proven for (codex pre-push P0): a staff address
-    // change rewrites an open quote's address column (customer-address-fanout.js), so the accept and
-    // a reuse compare the account's home with this key as well as with that column.
-    [estimateBlock.key]: strictEvidence ? { ...estimateBlock.value, premisesKey: primaryStreet } : estimateBlock.value,
+    [estimateBlock.key]: { ...estimateBlock.value, ...premisesStamp },
   };
-  // priorQualifyingServices from the SERVER-derived residual set —
-  // normally empty for a cancelled customer, so the engine prices at
-  // today's list; a family they somehow still hold prices the restart at
-  // the combined tier instead of standalone. Already family-canonical.
-  const priorQualifyingServices = [...ownedFamilies];
   // Persist the qualifiers WITH the inputs (click-mint pattern, codex GH
   // r8 P1): buildEstimateSendSnapshot replays engineInputs through
   // extractEngineInputs, which restores combined-tier context only from
   // estimate_data.priorQualifyingServices — omitting them recomputes the
   // partial-residual case standalone and fails the totals-match check.
-  if (priorQualifyingServices.length) estimateData.priorQualifyingServices = priorQualifyingServices;
+  if (ownedFamilies.length) estimateData.priorQualifyingServices = [...ownedFamilies];
+  return estimateData;
+}
+
+// The server-authoritative price for estimateData, written back onto it (result,
+// setup fee, pest version). priorQualifyingServices come from the SERVER-derived
+// residual set — normally empty for a cancelled customer, so the engine prices at
+// today's list; a family they somehow still hold prices the restart at
+// the combined tier instead of standalone. Already family-canonical.
+async function recomputeOffer(mint, estimateData, propertySeed) {
+  const {
+    toPrice, ownedFamilies, logTag, mintDeps: { persistence },
+  } = mint;
+  const priorQualifyingServices = [...ownedFamilies];
   const recomputed = await persistence.serverRecomputeFromEstimateData(estimateData, {
     priorQualifyingServices,
     recurringCustomer: priorQualifyingServices.length > 0,
@@ -975,40 +1019,49 @@ async function mintPricedEstimate({
   // price. The customer gets the priced-by-hand 409.
   const raw = recomputed.rawEngineResult || {};
   if (engineResultNeedsReview(raw) || seedRefusesPrice(propertySeed, toPrice)) {
-    throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
+    throw new RestartUnavailableError('pricing_unavailable', HAND_CHECK_MESSAGE);
   }
 
   estimateData.result = recomputed.serverResult;
   const setupFeeQuote = disclosedSetupFeeQuote(estimateData);
   if (setupFeeQuote) estimateData.setupFeeQuote = setupFeeQuote;
-  if (recomputed.pestPricingVersion && estimateData.engineInputs.services.pest
-    && typeof estimateData.engineInputs.services.pest === 'object') {
-    estimateData.engineInputs.services.pest.version = recomputed.pestPricingVersion;
-  }
+  const pest = estimateData.engineInputs.services.pest;
+  if (recomputed.pestPricingVersion && pest && typeof pest === 'object') pest.version = recomputed.pestPricingVersion;
 
+  const amount = (value) => Number(value || 0);
   const totals = recomputed.serverTotals || {};
-  const monthlyTotal = Number(totals.monthlyTotal || 0);
-  const annualTotal = Number(totals.annualTotal || 0) || monthlyTotal * 12;
-  const onetimeTotal = Number(totals.onetimeTotal || 0);
-  const serverTier = recomputed.rawEngineResult?.waveGuard?.tier
-    || recomputed.rawEngineResult?.waveGuard?.label || null;
-  // Source-specific offer check on the SERVER's own totals and engine result
-  // (plan_start: every price the customer was shown must still be today's).
-  if (assertOffer) assertOffer({ monthlyTotal, annualTotal, onetimeTotal, rawEngineResult: raw });
+  const monthlyTotal = amount(totals.monthlyTotal);
+  return {
+    raw,
+    totals: {
+      monthlyTotal,
+      annualTotal: amount(totals.annualTotal) || monthlyTotal * 12,
+      onetimeTotal: amount(totals.onetimeTotal),
+    },
+    serverTier: raw.waveGuard?.tier || raw.waveGuard?.label || null,
+  };
+}
 
-  // Reuse decision — only NOW, with today's property context resolved,
-  // the commercial / verified-override / review-marker gates passed, and
-  // TODAY's recompute in hand (codex pre-push P0): a live quote is handed
-  // back only when it names exactly today's eligible families AND today's
-  // totals land on its frozen dollars. Anything else — price-config
-  // drift, corrected measurements, a changed scope — retires the lineage
-  // and mints fresh (owner ruling: restart ALWAYS reprices at the
-  // current price; idempotent button, one honorable price at a time).
-  // The checks read the lineage again, under its row locks (codex pre-push
-  // P1): the read above took no lock, and a tier the customer picks in
-  // another tab while today's price is computed can drop the frozen
-  // snapshot they check. Locked, the rows hold still until this transaction
-  // commits, so the checks read the row the link opens.
+// Reuse decision — only NOW, with today's property context resolved,
+// the commercial / verified-override / review-marker gates passed, and
+// TODAY's recompute in hand (codex pre-push P0): a live quote is handed
+// back only when it names exactly today's eligible families AND today's
+// totals land on its frozen dollars. Anything else — price-config
+// drift, corrected measurements, a changed scope — retires the lineage
+// and mints fresh (owner ruling: restart ALWAYS reprices at the
+// current price; idempotent button, one honorable price at a time).
+// The checks read the lineage again, under its row locks (codex pre-push
+// P1): the read above took no lock, and a tier the customer picks in
+// another tab while today's price is computed can drop the frozen
+// snapshot they check. Locked, the rows hold still until this transaction
+// commits, so the checks read the row the link opens.
+// Returns the live quote's { estimateId, token, url, reused: true }, or null.
+async function reuseLiveQuote(mint, {
+  priorRows, offer, estimateData, primaryStreet, premisesStamp,
+}) {
+  const {
+    trx, matchesLive, estimateBlock, sells, now,
+  } = mint;
   const lockedPriorRows = await trx('estimates')
     .whereIn('id', priorRows.map((row) => row.id))
     .orderBy('created_at', 'desc')
@@ -1017,55 +1070,65 @@ async function mintPricedEstimate({
   // transaction waited on its locks and repriced, so a quote that expired meanwhile would be
   // handed back as live.
   const live = liveRestartEstimate(lockedPriorRows, now());
-  if (live) {
-    const liveData = parseJson(live.estimate_data, {});
-    const cents = (v) => Math.round(Number(v || 0) * 100);
-    // Full-offer fingerprint, not just the three aggregates (codex GH r9
-    // P1): offsetting price changes across families can keep the totals
-    // identical while per-service application prices or the default
-    // option drifted — and acceptance converts the STORED estimate_data,
-    // so reuse requires the stored offer to EQUAL today's recompute:
-    // engine inputs, qualifiers, and the full server result.
-    // The frozen setup fee is part of the offer (codex pre-push P0): a quote
-    // minted before the freeze carries none, so its accept would bill the
-    // code constant instead of the fee its page shows.
-    // Both sides in their stored JSON form (codex pre-push P1): the live row
-    // went through JSON.stringify, which drops a key whose value is undefined
-    // (the property resolver leaves bedArea or palmCount unset), so today's
-    // offer drops it too. Else an identical second tap re-mints and releases
-    // the first quote's slot hold.
-    const offerFingerprint = (data) => stableStringify(JSON.parse(JSON.stringify({
-      engineInputs: data?.engineInputs ?? null,
-      priorQualifyingServices: Array.isArray(data?.priorQualifyingServices) ? [...data.priorQualifyingServices].sort() : [],
-      result: data?.result ?? null,
-      setupFeeQuote: data?.setupFeeQuote ?? null,
-    })));
-    // Same premises (codex pre-push P1): the offer fingerprint carries the
-    // property facts, not the street, so a quote minted before the account's
-    // address changed would hand back a link addressed to the old house. Its
-    // stored address must key to today's primary premises; else the lineage
-    // archives and a fresh quote is minted at the current address.
-    if (matchesLive(liveData)
-      && sameHome(linkage.normalizedEstimateStreet(live.address), primaryStreet)
-      && (!strictEvidence || sameHome(liveData?.[estimateBlock.key]?.premisesKey, primaryStreet))
-      && cents(monthlyTotal) === cents(live.monthly_total)
-      && cents(annualTotal) === cents(live.annual_total)
-      && cents(onetimeTotal) === cents(live.onetime_total)
-      && offerFingerprint(liveData) === offerFingerprint(estimateData)
-      // The page still sells its frozen snapshot (codex pre-push P0): the
-      // fingerprint omits sendSnapshot, and the page's tier selection can
-      // clear the bundle while inputs, result and totals stay the same. Such
-      // a quote would reprice on live rules, so it is re-minted instead.
-      && sells(liveData?.sendSnapshot?.pricingBundle, live, liveData)) {
-      return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
-    }
+  if (!live) return null;
+  const liveData = parseJson(live.estimate_data, {}) || {};
+  // Same premises (codex pre-push P1): the offer fingerprint carries the
+  // property facts, not the street, so a quote minted before the account's
+  // address changed would hand back a link addressed to the old house. Its
+  // stored address must key to today's primary premises; else the lineage
+  // archives and a fresh quote is minted at the current address.
+  const sameStamp = Object.entries(premisesStamp)
+    .every(([key, home]) => sameHome(liveData[estimateBlock.key]?.[key], home));
+  const { monthlyTotal, annualTotal, onetimeTotal } = offer.totals;
+  const sameTotals = [['monthly_total', monthlyTotal], ['annual_total', annualTotal], ['onetime_total', onetimeTotal]]
+    .every(([column, total]) => toCents(total) === toCents(live[column]));
+  if (matchesLive(liveData)
+    && sameHome(require('../estimate-property-linkage').normalizedEstimateStreet(live.address), primaryStreet)
+    && sameStamp
+    && sameTotals
+    && offerFingerprint(liveData) === offerFingerprint(estimateData)
+    // The page still sells its frozen snapshot (codex pre-push P0): the
+    // fingerprint omits sendSnapshot, and the page's tier selection can
+    // clear the bundle while inputs, result and totals stay the same. Such
+    // a quote would reprice on live rules, so it is re-minted instead.
+    && sells(liveData.sendSnapshot?.pricingBundle, live, liveData)) {
+    return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
   }
-  // The WHOLE unaccepted lineage, read FOR UPDATE (codex pre-push r16 P1):
-  // the delivery check and the archive below act on exactly these rows. An
-  // operator send claims a row with one UPDATE that refuses an archived row,
-  // so a claim either committed before this read (its status refuses the
-  // mint here) or waits on the lock and then finds the row archived.
-  // Query-shaped (not the limit-10 reuse read) so no straggler survives.
+  return null;
+}
+
+// Full-offer fingerprint, not just the three aggregates (codex GH r9
+// P1): offsetting price changes across families can keep the totals
+// identical while per-service application prices or the default
+// option drifted — and acceptance converts the STORED estimate_data,
+// so reuse requires the stored offer to EQUAL today's recompute:
+// engine inputs, qualifiers, and the full server result.
+// The frozen setup fee is part of the offer (codex pre-push P0): a quote
+// minted before the freeze carries none, so its accept would bill the
+// code constant instead of the fee its page shows.
+// Both sides in their stored JSON form (codex pre-push P1): the live row
+// went through JSON.stringify, which drops a key whose value is undefined
+// (the property resolver leaves bedArea or palmCount unset), so today's
+// offer drops it too. Else an identical second tap re-mints and releases
+// the first quote's slot hold.
+function offerFingerprint(data) {
+  return stableStringify(JSON.parse(JSON.stringify({
+    engineInputs: data.engineInputs ?? null,
+    priorQualifyingServices: Array.isArray(data.priorQualifyingServices) ? [...data.priorQualifyingServices].sort() : [],
+    result: data.result ?? null,
+    setupFeeQuote: data.setupFeeQuote ?? null,
+  })));
+}
+
+// Retire the replaced lineage. The WHOLE unaccepted lineage, read FOR UPDATE (codex pre-push r16 P1):
+// the delivery check and the archive below act on exactly these rows. An
+// operator send claims a row with one UPDATE that refuses an archived row,
+// so a claim either committed before this read (its status refuses the
+// mint here) or waits on the lock and then finds the row archived.
+// Query-shaped (not the limit-10 reuse read) so no straggler survives.
+async function retireLineage({
+  trx, fresh, source, nowDate, releaseEstimateHolds,
+}) {
   const lineage = await trx('estimates')
     .where({ customer_id: fresh.id, source })
     .whereNull('archived_at')
@@ -1099,19 +1162,29 @@ async function mintPricedEstimate({
   for (const id of archivedIds) {
     await releaseEstimateHolds({ estimateId: id, database: trx });
   }
+}
 
+// Publish the priced quote: insert the row, freeze its send snapshot, write the
+// timeline note. Returns { estimateId, token, url, reused: false }.
+async function publishMintedEstimate(mint, { offer, estimateData }) {
+  const {
+    trx, fresh, source, families, snapshotSells, sells, note, logTag, logDetail, handMessage,
+    nowDate, now, randomBytes, mintDeps: { persistence, pricingAi, buildEstimateSendSnapshot },
+  } = mint;
+  const { monthlyTotal, annualTotal, onetimeTotal } = offer.totals;
+  const orNull = (value) => value || null;
   const token = randomBytes(16).toString('hex');
   const [created] = await trx('estimates').insert({
     estimate_data: JSON.stringify(estimateData),
-    address: pricingAi.addressForCustomer(fresh) || null,
+    address: orNull(pricingAi.addressForCustomer(fresh)),
     customer_id: fresh.id,
-    customer_name: `${fresh.first_name || ''} ${fresh.last_name || ''}`.trim() || null,
-    customer_phone: fresh.phone || null,
-    customer_email: fresh.email || null,
+    customer_name: orNull([fresh.first_name, fresh.last_name].filter(Boolean).join(' ').trim()),
+    customer_phone: orNull(fresh.phone),
+    customer_email: orNull(fresh.email),
     monthly_total: monthlyTotal,
     annual_total: annualTotal,
     onetime_total: onetimeTotal,
-    waveguard_tier: serverTier,
+    waveguard_tier: offer.serverTier,
     token,
     expires_at: persistence.estimateExpiresAt(now),
     notes: null,
@@ -1128,8 +1201,8 @@ async function mintPricedEstimate({
     category: fresh.property_type === 'commercial' ? 'COMMERCIAL' : 'RESIDENTIAL',
     pricing_authority: 'SERVER',
     server_computed_price: annualTotal > 0 ? annualTotal : null,
-    ...(typeof recomputed.serverResult?.engineVersion === 'string'
-      ? { pricing_version: recomputed.serverResult.engineVersion.slice(0, 80) }
+    ...(typeof estimateData.result?.engineVersion === 'string'
+      ? { pricing_version: estimateData.result.engineVersion.slice(0, 80) }
       : {}),
   }).returning('*');
 
@@ -1141,10 +1214,11 @@ async function mintPricedEstimate({
   // delivered (the triage sweep's quote_promised witness, the
   // updated-wording check).
   const withSnapshot = await buildEstimateSendSnapshot(created, now, { delivered: false });
-  if (!withSnapshot?.sendSnapshot || withSnapshot.sendSnapshot.pricingBundleError) {
-    throw new Error(`${logTag} send snapshot did not freeze pricing${withSnapshot?.sendSnapshot?.pricingBundleError ? `: ${withSnapshot.sendSnapshot.pricingBundleError}` : ''}`);
+  const snapshot = withSnapshot?.sendSnapshot;
+  if (!snapshot || snapshot.pricingBundleError) {
+    throw new Error(`${logTag} send snapshot did not freeze pricing${snapshot?.pricingBundleError ? `: ${snapshot.pricingBundleError}` : ''}`);
   }
-  if (!sells(withSnapshot.sendSnapshot.pricingBundle, created, withSnapshot)) {
+  if (!sells(snapshot.pricingBundle, created, withSnapshot)) {
     if (!snapshotSells) throw new Error(`${logTag} send snapshot does not match the minted totals`);
     throw new RestartUnavailableError('pricing_unavailable', handMessage);
   }
@@ -1523,8 +1597,9 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   let premisesStreet;
   try {
     const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data', 'address');
+    const customerId = row?.customer_id;
     const planStart = parseJson(row?.estimate_data, {})?.planStart;
-    quoted = Array.isArray(planStart?.families) ? planStart.families : null;
+    quoted = Array.isArray(planStart?.families) ? planStart.families : [];
     quotedStreet = require('../estimate-property-linkage').normalizedEstimateStreet(row?.address);
     // The home the mint priced (codex pre-push P0): a staff address change rewrites the address
     // column above on an open quote, but never this key.
@@ -1537,13 +1612,11 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     // turf-profile save that holds that key and waits for the row; the
     // converter's second acquire is a re-entrant no-op. The whole row, as the
     // mint reads it: the premises proof needs the address and the multi-home flag.
-    await lockCustomerComms(trx, row?.customer_id);
-    if (row?.customer_id) {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(row.customer_id)]);
+    await lockCustomerComms(trx, customerId);
+    if (customerId) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+      fresh = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
     }
-    fresh = row?.customer_id
-      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first()
-      : null;
     if (fresh) {
       commercial = require('../pricing-engine/commercial-helpers').isCommercialProperty({ propertyType: fresh.property_type });
       ownsPlan = await ownsAnyRecurringService(trx, fresh.id);
@@ -1555,7 +1628,7 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   }
   const changed = () => refuse('This account changed since this estimate was created — please go back to your portal for a current price.');
   // A plan_start estimate without its quoted families (or its customer) is malformed — never accept it.
-  if (!quoted || !quoted.length || !fresh) throw changed();
+  if (!quoted.length || !fresh) throw changed();
   // The mint's bar again (the price was standalone and residential): no plan
   // membership on the row, no commercial type, no live recurring service of
   // any kind, and the one premises the estimate is addressed to and was priced for.
