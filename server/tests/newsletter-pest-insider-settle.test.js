@@ -375,7 +375,7 @@ test('a failed issue whose send became sent (a Resume that finished, or delivery
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
     errors: [correction.charAt(0).toUpperCase() + correction.slice(1)], outcome: true,
-  }), { dedupeKey: 'pest-insider-recovered:issue-1' });
+  }), { dedupeKey: 'pest-insider-recovered:issue-1:after-2026-12-03T12:30:00.000Z' });
   expect(writes).toEqual([
     {
       table: 'pest_insider_issues',
@@ -383,12 +383,65 @@ test('a failed issue whose send became sent (a Resume that finished, or delivery
       patch: expect.objectContaining({
         status: 'sent',
         reason: correction,
-        // The failure stays on record as told; the correction is told next.
-        diagnostics: { sql: "(coalesce(diagnostics, '{}'::jsonb) - 'outcomeToldAt') || ?::jsonb", bindings: [JSON.stringify({ failureToldAt: '2026-12-03T12:30:00.000Z' })] },
+        // The failure stays on record as told; the correction is told next. A recovery starts over:
+        // the marks of the alerts before it are cleared.
+        diagnostics: { sql: RECOVERY_SQL, bindings: [JSON.stringify({ failureToldAt: '2026-12-03T12:30:00.000Z' })] },
       }),
     },
-    toldMark('issue-1', 'sent'),
+    // Its own mark: the issue stays on the lists, read as any sent issue is.
+    toldMark('issue-1', 'sent', IN_WINDOW, 'recoveredToldAt'),
   ]);
+});
+
+const RECOVERY_SQL = "(coalesce(diagnostics, '{}'::jsonb) - array['outcomeToldAt', 'blockedToldAt', 'recoveredToldAt']) || ?::jsonb";
+// Recovered from a failure the owner was told at 12:30, and told of the correction.
+const TOLD_RECOVERED = {
+  ...ISSUE, status: 'sent', reason: 'went out after all: 85 readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume',
+  diagnostics: { failureToldAt: '2026-12-03T12:30:00.000Z', recoveredToldAt: '2026-12-03T12:45:00.000Z' },
+};
+
+test.each([
+  ["a block after its Resume gets its own alert, keyed by the failure it recovered from (one keyed by the issue alone was told before it)", { got: 85, left: 3 }, [
+    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'sent', reason: BLOCKED_REASON }) },
+    toldMark('issue-1', 'sent', IN_WINDOW, 'blockedToldAt'),
+  ], 'pest-insider-blocked:issue-1:after-2026-12-03T12:30:00.000Z'],
+  ['no reader got it after all (every one it reached bounced later): it fails again, with a new alert', { got: 0, left: 0, refused: 85 }, [
+    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it' }) },
+    toldMark('issue-1', 'failed'),
+  ], 'pest-insider-outcome:issue-1:after-2026-12-03T12:30:00.000Z'],
+  ['nobody left to resume: its reason clears, quietly, as any sent issue\'s does', { got: 85, left: 0 }, CLEARED, null],
+])('a recovered issue whose correction was told is still read: %s', async (_label, counts, expected, alertKey) => {
+  const { writes } = fakeDb({ issues: [TOLD_RECOVERED], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(writes).toEqual(expected);
+  if (alertKey) expect(mockTrigger.mock.calls.map((call) => call[2])).toEqual([{ dedupeKey: alertKey }]);
+  else expect(mockTrigger).not.toHaveBeenCalled();
+});
+
+test('a second recovery starts over: it clears every earlier mark, records the failure it recovered from, and its correction has a new key', async () => {
+  const failedAgain = {
+    ...ISSUE, status: 'failed', reason: 'did not go out: its send ended, and no reader got it',
+    diagnostics: { ...TOLD_RECOVERED.diagnostics, blockedToldAt: '2026-12-03T13:00:00.000Z', outcomeToldAt: '2026-12-03T14:00:00.000Z' },
+  };
+  const { writes } = fakeDb({ issues: [failedAgain], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(writes[0].patch.diagnostics).toEqual({ sql: RECOVERY_SQL, bindings: [JSON.stringify({ failureToldAt: '2026-12-03T14:00:00.000Z' })] });
+  expect(mockTrigger.mock.calls.map((call) => call[2])).toEqual([{ dedupeKey: 'pest-insider-recovered:issue-1:after-2026-12-03T14:00:00.000Z' }]);
+  expect(writes[1]).toEqual(toldMark('issue-1', 'sent', IN_WINDOW, 'recoveredToldAt'));
+});
+
+test('a failure after a recovery whose worker stopped before marking it told is found by its own key', async () => {
+  const failedAgain = { ...ISSUE, status: 'failed', reason: 'did not go out: its send ended, and no reader got it', diagnostics: { ...TOLD_RECOVERED.diagnostics } };
+  const bells = [
+    { dedupeKey: 'pest-insider-outcome:issue-1', created_at: new Date('2026-12-03T12:30:00Z') },
+    { dedupeKey: 'pest-insider-outcome:issue-1:after-2026-12-03T12:30:00.000Z', created_at: new Date('2026-12-03T14:00:00Z') },
+  ];
+  const { writes } = fakeDb({ issues: [failedAgain], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 }, bells });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(writes[0].patch.diagnostics.bindings).toEqual([JSON.stringify({ failureToldAt: '2026-12-03T14:00:00.000Z' })]);
 });
 
 test('a send whose count says nobody, but whose ledger shows every planned reader got it, is sent, quietly', async () => {
@@ -405,7 +458,7 @@ test('a worker that delivered the failure alert but stopped before marking the r
   const { writes } = fakeDb({ issues: [failed], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 }, bells });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
-  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.anything(), { dedupeKey: 'pest-insider-recovered:issue-1' });
+  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.anything(), { dedupeKey: 'pest-insider-recovered:issue-1:after-2026-12-03T12:30:00.000Z' });
   expect(writes[0].patch.diagnostics.bindings).toEqual([JSON.stringify({ failureToldAt: '2026-12-03T12:30:00.000Z' })]);
 });
 
@@ -423,8 +476,8 @@ test('a correction that reached no one is told the next minute, in the words the
   const { writes } = fakeDb({ issues: [recovered], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
-  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({ errors: ['Went out after all: 85 readers got it'] }), { dedupeKey: 'pest-insider-recovered:issue-1' });
-  expect(writes).toEqual([toldMark('issue-1', 'sent')]);
+  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({ errors: ['Went out after all: 85 readers got it'] }), { dedupeKey: 'pest-insider-recovered:issue-1:after-2026-12-03T12:30:00.000Z' });
+  expect(writes).toEqual([toldMark('issue-1', 'sent', IN_WINDOW, 'recoveredToldAt')]);
 });
 
 test('a told failed issue whose send is still not sent is not read again', async () => {
@@ -598,10 +651,11 @@ test('a failed row past the lookback is no longer listed', async () => {
   lists[2].whereExists.mock.calls[0][0].call(sendQuery);
   expect(sendQuery.where).toHaveBeenCalledWith('newsletter_sends.status', 'sent');
   expect(sendQuery.whereRaw).toHaveBeenCalledWith("newsletter_sends.updated_at >= now() - ?::int * interval '1 day'", [14]);
-  // A correction that reached no one is listed by the recovery's own write, not the issue date.
+  // A recovered issue is listed by its own last change, not the issue date, also once its
+  // correction was told (it is read as any sent issue is).
   expect(lists[3].where).toHaveBeenCalledWith({ status: 'sent' });
   expect(lists[3].whereRaw).toHaveBeenCalledWith("diagnostics->>'failureToldAt' is not null");
-  expect(lists[3].whereRaw).toHaveBeenCalledWith("diagnostics->>'outcomeToldAt' is null");
+  expect(lists[3].whereRaw).not.toHaveBeenCalledWith("diagnostics->>'outcomeToldAt' is null");
   expect(lists[3].whereRaw).toHaveBeenCalledWith("updated_at >= now() - ?::int * interval '1 day'", [14]);
   expect(lists[3].whereRaw).not.toHaveBeenCalledWith("issue_date >= (now() at time zone 'America/New_York')::date - ?::int", [14]);
 });
