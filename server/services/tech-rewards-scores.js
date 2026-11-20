@@ -10,28 +10,18 @@
  * number while any part is null (a bonus is never computed from partial data).
  *
  * Definitions (a window is two ET calendar dates, both days included)
- *   onTime       Of the technician's completed service_records with a service_report_v1
- *                report dated in the window, the share whose report went out within
- *                REPORT_ON_TIME_HOURS of the record being created. "Went out" reuses the
- *                sources the Intelligence Bar report-engagement read uses
- *                (intelligence-bar/dashboard-tools.js): the earliest of a sent
- *                service_report_deliveries row, a sent service_report_ready email (key
- *                service_report_ready:<record>:<role>[:<suffix>], matched on the record segment),
- *                the confirmed video recap text (service_recaps.sent_at), the completion text
- *                (completionSmsDeferredDeliveredAt, else sentSmsAt, when
- *                completionSmsStatus is 'sent'), and the combined-visit summary send
- *                (visit_effects completion_sms / completion_email, as closeout-status.js reads
- *                it; the send record counts even if the summary link is revoked later).
- *                No send on record counts as not on time. An on-time send on any channel credits
- *                the record. A record with a malformed text timestamp and no on-time send is
- *                unknown (it may have gone out on time): the whole part is null (missing
- *                data), never late. Records that expect no customer report are left out, by the
- *                customer summary's own rule (publishableSummaryItems in
- *                visit-completion-summary.js: no backfill, only an auto_send or absent
- *                typedReportDelivery, so 'internal_only' and 'disabled' are out) and by the
- *                frozen internalOnlyCompletion flag.
- *                bi-tech-scorecard.js carries no on-time rule; the 24 hours is this module's
- *                own, in one constant.
+ *   onTime       Of the technician's completed service_records with a service_report_v1 report dated
+ *                in the window, the share whose customer report went out within REPORT_ON_TIME_HOURS
+ *                of the record being created. Everything about delivery comes from ONE reader,
+ *                completion-record-invariants.js deliveryEvidenceForRecords, which applies the same
+ *                decisions as the completion-record detectors: the canonical sibling, the frozen
+ *                closeout requirements with the legacy catalog fallback, backfill and delivery
+ *                posture, project-backed visits, and every confirmed send channel (report row,
+ *                report-ready email, completion text, provider-confirmed pest-recap text, video
+ *                recap, combined-visit summary). Exempt records are left out. A confirmed send with
+ *                no readable time and no other on-time proof makes the whole part null (unknown,
+ *                never late). No confirmed send counts as not on time. bi-tech-scorecard.js
+ *                carries no on-time rule; the 24 hours is this module's own, in one constant.
  *   audit        Share of the technician's tech_protocol_audits rows with result 'match',
  *                for audit months in the window.
  *   callbacks    callbacksPer100 = callbacks credited to the technician (the source-visit
@@ -48,7 +38,7 @@ const db = require('../models/db');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const calc = require('./tech-rewards-calc');
 const { callbackCreditByTechnician } = require('./callback-credit');
-const { publishableSummaryItems } = require('./visit-completion-summary');
+const { deliveryEvidenceForRecords } = require('./completion-record-invariants');
 
 const { DEFAULT_WEIGHTS, DEFAULT_CUT_LINES, seasonWindow, weightedScore, scoreBand } = calc;
 
@@ -205,97 +195,41 @@ async function saveSettings(input, actor = null, conn = db) {
 // ---------------------------------------------------------------------------
 // Score parts. Each: (technicianId, { from, to }, conn) -> 0..100 (2 decimals) or null.
 
-// Per cohort record: the first send from the stored send records, and the completion text's
-// raw timestamp. The text timestamp is checked in JS (firstTextSend), never cast in SQL: a bad
-// stored value must not fail the whole read.
-const ON_TIME_SQL = `
-  WITH cohort AS (
-    SELECT id, scheduled_service_id, created_at, structured_notes
-      FROM service_records
-     WHERE technician_id = ?
-       AND status = 'completed'
-       AND service_date >= ?::date AND service_date <= ?::date
-       AND report_template_version = 'service_report_v1'
-  ),
-  sends AS (
-    SELECT service_record_id, MIN(sent_at) AS first_sent_at
-      FROM (
-        SELECT d.service_record_id, d.sent_at
-          FROM service_report_deliveries d JOIN cohort c ON c.id = d.service_record_id
-         WHERE d.status = 'sent' AND d.sent_at IS NOT NULL
-        UNION ALL
-        SELECT c.id, m.sent_at
-          FROM email_messages m
-          JOIN cohort c ON split_part(m.idempotency_key, ':', 2) = c.id::text
-         WHERE split_part(m.idempotency_key, ':', 1) = 'service_report_ready'
-           AND m.sent_at IS NOT NULL -- the recorded send time stands whatever the status became later (unsubscribed, spam_report, ...)
-        UNION ALL
-        -- the video recap text: service_recaps.sent_at is set only on provider confirmation
-        -- (recap-delivery.js; completion-record-invariants.js reads it the same way)
-        SELECT c.id, rc.sent_at
-          FROM cohort c
-          JOIN service_recaps rc ON rc.scheduled_service_id = c.scheduled_service_id
-         WHERE rc.sent_at IS NOT NULL
-        UNION ALL
-        -- a combined visit: ONE summary text or email for every member (visit_effects, as closeout-status
-        -- reads it). The send record is the evidence: a link revoked later does not undo a delivery.
-        SELECT c.id, e.sent_at
-          FROM cohort c
-          JOIN visit_completion_packet_items i ON i.service_record_id = c.id AND i.status = 'done'
-          JOIN visit_completion_packets p ON p.id = i.packet_id AND p.status IN ('processing', 'done')
-          JOIN visit_effects e ON e.visit_id = p.visit_id AND e.effect_type IN ('completion_sms', 'completion_email')
-         WHERE e.status = 'sent' AND e.sent_at IS NOT NULL
-      ) snd
-     GROUP BY service_record_id
-  )
-  SELECT c.id, c.created_at, c.structured_notes, s.first_sent_at,
-         CASE WHEN c.structured_notes->>'completionSmsStatus' = 'sent'
-              THEN COALESCE(c.structured_notes->>'completionSmsDeferredDeliveredAt', c.structured_notes->>'sentSmsAt') END AS text_sent_at
-    FROM cohort c LEFT JOIN sends s ON s.service_record_id = c.id`;
-
-const TEXT_TS_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})$/;
-
-// The text's send time as ms, or null when the value is absent or not a real timestamp
-// (a calendar date that does not exist, an hour over 23, no zone).
-function firstTextSend(raw) {
-  const m = typeof raw === 'string' ? TEXT_TS_RE.exec(raw) : null;
-  if (!m) return null;
-  const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
-  const calendar = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
-  const real = calendar.getUTCFullYear() === year && calendar.getUTCMonth() === month - 1 && calendar.getUTCDate() === day
-    && hour <= 23 && minute <= 59 && second <= 59;
-  const ms = real ? Date.parse(raw) : NaN;
-  return Number.isFinite(ms) ? ms : null;
-}
+// The completed report records the technician owes a report on. What each record's customer delivery
+// looked like (owed at all, which confirmed sends, when) is decided in ONE place:
+// completion-record-invariants.js deliveryEvidenceForRecords.
+const ON_TIME_COHORT_SQL = `
+  SELECT id, created_at
+    FROM service_records
+   WHERE technician_id = ?
+     AND status = 'completed'
+     AND service_date >= ?::date AND service_date <= ?::date
+     AND report_template_version = 'service_report_v1'`;
 
 /**
- * On-time share, or null when there is no record to measure OR a record's only send evidence is a
- * malformed completion-text timestamp (unreadable is not late: the part counts as missing data).
+ * On-time share, or null when there is nothing to measure OR a record's on-time answer is unknown:
+ * a confirmed send with no readable time and no other on-time proof (a send that may have been on
+ * time is never counted late). Exempt records (no customer report owed) are left out; any confirmed
+ * send within REPORT_ON_TIME_HOURS of the record being created is on time; otherwise late.
  */
 async function readOnTime(rawTechnicianId, window, conn = db) {
   const technicianId = requireTechnician(rawTechnicianId);
   const { from, to } = requireWindow(window);
-  const { rows } = await conn.raw(ON_TIME_SQL, [technicianId, from, to]);
+  const { rows } = await conn.raw(ON_TIME_COHORT_SQL, [technicianId, from, to]);
   if (!rows.length) return null;
+  const evidence = await deliveryEvidenceForRecords(rows.map((row) => row.id), conn);
   const limitMs = REPORT_ON_TIME_HOURS * 3600000;
-  // Records that expect no customer report are left out. One definition, the customer summary's own
-  // (visit-completion-summary.js): never a backfill, only an auto_send (or absent) report posture;
-  // plus the frozen internal-only flag.
-  const owed = rows.filter((row) => publishableSummaryItems([row]).length > 0 && row.structured_notes?.internalOnlyCompletion !== true);
-  if (!owed.length) return null;
+  let owed = 0;
   let onTime = 0;
-  for (const row of owed) {
-    const textMs = firstTextSend(row.text_sent_at);
-    const tableMs = row.first_sent_at ? new Date(row.first_sent_at).getTime() : null;
-    const first = [tableMs, textMs].filter((ms) => ms !== null).sort((a, b) => a - b)[0];
+  for (const row of rows) {
+    const found = evidence.get(String(row.id).toLowerCase());
+    if (found.exempt) continue;
+    owed += 1;
     const deadline = new Date(row.created_at).getTime() + limitMs;
-    if (first !== undefined && first <= deadline) {
-      onTime += 1; // an on-time send on any channel credits the record
-    } else if (row.text_sent_at != null && textMs === null) {
-      return null; // the unreadable text may have gone out on time: unknown, not late
-    }
+    if (found.firstConfirmedSendAt && found.firstConfirmedSendAt.getTime() <= deadline) onTime += 1;
+    else if (found.confirmedWithoutTime) return null; // may have gone out on time: unknown, not late
   }
-  return percent(onTime, owed.length);
+  return owed ? percent(onTime, owed) : null;
 }
 
 async function readAudit(rawTechnicianId, window, conn = db) {
@@ -314,8 +248,10 @@ async function readAudit(rawTechnicianId, window, conn = db) {
 async function readCallbacks(rawTechnicianId, window, conn = db) {
   const technicianId = requireTechnician(rawTechnicianId);
   const { from, to } = requireWindow(window);
+  // A visit is ONE scheduled service even when the recap and dispatch rails left sibling records for it
+  // (an unlinked record is its own visit). A customer_declined visit performed no service.
   const visitRow = (await conn.raw(
-    `SELECT COUNT(*) AS visits FROM service_records
+    `SELECT COUNT(DISTINCT COALESCE(scheduled_service_id::text, id::text)) AS visits FROM service_records
       WHERE technician_id = ? AND status = 'completed' AND is_callback IS NOT TRUE
         AND COALESCE(structured_notes->>'visitOutcome', '') <> 'customer_declined'
         AND service_date >= ?::date AND service_date <= ?::date`,
@@ -323,7 +259,7 @@ async function readCallbacks(rawTechnicianId, window, conn = db) {
   )).rows[0];
   const visits = toCount(visitRow?.visits);
   if (!visits) return null;
-  const credited = await callbackCreditByTechnician(conn, { start: from, endDate: to });
+  const credited = await callbackCreditByTechnician(conn, { start: from, endDate: to, distinctVisits: true, performedSourcesOnly: true });
   const callbacks = toCount(credited.get(technicianId));
   // score = 100 - 100 x per100 / CALLBACK_RATE_AT_ZERO, per100 = 100 x callbacks / visits, all in
   // integers: hundredths = (10000 x visits - 10000 x 100 x callbacks / RATE) / visits, half up once.

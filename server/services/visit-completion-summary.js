@@ -1342,7 +1342,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   return { state: pending || stampOwed ? 'delivery_pending' : unknown ? 'delivery_review' : 'delivered' };
 }
 
-module.exports = { publishableSummaryItems, summarySmsRecipient, VISIT_SUMMARY_TOKEN_RE, planSummaryBillingLink, summaryLinkTextStarted, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
+module.exports = { summarySmsRecipient, VISIT_SUMMARY_TOKEN_RE, planSummaryBillingLink, summaryLinkTextStarted, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
   retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,

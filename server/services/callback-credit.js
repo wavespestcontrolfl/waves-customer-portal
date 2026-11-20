@@ -25,14 +25,17 @@ const LOOKBACK_DAYS = 60;
 
 /**
  * Callback counts by credited technician for callbacks dated start..endDate
- * (YYYY-MM-DD, inclusive). Returns a Map: technician id (string) or null
+ * (YYYY-MM-DD, inclusive). Two opt-in options for the Tech Rewards score, off for every other reader:
+ * distinctVisits counts sibling callback records of one scheduled service once, and performedSourcesOnly
+ * never takes a customer_declined visit as the source a callback corrects. Returns a Map: technician id (string) or null
  * (no technician anywhere) -> count.
  */
-async function callbackCreditByTechnician(conn, { start, endDate }) {
+async function callbackCreditByTechnician(conn, { start, endDate, distinctVisits = false, performedSourcesOnly = false }) {
   const result = await conn.raw(`
     SELECT cb.id AS callback_id,
            cb.service_type AS callback_type,
            cb.technician_id AS callback_tech_id,
+           ${distinctVisits ? 'COALESCE(cb.scheduled_service_id::text, cb.id::text)' : 'NULL'} AS callback_visit,
            sr.technician_id AS source_tech_id,
            sr.service_type AS source_type
       FROM service_records cb
@@ -40,7 +43,8 @@ async function callbackCreditByTechnician(conn, { start, endDate }) {
         ON sr.customer_id = cb.customer_id
        AND sr.id <> cb.id
        AND sr.is_callback IS NOT TRUE
-       AND sr.technician_id IS NOT NULL
+       AND sr.technician_id IS NOT NULL${performedSourcesOnly ? `
+       AND COALESCE(sr.structured_notes->>'visitOutcome', '') <> 'customer_declined'` : ''}
        AND (sr.service_date < cb.service_date
             OR (sr.service_date = cb.service_date AND sr.created_at < cb.created_at))
        AND sr.service_date >= cb.service_date - CAST(? AS integer)
@@ -55,7 +59,7 @@ async function callbackCreditByTechnician(conn, { start, endDate }) {
   // candidate in the callback's category is its source.
   const credited = new Map();
   for (const row of rows) {
-    const id = String(row.callback_id);
+    const id = distinctVisits ? String(row.callback_visit) : String(row.callback_id);
     let entry = credited.get(id);
     if (!entry) {
       entry = { techId: row.callback_tech_id ?? null, category: classifyServiceCategory(row.callback_type), found: false };

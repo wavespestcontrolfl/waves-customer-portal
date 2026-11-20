@@ -55,7 +55,7 @@ describe('tech rewards scores input checks', () => {
   async function visit(technicianId, fields = {}) {
     const [row] = await db('service_records').insert({
       technician_id: technicianId, customer_id: fields.customer_id || randomUUID(), status: 'completed',
-      service_type: 'Quarterly Pest Control', service_date: '2026-04-10', report_template_version: 'service_report_v1',
+      service_type: 'Quarterly Pest Control', service_date: '2026-04-10', report_template_version: 'service_report_v1', report_view_token: 'fixture-token',
       created_at: ts('2026-04-10T15:00:00Z'), ...fields,
     }).returning('*');
     return row;
@@ -76,11 +76,47 @@ describe('tech rewards scores input checks', () => {
     await db.schema.withSchema(mockSchema).createTable('scheduled_services', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
       t.uuid('technician_id');
+      t.uuid('service_id');
+      t.text('service_type');
+      t.timestamp('completed_at', { useTz: true });
+    });
+    await db.schema.withSchema(mockSchema).createTable('projects', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('scheduled_service_id');
+      t.uuid('service_record_id');
+    });
+    await db.schema.withSchema(mockSchema).createTable('services', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.text('name');
+      t.boolean('requires_service_report');
+      t.boolean('requires_customer_notice');
+      t.boolean('requires_application_log');
+      t.text('closeout_requirements_source');
+    });
+    await db.schema.withSchema(mockSchema).createTable('service_completion_attempts', (t) => {
+      t.uuid('service_id');
+      t.string('status', 20);
+      t.uuid('service_record_id');
+      t.timestamp('updated_at', { useTz: true }).defaultTo(db.fn.now());
+    });
+    await db.schema.withSchema(mockSchema).createTable('messaging_audit_log', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.text('audience');
+      t.text('purpose');
+      t.text('channel');
+      t.jsonb('metadata');
+      t.timestamp('sent_at', { useTz: true });
+      t.text('blocked_code');
+      t.text('provider_message_id');
+      t.text('provider');
     });
     await db.schema.withSchema(mockSchema).createTable('service_records', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
       t.uuid('technician_id');
       t.uuid('scheduled_service_id');
+      t.text('report_view_token');
+      t.text('completion_source');
+      t.timestamp('recap_sms_sent_at', { useTz: true });
       t.uuid('customer_id');
       t.text('status');
       t.text('service_type');
@@ -157,6 +193,10 @@ describe('tech rewards scores input checks', () => {
     await db('tech_protocol_audits').del();
     await db('tech_owner_ratings').del();
     await db('equipment_checks').del();
+    await db('messaging_audit_log').del();
+    await db('service_completion_attempts').del();
+    await db('projects').del();
+    await db('services').del();
     await db('service_recaps').del();
     await db('visit_completion_packet_items').del();
     await db('visit_completion_packets').del();
@@ -350,6 +390,49 @@ describe('tech rewards scores input checks', () => {
       expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
     });
 
+    test('onTime: a confirmed completion text with no stored time is unknown unless another send is on time', async () => {
+      const record = await visit(tech, { structured_notes: { completionSmsStatus: 'sent' } });
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull();
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-12T16:00:00Z') }); // late email
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull();
+      await db('email_messages').del();
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-10T16:00:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+    });
+
+    test('onTime: a provider-confirmed pest recap text on a sibling record credits the visit; consent-blocked and waived visits are left out', async () => {
+      // two records for one visit: the recap text is keyed to the sibling, the other record has no send of its own
+      const svc = await scheduled(tech);
+      const first = await visit(tech, { scheduled_service_id: svc.id });
+      const sibling = await visit(tech, { scheduled_service_id: svc.id, structured_notes: { completionSmsStatus: 'skipped_recap_sms_already_sent' } });
+      await db('messaging_audit_log').insert([
+        { audience: 'customer', purpose: 'service_completion', channel: 'sms', metadata: { original_message_type: 'pest_recap', service_record_id: sibling.id },
+          sent_at: ts('2026-04-10T16:00:00Z'), provider_message_id: `SM${'a'.repeat(32)}` },
+        // a gate-blocked synthetic send is no delivery
+        { audience: 'customer', purpose: 'service_completion', channel: 'sms', metadata: { original_message_type: 'pest_recap', service_record_id: first.id },
+          sent_at: ts('2026-04-10T15:10:00Z'), provider_message_id: 'synthetic-blocked' },
+      ]);
+      expect(first.id).toBeTruthy();
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100); // both records of the visit share the recap evidence
+      // a consent-blocked text with no send: not owed
+      await visit(tech, { structured_notes: { completionSmsStatus: 'blocked' } });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+      // a frozen closeout snapshot that waives BOTH the report and the notice: not owed; waiving only one: owed
+      const snap = (report, notice) => ({ v: 1, source: 'catalog', requiresServiceReport: report, requiresApplicationLog: false, requiresCustomerSignature: false,
+        requiresCustomerNotice: notice, requiresLicense: false, requiredPhotoCount: 0 });
+      const waivedSvc = await scheduled(tech);
+      await visit(tech, { scheduled_service_id: waivedSvc.id, structured_notes: { closeoutRequirements: snap(false, false) } });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+      const owedSvc = await scheduled(tech);
+      await visit(tech, { scheduled_service_id: owedSvc.id, structured_notes: { closeoutRequirements: snap(false, true) } });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(66.67); // 2 on time of 3 owed (the new one has no send)
+      // a project-backed visit is judged on the project report path, not here
+      const projectSvc = await scheduled(tech);
+      const projectRecord = await visit(tech, { scheduled_service_id: projectSvc.id });
+      await db('projects').insert({ scheduled_service_id: projectSvc.id, service_record_id: projectRecord.id });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(66.67);
+    });
+
     test('audit: match share of audited visits in the window months', async () => {
       expect(await scores.readAudit(tech, WINDOW)).toBeNull();
       const add = async (month, result, technicianId = tech) => db('tech_protocol_audits').insert({
@@ -405,6 +488,40 @@ describe('tech rewards scores input checks', () => {
       await visit(other, { customer_id: customer, service_date: '2026-04-20', is_callback: true });
       // 1 callback over 4 counted visits (the declined one is out) = 25 per 100: clamped to 0 at 10 per 100
       expect(await scores.readCallbacks(tech, WINDOW)).toBe(0);
+    });
+
+    test('callbacks: sibling records of one visit count once, in the visits and in the callbacks', async () => {
+      const customers = Array.from({ length: 10 }, () => randomUUID());
+      for (const customer_id of customers) {
+        const svc = await scheduled(tech);
+        await visit(tech, { customer_id, scheduled_service_id: svc.id, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') });
+        await visit(tech, { customer_id, scheduled_service_id: svc.id, service_date: '2026-04-01', created_at: ts('2026-04-01T14:05:00Z') }); // sibling rail
+      }
+      // 10 visits (20 records), no callbacks
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(100);
+      // one callback visit with two sibling callback records = ONE callback in 10 visits = 10 per 100 -> 0
+      const cbSvc = await scheduled(other);
+      for (const minute of ['14:00', '14:05']) {
+        await visit(other, { customer_id: customers[0], scheduled_service_id: cbSvc.id, is_callback: true, service_date: '2026-04-20', created_at: ts(`2026-04-20T${minute}:00Z`) });
+      }
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0);
+      // 20 visits make one callback 5 per 100 = 50: counting records instead would read 10 visits (0) or 40 (75)
+      for (const customer_id of customers) {
+        const svc = await scheduled(tech);
+        await visit(tech, { customer_id, scheduled_service_id: svc.id, service_date: '2026-05-01', created_at: ts('2026-05-01T14:00:00Z') });
+      }
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(50);
+    });
+
+    test('callbacks: a declined visit by another technician is never the source a callback corrects', async () => {
+      const customer_id = randomUUID();
+      await visit(tech, { customer_id, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') }); // performed the service
+      await visit(other, { customer_id, service_date: '2026-04-10', created_at: ts('2026-04-10T14:00:00Z'), structured_notes: { visitOutcome: 'customer_declined' } });
+      await visit(tech, { customer_id: randomUUID(), service_date: '2026-04-02', created_at: ts('2026-04-02T14:00:00Z') });
+      await visit(other, { customer_id, service_date: '2026-04-20', is_callback: true }); // callback after both visits
+      // the callback corrects tech's performed visit (not other's declined one): 1 callback in 2 visits
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0);
+      expect(await scores.readCallbacks(other, WINDOW)).toBeNull(); // only a declined visit: no data
     });
 
     test('every read takes an uppercase technician id like the lowercase one', async () => {
