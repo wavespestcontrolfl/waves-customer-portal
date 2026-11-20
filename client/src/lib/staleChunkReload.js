@@ -44,7 +44,10 @@
 // pages. The staff rules apply while either is a staff page (staffTab), and
 // a page that never reloads by itself bars the reload whether it is in view
 // or at the address. A page whose code is missing reloads only while the
-// address names its route: after Back, its reload would open the next page.
+// address names that page: after Back, its reload would open the next page.
+// Two paths name one page when they decode alike, case kept (decodedPath):
+// the router keeps a link's path as written, while the browser encodes the
+// address, and a route's parameters keep their case.
 //
 // A page can hold unsaved work in component state that no hold names. So a
 // staff tab used on the page in view since it came into view (watchPageUse)
@@ -64,7 +67,7 @@
 // reopened (chunkReloadAttempted): a route can load in parts, and the part
 // that loads clears the one-shot flag before the part still missing fails.
 
-import { isAdminPath, routerPath } from './adminBookmarkMeta';
+import { decodedPath, isAdminPath } from './adminBookmarkMeta';
 import {
   blockersBesideWork, isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
 } from './portalReload';
@@ -110,16 +113,17 @@ export function notePageMove(from, to) {
 // bar (usePageUsed): the move remounted the routes, so nothing unsaved stays
 // from that use, and Back to that page opens it unused. A move React dropped
 // leaves the page and its use. A move in view away from the path the one
-// reload reopened also ends that reload's count, path and flag
-// (chunkReloadAttempted); nothing else does. A move can load nothing: React.lazy keeps a page it
-// loaded, the More page is in the entry bundle, and the reopened page may
-// still fail. While a reload is under way, the flag must reach the page load
-// it opens. During an outage a page the tab then opens can take one more
-// reload; after it, that page shows its retry screen.
+// reload reopened, to another page (decodedPath), also ends that reload's
+// count, path and flag (chunkReloadAttempted); nothing else does. A move can
+// load nothing: React.lazy keeps a page it loaded, the More page is in the
+// entry bundle, and the reopened page may still fail. While a reload is
+// under way, the flag must reach the page load it opens. During an outage a
+// page the tab then opens can take one more reload; after it, that page
+// shows its retry screen.
 export function notePageInView(from, to) {
   shownMove = { from, to };
   usedPath = null;
-  if (reloadPending || reloadedPath === null || routerPath(to) === routerPath(reloadedPath)) return;
+  if (reloadPending || reloadedPath === null || decodedPath(to) === decodedPath(reloadedPath)) return;
   reloadedPath = null;
   clearChunkReloadFlag();
 }
@@ -344,8 +348,9 @@ export function missingCodeIsNewVersion(newer, offline) {
 // comes at once, and the wait ends at its next look once none can (the page
 // closed or moved, or a reason of selfReloadRuledOut came up). `pathname`:
 // the path of the route whose code is missing, as the router rendered it
-// (App.jsx). It reloads only while the address names that route, as the
-// routes match a path, before and after the wait. Back moves the address on
+// (App.jsx). It reloads only while the address names that page, before and
+// after the wait: the same path once each is decoded, case kept (decodedPath).
+// Back moves the address on
 // at once, even before this page's effect starts, but the routes keep this
 // page in view until the next page's code loads: a reload then would open
 // the next page and spend the one reload on it. With no `pathname`, it never
@@ -361,7 +366,7 @@ export async function reloadForMissingCode({
   reload = () => window.location.reload(),
   now,
 } = {}) {
-  const atPage = () => routerPath(window.location.pathname) === routerPath(pathname);
+  const atPage = () => decodedPath(window.location.pathname) === decodedPath(pathname);
   if (!atPage()) return 'moved';
   const noReload = () => !current() || !atPage() || Boolean(selfReloadRuledOut());
   if (!noReload()) await waitForWork({ now, done: noReload });

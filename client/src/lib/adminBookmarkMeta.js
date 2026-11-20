@@ -46,22 +46,29 @@ export const FIELD_BOOKMARK_META = {
 
 const FIELD_MANIFESTS = [FIELD_BOOKMARK_META.manifest, "/tech-manifest.json"];
 
-// A path as React Router matches it: case-insensitive, with each segment
-// decoded (decodePath in @remix-run/router). An encoded "/" stays inside its
-// segment, and a path that does not decode stays as it is. So /ADMIN/TODAY,
-// /%61dmin/today and /admin/%74oday all open Today, and the predicates below
-// say so (pre-push P1s).
-export function routerPath(pathname) {
+// A path with each segment decoded, as React Router decodes it before it
+// matches (decodePath in @remix-run/router). An encoded "/" stays inside its
+// segment, and a path that does not decode stays as it is. Case stays: a
+// route's parameters keep theirs, so /report/AbC and /report/abc are two
+// pages. Whether two paths name one page reads it (lib/staleChunkReload.js).
+export function decodedPath(pathname) {
   const path = String(pathname || "");
   try {
     return path
       .split("/")
       .map((segment) => decodeURIComponent(segment).replace(/\//g, "%2F"))
-      .join("/")
-      .toLowerCase();
+      .join("/");
   } catch {
-    return path.toLowerCase();
+    return path;
   }
+}
+
+// A path as React Router matches it to a route: case-insensitive, with each
+// segment decoded (decodedPath). So /ADMIN/TODAY, /%61dmin/today and
+// /admin/%74oday all open Today, and the predicates below say so (pre-push
+// P1s).
+export function routerPath(pathname) {
+  return decodedPath(pathname).toLowerCase();
 }
 
 export function isFieldPath(pathname) {

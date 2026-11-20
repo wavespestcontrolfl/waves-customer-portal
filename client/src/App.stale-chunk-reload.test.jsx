@@ -1001,6 +1001,19 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  // A route's parameters keep their case: a move to the same route with a
+  // parameter in another case opens another page.
+  test('a move in view from the path the one reload reopened to a parameter in another case ends that reload\'s count: that page reloads once', async () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog/AbC', reload });
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    resetStaleChunkReloadForTests(); // the page load the one reload opened
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog/abc', reload });
+    notePageInView('/admin/blog/AbC', '/admin/blog/abc');
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    await expect(reloadForMissingCode({ pathname: '/admin/blog/abc', reload })).resolves.toBeNull();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
   test('a page that closed during the wait does not reload', async () => {
     await expect(reloadForMissingCode({ pathname: '/admin/dashboard', current: () => false, reload })).resolves.toBe('moved');
     expect(reload).not.toHaveBeenCalled();
@@ -1027,8 +1040,19 @@ describe('on a staff page', () => {
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
   });
 
+  // Back to the same route with a parameter in another case opens another
+  // page: /report/AbC and /report/abc are two reports. A staff page is in
+  // view, so the page whose code is missing has the staff rules.
+  test('an address that names the same route with a parameter in another case is another page, so a page whose code is missing does not reload', async () => {
+    notePageInView(null, '/admin/dashboard');
+    vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+    await expect(reloadForMissingCode({ pathname: '/report/AbC', reload })).resolves.toBe('moved');
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  });
+
   // A link's path stays as written in the router, while the browser encodes
-  // the address. Both name the same page, as the routes match a path.
+  // the address. Both name the same page once each is decoded (decodedPath).
   test('an address the browser encoded names the same page as its route, so a page whose code is missing still reloads once', async () => {
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog/caf%C3%A9', reload });
     const Post = lazyWithRetry(missingChunk);
