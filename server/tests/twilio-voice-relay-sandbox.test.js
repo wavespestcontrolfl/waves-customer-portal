@@ -599,6 +599,19 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(res.body).toContain('budget is used up');
   });
 
+  test('the budget comparison is exact: $0.0450 spent + the $0.525 reservation fits a $0.57 cap; one ten-thousandth more does not', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.VOICE_GPT_LIVE_TEST_MAX_USD = '0.57';
+    let res = mockRes();
+    primeLive({ usd: '0.0450' });
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('<Stream');
+    res = mockRes();
+    primeLive({ usd: '0.0451' });
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('budget is used up');
+  });
+
   test('a set VOICE_GPT_LIVE_TEST_MAX_USD that is not a plain number refuses the call; it never falls back to $5', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
     for (const bad of ['', '   ', '$1', '-1', 'five', '1e3', '9'.repeat(400)]) {

@@ -192,6 +192,7 @@ class LiveBridge {
     this._finalizing = null;
     this.capTimer = null;
     this.startTimer = null;
+    this.firstReplyAmbiguousMs = null; // caller spoke before the first reply
   }
 
   // ── plumbing ─────────────────────────────────────────────────────────────
@@ -377,6 +378,12 @@ class LiveBridge {
     this.prevReplyStartWall = this.replyStartWall;
     this.replyStartWall = t;
     this.replySample = null;
+    // The first reply is normally the greeting. When the caller spoke first,
+    // it may instead be the answer: that delay is kept apart, never mixed into
+    // the per-turn delays and never lost.
+    if (greeting && this.awaitingReply && this.speechEndWall !== null) {
+      this.firstReplyAmbiguousMs = Math.max(0, Math.round(t - this.speechEndWall));
+    }
     if (!greeting && this.awaitingReply && this.speechEndWall !== null) {
       this.latencies.push(Math.max(0, Math.round(t - this.speechEndWall)));
       this.replySample = { index: this.latencies.length - 1, speechEnd: this.speechEndWall };
@@ -563,6 +570,7 @@ class LiveBridge {
       turns: this.latencies,
       latency_p50_ms: median(sorted),
       latency_max_ms: sorted.length ? sorted[sorted.length - 1] : null,
+      first_reply_ambiguous_ms: this.firstReplyAmbiguousMs,
       interruptions: this.interruptions,
       delegations: this.delegations.size,
       errors,

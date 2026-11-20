@@ -2657,7 +2657,10 @@ async function reserveGptLiveCall(callSid, { cell, voice, token }) {
       .whereRaw("created_at < now() - (? * interval '1 second')", [GPT_LIVE_ADMIT_WINDOW_S])
       .update({ cost_usd: 0, settled_at: trx.fn.now() });
     const row = await trx(GPT_LIVE_LEDGER).first(trx.raw(GPT_LIVE_SPENT_SQL));
-    if (Number(row && row.usd) + PER_CALL_RESERVE_USD > maxUsd) return false;
+    // Whole ten-thousandths of a dollar (the ledger's numeric(10,4) scale), so
+    // the comparison is exact: 0.0450 + 0.525 must fit a 0.57 cap.
+    const units = (usd) => Math.round(Number(usd) * 10000);
+    if (units(row && row.usd) + units(PER_CALL_RESERVE_USD) > units(maxUsd)) return false;
     const claimed = await trx(GPT_LIVE_LEDGER)
       .insert({ call_sid: callSid, reserved_usd: PER_CALL_RESERVE_USD })
       .onConflict('call_sid').ignore()
