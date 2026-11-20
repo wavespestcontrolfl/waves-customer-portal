@@ -238,46 +238,36 @@ describe('the report payload', () => {
   });
 });
 
-describe("the lawn reconciliation never rewrites the technician's own note", () => {
-  const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
-  // Radar rain well over target with a drought signal: on any other summary
-  // the pass rewrites a stale weekly rain figure and a drought guess.
-  const reportV2 = () => ({ water: { rainInches: 2.96, targetInches: 0.75, droughtSignal: true }, insights: [] });
-  const RAIN_NOTE = 'Rain this week totaled 0.4 inches, so I watered in the feeding. — Dana';
-  const DROUGHT_NOTE = 'The thin patch by the driveway looks like drought stress. — Dana';
-  const apply = (summary, options) => applyLawnReportReconciliation({ summary, serviceLine: 'lawn', reportV2: reportV2() }, null, options);
+describe('the note stands only on a pest report', () => {
+  // Phase 1: the lawn and tree & shrub reports take the note in their own
+  // later step, with its own place on their page; termite, rodent, mosquito
+  // and palm visits come with the typed visits.
+  const RECAP = 'We completed your visit and checked the yard.';
 
-  test('a note record keeps its rain figure and its drought wording', () => {
-    expect(apply(RAIN_NOTE).summary).toContain('2.96 inches');
-    expect(apply(DROUGHT_NOTE).summary).not.toContain('drought stress');
-    expect(apply(RAIN_NOTE, { ownNote: true }).summary).toBe(RAIN_NOTE);
-    expect(apply(DROUGHT_NOTE, { ownNote: true }).summary).toBe(DROUGHT_NOTE);
+  test('a record of any other line prints no note: no summary from it, never the recap, never the notes column', async () => {
+    for (const line of ['lawn', 'tree_shrub', 'mosquito', 'termite', 'rodent', 'palm']) {
+      const data = await build({ service_line: line, structured_notes: notes({ customerRecap: RECAP }) });
+      expect(data.summarySource).not.toBe('technician_report');
+      expect(data).not.toHaveProperty('summaryIsOwnNote');
+      const payload = JSON.stringify(data);
+      expect(payload).not.toContain('fire ant hill');
+      expect(payload).not.toContain(RECAP);
+      expect(payload).not.toContain('4471');
+    }
   });
 
-  test('every caller passes the own-note state of the record it renders', () => {
-    const fs = require('fs');
-    const path = require('path');
-    const root = path.join(__dirname, '..');
-    const calls = [];
-    const walk = (dir) => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (entry.name !== 'node_modules') walk(full);
-        } else if (entry.name.endsWith('.js') && !full.endsWith(path.join('service-report', 'report-consistency.js'))) {
-          const src = fs.readFileSync(full, 'utf8');
-          for (const m of src.matchAll(/(?:applyLawnReportReconciliation|reconcileLawnReport)\(([^;]*?)\)(?: \|\||;)/g)) {
-            calls.push({ file: path.relative(root, full), args: m[1] });
-          }
-        }
-      }
-    };
-    walk(path.join(root, 'routes'));
-    walk(path.join(root, 'services'));
-    expect(calls.map((c) => c.file).sort()).toEqual([
-      'routes/reports-public.js', 'services/service-report/lawn-report-write-gate.js', 'services/service-report/pdf-queue.js',
-    ]);
-    for (const call of calls) expect(call.args).toMatch(/ownNote: carriesReportNote\((?:service|record)\.structured_notes\)/);
+  test('the line is the one the report renders as: the service type when the record names no line, pest when it names neither', async () => {
+    const lawn = await build({ service_line: null, service_type: 'Lawn Care' });
+    expect(lawn.summarySource).not.toBe('technician_report');
+    expect(JSON.stringify(lawn)).not.toContain('fire ant hill');
+    const unnamed = await build({ service_line: null, service_type: null });
+    expect(unnamed.summary).toBe(`${NOTE} — Jordan`);
+  });
+
+  test('the PDF key runs the same rule: another line keys the note record and no summary', () => {
+    expect(summaryCopySignature({ ...SERVICE, service_line: 'lawn' })).toBe('-rn');
+    expect(summaryCopySignature({ ...SERVICE, service_line: 'tree_shrub' })).toBe('-rn');
+    expect(summaryCopySignature(SERVICE)).toBe(`${keyOf(`${NOTE} — Jordan`)}-rn`);
   });
 });
 

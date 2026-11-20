@@ -432,14 +432,35 @@ function printedReportSummary(parsed, service = {}) {
   return signer ? `${parsed.body} — ${signer}` : parsed.body;
 }
 
+// The service lines whose report may print the technician's own note. Phase 1
+// of the report speed plan (owner 2026-11-19) is the pest report alone: the
+// lawn and tree & shrub reports take the note in their own later step, with
+// its own place on their page (*lawn note*), and termite, rodent, mosquito
+// and palm visits come with the typed visits.
+const REPORT_NOTE_SERVICE_LINES = new Set(['pest']);
+
+// The line a record's report renders as, by the rule report-data.js uses to
+// pick the layout (a record with no line and no type renders as pest).
+function reportServiceLine(record) {
+  // Required here: the line table loads the service-type normalizer, which
+  // the copy rules do not need.
+  const { detectServiceLine } = require('./service-line-configs');
+  return record?.service_line || detectServiceLine(record?.service_type);
+}
+
 // The customer copy of a visit record's report text: the technician's own
 // note when the record carries one (a refused or malformed note shows
 // nothing: the raw notes column is never the fallback), else the titled
 // report parsed from technician_notes. One rule for every reader that holds
-// the record.
+// the record. A note on a record of any other line reads as no text, as a
+// refused one does: no lawn or tree & shrub page edits it, and the raw notes
+// column beside it stays internal.
 function visitReportCustomerCopy(record) {
-  return reportNoteCustomerCopy(record?.structured_notes)
-    || technicianReportCustomerCopy(record?.technician_notes);
+  const note = reportNoteCustomerCopy(record?.structured_notes);
+  if (note && !REPORT_NOTE_SERVICE_LINES.has(reportServiceLine(record))) {
+    return { body: null, violations: ['report_note_service_line'], source: null };
+  }
+  return note || technicianReportCustomerCopy(record?.technician_notes);
 }
 
 // A record's service_data as an object ({} when absent or unreadable).

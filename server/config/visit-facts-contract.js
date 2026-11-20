@@ -570,7 +570,7 @@ function genericCompletionFacts(opts = {}) {
         },
         {
           file: REPORT_DATA,
-          section: 'Visit summary / Today\'s Result body — ONLY the screened WHAT WE DID / WHAT WE FOUND parse, or on a record that carries structured_notes.reportNote the stored own note; the raw column never egresses',
+          section: 'Visit summary / Today\'s Result body — ONLY the screened WHAT WE DID / WHAT WE FOUND parse, or on a record that carries structured_notes.reportNote the stored own note (on a pest report only); the raw column never egresses',
           readerSymbol: 'visitReportCustomerCopy',
         },
       ]),

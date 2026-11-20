@@ -602,13 +602,9 @@ function replaceDroughtHypothesis(text, protect) {
  *   a followUp card, so a prose-derived "follow-up already planned" claim
  *   would surface with no supporting card (T&S audit 2026-07-18). Any other
  *   line is a no-op.
- * @param {boolean} [input.ownNote=false]  the record carries the technician's
- *   own note (carriesReportNote on the STORED notes): data.summary is their
- *   signed words, so neither the rain figure nor the drought wording rewrites
- *   it. Every other pass runs as before.
  * @returns {{ todaysResult: string|null, reentry: object|null, followUp: object|null, warnings: object[] } | null}
  */
-function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn', ownNote } = {}) {
+function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' } = {}) {
   if (!reportV2) return null;
   const reentryWording = REENTRY_REWRITES[serviceLine] || null;
   if (!reentryWording) return null;
@@ -621,7 +617,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn',
   // Keep the AI summary's weekly rain total in agreement with the live widget.
   const canonicalRain = lawnPass ? toNum(reportV2.water && reportV2.water.rainInches) : null;
   let summary = null;
-  if (canonicalRain != null && !ownNote) {
+  if (canonicalRain != null) {
     summary = reconcileRainFigure(data.summary, canonicalRain);
     if (summary) {
       warnings.push({
@@ -660,7 +656,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn',
     message: `${where} attributed stress to drought/dry conditions while measured weekly rain (${formatInches(canonicalRain)}") is well above the ${formatInches(rainTarget)}" target.`,
   });
   if (reconcileDrought) {
-    const summaryDrought = ownNote ? null : replaceDroughtHypothesis(liveSummary);
+    const summaryDrought = replaceDroughtHypothesis(liveSummary);
     if (summaryDrought) { summary = summaryDrought; droughtWarn('Visit summary'); }
     const patched = insights.map((i) => {
       const fields = {};
@@ -853,14 +849,13 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn',
 }
 
 // reconcileLawnReport's fixes applied onto the payload in place (best-effort).
-function applyReconciliationFixes(data, dynamicContext, ownNote) {
+function applyReconciliationFixes(data, dynamicContext) {
   if (!data || !data.reportV2) return data;
   try {
     const fix = reconcileLawnReport({
       data: { ...data, dynamicContext },
       reportV2: data.reportV2,
       serviceLine: data.serviceLine,
-      ownNote,
     });
     if (!fix) return data;
     data.reportV2 = {
@@ -893,11 +888,8 @@ function applyReconciliationFixes(data, dynamicContext, ownNote) {
  * key, so a queue render without this pass would bake the pre-reconciliation
  * copy into the cache and the direct route would then serve it as current
  * (codex P2 #3197 r6). Best-effort: any throw leaves the payload untouched.
- * `ownNote`: the record carries the technician's own note (every caller
- * passes carriesReportNote on the record's STORED notes); its summary keeps
- * the technician's words (reconcileLawnReport).
  */
-function applyLawnReportReconciliation(data, dynamicContext = null, { ownNote } = {}) {
+function applyLawnReportReconciliation(data, dynamicContext = null) {
   // The "Since your last visit" block rides the built report as a
   // non-enumerable hand-off (report-data.js); the fixes below rebuild
   // reportV2 by spread, which would drop it, so it is read first.
@@ -915,7 +907,7 @@ function applyLawnReportReconciliation(data, dynamicContext = null, { ownNote } 
   // same non-enumerable hand-off, reaching the customer only through
   // reportV2.lead.techParagraph.
   const techParagraph = (data && data.reportV2 && data.reportV2.techParagraph) || null;
-  applyReconciliationFixes(data, dynamicContext, ownNote === true);
+  applyReconciliationFixes(data, dynamicContext);
   // Service report cleanup: before the lead reads them, the follow-up reason is a whole customer sentence and the
   // repeated stock lines are gone.
   cleanup1020.cleanFollowUp(data);

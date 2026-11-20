@@ -3060,12 +3060,17 @@ note, and no reader below shows a line of it. (The lawn and tree & shrub
 technician paragraphs, each under its own gate, still take that note as their
 input, as they do on any visit today.) The payload changes existing fields
 and adds the one key below: `summary` is the note when the summary rule accepts it
-(only on a visit with no frozen typed card, primary or companion), a `cleaned`
+(only on a pest report, the line the report renders as, `service_line` or else
+`detectServiceLine(service_type)`, and only on a visit with no frozen typed
+card, primary or companion), a `cleaned`
 note signed ` — <first name>` (the identity snapshot's name, never a generic
 label). Otherwise it is what the report builds with no free text (the lawn visit
 summary, or on a live view a narrative of the typed card under that narrative's
 own gate, which reads an empty recap) or empty, never `customerRecap`. A
 refused or malformed note is no text, and the raw column is never its fallback.
+A note on a record of any other line is no text too: the lawn and tree & shrub
+reports take the note in their own later step, and the termite, rodent, mosquito
+and palm reports with the typed visits.
 Stored notes that cannot be read (a top-level value that is not an object)
 count as a note on every reader below too. Every frozen card's `todaysResult`
 drops a body it took from report text (`bodySource: 'technician_report'`) and
@@ -3078,10 +3083,9 @@ and each value passes `customerCopyViolations` as it renders. Completion writes
 merged `protocolActionsCompleted` on every visit. `findings` drops a row with a
 bare title (no detail, no recommendation; text of only spaces counts as none),
 and the render adds no "no activity" row: the completion writes that row from
-the merged lists. The lawn reconciliation (`report-consistency.js`) never
-rewrites such a record's `summary`: a weekly rain figure or a drought guess
-stays as the technician wrote it. Each of its callers (the live view, the PDF
-queue and the lawn write gate) passes the stored record's note state. The PDF
+the merged lists. The lawn write gate's report build reads stored notes that
+cannot be read as stored, never an object it rebuilt around its frozen facts,
+so it reads them as the live report does. The PDF
 key hashes the summary as it prints, and on such a record it always carries
 `-rn` (just before any `-fson`/`-fsoff` part), summary or not. The visit notes on the
 other surfaces (`customerSafeVisitNotes`) run the same rule. The payload adds
@@ -3089,7 +3093,7 @@ one key and no query parameter: `summaryIsOwnNote: true`, present only when
 `summary` is the note (on such a record a `technician_report` summary is always
 the note). The page's Visit Summary and the PDF print that summary as stored
 (`printedVisitSummary`), never through `cleanVisitSummary`'s fixes for the
-stored legacy recap. A record whose stored notes are an object without
+stored legacy recap, and the lawn layout takes no applied sentence out of it. A record whose stored notes are an object without
 `reportNote` renders exactly as before, and its payload has no
 `summaryIsOwnNote` key.
 

@@ -228,6 +228,19 @@ describe('gate on: the phone order (the story order)', () => {
     expect(document.querySelector('#visit-summary')).toHaveTextContent('which fits the fall season');
   });
 
+  it("keeps the technician's own note whole: no applied sentence is taken out of it", async () => {
+    // The server sends a note only on a pest report today; the layout keeps a
+    // note whole wherever one prints (summaryIsOwnNote).
+    const note = clone(spotOn);
+    note.summary = 'Today we applied azoxystrobin and propiconazole. The photos read as thin turf in the front yard. — Dana';
+    note.summarySource = 'technician_report';
+    note.summaryIsOwnNote = true;
+    expect(note.reportV2.lead.applied).toBeTruthy();
+    renderReport(note);
+    await waitForReport();
+    expect(document.querySelector('#visit-summary')).toHaveTextContent(note.summary);
+  });
+
   it('the lead\'s next-visit date is dropped only when Your plan prints that lawn visit', async () => {
     const { container } = renderReport(clone(spotOn));
     await waitForReport();

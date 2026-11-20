@@ -112,8 +112,16 @@ function withVisitSummary(result, visitSummaryFreeze) {
 
 // The record with the report facts this run just froze in its in-memory notes, so the first report build (and
 // with it the v6 copy's first freeze) and the Visit Summary read what was just decided.
+// The record with the frozen block in its in-memory notes, for the report build below. Stored notes that cannot be
+// read (an array, a JSON scalar) stay as stored: spread into an object they would read as notes without the
+// technician's own note, and the report treats unreadable notes as carrying one (technician-report-copy
+// carriesReportNote: no line of the raw notes column is customer copy). The build then matches the live report.
 function withReportFacts(record, freeze) {
-  return freeze ? { ...record, structured_notes: { ...parseJsonObject(record.structured_notes), [reportFacts.FREEZE_KEY]: freeze } } : record;
+  if (!freeze) return record;
+  const notes = { ...parseJsonObject(record.structured_notes), [reportFacts.FREEZE_KEY]: freeze };
+  const { carriesReportNote } = require('./technician-report-copy');
+  if (carriesReportNote(record.structured_notes) !== carriesReportNote(notes)) return record;
+  return { ...record, structured_notes: notes };
 }
 
 // The facts freeze, run inside the synthesis (live gate only): returns the record with the block in its in-memory notes
@@ -237,10 +245,7 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     const reportV2 = data && data.reportV2;
     if (!reportV2) return emptyWithFacts();
 
-    // The frozen todaysResult leads with a note record's own first sentence,
-    // never one the reconciliation rewrote (the same rule as the render).
-    const { carriesReportNote } = require('./technician-report-copy');
-    const fix = reconcileLawnReport({ data, reportV2, ownNote: carriesReportNote(record.structured_notes) }) || { warnings: [] };
+    const fix = reconcileLawnReport({ data, reportV2 }) || { warnings: [] };
     const warnings = fix.warnings || [];
 
     // Surface contradictions to the office without blocking completion.
