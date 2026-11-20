@@ -26,6 +26,7 @@ import {
   notePageMove,
   reloadForMissingCode,
   resetStaleChunkReloadForTests,
+  usedOnThisStaffPage,
   watchPageUse,
 } from './lib/staleChunkReload';
 import { registerReloadHold } from './lib/reloadHolds';
@@ -138,8 +139,9 @@ afterEach(() => {
 
 // Waves Admin can open a customer link, such as a report, in its own
 // webview. There every page keeps the staff rules, and none reloads by
-// itself (selfReloadBarred, lib/portalReload.js).
-test('in Waves Admin a report link opened directly whose code is missing gets the staff retry screen: the preload error leaves its import to fail, and nothing reloads', async () => {
+// itself (selfReloadBarred, lib/portalReload.js). After a use of the page,
+// Retry asks once first, as on a staff page.
+test('in Waves Admin a report link opened directly whose code is missing gets the staff retry screen: the preload error leaves its import to fail, nothing reloads, and after a use of the page Retry asks once first', async () => {
   const reload = vi.fn();
   vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
   window.webkit = { messageHandlers: { wavesAdmin: { postMessage: vi.fn() } } };
@@ -154,6 +156,12 @@ test('in Waves Admin a report link opened directly whose code is missing gets th
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
     expect(reload).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    fireEvent.pointerDown(document.body);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(screen.getByText('Anything not saved on this page will be lost.')).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+    expect(reload).toHaveBeenCalledTimes(1);
   } finally {
     delete window.webkit;
     vi.unstubAllGlobals();
@@ -877,24 +885,40 @@ describe('on a staff page', () => {
 
   // Once its last page is in view, a move from a staff page ends the staff
   // rules, unless it left a field page: code that a customer page asks for
-  // after that reloads at once, as on main, while the page that a move from
-  // Today opened keeps the field bar.
-  test('once a move from the dashboard to a customer page is in view, a missing chunk there reloads at once, as on main', () => {
+  // after that reloads at once, as on main, and a use of that page is not
+  // recorded as a staff use. The page that a move from Today opened keeps
+  // the field bar, and a use of it asks once first before a reload.
+  test('once a move from the dashboard to a customer page is in view, a missing chunk there reloads at once, as on main, and a use of it does not count', () => {
     notePageInView(null, '/admin/dashboard');
     notePageMove('/admin/dashboard', '/report/abc');
     notePageInView('/admin/dashboard', '/report/abc');
     vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+    const stopWatching = watchPageUse();
+    try {
+      fireEvent.pointerDown(document.body);
+      expect(usedOnThisStaffPage()).toBe(false);
+    } finally {
+      stopWatching();
+    }
     const stale = preloadErrorEvent();
     handleVitePreloadError(stale, reload);
     expect(stale.defaultPrevented).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  test('a customer page that Back from Today opened keeps the field bar once in view: a later missing chunk there reloads nothing', () => {
+  test('a customer page that Back from Today opened keeps the field bar once in view: a later missing chunk there reloads nothing, and a use of it counts', () => {
     notePageInView(null, '/admin/today');
     notePageMove('/admin/today', '/report/abc');
     notePageInView('/admin/today', '/report/abc');
     vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+    const stopWatching = watchPageUse();
+    try {
+      expect(usedOnThisStaffPage()).toBe(false);
+      fireEvent.pointerDown(document.body);
+      expect(usedOnThisStaffPage()).toBe(true);
+    } finally {
+      stopWatching();
+    }
     const stale = preloadErrorEvent();
     handleVitePreloadError(stale, reload);
     expect(stale.defaultPrevented).toBe(false);

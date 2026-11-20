@@ -241,17 +241,18 @@ export function onPageUse(listener) {
   };
 }
 
-// Whether the tab was used on the staff page in view since it came into
-// view: a tap, a key or a field change anywhere but on a Reload control. A
-// page keeps unsaved work in many ways: a field, a toggle, a picked slot, a
-// signature on a canvas, a shape drawn on a map. No list of controls names
-// them all, so after any use a reload asks once first: the Reload bar, the
-// staff retry screen (App.jsx) and a page whose code is missing ask this. A
-// page move ends the use once it is in view (notePageInView). Both paths
-// read the page in view, so they share one spelling.
+// Whether the tab was used on the page in view since it came into view, while
+// the staff rules apply (staffTab): on a staff page, and also on a customer
+// page that Waves Admin or a move from a field page opened. A use is a tap, a
+// key or a field change anywhere but on a Reload control. A page keeps
+// unsaved work in many ways: a field, a toggle, a picked slot, a signature on
+// a canvas, a shape drawn on a map. No list of controls names them all, so
+// after any use a reload asks once first: the Reload bar, the staff retry
+// screen (App.jsx) and a page whose code is missing ask this. A page move
+// ends the use once it is in view (notePageInView). Both paths read the page
+// in view, so they share one spelling.
 export function usedOnThisStaffPage() {
-  const pathname = pageInView();
-  return isAdminPath(pathname) && usedPath === pathname;
+  return usedPath === pageInView() && staffTab();
 }
 
 // Whether the staff rules bar the reload of a page whose code is missing
