@@ -500,16 +500,18 @@ describe('syncRestaurantProspects', () => {
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
   });
 
-  test('a license row with a cell added or lost is malformed; the usual 36 cells and a full 38 load', async () => {
+  test('a license row loads only with the usual 36 cells: a cell added, two added or one lost is malformed', async () => {
     store = makeStore();
     // 37 cells: an extra cell before Secondary Phone Number would move the phone and the license number.
     const added = licRow({ app: '7002' }).replace('"Sarasota","941-555-0101"', '"Sarasota","X","941-555-0101"');
     const lost = licRow({ app: '7003' }).replace('"UNIT 3",', ''); // 35 cells
-    const full = `${licRow({ app: '7004' })},"1","1"`; // 38 cells: the two risk levels filled
-    fetchText = makeFetch({ 'newfood.csv': () => licCsv([licRow({ app: '7001' }), added, lost, full]) });
+    // 38 cells from two stray cells after Location County: the district would read as the license number.
+    const twoAdded = licRow({ app: '7004' }).replace('"Sarasota","941-555-0101"', '"Sarasota","X","Y","941-555-0101"');
+    const filled = `${licRow({ app: '7005' })},"1","1"`; // 38 cells: the two risk levels filled
+    fetchText = makeFetch({ 'newfood.csv': () => licCsv([licRow({ app: '7001' }), added, lost, twoAdded, filled]) });
     const result = await sync({ fetchText, store });
-    expect(result.files.new_license).toEqual({ kept: 2, malformed: 2, upserted: 2 });
-    expect(upserts.filter((r) => r.kind === 'new_license').map((r) => r.source_key)).toEqual(['7001', '7004']);
+    expect(result.files.new_license).toEqual({ kept: 1, malformed: 4, upserted: 1 });
+    expect(upserts.filter((r) => r.kind === 'new_license').map((r) => r.source_key)).toEqual(['7001']);
   });
 
   test('a short first row never hides a column: the file loads and the short row is counted', async () => {

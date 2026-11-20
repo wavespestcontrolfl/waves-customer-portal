@@ -304,12 +304,13 @@ async function saveRead(kind, read) {
 
 const defaultStore = { upsertRecords, lastRead, saveRead };
 
-// The row widths each file has, as cells minus header names. The inspection file fills every header column. The
+// The row width each file has, as cells minus header names. The inspection file fills every header column. The
 // license files never fill their last two (Base Risk Level, Secondary Risk Level): every row of the 2026-11-20 files
-// has 36 cells under 38 names, and a row that fills them is taken too. Any other width means a cell went missing or
-// crept in and every cell after it moved: a shifted phone, license number or report id would pass every other check.
-// Such a row is malformed.
-const ROW_WIDTHS = { inspection: [0], new_license: [-2, 0], owner_change: [-2, 0] };
+// has 36 cells under 38 names. Any other width means a cell went missing or crept in and every cell after it moved:
+// a shifted phone, license number or report id would pass every other check. Such a row is malformed, a 38-cell
+// license row too (two stray cells reach 38). So a file that starts to fill the risk levels fails, by the rule
+// below, until this width is changed.
+const ROW_WIDTHS = { inspection: 0, new_license: -2, owner_change: -2 };
 
 // The column with each row's own date. The state cuts each file by it: every row of the 2026-11-20 files falls in
 // one fiscal year.
@@ -326,7 +327,7 @@ async function loadFile(kind, fetchText, now, last) {
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
   const header = await eachDbprCsvRow(text, (row, { cells, columns }) => {
     rowsRead += 1;
-    if (!ROW_WIDTHS[kind].includes(cells - columns)) {
+    if (cells - columns !== ROW_WIDTHS[kind]) {
       counts.malformed += 1;
       return;
     }
