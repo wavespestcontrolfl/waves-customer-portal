@@ -24,11 +24,13 @@ jest.mock('../services/pest-insider/posts', () => {
   const postUrl = (id) => (Object.prototype.hasOwnProperty.call(POSTS, id) ? `${actual.SITE}${POSTS[id].path}` : null);
   return { ...actual, POSTS, postUrl, POST_URLS: Object.freeze([...new Set(Object.keys(POSTS).map(postUrl))]) };
 });
-const { buildIssue } = require('../services/pest-insider');
+const { buildIssue, NEWSLETTER_TYPE } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
 const { SPECIES, planIssue } = require('../services/pest-insider/plan');
 const { postUrl } = require('../services/pest-insider/posts');
-const { POST_LINK_TEXT } = require('../services/pest-insider/render');
+const { POST_LINK_TEXT, withToolBlock } = require('../services/pest-insider/render');
+const { validateNewsletterDraft } = require('../services/newsletter-validator');
+const { loadTools, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 
 // Every main fact's post answers as live, unless a case says otherwise.
 const LIVE = FACTS.filter((f) => !f.reserve).map((f) => f.id);
@@ -38,7 +40,8 @@ const A01 = factById('A01');
 const WFA = SPECIES.find((s) => s.slug === 'white-footed-ant');
 // A fixed plan: fact A01 (white-footed ants) and the White-footed Ant species,
 // so these cases test check -> render -> validate, not the planner's rotation.
-const usePlan = (leadFact, idItem = WFA) => planIssue.mockImplementation(() => ({ leadFact, idItem }));
+const usePlan = (leadFact, idItem = WFA, tool = null) => planIssue.mockImplementation(() => ({ leadFact, idItem, tool }));
+const ALL_URLS = loadTools().tools.map((t) => t.url);
 
 afterEach(() => {
   planIssue.mockReset();
@@ -50,7 +53,9 @@ describe('buildIssue', () => {
     usePlan(A01);
     const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE });
     expect(r.ok).toBe(true);
-    expect(planIssue).toHaveBeenCalledWith({ sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [], livePostFactIds: LIVE });
+    expect(planIssue).toHaveBeenCalledWith({
+      sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [], livePostFactIds: LIVE, liveToolUrls: [], recentToolIds: [],
+    });
     expect(r.issue.subject).toBe(`🐜 ${A01.title}`);
     expect(r.issue.preview).toBe("What's this? White-footed Ant");
     for (const line of A01.lead) {
@@ -61,7 +66,39 @@ describe('buildIssue', () => {
     // the lead links A01's own reviewed post
     expect(r.issue.html_body).toContain(`href="${postUrl('A01')}"`);
     expect(r.issue.text_body).toContain(`${POST_LINK_TEXT}: ${postUrl('A01')}`);
-    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', problems: [] });
+    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, problems: [] });
+    // no live tool named: no tool, and no Amazon link anywhere
+    expect(r.tool).toBeNull();
+    for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
+  });
+
+  test('a live tool comes back as `tool`, outside the shared body; its opted-in copy still fails the send check until PR 4', () => {
+    const mesh = toolById('stuff-it-copper-mesh');
+    usePlan(A01, WFA, mesh);
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [mesh.url] });
+    expect(r).toMatchObject({ ok: true, reason: null, tool: { productId: 'stuff-it-copper-mesh', url: mesh.url } });
+    expect(r.diagnostics.toolId).toBe('stuff-it-copper-mesh');
+    // the shared body, which the archive serves, has no Amazon link (pre-push PR 3 r1)
+    for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
+    const optedIn = withToolBlock(r.issue, r.tool);
+    expect(optedIn.html_body).toContain(`>${toolLinkText(mesh)}</a>`);
+    expect(optedIn.text_body).toContain(`${mesh.lines.join(' ')}\n\n${toolLinkText(mesh)}: ${mesh.url}\n${AMAZON_DISCLOSURE}`);
+    // No newsletter type may carry it yet: PR 4 adds the per-recipient check with opt-in evidence.
+    const { errors } = validateNewsletterDraft({
+      subject: optedIn.subject, preview_text: optedIn.preview, html_body: optedIn.html_body, text_body: optedIn.text_body, newsletter_type: NEWSLETTER_TYPE,
+    });
+    expect(errors.join(' ')).toMatch(/AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL/);
+  });
+
+  test('the builder refuses a tool the planner returns without a live check of its link', () => {
+    usePlan(A01, WFA, toolById('stuff-it-copper-mesh'));
+    expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [toolById('acurite-glass-rain-gauge').url] }))
+      .toMatchObject({ ok: false, issue: null, reason: 'no_live_tool: stuff-it-copper-mesh' });
+  });
+
+  test('the live tool links and the recent tools are passed to the plan', () => {
+    buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: ALL_URLS, recent: { toolIds: ['stuff-it-copper-mesh', null] } });
+    expect(planIssue).toHaveBeenCalledWith(expect.objectContaining({ liveToolUrls: ALL_URLS, recentToolIds: ['stuff-it-copper-mesh', null] }));
   });
 
   test('with no live-post list, no issue builds: every issue links its lead fact\'s post', () => {
@@ -203,5 +240,20 @@ describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
       status: 0,
       files: ['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt', 'pest-insider-2026-12-17.html', 'pest-insider-2026-12-17.txt'],
     });
+  }, 120000);
+
+  test('--assume-tools adds the opted-in copy; a rerun without a tool removes it (pre-push PR 3 r2)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-sample-'));
+    try {
+      const go = (...flags) => spawnSync(process.execPath, [SCRIPT, dir, '2026-12-03', '--assume-live', ...flags], { encoding: 'utf8', timeout: 60000 }).status;
+      expect(go('--assume-tools')).toBe(0);
+      expect(fs.readdirSync(dir).sort()).toEqual(['.html', '.optin.html', '.optin.txt', '.txt'].map((ext) => `pest-insider-2026-12-03${ext}`));
+      expect(fs.readFileSync(path.join(dir, 'pest-insider-2026-12-03.optin.txt'), 'utf8')).toContain(AMAZON_DISCLOSURE);
+      expect(go()).toBe(0);
+      expect(fs.readdirSync(dir).sort()).toEqual(['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt']);
+      for (const f of fs.readdirSync(dir)) expect(fs.readFileSync(path.join(dir, f), 'utf8')).not.toMatch(/amazon/i);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }, 120000);
 });
