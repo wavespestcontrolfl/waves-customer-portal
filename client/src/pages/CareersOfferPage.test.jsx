@@ -566,6 +566,7 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(body));
     renderPage();
     expect(await screen.findByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Your job offer' })).toBeInTheDocument(); // the page still says what it is
     expect(screen.getByRole('button', { name: 'Reload page' })).toBeEnabled();
     expect(screen.queryByText(/load that offer link/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();

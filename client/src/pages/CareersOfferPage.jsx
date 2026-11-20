@@ -527,7 +527,7 @@ function CallUsLine() {
   return (
     <p style={{ margin: '8px 0 0' }}>
       If this keeps happening, call us at{' '}
-      <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: 'inherit', fontWeight: 700 }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
+      <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: 'inherit', fontWeight: 700, whiteSpace: 'nowrap' }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
       {' '}and we will check it for you.
     </p>
   );
@@ -1022,7 +1022,15 @@ function OfferPage({ token }) {
 
   if (loading) return <LoadingState />;
   if (error === 'notfound') return <NotValidState />;
-  if (error === 'outdated') return <Column><OutdatedBanner outdated unresolved={false} /></Column>;
+  if (error === 'outdated') {
+    return (
+      <Column>
+        <div style={EYEBROW}>Waves</div>
+        <h1 style={H1_STYLE}>Your job offer</h1>
+        <OutdatedBanner outdated unresolved={false} />
+      </Column>
+    );
+  }
   if (error === 'temporary' || !usableOffer(data)) {
     return <Column><PublicLoadError resource="offer link" onRetry={() => setLoadAttempt((a) => a + 1)} /></Column>;
   }
