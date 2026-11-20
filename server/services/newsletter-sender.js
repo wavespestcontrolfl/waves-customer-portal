@@ -2153,20 +2153,25 @@ async function ledgerProgress(trx, send) {
 
 /**
  * A send's spam reports and the copies it delivered, for the Waves Pest Insider spam-report stop
- * (pest-insider/schedule.js). A report is a reader's own (complained_at). A delivered copy has a
- * delivery signal: delivered, opened or clicked, or the reader's own spam report or unsubscribe,
- * which only a delivered message gets. An accepted copy with no later event is not counted yet.
- * A refused row (refusedDelivery: a hard bounce, or SendGrid's drop for an address on its
- * unsubscribe or spam-report list) is neither: that drop also writes complained_at.
+ * (pest-insider/schedule.js). A report is a reader's own (complained_at with no drop reason).
+ * SendGrid's drop for an address on its spam-report list also writes complained_at, with
+ * SPAM_REPORT_DROP_REASON, so it is never a report, also on a row an earlier attempt delivered.
+ * A delivered copy has a delivery signal: delivered, opened or clicked, or the reader's own spam
+ * report or unsubscribe, which only a delivered message gets. An accepted copy with no later event
+ * is not counted yet. A refused row (refusedDelivery) is neither. One statement reads both counts,
+ * so a webhook update between two reads cannot pair a count with a stale other count.
  */
 async function spamReportCounts(db, sendId) {
-  const kept = () => db('newsletter_send_deliveries').where({ send_id: sendId }).whereNot(refusedDelivery);
-  const reports = await kept().whereNotNull('complained_at').count('* as c').first();
-  const delivered = await kept()
-    .where((q) => q.whereNotNull('delivered_at').orWhereNotNull('opened_at').orWhereNotNull('clicked_at')
-      .orWhereNotNull('complained_at').orWhereNotNull('unsubscribed_at'))
-    .count('* as c').first();
-  return { reports: Number(reports?.c) || 0, delivered: Number(delivered?.c) || 0 };
+  const counts = await db('newsletter_send_deliveries')
+    .where({ send_id: sendId })
+    .whereNot(refusedDelivery)
+    .select(
+      db.raw('count(*) filter (where complained_at is not null and bounce_reason is distinct from ?) as reports', [SPAM_REPORT_DROP_REASON]),
+      db.raw('count(*) filter (where delivered_at is not null or opened_at is not null or clicked_at is not null'
+        + ' or complained_at is not null or unsubscribed_at is not null) as delivered'),
+    )
+    .first();
+  return { reports: Number(counts?.reports) || 0, delivered: Number(counts?.delivered) || 0 };
 }
 
 // Why a planned issue did not go out: its 'failed' outcome, with the 'outcome' alert.

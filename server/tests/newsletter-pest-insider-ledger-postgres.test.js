@@ -48,12 +48,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     }
   }
 
-  test("an accepted row with no reason is reached; a bounce and SendGrid's unsubscribe and spam-report drops are refused; a reader's own spam report or unsubscribe is reached", async () => {
+  test("an accepted row with no reason is reached; a bounce and SendGrid's unsubscribe and spam-report drops are refused; a reader's own spam report or unsubscribe is reached; a drop after a delivery stays reached and is no spam report", async () => {
     const [send] = await db('newsletter_sends').insert({
       subject: 'Synthetic ledger', html_body: '<p>Body</p>', text_body: 'Body', status: 'sent', sent_at: new Date(), auto_share_social: false,
     }).returning(['id', 'segment_filter']);
     sendIds.push(send.id);
-    const kinds = ['accepted', 'delivered', 'bounced', 'unsubscribedrop', 'spamdrop', 'spamreport', 'unsubscribedafter'];
+    const kinds = ['accepted', 'delivered', 'bounced', 'unsubscribedrop', 'spamdrop', 'spamreport', 'unsubscribedafter', 'deliveredspamdrop'];
     const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const rows = await db('newsletter_send_deliveries').insert(kinds.map((kind) => ({
       send_id: send.id, subscriber_id: null, email: `ledger-${kind}-${stamp}@example.test`, status: 'sent', sent_at: new Date(),
@@ -70,6 +70,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     await db('newsletter_send_deliveries').where({ id: id.spamreport }).update({ sent_at: null });
     await receive(id.spamreport, { event: 'spamreport' });
     await receive(id.unsubscribedafter, { event: 'delivered' }, { event: 'unsubscribe' });
+    // Signals from two attempts on one row: delivered first, then SendGrid's spam-report-list drop,
+    // which writes complained_at with its reason.
+    await receive(id.deliveredspamdrop, { event: 'delivered' }, { event: 'dropped', reason: 'Spam Reporting Address' });
 
     expect(await db('newsletter_send_deliveries').where({ id: id.accepted }).first())
       .toMatchObject({ status: 'sent', bounce_reason: null, delivered_at: null });
@@ -77,14 +80,20 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       .toMatchObject({ status: 'complained', bounce_reason: 'spam reporting address' });
     expect(await db('newsletter_send_deliveries').where({ id: id.spamreport }).first())
       .toMatchObject({ status: 'complained', bounce_reason: null, sent_at: null });
+    const mixed = await db('newsletter_send_deliveries').where({ id: id.deliveredspamdrop }).first();
+    expect(mixed).toMatchObject({ status: 'complained', bounce_reason: 'spam reporting address' });
+    expect(mixed.delivered_at).not.toBeNull();
+    expect(mixed.complained_at).not.toBeNull();
 
-    // Reached: accepted, delivered, the reader's spam report, the reader's unsubscribe after delivery.
-    // Refused: the bounce and the two drops. Nobody is left: no row is retryable.
-    expect(await ledgerProgress(db, send)).toEqual({ got: 4, left: 0, refused: 3 });
-    // The spam-report stop counts the reader's own report against the 3 copies with a delivery signal
-    // (delivered, the spam report, the unsubscribe after delivery). The spam-report drop also has
-    // complained_at, but it is refused: neither a report nor a delivered copy. The accepted copy has
-    // no delivery event yet.
-    expect(await spamReportCounts(db, send.id)).toEqual({ reports: 1, delivered: 3 });
+    // Reached: accepted, delivered, the reader's spam report, the reader's unsubscribe after delivery,
+    // and the row delivered before its drop. Refused: the bounce and the two drops. Nobody is left: no
+    // row is retryable.
+    expect(await ledgerProgress(db, send)).toEqual({ got: 5, left: 0, refused: 3 });
+    // The spam-report stop counts only the reader's own report, against the 4 copies with a delivery
+    // signal (delivered, the spam report, the unsubscribe after delivery, the row delivered before its
+    // drop). Both drops wrote complained_at: the refused one is neither a report nor a delivered copy,
+    // and the delivered one is a delivered copy but no report. The accepted copy has no delivery
+    // event yet.
+    expect(await spamReportCounts(db, send.id)).toEqual({ reports: 1, delivered: 4 });
   });
 });

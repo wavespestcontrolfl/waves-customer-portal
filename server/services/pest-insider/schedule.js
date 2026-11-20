@@ -20,8 +20,9 @@
  *
  * Spam-report stop: when the issue before this one went out and its readers marked more than 0.3%
  * of the copies it delivered as spam, this issue waits. It is skipped with that reason, and the
- * 1:00 PM run tells the owner once. The issue after it looks back at the skipped issue, which
- * mailed no one, so it goes out as usual.
+ * 1:00 PM run tells the owner once. A draft whose FYI copy a later run retries is checked again
+ * first and stays unqueued. The issue after it looks back at an issue that mailed no one, so it
+ * goes out as usual.
  *
  * Calendar dates here are 'YYYY-MM-DD' strings. The date math is the shared ET helpers in
  * utils/datetime-et.js (validCalendarDate, etNthWeekdayOfMonth, addETDays, etDateString);
@@ -392,18 +393,11 @@ async function runIssuePlanner({ now = new Date(), fetchImpl, database, finalTic
   try {
     const existing = await db('pest_insider_issues').where({ issue_date: issueDate }).first('id', 'status', 'send_id');
 
-    let result;
-    if (existing && existing.status === 'drafted' && autoSend) {
-      const proof = existing.send_id ? await proofStep(existing.send_id) : { skipped: true, reason: 'draft_missing' };
-      result = { skipped: false, issueDate, status: 'drafted', reason: null, written: false, retried: true, sendId: existing.send_id, proof: proofOutcome(proof) };
-      result.noticeRaised = finalTick && await noticeIfIssueWillNotSend(db, issueDate, proof);
-      require('../logger').info(`[pest-insider] issue ${issueDate}: proof step again for its draft: ${result.proof}`);
-      return result;
-    }
+    if (existing && existing.status === 'drafted' && autoSend) return await retryDraft(db, existing, { issueDate, finalTick, proofStep });
     if (existing && !rebuildable(autoSend).includes(existing.status)) return { skipped: true, reason: 'already_built' };
 
     const { proof, ...built } = await buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImpl, proofStep });
-    result = { ...built, proof: proofOutcome(proof) };
+    const result = { ...built, proof: proofOutcome(proof) };
     if (finalTick && autoSend) result.noticeRaised = await noticeIfIssueWillNotSend(db, issueDate, proof);
     return result;
   } catch (err) {
@@ -419,6 +413,19 @@ async function runIssuePlanner({ now = new Date(), fetchImpl, database, finalTic
     }
     throw err;
   }
+}
+
+// A drafted issue whose FYI copy did not go out: the proof step again. The spam-report stop is read
+// again first: a report since the first run leaves the draft unqueued, and the last tick's notice
+// says why. Returns the run's result.
+async function retryDraft(db, existing, { issueDate, finalTick, proofStep }) {
+  const spamStop = await spamStopReason(db, issueDate);
+  let proof = { skipped: true, reason: spamStop || 'draft_missing' };
+  if (!spamStop && existing.send_id) proof = await proofStep(existing.send_id);
+  const result = { skipped: false, issueDate, status: 'drafted', reason: null, written: false, retried: true, sendId: existing.send_id, proof: proofOutcome(proof) };
+  result.noticeRaised = finalTick && await noticeIfIssueWillNotSend(db, issueDate, proof);
+  require('../logger').info(`[pest-insider] issue ${issueDate}: proof step again for its draft: ${result.proof}`);
+  return result;
 }
 
 // One build: the spam-report stop, post check, history, builder, then the row (and, with the switch

@@ -490,6 +490,32 @@ describe('runIssuePlanner with GATE_PEST_INSIDER_AUTO_SEND on', () => {
       expect(spamReportCounts.mock.calls).toEqual(counts ? [[database, 'send-prev']] : []);
     });
 
+    test('a draft whose FYI copy did not go out stays unqueued when a report since the first run passes the limit', async () => {
+      spamReportCounts.mockResolvedValue({ reports: 2, delivered: 322 });
+      // The 7:00 AM run drafted it, but its FYI copy failed; a spam report on the Nov 19 issue came after.
+      const database = fakeDb({ existing: { id: 'row-1', status: 'drafted', send_id: 'send-1' }, after: { status: 'drafted', reason: null }, previous: BEFORE });
+      const sendProof = jest.fn(async () => QUEUED);
+      const result = await runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof });
+
+      expect(sendProof).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ status: 'drafted', retried: true, sendId: 'send-1', proof: STOP, noticeRaised: true });
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      expect(triggerNotification.mock.calls[0][1].errors).toEqual([
+        'It will not send this time: readers marked 2 of the 322 delivered copies of the Thursday, November 19 issue as spam '
+        + `(0.62%), above the 0.3% limit; the issue after this one sends as usual (${STOP})`,
+      ]);
+    });
+
+    test('a draft retried under the limit goes to the proof step as before', async () => {
+      spamReportCounts.mockResolvedValue({ reports: 1, delivered: 400 });
+      const database = fakeDb({ existing: { id: 'row-1', status: 'drafted', send_id: 'send-1' }, previous: BEFORE });
+      const sendProof = jest.fn(async () => QUEUED);
+      const result = await runIssuePlanner({ now: CATCH_UP, database, sendProof });
+
+      expect(sendProof).toHaveBeenCalledWith('send-1');
+      expect(result).toMatchObject({ status: 'drafted', retried: true, proof: 'queued' });
+    });
+
     test('the last tick checks again and tells the owner once, naming the earlier issue and its counts', async () => {
       spamReportCounts.mockResolvedValue({ reports: 2, delivered: 322 });
       // The 7:00 AM run skipped it; the 1:00 PM run rebuilds a skipped row, stops it again, then tells the owner.
