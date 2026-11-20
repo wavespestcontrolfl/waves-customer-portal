@@ -10,6 +10,7 @@ import { IntelligenceBarPageDataProvider, usePublishIntelligenceBarPageData } fr
 import { AdminNavigationProvider } from '../../hooks/useAdminNavigation';
 import { markUsageSource } from '../../lib/adminUsage';
 import { encodeJpegDataUrl } from '../../utils/imageCompression';
+import { reloadHoldNames } from '../../lib/reloadHolds';
 
 vi.mock('../../lib/adminUsage', () => ({ markUsageSource: vi.fn(), trackAdminPageView: vi.fn() }));
 
@@ -1288,4 +1289,17 @@ describe('IB UI audit 2026-10-29 fixes', () => {
     fireEvent.change(input, { target: { files: [png('broken-a.png'), png('broken-b.png')] } });
     expect(await screen.findByText(/^2 files could not be attached because they are not readable images\./)).toBeInTheDocument();
   });
+});
+
+test('an unsent question holds the Reload bar of an out-of-date tab until it is cleared or the palette unmounts', async () => {
+  await mount();
+  const input = screen.getByPlaceholderText(/Ask anything/);
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  fireEvent.change(input, { target: { value: 'Unsent question' } });
+  expect(reloadHoldNames()).toContain('ask-draft');
+  fireEvent.change(input, { target: { value: '   ' } });
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  fireEvent.change(input, { target: { value: 'Unsent question' } });
+  cleanup();
+  expect(reloadHoldNames()).not.toContain('ask-draft');
 });
