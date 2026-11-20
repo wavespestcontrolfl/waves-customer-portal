@@ -1341,3 +1341,252 @@ describe('PATCH /:id/tech-count', () => {
     expect(mockRows[0].tech_final_count).toBeNull();
   });
 });
+
+// ── Technician-confirmed points (owner ruling 2026-11-20, choice 4A) ──────────────────────────────────────────────────
+
+describe('validateTechPins', () => {
+  const pin = (over = {}) => ({ x: 0.25, y: 0.5, type: 'gable_vents', ...over });
+
+  it('lists the types the staff editor offers: every entry type, plus other', () => {
+    expect(svc.TECH_PIN_TYPES).toEqual([...svc.ENTRY_TYPES, 'other']);
+    for (const t of svc.TECH_PIN_TYPES) expect(typeof svc.PIN_LABELS[t]).toBe('string');
+    expect(svc.MAX_TECH_PINS).toBe(20);
+  });
+
+  it('normalizes: rounds to 4 decimals, keeps the order, and gives a missing or blank note null', () => {
+    expect(svc.validateTechPins([pin({ x: 0.123456, y: 0.987654 }), pin({ note: '   ' }), pin({ x: 0, y: 1, type: 'other' })])).toEqual([
+      { x: 0.1235, y: 0.9877, type: 'gable_vents', note: null },
+      { x: 0.25, y: 0.5, type: 'gable_vents', note: null },
+      { x: 0, y: 1, type: 'other', note: null },
+    ]);
+    expect(svc.validateTechPins([])).toEqual([]);
+  });
+
+  it('trims a note, turns control characters and runs of spaces into one space, and allows exactly 40 characters', () => {
+    expect(svc.validateTechPins([pin({ note: '  front\tleft \n side  ' })])[0].note).toBe('front left side');
+    const forty = 'a'.repeat(40);
+    expect(svc.validateTechPins([pin({ note: forty })])[0].note).toBe(forty);
+    expect(svc.validateTechPins([pin({ note: `${forty}b` })])).toBeNull();
+  });
+
+  it('accepts exactly 20 points and rejects 21', () => {
+    expect(svc.validateTechPins(Array.from({ length: 20 }, () => pin()))).toHaveLength(20);
+    expect(svc.validateTechPins(Array.from({ length: 21 }, () => pin()))).toBeNull();
+  });
+
+  it.each([
+    ['not a list', { x: 0.5, y: 0.5, type: 'other' }],
+    ['a string', 'pins'],
+    ['null', null],
+    ['undefined', undefined],
+    ['a null entry', [null]],
+    ['a list entry', [[0.5, 0.5]]],
+    ['x below 0', [pin({ x: -0.01 })]],
+    ['x above 1', [pin({ x: 1.01 })]],
+    ['y below 0', [pin({ y: -0.0001 })]],
+    ['y above 1', [pin({ y: 2 })]],
+    ['a string x', [pin({ x: '0.5' })]],
+    ['a missing y', [{ x: 0.5, type: 'other' }]],
+    ['NaN', [pin({ x: NaN })]],
+    ['Infinity', [pin({ y: Infinity })]],
+    ['an unknown type', [pin({ type: 'attic_door' })]],
+    ['a missing type', [{ x: 0.5, y: 0.5 }]],
+    ['a number note', [pin({ note: 4 })]],
+    ['an object note', [pin({ note: { a: 1 } })]],
+  ])('rejects %s', (_name, input) => {
+    expect(svc.validateTechPins(input)).toBeNull();
+  });
+});
+
+describe('saveTechCount pins', () => {
+  const PINS = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }, { x: 0.8, y: 0.7, type: 'other', note: null }];
+  const CROP = { lat: 27.46, lng: -82.57 };
+  beforeEach(() => {
+    mockRows.push({
+      id: READ_A, lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
+      ai_flags: {}, ai_tier: 'med', status: 'done', tech_final_count: null, tech_final_flags: null, tech_pins: null,
+      hide_on_estimate: false, crop_lat: null, crop_lng: null, created_at: new Date().toISOString(),
+    });
+  });
+
+  it('saves the points with the crop centre that hashes to the row, and stores the rounded centre', async () => {
+    const read = await svc.saveTechCount(READ_A, { pins: PINS, crop: { lat: 27.460004, lng: -82.570004 } });
+    expect(read.tech_pins).toEqual(PINS);
+    expect(read.hide_on_estimate).toBe(false);
+    expect(mockRows[0].crop_lat).toBe(27.46);
+    expect(mockRows[0].crop_lng).toBe(-82.57);
+  });
+
+  it.each([
+    ['another roof', { lat: 27.47, lng: -82.57 }],
+    ['a missing crop', undefined],
+    ['a crop without numbers', { lat: '27.46', lng: '-82.57' }],
+    ['an out of range crop', { lat: 270, lng: -82.57 }],
+  ])('refuses points drawn on %s with crop_mismatch and writes nothing', async (_name, c) => {
+    await expect(svc.saveTechCount(READ_A, { pins: PINS, crop: c, count: 3 })).rejects.toMatchObject({ code: 'crop_mismatch' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].crop_lat).toBeNull();
+    expect(mockRows[0].tech_final_count).toBeNull();
+  });
+
+  it('clears the points with null, and keeps the stored crop centre', async () => {
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
+    const read = await svc.saveTechCount(READ_A, { pins: null });
+    expect(read.tech_pins).toBeNull();
+    expect(mockRows[0].crop_lat).toBe(27.46);
+  });
+
+  it('saves an empty list: the technician confirmed none', async () => {
+    const read = await svc.saveTechCount(READ_A, { pins: [], crop: CROP });
+    expect(read.tech_pins).toEqual([]);
+  });
+
+  it('changes the hide flag alone, and leaves the points, count and flags alone', async () => {
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP, count: 2 });
+    const hidden = await svc.saveTechCount(READ_A, { hideOnEstimate: true });
+    expect(hidden.hide_on_estimate).toBe(true);
+    expect(hidden.tech_pins).toEqual(PINS);
+    expect(hidden.tech_final_count).toBe(2);
+    expect((await svc.saveTechCount(READ_A, { hideOnEstimate: false })).hide_on_estimate).toBe(false);
+  });
+
+  it('leaves the points alone when only a count is saved', async () => {
+    await svc.saveTechCount(READ_A, { pins: PINS, crop: CROP });
+    const read = await svc.saveTechCount(READ_A, { count: 5 });
+    expect(read.tech_pins).toEqual(PINS);
+    expect(read.tech_final_count).toBe(5);
+  });
+
+  it('returns null for an unknown id', async () => {
+    expect(await svc.saveTechCount(MISSING, { pins: PINS, crop: CROP })).toBeNull();
+    expect(await svc.saveTechCount(MISSING, { hideOnEstimate: true })).toBeNull();
+  });
+});
+
+describe('cropImageUrl and customerPointsFromRow', () => {
+  const row = (over = {}) => ({
+    status: 'done', image_source: 'manatee_2025_rgb', image_year: 2025, crop_lat: '27.46000', crop_lng: '-82.57000',
+    hide_on_estimate: false,
+    tech_pins: JSON.stringify([
+      { x: 0.2, y: 0.3, type: 'roof_returns_and_valleys', note: 'front left' },
+      { x: 0.5, y: 0.5, type: 'trees_touching_roof', note: null },
+      { x: 0.9, y: 0.1, type: 'other', note: null },
+    ]),
+    ...over,
+  });
+
+  it('builds the county crop URL from the stored centre, and returns null without one or for an unknown source', () => {
+    const url = svc.cropImageUrl(row());
+    expect(url).toMatch(/^https:\/\/www\.mymanatee\.org\/.*exportImage\?bbox=/);
+    expect(url).toContain('f=image');
+    expect(svc.cropImageUrl(row({ crop_lat: null }))).toBeNull();
+    expect(svc.cropImageUrl(row({ crop_lng: null }))).toBeNull();
+    expect(svc.cropImageUrl(row({ crop_lat: 'x' }))).toBeNull();
+    expect(svc.cropImageUrl(row({ image_source: 'unknown_source' }))).toBeNull();
+    expect(svc.cropImageUrl(null)).toBeNull();
+  });
+
+  it('numbers the points in saved order, with customer labels, notes and the action at each', () => {
+    const out = svc.customerPointsFromRow(row());
+    expect(out.imageUrl).toBe(svc.cropImageUrl(row()));
+    expect(out.imageYear).toBe(2025);
+    expect(out.pins).toEqual([
+      { n: 1, x: 0.2, y: 0.3, type: 'roof_returns_and_valleys', label: 'Roof return, front left', action: 'seal' },
+      { n: 2, x: 0.5, y: 0.5, type: 'trees_touching_roof', label: 'Branch touching the roof', action: 'trim back' },
+      { n: 3, x: 0.9, y: 0.1, type: 'other', label: 'Entry point', action: 'seal' },
+    ]);
+    expect(svc.pinAction('trees_touching_roof')).toBe('trim back');
+    expect(svc.pinAction('chimney_or_flue')).toBe('seal');
+  });
+
+  it('accepts points already parsed (a jsonb column)', () => {
+    expect(svc.customerPointsFromRow(row({ tech_pins: [{ x: 0.1, y: 0.1, type: 'gable_vents', note: null }] })).pins[0].label).toBe('Gable vent');
+  });
+
+  it.each([
+    ['hidden by staff', { hide_on_estimate: true }],
+    ['no points saved', { tech_pins: null }],
+    ['an empty list of points', { tech_pins: '[]' }],
+    ['no stored crop centre', { crop_lat: null, crop_lng: null }],
+    ['a read that is not done', { status: 'pending' }],
+  ])('shows nothing for %s', (_name, over) => {
+    expect(svc.customerPointsFromRow(row(over))).toBeNull();
+  });
+
+  it('shows nothing for no row', () => {
+    expect(svc.customerPointsFromRow(null)).toBeNull();
+  });
+});
+
+describe('PATCH /:id/tech-count with points', () => {
+  const PINS = [{ x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' }, { x: 0.8, y: 0.7, type: 'other' }];
+  const CROP = { lat: 27.46, lng: -82.57 };
+  const patch = (body, opts) => call('PATCH', `/${READ_A}/tech-count`, { body, ...opts });
+  beforeEach(() => {
+    mockRows.push({
+      id: READ_A, lookup_key: CROP_KEY(), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, model: 'm',
+      ai_flags: {}, ai_tier: 'med', status: 'done', tech_final_count: null, tech_final_flags: null, tech_pins: null,
+      hide_on_estimate: false, crop_lat: null, crop_lng: null, created_at: new Date().toISOString(),
+    });
+  });
+
+  it('saves points with the crop and the hide flag, and answers with the normalized read', async () => {
+    const res = await patch({ pins: PINS, crop: CROP, hide_on_estimate: true });
+    expect(res.status).toBe(200);
+    expect(res.json.read.tech_pins).toEqual([
+      { x: 0.2, y: 0.3, type: 'gable_vents', note: 'front left' },
+      { x: 0.8, y: 0.7, type: 'other', note: null },
+    ]);
+    expect(res.json.read.hide_on_estimate).toBe(true);
+    expect(mockRows[0].crop_lat).toBe(27.46);
+  });
+
+  it('saves the hide flag alone, and clears the points with null', async () => {
+    await patch({ pins: PINS, crop: CROP });
+    const hide = await patch({ hide_on_estimate: true });
+    expect(hide.status).toBe(200);
+    expect(hide.json.read.tech_pins).toHaveLength(2);
+    const cleared = await patch({ pins: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.json.read.tech_pins).toBeNull();
+  });
+
+  it('still takes a count and flags with the points in one save', async () => {
+    const res = await patch({ count: 3, flags: { gable_vents: 'yes' }, pins: PINS, crop: CROP });
+    expect(res.status).toBe(200);
+    expect(res.json.read).toEqual(expect.objectContaining({ tech_final_count: 3, tech_final_flags: { gable_vents: 'yes' } }));
+  });
+
+  it.each([
+    ['nothing but a crop', { crop: CROP }],
+    ['points without a crop', { pins: PINS }],
+    ['points with a crop that has no numbers', { pins: PINS, crop: { lat: 'a', lng: 'b' } }],
+    ['points with a crop out of range', { pins: PINS, crop: { lat: 91, lng: 0 } }],
+    ['21 points', { pins: Array.from({ length: 21 }, () => PINS[0]), crop: CROP }],
+    ['a point outside the photo', { pins: [{ x: 1.2, y: 0.5, type: 'other' }], crop: CROP }],
+    ['an unknown point type', { pins: [{ x: 0.5, y: 0.5, type: 'attic_door' }], crop: CROP }],
+    ['a note over 40 characters', { pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'n'.repeat(41) }], crop: CROP }],
+    ['points as an object', { pins: { x: 0.5 }, crop: CROP }],
+    ['a string hide flag', { hide_on_estimate: 'true' }],
+    ['a number hide flag', { hide_on_estimate: 1 }],
+  ])('rejects %s with 400 and writes nothing', async (_name, body) => {
+    const res = await patch(body);
+    expect(res.status).toBe(400);
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
+  it('answers 400 with the photo message for a crop that is not this read\'s, and writes nothing', async () => {
+    const res = await patch({ pins: PINS, crop: { lat: 28.1, lng: -82.1 }, hide_on_estimate: true });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'These points were not drawn on this roof photo' });
+    expect(mockRows[0].tech_pins).toBeNull();
+    expect(mockRows[0].hide_on_estimate).toBe(false);
+  });
+
+  it('answers 404 for an unknown read, and keeps a technician out', async () => {
+    expect((await call('PATCH', `/${MISSING}/tech-count`, { body: { pins: PINS, crop: CROP } })).status).toBe(404);
+    expect((await patch({ pins: PINS, crop: CROP }, { role: 'technician' })).status).toBe(403);
+    expect(mockRows[0].tech_pins).toBeNull();
+  });
+});

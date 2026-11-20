@@ -1,11 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Button, Checkbox, Field, Input } from "../ui";
+import { Button, Checkbox, Field, Input, Select } from "../ui";
 
 // Staff-only roof read (GATE_ROOF_ENTRY_READ, owner 2026-11-19). The county aerial of the home, with the AI's
 // likely rodent entry points drawn on it, and the technician's own count saved beside it. Every new read is a
 // paid model call, so nothing here runs on its own: only the "Read the roof" tap posts. The parent shows this
 // panel only while the server says the gate is on, and mounts it with a key so a new estimate, property,
 // customer or lead starts from a blank panel.
+//
+// Owner ruling 2026-11-20 (choice 4A): the customer estimate shows only the points the technician confirmed. The AI's
+// "yes" pins are faded suggestions here; tapping one confirms it, tapping the empty photo adds a point, and a point can
+// be dragged, retyped, given a short note, or removed. "Save points" stores them with the PATCH (still a tap, never on load).
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -20,6 +24,19 @@ export const ROOF_TYPES = [
   { key: "trees_touching_roof", label: "Trees touching the roof" },
   { key: "tile_eave_open_ends", label: "Tile eave open ends" },
 ];
+
+// The types a confirmed point can carry (the server's TECH_PIN_TYPES), with the one letter a suggestion shows on the photo.
+export const POINT_TYPES = [...ROOF_TYPES, { key: "other", label: "Other entry point" }];
+const TYPE_LETTERS = {
+  roof_returns_and_valleys: "R", plumbing_vent_stacks: "P", roof_vents_or_turbines: "V", chimney_or_flue: "C",
+  ac_or_utility_line_entry: "A", soffit_or_fascia_gaps: "S", gable_vents: "G", trees_touching_roof: "T",
+  tile_eave_open_ends: "E", other: "O",
+};
+const TYPE_LABELS = Object.fromEntries(POINT_TYPES.map((t) => [t.key, t.label]));
+const MAX_POINTS = 20;
+const MAX_NOTE = 40;
+const NUDGE = 0.01;
+const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 
 const TIER_LABELS = { low: "Low", med: "Medium", high: "High", unknown: "Could not be read" };
 const LIKELY_LABELS = { yes: "Yes", no: "No", unsure: "Unsure" };
@@ -70,28 +87,135 @@ function techFlagsFrom(read) {
   return Object.fromEntries(ROOF_TYPES.map(({ key }) => [key, saved[key] === "yes"]));
 }
 
-// The county crop with one numbered dot per pin. Pin x and y are fractions from the top-left of the picture.
-function RoofImage({ url, read }) {
-  const marked = ROOF_TYPES.map((t, i) => ({ ...t, n: i + 1, pins: read.flags?.[t.key]?.pins || [] })).filter((t) => t.pins.length);
+const clamp01 = (n) => Math.min(1, Math.max(0, n));
+const round4 = (n) => Math.round(n * 10000) / 10000;
+const near = (a, b) => Math.abs(a - b) < 0.0006;
+
+// The AI's "yes" pins, as suggestions. x and y are fractions from the top-left of the picture.
+function suggestionsFrom(read) {
+  return ROOF_TYPES.flatMap((t) => {
+    const entry = read?.flags?.[t.key];
+    if (entry?.likely !== "yes") return [];
+    return (entry.pins || []).map((p, i) => ({ key: `${t.key}-${i}`, type: t.key, x: p.x, y: p.y }));
+  });
+}
+
+// The technician's saved points, each with a local id so a point can be dragged and edited. Ids never leave the panel.
+function pointsFrom(read, nextId) {
+  return (Array.isArray(read?.tech_pins) ? read.tech_pins : []).map((p) => ({
+    id: nextId(), x: p.x, y: p.y, type: TYPE_LABELS[p.type] ? p.type : "other", note: p.note || "", from: null,
+  }));
+}
+
+const pointText = (p) => `${TYPE_LABELS[p.type]}${p.note.trim() ? `, ${p.note.trim()}` : ""}`;
+
+const PIN_BASE = "absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 p-0 rounded-full text-11 leading-4 text-center focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-1";
+
+// The county crop with the AI's suggestions (faded, with the type letter) and the technician's confirmed points
+// (solid, numbered) on it. The photo is a click target for adding a point; every point is a button.
+function RoofImage({ url, suggestions, points, selectedId, editable, frameRef, onAdd, onConfirm, onSelect, onMove, onNudge, onRemove }) {
+  const drag = useRef(null);
+  const suppressClick = useRef(false);
+  const letters = [...new Set(suggestions.map((s) => s.type))];
+
+  function addAt(e) {
+    if (!editable || e.target.closest("[data-roof-point]")) return;
+    const rect = frameRef.current?.getBoundingClientRect();
+    if (!rect || !rect.width || !rect.height) return;
+    onAdd(clamp01((e.clientX - rect.left) / rect.width), clamp01((e.clientY - rect.top) / rect.height));
+  }
+  function down(e, id) {
+    suppressClick.current = false;
+    if (!editable || (e.button != null && e.button > 0)) return;
+    drag.current = { id, sx: e.clientX, sy: e.clientY, moved: false };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  }
+  function move(e) {
+    const d = drag.current;
+    if (!d) return;
+    if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 3) return;
+    const rect = frameRef.current?.getBoundingClientRect();
+    if (!rect || !rect.width || !rect.height) return;
+    d.moved = true;
+    onMove(d.id, clamp01((e.clientX - rect.left) / rect.width), clamp01((e.clientY - rect.top) / rect.height));
+  }
+  function up() {
+    if (drag.current?.moved) suppressClick.current = true;
+    drag.current = null;
+  }
+  function key(e, id) {
+    if (!editable) return;
+    const arrow = ARROWS[e.key];
+    if (arrow) {
+      e.preventDefault();
+      onNudge(id, arrow[0] * NUDGE, arrow[1] * NUDGE);
+    } else if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      onRemove(id);
+    } else if (e.key === "Escape") {
+      onSelect(null);
+    }
+  }
+
   return (
     <div>
-      <div className="relative w-full max-w-md aspect-square bg-zinc-100 border-hairline border-zinc-200 rounded-xs overflow-hidden" data-testid="roof-read-image">
-        <img src={url} alt="County aerial photo of the roof" className="absolute inset-0 w-full h-full object-cover" />
-        {marked.flatMap((t) => t.pins.map((p, i) => (
-          <span
-            key={`${t.key}-${i}`}
+      <div
+        ref={frameRef}
+        className={`relative w-full max-w-md aspect-square bg-zinc-100 border-hairline border-zinc-200 rounded-xs overflow-hidden ${editable ? "cursor-crosshair" : ""}`}
+        data-testid="roof-read-image"
+        onClick={addAt}
+      >
+        <img src={url} alt="County aerial photo of the roof" className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none" draggable={false} />
+        {suggestions.map((s) => (
+          <button
+            key={s.key}
+            type="button"
             data-testid="roof-read-pin"
-            data-type={t.key}
-            title={t.label}
-            className="absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-zinc-900 text-white text-11 leading-5 text-center border-2 border-white"
+            data-roof-point="suggestion"
+            data-type={s.type}
+            title={`${TYPE_LABELS[s.type]} (suggested by the AI). Tap to confirm.`}
+            aria-label={`Suggested point: ${TYPE_LABELS[s.type]}. Confirm it`}
+            disabled={!editable}
+            onClick={(e) => { e.stopPropagation(); onConfirm(s); }}
+            className={`${PIN_BASE} bg-white/70 text-zinc-900 border border-dashed border-zinc-900 opacity-70`}
+            style={{ left: `${s.x * 100}%`, top: `${s.y * 100}%` }}
+          >
+            {TYPE_LETTERS[s.type]}
+          </button>
+        ))}
+        {points.map((p, i) => (
+          <button
+            key={p.id}
+            type="button"
+            data-testid="roof-read-point"
+            data-roof-point="confirmed"
+            data-n={i + 1}
+            data-type={p.type}
+            aria-label={`Point ${i + 1}: ${pointText(p)}`}
+            aria-pressed={selectedId === p.id}
+            title={pointText(p)}
+            disabled={!editable}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (suppressClick.current) { suppressClick.current = false; return; }
+              onSelect(selectedId === p.id ? null : p.id);
+            }}
+            onPointerDown={(e) => down(e, p.id)}
+            onPointerMove={move}
+            onPointerUp={up}
+            onPointerCancel={up}
+            onKeyDown={(e) => key(e, p.id)}
+            className={`${PIN_BASE} touch-none bg-zinc-900 text-white border-2 border-white ${selectedId === p.id ? "ring-2 ring-zinc-900 ring-offset-1" : ""}`}
             style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%` }}
           >
-            {t.n}
-          </span>
-        )))}
+            {i + 1}
+          </button>
+        ))}
       </div>
-      {marked.length > 0 && (
-        <p className="text-14 text-zinc-600 mt-2">{marked.map((t) => `${t.n} ${t.label}`).join(" · ")}</p>
+      {letters.length > 0 && (
+        <p className="text-14 text-zinc-600 mt-2" data-testid="roof-read-legend">
+          Faded letters are the AI's suggestions: {letters.map((t) => `${TYPE_LETTERS[t]} ${TYPE_LABELS[t]}`).join(" · ")}
+        </p>
       )}
     </div>
   );
@@ -107,6 +231,16 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   const [touched, setTouched] = useState({});
   const [countEdited, setCountEdited] = useState(false);
   const [saveState, setSaveState] = useState({ busy: false, msg: "", err: "" });
+  // The technician's confirmed points, whether to show them on the customer estimate, and whether they changed since the
+  // read was loaded or last saved.
+  const [points, setPoints] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [showOnEstimate, setShowOnEstimate] = useState(true);
+  const [pointsEdited, setPointsEdited] = useState(false);
+  const [pointsState, setPointsState] = useState({ busy: false, msg: "", err: "" });
+  const pointId = useRef(0);
+  const nextId = () => { pointId.current += 1; return `pt${pointId.current}`; };
+  const frameRef = useRef(null);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -149,6 +283,11 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
         setTouched({});
         setCountEdited(false);
         setSaveState({ busy: false, msg: "", err: "" });
+        setPoints(pointsFrom(body.read, nextId));
+        setSelectedId(null);
+        setShowOnEstimate(!body.read.hide_on_estimate);
+        setPointsEdited(false);
+        setPointsState({ busy: false, msg: "", err: "" });
         setPhase("ok");
         return;
       }
@@ -206,6 +345,83 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   }
 
   const read = phase === "ok" ? result?.read : null;
+  const editable = !!estimateId && !pointsState.busy;
+  const atMax = points.length >= MAX_POINTS;
+  const suggestions = read
+    ? suggestionsFrom(read).filter((sg) => !points.some((p) => p.from === sg.key || (p.type === sg.type && near(p.x, sg.x) && near(p.y, sg.y))))
+    : [];
+  const selected = points.find((p) => p.id === selectedId) || null;
+
+  const edited = (fn) => { fn(); setPointsEdited(true); setPointsState((st) => (st.busy ? st : { busy: false, msg: "", err: "" })); };
+  function addPoint(x, y, type = "other", from = null) {
+    if (!editable || points.length >= MAX_POINTS) return;
+    const id = nextId();
+    edited(() => {
+      setPoints((list) => (list.length >= MAX_POINTS ? list : [...list, { id, x: round4(x), y: round4(y), type, note: "", from }]));
+      setSelectedId(id);
+    });
+  }
+  const confirmSuggestion = (sg) => addPoint(sg.x, sg.y, sg.type, sg.key);
+  function movePoint(id, x, y) {
+    if (!editable) return;
+    edited(() => setPoints((list) => list.map((p) => (p.id === id ? { ...p, x: round4(clamp01(x)), y: round4(clamp01(y)) } : p))));
+  }
+  const nudgePoint = (id, dx, dy) => {
+    const p = points.find((q) => q.id === id);
+    if (p) movePoint(id, p.x + dx, p.y + dy);
+    setSelectedId(id);
+  };
+  function changePoint(id, patch) {
+    if (!editable) return;
+    edited(() => setPoints((list) => list.map((p) => (p.id === id ? { ...p, ...patch } : p))));
+  }
+  function removePoint(id) {
+    if (!editable) return;
+    edited(() => {
+      setPoints((list) => list.filter((p) => p.id !== id));
+      setSelectedId((cur) => (cur === id ? null : cur));
+    });
+  }
+
+  async function savePoints() {
+    const rd = result?.read;
+    if (!rd || pointsState.busy || !estimateId) return;
+    if (!spot) {
+      setPointsState({ busy: false, msg: "", err: "The map point is missing. Look up the address again." });
+      return;
+    }
+    if (!pointsEdited) {
+      setPointsState({ busy: false, msg: "", err: "Change a point first." });
+      return;
+    }
+    setPointsState({ busy: true, msg: "", err: "" });
+    try {
+      const r = await roofFetch(`/admin/roof-entry-read/${encodeURIComponent(rd.id)}/tech-count`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          pins: points.map((p) => ({ x: round4(p.x), y: round4(p.y), type: p.type, note: p.note.trim() || null })),
+          crop: { lat: spot.lat, lng: spot.lng },
+          hide_on_estimate: !showOnEstimate,
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!mounted.current) return;
+      if (!r.ok || !body?.read) {
+        setPointsState({ busy: false, msg: "", err: body?.error || "Could not save the points. Try again." });
+        return;
+      }
+      // What the server holds now, then clear the edited marker.
+      setResult((prev) => ({ ...prev, read: body.read }));
+      setPoints(pointsFrom(body.read, nextId));
+      setSelectedId(null);
+      setShowOnEstimate(!body.read.hide_on_estimate);
+      setPointsEdited(false);
+      setPointsState({ busy: false, msg: "Points saved.", err: "" });
+    } catch {
+      if (mounted.current) setPointsState({ busy: false, msg: "", err: "Could not reach the server. Try again." });
+    }
+  }
+
   return (
     <div className="space-y-3" data-testid="roof-read-panel">
       <p className="text-14 text-zinc-400 font-medium">Roof read</p>
@@ -235,7 +451,77 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
       )}
       {read && (
         <div className="space-y-4" data-testid="roof-read-result">
-          <RoofImage url={result.image_url} read={read} />
+          <RoofImage
+            url={result.image_url}
+            suggestions={suggestions}
+            points={points}
+            selectedId={selectedId}
+            editable={editable}
+            frameRef={frameRef}
+            onAdd={(x, y) => addPoint(x, y)}
+            onConfirm={confirmSuggestion}
+            onSelect={setSelectedId}
+            onMove={movePoint}
+            onNudge={nudgePoint}
+            onRemove={removePoint}
+          />
+          <div className="space-y-2" data-testid="roof-read-points">
+            <p className="text-14 text-zinc-400 font-medium">Points the tech confirmed</p>
+            <p className="text-14 text-zinc-600">
+              Tap a faded letter to confirm it, or tap the photo to add a point. Drag a point to move it, or select it and press the arrow keys.
+              The customer estimate shows only the points confirmed here.
+            </p>
+            <div className="flex items-center gap-3 flex-wrap">
+              <Button variant="secondary" size="sm" onClick={() => addPoint(0.5, 0.5)} disabled={!editable || atMax} data-testid="roof-read-add-point">
+                Add a point
+              </Button>
+              <span className="text-14 text-zinc-600" data-testid="roof-read-point-count">{points.length} of {MAX_POINTS} points</span>
+              {atMax && <span className="text-14 text-zinc-600" data-testid="roof-read-point-max">That is the most. Remove a point to add another.</span>}
+            </div>
+            {points.length > 0 && (
+              <ol className="text-14 text-zinc-900 space-y-1" data-testid="roof-read-point-list">
+                {points.map((p, i) => (
+                  <li key={p.id} data-testid={`roof-read-point-row-${i + 1}`}>{i + 1}. {pointText(p)}</li>
+                ))}
+              </ol>
+            )}
+            {selected && (
+              <div className="p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-2" data-testid="roof-read-point-editor">
+                <p className="text-14 text-zinc-400 font-medium">Point {points.indexOf(selected) + 1}</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <Field label="Type" id="roof-read-point-type" className="mb-0">
+                    <Select value={selected.type} disabled={!editable} onChange={(e) => changePoint(selected.id, { type: e.target.value })}>
+                      {POINT_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+                    </Select>
+                  </Field>
+                  <Field label="Note" id="roof-read-point-note" className="mb-0">
+                    <Input value={selected.note} maxLength={MAX_NOTE} placeholder="front left" disabled={!editable} onChange={(e) => changePoint(selected.id, { note: e.target.value.slice(0, MAX_NOTE) })} />
+                  </Field>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Button variant="secondary" size="sm" onClick={() => removePoint(selected.id)} disabled={!editable} data-testid="roof-read-point-remove">Remove</Button>
+                  <Button variant="secondary" size="sm" onClick={() => setSelectedId(null)} data-testid="roof-read-point-done">Done</Button>
+                </div>
+              </div>
+            )}
+            <Checkbox
+              id="roof-read-show-on-estimate"
+              label="Show these points on the customer estimate"
+              checked={showOnEstimate}
+              disabled={!editable}
+              onChange={() => edited(() => setShowOnEstimate((v) => !v))}
+            />
+            <div className="flex items-center gap-3 flex-wrap">
+              <Button variant="secondary" size="sm" onClick={savePoints} loading={pointsState.busy} disabled={pointsState.busy || !estimateId} data-testid="roof-read-points-save">
+                Save points
+              </Button>
+              {!estimateId && (
+                <span className="text-14 text-zinc-600" data-testid="roof-read-points-save-first">Save the estimate first to record the tech's points.</span>
+              )}
+              {pointsState.msg && <span className="text-14 text-zinc-600" role="status" data-testid="roof-read-points-status">{pointsState.msg}</span>}
+              {pointsState.err && <span className="text-14 text-zinc-600" role="alert" data-testid="roof-read-points-error">{pointsState.err}</span>}
+            </div>
+          </div>
           <p className="text-14 text-zinc-600">
             {String(read.county).replace(/^./, (c) => c.toUpperCase())} County aerial, {read.image_year}.
             {result.cached ? " Reused from an earlier read." : ""}

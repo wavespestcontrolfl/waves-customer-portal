@@ -8,8 +8,15 @@
  *         200 for every status except 202 'in_progress': another request holds this roof's claim, no image fetch or
  *         model call was made, ask again shortly. estimate_id / customer_id are stored and compared lower-case.
  *         400 { error: 'reference_mismatch' } when both ids are given and the estimate belongs to a different customer.
- *   PATCH /api/admin/roof-entry-read/:id/tech-count the technician's final count and flags, to compare with the AI later
- *         body { count?: int >= 0, flags?: { <entry type>: 'yes' | 'no' | 'unsure' } } -> { read }
+ *   PATCH /api/admin/roof-entry-read/:id/tech-count the technician's final count, flags and confirmed points
+ *         body { count?: int 0-500, flags?: { <entry type>: 'yes' | 'no' | 'unsure' },
+ *                pins?: [{ x, y, type, note? }, ...] | null, crop?: { lat, lng }, hide_on_estimate?: boolean } -> { read }
+ *         At least one of count, flags, pins, hide_on_estimate is required. pins (owner ruling 2026-11-20, choice 4A) are the
+ *         points the technician confirmed on the photo, saved whole (null clears them); the customer estimate shows only
+ *         these, never the AI read. When pins is a list, crop is required: the crop centre the panel drew on, which must
+ *         belong to this read's photo (else 400 { error: 'These points were not drawn on this roof photo' }). An invalid
+ *         pins list (over 20 points, x or y outside 0-1, an unknown type, a note over 40 characters) is 400.
+ *         hide_on_estimate true keeps the points off the customer estimate.
  *
  * Admin only, like the other admin estimate routes. The gate is this router's first middleware, ahead of the staff
  * login that reads the technicians table: gate off = 404 { enabled: false } from the router, with no route-level
@@ -22,7 +29,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { roofEntryReadLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const {
-  ENTRY_TYPES, LIKELY, countyKey, runRoofEntryRead, saveTechCount,
+  ENTRY_TYPES, LIKELY, countyKey, runRoofEntryRead, saveTechCount, validateTechPins,
 } = require('../services/roof-entry-read');
 
 const router = express.Router();
@@ -62,7 +69,21 @@ function techCountInput(body) {
     if (!valid) return null;
     out.flags = f;
   }
-  return out.count === undefined && out.flags === undefined ? null : out;
+  if (b.pins !== undefined) {
+    if (b.pins === null) out.pins = null;
+    else {
+      const pins = validateTechPins(b.pins);
+      const c = b.crop;
+      if (!pins || !c || typeof c !== 'object' || !isCoord(c.lat, 90) || !isCoord(c.lng, 180)) return null;
+      out.pins = pins;
+      out.crop = { lat: c.lat, lng: c.lng };
+    }
+  }
+  if (b.hide_on_estimate !== undefined) {
+    if (typeof b.hide_on_estimate !== 'boolean') return null;
+    out.hideOnEstimate = b.hide_on_estimate;
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 router.post('/', async (req, res, next) => {
@@ -86,11 +107,16 @@ router.patch('/:id/tech-count', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Read not found' });
     const input = techCountInput(req.body);
-    if (!input) return res.status(400).json({ error: 'Send count (whole number, 0-500) and/or flags ({ <entry type>: yes | no | unsure })' });
+    if (!input) {
+      return res.status(400).json({
+        error: 'Send count (whole number, 0-500), flags ({ <entry type>: yes | no | unsure }), pins (up to 20, with crop) and/or hide_on_estimate (true or false)',
+      });
+    }
     const read = await saveTechCount(req.params.id, input);
     if (!read) return res.status(404).json({ error: 'Read not found' });
     return res.json({ read });
   } catch (err) {
+    if (err.code === 'crop_mismatch') return res.status(400).json({ error: 'These points were not drawn on this roof photo' });
     logger.error(`[admin-roof-entry-read] tech count failed: ${err.message}`);
     return next(err);
   }

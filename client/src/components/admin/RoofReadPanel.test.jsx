@@ -310,3 +310,302 @@ describe("roofSpotFrom", () => {
     expect(roofSpotFrom(null)).toBeNull();
   });
 });
+
+// ── Technician-confirmed points (owner ruling 2026-11-20, choice 4A) ──────────────────────────────────────────────────
+
+describe("confirmed points", () => {
+  const READ_ID = "33333333-3333-4333-8333-333333333333";
+  const patches = () => fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH");
+  const lastBody = () => JSON.parse(patches().at(-1)[1].body);
+  const frame = () => screen.getByTestId("roof-read-image");
+  // jsdom has no layout: give the photo a 200 x 100 box at the page origin, so a tap at (50, 25) is x 0.25, y 0.25.
+  const sizeFrame = () => { frame().getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100 }); };
+  const opened = async (props = {}, read = READ()) => {
+    fetchMock.mockImplementationOnce(() => reply({ status: "ok", cached: false, read, image_url: IMAGE }));
+    const view = render(<RoofReadPanel spot={SPOT} estimateId={EST} {...props} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    sizeFrame();
+    return view;
+  };
+  const SAVED = [
+    { x: 0.2, y: 0.3, type: "gable_vents", note: "front left" },
+    { x: 0.6, y: 0.4, type: "other", note: null },
+  ];
+
+  it("draws the AI's yes pins as faded suggestions with a type letter, and confirmed points as numbered solid pins", async () => {
+    await opened({}, READ({ tech_pins: SAVED }));
+    const suggestions = screen.getAllByTestId("roof-read-pin");
+    expect(suggestions).toHaveLength(2);
+    expect(suggestions[0]).toHaveTextContent("P");
+    expect(suggestions[0].className).toMatch(/opacity-70/);
+    const points = screen.getAllByTestId("roof-read-point");
+    expect(points.map((p) => p.textContent)).toEqual(["1", "2"]);
+    expect(points[0].style.left).toBe("20%");
+    expect(points[0].style.top).toBe("30%");
+    expect(points[0]).toHaveAttribute("data-type", "gable_vents");
+    expect(screen.getByTestId("roof-read-point-row-1")).toHaveTextContent("1. Gable vents, front left");
+    // An "unsure" or "no" type draws no suggestion.
+    expect(screen.getByTestId("roof-read-legend")).toHaveTextContent("P Plumbing vent stacks");
+    expect(screen.getByTestId("roof-read-legend")).not.toHaveTextContent("Gable");
+    expect(screen.getByTestId("roof-read-point-count")).toHaveTextContent("2 of 20 points");
+  });
+
+  it("posts nothing on load or while editing, and tapping a suggestion confirms it with the AI type", async () => {
+    await opened();
+    expect(screen.queryAllByTestId("roof-read-point")).toHaveLength(0);
+    fireEvent.click(screen.getAllByTestId("roof-read-pin")[1]);
+    const points = screen.getAllByTestId("roof-read-point");
+    expect(points).toHaveLength(1);
+    expect(points[0]).toHaveAttribute("data-type", "plumbing_vent_stacks");
+    expect(points[0].style.left).toBe("75%");
+    expect(points[0].style.top).toBe("10%");
+    // The confirmed suggestion is no longer a suggestion.
+    expect(screen.getAllByTestId("roof-read-pin")).toHaveLength(1);
+    expect(screen.getByTestId("roof-read-point-editor")).toBeInTheDocument();
+    expect(posts()).toHaveLength(1);
+    expect(patches()).toHaveLength(0);
+  });
+
+  it("adds an 'other' point where the empty photo is tapped, and not when a point is tapped", async () => {
+    await opened();
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    const points = screen.getAllByTestId("roof-read-point");
+    expect(points).toHaveLength(1);
+    expect(points[0]).toHaveAttribute("data-type", "other");
+    expect(points[0].style.left).toBe("25%");
+    expect(points[0].style.top).toBe("25%");
+    fireEvent.click(points[0]);
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(1);
+  });
+
+  it("edits the selected point: type, a note of at most 40 characters, and Remove", async () => {
+    await opened();
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "chimney_or_flue" } });
+    const note = screen.getByLabelText("Note");
+    expect(note).toHaveAttribute("placeholder", "front left");
+    expect(note).toHaveAttribute("maxlength", "40");
+    fireEvent.change(note, { target: { value: "x".repeat(60) } });
+    expect(note).toHaveValue("x".repeat(40));
+    fireEvent.change(note, { target: { value: "back right" } });
+    const point = screen.getByTestId("roof-read-point");
+    expect(point).toHaveAttribute("data-type", "chimney_or_flue");
+    expect(screen.getByTestId("roof-read-point-row-1")).toHaveTextContent("1. Chimney or flue, back right");
+    fireEvent.click(screen.getByTestId("roof-read-point-remove"));
+    expect(screen.queryAllByTestId("roof-read-point")).toHaveLength(0);
+    expect(screen.queryByTestId("roof-read-point-editor")).toBeNull();
+  });
+
+  it("removing a point that came from a suggestion brings the suggestion back", async () => {
+    await opened();
+    fireEvent.click(screen.getAllByTestId("roof-read-pin")[0]);
+    expect(screen.getAllByTestId("roof-read-pin")).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("roof-read-point-remove"));
+    expect(screen.getAllByTestId("roof-read-pin")).toHaveLength(2);
+  });
+
+  it("works from the keyboard: Add a point, arrow keys nudge by 1%, Delete removes, and the editor shows on select", async () => {
+    await opened();
+    fireEvent.click(screen.getByTestId("roof-read-add-point"));
+    const point = screen.getByTestId("roof-read-point");
+    expect(point.style.left).toBe("50%");
+    expect(point.style.top).toBe("50%");
+    expect(point.tagName).toBe("BUTTON");
+    fireEvent.keyDown(point, { key: "ArrowRight" });
+    fireEvent.keyDown(point, { key: "ArrowRight" });
+    fireEvent.keyDown(point, { key: "ArrowUp" });
+    expect(screen.getByTestId("roof-read-point").style.left).toBe("52%");
+    expect(screen.getByTestId("roof-read-point").style.top).toBe("49%");
+    fireEvent.keyDown(point, { key: "ArrowLeft" });
+    fireEvent.keyDown(point, { key: "ArrowDown" });
+    expect(screen.getByTestId("roof-read-point").style.left).toBe("51%");
+    expect(screen.getByTestId("roof-read-point").style.top).toBe("50%");
+    // Done closes the editor; Enter on the pin (a click) selects it again.
+    fireEvent.click(screen.getByTestId("roof-read-point-done"));
+    expect(screen.queryByTestId("roof-read-point-editor")).toBeNull();
+    fireEvent.click(screen.getByTestId("roof-read-point"));
+    expect(screen.getByTestId("roof-read-point-editor")).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByTestId("roof-read-point"), { key: "Delete" });
+    expect(screen.queryAllByTestId("roof-read-point")).toHaveLength(0);
+  });
+
+  it("keeps a nudged point inside the photo", async () => {
+    await opened({}, READ({ tech_pins: [{ x: 1, y: 0, type: "other", note: null }] }));
+    const point = screen.getByTestId("roof-read-point");
+    fireEvent.keyDown(point, { key: "ArrowRight" });
+    fireEvent.keyDown(point, { key: "ArrowUp" });
+    expect(point.style.left).toBe("100%");
+    expect(point.style.top).toBe("0%");
+  });
+
+  it("drags a point with pointer events, and a drag does not toggle the editor", async () => {
+    // jsdom has no PointerEvent, so a fired pointer event would lose its coordinates: use a mouse event with a pointer id.
+    const hadPointerEvent = "PointerEvent" in window;
+    if (!hadPointerEvent) {
+      window.PointerEvent = class PointerEvent extends MouseEvent {
+        constructor(type, init = {}) { super(type, init); this.pointerId = init.pointerId; }
+      };
+    }
+    try {
+      await dragCase();
+    } finally {
+      if (!hadPointerEvent) delete window.PointerEvent;
+    }
+  });
+
+  async function dragCase() {
+    await opened({}, READ({ tech_pins: SAVED }));
+    const point = screen.getAllByTestId("roof-read-point")[0];
+    fireEvent.pointerDown(point, { clientX: 40, clientY: 30, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(point, { clientX: 100, clientY: 50, pointerId: 1 });
+    expect(screen.getAllByTestId("roof-read-point")[0].style.left).toBe("50%");
+    expect(screen.getAllByTestId("roof-read-point")[0].style.top).toBe("50%");
+    fireEvent.pointerMove(point, { clientX: 900, clientY: -40, pointerId: 1 });
+    expect(screen.getAllByTestId("roof-read-point")[0].style.left).toBe("100%");
+    expect(screen.getAllByTestId("roof-read-point")[0].style.top).toBe("0%");
+    fireEvent.pointerUp(point, { pointerId: 1 });
+    fireEvent.click(point);
+    expect(screen.queryByTestId("roof-read-point-editor")).toBeNull();
+    // After the drag has ended, moving the pointer moves nothing.
+    fireEvent.pointerMove(point, { clientX: 10, clientY: 10, pointerId: 1 });
+    expect(screen.getAllByTestId("roof-read-point")[0].style.left).toBe("100%");
+    // A plain tap (no movement) selects it.
+    fireEvent.pointerDown(point, { clientX: 5, clientY: 5, pointerId: 1, button: 0 });
+    fireEvent.pointerUp(point, { pointerId: 1 });
+    fireEvent.click(point);
+    expect(screen.getByTestId("roof-read-point-editor")).toBeInTheDocument();
+  }
+
+  it("stops adding at 20 points, says so, and adds again after a removal", async () => {
+    await opened({}, READ({ tech_pins: Array.from({ length: 19 }, (_, i) => ({ x: i / 40, y: 0.5, type: "other", note: null })) }));
+    expect(screen.queryByTestId("roof-read-point-max")).toBeNull();
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(20);
+    expect(screen.getByTestId("roof-read-point-max")).toBeInTheDocument();
+    expect(screen.getByTestId("roof-read-add-point")).toBeDisabled();
+    fireEvent.click(frame(), { clientX: 120, clientY: 60 });
+    fireEvent.click(screen.getAllByTestId("roof-read-pin")[0]);
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(20);
+    fireEvent.click(screen.getByTestId("roof-read-point-remove"));
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(19);
+    expect(screen.queryByTestId("roof-read-point-max")).toBeNull();
+  });
+
+  it("shows the hide checkbox checked by default and unchecked when the saved read is hidden", async () => {
+    await opened();
+    expect(screen.getByRole("checkbox", { name: "Show these points on the customer estimate" })).toBeChecked();
+    cleanup();
+    await opened({}, READ({ hide_on_estimate: true, tech_pins: SAVED }));
+    expect(screen.getByRole("checkbox", { name: "Show these points on the customer estimate" })).not.toBeChecked();
+  });
+
+  it("saves the exact payload: the points, the panel's own map point as the crop, and the hide flag", async () => {
+    await opened();
+    fireEvent.click(screen.getAllByTestId("roof-read-pin")[0]);
+    fireEvent.change(screen.getByLabelText("Note"), { target: { value: "  front left  " } });
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show these points on the customer estimate" }));
+    fetchMock.mockImplementationOnce(() => reply({
+      read: READ({
+        hide_on_estimate: true,
+        tech_pins: [{ x: 0.25, y: 0.5, type: "plumbing_vent_stacks", note: "front left" }, { x: 0.25, y: 0.25, type: "other", note: null }],
+      }),
+    }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    expect(patches()).toHaveLength(1);
+    expect(String(patches()[0][0])).toMatch(new RegExp(`/admin/roof-entry-read/${READ_ID}/tech-count$`));
+    expect(lastBody()).toEqual({
+      pins: [
+        { x: 0.25, y: 0.5, type: "plumbing_vent_stacks", note: "front left" },
+        { x: 0.25, y: 0.25, type: "other", note: null },
+      ],
+      crop: { lat: 27.46, lng: -82.57 },
+      hide_on_estimate: true,
+    });
+    // The count and flags are not part of a points save.
+    expect(lastBody()).not.toHaveProperty("count");
+    expect(lastBody()).not.toHaveProperty("flags");
+    expect(screen.getByRole("checkbox", { name: "Show these points on the customer estimate" })).not.toBeChecked();
+  });
+
+  it("takes the server's values after a save, and clears the edited marker", async () => {
+    await opened();
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: [{ x: 0.9, y: 0.9, type: "gable_vents", note: "server" }] }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    const points = screen.getAllByTestId("roof-read-point");
+    expect(points).toHaveLength(1);
+    expect(points[0].style.left).toBe("90%");
+    expect(screen.getByTestId("roof-read-point-row-1")).toHaveTextContent("1. Gable vents, server");
+    expect(screen.queryByTestId("roof-read-point-editor")).toBeNull();
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/Change a point first/);
+    expect(patches()).toHaveLength(1);
+  });
+
+  it("can save an empty list after the last point is removed, and shows the server's refusal", async () => {
+    await opened({}, READ({ tech_pins: SAVED }));
+    fireEvent.click(screen.getAllByTestId("roof-read-point")[0]);
+    fireEvent.click(screen.getByTestId("roof-read-point-remove"));
+    fireEvent.click(screen.getAllByTestId("roof-read-point")[0]);
+    fireEvent.click(screen.getByTestId("roof-read-point-remove"));
+    fetchMock.mockImplementationOnce(() => reply({ error: "These points were not drawn on this roof photo" }, 400));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent("These points were not drawn on this roof photo");
+    expect(lastBody().pins).toEqual([]);
+    // The points stay as edited so staff can try again.
+    expect(screen.queryAllByTestId("roof-read-point")).toHaveLength(0);
+  });
+
+  it("locks the points and Save while a save is pending", async () => {
+    await opened();
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    let finish;
+    fetchMock.mockImplementationOnce(() => new Promise((r) => { finish = () => r({ ok: true, status: 200, json: async () => ({ read: READ({ tech_pins: [] }) }) }); }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await waitFor(() => expect(screen.getByTestId("roof-read-points-save")).toBeDisabled());
+    expect(screen.getByTestId("roof-read-add-point")).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Show these points on the customer estimate" })).toBeDisabled();
+    fireEvent.click(frame(), { clientX: 80, clientY: 40 });
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(patches()).toHaveLength(1);
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(1);
+    finish();
+    await screen.findByText("Points saved.");
+  });
+
+  it("cannot save, add or edit points until the estimate has an id, and says so", async () => {
+    await opened({ estimateId: null });
+    expect(screen.getByTestId("roof-read-points-save")).toBeDisabled();
+    expect(screen.getByTestId("roof-read-points-save-first")).toHaveTextContent("Save the estimate first to record the tech's points.");
+    expect(screen.getByTestId("roof-read-add-point")).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Show these points on the customer estimate" })).toBeDisabled();
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    expect(screen.queryAllByTestId("roof-read-point")).toHaveLength(0);
+    for (const s of screen.getAllByTestId("roof-read-pin")) expect(s).toBeDisabled();
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(patches()).toHaveLength(0);
+  });
+
+  it("leaves the count and flags save as it was: a count save sends no points", async () => {
+    await opened({}, READ({ tech_pins: SAVED }));
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_final_count: 3, tech_pins: SAVED }) }));
+    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "3" } });
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    await screen.findByText("Saved.");
+    expect(lastBody()).toEqual({ count: 3 });
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(2);
+  });
+
+  it("shows a save that could not reach the server, without losing the points", async () => {
+    await opened();
+    fireEvent.click(frame(), { clientX: 50, clientY: 25 });
+    fetchMock.mockImplementationOnce(() => Promise.reject(new Error("offline")));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent(/Could not reach the server/);
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(1);
+  });
+});
