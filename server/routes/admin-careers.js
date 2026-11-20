@@ -3,11 +3,13 @@
  *
  *   GET   /                  list (status/role filters, newest first, ai fields)
  *   GET   /:id                full application detail, plus same_phone: the
- *                             person's other applications (same phone number)
+ *                             person's other applications (same phone number);
+ *                             ?peek=1 acknowledges no replies
  *   GET   /:id/stage-preview  rendered notify preview for a candidate status, and what
  *                             the move does to the application's job offers
  *   PATCH /:id/status         owner status transition + optional notify/resend;
- *                             optional expected_status refuses a stale decision (409)
+ *                             optional expected_status refuses a stale decision (409), and
+ *                             optional expected_offers a move whose offers changed (409)
  *   GET   /:id/offer, POST /:id/offer, POST /:id/offer/:offerId/{send,withdraw,revise},
  *   GET   /:id/offer/:offerId/signed-copy
  *                             the job offer flow (GATE_JOB_OFFERS; 404 { enabled: false } while off).
@@ -196,6 +198,9 @@ router.get('/:id', async (req, res) => {
       replyMedia = {};
     }
     res.json({ application: await presentApplication(row), reply_media: replyMedia, same_phone: await samePhoneApplications(row) });
+    // A re-read the page makes on its own (?peek=1: after an offer action, or its Try again) acknowledges nothing: a
+    // reply that arrived meanwhile may sit behind a dialog the owner has open. Only an explicit open reads them.
+    if (req.query.peek === '1') return;
     // Opening the application IS reading its replies (Codex r7 P2): clear the
     // unread flags on the applicant's reply rows in both message stores so
     // the shared unread counts do not stay lit for messages the owner has
@@ -231,10 +236,11 @@ router.get('/:id', async (req, res) => {
 // What a stage move does to the application's job offers, by the rule the move applies (applyStatusTransition), with
 // GATE_JOB_OFFERS on or off: whether it withdraws an offer the applicant holds or discards a draft, and whether this
 // account may make it (a held offer is withdrawn only by the owner account). The stage dialog says it before Confirm.
+// stamp: the offers this preview saw; the move sends it back as expected_offers and is refused if they changed.
 async function stageOfferEffect(req, row, status) {
-  if (!JobOffers.stageMoveClosesOffers(row.status, status)) return { held: false, draft: false, owner_only: false };
-  const { held, draft } = await JobOffers.liveOfferStake(db, row.id);
-  return { held, draft, owner_only: held && !ibFullAccess(req) };
+  if (!JobOffers.stageMoveClosesOffers(row.status, status)) return { held: false, draft: false, owner_only: false, stamp: null };
+  const { held, draft, stamp } = await JobOffers.liveOfferStake(db, row.id);
+  return { held, draft, owner_only: held && !ibFullAccess(req), stamp };
 }
 
 router.get('/:id/stage-preview', async (req, res) => {
@@ -299,6 +305,13 @@ function buildStatusPatchPlan(req) {
     return { error: { code: 400, body: { error: 'Unknown expected status' } } };
   }
 
+  // The job offers the stage dialog's preview showed (its offers.stamp). Optional, like expected_status; when present,
+  // a move that withdraws offers is refused if they changed since.
+  const expectedOffers = req.body.expected_offers ?? null;
+  if (expectedOffers !== null && !(typeof expectedOffers === 'string' && /^[0-9a-f]{32}$/.test(expectedOffers))) {
+    return { error: { code: 400, body: { error: 'Unknown expected offers' } } };
+  }
+
   const note = typeof req.body.note === 'string'
     ? req.body.note.trim().slice(0, MAX_NOTE_CHARS)
     : '';
@@ -315,7 +328,7 @@ function buildStatusPatchPlan(req) {
 
   return {
     plan: {
-      status, expectedStatus, note, resend, notify,
+      status, expectedStatus, expectedOffers, note, resend, notify,
       ...overrides,
       wantSms, wantEmail,
     },
@@ -457,6 +470,12 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan, { o
   // outstanding job offers in the same transaction, so an old link cannot sign over the owner's newer decision or revive
   // when the application is moved back (the offer flow, GATE_JOB_OFFERS).
   const closesOffers = JobOffers.stageMoveClosesOffers(row.status, plan.status);
+  // The move withdraws only the offers its dialog showed: if another session sent, revised or withdrew one since the
+  // preview, refuse before anything is written; the dialog reads the preview again.
+  if (closesOffers && plan.expectedOffers
+    && JobOffers.offerStampOf(await JobOffers.liveOffersOf(trx, applicationId, { lock: true })) !== plan.expectedOffers) {
+    return { row, offersChanged: true };
+  }
   // An offer the applicant holds is withdrawn only by the owner account, as on POST .../withdraw: any other admin's
   // stage move is refused here, before anything is written.
   if (closesOffers && !ownerAccount && (await JobOffers.heldOffersOf(trx, applicationId)).length) {
@@ -573,6 +592,13 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(403).json({
         error: 'This application has a job offer out. Only the owner account can move it out of Offer.',
         code: 'OWNER_ONLY',
+        application: await presentApplication(txResult.row),
+      });
+    }
+    if (txResult.offersChanged) {
+      return res.status(409).json({
+        error: 'The job offer changed since this opened. Nothing was changed. Check the move again.',
+        code: 'OFFERS_CHANGED',
         application: await presentApplication(txResult.row),
       });
     }

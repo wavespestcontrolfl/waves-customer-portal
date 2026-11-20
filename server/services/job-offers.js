@@ -749,11 +749,24 @@ function stageMoveClosesOffers(fromStatus, toStatus) {
     || (['rejected', 'withdrawn', 'hired'].includes(toStatus) && fromStatus !== toStatus);
 }
 
+// The live offers such a move withdraws (a draft, a sent offer, a date request).
+function liveOffersOf(knex, applicationId, { lock = false } = {}) {
+  const query = knex('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES);
+  return (lock ? query.forUpdate() : query).select('id', 'status', 'expires_at');
+}
+
+// One stamp for those offers, from their ids and statuses: what the move would withdraw changes only when an offer is
+// sent, revised (a new row), withdrawn, discarded, declined, signed or answered with a date request. The stage preview
+// returns it and the move compares it under its lock, so a move never withdraws an offer the dialog did not show.
+function offerStampOf(rows) {
+  const parts = rows.map((o) => `${o.id}:${o.status}`).sort();
+  return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 32);
+}
+
 /** What such a move would withdraw, for the stage dialog's preview: a plain read (the move re-checks under its lock). */
 async function liveOfferStake(knex, applicationId, now = new Date()) {
-  const rows = await knex('job_offers').where({ application_id: applicationId })
-    .whereIn('status', LIVE_STATUSES).select('status', 'expires_at');
-  return { held: rows.some((o) => isHeldOffer(o, now)), draft: rows.some((o) => o.status === 'draft') };
+  const rows = await liveOffersOf(knex, applicationId);
+  return { held: rows.some((o) => isHeldOffer(o, now)), draft: rows.some((o) => o.status === 'draft'), stamp: offerStampOf(rows) };
 }
 
 async function closeOffersWithApplication(trx, applicationId, actorId, now = new Date()) {
@@ -1188,7 +1201,7 @@ module.exports = {
   snapshotHashOf, signatureHashOf, renderLetterMarkdown, readableTerms, payDayLineFrom,
   publicStateOf, closedMessage, presentOffer, timelineOf, buildSnapshot,
   // admin
-  loadIssuedTerms, draftHashOf, heldOffersOf, stageMoveClosesOffers, liveOfferStake, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
+  loadIssuedTerms, draftHashOf, heldOffersOf, stageMoveClosesOffers, liveOffersOf, offerStampOf, liveOfferStake, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
 };

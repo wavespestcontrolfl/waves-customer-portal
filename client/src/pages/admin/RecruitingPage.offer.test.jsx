@@ -79,6 +79,10 @@ function offerRecord(overrides = {}) {
   };
 }
 
+// The API path of a request. The page's own re-reads of an application add ?peek=1 (they acknowledge no reply); the
+// hand-written routers below answer them like an open.
+const apiPath = (url) => String(url).replace(/^.*\/api/, '').replace(/\?peek=1$/, '');
+
 // routes: { 'METHOD path-suffix': () => response }
 function setupFetch(routes, { offer = offerPayload(), detail = detailFixture() } = {}) {
   const calls = [];
@@ -86,7 +90,8 @@ function setupFetch(routes, { offer = offerPayload(), detail = detailFixture() }
     const method = options.method || 'GET';
     const path = String(url).replace(/^.*\/api/, '');
     calls.push({ method, path, body: options.body ? JSON.parse(options.body) : null });
-    const key = `${method} ${path}`;
+    // The page's own re-reads of the application add ?peek=1 (no reply is acknowledged); they answer like an open.
+    const key = `${method} ${path}`.replace(/\?peek=1$/, '');
     if (routes[key]) return Promise.resolve(routes[key]());
     if (path.startsWith('/admin/careers?status=')) {
       return Promise.resolve(res(200, {
@@ -686,12 +691,54 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(screen.queryByTestId('offer-card')).toBeNull();
   });
 
+  it('reads the preview again when the job offers changed since it, and sends the offers it showed', async () => {
+    let offers = { held: false, draft: true, owner_only: false, stamp: 'a'.repeat(32) };
+    const { calls } = setupFetch(
+      {
+        'GET /admin/careers/app-1/stage-preview?status=reviewed': () => stagePreview(offers)(),
+        // Another session sent the draft after the preview: the server refuses the move and changes nothing.
+        'PATCH /admin/careers/app-1/status': () => {
+          offers = { held: true, draft: false, owner_only: false, stamp: 'b'.repeat(32) };
+          return res(409, { error: 'The job offer changed since this opened. Nothing was changed. Check the move again.', code: 'OFFERS_CHANGED', application: detailFixture({ status: 'offer' }) });
+        },
+      },
+      { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    await screen.findByTestId('offer-card');
+    const offerReads = () => calls.filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1/offer').length;
+    const stage = await openMove();
+    expect(await within(stage).findByText('This move also discards the unsent offer draft.')).toBeInTheDocument();
+    const readsBefore = offerReads();
+    fireEvent.click(within(stage).getByRole('button', { name: 'Confirm' }));
+    expect(await within(stage).findByText('This move also withdraws the offer you sent to Jordan, so their link stops working.')).toBeInTheDocument();
+    expect(within(stage).getByText('The job offer changed since this opened. Nothing was changed. Check the move again.')).toBeInTheDocument();
+    expect(calls.find((c) => c.method === 'PATCH').body).toMatchObject({ status: 'reviewed', expected_status: 'offer', expected_offers: 'a'.repeat(32) });
+    await waitFor(() => expect(offerReads()).toBeGreaterThan(readsBefore));
+    expect(within(stage).getByRole('button', { name: 'Confirm' })).toBeEnabled();
+  });
+
+  it('re-reads the application after an offer action with ?peek=1, so no reply is marked read behind a dialog', async () => {
+    const { calls } = setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => res(200, { offer: { ...sent, status: 'withdrawn' } }) },
+      { offer: offerPayload({ current: sent }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'GET' && c.path === '/admin/careers/app-1?peek=1')).toBe(true));
+    // Only the open itself read the application without it.
+    expect(calls.filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1')).toHaveLength(1);
+  });
+
   it('drops a Revise result that comes back after the owner opened another applicant', async () => {
     let releaseRevise;
     const pending = new Promise((resolve) => { releaseRevise = resolve; });
     const fetchMock = vi.fn((url, options = {}) => {
       const method = options.method || 'GET';
-      const path = String(url).replace(/^.*\/api/, '');
+      const path = apiPath(url);
       if (path.startsWith('/admin/careers?status=')) {
         return Promise.resolve(res(200, {
           applications: ['app-1', 'app-2'].map((id, i) => ({ id, role: 'technician', status: 'offer', contact_snapshot: { name: i ? 'Casey Morgan' : 'Jordan Rivera' }, created_at: '2026-09-10T12:00:00Z' })),
@@ -726,7 +773,7 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     const listCalls = [];
     const fetchMock = vi.fn((url, options = {}) => {
       const method = options.method || 'GET';
-      const path = String(url).replace(/^.*\/api/, '');
+      const path = apiPath(url);
       if (path.startsWith('/admin/careers?status=')) {
         const status = new URLSearchParams(path.split('?')[1]).get('status');
         listCalls.push(status);
@@ -1159,7 +1206,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     const bGate = new Promise((resolve) => { releaseB = resolve; });
     const fetchMock = vi.fn((url, options = {}) => {
       const method = options.method || 'GET';
-      const path = String(url).replace(/^.*\/api/, '');
+      const path = apiPath(url);
       if (path.startsWith('/admin/careers?status=')) {
         return Promise.resolve(res(200, { applications: [{ id: 'app-1', role: 'technician', status: 'interview', contact_snapshot: { name: 'Jordan Rivera' }, created_at: '2026-09-10T12:00:00Z' }], counts: {} }));
       }
@@ -1205,7 +1252,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     const calls = [];
     const fetchMock = vi.fn((url, options = {}) => {
       const method = options.method || 'GET';
-      const path = String(url).replace(/^.*\/api/, '');
+      const path = apiPath(url);
       calls.push(`${method} ${path}`);
       if (path.startsWith('/admin/careers?status=')) {
         return Promise.resolve(res(200, { applications: [{ id: 'app-1', role: 'technician', status: 'offer', contact_snapshot: { name: 'Jordan Rivera' }, created_at: '2026-09-10T12:00:00Z' }], counts: {} }));
@@ -1311,7 +1358,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     // The detail follows the stage the signature moved it to, with no manual reload: no Hired move on a hired application.
     const detailDialog = screen.getByRole('heading', { name: /Jordan Rivera — / }).closest('[role="dialog"]');
     await waitFor(() => expect(within(detailDialog).queryByRole('button', { name: 'Hired' })).toBeNull());
-    expect(calls.filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1').length).toBeGreaterThanOrEqual(2);
+    expect(calls.filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1?peek=1').length).toBeGreaterThanOrEqual(1); // the re-read
   });
 
   it('a withdraw whose answer is lost re-reads: the confirm closes and the card shows the offer as it reads now', async () => {

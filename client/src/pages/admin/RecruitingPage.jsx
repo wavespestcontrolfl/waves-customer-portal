@@ -548,8 +548,9 @@ function StageChangeDialog({
 // the same way openDetail/load already stayed out as their own callbacks.
 // refreshFailed: the page's in-place re-read of this application failed (after an
 // offer action), so the stage on screen may be out of date. It holds Confirm, as it
-// holds the stage buttons behind the dialog.
-function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refreshFailed) {
+// holds the stage buttons behind the dialog. onOffersChanged: re-read the offer card,
+// after a move the server refused because the job offers changed since the preview.
+function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refreshFailed, onOffersChanged) {
   const [stageDialog, setStageDialog] = useState(null);
   const [preview, setPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -583,39 +584,56 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
   const previewSeq = useRef(0);
   const submitSeq = useRef(0);
 
-  const openStageDialog = useCallback(
-    async (status, { resend = false } = {}) => {
-      if (!detail) return;
+  // Reads the move's preview into the dialog, superseding any read before it: when
+  // the dialog opens, and again when a move was refused because the job offers changed
+  // since (what the owner typed and chose stays). Returns the preview, or null when the
+  // read failed or a newer one replaced it. A failed read clears the preview, so
+  // Confirm never acts on one the server has refused.
+  const readPreview = useCallback(
+    async (status) => {
       const seq = ++previewSeq.current;
-      // fromStatus = the stage the operator SAW on the detail, not whatever
-      // the preview read later: Confirm is refused if it changed since
-      // (recruiting audit R1).
-      setStageDialog({ status, resend, fromStatus: detail.status });
-      setPreview(null);
       setPreviewError(null);
-      setSendResult(null);
-      setStageError(null);
-      setNote("");
-      setMoveWithoutNotifying(false);
       setPreviewLoading(true);
       try {
         const data = await adminFetch(
           `/admin/careers/${detail.id}/stage-preview?status=${encodeURIComponent(status)}`,
         );
-        if (seq !== previewSeq.current) return;
+        if (seq !== previewSeq.current) return null;
         setPreview(data);
-        setSmsChecked(Boolean(data.templated && data.channels?.sms?.available));
-        setEmailChecked(Boolean(data.templated && data.channels?.email?.available));
-        setSmsBody(data.sms_body || "");
-        setEmailSubject(data.email_subject || "");
-        setEmailBody(data.email_body || "");
+        return data;
       } catch (err) {
-        if (seq === previewSeq.current) setPreviewError(err.message);
+        if (seq !== previewSeq.current) return null;
+        setPreview(null);
+        setPreviewError(err.message);
+        return null;
       } finally {
         if (seq === previewSeq.current) setPreviewLoading(false);
       }
     },
     [detail],
+  );
+
+  const openStageDialog = useCallback(
+    async (status, { resend = false } = {}) => {
+      if (!detail) return;
+      // fromStatus = the stage the operator SAW on the detail, not whatever
+      // the preview read later: Confirm is refused if it changed since
+      // (recruiting audit R1).
+      setStageDialog({ status, resend, fromStatus: detail.status });
+      setPreview(null);
+      setSendResult(null);
+      setStageError(null);
+      setNote("");
+      setMoveWithoutNotifying(false);
+      const data = await readPreview(status);
+      if (!data) return;
+      setSmsChecked(Boolean(data.templated && data.channels?.sms?.available));
+      setEmailChecked(Boolean(data.templated && data.channels?.email?.available));
+      setSmsBody(data.sms_body || "");
+      setEmailSubject(data.email_subject || "");
+      setEmailBody(data.email_body || "");
+    },
+    [detail, readPreview],
   );
 
   const closeStageDialog = useCallback(() => {
@@ -633,9 +651,16 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
     setBusy(true);
     setStageError(null);
     try {
-      const body = { status: stageDialog.status, expected_status: stageDialog.fromStatus };
-      if (note.trim()) body.note = note.trim();
-      if (stageDialog.resend) body.resend = true;
+      // The stage the owner saw and the job offers its preview showed: the server
+      // refuses the move if either changed since. An empty note and resend: false
+      // read on the server as none.
+      const body = {
+        status: stageDialog.status,
+        expected_status: stageDialog.fromStatus,
+        expected_offers: preview?.offers?.stamp,
+        note: note.trim(),
+        resend: stageDialog.resend,
+      };
       const wantsNotify =
         preview?.templated &&
         !moveWithoutNotifying &&
@@ -666,6 +691,13 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
       if (err.status === 409 && err.body?.application) {
         onApplicationUpdated(err.body.application);
         load(tab); // not awaited: nothing is sending, so no "Sending…" while the list reloads
+        // The job offers changed since the preview (another session sent, revised or
+        // withdrew one): read the preview again, and the offer card. Confirm stays off
+        // until the new preview is on screen.
+        if (err.body.code === "OFFERS_CHANGED") {
+          onOffersChanged();
+          readPreview(stageDialog.status);
+        }
       }
       setStageError(err.message);
     } finally {
@@ -1049,8 +1081,8 @@ export default function RecruitingPage() {
     setDetail(application);
   }, []);
 
-  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError));
   const offerFlow = useOfferFlow(detail?.id, detail?.status);
+  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError), offerFlow.reload);
   const detailIdRef = useRef(null);
   detailIdRef.current = detail?.id ?? null;
 
@@ -1066,7 +1098,9 @@ export default function RecruitingPage() {
     const seq = refresh ? detailSeq.current : ++detailSeq.current;
     const fresh = refresh ? ++refreshSeq.current : 0;
     try {
-      const data = await adminFetch(`/admin/careers/${id}`);
+      // The page's own re-reads (after an offer action, or a Try again) acknowledge no
+      // replies: one that arrived meanwhile may sit behind a dialog. An open reads them.
+      const data = await adminFetch(`/admin/careers/${id}${refresh ? "?peek=1" : ""}`);
       if (seq !== detailSeq.current) return; // superseded or dialog closed
       if (refresh && (detailIdRef.current !== id || fresh !== refreshSeq.current)) return;
       setDetail(data.application);

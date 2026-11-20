@@ -610,6 +610,21 @@ describe('GET /:id detail never exposes the raw token', () => {
     expect(args.readBefore.getTime()).toBeLessThanOrEqual(Date.now());
   });
 
+  // The page's own re-reads (after an offer action, or its Try again) ask with ?peek=1: a reply that arrived meanwhile
+  // may sit behind a dialog, so only an explicit open acknowledges it.
+  test('a peek re-read returns the same detail and acknowledges no reply', async () => {
+    mockDb.__setRows([appRow({
+      status: 'offer',
+      comms_history: [{ id: 'e-1', stage: 'applicant_reply', channel: 'sms', outcome: 'received', unified_message_id: 'm-1' }],
+    })]);
+    mockMarkInboundSmsRead.mockClear();
+    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001?peek=1`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).application.comms_history).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(mockMarkInboundSmsRead).not.toHaveBeenCalled();
+  });
+
   test('detail signs applicant attachments per ledger entry (reply_media)', async () => {
     const smsMedia = require('../services/sms-media');
     const spy = jest.spyOn(smsMedia, 'signMediaForClient').mockResolvedValue([{ key: 'k', url: 'https://signed/x', contentType: 'image/jpeg' }]);
@@ -772,26 +787,27 @@ describe('GET /:id/stage-preview — what the move does to job offers', () => {
     expect(res.status).toBe(200);
     return (await res.json()).offers;
   };
-  const NONE = { held: false, draft: false, owner_only: false };
+  const NONE = { held: false, draft: false, owner_only: false, stamp: null };
+  const STAMP = expect.stringMatching(/^[0-9a-f]{32}$/);
   afterEach(() => { mockStaffEmail = null; });
 
   test('a move out of Offer names the held offer and the draft; only the owner account may make it', async () => {
     mockDb.__setRows([appRow({ status: 'offer' })]);
     mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }, { id: 'o2', status: 'draft', expires_at: null }]);
-    expect(await offersFor('reviewed')).toEqual({ held: true, draft: true, owner_only: true });
-    expect(await offersFor('interview')).toEqual({ held: true, draft: true, owner_only: true }); // the templated preview too
+    expect(await offersFor('reviewed')).toEqual({ held: true, draft: true, owner_only: true, stamp: STAMP });
+    expect(await offersFor('interview')).toEqual({ held: true, draft: true, owner_only: true, stamp: STAMP }); // the templated preview too
     mockStaffEmail = 'contact@wavespestcontrol.com';
-    expect(await offersFor('rejected')).toEqual({ held: true, draft: true, owner_only: false });
+    expect(await offersFor('rejected')).toEqual({ held: true, draft: true, owner_only: false, stamp: STAMP });
   });
 
   test('a date request is held past its expiry, an expired sent offer is not, and a draft alone needs no owner', async () => {
     mockDb.__setRows([appRow({ status: 'offer' })]);
     mockDb.__setHeldOffers([{ id: 'o1', status: 'date_requested', expires_at: inDays(-2) }]);
-    expect(await offersFor('hired')).toEqual({ held: true, draft: false, owner_only: true });
+    expect(await offersFor('hired')).toEqual({ held: true, draft: false, owner_only: true, stamp: STAMP });
     mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(-2) }]);
-    expect(await offersFor('hired')).toEqual(NONE);
+    expect(await offersFor('hired')).toEqual({ held: false, draft: false, owner_only: false, stamp: STAMP });
     mockDb.__setHeldOffers([{ id: 'o2', status: 'draft', expires_at: null }]);
-    expect(await offersFor('reviewed')).toEqual({ held: false, draft: true, owner_only: false });
+    expect(await offersFor('reviewed')).toEqual({ held: false, draft: true, owner_only: false, stamp: STAMP });
   });
 
   test('a move that keeps the offers says nothing about them', async () => {
@@ -805,7 +821,37 @@ describe('GET /:id/stage-preview — what the move does to job offers', () => {
     mockIsEnabled.mockImplementation((name) => name !== 'jobOffers');
     mockDb.__setRows([appRow({ status: 'offer' })]);
     mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }]);
-    expect(await offersFor('withdrawn')).toEqual({ held: true, draft: false, owner_only: true });
+    expect(await offersFor('withdrawn')).toEqual({ held: true, draft: false, owner_only: true, stamp: STAMP });
+  });
+
+  // The move withdraws only the offers its dialog showed: the preview's stamp rides back as expected_offers.
+  test('a move whose offers changed since the preview is refused, and nothing changes', async () => {
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o2', status: 'draft', expires_at: null }]);
+    const { stamp } = await offersFor('reviewed');
+    // Another session sends the draft before Confirm.
+    mockDb.__setHeldOffers([{ id: 'o2', status: 'sent', expires_at: inDays(7) }]);
+    const refused = await patch(APP_ID, { status: 'reviewed', expected_status: 'offer', expected_offers: stamp });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'OFFERS_CHANGED', application: expect.objectContaining({ status: 'offer' }) });
+    expect(mockDb.__rows()[0].status).toBe('offer');
+    expect(mockDb.__closedOffers()).toEqual([]);
+    // A fresh preview names the sent offer; the move with its stamp goes through and withdraws it.
+    const fresh = await offersFor('reviewed');
+    expect(fresh).toMatchObject({ held: true, draft: false });
+    expect(fresh.stamp).not.toBe(stamp);
+    const moved = await patch(APP_ID, { status: 'reviewed', expected_status: 'offer', expected_offers: fresh.stamp });
+    expect(moved.status).toBe(200);
+    expect(mockDb.__closedOffers()).toHaveLength(1);
+  });
+
+  test('the stamp is checked only on a move that withdraws offers, and must be a stamp', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'draft', expires_at: null }]);
+    expect((await patch(APP_ID, { status: 'interview', expected_offers: 'a'.repeat(32) })).status).toBe(200);
+    expect((await patch(APP_ID, { status: 'rejected', expected_offers: 'not a stamp' })).status).toBe(400);
+    expect(mockDb.__closedOffers()).toEqual([]);
   });
 });
 
