@@ -11,7 +11,9 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { lazyPanel } from './LazyPanel';
 import { registerReloadHold } from '../lib/reloadHolds';
 import { noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
-import { CHUNK_RELOAD_FLAG, handleVitePreloadError, resetStaleChunkReloadForTests } from '../lib/staleChunkReload';
+import {
+  CHUNK_RELOAD_FLAG, handleVitePreloadError, notePageInView, resetStaleChunkReloadForTests,
+} from '../lib/staleChunkReload';
 
 let holding = false;
 registerReloadHold('card-payment', () => holding);
@@ -154,6 +156,15 @@ test('a part that loads renders as usual', async () => {
 test('on a customer page, a part whose code is missing throws to the route tree boundary, as before', async () => {
   renderPage(lazyPanel(missingChunk), '/');
   expect(await screen.findByText(/Route tree crashed: Failed to fetch dynamically imported module/)).toBeInTheDocument();
+});
+
+// Back changes the address before the routes render: for that moment it
+// names a customer page while the staff page is still in view.
+test('while the address already names a customer page, a part of the staff page in view shows its prompt, and the page stays', async () => {
+  notePageInView(null, '/admin/customers');
+  renderPage(lazyPanel(missingChunk), '/');
+  expect(await screen.findByText(CONNECTION)).toBeInTheDocument();
+  expect(screen.getByText('Page body')).toBeInTheDocument();
 });
 
 test('an error that is not missing code throws to the route tree boundary, as before', async () => {

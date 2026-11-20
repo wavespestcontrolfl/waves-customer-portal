@@ -1,7 +1,6 @@
 import { lazy } from 'react';
-import { isAdminPath } from '../lib/adminBookmarkMeta';
 import { browserOffline } from '../lib/portalReload';
-import { isChunkError, isStaleChunkReloadPending, missingCodeIsNewVersion } from '../lib/staleChunkReload';
+import { isChunkError, isStaleChunkReloadPending, missingCodeIsNewVersion, staffTab } from '../lib/staleChunkReload';
 import { PortalReloadPrompt, useNewerBuild } from './PortalUpdate';
 
 // React.lazy for a part of a staff page: a tab, a panel, a sheet. A route's
@@ -19,7 +18,7 @@ export function lazyPanel(factory) {
       return mod;
     } catch (err) {
       if (isStaleChunkReloadPending()) return { default: PanelPending };
-      if (isChunkError(err) && isAdminPath(window.location.pathname)) return { default: MissingPanelCode };
+      if (isChunkError(err) && staffTab()) return { default: MissingPanelCode };
       throw err;
     }
   });

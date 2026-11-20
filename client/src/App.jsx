@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from '
 import { reportError } from './lib/reportError';
 import {
   CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
-  noteChunkLoaded, reloadForMissingCode, takeChunkReload, usedOnThisStaffPage,
+  noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, usedOnThisStaffPage,
 } from './lib/staleChunkReload';
 import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload, useNewerBuild, usePageUsed } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -81,13 +81,13 @@ function CustomerFailureScreen({ title, message, onRetry }) {
 
 export class PageErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null, missingStaffCode: false }; }
-  // On a staff page, a plain React.lazy whose code the live build no longer
+  // On a staff tab, a plain React.lazy whose code the live build no longer
   // serves throws here when the stale-chunk reload did not run at once: open
   // or held work kept the tab, or its one reload already ran
   // (lib/staleChunkReload.js). It gets the recovery lazyWithRetry gives a
   // page (MissingPageCode).
   static getDerivedStateFromError(error) {
-    return { error, missingStaffCode: isChunkError(error) && isAdminPath(window.location.pathname) };
+    return { error, missingStaffCode: isChunkError(error) && staffTab() };
   }
   componentDidCatch(error, info) {
     // A stale-chunk reload is already under way: the swallowed import made
@@ -416,9 +416,9 @@ export function lazyWithRetry(factory) {
       // failed too: same reload, same placeholder.
       if (isStaleChunkReloadPending()) return { default: RouteFallback };
       if (isChunkError(err)) {
-        // A staff page obeys the holds of an out-of-date tab
-        // (lib/staleChunkReload.js).
-        if (isAdminPath(window.location.pathname)) return { default: MissingPageCode };
+        // A staff tab obeys the holds of an out-of-date tab, while a staff
+        // page is in view or at the address (lib/staleChunkReload.js).
+        if (staffTab()) return { default: MissingPageCode };
         if (takeChunkReload()) {
           markStaleChunkReloadPending();
           showReloadToast();

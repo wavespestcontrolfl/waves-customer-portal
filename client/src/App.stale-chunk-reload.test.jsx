@@ -530,8 +530,14 @@ describe('on a staff page', () => {
   // The gate notes each move (notePageMove, notePageInView). Each move below
   // ends on /admin/dashboard, the location this describe stubs, unless a
   // test stubs another.
-  test('Back from a field page, with no use of it, opens a page that never reloads by itself', () => {
+  test('Back from a field page, with no use of it, opens a page that never reloads by itself, from the moment the address changes', () => {
     const move = renderGate(['/admin/dashboard', '/admin/today']);
+    // Back changes the address first: it names the dashboard, as this
+    // describe stubs it, while Today is still in view.
+    const early = preloadErrorEvent();
+    handleVitePreloadError(early, reload);
+    expect(early.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
     move(-1);
     expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
     const stale = preloadErrorEvent();
@@ -638,6 +644,42 @@ describe('on a staff page', () => {
     } finally {
       stop();
     }
+  });
+
+  // Back changes the address before the routes render. For that moment a
+  // reload would close the staff page in view and open a customer page.
+  test('while the address already names a customer page, the staff page in view keeps its rules: held work keeps the tab, and missing page code gets the staff recovery', async () => {
+    renderGate(['/admin/dashboard']);
+    vi.stubGlobal('location', { ...window.location, pathname: '/', reload });
+    holding = true;
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    renderInBoundary(lazyWithRetry(missingChunk));
+    renderInBoundary(lazy(missingChunk));
+    expect(await screen.findAllByText('Couldn’t load this page')).toHaveLength(2);
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    expect(document.getElementById('chunk-reload-toast')).toBeNull();
+    expect(reported.calls).toEqual([]);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a move from a customer page gets the staff rules once the address names a staff page: held work keeps the tab', () => {
+    renderGate(['/']);
+    holding = true;
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a move to a field page bars the reload before that page is in view', () => {
+    renderGate(['/admin/dashboard']);
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
   });
 
   test('a move that never comes into view keeps the bar on a page a move from a field page opened', () => {
@@ -767,6 +809,15 @@ describe('on a staff page', () => {
   test('a page that closed during the wait does not reload', async () => {
     await expect(reloadForMissingCode({ current: () => false, reload })).resolves.toBe('moved');
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('held work that starts as the wait for open work ends keeps the tab: the holds are read in the same turn as the reload', async () => {
+    // Queued first, so it runs after the wait's last look at open work and
+    // before the page goes on.
+    queueMicrotask(() => { holding = true; });
+    await expect(reloadForMissingCode({ reload })).resolves.toBe('card-payment');
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
   });
 
   test('without session storage there is no one-shot guard, so the tab never reloads by itself; no reload ran, so its screen can say new version', async () => {

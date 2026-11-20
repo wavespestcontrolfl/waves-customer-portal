@@ -29,6 +29,13 @@
 // (reloadForMissingCode, App.jsx). A part of a page shows a Reload prompt in
 // its place (components/LazyPanel.jsx).
 //
+// A reload closes the page in view and opens the address. While a move is
+// not yet in view the two differ: the address changes first, and Back
+// changes it even before the routes render. So every rule here judges both
+// pages. The staff rules apply while either is a staff page (staffTab), and
+// a page that never reloads by itself bars the reload whether it is in view
+// or at the address.
+//
 // A part opens in place, so the page around it can hold unsaved work in
 // component state that no hold names. So a staff tab used on the page in
 // view since it came into view (watchPageUse) keeps the tab too: a part asks
@@ -51,7 +58,7 @@
 
 import { isAdminPath } from './adminBookmarkMeta';
 import {
-  browserOffline, isPageUse, PAGE_USE_EVENTS, selfReloadBarred, staffBlockerAfterWork, staffReloadBlocker,
+  browserOffline, isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
 } from './portalReload';
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
@@ -99,7 +106,8 @@ export function notePageInView(from, to) {
   usedPath = null;
 }
 
-// The page that the move to `pathname` left.
+// The page that the move to `pathname` left. Null for a move the gate has not
+// rendered yet: the page in view then judges it (staffSelfReloadBarred).
 function moveFromFor(pathname) {
   if (renderedMove.to === pathname) return renderedMove.from;
   return shownMove.to === pathname ? shownMove.from : null;
@@ -110,6 +118,19 @@ function moveFromFor(pathname) {
 // names the next page, and Back can still undo that move.
 function pageInView() {
   return shownMove.to ?? window.location.pathname;
+}
+
+// Whether the staff rules apply: while the page in view or the address is a
+// staff page (see the top of this file). App.jsx and LazyPanel.jsx ask it
+// too, for a page or a part whose code is missing.
+export function staffTab() {
+  return isAdminPath(pageInView()) || isAdminPath(window.location.pathname);
+}
+
+// What holds a staff tab (lib/portalReload.js), or null. Customer pages are
+// unchanged.
+function staffBlocker() {
+  return staffTab() ? reloadBlocker() : null;
 }
 
 // Notes each use of a page against the page in view, as the Reload bar
@@ -127,10 +148,12 @@ export function usedOnThisStaffPage() {
   return isAdminPath(pathname) && usedPath === pathname;
 }
 
-// A staff page that never reloads by itself (see the top of this file).
+// A staff tab that never reloads by itself (see the top of this file): the
+// page in view or the address bars it, each judged by the move that opened
+// it.
 function staffSelfReloadBarred() {
-  const { pathname } = window.location;
-  return isAdminPath(pathname) && selfReloadBarred(pathname, moveFromFor(pathname));
+  return staffTab() && [pageInView(), window.location.pathname]
+    .some((pathname) => selfReloadBarred(pathname, moveFromFor(pathname)));
 }
 
 // The path this page load opened on, when the one reload for a missing chunk
@@ -230,7 +253,7 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
   // A staff tab with open or held work, used on the page in view since the
   // last page move, or on a page that never reloads by itself: the import
   // fails as it would with no handler (see the top of this file).
-  if (staffReloadBlocker() || usedOnThisStaffPage() || staffSelfReloadBarred()) return;
+  if (staffBlocker() || usedOnThisStaffPage() || staffSelfReloadBarred()) return;
   if (!takeChunkReload()) return;
   markStaleChunkReloadPending();
   event.preventDefault();
@@ -281,12 +304,14 @@ export async function reloadForMissingCode({
   reload = () => window.location.reload(),
   now,
 } = {}) {
-  const ruledOut = selfReloadRuledOut();
-  const blocker = ruledOut ? staffReloadBlocker() : await staffBlockerAfterWork({ now });
+  if (!selfReloadRuledOut()) await waitForWork({ now });
   if (!current()) return 'moved';
-  // The wait can outlast a use of the page or another reload.
-  const reason = ruledOut || selfReloadRuledOut();
+  // From here to the reload, all in one turn: no work can start and no hold
+  // can register between the last look and the reload. The wait can also
+  // outlast a use of the page or another reload.
+  const reason = selfReloadRuledOut();
   if (reason === 'reloaded') return reason;
+  const blocker = staffBlocker();
   if (blocker) return blocker;
   if (reason) return reason;
   try {
