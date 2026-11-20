@@ -54,7 +54,7 @@ describe('time-balanced CI sharding', () => {
   test('DATABASE_URL selects the DB timings, where DB-gated suites run for real', () => {
     process.env.DATABASE_URL = 'postgresql://ci/waves_test';
     const tests = realTests();
-    const key = (t) => path.relative(SERVER_ROOT, t.path);
+    const key = (t) => path.relative(SERVER_ROOT, t.path).split(path.sep).join('/');
     const expected = assignShards(
       tests.map((t) => ({ key: key(t), seconds: TIMINGS.db.files[key(t)] ?? TIMINGS.db.defaultSeconds })),
       4,
