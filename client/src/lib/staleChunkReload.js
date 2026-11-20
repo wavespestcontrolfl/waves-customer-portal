@@ -130,7 +130,7 @@ export function notePageMove(from, to, origin = from) {
   renderedMove = { from, to, origin };
 }
 
-// A move in view also ends the use of the page it left (usedOnThisStaffPage):
+// A move in view also ends the use of the page it left (usedOnPageInView):
 // the move remounted the routes, so nothing unsaved stays from that use, and
 // Back to that page opens it unused. A move React dropped leaves the page and
 // its use. A move in view away from the path the one reload reopened, to
@@ -204,7 +204,7 @@ export async function trackStaffImport(load) {
 
 // One set of document listeners notes each use of the page in view for the
 // whole tab (isPageUse, lib/portalReload.js): it records the page used
-// (usedOnThisStaffPage), then tells each listener (onPageUse), such as a
+// (usedOnPageInView), then tells each listener (onPageUse), such as a
 // Reload button that clears what it named (usePageUse in
 // components/PortalUpdate.jsx). It listens while anyone asks: main.jsx for
 // the page load (watchPageUse), and each listener while it listens.
@@ -241,18 +241,19 @@ export function onPageUse(listener) {
   };
 }
 
-// Whether the tab was used on the page in view since it came into view, while
-// the staff rules apply (staffTab): on a staff page, and also on a customer
-// page that Waves Admin or a move from a field page opened. A use is a tap, a
-// key or a field change anywhere but on a Reload control. A page keeps
+// Whether the tab was used on the page in view since it came into view: a
+// tap, a key or a field change anywhere but on a Reload control. A page keeps
 // unsaved work in many ways: a field, a toggle, a picked slot, a signature on
 // a canvas, a shape drawn on a map. No list of controls names them all, so
-// after any use a reload asks once first: the Reload bar, the staff retry
-// screen (App.jsx) and a page whose code is missing ask this. A page move
-// ends the use once it is in view (notePageInView). Both paths read the page
-// in view, so they share one spelling.
-export function usedOnThisStaffPage() {
-  return usedPath === pageInView() && staffTab();
+// after any use a reload asks once first. Only the staff rules ask this, so
+// it reads the record alone: the Reload bar, on a staff page; the staff retry
+// screen (App.jsx); and a page whose code is missing, asked for on a staff
+// tab (reloadForMissingCode), which keeps the staff rules once in view, a
+// customer page included. A page move ends the use once it is in view
+// (notePageInView). Both paths read the page in view, so they share one
+// spelling.
+export function usedOnPageInView() {
+  return usedPath === pageInView();
 }
 
 // Whether the staff rules bar the reload of a page whose code is missing
@@ -394,7 +395,7 @@ function selfReloadRuledOut() {
   } catch {
     return 'storage';
   }
-  if (usedOnThisStaffPage()) return 'page-use';
+  if (usedOnPageInView()) return 'page-use';
   if (staffSelfReloadBarred()) return 'manual';
   return blockersBesideWork()[0] ?? null;
 }

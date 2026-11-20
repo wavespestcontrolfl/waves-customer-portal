@@ -105,9 +105,13 @@ import { recordlessVisitNeedsCloseout, shortAddress } from './visitBrief';
 // owner ask 2026-07-13): tapping a visit whose report already exists opens
 // that report right here, like the pest completion, instead of re-opening
 // a create form (duplicate risk) or leaving the portal. Lazy so the admin
-// Jobs module stays out of the tech bundle until first use.
-const ProjectDetail = lazyPanel(() =>
-  import('../admin/ProjectsPage').then((m) => ({ default: m.ProjectDetail })),
+// Jobs module stays out of the tech bundle until first use. Its Close is the
+// editor's own, so when a deploy removed its code, its Reload prompt shows in
+// a "Report" dialog whose Close or Escape closes the editor (`dialog` in
+// LazyPanel.jsx): in the editor's place, the overlay would have no Close.
+export const ProjectDetail = lazyPanel(
+  () => import('../admin/ProjectsPage').then((m) => ({ default: m.ProjectDetail })),
+  { dialog: 'Report' },
 );
 
 // The visit job card (product checks, mix amounts, label limits, Order more)

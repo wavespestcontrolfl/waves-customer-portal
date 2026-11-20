@@ -4,7 +4,7 @@ import { Button } from './ui';
 import { isAdminPath, isFieldPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
 import { browserOffline, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
-import { notePageInView, notePageMove, onPageUse, usedOnThisStaffPage } from '../lib/staleChunkReload';
+import { notePageInView, notePageMove, onPageUse, usedOnPageInView } from '../lib/staleChunkReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
 // (lib/portalReload.js) it shows `fallback` in place of the routes, so the old
@@ -88,7 +88,7 @@ const HOLD_TEXT = {
 // the naming (clearNamed): that use can start new work under a name already
 // shown, such as more typing after "Anything not saved on this page will be
 // lost.", so the next Reload asks again. `pageUsed`: whether the page in
-// view was used since it opened (usedOnThisStaffPage,
+// view was used since it opened (usedOnPageInView,
 // lib/staleChunkReload.js). `beforeReload` runs right before the reload.
 export function useHoldAwareReload(resetKey, beforeReload) {
   // A new resetKey clears the named work as it renders. An effect would run
@@ -114,7 +114,7 @@ export function useHoldAwareReload(resetKey, beforeReload) {
 // a use (onPageUse, lib/staleChunkReload.js). A Reload button clears what it
 // named, since that use can start new work under a name already shown. The
 // bar's Reload reloads the page in place, so it asks once first after a use
-// (usedOnThisStaffPage). The automatic reload waits for a move, which ends
+// (usedOnPageInView). The automatic reload waits for a move, which ends
 // the use, so it never needs this.
 export function usePageUse(onUse) {
   useEffect(() => onPageUse(onUse), [onUse]);
@@ -157,7 +157,7 @@ export function PortalUpdateBar() {
     <div role="status" data-portal-update-bar="" style={{ bottom: 'calc(80px + env(safe-area-inset-bottom, 0px))' }}
       className="fixed left-1/2 z-[10990] box-border flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-sm border-hairline border-zinc-300 bg-white px-4 py-2 font-sans text-sm text-zinc-900 shadow-lg">
       <span>{named ? heldText : 'A new version of the portal is ready.'}</span>
-      <Button className="min-h-11 shrink-0 text-sm" onClick={() => tryReload(usedOnThisStaffPage())}>
+      <Button className="min-h-11 shrink-0 text-sm" onClick={() => tryReload(usedOnPageInView())}>
         {named ? 'Reload anyway' : 'Reload'}
       </Button>
     </div>

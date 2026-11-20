@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from '
 import { reportError } from './lib/reportError';
 import {
   CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
-  noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, trackStaffImport, usedOnThisStaffPage,
+  noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, trackStaffImport, usedOnPageInView,
 } from './lib/staleChunkReload';
 import { PortalUpdateBar, PortalUpdateGate, useBrowserOffline, useHoldAwareReload, useNewerBuild, usePageUse } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -333,7 +333,7 @@ function ChunkLoadFallback({ newVersion = false, staff = false }) {
           {named ? heldText : idle.text}
         </div>
         <button
-          onClick={() => tryReload(usedOnThisStaffPage())}
+          onClick={() => tryReload(usedOnPageInView())}
           style={{
             minHeight: 42, padding: '0 18px', background: COLORS.glassNavy, color: '#fff',
             border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700,
