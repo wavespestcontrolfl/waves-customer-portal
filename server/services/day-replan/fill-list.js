@@ -1,0 +1,138 @@
+/**
+ * The 07:05 notice's fill list (owner 2026-11-20 *b*; page "Ad Budget Rule v2", D2: the open estimates, leads and due
+ * visits that fit each opening, in the 07:05 notice). This part lists open estimates. For each open block the notice
+ * lists (open-blocks-alert.js), the open estimates whose first visit fits it, least added drive first. A line gives the
+ * visit's length, the drive it adds and when it finishes. Staff decide whether to call the customer: nothing is held,
+ * booked or sent.
+ *
+ * The fit is the schedule gap tool's check (scheduling/gap-candidates.js analyzeGapCandidate): the staff arrival search
+ * on the technician's day as booked, the customer's day and time rules, the technician's capability for the service,
+ * and the van home by the route check's day end (route-check.js DISPATCH_DAY_END). The estimate stands in as a new
+ * stop (estimateGapCandidate): the customer's stored location, never geocoded, with the service and length its booking
+ * page offers, tried at every place in the route as the staff finder tries a new customer. A visit fits a block when it
+ * runs inside it: from the van's arrival (or the window's start, when the van is early) to the visit's end.
+ *
+ * Open estimate: sent or viewed, not archived or expired, with a customer who is not an internal test contact, and no
+ * visit or live hold made from it. Nothing here is paid: no geocoding and no road times.
+ */
+const logger = require('../logger');
+const { etDateString } = require('../../utils/datetime-et');
+const { isInternalTestContact } = require('../internal-test-customers');
+const { dayStopsQuery } = require('../scheduling/day-stops');
+const { QUALITY_EXCLUDED_STATUSES, dayStopSelect } = require('../scheduling/day-quality');
+const { estimateGapCandidate, analyzeGapCandidate } = require('../scheduling/gap-candidates');
+const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
+const { dayDepartureMinutes } = require('../scheduling/departure-time');
+const { DISPATCH_DAY_END } = require('./route-check');
+
+// The newest open estimates read each morning (9 were open on 2026-11-20).
+const MAX_ESTIMATES = 40;
+// The lines under one block: its best fits.
+const MAX_PER_BLOCK = 3;
+
+const toMin = (hhmm) => {
+  const [h, m] = String(hhmm).slice(0, 5).split(':').map(Number);
+  return h * 60 + m;
+};
+
+/** The open estimates, newest first: internal test contacts and the ones a visit or live hold was made from left out. */
+async function openEstimates(conn, now) {
+  const rows = await conn('estimates').whereIn('status', ['sent', 'viewed']).whereNull('archived_at').whereNotNull('customer_id')
+    .where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', now))
+    .orderBy('created_at', 'desc').limit(MAX_ESTIMATES).select('*');
+  const open = rows.filter((row) => {
+    const [firstName, ...rest] = String(row.customer_name || '').trim().split(/\s+/);
+    return !isInternalTestContact({ customerId: row.customer_id, firstName, lastName: rest.join(' '), email: row.customer_email, phone: row.customer_phone });
+  });
+  if (!open.length) return [];
+  const taken = await conn('scheduled_services').whereIn('source_estimate_id', open.map((row) => row.id)).whereNot('status', 'cancelled')
+    .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', now))
+    .pluck('source_estimate_id');
+  const takenIds = new Set(taken.map(String));
+  return open.filter((row) => !takenIds.has(String(row.id)));
+}
+
+/**
+ * The block's best fit, or null (routeFits come least added drive first): the visit runs inside the block, from the
+ * van's arrival (or the window's start, when the van is early) to its end.
+ */
+function fitInside(block, routeFits) {
+  for (const fit of routeFits) {
+    const length = toMin(fit.windowEnd) - toMin(fit.windowStart);
+    const startMin = Math.max(toMin(fit.windowStart), toMin(fit.estimatedArrival));
+    if (startMin >= block.start && startMin + length <= block.start + block.min) {
+      return { startMin, endMin: startMin + length, length, addedDriveMin: Math.max(0, Math.round(fit.addedDriveMinutes)) };
+    }
+  }
+  return null;
+}
+
+const byFit = (a, b) => a.addedDriveMin - b.addedDriveMin || a.startMin - b.startMin || a.estimateId.localeCompare(b.estimateId);
+
+// Each check is synchronous (48 on 2026-11-20's production data, about 2 s in all, up to 0.1 s each): the list yields
+// between them so the server keeps answering requests while it is built.
+const yieldToLoop = () => new Promise((resolve) => { setImmediate(resolve); });
+
+/** Every listed block's day as booked (the gap tool's read: its statuses, columns and live holds). */
+async function stopsByDay(conn, blocks) {
+  const out = new Map();
+  for (const day of new Set(blocks.map((b) => b.day))) {
+    out.set(day, await dayStopsQuery(conn, { dateStr: day, excludeStatuses: QUALITY_EXCLUDED_STATUSES, select: dayStopSelect(conn) })
+      .whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())'));
+  }
+  return out;
+}
+
+/**
+ * The fill list for the listed blocks ({ day, techId, start, min }): byBlock[i] is block i's lines, best first, and
+ * the counts the notice states. Throws when the estimates, a day's stops, the start points or the departure time cannot
+ * be read. An estimate whose own reads fail is left off and counted as unread.
+ */
+async function fillList(conn, blocks, now) {
+  const estimates = await openEstimates(conn, now);
+  const result = { checked: estimates.length, fitted: 0, noLocation: 0, unread: 0, byBlock: blocks.map(() => []) };
+  const candidates = [];
+  for (const estimate of blocks.length ? estimates : []) {
+    try {
+      const candidate = await estimateGapCandidate(estimate, conn);
+      if (candidate.unavailable) result.noLocation += 1;
+      else candidates.push({ estimate, candidate });
+    } catch (err) {
+      result.unread += 1;
+      logger.warn(`[fill-list] estimate ${estimate.id} unread (${err.message}); left off the list`);
+    }
+  }
+  if (!candidates.length) return result;
+  const days = await stopsByDay(conn, blocks);
+  const homes = await loadTechStartPoints(conn, [...new Set(blocks.map((b) => b.techId))]);
+  const departure = await dayDepartureMinutes(conn);
+  const today = etDateString(now);
+  // One ask per technician-day and estimate; each of that day's blocks takes its best fit.
+  const techDays = new Map();
+  blocks.forEach((block, i) => {
+    const key = `${block.day}|${block.techId}`;
+    techDays.set(key, [...(techDays.get(key) || []), i]);
+  });
+  const fitted = new Set();
+  for (const indexes of techDays.values()) {
+    const { day, techId } = blocks[indexes[0]];
+    for (const { estimate, candidate } of candidates) {
+      const { routeFits = [] } = analyzeGapCandidate(candidate, days.get(day), {
+        date: day, technicianId: techId, now, today, closed: false, home: homeFromMap(homes, techId),
+        modeledDepartureMinutes: departure, targetReturnMinutes: DISPATCH_DAY_END,
+      });
+      await yieldToLoop();
+      for (const i of indexes) {
+        const fit = fitInside(blocks[i], routeFits);
+        if (!fit) continue;
+        fitted.add(String(estimate.id));
+        result.byBlock[i].push({ estimateId: String(estimate.id), name: String(estimate.customer_name || '').trim() || null, label: candidate.label, ...fit });
+      }
+    }
+  }
+  for (const lines of result.byBlock) lines.sort(byFit).splice(MAX_PER_BLOCK);
+  result.fitted = fitted.size;
+  return result;
+}
+
+module.exports = { fillList, MAX_PER_BLOCK, _internals: { openEstimates, fitInside, MAX_ESTIMATES } };

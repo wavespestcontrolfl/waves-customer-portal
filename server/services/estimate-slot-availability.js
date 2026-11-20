@@ -3067,6 +3067,8 @@ module.exports = {
   invalidateAllEstimates,
   resolveEstimateSlotProfile,
   resolveCatalogSlotProfile,
+  // The services one appointment performs: the rain ranking's and the fill list's (day-replan/fill-list.js) read.
+  appointmentServicesFor,
   // The offer/commit collision guard, shared with the day-agreement shadow sweep.
   filterCollidingSlots,
   // Shared with slot-reservation so holds can be geo-stamped as route anchors.
