@@ -575,9 +575,11 @@ function wavesApp(text) {
     return SENTENCE_START_RE.test(s.slice(0, at)) ? 'The Waves app' : 'the Waves app';
   });
 }
+// Exact, case and spacing included: an Agent Ops draft reaches Google as written.
 function offAppName(text) {
-  for (const [m] of String(text || '').matchAll(APP_MENTION_RE)) {
-    if (m.replace(/\s+/g, ' ').toLowerCase() !== 'the waves app') return m;
+  const s = String(text || '');
+  for (const m of s.matchAll(APP_MENTION_RE)) {
+    if (m[0] !== (SENTENCE_START_RE.test(s.slice(0, m.index)) ? 'The Waves app' : 'the Waves app')) return m[0];
   }
   return null;
 }
@@ -1365,7 +1367,9 @@ async function draftReviewReply({ grounding, recentReplies = [] }) {
       // supersedes the 2026-09-03 "never parks for want of copy" directive.
       return { ok: false, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reason: res.reason, error: res.error };
     }
-    const normalized = splitReply(wavesApp(res.text), grounding.locationName).full;
+    // Rewrite after splitReply (it trims and strips outer quotes), so the
+    // rewrite and the verifier judge a sentence start on the same text.
+    const normalized = wavesApp(splitReply(res.text, grounding.locationName).full);
     const verdict = verifyReplyDetailed(normalized, grounding, { recentReplies, mode });
     if (!verdict) {
       return { ok: true, text: normalized, mode, version: REPLY_VERSION, attempts, rejections, rejectionDetails: stored(rejectionDetails), reviewOnly: step.reviewOnly };

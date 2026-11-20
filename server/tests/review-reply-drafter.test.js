@@ -918,6 +918,12 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
       expect(verdict(said)).toMatchObject({ code: 'app_name' });
     }
     expect(verdict('the Waves app')).toBeNull();
+    // Exact, case and spacing included: an Agent Ops draft reaches Google as written.
+    expect(verdict('the waves app')).toEqual({ code: 'app_name', span: 'the waves app' });
+    expect(verdict('the  Waves app')).toEqual({ code: 'app_name', span: 'the  Waves app' });
+    expect(Drafter.offAppName('Glad it helps. The Waves app is new, and the Waves app is free.')).toBeNull();
+    expect(Drafter.offAppName('Thanks for using The Waves app.')).toBe('The Waves app');
+    expect(Drafter.offAppName('Glad it helps. the Waves app is new.')).toBe('the Waves app');
     // "apps", "application", "app-based" and the App Store are other words; "the app stores" is the app.
     expect(Drafter.offAppName('Happy to apply the apps and our application, the App Store and the app-based tools.')).toBeNull();
     expect(Drafter.offAppName('Find the Waves app in the App Store.')).toBeNull();
@@ -930,6 +936,11 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(r).toMatchObject({ ok: true, attempts: 1, version: 'reply-v3' });
     expect(r.text).toContain('words about the Waves app and Marcus');
     expect(Drafter.verifyReplyText(r.text, g)).toBeNull();
+    // A reply the model wraps in quotes: the quotes come off first, then "our app" at a paragraph start becomes "The Waves app".
+    mockDispatch.mockResolvedValueOnce({ ok: true, text: `"${good('Hi Dana,\n\nThank you for the kind words about Marcus.\n\nour app is glad to help too.')}"` });
+    const quoted = await Drafter.draftReviewReply({ grounding: g, recentReplies: [] });
+    expect(quoted).toMatchObject({ ok: true, attempts: 1 });
+    expect(quoted.text).toBe(good('Hi Dana,\n\nThank you for the kind words about Marcus.\n\nThe Waves app is glad to help too.'));
   });
   test('a draft that names the app any other way is written again, and the retry prompt says why', async () => {
     const g = grounding({ text: appReview });
