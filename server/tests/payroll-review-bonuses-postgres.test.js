@@ -569,6 +569,20 @@ postgres('payroll review bonus import', () => {
       expect(before).toContain('"monthlyCapCount":15');
     });
 
+    it('a save stores the Eastern-midnight instant of a date-only cutoff and refuses an impossible or offset-free one', async () => {
+      await storePolicy(JSON.stringify({ enabled: true, amountCents: 1500, monthlyCapCount: 15, programStartsAt: '2026-01-01T05:00:00.000Z' }));
+      const stored = async () => (await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value;
+      const before = await stored();
+      for (const bad of ['2026-02-31', '2026-11-01T09:00:00']) {
+        await expect(savePolicy({ programStartsAt: bad }, trx)).rejects.toMatchObject({ code: 'review_policy_invalid', statusCode: 422 });
+        expect(await stored()).toBe(before);
+      }
+      expect((await savePolicy({ programStartsAt: '2026-07-01' }, trx)).programStartsAt).toBe('2026-07-01T04:00:00.000Z');
+      expect(JSON.parse(await stored()).programStartsAt).toBe('2026-07-01T04:00:00.000Z');
+      expect((await savePolicy({ programStartsAt: '2026-03-01T10:00:00-05:00' }, trx)).programStartsAt).toBe('2026-03-01T15:00:00.000Z');
+      expect((await getPolicyStrict(trx)).monthlyCapCount).toBe(15);
+    });
+
     it('the dashboard and the CSV export fail when the policy cannot be read', async () => {
       await readyTech('Sample Alpha');
       await trx.raw('alter table system_settings rename to system_settings_unreadable');

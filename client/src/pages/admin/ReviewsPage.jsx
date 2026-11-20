@@ -825,7 +825,10 @@ function fmtDateTime(value) {
   }
 }
 // Owner 2026-11-20 D4: the monthly cap on paid reviews per technician (null = none).
-function monthlyCapLabel(policy) {
+// "No monthly cap" only for a policy that loaded; a failed load shows "Unavailable", never a guess.
+function monthlyCapLabel(policy, readFailed) {
+  // A failed policy read, first or a later refresh, means the policy on screen may be stale: say so.
+  if (!policy || readFailed) return "Unavailable";
   return policy.monthlyCapCount
     ? `${policy.monthlyCapCount} reviews a month`
     : "No monthly cap";
@@ -842,6 +845,11 @@ function PaidNotice({ text }) {
       {text}
     </Card>
   );
+}
+// A fresh dashboard response carries the policy: the cap card takes it and drops any earlier failure.
+function applyCapPolicy(dashboard, setCapPolicy, setCapReadFailed) {
+  setCapPolicy(dashboard?.policy || null);
+  setCapReadFailed(false);
 }
 function payoutStatusLabel(p) {
   if (p.status === "paid") return "Paid";
@@ -1039,6 +1047,9 @@ function ReviewIncentivesPanel() {
   const [readError, setReadError] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [paidNotice, setPaidNotice] = useState(null);
+  // The cap card follows the policy read alone, so a failed attribution-queue read never hides the cap.
+  const [capPolicy, setCapPolicy] = useState(null);
+  const [capReadFailed, setCapReadFailed] = useState(false);
   const [queue, setQueue] = useState([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [activeRepairId, setActiveRepairId] = useState(null);
@@ -1059,8 +1070,18 @@ function ReviewIncentivesPanel() {
     if (!background) setLoading(true);
     if (!background) setQueueLoading(true);
     if (!background) setReadError(null);
+    const incentivesRead = adminFetch(`/admin/reviews/incentives?days=${days}`).then(
+      (d) => {
+        if (gen === loadGen.current) applyCapPolicy(d, setCapPolicy, setCapReadFailed);
+        return d;
+      },
+      (e) => {
+        if (gen === loadGen.current) setCapReadFailed(true);
+        throw e;
+      },
+    );
     return Promise.all([
-      adminFetch(`/admin/reviews/incentives?days=${days}`),
+      incentivesRead,
       adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`),
     ])
       .then(([d, q]) => {
@@ -1099,6 +1120,8 @@ function ReviewIncentivesPanel() {
         method: "POST",
         body: JSON.stringify({ days: Number(days) || 30 }),
       });
+      // The sync's response is a fresh dashboard: its policy replaces the card's, before the queue read.
+      applyCapPolicy(d, setCapPolicy, setCapReadFailed);
       const q = await adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`);
       setData(d);
       setQueue(q.items || []);
@@ -1369,7 +1392,7 @@ function ReviewIncentivesPanel() {
             <PolicyInfoCard
               Icon={CalendarDays}
               label="Monthly cap"
-              value={monthlyCapLabel(policy)}
+              value={monthlyCapLabel(capPolicy, capReadFailed)}
               sub="Per technician, by Eastern calendar month. Reviews past the cap are not paid."
             />
             <PolicyInfoCard
