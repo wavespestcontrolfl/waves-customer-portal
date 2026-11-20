@@ -4560,9 +4560,6 @@ const TEMPLATE_KINDS = [
   { key: "email", label: "Mail" },
 ];
 
-// Moved to its own module so the Portal tab can show photos too; still exported here for existing importers.
-export { MessageMediaV2 };
-
 export default function CommunicationsPageV2() {
   const location = useLocation();
   const navigate = useNavigate();
