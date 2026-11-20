@@ -280,9 +280,11 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(calls).toHaveLength(7);
     expect(calls.filter((c) => !/\baddress\b/.test(c))).toEqual([]);
     expect(calls.filter((c) => /rangeFrom: date, rangeTo: date/.test(c))).toHaveLength(2);
-    // Every build passes the trusted customer too, so an address in no zone takes the zone of its city on file, as
-    // the booking does: the lists (pre-push P1 on aa30bd86f1) and the commit's two one-day builds, so the commit
-    // gives the hour to the truck its list offered (pre-push P1 on 4eb9c11d2a).
-    expect(calls.filter((c) => !/\bcustomer\b/.test(c))).toEqual([]);
+    // Every build reads the trusted customer's fallback city too, so an address in no zone takes the zone of its city
+    // on file, as the booking does: the lists pass the customer (pre-push P1 on aa30bd86f1), and the commit's two
+    // one-day builds pass the city they read from it, the first build's before phase 1 and the re-check's after it,
+    // so the commit gives the hour to the truck its list offered (pre-push P1s on 4eb9c11d2a and cebd106404).
+    expect(calls.filter((c) => !/\b(customer|fallbackCity)\b/.test(c))).toEqual([]);
+    expect(calls.filter((c) => /\bfallbackCity\b/.test(c))).toHaveLength(2);
   });
 });
