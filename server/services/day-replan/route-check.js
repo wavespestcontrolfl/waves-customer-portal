@@ -419,22 +419,22 @@ function rowReader(conn) {
 }
 
 /**
- * Who works today, a Sunday: a technician with a stop booked (`booked`, the day's stops read) or a stop already done,
- * which that read leaves out (replan.loadDayStops: completed visits excluded). A technician whose last stop today is
- * done still works it, and the office's finder still offers that route (its route stops keep completed work). null when
- * either read failed: who works today is unknown.
+ * Who works today, a Sunday: { techs, whole }. A technician with a stop booked (`booked`, the day's stops read; null
+ * when it failed) or a stop already done, which that read leaves out (replan.loadDayStops: completed visits excluded). A
+ * technician whose last stop today is done still works it, and the office's finder still offers that route (its route
+ * stops keep completed work). Each read answers for itself: one failing leaves `techs` whom the other found, and
+ * `whole` false (someone else may work today).
  */
 async function sundayWorkToday(conn, today, booked) {
-  if (booked === null) return null;
+  let done = null;
   try {
-    const done = await recoverable(conn, (c) => c('scheduled_services')
+    done = techsWithStops(await recoverable(conn, (c) => c('scheduled_services')
       .where({ scheduled_date: today, status: 'completed' })
-      .select('technician_id', 'customer_id', 'reservation_expires_at', 'status'));
-    return new Set([...booked, ...techsWithStops(done)]);
+      .select('technician_id', 'customer_id', 'reservation_expires_at', 'status')));
   } catch (err) {
     logger.warn(`[route-check] ${today}: completed stops read failed (${err.message})`);
-    return null;
   }
+  return { techs: new Set([...(booked || []), ...(done || [])]), whole: booked !== null && done !== null };
 }
 
 // The rows dispatch's capacity model keeps (arrival-route.js loadArrivalRouteContext): a window start, a time window, or
@@ -517,16 +517,18 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  * ask and guard), at each zone's center, for each technician the run counts today. A start counts when its job ends by
  * the day's end (DISPATCH_DAY_END), from the van's modeled arrival: the office's start is an arrival window, and the
  * van can come after it (a 5 PM start reached at 6:09 PM ends at 7:09 PM). Today is asked only while a job can end in
- * time (sameDayOpen). That finder takes no clock: it reads the wall clock, and so does the window (both on the run's
- * day, by the other-day rule). A technician's failed ask or unverifiable route gives today no answer (null) unless
- * another technician has a start. The office's finder drives today's best hours on Google road times and this ask buys
+ * time (sameDayOpen) and the box is shown (openTimesBoxLive; hidden, today is not counted: sameDay.box 'off'). That
+ * finder takes no clock: it reads the wall clock, and so does the window (both on the run's day, by the other-day
+ * rule). A technician's failed ask, an unverifiable route, a crew a failed Sunday read left partly unknown, or a legacy
+ * start of unknown drive gives today no answer (null) unless a start is found. The office's finder drives today's best hours on Google road times and this ask buys
  * none, so `sameDay.travel` marks the answer as the free drive model's.
  * The asks carry their own label (PROBE_SURFACE): the customer route check logs them apart from customer searches.
  * Openings only. The asks take no fallback list (`verifiedOnly`): where /book would serve a list it could not check (an
  * unreadable closed-day list, service-line map or territory; a failed occupancy read; a customer route check that
  * failed, ran out of time or could not score a route), the ask throws and the zone has no answer. The crew's ask keeps
  * no floor: the customer route check keeps a whole week when none of its slots survive, but over the crew's slots that
- * is not /book's floor. So when the crew has no slot, the zone also asks /book's own pool (no crew): if /book's check
+ * is not /book's floor. So when the crew has no slot on those dates, the zone also asks /book's own pool (no crew; a
+ * slot today, from the office's finder, does not stand in): if /book's check
  * would keep its whole week (every slot in it would make a customer late, and /book shows them anyway), that ask
  * throws and the zone has no answer. Else its starts from a day's crew count as the crew's do (one can open between
  * the two reads), and with none the crew's zero stands. A crew slot needs no such ask: /book offers that start either
@@ -541,23 +543,23 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  *   zone's `error`, or a null in byDate), or the run is not on the wall clock's day (reason 'other_day'). A zone with
  *   no pin, or /book off, gets no answer (`no_offer`): an error, never "no slot".
  */
-async function decideSlotRule({ now, dates, crew }) {
+async function decideSlotRule({ now, dates, crew, todayWhole = true }) {
   if (etDateString(new Date()) !== etDateString(now)) return { mode: 'unknown', reason: 'other_day', dates };
   const today = etDateString(now);
-  const todayCrew = crew.get(today);
-  // Today joins while the office can still book a job there that ends by the day's end, and someone works it (or who
-  // does is unknown: a Sunday whose stops read failed).
-  const sameDay = sameDayOpen(new Date()) && (todayCrew === null || todayCrew?.size > 0);
-  // The office lists open times only while its box is shown (find-time-hints openTimesBoxLive). Hidden, today has no
-  // answer and nothing is asked: the list counted is not there to book from.
+  const todayCrew = crew.get(today) || new Set();
+  // Today joins while the office can still book a job there that ends by the day's end, and someone works it, or who
+  // does is not wholly known (a Sunday whose stops read failed).
+  const sameDay = sameDayOpen(new Date()) && (todayCrew.size > 0 || !todayWhole);
+  // The office lists open times only while its box is shown (find-time-hints openTimesBoxLive). Hidden, no list measures
+  // today: it is not counted, as before this ask, and the record says so (sameDay.box 'off').
   const listed = sameDay && require('../scheduling/find-time-hints').openTimesBoxLive();
-  const counted = sameDay ? [today, ...dates] : dates;
+  const counted = listed ? [today, ...dates] : dates;
   if (!counted.length) return { mode: 'floor', reason: 'no_staffed_days', dates: counted };
   const zones = (await db('service_zones').select('zone_name', 'center_lat', 'center_lng'))
     .sort((a, b) => String(a.zone_name).localeCompare(String(b.zone_name)));
   if (!zones.length) return { mode: 'unknown', reason: 'no_zones', dates: counted };
   const asked = [];
-  const todayAsk = { sameDay, techs: listed ? todayCrew : null };
+  const todayAsk = listed ? { techs: todayCrew, whole: todayWhole } : null;
   for (const zone of zones) asked.push(await zoneAnswer(zone, { now, today, todayAsk, dates, crew }));
   const anySlot = asked.some((z) => Object.values(z.byDate).some((n) => n > 0));
   const unread = asked.some((z) => z.error || Object.values(z.byDate).includes(null));
@@ -583,9 +585,9 @@ async function zoneAnswer(zone, { now, today, todayAsk, dates, crew }) {
     byDate[day] = starts ? starts.length : null;
     first ||= starts?.length ? `${day} ${starts[0]}` : null;
   };
-  if (todayAsk.sameDay) {
+  if (todayAsk) {
     try {
-      const answer = await sameDayStarts(zone, today, todayAsk.techs);
+      const answer = await sameDayStarts(zone, today, todayAsk);
       record(today, answer.starts);
       errors.push(...answer.errors);
     } catch (err) {
@@ -613,9 +615,10 @@ async function zoneAnswer(zone, { now, today, todayAsk, dates, crew }) {
         return offer;
       };
       tally(await ask({ crew }));
-      // No slot yet (today's or the crew's): /book's own pool says whether its check would keep the whole week (the ask
-      // throws), and a crew start it offers (one that opened between the two reads) counts.
-      if (!first) tally(await ask({}));
+      // No crew slot on the next days: /book's own pool says whether its check would keep the whole week (the ask
+      // throws), and a crew start it offers (one that opened between the two reads) counts. Today's slot does not stand
+      // in: another finder gave it, and /book's dates are still to verify.
+      if (!dates.some((day) => byDate[day] > 0)) tally(await ask({}));
     } catch (err) {
       errors.push(String(err.message));
     }
@@ -651,19 +654,19 @@ function sameDayOpen(clock) {
  * - its guard (find-time-hints guardHintStarts): every start that fits, one per technician. A gap of the legacy finder
  *   is walked hourly and an occupied hour (an unassigned visit too) is vetoed. `strict`: an unreadable snapshot throws,
  *   never the box's fail-open list.
- * starts null (no answer): who works today is unknown (`techs` null: a Sunday whose stops read failed; no ask), or no
- * start while a technician's ask failed (`errors`) or its route could not be verified (the finder offers nothing on
- * it: two stops under way, a stop done with no time), so the zero is not an answer. One technician's failure leaves the
- * others' starts standing.
+ * `techs`: today's crew; `whole` false when a failed Sunday read left it partly unknown (someone else may work today).
+ * starts null (no answer): no start, while the crew is not whole (nobody known: no ask), a technician's ask failed
+ * (`errors`), its route could not be verified (the finder offers nothing on it: two stops under way, a stop done with
+ * no time), or a legacy start's drive is unknown (below), so the zero is not an answer. Any start found still counts.
  */
-async function sameDayStarts(zone, today, techs) {
-  if (techs === null) return { starts: null, errors: [] };
+async function sameDayStarts(zone, today, { techs, whole }) {
+  if (!techs.size) return { starts: null, errors: [] };
   const { findAvailableSlots } = require('../scheduling/find-time');
   const { guardHintStarts } = require('../scheduling/find-time-hints');
   const lacking = await techsLacking(techs);
   const errors = [];
   const slots = [];
-  let unverified = false;
+  let unverified = !whole;
   for (const technicianId of techs) {
     if (lacking.has(String(technicianId))) continue;
     try {
@@ -685,6 +688,12 @@ async function sameDayStarts(zone, today, techs) {
   });
   const starts = new Set();
   for (const slot of every) {
+    // A legacy gap with a leg of unknown drive is no checked start: the gap finder scores a stop with no coordinates as
+    // zero drive (find-time makeCandidate; that leg null, as markUnknownDetours reads it), so the van may come later.
+    if (slot.route_mode !== 'arrival_windows' && (slot.drive_in_minutes === null || slot.drive_out_minutes === null)) {
+      unverified = true;
+      continue;
+    }
     // The job begins when the van gets there (the arrival search's estimated_arrival: a start is an arrival window, so
     // the van may come after it), never before its start; the legacy finder's start is its arrival.
     const begins = Math.max(toMin(slot.start_time), slot.estimated_arrival ? toMin(slot.estimated_arrival) : 0);
@@ -729,7 +738,7 @@ async function runRouteCheck({ now = new Date() } = {}) {
   }
   // A decision the run could not make, or an ask that failed, is an error of the run, as an unread campaign list is.
   if (run.status !== 'failed') {
-    const decision = await decideSlotRule({ now, dates: run.totals.next.dates, crew: run.crew }).catch((err) => {
+    const decision = await decideSlotRule({ now, dates: run.totals.next.dates, crew: run.crew, todayWhole: run.todayWhole }).catch((err) => {
       logger.warn(`[route-check] ${today}: slot-rule decision failed (${err.message})`);
       return { mode: 'unknown', error: String(err.message).slice(0, 200) };
     });
@@ -774,11 +783,10 @@ async function measureRun(conn, now) {
   // Who works each measured date, for the slot-rule decision. A Sunday whose stops read failed counts every technician
   // above (its room unknown, never left out), but who works it is unknown: null.
   const crew = new Map();
-  // Today's crew too, for the decision's same-day ask, by the same rule. Only a Sunday reads today's stops, its work done
-  // included (sundayWorkToday).
-  const todayStops = weekday(today) === 0 ? await sundayWorkToday(conn, today, await withStopsOn(today)) : new Set();
-  crew.set(today, todayStops === null ? null
-    : new Set(elig.techIds.filter((techId) => staffed(elig, today, techId, todayStops.has(techId)))));
+  // Today's crew too, for the decision's same-day ask, by the same rule. Only a Sunday reads today's stops, booked and
+  // done (sundayWorkToday); a read failing leaves the crew whom the other found, and todayWhole false.
+  const sunday = weekday(today) === 0 ? await sundayWorkToday(conn, today, await withStopsOn(today)) : { techs: new Set(), whole: true };
+  crew.set(today, new Set(elig.techIds.filter((techId) => staffed(elig, today, techId, sunday.techs.has(techId)))));
   for (const day of datesToMeasure(elig, today, stopsOn)) {
     const rows = await rowsOn(day);
     const withStops = await withStopsOn(day);
@@ -809,7 +817,7 @@ async function measureRun(conn, now) {
     return { live: null, error: String(err.message).slice(0, 200) };
   });
   const failed = ad.live === null || days.some((d) => d.skip === 'FAILED');
-  return { status: failed ? 'completed_with_errors' : 'completed', days, totals, ad, crew };
+  return { status: failed ? 'completed_with_errors' : 'completed', days, totals, ad, crew, todayWhole: sunday.whole };
 }
 
 module.exports = {
