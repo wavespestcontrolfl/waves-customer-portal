@@ -1531,10 +1531,13 @@ describe('call_phone_yes card tap', () => {
     expect(screen.queryByRole('button', { name: /Accept as pay per application/ })).toBeNull();
   });
 
-  it('a fee the office bills by hand is shown before the tap', () => {
-    const label = 'Invoice the WaveGuard membership fee ($99.00) by hand after the accept. This accept does not bill it.';
-    render(<PhoneYesEvidence payload={tapCard.payload} phoneYes={{ ...canAccept, by_hand: [{ name: 'WaveGuard membership fee', amount: 99, label }] }} isOpenView isAdmin onAcceptPhoneYes={() => {}} />);
-    expect(screen.getByText(label)).toBeInTheDocument();
+  it('the plan and its per-visit price, the live terms warning and the fee note are shown before the tap', () => {
+    const terms = 'The estimate may not show the terms the caller heard: its prices changed after it was last sent, or it was sent again after the yes.';
+    const fee = 'This accept does not bill the WaveGuard membership fee. If the fee is still owed when the first visit is completed, that visit is held for the office to bill it.';
+    render(<PhoneYesEvidence payload={tapCard.payload} phoneYes={{ ...canAccept, plan: 'Quarterly plan', per_visit: 45, terms_note: terms, fee_note: fee }} isOpenView isAdmin onAcceptPhoneYes={() => {}} />);
+    expect(screen.getByText('Quarterly plan at $45.00 a visit.')).toBeInTheDocument();
+    expect(screen.getByText(terms)).toBeInTheDocument();
+    expect(screen.getByText(fee)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Accept as pay per application' })).toBeInTheDocument();
   });
 

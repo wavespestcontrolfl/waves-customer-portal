@@ -742,7 +742,7 @@ const TAP_UNAVAILABLE = {
   word_changed: "The caller's word changed since the card loaded. Reload and look again.",
   word_not_current: "The caller's words on the card are not the latest word about this estimate. Reload in 10 minutes, or accept it from the estimate.",
   catalog_busy: 'The service catalog is being updated. Try again in a minute.',
-  one_time_by_hand: 'The estimate has one-time lines the office must schedule or adjust by hand. Accept it from the estimate.',
+  price_not_shown: "The plan's per-visit price would not be the one the card showed. Accept it from the estimate instead.",
   accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
 };
 const whyNot = (reason) => TAP_UNAVAILABLE[reason] || REASONS[reason] || TAP_UNAVAILABLE.accept_failed;
@@ -758,11 +758,12 @@ const stop = (reason) => Object.assign(new Error(reason), { phoneYesRefusal: rea
 
 // What the card showed, as one opaque token: the estimate and its row version, and the booked visit as read. The card
 // reads it (tapStateOf, GET /:id/call-phone-yes) and the tap sends it back, so an edit or a reschedule since asks for a fresh look.
-function tapPreviewTokenOf(evaluation) {
+function tapPreviewTokenOf(evaluation, terms) {
   const Manual = require('./estimate-manual-acceptance');
   const facts = [
     String(evaluation.estimate.id), Manual.estimateRowPin(evaluation.estimate),
     String(evaluation.visit.id), Manual.bookedVisitsPinOf([evaluation.visit]),
+    terms ? [terms.plan, cents(terms.perVisit)] : null,
   ];
   return require('crypto').createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 32);
 }
@@ -810,25 +811,44 @@ async function tapCheck(shown, { now }) {
   // The card must show what the sweep would show now (cardState: nothing to rewrite or close): the caller's word, the
   // estimate links and the accepted state as they stand. A tap never acts on words the card no longer holds.
   if (await cardState(card)) return { ok: false, reason: 'card_out_of_date', note: note(TAP_UNAVAILABLE.card_out_of_date) };
-  const byHand = await byHandLinesOf(evaluation.estimate);
-  if (!byHand) return { ok: false, reason: 'one_time_by_hand', note: note(TAP_UNAVAILABLE.one_time_by_hand) };
-  return { ok: true, evaluation, customerId, byHand };
+  // The plan and its per-visit price, as the accept will bill them: the card shows them before the tap, and the accept
+  // pins the price (priceSeriesStep). A price the card cannot show means no tap.
+  const terms = planTermsOf(evaluation.estimate);
+  if (!terms) return { ok: false, reason: 'price_unresolved', note: note(TAP_UNAVAILABLE.price_unresolved) };
+  return { ok: true, evaluation, customerId, terms };
 }
 
-// What the office still bills by hand after the accept, shown before the tap and again after it: the WaveGuard
-// membership fee (the standard accept invoices no setup fee). Read with the accept's own one-time line rules
-// (estimate-accept-effects.js oneTimeLineEffects). Anything but a fee to add by hand (work to schedule, a discount to
-// take off, lines the rules cannot read) returns null: the estimate page handles it.
-async function byHandLinesOf(estimate) {
-  const { loadTaxabilityMap } = require('./estimate-proposal-generate');
-  const { lines, refusal } = require('./estimate-accept-effects').oneTimeLineEffects(estimate, require('./estimate-converter'), {
-    billingTerm: 'standard', taxabilityMap: await loadTaxabilityMap(db),
-  });
-  if (refusal || lines.some((l) => l.consequence !== 'invoice_by_hand')) return null;
-  const money = (n) => Number(n).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-  return lines.map((l) => ({
-    name: l.name, amount: l.amount, label: `Invoice the ${l.name} (${money(l.amount)}) by hand after the accept. This accept does not bill it.`,
+// The plan the tap accepts and its per-visit price, by the converter's own rule for one recurring unit
+// (estimate-converter.js perApplicationChargeForAccept): the accepted cadence, else the one the estimate's data implies;
+// billing-cadence.js resolveBillingCadence and perApplicationChargeAmount on the row's monthly and annual totals; the
+// pest selection's visit count, else the line's. The accept pins it: priceSeriesStep refuses a converter price that
+// differs, so the price the card shows is the price the plan's visits carry. Null when no price can be read.
+function planTermsOf(estimate) {
+  const BillingCadence = require('./billing-cadence');
+  const Converter = require('./estimate-converter');
+  const data = parseJson(estimate.estimate_data);
+  const [unit] = require('../routes/estimate-public').acceptanceServiceLists(data).recurringSvcList || [];
+  const selected = data.customerSelection?.frequency || null;
+  const frequencyKey = selected || BillingCadence.inferFrequencyKeyFromEstimateData(data);
+  if (!unit || !frequencyKey) return null;
+  const monthlyRate = parseFloat(estimate.monthly_total || 0);
+  const annualRate = parseFloat(estimate.annual_total || 0);
+  const billingCadence = BillingCadence.resolveBillingCadence({ monthlyRate, annualRate, frequencyKey, estimateData: data, fallbackFrequencyKey: frequencyKey });
+  const perVisit = Number(BillingCadence.perApplicationChargeAmount({
+    billingCadence, annualRate, monthlyRate,
+    visitsPerYear: Converter.acceptedPestSelectionVisits(unit, selected) ?? Converter.visitsPerYearForRecurringService(unit),
+    serviceKey: Converter.recurringServiceKey(unit),
   }));
+  return perVisit > 0 ? { plan: billingCadence.planLabel, perVisit } : null;
+}
+
+// The WaveGuard membership fee, when the estimate carries one. The standard accept bills no setup fee, and completion
+// holds the plan's first visit for the office while the fee is still owed then (setup-fee-obligation.js, read by the
+// completion billing). So the card names that hold, and no amount: it tells no one to invoice the fee now.
+const FEE_NOTE = 'This accept does not bill the WaveGuard membership fee. If the fee is still owed when the first visit is completed, that visit is held for the office to bill it.';
+function feeNoteOf(estimate) {
+  const { lines } = require('./estimate-accept-effects').oneTimeLineEffects(estimate, require('./estimate-converter'), { billingTerm: 'standard' });
+  return lines.some((line) => line.name === MEMBERSHIP_FEE_LINE_NAME) ? FEE_NOTE : null;
 }
 
 /**
@@ -844,11 +864,16 @@ async function tapStateOf(card, { now = new Date() } = {}) {
   const { dateOnlyString } = require('../utils/datetime-et');
   return {
     can_accept: true,
-    preview_token: tapPreviewTokenOf(evaluation),
+    preview_token: tapPreviewTokenOf(evaluation, check.terms),
     estimate_id: String(evaluation.estimate.id),
     visit_id: String(evaluation.visit.id),
     visit_date: dateOnlyString(evaluation.visit.scheduled_date),
-    by_hand: check.byHand,
+    plan: check.terms.plan,
+    per_visit: check.terms.perVisit,
+    // The warning as it stands now (the card's shadow line is from filing): the estimate's prices changed after its last
+    // delivery, or, with a yes, it was delivered again after the yes.
+    terms_note: termsMayDiffer(evaluation.estimate, evaluation.yes?.at ?? null) ? REASONS.terms_may_differ : null,
+    fee_note: feeNoteOf(evaluation.estimate),
     message: null,
   };
 }
@@ -894,11 +919,6 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     if (!cardEstimateIds(card).includes(String(estimate.id))) throw stop('estimate_not_on_card');
     // The words the locked card shows are still the ones checked (the latest word about this estimate).
     if (wordKeyOf(parseJson(card.payload)) !== word.key) throw stop('word_changed');
-    // The caller's word, read again under the lock in the same window: a call still being read, or any change since
-    // the check (a later cancel, a re-read) refuses.
-    if (await Word.unreadCallSince(trx, { customerId, since: word.since })) throw stop('call_still_processing');
-    const heard = await Word.callerWord(trx, { customerId, since: word.since, until: word.until });
-    if (wordKeyOf(heardFields(heard.yes, { noYes: heard.noYes })) !== word.key) throw stop('word_changed');
     // A send that started since the check: which estimates are open is known only once it settles. The customer's
     // estimates are locked first, so a send claim cannot land between this read and the commit.
     await lockCustomerEstimates(trx, customerId);
@@ -924,6 +944,20 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     // The accept claimed this estimate (no longer open): any open estimate left is another one.
     if ((await openEstimatesOf(trx, customerId, new Date())).some((e) => String(e.id) !== String(estimate.id))) throw stop('more_than_one_estimate');
     if (await existingPlan(trx, customerId, visit.id)) throw stop('existing_plan');
+    // The word's window, derived again from the locked call and the locked estimates, as evaluatePhoneYes derives it
+    // (this estimate is the only one the call could answer): the estimate was sent before the booking call began (a
+    // recording recovery can move the call's derived start), and the first newer send bounds it. A moved window refuses,
+    // also with no yes heard, where the word itself reads the same.
+    const sent = await trx('estimates').where({ id: estimate.id }).first('sent_at', 'created_at', trx.raw(`${handoffSql()} AS handoff_at`));
+    const since = sentAnchorOf(sent || {});
+    const until = await newerEstimateSentAt(trx, { customerId, cardIds: [estimate.id], bookingCallId });
+    if (!(since <= callStartedAt(booking)) || since.getTime() !== new Date(word.since).getTime()
+      || String(until ?? '') !== String(word.until ?? '')) throw stop('changed_since_check');
+    // The caller's word, read again in that window: a call still being read, or any change since the check (a later
+    // cancel, a re-read) refuses.
+    if (await Word.unreadCallSince(trx, { customerId, since })) throw stop('call_still_processing');
+    const heard = await Word.callerWord(trx, { customerId, since, until });
+    if (wordKeyOf(heardFields(heard.yes, { noYes: heard.noYes })) !== word.key) throw stop('word_changed');
     const n = await trx('scheduled_services').where({ id: visit.id }).whereNull('source_estimate_id')
       .update({ source_estimate_id: estimate.id, updated_at: new Date() });
     if (Number(n) !== 1) throw stop('changed_since_check');
@@ -933,13 +967,15 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
 // Step 2, the accept's last step before the commit: check the series the converter booked from the visit, and price
 // it. The per-visit price is this acceptance's own per-application amount (the converter's figure, the one the
 // customer-level fee carries), never a guess. The label stays as booked (the converter never relabels service_type).
-function priceSeriesStep({ customerId, visit, seen }) {
+function priceSeriesStep({ customerId, visit, seen, shown }) {
   return async (trx, { estimate, conversion }) => {
     // The converter's own check of the plan it booked: every application the estimate sells is on the calendar.
     if (conversion?.recurringScheduleCheck?.ok !== true) throw stop('series_incomplete');
     const amount = Number(conversion?.membershipEmail?.perApplicationAmount);
     const customer = await trx('customers').where({ id: customerId, billing_mode: 'per_application' }).first('per_application_fee');
     if (!(amount > 0) || cents(customer?.per_application_fee) !== cents(amount)) throw stop('price_unresolved');
+    // The price the card showed before the tap (planTermsOf), and no other.
+    if (cents(amount) !== cents(shown)) throw stop('price_not_shown');
     // The series: the visit as a recurring parent linked to the estimate on a pest cadence catalog row, its next visits
     // on the same row, and no other visit linked to the estimate.
     const { PEST_CADENCE_CATALOG_KEYS } = require('./estimate-converter');
@@ -1008,8 +1044,8 @@ function tapErrorRefusal(err) {
 async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = null, expectedUpdatedAt = null, resolveCard = null, now = new Date() }) {
   const check = await tapCheck(item, { now });
   if (!check.ok) return tapRefusal(check.reason);
-  const { evaluation, customerId } = check;
-  if (!previewToken || previewToken !== tapPreviewTokenOf(evaluation)) return tapRefusal('changed_since_check');
+  const { evaluation, customerId, terms } = check;
+  if (!previewToken || previewToken !== tapPreviewTokenOf(evaluation, terms)) return tapRefusal('changed_since_check');
   const Manual = require('./estimate-manual-acceptance');
   const { estimate, visit } = evaluation;
   const seen = {};
@@ -1029,7 +1065,7 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
         visit, customerId, bookingCallId: item.call_log_id, cardId: item.id, expectedUpdatedAt, word,
       }),
       beforeCommit: async (trx, ctx) => {
-        await priceSeriesStep({ customerId, visit, seen })(trx, ctx);
+        await priceSeriesStep({ customerId, visit, seen, shown: terms.perVisit })(trx, ctx);
         // The caller's word, read again last, with its calls locked through the commit.
         await wordStillStep({ customerId, word })(trx);
         // The card closes with the accept, in its transaction: a card another admin closed or changed since rolls the
@@ -1049,9 +1085,8 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
   if (result?.alreadyAccepted) return tapRefusal('already_accepted');
   return {
     ok: true, estimateId: String(estimate.id), visitId: String(visit.id), seriesIds: seen.seriesIds || [], amount: seen.amount ?? null,
-    byHand: check.byHand,
-    // The by-hand billing step again, once the accept is done.
-    warnings: [...(Array.isArray(result?.warnings) ? result.warnings : []), ...check.byHand.map((l) => l.label)],
+    // The fee note again, once the accept is done.
+    warnings: [...(Array.isArray(result?.warnings) ? result.warnings : []), ...[feeNoteOf(estimate)].filter(Boolean)],
   };
 }
 
@@ -1060,6 +1095,7 @@ module.exports = {
   MOOT_RULE,
   REASONS,
   MEMBERSHIP_FEE_LINE_NAME,
+  FEE_NOTE,
   evaluatePhoneYes,
   runCallPhoneYesSweep,
   closeMootCards,

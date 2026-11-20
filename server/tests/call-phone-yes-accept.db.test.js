@@ -45,7 +45,7 @@ const { sendMembershipStarted } = require('../services/account-membership-email'
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { notifyAdmin } = require('../services/notification-service');
 const {
-  runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS, ACCEPT_SOURCE, TAP_REFUSALS, acceptPhoneYesCard, _private: PhoneYesPrivate,
+  runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS, ACCEPT_SOURCE, TAP_REFUSALS, acceptPhoneYesCard, FEE_NOTE, _private: PhoneYesPrivate,
 } = require('../services/call-phone-yes-accept');
 
 const GATE = 'GATE_CALL_PHONE_YES_ACCEPT';
@@ -1033,7 +1033,11 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     test('accepts as Mark accepted does, books the plan from the visit the call booked, prices it and resolves the card; only the membership email goes out', async () => {
       const { customerId, est, visitId, bookingCallId, card } = await filed();
       const row = await listed(card.id);
-      expect(row.call_phone_yes).toMatchObject({ can_accept: true, estimate_id: est.id, visit_id: visitId, visit_date: inDays(9), message: null });
+      // The plan and its per-visit price as the accept bills them, read now; no terms warning and no fee on this estimate.
+      expect(row.call_phone_yes).toMatchObject({
+        can_accept: true, estimate_id: est.id, visit_id: visitId, visit_date: inDays(9), plan: 'Quarterly plan', per_visit: PER_VISIT,
+        terms_note: null, fee_note: null, message: null,
+      });
       expect(row.call_phone_yes.preview_token).toMatch(/^[0-9a-f]{32}$/);
 
       const out = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at, preview_token: row.call_phone_yes.preview_token });
@@ -1234,17 +1238,30 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       } finally { spy.mockRestore(); }
     });
 
-    test('a WaveGuard membership fee the office bills by hand is shown before the tap and again after the accept', async () => {
+    test('a WaveGuard membership fee: the card says the accept does not bill it and names the completion hold, before the tap and after it', async () => {
       const withFee = planData({ setupFeeQuote: { amount: 99, waived: false }, result: { ...planData().result, oneTime: { items: [], membershipFee: 99 } } });
       // The fee is the estimate's whole one-time total (the evaluation refuses any other one-time charge).
-      const { est, card } = await filed({ estimateOver: { estimate_data: JSON.stringify(withFee), onetime_total: 99 } });
-      const label = 'Invoice the WaveGuard membership fee ($99.00) by hand after the accept. This accept does not bill it.';
+      const { customerId, est, visitId, card } = await filed({ estimateOver: { estimate_data: JSON.stringify(withFee), onetime_total: 99 } });
       const row = await listed(card.id);
-      expect(row.call_phone_yes).toMatchObject({ can_accept: true, by_hand: [{ name: 'WaveGuard membership fee', amount: 99, label }] });
+      expect(row.call_phone_yes).toMatchObject({ can_accept: true, fee_note: FEE_NOTE });
+      // No amount and no "invoice it now": a fee paid or billed elsewhere by then is not owed.
+      expect(FEE_NOTE).not.toMatch(/\$|invoice/i);
       const out = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at, preview_token: row.call_phone_yes.preview_token });
-      expect(out).toMatchObject({ status: 200, body: { ok: true, by_hand: [{ name: 'WaveGuard membership fee', amount: 99 }] } });
-      expect(out.body.warnings).toContain(label);
+      expect(out).toMatchObject({ status: 200, body: { ok: true } });
+      expect(out.body.warnings).toContain(FEE_NOTE);
       expect(await statusOf('estimates', est.id)).toBe('accepted');
+      // The hold the note names: completion's own check finds the fee owed on the plan's first visit.
+      const first = await trx('scheduled_services').where({ id: visitId }).first();
+      const { findUnmintedSetupFeeObligation } = require('../services/setup-fee-obligation');
+      await expect(findUnmintedSetupFeeObligation({ sourceEstimateId: est.id, customerId, visitPlanRow: first }, trx)).resolves.toMatchObject({ owed: true });
+    });
+
+    test('the terms warning is read live: an estimate re-priced after its last delivery shows it before the tap (the shadow line is from filing)', async () => {
+      const { est, card } = await filed();
+      expect((await listed(card.id)).call_phone_yes).toMatchObject({ can_accept: true, terms_note: null });
+      const data = typeof est.estimate_data === 'string' ? JSON.parse(est.estimate_data) : est.estimate_data;
+      await trx('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ ...data, sendSnapshot: { priced: { repriced: true } } }) });
+      expect((await listed(card.id)).call_phone_yes).toMatchObject({ can_accept: true, terms_note: REASONS.terms_may_differ });
     });
 
     test('an estimate the card does not name is never the one the tap accepts', async () => {
@@ -1367,11 +1384,24 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       const second = await estimate(customerId, { sent_at: new Date() });
       await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'more_than_one_estimate' });
       await trx('estimates').where({ id: second.id }).update({ status: 'declined' });
+      // Declined, its send still bounds the caller's word (a call since may be about it): the window the check read moved.
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+      await trx('estimates').where({ id: second.id }).del();
       // The call moved to another customer.
       const otherCustomer = await customer();
       await trx('call_log').where({ id: bookingCallId }).update({ customer_id: otherCustomer });
       await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'customer_changed' });
       await trx('call_log').where({ id: bookingCallId }).update({ customer_id: customerId });
+      // A recording recovery moved the booking call's derived start before the estimate's send (a post-call row whose
+      // length grew): the call could not have answered this estimate, though the word reads the same.
+      const callBefore = await trx('call_log').where({ id: bookingCallId }).first('metadata', 'duration_seconds');
+      await trx('call_log').where({ id: bookingCallId })
+        .update({ metadata: JSON.stringify({ source: 'twilio_recording_status_recovered' }), duration_seconds: 3 * 24 * 3600 });
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+      await trx('call_log').where({ id: bookingCallId })
+        .update({ metadata: callBefore.metadata == null ? null : JSON.stringify(callBefore.metadata), duration_seconds: callBefore.duration_seconds });
+      // A word window other than the one the check read (a newer send it did not see) refuses too.
+      await expect(run({ word: { ...PhoneYesPrivate.tapWordOfForTest(ev), until: new Date().toISOString() } })).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
       // Nothing was linked by a refused run; a clean run links the visit.
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();
       await run();
@@ -1381,7 +1411,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     test('the price step refuses a short schedule, a price it cannot resolve, a series the converter did not book, and a price decision on the series', async () => {
       const { customerId, est, visitId } = await phoneYes();
       const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
-      const run = (conversion) => trx.transaction((t) => PhoneYesPrivate.priceSeriesStepForTest({ customerId, visit: visitRow, seen: {} })(t, { estimate: est, conversion }));
+      const run = (conversion, shown = PER_VISIT) => trx.transaction((t) => PhoneYesPrivate.priceSeriesStepForTest({ customerId, visit: visitRow, seen: {}, shown })(t, { estimate: est, conversion }));
       const conversion = { membershipEmail: { perApplicationAmount: PER_VISIT }, recurringScheduleCheck: { ok: true, gaps: [] } };
       // The converter's own check found the plan short of visits (or could not run): nothing is priced.
       await expect(run({ ...conversion, recurringScheduleCheck: { ok: false, gaps: [{ kind: 'missing_application' }] } }))
@@ -1391,6 +1421,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'price_unresolved' });
       await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application', per_application_fee: PER_VISIT });
       await expect(run({ ...conversion, membershipEmail: { perApplicationAmount: null } })).rejects.toMatchObject({ phoneYesRefusal: 'price_unresolved' });
+      // A converter price that is not the one the card showed before the tap (planTermsOf).
+      await expect(run(conversion, PER_VISIT + 1)).rejects.toMatchObject({ phoneYesRefusal: 'price_not_shown' });
       // The visit is still a one-off: no series was booked from it.
       await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'series_not_booked' });
       expect((await trx('scheduled_services').where({ id: visitId }).first()).estimated_price).toBeNull();

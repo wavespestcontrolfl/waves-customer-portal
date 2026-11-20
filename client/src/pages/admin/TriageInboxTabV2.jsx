@@ -16,6 +16,7 @@ import {
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import HeldLinesPanel, { HeldLinesChip, useHeldLines } from "./HeldLinesPanel";
+import { fmtMoney } from "../../lib/money";
 
 const STATUS_TABS = [
   { key: "open", label: "Open" },
@@ -527,10 +528,12 @@ export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = 
           <div className="mt-1 text-14 text-ink-secondary">
             {`${acceptsNth >= 0 ? `It accepts estimate ${acceptsNth + 1}. ` : ""}The visit on ${live.visit_date} becomes the plan's first visit, and the plan's next visits are booked. The customer gets what Mark accepted sends (the membership email). No text goes out.`}
           </div>
-          {/* What the office still bills by hand after the accept (the membership fee): shown before the tap. */}
-          {(Array.isArray(live.by_hand) ? live.by_hand : []).map((line) => (
-            <div key={line.name} className="mt-1 text-14 text-zinc-900">{line.label}</div>
-          ))}
+          {/* The plan and its per-visit price as the accept bills them (the accept refuses any other price). */}
+          {live.plan && live.per_visit != null && <div className="mt-1 text-14 text-zinc-900">{`${live.plan} at ${fmtMoney(live.per_visit)} a visit.`}</div>}
+          {/* Read now, not at filing: the estimate's prices changed after its last delivery, or it was sent again after the yes. */}
+          {live.terms_note && <div className="mt-1 text-14 text-zinc-900">{live.terms_note}</div>}
+          {/* The membership fee: this accept does not bill it, and completion holds the first visit while it is owed. */}
+          {live.fee_note && <div className="mt-1 text-14 text-zinc-900">{live.fee_note}</div>}
           <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={() => onAcceptPhoneYes?.(live.preview_token || null)}
             title="Accepts the customer's estimate as pay per application, as Mark accepted does, and books the plan from the visit this call booked.">
             {busy ? "Accepting…" : "Accept as pay per application"}
