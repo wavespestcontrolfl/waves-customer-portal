@@ -2274,14 +2274,18 @@ describe('POST /:token commit', () => {
     // the funnel off too, so it could undo a validated correction. A profile that wrongly says Punta Gorda (a place the
     // area check refuses) kept that city after a served town typed in its shared ZIP passed the check, and the profile
     // failed the check on its next read. The city is kept only when the funnel's zone comes from it, never for a
-    // refused place.
+    // refused place. Pre-push P1 on f344681474: a zone with no truck rule (Sarasota) does not keep it either.
     test.each([
-      ['with the funnel off', false, 'Nokomis', 'Laurel', '34209'],
-      ['and a profile city the area check refuses', true, 'Punta Gorda', 'Charlotte Harbor', '33980'],
-    ])('a typed city in no zone at the profile\'s address, %s: phase 1 writes the typed city', async (_label, funnel, storedCity, typedCity, zip) => {
+      ['with the funnel off', false, 'Nokomis', 'Laurel', '34209', 'Sarasota'],
+      ['and a profile city the area check refuses', true, 'Punta Gorda', 'Charlotte Harbor', '33980', 'Charlotte'],
+      ['and a profile city in a zone with no truck rule', true, 'Sarasota', 'Bee Ridge', '34233', 'Sarasota'],
+    ])('a typed city in no zone at the profile\'s address, %s: phase 1 writes the typed city', async (_label, funnel, storedCity, typedCity, zip, county) => {
       Object.assign(mockFarSouthGates, { perTruck: true, funnel });
-      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] }];
-      mockCounty.mockImplementation(async () => 'Charlotte');
+      listResults.service_zones = [
+        { id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] },
+        { id: 'zone-s', zone_name: 'Sarasota / Lakewood Ranch', cities: ['Sarasota', 'Lakewood Ranch'] },
+      ];
+      mockCounty.mockImplementation(async () => county);
       mockLocality.mockImplementation(async () => ({ city: typedCity, zip }));
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
       firstResults.call_log = { from_phone: '+19415550101' };

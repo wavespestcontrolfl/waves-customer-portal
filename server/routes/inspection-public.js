@@ -2138,17 +2138,19 @@ async function provisionLinkedCustomer(trx, {
     // asked for again (this file's own contract — see the header).
     // An address that matches this row (same street and unit, and ZIP or
     // pin) keeps the row's city on file only when the far-south funnel's zone
-    // comes from it: the typed city is in no zone and the row's city is in one
-    // (slot-zone.js leadBookingZone), so a typed name no zone lists would take
-    // the property out of the zone its list read, for this commit, its
-    // refusal's times and every retry (owner rule B, pre-push P1s on
-    // 850a6a79f0 and 7a682696f6). A place the area check refuses (Punta Gorda)
-    // is never kept: the typed address passed that check. Every other address
-    // takes the typed city, the validated correction (pre-push P1 on
-    // 63e29d5511); with the funnel off no zone is read from it.
-    const keepCity = [matchesStoredAddress, funnelOn(), !isExcludedLocality(storedCustRow.city)].every(Boolean)
-      && (await leadBookingZone(trx, zoneFunnelInputs(resolved.address), storedCustRow.city)).fromCustomer;
-    const city = keepCity ? storedCustRow.city : resolved.address.city;
+    // comes from it: the typed city is in no zone and the row's city is in a
+    // funneled one (slot-zone.js leadBookingZone, isFunnelZone), so a typed
+    // name no zone lists would take the property out of the zone its list
+    // read, for this commit, its refusal's times and every retry (owner rule
+    // B, pre-push P1s on 850a6a79f0 and 7a682696f6). A place the area check
+    // refuses (Punta Gorda) is never kept: the typed address passed that
+    // check. Every other address takes the typed city, the validated
+    // correction (pre-push P1s on 63e29d5511 and f344681474: a zone with no
+    // truck rule, such as Sarasota, needs no kept city); with the funnel off
+    // no zone is read from it.
+    const { zone: cityZone, fromCustomer } = [matchesStoredAddress, funnelOn(), !isExcludedLocality(storedCustRow.city)].every(Boolean)
+      ? await leadBookingZone(trx, zoneFunnelInputs(resolved.address), storedCustRow.city) : {};
+    const city = fromCustomer && isFunnelZone(cityZone) ? storedCustRow.city : resolved.address.city;
     const after = {
       address_line1: resolved.address.line1,
       address_line2: resolved.address.line2,
