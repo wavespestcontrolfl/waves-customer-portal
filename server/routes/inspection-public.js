@@ -870,7 +870,7 @@ const customerAddressFields = (cust) => ({
 // 1ef6ba1b16). Phase 1 makes the profile it books this lead's trusted one, so a retry's list reads that profile.
 // The commit's zone re-check compares with the same city (zoneFallbackCity).
 const zoneFallbackCity = (customer, address, coords) => (
-  customer && address && profileMatchesAddress(customer, address, coords) ? customer.city : null
+  customer && profileMatchesAddress(customer, address, coords) ? customer.city : null
 );
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer }) {
   const booking = require('./booking');
