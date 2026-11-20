@@ -7689,12 +7689,16 @@ own address (the slot is checked again with it); at the same pin the booking
 keeps the typed address, as the list read it. When the customer's city decides
 a far-south zone (one the funnel covers) and the commit's first build read
 another city (phase one linked or changed the profile), the slot is checked
-again per truck (both far-south gates on). A
-refused booking's `SLOT_TAKEN` answer, with the funnel on, carries fresh times
-only when the page's next commit reads this one's inputs: an address typed (the
-page sends it again) at the same pin. They are built there with that address and the trusted customer, as
-the next commit's first build reads them. Any other
-refusal answers `availability: null`, and the page reloads its own list (GET, or
+again per truck (both far-south gates on). When the commit's first check,
+before phase one provisions the customer, no longer has the time, its
+`SLOT_TAKEN` answer carries fresh times at the resolved location, built with
+that address and the trusted customer, as the lists and the next commit's first
+check read them. A booking refused after phase one (its re-check or the booking
+itself), with the funnel on, carries fresh times only when the page's next
+commit reads this one's inputs: an address typed (the page sends it again) at
+the same pin. They are built there with that address and the trusted customer,
+as the next commit's first build reads them. Any other refusal after phase one
+answers `availability: null`, and the page reloads its own list (GET, or
 `POST /:token/availability` with the address it holds), which reads the same
 resolver and trusted customer as its next commit. A booking moved to a matched
 profile's other stored location also answers `address_changed: true` when that
