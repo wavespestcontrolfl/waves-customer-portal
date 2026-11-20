@@ -5113,16 +5113,11 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     const RecurringCards = require('../services/recurring-card-on-file');
     const estimate = await db('estimates').where({ id: setupIntent.metadata.estimate_id }).first();
     if (!estimate) return;
-    // Kill switch stops NEW captures — it must not strand committed ones
-    // (r4 P2): an accepted estimate already suppressed its pay link
-    // expecting Auto Pay, so this durable recovery still enrolls even when
-    // the flag is off. Flag-off + not-yet-accepted acks and drops (no
-    // retry loop for a killed feature).
-    if (!RecurringCards.isRecurringCardOnFileEnabled() && estimate.status !== 'accepted') return;
     // A customer's own plan quote that staff changed is never accepted: the accept refuses it, and no writer turns
     // its options back off (the customer's next tap replaces it). The page drops a card it captured there by several
     // paths, so retire the capture here, on this event's next delivery, instead of waiting for an accept that cannot
-    // come: one place for every path the tab took. Stripe unable to confirm = retry.
+    // come: one place for every path the tab took. Stripe unable to confirm = retry. It runs before the kill switch
+    // below (codex pre-push P1): the switch stops new captures, and must not strand the cleanup of one already made.
     if (estimate.status !== 'accepted'
       && require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate)) {
       const retired = await RecurringCards.retireOrphanedCaptureIntent({ estimate, setupIntentId: setupIntent.id });
@@ -5134,6 +5129,12 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       }
       return;
     }
+    // Kill switch stops NEW captures — it must not strand committed ones
+    // (r4 P2): an accepted estimate already suppressed its pay link
+    // expecting Auto Pay, so this durable recovery still enrolls even when
+    // the flag is off. Flag-off + not-yet-accepted acks and drops (no
+    // retry loop for a killed feature).
+    if (!RecurringCards.isRecurringCardOnFileEnabled() && estimate.status !== 'accepted') return;
     // This event normally arrives BEFORE the accept commits (the customer
     // confirms the card, then clicks through the deposit + accept). Acking it
     // then would burn the only durable retry this capture has — a deploy/crash

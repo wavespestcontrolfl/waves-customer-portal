@@ -7283,9 +7283,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // offers a live hold, the hold is released through the same release-then-refresh recovery a refused answer runs
     // (refuseStaleQuoteRef), and never adopted. Not mid-confirmSetup (recoverFromDeadHold refuses then, and the
     // confirm's own extend or accept gets the refusal). A recurring card this tab restored (a 3DS return) is never
-    // used on such a quote, and the setup_intent.succeeded webhook retires it (stripe-webhook.js).
+    // used on such a quote, and the setup_intent.succeeded webhook retires it (stripe-webhook.js). Only the customer's
+    // own page releases it: a staff preview (its print view included) and the headless PDF capture (?mode=pdf) never
+    // act on the customer's hold (codex pre-push P1).
     if (held && quoteRefusalCode) {
-      if (!inlineConfirmBusyRef.current && refusedQuoteHoldReleaseRef.current !== held.id) {
+      if (!readOnlyPreview && !pdfDocumentMode
+        && !inlineConfirmBusyRef.current && refusedQuoteHoldReleaseRef.current !== held.id) {
         refusedQuoteHoldReleaseRef.current = held.id;
         pendingRecoveryHoldRef.current = held.id;
         recoverFromDeadHold('configure');
@@ -7319,7 +7322,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // Re-seeding is idempotent: the updater returns `prev` unchanged once the
     // same hold+expiry is in place, so this cannot loop.
   }, [existingAppointment?.id, existingAppointment?.isHold, existingAppointment?.reservationExpiresAt,
-    reservation?.scheduledServiceId, ctaPhase, quoteRefusalCode, recoverFromDeadHold]);
+    reservation?.scheduledServiceId, ctaPhase, quoteRefusalCode, readOnlyPreview, pdfDocumentMode,
+    recoverFromDeadHold]);
 
   // ONE place that turns an extend outcome into page state (codex r7 P1).
   // The wrapper and the 0:00 rescue both needed identical handling three

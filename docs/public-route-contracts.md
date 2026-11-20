@@ -2165,13 +2165,15 @@ client secret (the recurring step retires its minted intent first). The texting 
 such a quote. A recurring card the tab captured and then dropped on this answer, by any path (a hold
 extension, a slot read, a 3DS return), is retired by its `setup_intent.succeeded` webhook
 (`stripe-webhook.js`): such a quote is never accepted, so the event's next delivery retires the capture
-and acks instead of waiting for an accept (Stripe unable to confirm = the event retries). The page
+and acks instead of waiting for an accept, even with the recurring-card kill switch off (Stripe unable to
+confirm = the event retries). The page
 answers that 409 from every card step (the modal mint, the replace-method call and the inline
 pre-mint), from the reserve and from its slot reads (the slot picker hands a 409 up through
 `onRefusal`: the list, a picked date and the date search) with the same banner, and reads it on a
 hold extension as a no-booking answer (release the hold, then reload into the banner). A load whose
 `/data` carries the mark and still lists a live hold releases that hold with the same
-release-then-refresh recovery, once per hold, and never adopts it. The office's stuck-booking
+release-then-refresh recovery, once per hold, and never adopts it; only the customer's own page does
+this, never a staff preview or the headless PDF capture (`?mode=pdf`). The office's stuck-booking
 alert treats both codes as routine, since the banner walks the customer back to the portal. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never
 waits on it while it holds the comms key), answers 409

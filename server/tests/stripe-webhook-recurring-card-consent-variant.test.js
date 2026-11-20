@@ -290,6 +290,20 @@ describe('estimate_recurring_card retires a capture on a plan quote staff change
     expect(mockCompleteEnrollment).not.toHaveBeenCalled();
   });
 
+  test('the kill switch off: the capture is still retired, never left for a drop (codex pre-push P1)', async () => {
+    const cards = require('../services/recurring-card-on-file');
+    cards.isRecurringCardOnFileEnabled.mockReturnValue(false);
+    try {
+      const estimate = planQuote();
+      wireDb(estimate);
+      await expect(handleSetupIntentSucceeded(SETUP_INTENT)).resolves.toBeUndefined();
+      expect(mockRetireOrphan).toHaveBeenCalledWith({ estimate, setupIntentId: 'seti_1' });
+      expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+    } finally {
+      cards.isRecurringCardOnFileEnabled.mockReturnValue(true);
+    }
+  });
+
   test('a replaced (archived) refused quote retires its capture too', async () => {
     estimatePublic.isEstimateAcceptActive.mockReturnValue(false);
     const estimate = planQuote({ archived_at: '2026-11-20T12:00:00Z' });
