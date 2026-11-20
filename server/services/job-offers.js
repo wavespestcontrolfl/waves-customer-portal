@@ -914,6 +914,7 @@ function openPayload(offer, state) {
     owner: snapshot.owner,
     expiresAt: snapshot.expiresAt,
     textConsent: Boolean(offer.text_consent_at),
+    version: iso(offer.updated_at),
     signedName: offer.signed_name || null,
     signedAt: iso(offer.signed_at),
     requestedStartDate: offer.requested_start_date ? ymdOf(offer.requested_start_date) : null,
@@ -957,6 +958,16 @@ async function lockByToken(trx, token) {
   return offer && state ? { offer, state, now } : null;
 }
 
+// Every write the applicant makes is made on what the page shows: `version` is the offer's version from the read or
+// save the page last applied, the text-consent choice included. A change since then (another tab's consent save, a
+// save that landed late) refuses the write with the state still open (409), so the page reads the offer again and the
+// applicant answers on what it now shows. A signature, a date request or a decline therefore never fixes a consent
+// choice the applicant did not see. The page always sends it, and a write without one is refused the same way, so no
+// write skips the check (a text choice equal to the stored one and an identical replay of a signature write nothing,
+// so they answer as for any resend). The page posts under /v2, which no server from before the version has.
+const changedSince = (offer, version) => version !== iso(offer.updated_at);
+const CHANGED = Object.freeze({ refused: true, body: Object.freeze({ state: 'open' }) });
+
 const refusal = (state, offer) => ({
   refused: true,
   body: state === 'superseded' || state === 'withdrawn' || state === 'expired'
@@ -964,16 +975,24 @@ const refusal = (state, offer) => ({
     : { state },
 });
 
-/** POST /:token/text-consent */
-async function setTextConsent(token, consent) {
+/**
+ * POST /:token/v2/text-consent. `version` is the offer's version from the read the choice was made on. A save can land
+ * late (its reply was lost and the page saved the same choice again), so a change made from an older version is
+ * refused: it cannot undo a later choice. A choice that is already stored writes nothing.
+ */
+async function setTextConsent(token, consent, version) {
   return db.transaction(async (trx) => {
     const found = await lockByToken(trx, token);
     if (!found) return { notFound: true };
     if (found.state !== 'open') return refusal(found.state, found.offer);
     if (typeof consent !== 'boolean') return { invalid: 'Choose yes or no.' };
-    const stamp = consent ? (found.offer.text_consent_at || found.now) : null;
-    await trx('job_offers').where({ id: found.offer.id }).update({ text_consent_at: stamp, updated_at: new Date() });
-    return { body: { textConsent: Boolean(consent) } };
+    const current = iso(found.offer.updated_at);
+    if (Boolean(found.offer.text_consent_at) === consent) return { body: { textConsent: consent, version: current } };
+    if (changedSince(found.offer, version)) return CHANGED;
+    // Strictly later than the version it replaces, so two changes in one millisecond still get two versions.
+    const updatedAt = new Date(Math.max(Date.now(), new Date(found.offer.updated_at).getTime() + 1));
+    await trx('job_offers').where({ id: found.offer.id }).update({ text_consent_at: consent ? found.now : null, updated_at: updatedAt });
+    return { body: { textConsent: consent, version: iso(updatedAt) } };
   });
 }
 
@@ -987,17 +1006,46 @@ function parseSignedName(value) {
 
 const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 
-/** POST /:token/accept */
-async function acceptOffer(token, { signedName, ip, userAgent }) {
+/** POST /:token/v2/accept. `version`: see changedSince. */
+// The terms a signature binds, as the page shows them, by the page's own rule (offerFormat.hasOfferFacts and
+// exactAmount, which this mirrors): the job, a real start date, an hourly rate as a number of whole cents (at least one
+// cent), the week, who they report to, pay day and the Terms, and a pay step only with both its rate and its date (no
+// raise: both null). buildSnapshot freezes a checked draft with numeric rates, so a gap here is a bug; the check holds
+// for every client, a tab from before the page's own check included.
+const textFact = (value) => typeof value === 'string' && value.trim() !== '';
+const centsFact = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0.01
+  && /^\d+\.\d{2}$/.test(value.toFixed(2)) && Number(value.toFixed(2)) === value;
+
+function signableSnapshot(snapshot) {
+  const s = snapshot || {};
+  const noStep = s.stepRate === null && s.stepEffectiveOn === null;
+  return textFact(s.jobTitle) && textFact(s.hoursLine) && textFact(s.reportTo) && textFact(s.payDayLine)
+    && isYmd(s.startDate) && centsFact(s.hourlyRate)
+    && (noStep || (centsFact(s.stepRate) && isYmd(s.stepEffectiveOn)))
+    && Boolean(s.terms) && textFact(s.terms.markdown);
+}
+
+async function acceptOffer(token, { signedName, version, ip, userAgent }) {
   const name = parseSignedName(signedName);
   const result = await db.transaction(async (trx) => {
     const found = await lockByToken(trx, token);
     if (!found) return { notFound: true };
     const { offer, state } = found;
-    // An identical replay of a signature is answered with the stored one, never a second signature.
-    if (state === 'signed' && name && sameName(name, offer.signed_name)) return { body: { state: 'signed', signedAt: iso(offer.signed_at) } };
+    // An identical replay of a signature is answered with the stored one, never a second signature. `replay`: this
+    // request signed nothing (another tab, or an earlier send whose reply was lost, signed first), so the page names
+    // the signer instead of saying "You signed".
+    if (state === 'signed' && name && sameName(name, offer.signed_name)) {
+      return { body: { state: 'signed', signedAt: iso(offer.signed_at), signedName: offer.signed_name, replay: true } };
+    }
     if (state !== 'open') return refusal(state, offer);
     if (!name) return { invalid: 'Type your full name to sign.' };
+    if (changedSince(offer, version)) return CHANGED;
+    // A frozen offer missing a term it shows is never signed: the same 409 with no write, and the page's read of it
+    // shows the load error.
+    if (!signableSnapshot(asObject(offer.snapshot))) {
+      logger.warn(`[job-offers] signature refused: offer ${offer.id} lacks a term the page shows`);
+      return CHANGED;
+    }
     return { body: await signOffer(trx, offer, { name, ip, userAgent, now: found.now }), forBell: offer };
   });
   if (result.forBell) await bell('signed', result.forBell, null);
@@ -1030,8 +1078,8 @@ async function moveApplication(trx, applicationId, { to, note, extra }) {
   });
 }
 
-/** POST /:token/date-request */
-async function requestDate(token, { requestedStartDate, note }) {
+/** POST /:token/v2/date-request. `version`: see changedSince. */
+async function requestDate(token, { requestedStartDate, note, version }) {
   const result = await db.transaction(async (trx) => {
     const found = await lockByToken(trx, token);
     if (!found) return { notFound: true };
@@ -1042,6 +1090,7 @@ async function requestDate(token, { requestedStartDate, note }) {
     if (note !== undefined && note !== null && (typeof note !== 'string' || cleanText(note).length > LIMITS.noteChars)) {
       return { invalid: `The note must be ${LIMITS.noteChars} characters or fewer.` };
     }
+    if (changedSince(found.offer, version)) return CHANGED;
     const cleanNote = note ? cleanText(note) : null;
     await trx('job_offers').where({ id: found.offer.id }).update({
       status: 'date_requested', date_requested_at: found.now, requested_start_date: requestedStartDate,
@@ -1053,8 +1102,8 @@ async function requestDate(token, { requestedStartDate, note }) {
   return result;
 }
 
-/** POST /:token/decline */
-async function declineOffer(token, { reason }) {
+/** POST /:token/v2/decline. `version`: see changedSince. */
+async function declineOffer(token, { reason, version }) {
   const result = await db.transaction(async (trx) => {
     const found = await lockByToken(trx, token);
     if (!found) return { notFound: true };
@@ -1062,6 +1111,7 @@ async function declineOffer(token, { reason }) {
     if (reason !== undefined && reason !== null && (typeof reason !== 'string' || cleanText(reason).length > LIMITS.noteChars)) {
       return { invalid: `The reason must be ${LIMITS.noteChars} characters or fewer.` };
     }
+    if (changedSince(found.offer, version)) return CHANGED;
     await trx('job_offers').where({ id: found.offer.id }).update({
       status: 'declined', declined_at: found.now, decline_reason: reason ? cleanText(reason) : null, updated_at: new Date(),
     });

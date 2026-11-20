@@ -170,6 +170,72 @@ const rate = {
 };
 
 // ---------------------------------------------------------------------------
+// /careers/offer/:token  (CareersOfferPage.jsx ← server/routes/public-careers-offer.js)
+// Job offer link for an applicant. Fictional people only; the token is 64 hex
+// like the interview link. Dates are computed from today so the open state
+// never ages into an expired one.
+// A Monday, like a real offer (start days are Monday to Thursday).
+let offerStart = addETDays(new Date(), 30);
+while (new Date(`${etDateString(offerStart)}T12:00:00Z`).getUTCDay() !== 1) offerStart = addETDays(offerStart, 1);
+const OFFER_START = etDateString(offerStart);
+// The pay step follows the server's rule (job-offers.js stepDateFor): the first Monday after day 90.
+let offerStep = addETDays(offerStart, 91);
+while (new Date(`${etDateString(offerStep)}T12:00:00Z`).getUTCDay() !== 1) offerStep = addETDays(offerStep, 1);
+const OFFER_STEP = etDateString(offerStep);
+const OFFER_SENT = etDateString(addETDays(new Date(), -1));
+const OFFER_EXPIRES = addETDays(new Date(), 6).toISOString();
+const OFFER_SIGNED = addETDays(new Date(), 1).toISOString();
+// ---------------------------------------------------------------------------
+const OFFER_PAYLOAD = {
+  state: 'open',
+  firstName: 'Jordan',
+  jobTitle: 'Pest Control Technician',
+  startDate: OFFER_START,
+  hourlyRate: 23,
+  stepRate: 25,
+  stepEffectiveOn: OFFER_STEP,
+  hoursLine: '40 paid hours each full week, four 10-hour days, Monday to Thursday',
+  reportTo: 'Sam Carter, owner',
+  payDayLine: 'Every Friday, for the week before',
+  owner: { name: 'Sam Carter', title: 'owner', sentOn: OFFER_SENT },
+  expiresAt: OFFER_EXPIRES,
+  textConsent: false,
+  version: '2026-12-11T15:20:00.000Z',
+  signedName: null,
+  signedAt: null,
+  terms: {
+    title: 'Technician Terms',
+    markdown: '## Hours\nFour 10-hour days, Monday to Thursday.\n\n## Pay\nPaid every Friday, for the week before.',
+  },
+};
+const offerHandle = (payload) => ({ method, path }) => {
+  if (method === 'GET' && path === `/api/public/careers/offer/${HEX64_A}`) return ok(payload);
+  return null;
+};
+const careersOffer = {
+  id: 'careers-offer', family: 'flow', surface: 'customer', role: 'public token', route: '/careers/offer/:token',
+  url: `/careers/offer/${HEX64_A}`, ready: 'Accept and sign', extraWidths: true, settle: 900,
+  handle: offerHandle(OFFER_PAYLOAD),
+  states: [
+    { name: 'open' },
+    {
+      name: 'signed', ready: 'Welcome to Waves',
+      handle: offerHandle({ ...OFFER_PAYLOAD, state: 'signed', signedName: 'Jordan Rivera', signedAt: OFFER_SIGNED }),
+    },
+    {
+      name: 'date-requested', ready: 'Sam will look at the new date',
+      handle: offerHandle({ ...OFFER_PAYLOAD, state: 'date_requested', requestedStartDate: OFFER_START }),
+    },
+    {
+      name: 'expired', ready: 'Please call',
+      handle: offerHandle({ state: 'expired', message: 'This offer closed last week. Please call Sam at (941) 555-0100 if you still want the job.', contactPhone: '(941) 555-0100' }),
+    },
+    { name: 'not-valid', ready: 'This link is not valid.', handle: () => ({ status: 404, body: { error: 'Not found' } }) },
+    { name: 'error', ready: 'load that offer link', handle: () => serverError() },
+  ],
+};
+
+// ---------------------------------------------------------------------------
 // /card/:token  (CardPage.jsx ← server/routes/card-public.js → services/customer-card.js)
 // ---------------------------------------------------------------------------
 const CARD_PAYLOAD = {
@@ -341,6 +407,7 @@ module.exports = [
   appointment,
   prepGuide,
   rate,
+  careersOffer,
   digitalCard,
   serviceOutline,
   newsletterArchive,

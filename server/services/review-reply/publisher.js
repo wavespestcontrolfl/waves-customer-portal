@@ -23,6 +23,7 @@ const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, asDraft, isDraftReply, stripDraftPrefix, removedOwnerReplyFields } = require('./draft-prefix');
 const { reviewFingerprint } = require('./fingerprint');
+const { appNameRefusal } = require('./app-name');
 
 class ReviewReplyError extends Error {
   constructor(code, message, { status = 500, cause = null } = {}) {
@@ -52,9 +53,15 @@ const CODES = {
   // DB error): retryable, and it must NOT be read as a definitive
   // "someone else replied" (codex r74).
   RECONCILE_FAILED: 'reconcile_failed',
+  // The reply names the app another way than "the Waves app" (owner 2026-11-19).
+  APP_NAME: 'app_name',
 };
 
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
+// The RECONCILE_FAILED message. Before 2026-11-20 the runner parked an
+// exhausted reconciliation as google_failed with this message, so the Monday
+// bell reads it to mark such a row "check Google first".
+const RECONCILE_FAILED_MSG = 'Google shows an owner reply but recording it failed';
 // Total deadline for each Google call. The runner processes rows serially
 // under a fleet-wide cron lease; a request that connects but never completes
 // must fail (retryable) instead of holding every later row and tick.
@@ -85,36 +92,61 @@ function withDeadline(call, label, ms = GOOGLE_CALL_TIMEOUT_MS) {
  * stored time whose rating and comment text also match. Anything else
  * resolves to null (NO_RESOURCE) — a reply must never land on the wrong
  * review. (The original admin-route fallback accepted the first same-name
- * review; that lenience is gone for every caller.)
+ * review; that lenience is gone for every caller.) A failed read of Google's
+ * list is not "no match": it throws GOOGLE_FAILED with the cause, so the
+ * runner retries a temporary one (a timeout, 429, 5xx) on the same long
+ * ladder as a failed getReview. The error carries identityLookup, so the
+ * runner's final park is no_gbp_resource, which the sync re-queues once it
+ * attaches the review's GBP name (requeueFieldsOnIdentity). Its message names
+ * the HTTP status only: Google's response text can quote reviewer names and
+ * review text, and the runner copies the message into the log and the bell.
  */
 async function resolveGbpReviewName(review, { conn = db } = {}) {
   if (review.gbp_review_name) return review.gbp_review_name;
   if (!review.location_id) return null;
+  const loc = WAVES_LOCATIONS.find((l) => l.id === review.location_id);
+  if (!loc?.googleLocationResourceName) return null;
+  let gbpReviews;
   try {
-    const loc = WAVES_LOCATIONS.find((l) => l.id === review.location_id);
-    if (!loc?.googleLocationResourceName) return null;
     // GBP caps pageSize at 50; the helper pages until exhausted.
-    const gbpReviews = await withDeadline((signal) => gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50, { signal }), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
-    const rName = (review.reviewer_name || '').toLowerCase();
-    const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
-    const rRating = Number(review.star_rating) || 0;
-    const rText = String(review.review_text || '').trim();
-    const ratingOf = (g) => ({ ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(g.starRating || '').toUpperCase()] || Number(g.starRating) || 0);
-    const candidates = gbpReviews.filter((g) => {
-      const gName = (g.reviewer?.displayName || '').toLowerCase();
-      const gTime = g.createTime ? new Date(g.createTime).getTime() : 0;
-      return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000
-        && ratingOf(g) === rRating
-        && String(g.comment || '').trim() === rText;
-    });
-    if (candidates.length === 1 && candidates[0].name) {
-      await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name });
-      return candidates[0].name;
-    }
-    if (candidates.length > 1) logger.warn(`GBP resource name lookup ambiguous for review ${review.id} (${candidates.length} candidates) — not resolved`);
+    gbpReviews = await withDeadline((signal) => gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50, { signal }), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
   } catch (lookupErr) {
-    logger.warn(`GBP resource name lookup failed: ${lookupErr.message}`);
+    const why = lookupErr?.timedOut ? 'timed out'
+      : Number.isInteger(lookupErr?.googleStatus) ? `HTTP ${lookupErr.googleStatus}`
+        : require('../notification-service').safeErrorSummary(lookupErr);
+    logger.warn(`GBP resource name lookup failed for review ${review.id}: ${why}`);
+    throw Object.assign(
+      new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read Google's review list to find this review (${why})`, { status: 502, cause: lookupErr }),
+      { identityLookup: true },
+    );
   }
+  const rName = (review.reviewer_name || '').toLowerCase();
+  const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
+  const rRating = Number(review.star_rating) || 0;
+  const rText = String(review.review_text || '').trim();
+  const ratingOf = (g) => ({ ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(g.starRating || '').toUpperCase()] || Number(g.starRating) || 0);
+  const candidates = gbpReviews.filter((g) => {
+    const gName = (g.reviewer?.displayName || '').toLowerCase();
+    const gTime = g.createTime ? new Date(g.createTime).getTime() : 0;
+    return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000
+      && ratingOf(g) === rRating
+      && String(g.comment || '').trim() === rText;
+  });
+  if (candidates.length === 1 && candidates[0].name) {
+    // The match is saved before any Google write: Retract finds the reply by
+    // this name. A failed save posts nothing (null: NO_RESOURCE, retried).
+    // Compare-and-set on the empty slot: a name the sync attached while this
+    // lookup ran wins, and the publish uses that name.
+    try {
+      const saved = await conn('google_reviews').where({ id: review.id }).whereNull('gbp_review_name').update({ gbp_review_name: candidates[0].name });
+      if (!saved) return (await conn('google_reviews').where({ id: review.id }).first('gbp_review_name'))?.gbp_review_name || null;
+    } catch (e) {
+      logger.warn(`GBP resource name not saved for review ${review.id}: ${require('../notification-service').safeErrorSummary(e)}`);
+      return null;
+    }
+    return candidates[0].name;
+  }
+  if (candidates.length > 1) logger.warn(`GBP resource name lookup ambiguous for review ${review.id} (${candidates.length} candidates) — not resolved`);
   return null;
 }
 
@@ -167,8 +199,12 @@ async function recordLiveOwnerReply(reviewId, live, fresh) {
     // google_uncertain / persist_failed park whose earlier PUT had actually
     // landed (its posted provenance and Retract). A transient error keeps
     // the row's state and retries; the next live read reconciles again.
-    logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`);
-    throw new ReviewReplyError(CODES.RECONCILE_FAILED, `Google shows an owner reply but recording it failed: ${e.message}`, { status: 503, cause: e });
+    // The failed write carried the live reply text, so a database error
+    // message can quote it (and the reviewer's name): only its code goes
+    // into the log, the bell and the row (AGENTS.md, PII in logs).
+    const summary = require('../notification-service').safeErrorSummary(e);
+    logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${summary}`);
+    throw new ReviewReplyError(CODES.RECONCILE_FAILED, `${RECONCILE_FAILED_MSG}: ${summary}`, { status: 503, cause: e });
   });
   // A landed write that parked (review / account facts moved since the
   // draft) needs a person: the retrying edited-after-post bell (codex r54).
@@ -205,12 +241,14 @@ function updatedCount(updated) {
  * @param {object} [p.autoFields]    extra google_reviews columns to stamp in the SAME conditional write (runner)
  * @param {object} [p.auditMeta]     activity_log metadata
  * @param {boolean} [p.requireGoogle=false]  refuse the dev local-only save (callers that report "posted")
+ * @param {boolean} [p.fromDraft=false]  a person's post that started from an AI or Agent Ops draft, edited or not
+ *        (Use Draft, AI Reply, a restored agent draft, Post now on an agent draft): the strict app-name rule
  * @param {(fresh: object) => (string|null)} [p.guard]  re-checked INSIDE the publish claim,
  *        immediately before the Google call, against a fresh row read: return a reason
  *        string to abort (e.g. the caller's auto claim was lost to a human skip/dismiss)
  * @returns {Promise<{googlePosted:boolean, reviewId:string, localOnly:boolean}>}
  */
-async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined, expectedAccountFingerprint = undefined }) {
+async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, fromDraft = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined, expectedAccountFingerprint = undefined }) {
   const replyText = String(text || '').trim();
   if (!replyText) throw new ReviewReplyError(CODES.EMPTY, 'Reply text required', { status: 400 });
   if (!actor?.type) throw new Error('publishReviewReply: actor.type required');
@@ -218,6 +256,15 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   const review = await db('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') throw new ReviewReplyError(CODES.NOT_FOUND, 'Review not found', { status: 404 });
   if (review.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+  // Owner 2026-11-19: the app is "the Waves app" (app-name.js). Checked
+  // here, where every path to Google meets, before any write. Agent text
+  // meets the strict rule: the runner and the Intelligence Bar post it, and
+  // a person's post says so (fromDraft) when it started from an AI or Agent
+  // Ops draft. Every other reply is a person's own words and meets the never
+  // list. No row state is read to guess who wrote the text.
+  const agentText = actor.type !== 'admin' || fromDraft;
+  const appRefusal = appNameRefusal(replyText, { agentText });
+  if (appRefusal) throw new ReviewReplyError(CODES.APP_NAME, appRefusal, { status: 422 });
   if (!allowOverwrite && hasRealReply(review.review_reply)) {
     throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
   }
@@ -514,7 +561,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // A manual attempt (admin editor / IB): keep the exact text and mark
       // the version manual, so the sync that later clears the park hands
       // that text back to a person instead of the automatic lane (codex r75).
-      Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || 'human', auto_reply_mode: null });
+      // 'agent_ops' (machine-authored) when the text started from an AI or
+      // Agent Ops draft: the restored [DRAFT] keeps that origin, so Use Draft
+      // and Post now send it with the strict app-name rule.
+      Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || (agentText ? 'agent_ops' : 'human'), auto_reply_mode: null });
     }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {
@@ -790,6 +840,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
 
 module.exports = {
   CODES,
+  RECONCILE_FAILED_MSG,
   ReviewReplyError,
   resolveGbpReviewName,
   publishReviewReply,

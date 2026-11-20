@@ -29,7 +29,7 @@ const { computeCurrentPlacement, territoryTechnicianForVisit, _internals } = req
 const { liveServiceLine } = require('../services/scheduling/line-technician');
 const territory = require('../services/territory');
 
-const ENV_KEYS = ['GATE_AUTO_DISPATCH_SHARED_MODEL', 'GATE_TERRITORY_NIGHT_RUN', 'GATE_TECH_WORK_DAYS', 'GATE_TECH_START_POINTS', 'GATE_DRIVE_TIME_CALIBRATION'];
+const ENV_KEYS = ['GATE_AUTO_DISPATCH_SHARED_MODEL', 'GATE_TERRITORY_NIGHT_RUN', 'GATE_TECH_WORK_DAYS', 'GATE_TECH_START_POINTS'];
 const PRIOR_ENV = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
 const DATE = '2026-08-07';
@@ -77,7 +77,6 @@ beforeEach(() => {
   process.env.GATE_TERRITORY_NIGHT_RUN = 'true';
   delete process.env.GATE_TECH_WORK_DAYS;
   delete process.env.GATE_TECH_START_POINTS;
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   liveServiceLine.mockReset().mockResolvedValue('general');
   territory.territoryTechnicianFor.mockReset().mockResolvedValue('t1');
 });

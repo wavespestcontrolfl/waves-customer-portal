@@ -176,13 +176,16 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
   });
 
   // The placed visit plans the owner table now (owner 2026-10-30: this fixture's uncadenced
-  // 'pest_control' reads one-time pest, 45), so the last gap is the 60 minutes before the block;
-  // the row it holds is still its 30-minute allowance.
+  // 'pest_control' reads one-time pest, 45); the row it holds is still its 30-minute allowance.
+  // The block starts at 17:15, so the last gap is the 75 minutes after the 16:00 stop. On the drive clock one visit
+  // needs 61 of them (45 minutes of work, the 15-minute margin before the block and 1 minute of drive) and two need
+  // 96 (the first hold's 30, the second visit's 45, the margin and 6 minutes of drive): one fits, two do not. A
+  // 17:00 block (a 60-minute gap) fit one visit only on the old straight-line minutes, which needed 60 and 90.
   test('concurrent customers cannot both consume the final gap', async () => {
     await f.db('scheduled_services').insert(f.baseStop({ window_start: '08:00', window_end: '16:00',
       estimated_duration_minutes: 480, route_order: 1 }));
     await f.db('tech_schedule_blocks').insert({ id: require('node:crypto').randomUUID(), date: f.date,
-      technician_id: f.ids.technician, block_type: 'blocked', start_time: '17:00', end_time: '18:00' });
+      technician_id: f.ids.technician, block_type: 'blocked', start_time: '17:15', end_time: '18:00' });
     const outcomes = await Promise.allSettled(f.ids.estimates.map(estimateId => reserveSlot({
       estimateId, slotId: f.signedSlot(estimateId, 30, '16:00'),
     })));

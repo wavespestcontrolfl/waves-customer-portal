@@ -5,7 +5,9 @@
  */
 const {
   QUIZ_SEEING, QUIZ_PROPERTY, normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizNamesProblem, quizNamesRequest, quizIsCommercial,
+  quizContinuesToPrice,
 } = require('../services/lead-quiz');
+const { TIMELINE_VALUES } = require('../services/lead-timeline');
 
 describe('normalizeQuiz', () => {
   test('keeps the allowlisted tokens of a quiz the site posts', () => {
@@ -110,5 +112,43 @@ describe('staff wording', () => {
     for (const property of ['house', 'townhome', 'condo']) expect(quizIsCommercial({ kind: 'pest', property })).toBe(false);
     expect(quizIsCommercial({ kind: 'pest' })).toBe(false);
     expect(quizIsCommercial(null)).toBe(false);
+  });
+});
+
+describe('quizContinuesToPrice: which answers end on a price page', () => {
+  const HOME_QUIZ = { kind: 'pest', seeing: 'roaches', property: 'condo' };
+
+  test('every named problem, at a home, that can wait', () => {
+    for (const kind of Object.keys(QUIZ_SEEING)) {
+      for (const seeing of QUIZ_SEEING[kind].filter((tile) => tile !== 'unsure')) {
+        for (const property of ['house', 'townhome', 'condo']) {
+          for (const timeline of ['this_week', 'this_month', 'browsing']) {
+            expect({ kind, seeing, property, timeline, ok: quizContinuesToPrice({ kind, seeing, property }, timeline) })
+              .toEqual({ kind, seeing, property, timeline, ok: true });
+          }
+        }
+      }
+    }
+  });
+
+  test('"Today" ends on a call, "Business" on a commercial call-back, "Unsure" on an office review', () => {
+    expect(quizContinuesToPrice(HOME_QUIZ, 'now')).toBe(false);
+    expect(quizContinuesToPrice({ ...HOME_QUIZ, property: 'business' }, 'this_week')).toBe(false);
+    expect(quizContinuesToPrice({ ...HOME_QUIZ, seeing: 'unsure' }, 'this_week')).toBe(false);
+    expect(quizContinuesToPrice({ kind: 'lawn', seeing: 'unsure', property: 'house' }, 'browsing')).toBe(false);
+  });
+
+  test('an unanswered question is not a yes', () => {
+    expect(quizContinuesToPrice({ kind: 'pest', seeing: 'roaches' }, 'this_week')).toBe(false);
+    expect(quizContinuesToPrice({ kind: 'pest', property: 'condo' }, 'this_week')).toBe(false);
+    expect(quizContinuesToPrice(HOME_QUIZ, null)).toBe(false);
+    expect(quizContinuesToPrice(HOME_QUIZ, undefined)).toBe(false);
+    expect(quizContinuesToPrice(HOME_QUIZ, 'someday')).toBe(false);
+    expect(quizContinuesToPrice(null, 'this_week')).toBe(false);
+    expect(quizContinuesToPrice({ kind: 'tree', seeing: 'roaches', property: 'condo' }, 'this_week')).toBe(false);
+  });
+
+  test('every declared timeline is decided: only "now" is refused', () => {
+    expect(TIMELINE_VALUES.filter((timeline) => !quizContinuesToPrice(HOME_QUIZ, timeline))).toEqual(['now']);
   });
 });

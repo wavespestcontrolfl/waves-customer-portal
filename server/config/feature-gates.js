@@ -6,6 +6,10 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_EXCLUSION_ROOF_STYLE_PRICING=true (owner 2026-11-19, choice 2A: the technician confirms the roof style on site with one tap in the rodent exclusion estimate (Shingle, Flat tile, Barrel tile, Metal, Other) and the quote uses only his answer; the county roof words and the photo read show beside the control as a suggestion and never set a price. Any tile roof (Flat tile or Barrel tile) multiplies the roof/high wire-mesh points by 1.25 (never bird boxes, mesh or ground points). Barrel tile also adds a "Barrel tile eave closure" line at $12 per foot of eave the technician measures, $395 minimum for that line; zero feet adds no line. Nothing tapped = today's price. It changes prices, so the owner flips it. Read at call time via exclusionRoofStylePricingLive(), strict 'true', dark by default. Off = every estimate without a roof-style pick prices and reads exactly as before, the admin estimate tool hides the control, and a NEW request that still carries a roof-style pick is refused (the estimate engine, fail closed); an estimate already quoted with a roof style keeps its multiplier and per-foot rate. Kill = unset.)
+ *   GATE_ROOF_ENTRY_READ=true (owner 2026-11-19: staff-only roof read. From a free county aerial photo of the home, one vision model call flags the likely rodent entry-point types on the roof (returns, vent stacks, vents, chimney, utility lines, eaves, trees touching) so the technician knows where to look and the estimate is not short. It has a gate because every read is a paid vision call; a read of the same property is reused for 90 days. Off, POST /api/admin/roof-entry-read and PATCH /api/admin/roof-entry-read/:id/tech-count answer 404 {enabled:false} from the router, after the portal's global API middleware (rate limit, body parsing), with no route-level database read, staff login, image fetch or model call. Nothing reaches a customer. Strict `=== 'true'`, read at call time via roofEntryReadLive(); dark by default. Kill: unset)
+ *   GATE_EXCLUSION_WHOLE_HOME=true (owner 2026-11-19: the rodent exclusion estimate offers a "Whole home" seal beside the usual spot seal. A whole-home seal replaces the $195 / $295 job floor with the home-size minimum from Settings (today $395 up to 1,500 sq ft, $595 up to 2,500, $895 up to 4,000, $1,295 above) and includes a 1-year re-entry guarantee in the price; renewing it costs the usual guarantee tier price ($199 / $249 / $299). The customer estimate then states the included guarantee. It changes prices, so the owner flips it. Read at call time via exclusionWholeHomeLive(), strict 'true', dark by default. Off = every estimate without a whole-home pick prices and reads exactly as before, the admin estimate tool hides the seal scope choice, and a NEW request that still asks for a whole-home seal is refused (the estimate engine, fail closed); an estimate already quoted as whole-home keeps its terms. Kill = unset.)
+ *   GATE_VOICE_GPT_LIVE_TEST=true (owner 2026-11-19, spend cap $5: on Sandy's sandbox test number only (VOICE_RELAY_SANDBOX_NUMBER), a caller who presses 71 (voice marin) or 72 (voice delta) during the greeting talks to OpenAI's GPT-Live speech-to-speech model instead of the Sandy chain, to compare the two by ear. It has a gate because every GPT-Live call is a paid OpenAI call. The line has no lookups (client delegation: no paid OpenAI backend model) and cannot book, take a lead, text or transfer. Each call is capped at 10 minutes, and a per-call worst-case reservation ($0.525) keeps all GPT-Live calls under VOICE_GPT_LIVE_TEST_MAX_USD (default 5). Twilio also bills each call's Media Stream (about $0.004 a minute), which the reservation does not count, so the flip needs the owner's yes for that too. The server records reply delay and cost (never the call's words) on call_log.metadata.gpt_live. Off, 71 and 72 behave like any other unknown code (the production profile). Strict `=== 'true'`, read at call time via voiceGptLiveTestLive(); dark by default. Kill: unset.)
  *   GATE_TECH_ESTIMATES=true (owner 2026-11-09, "GO, FOR ALL": a technician prices and, in later steps, sends an estimate from the phone. It has a gate because the later steps text and email customers and because the price preview runs the paid property lookup. Off, every /api/tech/estimates route answers 404 {enabled:false} before any customer read. On, a route also needs the technician's own Can create estimates switch (technicians.can_create_estimates, off by default); an admin login always passes. Steps 1 and 2a price and save a draft estimate (sold by = the creator) and read his own; nothing is sent. Pest lines only (general pest, mosquito, rodent, termite), each open to a technician only when his job type for it is Qualified. Strict `=== 'true'`, read at call time via techEstimatesLive(); dark by default. Kill: unset.)
  *   GATE_LIVE_CALL_TRANSCRIPTION=true (owner 2026-11-16 "ok build all", live-call suite PR 1: when a staff member presses 1 to take an inbound call, Twilio Real-Time Transcription starts on the caller's call, both sides, and each final utterance is saved card-number scrubbed in call_live_utterances through POST /api/webhooks/twilio/live-transcription. It collects text only; the features that read it come later. Read via isEnabled('liveCallTranscription') at boot, strict 'true', dark by default; off = no transcription starts and the press-1 TwiML is unchanged. Spends money when on (Twilio, $0.027 a call minute): owner flip only. Kill: delete the variable.)
  *   GATE_LIVE_CALL_UPSET_ALERT=true (owner 2026-11-16 "ok build all", live-call suite: while a call is live, when the caller sounds upset and the owner is not the one on the call, one bell row and one phone banner tell him so he can step in. After a caller utterance is saved, a Claude Haiku 5.5 read of the last two minutes runs when the caller has 3 or more new utterances, at most once per 45 seconds and 8 times per call; mood upset or angry raises one alert per call. Needs GATE_LIVE_CALL_TRANSCRIPTION data. Read via isEnabled('liveCallUpsetAlert') at boot, strict 'true', dark by default; off = no model call, no new read, behavior byte-identical. Spends money when on (a Haiku call per check): owner flip only. Kill: delete the variable.)
@@ -29,6 +33,7 @@
  *   GATE_LIVE_CALL_BACKUP_TRANSCRIPT=true (owner 2026-11-16 "ok build all", live-call suite part 10: when an answered inbound call has NO recording (Twilio holds none; the unrecorded-call watchdog rings for these), its live text from call_live_utterances becomes the call's transcript, labelled Agent:/Caller:, stored with provider twilio_realtime, and the normal pipeline runs on it: extraction, summary, follow-ups. Only the 5-minute missing-recording sweep starts it, after Twilio's lookup found no completed recording and 30 minutes after the call ended. A call WITH a recording never uses it, and a failed transcription of an existing recording stays no_transcription for the sweep to retry. Needs GATE_LIVE_CALL_TRANSCRIPTION on to have any text. Risk: the live text can carry the follow-ups that text a customer, so it ships dark. Read via isEnabled('liveCallBackupTranscript'), strict 'true'; off = a call with no recording ends no_transcription as before. Kill: delete the variable.)
  *   GATE_YARD_WRAPPED=true (owner 2026-10-31 perks round 4, build ask 2026-11-01: "Yard Wrapped", a year-in-review card for WaveGuard members on the Home tab of the customer app. From Dec 1 to Jan 31 (Eastern time) an active member with at least 3 performed visits in the year (the December year, so January still shows the year just ended) sees counts only: visits and the split by service line, the first and last tech-confirmed lawn score when there are two or more, up to 5 pests or weeds the year's products were logged for (each screened by customerCopyViolations), the technician who did the most visits, one lawn photo the app already serves, and the registered company name. A Share button hands the stats to the phone's share sheet. One read-only endpoint, GET /api/yard-wrapped. Read at call time via yardWrappedLive(), strict 'true', dark by default; off = the endpoint answers {enabled:false} with no database read and the card renders nothing, byte-identical to before. Sends nothing to anyone.)
  *   GATE_REVIEW_SENDER_EVERY_5_MIN=true (owner 2026-10-22: the review cadence sender runs every 5 minutes on its own offset (:04 ... :59) instead of :14/:44, so a due review text goes within 5 minutes. Same job and lock. Read at boot; off unless exactly 'true'; off = :14/:44 exactly as before.)
+ *   GATE_SHORT_CALL_RECORDING_SWEEP=true (owner 2026-11-19 "FIX": the 5-minute recording sweep, the restart-safe backstop for the in-memory processing timers that a deploy wipes, also takes a recording of 10 seconds or less on its first pass (a call never processed, or a pass that died) while its call is under 24 hours old. Before, the sweep took only recordings over 10 seconds, so a short call (often a cancel) that ended during a deploy never got a transcript (an 8-second cancel call on 2026-11-18). A short call that ended in no_transcription or extraction_failed is still not retried, and a finished one is not run again. The call-processing stall watchdog, the ops queue, the call-processing stats and the agent-control run list read the same length rule (config/call-extraction-retry.js). A short call older than 24 hours is never swept. It has a gate because each swept call is a paid transcription and extraction (estimate under $1 a month) and a processed call can text the caller (for example the voicemail text), so the owner flips it. Read at call time via shortCallRecordingSweepLive(), strict 'true', dark by default; off = every rule is byte-identical to before (over 10 seconds only). Kill: unset.)
  *   GATE_CALL_ENRICH_CODES_REQUIRE_ANI=true (a call writes gate / garage / lockbox codes and access notes to a customer's profile only when the call's caller ID is that customer's primary phone; a spoken callback number alone no longer does. Pets and internal notes are unchanged. Read at call time via callEnrichCodesRequireAniLive(), strict === 'true', dark by default; off = unchanged; sends nothing to a customer)
  *   GATE_BACKLINK_SIGNUP_URL_GUARD=true (security audit run 2, 2026-10-22: the backlink signup worker's Chromium opens only an http(s) URL whose host resolves to public IPv4, the model's signup_url must stay on the queued site, and a route guard aborts requests to blocked hostnames or literal non-public IPs. Read at call time via backlinkSignupUrlGuardLive(), strict 'true', dark by default; off = navigation exactly as before. Sends nothing to a customer.)
  *   GATE_EMAIL_AUTH_STRICT=true (inbound email trust: hasAlignedAuth parses only real Authentication-Results method results, and a vendor invoice books an expense only when the sender authenticated as its From domain; strict `=== 'true'`, read at call time by emailAuthStrictLive(); dark by default; sends nothing to a customer)
@@ -368,6 +373,7 @@
  *   GATE_LAWN_MIN_AFTER_DISCOUNT=true (lawn $55 minimum per visit after discounts, owner 2026-11-06: a residential recurring lawn plan (9x and 12x) never collects under lawn_pricing_v2.minimumPerVisitAfterDiscount (55) an application after the WaveGuard tier % and a typed percent or dollar discount; the list (crossed-out) price is raised so the full discount still shows; the public price ranges start at the minimum; strict opt-in via gateEnvValue, read at CALL time in generateEstimate and public-ranges; the resolved value is stamped in pricingMetadata.lawnMinimumPerVisitAfterDiscount and a saved quote replays with its stamp (0 when unstamped or priced while off), so only new quotes move; ships DARK, off = byte-identical prices; sends nothing to a customer)
  *   GATE_SITEONE_PROGRAMS_CHECK=true (owner 2026-10-26: on the 1st of each month at 9:00 AM ET the portal signs in to siteone.com with the order bot's stored login, reads SiteOne's Early Order Programs, promotions and Partners points, compares them with last month's list and posts one admin notification for new programs, programs ending within 30 days and points expiring within 60 days. Read-only on SiteOne: never adds to the cart, never changes the account, never orders. Strict opt-in via gateEnvValue, read at call time by server/services/procurement/siteone-programs-check.js; dark by default; off = nothing runs. Sends nothing to a customer.)
  *   GATE_SITEONE_EMAIL_ORDER=true (owner 2026-10-26, "OK DO OPTION B": SiteOne's website blocks the order bot, so an owner can instead email ONE pickup order to SiteOne for an open restock request. The Restock tab shows "Email order to SiteOne" on an open request (admins only); it opens a preview with To, Subject, the body and the estimate before tax, and Send email goes out through SendGrid from contact@ to SITEONE_ORDER_EMAIL (cc SITEONE_ORDER_CC). Then the request is marked ordered, so Receive works as today. One email per request, ever. Strict opt-in via gateEnvValue, read at call time by server/services/procurement/vendor-order-email.js via siteOneEmailOrderLive(); dark by default; off = the two routes answer 404 and the tab shows no button. Sends an email to SiteOne, a vendor, never to a customer; the order bot is untouched.)
+ *   GATE_SITEONE_DEAL_AI_END_DATE=true (owner 2026-11-19 "B" on the SiteOne Deal End Dates scope page: the Monday 8:00 AM SiteOne deals bell asks Claude Haiku 5.5 for each deal email's end date and shows it with the email's own words, for example: ends Apr 30 ("Offers valid March 1 – April 30, 2026."). The code keeps an answer only when those words are in the email and name that day (the end of a range, not its start). It has a gate because each read is a paid API call: about 2 deal emails a month cost under 1 cent; the cap (20 reads, one Monday run a week) is about $0.04 a week, $0.17 a month. Strict `=== 'true'`, read at run time by server/services/procurement/siteone-deals-digest.js via siteOneDealAiEndDateLive(); dark by default; off (kill: unset) = no model call, and each line keeps the date-pattern deadline it shows today.)
  *   GATE_MOSQUITO_MISTING=true (automatic mosquito misting system pricer: install price by tier, nozzle and riser overage, a $59 monthly plan and per-fill refill rates; the estimate engine accepts services.mosquitoMisting, the legacy mapper emits the plan line and a one-time install item, and the public price ranges list two rows; the line is not a WaveGuard tier service and takes no percent discount; draft prices, dealer cost unknown; also gates the misting system records (owner 2026-10-30): an admin-only Misting system panel on Customer 360 for the install calibration (spray-rate math checked against the label's daily limit) and the tank refill log, via /api/admin/misting-records, which answer 404 and render no panel when off; and the customer app's Home card, GET /api/misting-system (off = `{ system: null }` with no read); strict opt-in via gateEnvValue, read at CALL time via mosquitoMistingLive(); ships DARK, off = the key is ignored and every estimate is byte-identical)
  *   GATE_DEAD_ANIMAL_REMOVAL=true (owner 2026-10-26: the one-time Dead Rodent Removal & Odor Treatment line in the estimate engine: services.deadAnimalRemoval = { tier: reachable | attic | in_wall }, fixed tier prices, in_wall is a custom quote. NEW QUOTES ONLY: off = the estimator hides the choice and the engine refuses the input with a 400 failClosed error (DEAD_ANIMAL_REMOVAL_GATED); an estimate already saved with the line stays a normal estimate. Strict opt-in via gateEnvValue, read at CALL time via deadAnimalRemovalLive(); dark by default. Sends nothing to a customer.)
  *   GATE_LAWN_VISIT_SUMMARY_V2=true (PROTOTYPE ONLY: lawn report Visit Summary, FIXED SENTENCES, NO MODEL (owner 2026-10-07). The gate controls ONLY the freeze at completion: at completion code writes up to 5 sentences from the visit's structured facts, every word from closed phrase tables (the product CATEGORIES applied, never names or rates; the report's area reads with strong and healthy kept distinct; technician-kept PHOTO findings (the report's photo-finding selector; added details never count) by their own symptom label, hedged when the read is low or unknown confidence or undeterminable from the photos, and only while the report's own card for that topic shows a concern; one fixed results sentence and the next-visit topics, for a recurring plan visit with a scheduled next visit at this property only). There is NO watering sentence (the report's watering banner owns it). The technician note, the v13 program line, the headline and rain are not inputs. The frozen entry is { text, slots } in structured_notes.lawnVisitSummary[assessmentId], first writer wins. A RENDER shows any whole frozen summary whatever the gate says (it depends only on the record, so every pod and browser agrees during a rollout): the text must equal what the current tables render from the slots and pass the screens, else the report keeps the generic customerRecap. It replaces the lawn report's Visit Summary text (summarySource 'lawn_visit_summary'); the completion SMS keeps the short customerRecap; lawn only; customer copy, so strict opt-in: exactly 'true' in every environment, read at call time via lawnVisitSummaryV2Live(). Ships DARK; off = no new summaries are frozen and nothing else changes (rollback = unset the variable: summaries already frozen stay, because they are true statements))
@@ -2376,6 +2382,8 @@ const gates = {
   // outage) ring an admin bell instead of silently costing leads — the
   // 2026-08-31 wedge and a row stuck since 07-10 both went unnoticed.
   callProcessingStallWatchdog: process.env.GATE_CALL_PROCESSING_STALL_WATCHDOG === 'true',
+  // GATE_SHORT_CALL_RECORDING_SWEEP: read at CALL time via shortCallRecordingSweepLive(); this entry is for logGateStatus.
+  shortCallRecordingSweep: process.env.GATE_SHORT_CALL_RECORDING_SWEEP === 'true',
   // Callback spam closes the parent voicemail: an admin callback
   // (metadata.relatedCallId) that reaches a solicitor resolves the parent
   // voicemail's open Needs Review cards and dismisses its open callback
@@ -3383,8 +3391,7 @@ const gates = {
   // <72h or 72h-reminder-sent: frozen), plus the ±5-day cumulative drift
   // budget, the ≥5-days-out destination floor, and the reminder-sent freeze.
   // OFF = auto-dispatch's legacy flat 14-day lock, byte for byte. Read at CALL
-  // time via gateEnvValue (same pattern and rationale as
-  // GATE_DRIVE_TIME_CALIBRATION: it moves the numbers/windows scheduling
+  // time via gateEnvValue (the redeploy-free pattern: it moves the numbers/windows scheduling
   // decisions are made with, so the flip is a deliberate act in EVERY
   // environment — never an ambient dev default — and needs no redeploy).
   // Kill switch: unset GATE_ROUTE_TIERS.
@@ -3460,29 +3467,14 @@ const gates = {
   // GATE_ROUTE_SCORECARD.
   routeScorecard: gateEnvValue('GATE_ROUTE_SCORECARD'),
 
-  // Drive-Time Calibration — swaps the straight-line drive-time approximation
-  // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
-  // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an
-  // estimator change — no external calls, no new data, no customer-facing
-  // surface of its own; it moves the numbers auto-dispatch and the find-time
-  // scorer rank slots with. Opt-in everywhere so the shift in slot ordering is
-  // a deliberate flip. Off → the legacy constants apply unchanged.
-  // NOTE: consumers read this through gateEnvValue() at CALL time rather than
-  // this baked value, so a flip takes effect without a redeploy. Parsed with
-  // the SAME helper here so the registry and the startup log can never disagree
-  // with the scheduler — with a bare === 'true' a value of `1`/`on`/`TRUE`
-  // would calibrate the estimator while logGateStatus reported it disabled.
-  driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
-
   // Schedule tie-proximity display order (owner ruling 2026-09-26) — when two
   // stops on a tech's day start within 30 minutes of each other, the one
   // closer to the previous stop shows first, instead of falling back to
   // whichever was booked first. DISPLAY ONLY: server/services/schedule-tie-
   // proximity.js returns a `displayOrder` per stop; nothing writes
   // route_order or any other column, and no customer communication is sent.
-  // Uses the existing shared drive-time estimator (GATE_DRIVE_TIME_CALIBRATION
-  // governs which one) — no new Google API calls. Off (default in every
-  // environment) → the mobile day/week list and the desktop day board's route-
+  // Uses the existing shared drive-time estimator — no new Google API calls.
+  // Off (default in every environment) → the mobile day/week list and the desktop day board's route-
   // order badge sort by window start alone, exactly as before this gate
   // existed. Consumers read gateEnvValue() at CALL time, so a flip needs no
   // redeploy. Kill switch: unset GATE_SCHEDULE_TIE_PROXIMITY.
@@ -5955,6 +5947,14 @@ function reviewAskAfterReportLive() {
   return process.env.GATE_REVIEW_ASK_AFTER_REPORT === 'true';
 }
 
+// GATE_SHORT_CALL_RECORDING_SWEEP read at CALL time, strict `=== 'true'`, dark by default (owner 2026-11-19, "FIX").
+// config/call-extraction-retry.js: the recording sweep (and every reader of its length rule) also takes a recording of
+// 10 seconds or less while its call is under 24 hours old. Paid transcription + extraction, and a processed call can
+// text the caller, so the owner flips it. Off = over 10 seconds only, byte for byte. Kill = unset.
+function shortCallRecordingSweepLive() {
+  return process.env.GATE_SHORT_CALL_RECORDING_SWEEP === 'true';
+}
+
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI read at CALL time, strict `=== 'true'`, dark in every environment.
 // services/call-profile-enrichment.js: a call writes gate / garage / lockbox codes and access notes to the
 // customer's profile only when the call's caller ID is that customer's primary phone (a callback number the
@@ -6456,7 +6456,7 @@ function leadInspectionLinkLive() {
 }
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL read at CALL time via gateEnvValue (same
-// convention as GATE_ROUTE_TIERS / GATE_DRIVE_TIME_CALIBRATION — it moves
+// convention as GATE_ROUTE_TIERS — it moves
 // the numbers auto-dispatch ranks placements with, so the flip is deliberate
 // in every environment and needs no redeploy). The one canonical reader for
 // every entry point: candidate-slots.js (current-placement scoring + the
@@ -9106,6 +9106,8 @@ module.exports.wdoAttentionRingsLive = wdoAttentionRingsLive;
 module.exports.RETIRED_GATES = RETIRED;
 // GATE_CALL_ENRICH_CODES_REQUIRE_ANI reader, on its own line so gate PRs never conflict.
 module.exports.callEnrichCodesRequireAniLive = callEnrichCodesRequireAniLive;
+// GATE_SHORT_CALL_RECORDING_SWEEP reader, on its own line so gate PRs never conflict.
+module.exports.shortCallRecordingSweepLive = shortCallRecordingSweepLive;
 module.exports.backlinkSignupUrlGuardLive = backlinkSignupUrlGuardLive;
 module.exports.newsletterClickBoundLive = newsletterClickBoundLive;
 // GATE_NEWSLETTER_AUTO_SEND reader, on its own line so gate PRs never conflict.
@@ -9180,6 +9182,14 @@ module.exports.customerTextToVisitTechLive = customerTextToVisitTechLive;
 module.exports.smsPromptAutopromoteMode = smsPromptAutopromoteMode;
 // GATE_SITEONE_EMAIL_ORDER reader, on its own line so gate PRs never conflict.
 module.exports.siteOneEmailOrderLive = siteOneEmailOrderLive;
+// GATE_SITEONE_DEAL_AI_END_DATE read at RUN time, strict `=== 'true'`, dark (owner 2026-11-19 "B"). It has a gate because
+// each deal email's end-date read is a paid Claude Haiku call. Off = the Monday SiteOne deals bell makes no model call and
+// keeps its date-pattern deadlines. Kill = unset.
+function siteOneDealAiEndDateLive() {
+  return process.env.GATE_SITEONE_DEAL_AI_END_DATE === 'true';
+}
+// GATE_SITEONE_DEAL_AI_END_DATE reader, on its own line so gate PRs never conflict.
+module.exports.siteOneDealAiEndDateLive = siteOneDealAiEndDateLive;
 // GATE_AUTOPAY_HOLD_TIMEOUT reader, on its own line so gate PRs never conflict.
 module.exports.autopayHoldTimeoutMode = autopayHoldTimeoutMode;
 // GATE_TECH_COST_RATES reader, on its own line so gate PRs never conflict.
@@ -9428,3 +9438,39 @@ function techEstimatesLive() {
 }
 // GATE_TECH_ESTIMATES reader, on its own line so gate PRs never conflict.
 module.exports.techEstimatesLive = techEstimatesLive;
+
+// GATE_ROOF_ENTRY_READ read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19). It has a gate because each
+// roof read is a paid vision-model call. Off = both /api/admin/roof-entry-read routes answer 404 {enabled:false} from the
+// router, after the portal's global API middleware (rate limit, body parsing), with no route-level database read, staff
+// login, image fetch or model call. Kill = unset.
+function roofEntryReadLive() {
+  return process.env.GATE_ROOF_ENTRY_READ === 'true';
+}
+// GATE_ROOF_ENTRY_READ reader, on its own line so gate PRs never conflict.
+module.exports.roofEntryReadLive = roofEntryReadLive;
+// GATE_EXCLUSION_WHOLE_HOME read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19). It changes prices, so the owner
+// flips it. The estimate engine (wholeHomeSealInputs) is the ONE pricing decision: off = a new whole-home request is refused,
+// a stored estimate re-priced as sold keeps its terms, and the estimate tool hides the scope choice. Kill = unset.
+function exclusionWholeHomeLive() {
+  return process.env.GATE_EXCLUSION_WHOLE_HOME === 'true';
+}
+// GATE_EXCLUSION_WHOLE_HOME reader, on its own line so gate PRs never conflict.
+module.exports.exclusionWholeHomeLive = exclusionWholeHomeLive;
+
+// GATE_EXCLUSION_ROOF_STYLE_PRICING read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19, choice 2A). It changes prices,
+// so the owner flips it. The estimate engine (roofStyleInputs) is the ONE pricing decision: off = a new request with a roof-style
+// pick is refused, a stored estimate re-priced as sold keeps its quote-time terms, and the estimate tool hides the control. Kill = unset.
+function exclusionRoofStylePricingLive() {
+  return process.env.GATE_EXCLUSION_ROOF_STYLE_PRICING === 'true';
+}
+// GATE_EXCLUSION_ROOF_STYLE_PRICING reader, on its own line so gate PRs never conflict.
+module.exports.exclusionRoofStylePricingLive = exclusionRoofStylePricingLive;
+
+// GATE_VOICE_GPT_LIVE_TEST read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19). It has a gate because every
+// GPT-Live call spends on OpenAI (spend cap $5 = VOICE_GPT_LIVE_TEST_MAX_USD, reserved per call).
+// Off = the sandbox cell route ignores 71 and 72 and the /ws/voice-live upgrade is refused. Kill = unset.
+function voiceGptLiveTestLive() {
+  return process.env.GATE_VOICE_GPT_LIVE_TEST === 'true';
+}
+// GATE_VOICE_GPT_LIVE_TEST reader, on its own line so gate PRs never conflict.
+module.exports.voiceGptLiveTestLive = voiceGptLiveTestLive;

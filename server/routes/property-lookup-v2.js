@@ -5411,6 +5411,26 @@ function isAssociationCommercialJob({ commercialRiskType = null, commercialSubty
     || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
 }
 
+// The Seal scope pick of the admin estimate tool, as services.exclusion fields: {} without a Whole home
+// pick. The pick passes through; the estimate engine makes the one GATE_EXCLUSION_WHOLE_HOME decision.
+function wholeHomeSealFields(options, home) {
+  return options.exclSealScope === 'whole_home' ? { sealScope: 'whole_home', ...home } : {};
+}
+
+// The Roof style pick of the admin estimate tool, as services.exclusion fields: {} without a pick. The pick passes
+// through (the feet only with Barrel tile); the estimate engine makes the one GATE_EXCLUSION_ROOF_STYLE_PRICING decision.
+function roofStyleFields(options) {
+  // Only a missing, null or empty pick is "not confirmed"; any other value (a number, object, boolean) passes through
+  // so the engine's validation refuses it (EXCLUSION_ROOF_STYLE_INVALID) instead of the route silently dropping it.
+  const style = options.exclRoofStyle;
+  if (style === undefined || style === null || style === '') return {};
+  if (style !== 'barrel_tile') return { roofStyle: style };
+  const { parseBarrelEaveFt, invalidBarrelEaveFtError } = require('../services/estimate-roof-style-replay');
+  const barrelEaveFt = parseBarrelEaveFt(options.exclBarrelEaveFt);
+  if (barrelEaveFt === null) throw invalidBarrelEaveFtError();
+  return { roofStyle: style, barrelEaveFt };
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -6029,9 +6049,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     };
   }
   if (sel.has('EXCLUSION')) {
+    // Whole-home seal (GATE_EXCLUSION_WHOLE_HOME, dark): an all-zero count still prices the home-size
+    // minimum, so the pick alone selects the V2 shape. Gate off = the field is never read.
+    const wholeHomeSeal = wholeHomeSealFields(o, { homeSqFt, stories, roofType: p.roofType });
+    // Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, dark). The pick is ALWAYS carried to the engine, on the legacy and the
+    // V2 shape alike (it makes the one gate decision and sets the effective guarantee roof type). The pick NEVER changes the
+    // shape: it is decided exactly as without a pick, by counts or a whole-home seal. No pick = the field is never read.
+    const roofStyle = roofStyleFields(o);
     const hasV2Fields = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
       o.exclStandardBirdBox || o.exclTileHighBirdBox || o.exclCustomBirdBox ||
-      o.exclMeshSoftLF || o.exclMeshConcreteLF);
+      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope);
     if (hasV2Fields) {
       services.exclusion = {
         pricingVersion: 'v2',
@@ -6044,6 +6071,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         meshConcreteLF: o.exclMeshConcreteLF || 0,
         waiveInspection: !!o.exclWaiveInspection,
         urgency, afterHours,
+        ...wholeHomeSeal,
+        ...roofStyle,
       };
     } else {
       services.exclusion = {
@@ -6052,6 +6081,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         advanced: o.exclAdvanced || 0,
         waiveInspection: !!o.exclWaiveInspection,
         urgency, afterHours,
+        ...roofStyle,
       };
     }
   }

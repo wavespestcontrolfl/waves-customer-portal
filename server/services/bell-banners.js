@@ -34,6 +34,9 @@ const BELL_BANNER_KINDS = Object.freeze({
   live_call_upset: Object.freeze({ nightQuiet: false, gate: 'liveCallUpsetAlertLive' }),
   // A customer stuck booking from an estimate (estimate-stuck-alert.js, owner 2026-11-05 "1, 2 and 3").
   estimate_stuck: Object.freeze({ nightQuiet: true }),
+  // A call booked a visit on an open estimate: its card filed, or time runs short on it (call-phone-yes-bell.js, owner
+  // 2026-11-18 "ok go", phone-yes step 1). Its writer runs only under GATE_CALL_PHONE_YES_ACCEPT.
+  call_phone_yes: Object.freeze({ nightQuiet: true }),
 });
 
 const QUIET_FROM_HOUR = 21;

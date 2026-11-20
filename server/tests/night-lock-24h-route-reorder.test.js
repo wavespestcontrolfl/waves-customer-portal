@@ -284,14 +284,12 @@ describe('the cron entry passes the 24-hour lock down', () => {
   test('the repair-after-change entry never opts in', async () => {
     process.env.GATE_ROUTE_REORDER = 'true';
     process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
-    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     try {
       stopsByDate['2026-08-14'] = backtrackDay('a');
       await runRouteRepairAfterChange({ dates: ['2026-08-14'], now: NOW });
       expect(JSON.parse(ledgerInserts[0].constraints).freeze_hours).toBe(72);
     } finally {
       delete process.env.GATE_ROUTE_REORDER_REPAIR;
-      delete process.env.GATE_DRIVE_TIME_CALIBRATION;
     }
   });
 });

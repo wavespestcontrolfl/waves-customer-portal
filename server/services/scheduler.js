@@ -1768,6 +1768,34 @@ function initScheduledJobs() {
   }
 
   // =========================================================================
+  // MONDAY 10:36 AM ET — Weekly restaurant prospect list (owner 2026-11-19):
+  // new food licenses, ownership changes and violation-35 inspections in
+  // Manatee / Sarasota / Charlotte, less Punta Gorda (not served), from
+  // Florida's public restaurant files. Fills restaurant_prospects only:
+  // sends nothing, calls no AI, no gate. Kill = env
+  // DBPR_PROSPECT_SYNC_DISABLED. Minute 36, not :25: the hourly :25 check
+  // runs then. It is clear of the Monday 6:40-7:15 and the 8:40-9:40 deploy
+  // windows. Every write upserts by (kind, source_key), so a re-run after a
+  // deploy kill is harmless.
+  // =========================================================================
+  const runRestaurantProspectSyncTick = async () => {
+    const prospects = require('./prospects/dbpr-restaurants');
+    // The kill switch returns before the lease: a run that did nothing must not read as a success in job_health.
+    if (prospects.syncDisabled()) return;
+    await runExclusive('restaurant-prospect-sync', async () => {
+      const result = await prospects.syncRestaurantProspects();
+      // A failed file or a database failure must read as a FAILED run in job_health: rethrow (a count only) so
+      // runExclusive records it.
+      if (result.failures > 0) throw new Error(`restaurant prospect sync: ${result.failures} failure(s)`);
+    }).catch((err) => logger.error(`Restaurant prospect sync failed: ${err.message}`));
+  };
+  cron.schedule('36 10 * * 1', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
+  // The files hold one fiscal year and start over on July 1 (no CSV of the year before), so the last week of June
+  // runs daily: at most the last day of June goes unread. A Monday in that week runs once (one lease).
+  cron.schedule('36 10 24-30 6 *', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('restaurant-prospect-sync', () => runRestaurantProspectSyncTick());
+
+  // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
   // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
   // missing-unit and ambiguous-oz rows stay parked for review). Gate is
@@ -2317,8 +2345,10 @@ function initScheduledJobs() {
   // =========================================================================
   // WEEKLY SITEONE DEALS BELL (gated: cronJobs)
   // Reads the last 7 days of contact@ mail (the emails table), keeps SiteOne and
-  // product-maker deal mail, rings ONE admin bell. Plain rules, no model call and
-  // no paid API. Monday 8:00am ET.
+  // product-maker deal mail, rings ONE admin bell. Plain rules; the one paid step is
+  // dark behind GATE_SITEONE_DEAL_AI_END_DATE (a Claude Haiku read of each deal's end
+  // date, at most 20 a week): this Monday run alone asks for it (aiEndDates), and the
+  // catch-up below keeps the date patterns. Monday 8:00am ET.
   // =========================================================================
   cron.schedule('0 8 * * 1', async () => {
     logger.info('Running: Weekly SiteOne deals digest');
@@ -2327,7 +2357,7 @@ function initScheduledJobs() {
       // dedupes on the ET week either way).
       await runExclusive('siteone-deals-digest', async () => {
         const { runSiteOneDealsDigest } = require('./procurement/siteone-deals-digest');
-        const result = await runSiteOneDealsDigest();
+        const result = await runSiteOneDealsDigest({ aiEndDates: true });
         logger.info(`[siteone-deals] cron run: ${JSON.stringify(result)}`);
       });
     } catch (err) {
@@ -10470,8 +10500,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // EVERY 10 MIN — a call that BOOKED a pest visit while the customer had an open estimate (GATE_CALL_PHONE_YES_ACCEPT,
-  // checked each tick): files ONE admin card so the office accepts the estimate, and closes the cards that stopped being
-  // true. It accepts nothing and sends nothing. See server/services/call-phone-yes-accept.js.
+  // checked each tick): files ONE admin card so the office accepts the estimate, closes the cards that stopped being
+  // true, and rings the office's bell and phones for the open ones (call-phone-yes-bell.js). It accepts nothing and sends
+  // a customer nothing. See server/services/call-phone-yes-accept.js.
   cron.schedule('9,19,29,39,49,59 * * * *', async () => {
     if (!require('../config/feature-gates').callPhoneYesAcceptLive()) return;
     try {

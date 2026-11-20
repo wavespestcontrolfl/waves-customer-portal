@@ -1051,6 +1051,23 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.queryByText(/Unlimited free callbacks/i)).not.toBeInTheDocument();
   });
 
+  it('keeps an included re-entry guarantee in the satisfaction scope for the flagged exclusion row only', () => {
+    const flagged = {
+      service: 'rodent_exclusion', label: 'Rodent Exclusion', amount: 595,
+      includesReentryGuarantee: true, guaranteeRenewalPrice: 249,
+    };
+    const plain = { service: 'rodent_exclusion', label: 'Rodent Exclusion — Wire Mesh Points', amount: 150 };
+    render(<OneTimeBreakdownCard guaranteeScope="satisfaction" breakdown={{ total: 745, items: [
+      { ...flagged, copy: resolveOneTimeServiceCopy(flagged) },
+      // A stale saved copy that carries the bullet on a row without the flag never shows it.
+      { ...plain, copy: { ...resolveOneTimeServiceCopy(flagged), terms: 'Pay on service day. No contract.' } },
+    ] }} />);
+    for (const button of screen.getAllByRole('button', { name: /See everything included/i })) fireEvent.click(button);
+    expect(screen.getAllByText(/Includes a 1-year re-entry guarantee/)).toHaveLength(1);
+    expect(screen.getByText('Pay on service day. Renew the guarantee yearly for $249.')).toBeInTheDocument();
+    expect(screen.queryByText(/No contract/i)).not.toBeInTheDocument();
+  });
+
   it.each([
     ['missing warranty price metadata', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: null }],
     ['no warranty selected', { warrantyTier: 'none', warrantyAdder: 0 }],

@@ -204,6 +204,16 @@ describe('which loader the gate picks for list 1', () => {
     expect(require('../services/logger').warn.mock.calls[0][0]).toContain('without it');
   });
 
+  test('on, the fell-off list cannot be read and no other list has work: not a zero, so nothing is raised or closed', async () => {
+    process.env.GATE_MONDAY_FELL_OFF_LINE = 'true';
+    episodes.openAdminAlertKeys.mockResolvedValue(['monday-review:2026-11-02']);
+    fellOff.loadFellOffAlerts.mockRejectedValue(new Error('connection reset'));
+    const out = await review.runMondayReview({ now: MONDAY, database: emptyDatabase(), loaders: rest });
+    expect(out).toEqual({ count: 0, outcome: 'unknown' });
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('a test that mocks feature-gates without the reader reads the gate as off', () => {
     jest.isolateModules(() => {
       jest.doMock('../config/feature-gates', () => ({}));

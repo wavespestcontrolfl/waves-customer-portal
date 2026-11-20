@@ -27,7 +27,17 @@ const TOOL_RECENT_WINDOW = 2;
 function identifierSpecies(entries) {
   const species = entries
     .filter((e) => e.links && e.links.site_page === `/pest-identifier/${e.slug}/` && isApproved(e))
-    .map((e) => Object.freeze({ slug: e.slug, name: e.common_name, category: e.site_category, fact: e.copy && e.copy.fact, note: e.copy && e.copy.blurb }));
+    .map((e) => Object.freeze({
+      slug: e.slug,
+      name: e.common_name,
+      category: e.site_category,
+      fact: e.copy && e.copy.fact,
+      note: e.copy && e.copy.blurb,
+      // For the "What's this?" card only: the latin name under the common
+      // name, and the verdict chip (the website's identifier label for it).
+      scientific: typeof e.scientific_name === 'string' ? e.scientific_name : '',
+      verdict: typeof e.verdict === 'string' ? e.verdict : '',
+    }));
   if (!species.length) throw new Error('pest-insider species: the catalog has no approved identifier species');
   for (const s of species) {
     const missing = ['name', 'category', 'fact', 'note'].find((k) => typeof s[k] !== 'string' || !s[k].trim());

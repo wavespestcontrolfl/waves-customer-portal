@@ -1,0 +1,104 @@
+// The sprinkler timer on file as one record (services/controller-timer.js): the helpers the two preference writers and
+// the row movers use. The writers' routes are tested in property-prefs-partial-validation.test.js (the customer's) and
+// admin-customers-property-preferences-route.test.js (staff), the move in lawn-sod-move.test.js, the merge in
+// customer-dedupe.test.js, the undo in customer-dedupe-undo.test.js.
+const { CONTROLLER_BRANDS, CONTROLLER_MODELS, controllerAsksAboutApp } = require('@waves/irrigation-runtime');
+const {
+  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerOf, hasControllerTimer, settleControllerTimer,
+  settleKeptControllerTimer,
+} = require('../services/controller-timer');
+
+const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
+const NO_TIMER = { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null };
+const LONE_ANSWER = { ...NO_TIMER, irrigation_controller_app: 'yes' };
+
+test('the record is the three columns, read and cleared as a whole', () => {
+  expect(CONTROLLER_TIMER_FIELDS).toEqual(Object.keys(X2));
+  expect(clearedControllerTimer()).toEqual(NO_TIMER);
+  expect(controllerTimerOf({ id: 'pp-1', irrigation_zones: 6, ...X2 })).toEqual(X2);
+  expect(controllerTimerOf({ id: 'pp-1' })).toEqual(NO_TIMER);
+  expect(controllerTimerOf(null)).toEqual(NO_TIMER);
+});
+
+test('any non-null column is a timer: the columns are independently nullable', () => {
+  expect(hasControllerTimer(X2)).toBe(true);
+  expect(hasControllerTimer(LONE_ANSWER)).toBe(true);
+  for (const none of [NO_TIMER, {}, null, undefined]) expect(hasControllerTimer(none)).toBe(false);
+});
+
+// The premise a merge settles the kept customer's own row with (customer-dedupe timerPremiseOf).
+const RAIN_BIRD = { ...NO_TIMER, irrigation_controller_brand: 'rain_bird' };
+
+test('the kept customer\'s own timer stays while the merge leaves their home unchanged, even one field of it', () => {
+  for (const timer of [X2, RAIN_BIRD, LONE_ANSWER, NO_TIMER]) expect(settleKeptControllerTimer(timer, { winnerStays: true })).toEqual({});
+});
+
+test('their home changes (a backfilled unit, a first address): their own timer is cleared whole, as an address edit clears it', () => {
+  expect(settleKeptControllerTimer(X2, { winnerStays: false })).toEqual(NO_TIMER);
+  expect(settleKeptControllerTimer(LONE_ANSWER, { winnerStays: false })).toEqual(NO_TIMER);
+  expect(settleKeptControllerTimer(NO_TIMER, { winnerStays: false })).toEqual({});
+});
+
+test('only an exact false clears it; an unknown premise, or a row with no timer columns, changes nothing', () => {
+  for (const winnerStays of [true, undefined, null, 'false', 0]) expect(settleKeptControllerTimer(X2, { winnerStays })).toEqual({});
+  for (const premise of [undefined, null, {}]) expect(settleKeptControllerTimer(X2, premise)).toEqual({});
+  expect(settleKeptControllerTimer({ id: 'np-1', sms_opt_in: true }, { winnerStays: false })).toEqual({});
+});
+
+// A preference write (settleControllerTimer): the timer saves whole or not at all, and only from a form rendered
+// against the home on the row now. `left` is what the write still holds after the settle.
+const settle = (updates, options) => ({ rejected: settleControllerTimer(updates, options), left: updates });
+const timerColumns = ([brand, model, app]) => ({
+  irrigation_controller_brand: brand, irrigation_controller_model: model, irrigation_controller_app: app,
+});
+
+test('the phone-app question exists for a Rain Bird and for the Hunter models that can go on Hydrawise', () => {
+  const asked = [];
+  for (const brand of [null, ...Object.keys(CONTROLLER_BRANDS)]) {
+    for (const model of [null, ...Object.keys(CONTROLLER_MODELS)]) if (controllerAsksAboutApp(brand, model)) asked.push(`${brand}/${model}`);
+  }
+  expect(asked).toEqual(['hunter/x2', 'hunter/pro_c', 'hunter/hydrawise', ...[null, ...Object.keys(CONTROLLER_MODELS)].map((m) => `rain_bird/${m}`)]);
+});
+
+test('a whole timer that can exist passes untouched beside other fields; a write without one is never refused', () => {
+  for (const timer of [
+    ['hunter', 'x2', 'yes'], ['hunter', 'hydrawise', null], ['hunter', 'x_core', null], ['hunter', null, null],
+    ['rain_bird', null, 'unknown'], ['other', null, null], [null, null, null],
+  ]) {
+    const updates = { irrigation_zones: 6, ...timerColumns(timer) };
+    expect(settle({ ...updates })).toEqual({ rejected: [], left: updates });
+  }
+  expect(settle({ irrigation_zones: 6 }, { fresh: false })).toEqual({ rejected: [], left: { irrigation_zones: 6 } });
+});
+
+test('a timer field sent without the other two is rejected: an answer never lands on a timer the writer did not see', () => {
+  const { rejected, left } = settle({ irrigation_controller_app: 'no', irrigation_zones: 6 });
+  expect(left).toEqual({ irrigation_zones: 6 });
+  expect(rejected).toEqual([{ field: 'irrigationControllerApp', message: expect.stringMatching(/saves as one record/) }]);
+  expect(settle({ irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null }).left).toEqual({});
+});
+
+test('a timer that cannot exist is rejected whole, with one reason on each field', () => {
+  for (const [timer, reason] of [
+    [['rain_bird', 'x2', null], /Only a Hunter/],
+    [['other', null, 'yes'], /no phone-app question/],
+    [['hunter', 'x_core', 'no'], /no phone-app question/],
+    [['hunter', null, 'yes'], /no phone-app question/],
+    [[null, 'x2', null], /no brand/],
+    [[null, null, 'yes'], /no brand/],
+  ]) {
+    const { rejected, left } = settle(timerColumns(timer));
+    expect(left).toEqual({});
+    expect(rejected.map((r) => r.field)).toEqual(['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp']);
+    for (const r of rejected) expect(r.message).toMatch(reason);
+  }
+});
+
+test('a write rendered against a home the customer has left is rejected, a clear included', () => {
+  for (const timer of [X2, clearedControllerTimer()]) {
+    const { rejected, left } = settle({ ...timer }, { fresh: false });
+    expect(left).toEqual({});
+    expect(rejected).toHaveLength(3);
+    for (const r of rejected) expect(r.message).toBe('The home on this account changed. Reload, then set the sprinkler timer again.');
+  }
+});

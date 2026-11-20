@@ -251,6 +251,20 @@ describe('adapters project onto the canonical shape', () => {
     expect(callLog.fromRow({ ...eligible, recording_url: '' }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: 40 }).lifecycle).toBe('queued');
+    // … and with GATE_SHORT_CALL_RECORDING_SWEEP on (owner 2026-11-19 "FIX") the sweep takes a short recording only on its FIRST pass:
+    // a retry state keeps the 10-second floor, so a short failure 1 h old is terminal, gate on as off, and a long one still retries
+    const gateBefore = process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+    process.env.GATE_SHORT_CALL_RECORDING_SWEEP = 'true';
+    try {
+      expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null, created_at: realAgo(36e5) }).lifecycle).toBe('terminal');
+      const shortNoTranscript = { ...base, processing_status: 'no_transcription', duration_seconds: 8, recording_duration_seconds: null, created_at: realAgo(36e5) };
+      expect(callLog.fromRow({ ...shortNoTranscript, extraction_attempts: 1 }).lifecycle).toBe('terminal');
+      expect(callLog.fromRow({ ...shortNoTranscript, extraction_attempts: CALL_EXTRACTION_MAX_ATTEMPTS }).lifecycle).toBe('terminal');
+      expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: 40 }).lifecycle).toBe('queued');
+    } finally {
+      if (gateBefore === undefined) delete process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+      else process.env.GATE_SHORT_CALL_RECORDING_SWEEP = gateBefore;
+    }
     expect(callLog.fromRow({ ...eligible, recording_url: null, pan_detected: true, has_transcript: true }).lifecycle).toBe('queued');
     expect(callLog.fromRow({ ...eligible, recording_url: null, pan_detected: true, has_transcript: false }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...eligible, duration_seconds: 3, pan_detected: true }).lifecycle).toBe('queued');
@@ -259,14 +273,16 @@ describe('adapters project onto the canonical shape', () => {
     expect(linkFailed.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'failed']);
     expect(linkFailed.steps[3].detail).toBe('lead creation failed');
     expect(callLog.fromRow({ ...base, processing_status: 'voicemail' })).toMatchObject({ result: 'succeeded', disposition: 'no_action' });
-    // no transcription = the processor's known-failed retry state, reclaimed by every sweep with no cap: QUEUED (never a done no-op, never terminal), the last failure as the code, the transcribe step failed, nothing after it attempted
+    // no transcription = the processor's known-failed retry state, reclaimed by the sweep under the extraction attempt cap (codex #6271 r38): QUEUED (never a done no-op, never terminal), the last failure as the code, the transcribe step failed, nothing after it attempted
     const noTranscript = callLog.fromRow({ ...base, processing_status: 'no_transcription', transcription_status: 'failed' });
-    // … its retry policy is not the extraction limit: no cap, no count (attempts unknown, maxAttempts null)
-    expect(noTranscript).toMatchObject({ lifecycle: 'queued', result: null, errorCode: 'no_transcription', attempts: 0, maxAttempts: null });
+    // … counted against the one extraction limit (the processor increments extraction_attempts on it): base's 2 recorded failures of 3
+    expect(noTranscript).toMatchObject({ lifecycle: 'queued', result: null, errorCode: 'no_transcription', attempts: 2, maxAttempts: CALL_EXTRACTION_MAX_ATTEMPTS });
     expect(noTranscript.steps.map((s) => s.status)).toEqual(['failed', 'skipped', 'skipped', 'skipped']);
     expect(runIndex.bucketsOf({ ...noTranscript, health: 'healthy', attention: null })).toMatchObject({ active: true, failed: false, done: false });
+    // … at the cap the sweep stops retrying it: an errored transcription, not queued work
+    expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', extraction_attempts: CALL_EXTRACTION_MAX_ATTEMPTS })).toMatchObject({ lifecycle: 'terminal', result: 'errored', errorCode: 'no_transcription', attempts: CALL_EXTRACTION_MAX_ATTEMPTS, maxAttempts: CALL_EXTRACTION_MAX_ATTEMPTS });
     // … and only while a claimable recording is on the row (the sweep's gates; the PAN transcript-only branch does not reclaim this state): otherwise it is an errored transcription nothing will retry
-    expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', recording_url: null })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', errorCode: 'no_transcription', maxAttempts: null });
+    expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', recording_url: null })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', errorCode: 'no_transcription', maxAttempts: CALL_EXTRACTION_MAX_ATTEMPTS });
     expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', recording_url: null, pan_detected: true, has_transcript: true }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', duration_seconds: 5 }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', duration_seconds: 5, pan_detected: true }).lifecycle).toBe('queued');
@@ -290,6 +306,33 @@ describe('adapters project onto the canonical shape', () => {
     const unknown = callLog.fromRow({ id: 'y', processing_status: 'brand_new_state', created_at: ago(1e3) });
     expect(unknown).toMatchObject({ lifecycle: 'terminal', result: null });
     expect(runIndex.bucketsOf({ ...unknown, health: 'healthy', attention: null })).toMatchObject({ failed: true, attention: true, done: false });
+  });
+
+  test('call_log list SQL: a no_transcription row stays listed as a retry only under the attempt cap, as the processor retries it', async () => {
+    // A real knex builder with no connection: awaiting the call_log scan records its SQL.
+    const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
+    const kx = require('knex')({ client: 'pg' });
+    const db = require('../models/db');
+    const fallback = db.getMockImplementation();
+    const fakeRaw = db.raw;
+    const sent = [];
+    db.raw = (...args) => kx.raw(...args);
+    db.mockImplementation((table) => {
+      if (table !== 'call_log') return fallback(table);
+      const qb = kx(table);
+      qb.then = (resolve, reject) => { sent.push(qb.toString()); return Promise.resolve([]).then(resolve, reject); };
+      return qb;
+    });
+    try {
+      expect(await callLog.list({ from: ago(1e6) })).toEqual({ runs: [], unavailable: false });
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toContain(`"processing_status" = 'no_transcription' and COALESCE(extraction_attempts, 0) < ${CALL_EXTRACTION_MAX_ATTEMPTS} and`);
+      expect(sent[0]).toContain(`"processing_status" = 'extraction_failed' and COALESCE(extraction_attempts, 0) < ${CALL_EXTRACTION_MAX_ATTEMPTS} and`);
+    } finally {
+      db.raw = fakeRaw;
+      db.mockImplementation(fallback);
+      await kx.destroy();
+    }
   });
 
   test('agent_decisions: the action link is the hub decisions tab; a house-voice suggestion links to its comms thread, where it is actionable (Codex r13)', () => {

@@ -430,6 +430,8 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
         service: serviceLabel || null,
         phone: phoneE164,
         leadId,
+        // Rung only for a lead this request created: the lead's intake bell (new-lead-reminder.js inquiryOf).
+        createdLead: true,
       }, { shouldContinue: stillOpen, beforePush: stillOpen });
     } catch (err) {
       logger.warn(`[booking:preferred-time] admin bell failed: ${err.message}`);

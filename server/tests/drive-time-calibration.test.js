@@ -1,60 +1,27 @@
 /**
- * Auto-dispatch drive-time estimator — legacy vs calibrated model.
+ * Auto-dispatch drive-time estimator — the calibrated model.
  *
- * The calibrated model (fixed per-leg overhead + per-mile rate, the GPS-fitted
- * drive clock pair) rides GATE_DRIVE_TIME_CALIBRATION. Pins:
- *  - gate off → the legacy haversine × 1.4 @ 30 mph arithmetic is byte-for-byte
- *    what it was, so flipping the gate back is a true revert;
- *  - gate on  → the fitted two-term model applies;
- *  - the gate is read at CALL time, so a flip needs no redeploy and no module
- *    reload (the whole point of using gateEnvValue over the baked gates map);
- *  - co-located points cost nothing under either model — the fixed overhead
- *    must not be charged for a leg that isn't a drive;
+ * The model is the GPS-fitted drive clock pair (fixed per-leg overhead +
+ * per-mile rate; the old haversine x 1.4 @ 30 mph constants are gone). Pins:
+ *  - the fitted two-term model applies;
+ *  - co-located points cost nothing — the fixed overhead must not be charged
+ *    for a leg that isn't a drive;
  *  - missing/garbage coordinates still return 0 rather than NaN.
  */
 const { driveMin, milesToDriveMinutes } = require('../services/auto-dispatch/geo');
 const routeOptimizer = require('../services/route-optimizer');
 const autoDispatchGeo = require('../services/auto-dispatch/geo');
 
-const GATE = 'GATE_DRIVE_TIME_CALIBRATION';
-const ORIGINAL = process.env[GATE];
-
 // Two real SW Florida points ~17 straight-line miles apart (Venice → Sarasota).
 const VENICE = { lat: 27.0998, lng: -82.4543 };
 const SARASOTA = { lat: 27.3364, lng: -82.5307 };
 
-afterEach(() => {
-  if (ORIGINAL === undefined) delete process.env[GATE];
-  else process.env[GATE] = ORIGINAL;
-});
-
 describe('drive-time estimator', () => {
-  describe('gate OFF (legacy)', () => {
-    beforeEach(() => { delete process.env[GATE]; });
-
-    test('applies haversine x1.4 @ 30mph exactly', () => {
-      // 10 straight-line miles -> 10 * 1.4 / 30 * 60 = 28 min
-      expect(milesToDriveMinutes(10)).toBe(28);
-      expect(milesToDriveMinutes(5)).toBe(14);
-    });
-
-    test('charges no fixed overhead for a short leg', () => {
-      // 0.5 mi -> 1.4 min -> rounds to 1, NOT the calibrated fixed term
-      expect(milesToDriveMinutes(0.5)).toBe(1);
-    });
-
-    test('scores a real leg with the legacy constants', () => {
-      expect(driveMin(VENICE, SARASOTA)).toBe(48);
-    });
-  });
-
-  describe('gate ON (calibrated)', () => {
-    beforeEach(() => { process.env[GATE] = 'true'; });
-
+  describe('calibrated model', () => {
     test('applies fixed overhead + per-mile rate', () => {
       // 10 mi -> 7.9 + 22 = 29.9 -> 30
       expect(milesToDriveMinutes(10)).toBe(30);
-      // 5 mi -> 7.9 + 11 = 18.9 -> 19 ; legacy would say 14
+      // 5 mi -> 7.9 + 11 = 18.9 -> 19
       expect(milesToDriveMinutes(5)).toBe(19);
     });
 
@@ -63,39 +30,26 @@ describe('drive-time estimator', () => {
       expect(milesToDriveMinutes(0.5)).toBe(9);
     });
 
-    test('scores a real leg lower than legacy (legacy over-estimates long legs)', () => {
-      const calibrated = driveMin(VENICE, SARASOTA);
-      expect(calibrated).toBe(45);
-      delete process.env[GATE];
-      expect(calibrated).toBeLessThan(driveMin(VENICE, SARASOTA));
+    test('scores a real leg with the fitted pair', () => {
+      expect(driveMin(VENICE, SARASOTA)).toBe(45);
     });
 
-    test('makes inserting an en-route stop cost real time, where legacy made it free', () => {
+    test('makes inserting an en-route stop cost real time', () => {
       // detour = d(prev,new) + d(new,next) - d(prev,next) for a stop sitting
-      // essentially on the line between its neighbours. Under legacy the terms
-      // are purely proportional to distance, so a collinear stop nets ~0 — the
-      // scorer treats it as free. Under the calibrated model the fixed overhead
-      // survives the subtraction. Asserted as a comparison rather than an exact
-      // figure because each leg rounds to whole minutes independently, which
-      // can shave a minute off the difference.
+      // essentially on the line between its neighbours. The fixed per-leg
+      // overhead survives the subtraction, so a collinear stop is never free.
+      // Asserted as a bound rather than an exact figure because each leg
+      // rounds to whole minutes independently.
       const prev = { lat: 27.1000, lng: -82.4500 };
       const mid = { lat: 27.2000, lng: -82.4900 };
       const next = { lat: 27.3000, lng: -82.5300 };
-      const detourOf = () => driveMin(prev, mid) + driveMin(mid, next) - driveMin(prev, next);
-
-      const calibrated = detourOf();
-      delete process.env[GATE];
-      const legacy = detourOf();
-
-      expect(legacy).toBeLessThanOrEqual(1);
-      expect(calibrated).toBeGreaterThanOrEqual(3);
-      expect(calibrated).toBeGreaterThan(legacy);
+      const detour = driveMin(prev, mid) + driveMin(mid, next) - driveMin(prev, next);
+      expect(detour).toBeGreaterThanOrEqual(3);
     });
   });
 
-  describe('invariants under both models', () => {
-    test.each([['off', undefined], ['on', 'true']])('co-located points cost 0 (gate %s)', (_label, val) => {
-      if (val === undefined) delete process.env[GATE]; else process.env[GATE] = val;
+  describe('invariants', () => {
+    test('co-located points cost 0', () => {
       expect(driveMin(VENICE, VENICE)).toBe(0);
       expect(milesToDriveMinutes(0)).toBe(0);
     });
@@ -107,7 +61,6 @@ describe('drive-time estimator', () => {
      * parking time — the overhead is exactly what those legs cost.
      */
     test('a nearby but distinct address still costs the per-leg overhead', () => {
-      process.env[GATE] = 'true';
       // ~200 ft north: two houses on the same street, not the same house.
       const neighbour = { lat: VENICE.lat + 0.000549, lng: VENICE.lng };
       const miles = require('../services/route-optimizer').haversine(
@@ -118,8 +71,7 @@ describe('drive-time estimator', () => {
       expect(driveMin(VENICE, neighbour)).toBeGreaterThanOrEqual(4);
     });
 
-    test.each([['off', undefined], ['on', 'true']])('missing or bad coords return 0 (gate %s)', (_label, val) => {
-      if (val === undefined) delete process.env[GATE]; else process.env[GATE] = val;
+    test('missing or bad coords return 0', () => {
       expect(driveMin(null, SARASOTA)).toBe(0);
       expect(driveMin(VENICE, null)).toBe(0);
       expect(driveMin({ lat: null, lng: null }, SARASOTA)).toBe(0);
@@ -127,8 +79,7 @@ describe('drive-time estimator', () => {
       expect(milesToDriveMinutes(-5)).toBe(0);
     });
 
-    test.each([['off', undefined], ['on', 'true']])('longer legs never score shorter (gate %s)', (_label, val) => {
-      if (val === undefined) delete process.env[GATE]; else process.env[GATE] = val;
+    test('longer legs never score shorter', () => {
       let prior = 0;
       for (const mi of [0.5, 1, 3, 8, 20, 50]) {
         const m = milesToDriveMinutes(mi);
@@ -174,23 +125,19 @@ describe('drive-time estimator', () => {
     // so the production wrapper must agree with the model applied directly to
     // the same straight-line distance. Exercised through auto-dispatch's real
     // wrapper rather than a test-only one on the optimizer.
-    test.each([['off', undefined], ['on', 'true']])(
-      'the production wrapper applies exactly the shared model (gate %s)', (_label, val) => {
-        if (val === undefined) delete process.env[GATE]; else process.env[GATE] = val;
-        const miles = routeOptimizer.haversine(
-          VENICE.lat, VENICE.lng, SARASOTA.lat, SARASOTA.lng,
-        );
-        expect(autoDispatchGeo.driveMin(VENICE, SARASOTA))
-          .toBe(routeOptimizer.milesToDriveMinutes(miles));
-      },
-    );
+    test('the production wrapper applies exactly the shared model', () => {
+      const miles = routeOptimizer.haversine(
+        VENICE.lat, VENICE.lng, SARASOTA.lat, SARASOTA.lng,
+      );
+      expect(autoDispatchGeo.driveMin(VENICE, SARASOTA))
+        .toBe(routeOptimizer.milesToDriveMinutes(miles));
+    });
   });
 
   /**
    * The optimizer's own fallback (used whenever Google Routes is unavailable)
-   * and its single-stop shortcut used to derive minutes from a hardcoded
-   * 30 mph. They now go through the shared model, so a gate flip moves every
-   * scheduling surface together rather than leaving admin route metrics behind.
+   * and its single-stop shortcut go through the shared model, so every
+   * scheduling surface moves together.
    */
   describe('route-optimizer fallback paths use the shared model', () => {
     const stopsFor = () => ([
@@ -198,102 +145,38 @@ describe('drive-time estimator', () => {
       { lat: 27.3364, lng: -82.5307, customerName: 'B' },
     ]);
 
-    /**
-     * The original fallback computed minutes from the ALREADY-ROUNDED metre
-     * figure. Re-deriving from raw miles is the same number almost everywhere
-     * and a different one at a rounding boundary, which would make the kill
-     * switch approximate rather than exact. 0.178572 mi is such a boundary:
-     * metre-first lands on 0 minutes, mile-first on 1.
-     */
-    test('gate off preserves legacy meter-first rounding at the boundary', () => {
-      delete process.env[GATE];
-      const BOUNDARY_MILES = 0.178572;
-      const { meters, minutes } = routeOptimizer.fallbackLegMetrics(BOUNDARY_MILES);
-
-      expect(minutes).toBe(Math.round((meters / 1609.34 / 30) * 60));
-      expect(minutes).toBe(0);
-      // Deriving from raw miles instead would have rounded up — that is the bug.
-      expect(Math.round(BOUNDARY_MILES * 1.4 / 30 * 60)).toBe(1);
+    test('zero-length fallback legs cost nothing', () => {
+      expect(routeOptimizer.fallbackLegMetrics(0)).toEqual({ meters: 0, minutes: 0 });
+      expect(routeOptimizer.fallbackLegMetrics(NaN)).toEqual({ meters: 0, minutes: 0 });
     });
 
-    test('zero-length fallback legs cost nothing under either model', () => {
-      for (const val of [undefined, 'true']) {
-        if (val === undefined) delete process.env[GATE]; else process.env[GATE] = val;
-        expect(routeOptimizer.fallbackLegMetrics(0)).toEqual({ meters: 0, minutes: 0 });
-        expect(routeOptimizer.fallbackLegMetrics(NaN)).toEqual({ meters: 0, minutes: 0 });
+    test('nearest-neighbour legs take their minutes from the shared model', () => {
+      const result = routeOptimizer.nearestNeighborOptimize(stopsFor());
+      for (const leg of result.legs) {
+        expect(leg.durationMinutes).toBe(routeOptimizer.milesToDriveMinutes(leg.distanceMeters / 1609.34 / 1.4));
       }
+      expect(result.totalDurationSeconds).toBe(result.legs.reduce((sum, l) => sum + l.durationMinutes * 60, 0));
     });
 
-    test('nearest-neighbour legs move with the gate', async () => {
-      delete process.env[GATE];
-      const legacy = routeOptimizer.nearestNeighborOptimize(stopsFor());
-      process.env[GATE] = 'true';
-      const calibrated = routeOptimizer.nearestNeighborOptimize(stopsFor());
-
-      expect(legacy.totalDurationSeconds).toBeGreaterThan(0);
-      expect(calibrated.totalDurationSeconds).not.toBe(legacy.totalDurationSeconds);
-      // Distance is deliberately NOT gated — this gate covers time only.
-      expect(calibrated.totalDistanceMeters).toBe(legacy.totalDistanceMeters);
-    });
-
-    test('single-stop shortcut moves with the gate', async () => {
-      const one = () => ([{ lat: 27.0998, lng: -82.4543, customerName: 'Solo' }]);
-      delete process.env[GATE];
-      const legacy = await routeOptimizer.optimizeRoute(one());
-      process.env[GATE] = 'true';
-      const calibrated = await routeOptimizer.optimizeRoute(one());
-
-      expect(legacy.source).toBe('single_stop');
-      expect(calibrated.source).toBe('single_stop');
-      expect(calibrated.totalDurationSeconds).not.toBe(legacy.totalDurationSeconds);
-      expect(calibrated.legs[0].durationMinutes).toBe(calibrated.legs[1].durationMinutes);
-      expect(calibrated.legs[0].distanceMeters).toBe(calibrated.legs[1].distanceMeters);
-    });
-
-    /**
-     * The single-stop path was the one fallback leg that never applied the 1.4
-     * road factor. Correcting that rides the gate, so OFF must still reproduce
-     * the ORIGINAL arithmetic exactly — otherwise flipping the gate back would
-     * not restore prior metrics, and the kill switch would be a lie. Pinned
-     * against the formulas as they were written, not against the new helpers.
-     */
-    test('gate off reproduces the original single-stop arithmetic exactly', async () => {
-      delete process.env[GATE];
+    test('single-stop shortcut takes its minutes from the shared model', async () => {
       const stop = { lat: 27.0998, lng: -82.4543, customerName: 'Solo' };
       const r = await routeOptimizer.optimizeRoute([{ ...stop }]);
-
-      const d = routeOptimizer.haversine(
-        routeOptimizer.HQ.lat, routeOptimizer.HQ.lng, stop.lat, stop.lng,
-      );
-      const expectedMeters = Math.round(d * 1609.34 * 2);
-      expect(r.totalDistanceMeters).toBe(expectedMeters);
-      expect(r.unoptimizedDistanceMeters).toBe(expectedMeters);
-      expect(r.totalDurationSeconds).toBe(Math.round((expectedMeters / 1609.34 / 30) * 60) * 60);
-      for (const leg of r.legs) {
-        expect(leg.distanceMeters).toBe(Math.round(expectedMeters / 2));
-        expect(leg.durationMinutes).toBe(Math.round((expectedMeters / 2 / 1609.34 / 30) * 60));
-      }
+      const miles = routeOptimizer.haversine(routeOptimizer.HQ.lat, routeOptimizer.HQ.lng, stop.lat, stop.lng);
+      expect(r.source).toBe('single_stop');
+      expect(r.legs[0].durationMinutes).toBe(routeOptimizer.milesToDriveMinutes(miles));
+      expect(r.totalDurationSeconds).toBe(r.legs[0].durationMinutes * 2 * 60);
+      expect(r.legs[0].durationMinutes).toBe(r.legs[1].durationMinutes);
+      expect(r.legs[0].distanceMeters).toBe(r.legs[1].distanceMeters);
+      // Distance keeps the 1.4 road factor.
+      expect(r.totalDistanceMeters).toBe(Math.round(miles * 1609.34 * 1.4) * 2);
     });
-  });
-
-  test('gate is honoured at call time, with no module reload', () => {
-    delete process.env[GATE];
-    const legacy = milesToDriveMinutes(5);
-    process.env[GATE] = 'true';
-    const calibrated = milesToDriveMinutes(5);
-    process.env[GATE] = 'false';
-    const reverted = milesToDriveMinutes(5);
-    expect(calibrated).not.toBe(legacy);
-    expect(reverted).toBe(legacy);
   });
 });
 
-// Drive clock (owner 2026-10-28, "add drive clock if its free"): with
-// calibration on, the calibrated branch uses the pair fitted on our own GPS.
-// The legacy branch (calibration off) never moves.
+// Drive clock (owner 2026-10-28, "add drive clock if its free"): the estimate
+// uses the pair fitted on our own GPS.
 describe('drive clock estimate legs', () => {
   const SETTINGS = ['DRIVE_CLOCK_FIXED_MINUTES', 'DRIVE_CLOCK_MINUTES_PER_MILE', 'DRIVE_CLOCK_PARK_MINUTES'];
-  beforeEach(() => { process.env[GATE] = 'true'; });
   afterEach(() => {
     for (const name of SETTINGS) delete process.env[name];
   });
@@ -308,12 +191,6 @@ describe('drive clock estimate legs', () => {
     expect(milesToDriveMinutes(0)).toBe(0);
     expect(milesToDriveMinutes(1e-7)).toBe(0);
     expect(milesToDriveMinutes(NaN)).toBe(0);
-  });
-
-  test('the legacy branch (calibration off) does not move', () => {
-    delete process.env[GATE];
-    expect(milesToDriveMinutes(10)).toBe(28);
-    expect(milesToDriveMinutes(5)).toBe(14);
   });
 
   test('settings are read at call time', () => {
@@ -343,17 +220,12 @@ describe('drive clock estimate legs', () => {
     expect(milesToDriveMinutes(10)).toBe(90);
   });
 
-  // The drive clock runs exactly when calibration is on, so the label, the
-  // estimate and Google's park minutes agree.
-  test.each([
-    [false, 'legacy', false],
-    [true, 'drive_clock', true],
-  ])('calibration %s: label %s, live %s', (calibration, label, live) => {
-    const { driveModelLabel, driveClockLive, parkedMinutes } = require('../services/scheduling/drive-clock');
-    if (calibration) process.env[GATE] = 'true'; else delete process.env[GATE];
-    expect(driveModelLabel()).toBe(label);
-    expect(driveClockLive()).toBe(live);
-    expect(parkedMinutes(10)).toBe(live ? 14 : 10);
-    expect(milesToDriveMinutes(10)).toBe(live ? 30 : 28);
+  // The label, the estimate and Google's park minutes agree.
+  test('label drive_clock, park minutes added, fitted estimate', () => {
+    const { driveModelLabel, parkedMinutes } = require('../services/scheduling/drive-clock');
+    expect(driveModelLabel()).toBe('drive_clock');
+    expect(parkedMinutes(10)).toBe(14);
+    expect(parkedMinutes(0)).toBe(0);
+    expect(milesToDriveMinutes(10)).toBe(30);
   });
 });

@@ -18,10 +18,9 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const DATE = etDateString(addETDays(new Date(), 10));
 const OTHER_DAY = etDateString(addETDays(new Date(), 9));
-const GATES = ['GATE_DRIVE_TIME_CALIBRATION', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
 const saved = Object.fromEntries(GATES.map(key => [key, process.env[key]]));
 beforeEach(() => {
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
   delete process.env.GATE_SCHEDULING_CAPACITY;
 });
