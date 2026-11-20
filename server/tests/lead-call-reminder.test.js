@@ -227,14 +227,17 @@ describe('the banner', () => {
     expect(await beforePush()).toBe(false);
   });
 
-  test('the 8 PM cutoff is asked again at dispatch: a banner stamped at 7:58 PM that dispatches after 8 sends nothing', async () => {
+  test('the 8 PM cutoff is asked again at dispatch and before each device: a banner stamped at 7:58 PM sends nothing after 8', async () => {
     let at = est('05', '19:58');
     const result = await runLeadCallReminder({ now: at, clock: () => at });
     await Promise.all(result.sends || []);
-    const { beforePush } = reminders()[0][2];
+    const { beforePush, beforeHandoff } = reminders()[0][2];
     expect(await beforePush()).toBe(true);
+    expect(await beforeHandoff()).toBe(true);
     at = est('05', '20:01');
     expect(await beforePush()).toBe(false);
+    // A device whose turn comes after 8 PM, behind a slow earlier device, sends nothing either.
+    expect(await beforeHandoff()).toBe(false);
   });
 
   test('a banner that throws is logged and never reaches the sweep', async () => {

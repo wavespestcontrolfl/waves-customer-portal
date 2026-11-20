@@ -902,6 +902,35 @@ postgres('Email commitments on PostgreSQL', () => {
     await expect(resolveEmailCustomerLink(mockPg, { ...row, cc_address: '', bcc_address: '' })).resolves.toBe(customerId);
   });
 
+  test('emailCustomerLink: a null link says whether the send names no customer or cannot be settled', async () => {
+    const { emailCustomerLink, resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    // Names no customer: Cc/Bcc captured, no customer in its thread, no recipient on a customer's file.
+    const nobody = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'Lead Fixture <lead.only@nowhere.invalid>', cc_address: '', bcc_address: '' };
+    await expect(emailCustomerLink(mockPg, nobody)).resolves.toEqual({ customerId: null, namesNoCustomer: true });
+    await expect(emailCustomerLink(mockPg, { ...nobody, gmail_thread_id: null })).resolves.toEqual({ customerId: null, namesNoCustomer: true });
+    // Every other null cannot be settled. Cc or Bcc never captured: who else it reached is unknown.
+    const unsettled = { customerId: null, namesNoCustomer: false };
+    await expect(emailCustomerLink(mockPg, { ...nobody, bcc_address: null })).resolves.toEqual(unsettled);
+    // A mixed thread: two customers wrote in it.
+    const otherId = randomUUID();
+    await mockPg('customers').insert({ id: otherId, first_name: 'Other', last_name: 'Fixture',
+      phone: '+12025559995', email: 'mixed.other@example.invalid', address_line1: '6 Fixture Way', city: 'Sarasota', zip: '34236' });
+    const mixed = await insertEmail({ customer_id: customerId });
+    await insertEmail({ customer_id: otherId, gmail_thread_id: mixed.gmail_thread_id, from_address: 'mixed.other@example.invalid' });
+    await expect(emailCustomerLink(mockPg, { ...nobody, gmail_thread_id: mixed.gmail_thread_id })).resolves.toEqual(unsettled);
+    // The customer's own thread, sent to someone else (an internal forward).
+    const own = await insertEmail({ customer_id: customerId });
+    await expect(emailCustomerLink(mockPg, { ...nobody, gmail_thread_id: own.gmail_thread_id })).resolves.toEqual(unsettled);
+    // Recipients naming two customers.
+    await expect(emailCustomerLink(mockPg, { ...nobody, to_address: 'customer@example.invalid, mixed.other@example.invalid' })).resolves.toEqual(unsettled);
+    // Linked: the customer's own address.
+    await expect(emailCustomerLink(mockPg, { ...nobody, to_address: 'customer@example.invalid' })).resolves.toEqual({ customerId, namesNoCustomer: false });
+    // resolveEmailCustomerLink still answers the customer alone.
+    await expect(resolveEmailCustomerLink(mockPg, nobody)).resolves.toBeNull();
+    await expect(resolveEmailCustomerLink(mockPg, { ...nobody, bcc_address: null })).resolves.toBeNull();
+    await expect(resolveEmailCustomerLink(mockPg, { ...nobody, to_address: 'customer@example.invalid' })).resolves.toBe(customerId);
+  });
+
   test('cc/bcc: intake marks a NULL-recipient SENT row seen with no commitment, and links a captured one', async () => {
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: '', subject: '' });
     const sent = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',

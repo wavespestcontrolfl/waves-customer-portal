@@ -1527,7 +1527,7 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, beforeHandoff = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1891,10 +1891,14 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               ...pushExpiryFor(triggerKey, payload),
             };
           },
-          { beforeDispatch, ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
+          // beforeHandoff (optional): the push service's own check before EACH device's handoff (push-notifications.js).
+          // A false answer, or a throw, skips that device and every later one, so a change made while an earlier
+          // device's request runs still stops the rest.
+          { beforeDispatch, ...(typeof beforeHandoff === 'function' ? { beforeHandoff } : {}), ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
         );
         if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
-        if (stats.push?.superseded) stats.push = { sent: 0, skipped: 'superseded_before_push' };
+        // Stopped before any device: nothing went. A fan-out beforeHandoff stopped part way keeps its count.
+        if (stats.push?.superseded && !stats.push.sent) stats.push = { sent: 0, skipped: 'superseded_before_push' };
       }
     } catch (e) {
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);

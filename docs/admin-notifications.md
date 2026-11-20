@@ -611,7 +611,9 @@ metadata under that lock), so a row sends at most one banner. The banner goes on
 the bell feed with exactly the stamped metadata: a bell that rang again or moved to Activity since the stamp sends
 nothing. Before that row read, the lead is judged again with fresh reads (`lead-reminder-sweep.js` `waitingNow`): a lead
 a person reached, or one that closed, since the sweep read it sends nothing, and a failed read sends nothing. The row
-read is the last read before the handoff, so a Done or a new ring during the lead's reads still stops it. Neither reminder's stamp is part of the bell's content version (`NOTIFICATION_VERSION_SQL` leaves out
+read is the last read before the handoff, so a Done or a new ring during the lead's reads still stops it. The same check
+runs again before each device's handoff (the push service's `beforeHandoff`, passed through `triggerNotification`), so a
+Done, a contact or the hours closing while an earlier device's request runs stops the remaining devices. Neither reminder's stamp is part of the bell's content version (`NOTIFICATION_VERSION_SQL` leaves out
 `REMINDER_STAMP_KEYS`), so a stamp that lands after an admin opened the bell never refuses that admin's Done. The stamp is not a ring, so the 3-day quiet fall-off
 still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
 still waits for a call") or by unsetting the gate. It sends nothing to a lead.
@@ -643,7 +645,8 @@ set by that writer (the form webhook, the call processor's `notifyNewCallLead`, 
 the bell's inquiry began, with no look-back before it (the shared contact witnesses, kind `customer`; for the intake bell, the
 earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
 lead made days ago, the bell itself); a person's email to the lead's own address since that moment (only one the shared email linkage,
-`resolveEmailCustomerLink`, ties to the lead's customer, or to nobody while no other customer holds the address; a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up
+`emailCustomerLink`, ties to the lead's customer, or shows names no customer at all: Cc and Bcc captured, no customer in its
+thread, no recipient on a customer's file; a send the linkage cannot settle, such as a mixed thread, is no proof; a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up
 bell is written after classification and drafting; the push deadline stays on the bell); or an estimate sent (`sent_at`, as
 `newLeadMovedOn` reads it: the one the bell names, `metadata.estimateId`, the lead's own, or any to its customer) or handed off. A lead needs a customer, a 10-digit phone or an email
 address to be judged, so a lead from email intake with no phone is judged on email and estimate evidence. A missing lead

@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockState = {};
 const resetState = () => Object.assign(mockState, {
-  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, customerRows: [], links: {}, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null, onOpenRead: null, onRaw: null,
+  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, links: {}, unsettled: [], stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null, onOpenRead: null, onRaw: null,
 });
 resetState();
 jest.mock('../models/db', () => {
@@ -20,7 +20,7 @@ jest.mock('../models/db', () => {
     if (state.table === 'estimates') return state.verb === 'first' ? mockState.handedOff : mockState.estimates;
     if (state.table === 'emails as er') return mockState.emails;
     if (state.table === 'emails') return mockState.emailRows;
-    if (state.table === 'customers') return state.verb === 'first' ? mockState.customer : mockState.customerRows;
+    if (state.table === 'customers') return state.verb === 'first' ? mockState.customer : [];
     if (state.table !== 'notifications') return [];
     if (state.verb === 'update') return mockState.stampResults.length ? mockState.stampResults.shift() : 1;
     if (state.verb === 'first') {
@@ -79,10 +79,14 @@ jest.mock('../services/call-commitments', () => ({
   whereEstimateCustomerOwnership: jest.fn((q) => q),
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })) }));
-// The witnesses' email linkage, set per test (mockState.links: a sent row's id -> the customer it links to; none = no link).
+// The witnesses' email linkage with its reason, set per test: mockState.links maps a sent row's id to the customer it
+// links to; mockState.unsettled lists the sends it cannot settle (Cc or Bcc never captured, a mixed thread, two customers
+// named). Any other send names no customer.
 jest.mock('../services/email/email-customer-link', () => ({
   ...jest.requireActual('../services/email/email-customer-link'),
-  resolveEmailCustomerLink: jest.fn(async (_conn, sent) => mockState.links[sent.id] || null),
+  emailCustomerLink: jest.fn(async (_conn, sent) => (mockState.links[sent.id]
+    ? { customerId: mockState.links[sent.id], namesNoCustomer: false }
+    : { customerId: null, namesNoCustomer: !mockState.unsettled.includes(sent.id) })),
 }));
 const { triggerNotification } = require('../services/notification-triggers');
 const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
@@ -351,6 +355,22 @@ describe('the 15-minute push (no gate)', () => {
     expect(mockState.calls[mockState.calls.length - 1]).toMatchObject({ table: 'notifications', verb: 'first' });
   });
 
+  test('every device asks again before its handoff: a Done or the 6 PM close while an earlier device\'s request runs stops the rest', async () => {
+    let at = PUSH_NOW;
+    const result = await runNewLeadReminder({ now: PUSH_NOW, clock: () => at });
+    await Promise.all(result.sends || []);
+    const { beforeHandoff } = pushes()[0][2];
+    // The first device goes; the bell is marked Done while its request runs, so the next device sends nothing.
+    expect(await beforeHandoff()).toBe(true);
+    mockState.open['n-1'] = { done_at: est('09', '10:21') };
+    expect(await beforeHandoff()).toBe(false);
+    // An open bell whose next device comes after 6 PM sends nothing either.
+    delete mockState.open['n-1'];
+    expect(await beforeHandoff()).toBe(true);
+    at = est('09', '18:01');
+    expect(await beforeHandoff()).toBe(false);
+  });
+
   test('the banner goes only while the row is an open bell with exactly the metadata the stamp left', async () => {
     await run(PUSH_NOW);
     const { beforePush } = pushes()[0][2];
@@ -476,7 +496,7 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     expect(items[0].refs).toEqual({ customerId: null, phone: null });
     updates().length = 0;
     triggerNotification.mockClear();
-    mockState.emails = [{ to_address: 'Pat Sample <pat@example.invalid>', cc_address: null, bcc_address: null, received_at: est('09', '10:05') }];
+    mockState.emails = [{ to_address: 'Pat Sample <pat@example.invalid>', cc_address: '', bcc_address: '', received_at: est('09', '10:05') }];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
     expect(triggerNotification).not.toHaveBeenCalled();
   });
@@ -524,31 +544,32 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
 
   test('a person\'s email to the lead\'s own address (a lead from email, no customer yet)', async () => {
     mockState.leads = [lead({ customer_id: null })];
-    mockState.emails = [{ to_address: 'Pat Sample <pat@example.invalid>', cc_address: null, bcc_address: null, received_at: est('09', '10:05') }];
+    mockState.emails = [{ to_address: 'Pat Sample <pat@example.invalid>', cc_address: '', bcc_address: '', received_at: est('09', '10:05') }];
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 0 });
-    mockState.emails = [{ to_address: 'someone.else@example.invalid', cc_address: null, bcc_address: null, received_at: est('09', '10:05') }];
+    mockState.emails = [{ to_address: 'someone.else@example.invalid', cc_address: '', bcc_address: '', received_at: est('09', '10:05') }];
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 1 });
   });
 
-  test('a send to a mailbox the lead shares with another customer counts only when the linkage ties it to this lead', async () => {
+  test('a send to the lead\'s address counts only when the linkage ties it to this lead\'s customer or shows it names no customer', async () => {
     const OTHER = '33333333-3333-4333-8333-333333333333';
-    // Two customers on file with one address (a couple, or a landlord and a tenant).
-    mockState.customerRows = [{ id: CUST, email: 'pat@example.invalid' }, { id: OTHER, email: 'Pat@Example.invalid' }];
     mockState.emails = [{ id: 'm-1', gmail_thread_id: 't-1', to_address: 'pat@example.invalid', cc_address: '', bcc_address: '', received_at: est('09', '10:05') }];
-    // Linked to the other customer: it says nothing about this lead.
+    // Linked to another customer (a mailbox the lead shares with them): it says nothing about this lead.
     mockState.links = { 'm-1': OTHER };
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
-    // Linked to nobody: it may have been for either customer, so it does not settle this lead either.
+    // A send the linkage cannot settle (a mixed thread, Cc or Bcc never captured, two customers named) is no proof, even
+    // when no other customer holds the address.
     mockState.links = {};
+    mockState.unsettled = ['m-1'];
     mockState.rows = [row('n-2')];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
     // Linked to the lead's own customer: reached.
     mockState.links = { 'm-1': CUST };
+    mockState.unsettled = [];
     mockState.rows = [row('n-3')];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
-    // The address on no other customer's file: a send linked to nobody reached this lead.
-    mockState.customerRows = [{ id: CUST, email: 'pat@example.invalid' }];
+    // A lead from email with no customer yet: a send that names no customer at all reached it.
     mockState.links = {};
+    mockState.leads = [lead({ customer_id: null })];
     mockState.rows = [row('n-4')];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
   });
@@ -556,7 +577,7 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
   test('an email lead looks back to when the message came in, not only to when classification made the lead', async () => {
     mockState.rows = [row('n-1', { createdAt: est('09', '10:03') })];
     mockState.leads = [lead({ customer_id: null, phone: null, created_at: est('09', '10:02'), first_contact_at: est('09', '09:40') })];
-    mockState.emails = [{ to_address: 'pat@example.invalid', cc_address: null, bcc_address: null, received_at: est('09', '09:50') }];
+    mockState.emails = [{ to_address: 'pat@example.invalid', cc_address: '', bcc_address: '', received_at: est('09', '09:50') }];
     expect(await run(est('09', '10:20'))).toMatchObject({ due: 1, pushed: 0 });
     const [[items]] = loadContactBundles.mock.calls;
     expect(items[0].bellAt).toEqual(est('09', '09:40'));
@@ -578,7 +599,7 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.rows = [row('n-1', { createdAt: est('09', '10:00'), metadata: { emailId: EMAIL, leadId: LEAD } })];
     mockState.leads = [lead({ created_at: est('06', '10:00'), customer_id: null, phone: null })];
     mockState.emailRows = [{ id: EMAIL, received_at: est('09', '09:20') }];
-    mockState.emails = [{ to_address: 'pat@example.invalid', cc_address: null, bcc_address: null, received_at: est('09', '09:40') }];
+    mockState.emails = [{ to_address: 'pat@example.invalid', cc_address: '', bcc_address: '', received_at: est('09', '09:40') }];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
     const [[items]] = loadContactBundles.mock.calls;
     expect(items[0].bellAt).toEqual(est('09', '09:20'));

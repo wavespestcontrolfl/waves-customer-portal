@@ -33,7 +33,7 @@
  *   the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself; a bell that
  *   names an email, metadata.emailId, counts from that message's received_at; the push deadline stays on the bell);
  *   a person's email to the lead's own address since the same moment (one the shared linkage ties to this lead's customer,
- *   or to nobody while no other customer holds the address); or an estimate was sent (sent_at, as the new-lead
+ *   or one it shows names no customer at all; a send it cannot settle is no proof); or an estimate was sent (sent_at, as the new-lead
  *   class of admin-alert-relevance.js reads it: the one the bell names, the lead's own, or any to its customer) or handed
  *   off to the customer. A lead needs a customer, a 10-digit
  *   phone or an email address to be judged: an email-only lead is judged on email and estimate evidence. A lead row that is
@@ -203,13 +203,15 @@ async function reachedLeads(items) {
 }
 
 // An email a person sent to the lead's own address since the item's anchor (a Gmail SENT row): the witnesses read only a
-// customer's address, and a lead that came in by email may have no customer yet. A send counts only when it is this
-// lead's, by the witnesses' own linkage (resolveEmailCustomerLink): linked to the lead's customer, or linked to nobody
-// while no other customer holds the address. A send linked to another customer, or one to a mailbox another customer
-// shares, says nothing about this lead. The read starts at the earliest anchor of these items, so a reply inside an old
-// lead's own window is never cut off. Returns the test for one item.
+// customer's address, and a lead that came in by email may have no customer yet. A send counts only when the witnesses'
+// own linkage (emailCustomerLink) says it is this lead's: linked to the lead's customer, or provably naming no customer
+// (Cc and Bcc captured, no customer in its thread, no recipient on a customer's file, so not a mailbox another customer
+// shares). A send linked to another customer says nothing about this lead, and neither does one the linkage cannot
+// settle (Cc or Bcc never captured, a mixed thread, recipients naming two customers): the push still goes. The read
+// starts at the earliest anchor of these items, so a reply inside an old lead's own window is never cut off. Returns the
+// test for one item.
 async function personEmailed(items) {
-  const { personSentFilter, extractEmailAddresses, resolveEmailCustomerLink } = require('./email/email-customer-link');
+  const { personSentFilter, extractEmailAddresses, emailCustomerLink } = require('./email/email-customer-link');
   const addresses = [...new Set(items.map(({ lead }) => leadEmail(lead)).filter(Boolean))];
   if (!addresses.length) return () => false;
   const earliest = new Date(Math.min(...items.map((item) => item.anchor.getTime())));
@@ -217,26 +219,21 @@ async function personEmailed(items) {
     .where('er.received_at', '>', earliest)
     .whereRaw("EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), a.addr) > 0)", [addresses])
     .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at');
-  // The customers holding each address, read the way the linkage matches a customer's email.
-  const holders = new Map();
-  const customers = await db('customers').whereNull('deleted_at').whereIn(db.raw('LOWER(TRIM(email))'), addresses).select('id', 'email');
-  for (const customer of customers) {
-    for (const address of extractEmailAddresses(customer.email)) holders.set(address, new Set([...(holders.get(address) || []), String(customer.id)]));
-  }
   const sent = [];
   for (const r of rows) {
+    const { customerId, namesNoCustomer } = await emailCustomerLink(db, r);
     sent.push({
       at: new Date(r.received_at).getTime(),
       to: new Set(extractEmailAddresses([r.to_address, r.cc_address, r.bcc_address].filter(Boolean).join(','))),
-      linked: await resolveEmailCustomerLink(db, r),
+      linked: customerId,
+      namesNoCustomer,
     });
   }
   return ({ lead }, anchor) => {
     const address = leadEmail(lead);
     if (!address) return false;
     const own = lead.customer_id ? String(lead.customer_id) : null;
-    const shared = [...(holders.get(address) || [])].some((id) => id !== own);
-    return sent.some((m) => m.at > anchor.getTime() && m.to.has(address) && (m.linked ? String(m.linked) === own : !shared));
+    return sent.some((m) => m.at > anchor.getTime() && m.to.has(address) && (m.linked ? String(m.linked) === own : m.namesNoCustomer));
   };
 }
 

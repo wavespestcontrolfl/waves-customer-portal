@@ -106,8 +106,11 @@ async function rowStillOpen(id, label, stamped = null) {
 // metadata as the stamp left it (rowStillOpen). `ready` (optional) is asked with a fresh clock just before dispatch,
 // before the reads and again after them: false means the reminder's hours, or this item's late window, closed since the
 // sweep began. `stillWaiting` (optional, async) judges the lead again: false means a person reached it, or it closed,
-// since the page was read. The open-row read runs after it, the last read before the handoff. Never throws.
+// since the page was read. The open-row read runs after it, the last read before the handoff. The same check runs before
+// the dispatch and again before each device's handoff (the push service's beforeHandoff), so a Done, a contact or the
+// cutoff while an earlier device's request runs stops the remaining devices. Never throws.
 async function sendPush({ row, customerId, stamped = null }, label, ready = () => true, stillWaiting = async () => true) {
+  const stillDue = async () => ready() && (await stillWaiting()) && (await rowStillOpen(row.id, label, stamped)) && ready();
   try {
     const { triggerNotification } = require('./notification-triggers');
     return await triggerNotification(TRIGGER_KEY, {
@@ -117,7 +120,8 @@ async function sendPush({ row, customerId, stamped = null }, label, ready = () =
       // bellAuthorized: the bell row's writer rang it (bell: true), so the push keeps that answer. pushOnly: the row is
       // not rewritten. adminOnly: nothing goes to a lead, a customer or a technician.
       pushOnly: true, adminOnly: true, bellAuthorized: true,
-      beforePush: async () => ready() && (await stillWaiting()) && (await rowStillOpen(row.id, label, stamped)) && ready(),
+      beforePush: stillDue,
+      beforeHandoff: stillDue,
     });
   } catch (err) {
     logger.warn(`[${label}] push failed for notification ${row.id}: ${safeError(err)}`);
