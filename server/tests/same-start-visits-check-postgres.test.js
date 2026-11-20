@@ -294,7 +294,7 @@ postgres('same-start visits check on Postgres', () => {
     // After the run: a pair for tomorrow for the known customer, and a pair on a later day for another.
     await pair(known, { scheduled_date: '2040-01-11', window_start: '14:00', window_end: '15:00', technician_id: tech });
     await pair(laterDay, { scheduled_date: '2040-01-12', technician_id: tech });
-    expect(await _sameStartUrgentInner({ now: at('12:25') })).toEqual({ rang: 1, failed: false });
+    expect(await _sameStartUrgentInner({ now: at('12:25') })).toEqual({ rang: 1, undelivered: 0, failed: false });
     const rang = await bell(known);
     expect(rang.id).toBe(raised.id);
     expect(rang.read_at).toBeNull();
@@ -303,13 +303,13 @@ postgres('same-start visits check on Postgres', () => {
 
     // The next pass: the bell already shows tomorrow, so it stays read.
     await markRead(known, at('12:30'));
-    expect(await _sameStartUrgentInner({ now: at('13:25') })).toEqual({ rang: 0, failed: false });
+    expect(await _sameStartUrgentInner({ now: at('13:25') })).toEqual({ rang: 0, undelivered: 0, failed: false });
     expect((await bell(known)).read_at).not.toBeNull();
 
     // A pair later today rings while its start is ahead; a pair that already started never does.
     await pair(laterToday, { scheduled_date: TODAY, window_start: '16:00', window_end: '17:00', technician_id: tech });
     await pair(started, { scheduled_date: TODAY, window_start: '13:00', window_end: '14:00', technician_id: tech });
-    expect(await _sameStartUrgentInner({ now: at('13:25') })).toEqual({ rang: 1, failed: false });
+    expect(await _sameStartUrgentInner({ now: at('13:25') })).toEqual({ rang: 1, undelivered: 0, failed: false });
     expect((await bell(laterToday)).metadata.itemKeys).toEqual([TODAY]);
     expect(await bell(started)).toBeUndefined();
     expect(await bell(laterDay)).toBeUndefined();

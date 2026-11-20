@@ -1224,6 +1224,18 @@ describe('same-start visits (class 5)', () => {
     expect(sameStartKeys()).toEqual(['same-start-visits:cust-pair-1']);
   });
 
+  test('a lost write never holds back the next customer; the run then fails loudly', async () => {
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1'), pairAlert('cust-pair-2')], failed: false });
+    makeDbMock();
+    episodeHelpers.raiseAdminAlertWithReopen.mockImplementation(async (...args) => (
+      args[3]?.dedupeKey === 'same-start-visits:cust-pair-1' ? null : delegatingRaise(...args)));
+    await expect(runInner({ now: NOW })).rejects.toThrow('1 same-start bell not delivered');
+    const sameStartKeys = (mock) => mock.calls.map((c) => c[3].dedupeKey).filter((k) => k.startsWith('same-start-visits:'));
+    expect(sameStartKeys(episodeHelpers.raiseAdminAlertWithReopen.mock)).toEqual(['same-start-visits:cust-pair-1', 'same-start-visits:cust-pair-2']);
+    expect(sameStartKeys(NotificationService.notifyAdmin.mock)).toEqual(['same-start-visits:cust-pair-2']);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('same-start-visits:cust-pair-1 not delivered'));
+  });
+
   test('a failed combined-booking check may have rung before it threw: the same-start bells wait for a later run, all but a new pair for tomorrow', async () => {
     const tomorrow = pairAlert('cust-pair-2');
     tomorrow[3] = { ...tomorrow[3], itemKeys: ['2026-08-05'] };
@@ -1622,22 +1634,38 @@ describe('same-start urgent pass (hourly; owner 2026-11-19, "A")', () => {
       { dedupe_key: 'same-start-visits:cust-tomorrow', auto_cleared: null, item_keys: ['2026-08-12'] },
       { dedupe_key: 'same-start-visits:cust-known', auto_cleared: null, item_keys: ['2026-08-05'] },
     ] });
-    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 2, failed: false });
+    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 2, undelivered: 0, failed: false });
     expect(sameStartVisitAlerts).toHaveBeenCalledWith('2026-08-04', '12:00');
     const calls = episodeHelpers.raiseAdminAlertWithReopen.mock.calls;
     expect(calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-today', 'same-start-visits:cust-tomorrow']);
     expect(calls[0][3].metadata.itemKeys).toEqual(['2026-08-04', '2026-08-20']);
     expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(runCombinedBookingCheck).not.toHaveBeenCalled();
+    // Its own job health; the daily run's lock is only borrowed, so this pass never records over that run's health.
+    const { runExclusive } = require('../utils/cron-lock');
+    expect(runExclusive.mock.calls.map(([name, , opts]) => [name, opts])).toEqual([
+      ['same-start-urgent-pass', undefined], ['schedule-integrity-watchdog', { recordHealth: false }],
+    ]);
   });
 
-  test('a failed check writes nothing', async () => {
+  test('a failed check writes nothing and fails the pass', async () => {
     watchdogOn();
     sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [], failed: true });
     makeDbMock();
-    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 0, failed: true });
+    await expect(runSameStartUrgentPass({ now: NOW })).rejects.toThrow('the same-start check failed');
     expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('one customer\'s failed write never holds back the next; the pass then fails', async () => {
+    watchdogOn();
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairOn('cust-a', ['2026-08-05']), pairOn('cust-b', ['2026-08-05'])], failed: false });
+    makeDbMock();
+    episodeHelpers.raiseAdminAlertWithReopen.mockImplementationOnce(async () => null); // the first write is lost
+    await expect(runSameStartUrgentPass({ now: NOW })).rejects.toThrow('1 bell not delivered');
+    expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-a', 'same-start-visits:cust-b']);
+    expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-b']);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('same-start-visits:cust-a not delivered'));
   });
 
   test('kill switch off: the same customers ring through notifyAdmin', async () => {
@@ -1645,7 +1673,7 @@ describe('same-start urgent pass (hourly; owner 2026-11-19, "A")', () => {
     alertEpisodesLive.mockReturnValue(false);
     sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairOn('cust-tomorrow', ['2026-08-05']), pairOn('cust-later', ['2026-08-06'])], failed: false });
     makeDbMock();
-    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 1, failed: false });
+    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 1, undelivered: 0, failed: false });
     expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-tomorrow']);
     expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });

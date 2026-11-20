@@ -55,15 +55,15 @@ test.each([
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(message));
 });
 
-test('the hourly same-start urgent pass runs on its own :25 tick, 7 AM to 8 PM ET, and reports a failed check', async () => {
-  runSameStartUrgentPass.mockResolvedValue({ rang: 0, failed: true });
+test('the hourly same-start urgent pass runs on its own :25 tick, 7 AM to 8 PM ET, and logs a failed pass', async () => {
+  runSameStartUrgentPass.mockRejectedValue(new Error('1 bell not delivered'));
   initScheduledJobs();
   // Two jobs share the slot: the combined-booking urgent pass, then this one.
   const registration = cron.schedule.mock.calls.filter(([expression]) => expression === '25 7-20 * * *').at(-1);
   expect(registration[2]).toEqual({ timezone: 'America/New_York' });
   await registration[1]();
   expect(runSameStartUrgentPass).toHaveBeenCalledTimes(1);
-  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('same-start urgent pass: the check failed'));
+  expect(logger.error).toHaveBeenCalledWith('[schedule-integrity] same-start urgent pass failed: 1 bell not delivered');
 });
 
 test('gratitude runs on its own locked cron, not inside the scheduled-SMS sweep', async () => {
