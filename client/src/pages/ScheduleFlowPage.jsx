@@ -2254,8 +2254,10 @@ function ScheduleFlowPage({ flow }) {
     setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
-    // The page's requests now: a change of address, a reload or another token
-    // replaces this controller while the booking runs.
+    // The page's requests now. A change of address, a reload or a closed page
+    // (another link remounts it) aborts this controller while the booking
+    // runs (every replacement aborts the one it replaces): the page moved on,
+    // and this booking's refusal or failure belongs to the old page.
     const pageRequests = loadAbortRef.current;
     const payload = cfg.payload({ slot: slotToBook, data, lane: selectedLane, details, pests: selectedPests, address: resolvedAddress });
     try {
@@ -2271,10 +2273,9 @@ function ScheduleFlowPage({ flow }) {
       }
       // A refusal that lands after the page moved on belongs to the old page:
       // the new list is on screen, and this answer's times, address and
-      // message are not for it (pre-push P1 on 6db4e39ca7). A booking above
-      // always shows. A closed page (another link remounts it) keeps its
-      // last controller, aborted (pre-push P1 on a8a0462d10).
-      if (loadAbortRef.current !== pageRequests || pageRequests.signal.aborted) return;
+      // message are not for it (pre-push P1s on 6db4e39ca7 and a8a0462d10).
+      // A booking above always shows.
+      if (pageRequests.signal.aborted) return;
       // Any answer but a booking supersedes the searches still running, as
       // onChangeAddress does: their times were built before it and could
       // land over what it shows (pre-push P1s on 8f40c19990 and 4e9d76bcb1).
@@ -2360,7 +2361,12 @@ function ScheduleFlowPage({ flow }) {
           setSearchClosed(true);
           const done = await refreshInspectionAvailability({ signal, ignoreHeldAddress: Boolean(body.address_changed) })
             .then(() => {
-              if (!signal.aborted) setSearchClosed(false);
+              if (!signal.aborted) {
+                // A time picked from the old calendar while the reload ran is
+                // not one of these times (pre-push P1 on f49f71aa78).
+                setSelectedSlot(null);
+                setSearchClosed(false);
+              }
               return signal.aborted;
             }, () => {
               if (!signal.aborted) {
@@ -2394,6 +2400,9 @@ function ScheduleFlowPage({ flow }) {
       }
       setSubmitError(body.error || 'Something went wrong. Please try again, or text us and we\'ll help.');
     } catch {
+      // A failure after the page moved on is the old page's, as a refusal is
+      // (pre-push P1 on f49f71aa78).
+      if (pageRequests.signal.aborted) return;
       setSubmitError('Something went wrong. Please try again, or text us and we\'ll help.');
     } finally {
       setSubmitting(false);

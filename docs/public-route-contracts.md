@@ -7749,14 +7749,16 @@ server resolves now under the address the page still shows. A newly typed addres
 page (another token) starts a fresh page, so nothing from the old link carries over:
 no typed address, closed search, result or out-of-area stop. The search is
 closed while that reload runs, and opens again when the reload brings a list, so a
-search never finishes over a failed reload. A terminal state, the address form, or the GET's own no-times answers
+search never finishes over a failed reload. A time picked from the old calendar while
+it runs is not kept: the reload's list drops it, even when it offers the same start. A terminal state, the address form, or the GET's own no-times answers
 (`service_area_unavailable`, `booking_unavailable`) in that answer still replace the
 page. Any answer but a booking also drops a search still running, so its late times
 never land over the page. The reload runs under the page's request controller: a
 change of address while it runs supersedes it, and it then applies no list,
 clears nothing and shows no message. A refusal that lands after a change of
 address, a reload or another link (which remounts the page) belongs to the old page,
-and the page applies none of it: no times, no dropped address, no message, no reload. A booking always shows. With the
+and the page applies none of it: no times, no dropped address, no message, no reload.
+A booking that fails after that (a network error) shows no message either. A booking always shows. With the
 funnel off, every refusal carries fresh times at the booking location, as
 before. No field,
 status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search

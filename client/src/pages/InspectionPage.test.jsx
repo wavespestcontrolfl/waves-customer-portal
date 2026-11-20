@@ -987,6 +987,80 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(screen.queryByText(/That time was just taken/i)).not.toBeInTheDocument();
   });
 
+  // Pre-push P1 on f49f71aa78: a refusal with no times leaves the old calendar
+  // on screen while its reload runs. A time picked there is not one of the
+  // fresh times, so the reload's list never keeps it, even when it offers the
+  // same start.
+  it("a time picked from the old calendar while the refusal's reload runs is not kept", async () => {
+    const twoSlots = {
+      ...okPayload().availability,
+      days: [{
+        date: '2026-07-12',
+        fullDate: 'Sunday, July 12',
+        nearby: false,
+        slots: [
+          { start_time: '13:00', end_time: '13:30', start_label: '1:00 PM', end_label: '1:30 PM', technician_id: 'tech-1' },
+          { start_time: '14:00', end_time: '14:30', start_label: '2:00 PM', end_label: '2:30 PM', technician_id: 'tech-1' },
+        ],
+      }],
+    };
+    let getCalls = 0;
+    let resolveReload = null;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null }, 409));
+      getCalls += 1;
+      if (getCalls === 1) return Promise.resolve(jsonResponse(okPayload({ availability: twoSlots })));
+      return new Promise((resolve) => { resolveReload = resolve; });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(resolveReload).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: /Choose 2:00 PM on Sunday, July 12/i }));
+    expect(screen.getByRole('button', { name: /Choose 2:00 PM on Sunday, July 12/i })).toHaveAttribute('aria-pressed', 'true');
+    await act(async () => {
+      resolveReload(jsonResponse(okPayload({ availability: twoSlots })));
+    });
+    expect(await screen.findByText(/here are the latest open times/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 2:00 PM on Sunday, July 12/i })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByRole('button', { name: /^Book /i })).toBeNull();
+  });
+
+  // Pre-push P1 on f49f71aa78: a booking that fails after a change of address
+  // (a network error) is the old page's, as its refusal is: the new address's
+  // page shows no error.
+  it("a booking that fails after a change of address shows no error on the new address's page", async () => {
+    let rejectCommit = null;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/availability') && opts.method === 'POST') {
+        return Promise.resolve(jsonResponse({ availability: mondayAvailability('09:00', '9:00 AM'), needs_address: false }));
+      }
+      if (opts.method === 'POST') return new Promise((_resolve, reject) => { rejectCommit = reject; });
+      return Promise.resolve(jsonResponse(okPayload()));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(rejectCommit).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Different address?' }));
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '9 Gulf Dr, Sarasota, FL 34231' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    expect(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
+    await act(async () => {
+      rejectCommit(new TypeError('Failed to fetch'));
+      await new Promise((r) => { setTimeout(r, 50); });
+    });
+    expect(screen.queryByText(/Something went wrong/i)).not.toBeInTheDocument();
+  });
+
   // Pre-push P1 on 8f40c19990: a search still running when the refusal lands
   // must not put its times back over the reload's.
   it('a search still running when the refusal lands → its late times never show', async () => {
