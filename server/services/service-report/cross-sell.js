@@ -507,16 +507,35 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   return hasAnyDimension ? seed : null;
 }
 
+const CACHE_ONLY_FLAGS = Object.freeze({ cacheOnly: true, persist: false });
+const STRICT_CACHE_ONLY_FLAGS = Object.freeze({ cacheOnly: true, persist: false, strictCacheReads: true });
+
+// The cache-only lookup, in the two forms below. One call site: lookup-callers.js
+// declares one call in this file. Lazy-required — property-lookup-v2 is heavy
+// and cyclic-prone.
+async function runCacheOnlyLookup(address, flags) {
+  const { performPropertyLookup } = require('../../routes/property-lookup-v2');
+  // Scope decision: lookup-callers.js (report_cross_sell: customer report, cache-only).
+  const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
+  return performPropertyLookup(address, lookupOptionsFor('report_cross_sell', flags));
+}
+
 // Default property lookup for the offer price: CACHE-ONLY. The live lookup
 // pipeline (geocode + satellite + AI vision, 60s budget) must never run
 // inside a report view; a cached row is adopted, a miss prices from the
 // stored profile alone and the card degrades to the CTA when that isn't
-// enough. Lazy-required — property-lookup-v2 is heavy and cyclic-prone.
+// enough.
 async function cacheOnlyPropertyLookup(address) {
-  const { performPropertyLookup } = require('../../routes/property-lookup-v2');
-  // Scope decision: lookup-callers.js (report_cross_sell: customer report, cache-only).
-  const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
-  return performPropertyLookup(address, lookupOptionsFor('report_cross_sell', { cacheOnly: true, persist: false }));
+  return runCacheOnlyLookup(address, CACHE_ONLY_FLAGS);
+}
+
+// The plan start offer's lookup (buildStartOffer): the same cache-only read,
+// with a failed cache or correction read THROWN (LOOKUP_CACHE_READ_FAILED).
+// The default form answers a failed correction read as "no corrections" and
+// serves the cached home without them. A report view may degrade that way,
+// with a person looking at it. A job that prices alone must stop instead.
+async function strictCacheOnlyPropertyLookup(address) {
+  return runCacheOnlyLookup(address, STRICT_CACHE_ONLY_FLAGS);
 }
 
 // buildReportCrossSell(service, database) → crossSell payload | null.
@@ -1386,11 +1405,163 @@ async function buildPortalPurchaseBasis(customerId, database, opts = {}) {
   }
 }
 
+// The start offer follows ONE visit and prices the primary home, so that
+// visit must be at the primary home. Same proof as the report card
+// (resolveVisitPropertyScope): a stamp or a link that resolves must name the
+// primary premises. One that cannot be resolved is NOT proof, and the
+// account-level proof skips such a row, so it fails closed here. A visit with
+// no stamp and no link proves nothing either way, so the ACCOUNT must be
+// proven single-premises, in the strict form of that proof (unresolvedFails):
+// resolvePortalOfferPremises ran its default form, which skips another visit
+// whose link cannot be resolved, and that visit could be at a second home.
+// A failed read throws, by buildStartOffer's contract.
+async function visitIsAtPrimaryPremises(database, customer, visitId, primaryStreet) {
+  const visit = await database('scheduled_services').where({ id: visitId, customer_id: customer.id })
+    .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+      'property_id', 'source_estimate_id');
+  if (!visit) return false;
+  const scopeProofs = require('./visit-property-scope');
+  let lookupFailed = false;
+  const scope = await scopeProofs.resolveVisitPropertyScope(visit, database, { onLookupFailure: () => { lookupFailed = true; } });
+  if (lookupFailed) throw Object.assign(new Error('visit premises read failed'), { code: 'PREMISES_LOOKUP_FAILED' });
+  if (scope.hasEvidence) return scopeProofs.sameResolvedProperty(scope.key, primaryStreet);
+  return scopeProofs.customerHasOnlyPrimaryPremises(database, customer.id, customer, primaryStreet, { unresolvedFails: true });
+}
+
+// The calendar read (loadLiveRecurringObligationRows) takes the rows flagged
+// is_recurring = true. A legacy child of a recurring root carries is_recurring
+// NULL with a recurring_parent_id, and it is a plan visit all the same: the
+// plan's own row rule counts it (isPlanSeriesRow in
+// recurring-series-cancel-reseed.js; PLAN_ROW_SQL in rate-review.js is its SQL
+// form), and that rule drops a free re-service callback and an included
+// follow-up. "Live" is the calendar read's own row rule (isLiveObligationRow):
+// not terminal, not a callback, not a one-time booking source, and today or
+// later in Eastern time, or in progress now. A failed read throws.
+async function hasLiveLegacyPlanVisit(database, customerId) {
+  const { TERMINAL_STATUSES, isLiveObligationRow } = require('../waveguard-existing-services');
+  const { isPlanSeriesRow } = require('../recurring-series-cancel-reseed');
+  const { etDateString } = require('../../utils/datetime-et');
+  const rows = await database('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNull('is_recurring')
+    .whereNotNull('recurring_parent_id')
+    .whereNotIn('status', TERMINAL_STATUSES)
+    .select('id', 'scheduled_date', 'status', 'source', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+  const today = etDateString();
+  // The shape is tested here too, not only in SQL: the rule must hold for
+  // whatever rows the read returns.
+  return rows.some((row) => row.is_recurring == null && Boolean(row.recurring_parent_id)
+    && isPlanSeriesRow(row) && isLiveObligationRow(row, today));
+}
+
+// Does the customer already hold a plan? Then an offer to START one is not for
+// this customer, and a new-plan price would be wrong. Every record of a plan
+// counts, each read by the module that owns it:
+// - the account: a tier, or a legacy monthly rate with no tier, by the
+//   predicate the setup-fee decision reads (isMembershipCustomerRow);
+// - the calendar: any live recurring obligation. The test is the live rows,
+//   never the owned keys: a recurring palm injection or a termite bond maps to
+//   no offer family and is still the customer's plan. A legacy plan visit
+//   (no recurring flag, a recurring parent) counts too (hasLiveLegacyPlanVisit);
+// - the plan-rate ledger: any billed component, also one the ledger could not
+//   name (the portal card reads only the named ones: it must place a rate on
+//   a family, and here a billed rate with no name is still a plan). The read
+//   asks for a strict table probe: with GATE_PLAN_RATE_LEDGER off the ledger
+//   answers a failed probe as "no ledger", and here a billed rate is evidence
+//   in either mode;
+// - annual prepay: a term whose paid coverage is live, or a prepay invoice
+//   still payable (a payment starts the term and seeds its visits).
+// The calendar and prepay reads are the ones the phone-yes accept refuses on
+// (existingPlan in call-phone-yes-accept.js). A failed read throws.
+async function customerHoldsPlan(database, customer) {
+  const existing = require('../waveguard-existing-services');
+  if (existing.isMembershipCustomerRow(customer)) return true;
+  if ((await existing.loadLiveRecurringObligationRows(database, customer.id)).length) return true;
+  if (await hasLiveLegacyPlanVisit(database, customer.id)) return true;
+  const billedRates = (await require('../plan-rate-ledger').loadComponents(database, customer.id, { strictProbe: true }))
+    .filter((row) => Number(row.monthly_rate) > 0);
+  if (billedRates.length) return true;
+  if (await require('../customer-lifecycle-guard').findActivePrepayTerm(database, customer.id)) return true;
+  return Boolean(await require('../admin-cancellation').findPendingPrepayInvoice(customer.id, null, database));
+}
+
+// The families the start offer may price. Pest only: the pest plan's price
+// reads the home (footprint, type, features) and never the turf profile. The
+// pricer's turf-profile read (loadTurfProfile in customer-pricing-ai.js)
+// answers a FAILED read as an empty profile, so a lawn price could come from
+// a fallback size with nobody watching. A family whose price reads the turf
+// profile needs that read made strict before it joins this list.
+const START_OFFER_FAMILIES = Object.freeze(['pest_control']);
+
+// The price must come from the LIVE price settings. The pricer refreshes them
+// when the bridge's interval is due, and the bridge answers a failed refresh
+// with the values it had (the code defaults on a cold start). A card that a
+// person reads may show that; an offer priced with nobody watching must not
+// carry it. Same rule as the misting refill (pricingIsFresh in
+// misting-refill.js): a refresh that is due and fails means no price.
+async function assertLivePriceSettings(database) {
+  const engine = require('../pricing-engine');
+  if (!engine.needsSync()) return;
+  if ((await engine.syncConstantsFromDB(database)) !== true) {
+    throw Object.assign(new Error('live price settings could not be loaded'), { code: 'PRICING_CONFIG_UNAVAILABLE' });
+  }
+}
+
+// buildStartOffer(customerId, database, targetKey, { visitId }) → { option, reason }.
+// The one-time plan offer's entry point (owner 2026-11-19): the price of ONE
+// family (START_OFFER_FAMILIES) for a customer who has NO recurring service.
+// composePortalOffer answers null for that customer on purpose (its card ADDS
+// a service to a plan), so this runs the same stages with the ownership answer reversed: any
+// record of a plan (customerHoldsPlan) means the customer has a plan. Same
+// premises proof, cache-only lookup, estimate seed and demotions as every
+// other offer surface, so the price is the one the report card and the portal
+// would show.
+// `option` is the full quoted option for a priced answer, else null with the
+// `reason` the app could not offer or price it: 'premises' (not a live,
+// residential, single-premises account, or `visitId` is not provably at
+// that premises), 'has_plan', or 'not_priced'.
+// `visitId` is the visit the offer follows, and it is REQUIRED: the price is
+// for the primary home, so that visit must be at the primary home
+// (visitIsAtPrimaryPremises). Without it nothing proves which home the offer
+// is about (the account-level proof skips a visit whose link cannot be
+// resolved), so a call without it is a programming error, never a price.
+// A priced answer is always the family's STANDARD plan (PREFERRED_OPTION_IDS):
+// the offer names one plan, so pickOption's fallbacks (another cadence, the
+// first option) are 'not_priced' here, never a price under the wrong name.
+// THROWS on a failed read: the caller is a job that tries again, and an
+// outage must never read as "this home cannot be priced". That covers the
+// lookup's own reads: the default lookup is the strict cache-only form
+// (strictCacheOnlyPropertyLookup), so a failed cache read is not a miss and a
+// failed correction read is not "no corrections". It covers the price
+// settings too (assertLivePriceSettings).
+async function buildStartOffer(customerId, database, targetKey, { propertyLookup = strictCacheOnlyPropertyLookup, visitId = null } = {}) {
+  if (!customerId || !database || !visitId || !START_OFFER_FAMILIES.includes(targetKey)) {
+    throw new Error('buildStartOffer: a customer, a database, a start offer family and the visit the offer follows are required');
+  }
+  const premises = await resolvePortalOfferPremises(database, customerId);
+  if (!premises) return { option: null, reason: 'premises' };
+  const { customer, primaryStreet } = premises;
+  if (!(await visitIsAtPrimaryPremises(database, customer, visitId, primaryStreet))) return { option: null, reason: 'premises' };
+  if (await customerHoldsPlan(database, customer)) return { option: null, reason: 'has_plan' };
+  await assertLivePriceSettings(database);
+  const pricing = await resolvePortalOfferPricingResult({
+    database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError: true,
+  });
+  if (!pricing || pricing.refusal) return { option: null, reason: pricing?.refusal === 'owned' ? 'has_plan' : 'not_priced' };
+  // A customer who reaches the price holds no plan, so nothing is owned.
+  const { option } = composePricedOfferBasis({
+    ...pricing, targetKey, ownedKeys: [], evidencedOwnedKeys: [], customer, primaryStreet,
+  });
+  const standardPlan = option && option.id === PREFERRED_OPTION_IDS[targetKey];
+  return standardPlan ? { option, reason: null } : { option: null, reason: 'not_priced' };
+}
+
 module.exports = {
   buildReportCrossSell,
   buildPortalOffer,
   buildOfferForFamily,
   buildPortalPurchaseBasis,
+  buildStartOffer,
   // The families a customer may choose to add: the My Plan "Add a service"
   // list walks it, and a one-tap purchase accepts no family outside it.
   PURCHASE_FAMILIES,

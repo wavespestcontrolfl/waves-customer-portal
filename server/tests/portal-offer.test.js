@@ -8,8 +8,10 @@
 jest.mock('../services/property-lookup/lookup-cache', () => ({
   hasVerifiedOverrides: jest.fn(async () => false),
 }));
+// The lookup itself is never run here: a test passes its own, or reads the options the default one is called with.
+jest.mock('../routes/property-lookup-v2', () => ({ performPropertyLookup: jest.fn(async () => null) }));
 
-const { buildPortalOffer, buildOfferForFamily } = require('../services/service-report/cross-sell');
+const { buildPortalOffer, buildOfferForFamily, buildStartOffer } = require('../services/service-report/cross-sell');
 const { hasVerifiedOverrides } = require('../services/property-lookup/lookup-cache');
 
 const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
@@ -18,18 +20,26 @@ const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISO
 // fixture builder is test scaffolding, not a production surface).
 function dbForTables(tables = {}) {
   const dbFn = (table) => {
-    const rows = tables[table] || [];
+    // A table is a list of rows. It can also be a function of the filters one read used ([name, ...args] in call
+    // order), for a test whose answer must depend on WHICH read asks (this fake applies no filter itself).
+    const source = tables[table];
+    const calls = [];
+    const answer = () => (typeof source === 'function' ? source(calls) : source || []);
+    const filter = (name) => (...args) => { calls.push([name, ...args]); return q; };
     const q = {
-      where() { return q; },
-      whereNotIn() { return q; },
-      orWhereNull() { return q; },
+      where: filter('where'),
+      whereNotIn: filter('whereNotIn'),
+      orWhereNull: filter('orWhereNull'),
+      whereNull: filter('whereNull'),
       leftJoin() { return q; },
       orderBy() { return q; },
-      select() { return rows; },
+      select() { return answer(); },
       limit() { return q; },
-      first() { return rows[0] || null; },
-      whereNotNull() { return q; },
-      distinct() { return rows; },
+      first() { return answer()[0] || null; },
+      whereNotNull: filter('whereNotNull'),
+      // The annual-prepay coverage read (coveredTermsAsOf) filters with raw SQL; this fake answers by table.
+      whereRaw: filter('whereRaw'),
+      distinct() { return answer(); },
       columnInfo() {
         return table === 'scheduled_services'
           ? {
@@ -73,7 +83,7 @@ function recurringRows(serviceTypes) {
   }));
 }
 
-function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [] } = {}) {
+function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [], tables = {} } = {}) {
   const scheduled = recurringRows(serviceTypes);
   return dbForTables({
     customers: [customer],
@@ -83,6 +93,7 @@ function dbFor({ customer = CUSTOMER(), serviceTypes = [], planRates = [] } = {}
     customer_turf_profiles: [],
     estimates: [],
     customer_plan_rates: planRates,
+    ...tables,
   });
 }
 
@@ -282,5 +293,337 @@ describe('buildOfferForFamily', () => {
   test('an unknown family → null', async () => {
     const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
     expect(await buildOfferForFamily('cust-1', db, 'mosquito', { propertyLookup: missLookup })).toBeNull();
+  });
+});
+
+// buildStartOffer — the one-time job to plan offer's price (owner 2026-11-19):
+// the same stages for a customer who owns NOTHING recurring, with the
+// ownership answer reversed. The portal entry points keep their "owns
+// nothing → no offer" answer (pinned above); this one is the only way to
+// price a plan for that customer, so its refusals are pinned here.
+describe('buildStartOffer', () => {
+  const pricingEngine = require('../services/pricing-engine');
+  // A saved lookup the real engine prices from (the report suite's own shape).
+  const savedLookup = async () => ({ enriched: { homeSqFt: 2400, lotSqFt: 8000, stories: 1 }, propertyRecord: {} });
+  // The visit the offer follows. Bare: no stamp and no link, so the single-premises proof decides.
+  const VISIT = { id: 'visit-1' };
+  const start = (db, options = {}) => buildStartOffer('cust-1', db, 'pest_control', { propertyLookup: savedLookup, visitId: VISIT.id, ...options });
+  // The one-time customer the offer is for: no tier and no rate on the account (the suite's fixture is a member).
+  const NO_PLAN = { waveguard_tier: null, monthly_rate: null };
+  // The read of the visit the offer follows names its id. Every other read of the table gets `visits`: a list of
+  // rows, or a function of the read's filters (this fake applies no filter itself).
+  const isVisitRead = (calls) => calls.some(([name, filter]) => name === 'where' && filter && filter.id === VISIT.id);
+  const noPlanDb = ({ customer = {}, serviceTypes = [], visits = recurringRows(serviceTypes), tables = {}, ...rest } = {}) => dbFor({
+    ...rest,
+    serviceTypes,
+    customer: CUSTOMER({ ...NO_PLAN, ...customer }),
+    tables: {
+      scheduled_services: (calls) => (isVisitRead(calls) ? [VISIT] : (typeof visits === 'function' ? visits(calls) : visits)),
+      ...tables,
+    },
+  });
+
+  // The fake database holds no price settings, so the bridge's refresh would fail and the start offer would
+  // refuse to price (assertLivePriceSettings). Fresh settings are the default here; one describe below tests the rule.
+  let needsSync;
+  beforeEach(() => { needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false); });
+  afterEach(() => { needsSync.mockRestore(); });
+
+  test('a customer with no plan gets the standard pest plan, priced by the real engine, with the setup fee a new plan carries', async () => {
+    const { option, reason } = await start(noPlanDb());
+    expect(reason).toBeNull();
+    expect(option.id).toBe('pest-quarterly');
+    expect(option.perVisit).toBeGreaterThan(0);
+    // The fee the offer removes: a customer with no recurring service is priced as new.
+    expect(option.setupFee).toBeGreaterThan(0);
+    // The FULL quoted option (server-only), not the card payload that carries perVisit alone.
+    expect(option.annual).toBeGreaterThan(0);
+  });
+
+  test('a home with no saved lookup is not priced (no price on profile facts alone)', async () => {
+    expect(await start(noPlanDb(), { propertyLookup: missLookup })).toEqual({ option: null, reason: 'not_priced' });
+  });
+
+  test('an owned recurring service, or a billed plan rate with no visit on the calendar, means the customer has a plan', async () => {
+    expect(await start(noPlanDb({ serviceTypes: ['Lawn Care Program'] }))).toEqual({ option: null, reason: 'has_plan' });
+    expect(await start(noPlanDb({ planRates: [{ family_key: 'lawn_care', monthly_rate: 55 }] })))
+      .toEqual({ option: null, reason: 'has_plan' });
+  });
+
+  // A plan has several records, and one alone is enough: a member can have no recurring visit on the calendar
+  // and no named ledger component, and a plan can be a service the offer ladder has no family for. Without
+  // these reads the offer would price a new plan, with a setup fee to remove, for a customer who already has one.
+  const PREPAY_INVOICE = (status) => ({
+    annual_prepay_terms: [{ id: 'term-1', prepay_invoice_id: 'inv-1' }], invoices: [{ id: 'inv-1', status }],
+  });
+  test.each([
+    ['a tier on the account', { customer: { waveguard_tier: 'Gold' } }],
+    ['a legacy monthly rate with no tier', { customer: { monthly_rate: 45 } }],
+    ['a billed plan rate the ledger could not name', { planRates: [{ family_key: 'unattributed', monthly_rate: 45 }] }],
+    ['a billed plan rate with no family at all', { planRates: [{ family_key: null, monthly_rate: 45 }] }],
+    // Palm injection maps to no offer family, so the owned keys are empty. The live recurring row is the plan.
+    ['a recurring visit that maps to no offer family', { serviceTypes: ['Palm Injection'] }],
+    ['an annual prepay whose paid coverage is live', { tables: { 'annual_prepay_terms as t': [{ id: 'term-1' }] } }],
+    ['an annual prepay invoice that is still payable', { tables: PREPAY_INVOICE('sent') }],
+  ])('%s means the customer has a plan', async (_label, world) => {
+    expect(await start(noPlanDb(world))).toEqual({ option: null, reason: 'has_plan' });
+  });
+
+  test.each([
+    ['a tier value that names no plan', { customer: { waveguard_tier: 'One-Time' } }],
+    ['a plan rate of zero', { planRates: [{ family_key: 'unattributed', monthly_rate: 0 }] }],
+    ['an annual prepay invoice that was voided', { tables: PREPAY_INVOICE('void') }],
+  ])('%s is not a plan: the home is priced', async (_label, world) => {
+    expect(await start(noPlanDb(world))).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+  });
+
+  test("the pricer's own ownership answer (alreadyIncluded) also reads as a plan", async () => {
+    const spy = jest.spyOn(require('../services/customer-pricing-ai'), 'buildCustomerPricingResponse');
+    try {
+      spy.mockResolvedValueOnce({ ok: true, options: [], alreadyIncluded: ['pest_control'], currentServiceKeys: ['pest_control'] });
+      expect(await start(noPlanDb())).toEqual({ option: null, reason: 'has_plan' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // A legacy plan visit carries no recurring flag (NULL) and a recurring parent. The calendar read asks for
+  // is_recurring = true, so it never returns that row, and without a second read the offer would price a new
+  // plan for a customer whose only live plan record is that visit. The table below answers ONLY the legacy read
+  // (the one that asks for a NULL flag), as the database would, so these cases cannot pass on the calendar read.
+  describe('a legacy plan visit (no recurring flag, a recurring parent)', () => {
+    const PAST_DATE = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const LEGACY = { id: 'legacy-1', is_recurring: null, recurring_parent_id: 'root-1', status: 'confirmed', scheduled_date: FUTURE_SCHEDULED_DATE };
+    const asksForNullFlag = (calls) => calls.some(([name, column]) => name === 'whereNull' && column === 'is_recurring');
+    const legacyDb = (row) => noPlanDb({ visits: (calls) => (asksForNullFlag(calls) ? [row] : []) });
+
+    test('means the customer has a plan', async () => {
+      expect(await start(legacyDb(LEGACY))).toEqual({ option: null, reason: 'has_plan' });
+    });
+
+    test('a visit in progress now counts, also when its date is before today', async () => {
+      expect(await start(legacyDb({ ...LEGACY, status: 'on_site', scheduled_date: PAST_DATE })))
+        .toEqual({ option: null, reason: 'has_plan' });
+    });
+
+    test.each([
+      ['a free re-service callback', { is_callback: true }],
+      ['an included follow-up', { followup_included: true }],
+      ['a visit dated before today', { scheduled_date: PAST_DATE }],
+      ['a visit with no date', { scheduled_date: null }],
+      // The calendar read's own exclusions (isLiveObligationRow): a visit booked as one-time is not a plan,
+      // also while it is in progress.
+      ['a visit booked from a one-time source', { source: 'estimate-accept' }],
+      ['a one-time booking in progress now', { source: 'quote-wizard-onetime', status: 'on_site' }],
+      ['a callback in progress now', { is_callback: true, status: 'en_route' }],
+      // Rows the read does not ask for. The rule is applied to whatever the read returns.
+      ['a row flagged not recurring (a booster)', { is_recurring: false }],
+      ['a row with no recurring parent', { recurring_parent_id: null }],
+    ])('%s is not a plan visit: the home is priced', async (_label, change) => {
+      expect(await start(legacyDb({ ...LEGACY, ...change }))).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+    });
+
+    test('the read asks for the legacy shape among visits that are not over', async () => {
+      const reads = [];
+      const db = noPlanDb({ visits: (calls) => { reads.push(calls.map(([name, ...args]) => [name, ...args])); return []; } });
+      await start(db);
+      const legacyRead = reads.find(asksForNullFlag);
+      expect(legacyRead).toEqual(expect.arrayContaining([
+        ['where', { customer_id: 'cust-1' }],
+        ['whereNull', 'is_recurring'],
+        ['whereNotNull', 'recurring_parent_id'],
+        ['whereNotIn', 'status', require('../services/waveguard-existing-services').TERMINAL_STATUSES],
+      ]));
+    });
+  });
+
+  // The start offer prices with nobody watching, so its default lookup asks for strict reads: a failed cache or
+  // correction read is thrown (the default form serves the cached home without its corrections). The cards a
+  // person looks at keep the default reads.
+  describe('the lookup the start offer runs by default', () => {
+    const { performPropertyLookup } = require('../routes/property-lookup-v2');
+    const SAVED = { enriched: { homeSqFt: 2400, lotSqFt: 8000, stories: 1 }, propertyRecord: {} };
+    afterEach(() => { performPropertyLookup.mockReset(); performPropertyLookup.mockImplementation(async () => null); });
+
+    test('is cache-only, stores nothing and asks for strict reads', async () => {
+      performPropertyLookup.mockResolvedValue(SAVED);
+      expect(await buildStartOffer('cust-1', noPlanDb(), 'pest_control', { visitId: VISIT.id })).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+      expect(performPropertyLookup).toHaveBeenCalled();
+      for (const [, options] of performPropertyLookup.mock.calls) {
+        expect(options).toEqual({ cacheOnly: true, persist: false, strictCacheReads: true });
+      }
+    });
+
+    test('the portal card keeps the default reads', async () => {
+      performPropertyLookup.mockResolvedValue(SAVED);
+      await buildPortalOffer('cust-1', dbFor({ serviceTypes: ['Quarterly Pest Control', 'Lawn Care Program'] }));
+      expect(performPropertyLookup).toHaveBeenCalled();
+      for (const [, options] of performPropertyLookup.mock.calls) expect(options).toEqual({ cacheOnly: true, persist: false });
+    });
+
+    test('a failed cache or correction read is thrown: never a miss, never a price', async () => {
+      performPropertyLookup.mockRejectedValue(Object.assign(new Error('property lookup verified override read failed'), { code: 'LOOKUP_CACHE_READ_FAILED' }));
+      await expect(buildStartOffer('cust-1', noPlanDb(), 'pest_control', { visitId: VISIT.id })).rejects.toMatchObject({ code: 'LOOKUP_CACHE_READ_FAILED' });
+    });
+  });
+
+  // The offer follows one visit and prices the primary home. The account-level proof skips a visit whose link
+  // cannot be resolved, so without this proof such a job could earn a price for a home it was not at.
+  describe('the visit the offer follows must be at the home the price is for', () => {
+    const scopeModule = require('../services/service-report/visit-property-scope');
+    const linkage = require('../services/estimate-property-linkage');
+    // The fixture customer's home, stamped on the visit as dispatch stamps it.
+    const AT_HOME = { service_address_line1: '123 Gulf Dr', service_address_city: 'Sarasota', service_address_zip: '34236' };
+    const visitDb = (visit) => dbForTables({
+      customers: [CUSTOMER(NO_PLAN)], customer_properties: [], scheduled_services: visit ? [{ id: 'visit-1', ...visit }] : [],
+      'scheduled_services as s': [], customer_turf_profiles: [], estimates: [], customer_plan_rates: [],
+    });
+    const follow = (db) => start(db);
+    // The resolver's answer for a visit that carries a link (the fake database has no promise chain to resolve one).
+    const withScope = async (answer, body) => {
+      const spy = jest.spyOn(scopeModule, 'resolveVisitPropertyScope').mockImplementationOnce(answer);
+      try { return await body(); } finally { spy.mockRestore(); }
+    };
+
+    test.each([
+      ['a visit stamped at the primary home', AT_HOME],
+      ['a visit with no stamp and no link (the single-premises proof stands)', {}],
+    ])('%s is priced', async (_label, visit) => {
+      expect(await follow(visitDb(visit))).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+    });
+
+    // The account-level proof skips another visit whose link cannot be resolved. For a job that carries no
+    // proof of its own, that visit could be at a second home: the strict form of the proof decides.
+    test('a visit with no stamp and no link is refused when another visit of the account has a link that cannot be resolved', async () => {
+      const db = dbForTables({
+        customers: [CUSTOMER(NO_PLAN)], customer_properties: [],
+        scheduled_services: [{ id: 'visit-1' }, { id: 'visit-2', source_estimate_id: 'est-gone' }],
+        'scheduled_services as s': [], customer_turf_profiles: [], estimates: [], customer_plan_rates: [],
+      });
+      const strict = jest.spyOn(scopeModule, 'customerHasOnlyPrimaryPremises');
+      try {
+        expect(await follow(db)).toEqual({ option: null, reason: 'premises' });
+        expect(strict).toHaveBeenCalledWith(db, 'cust-1', expect.objectContaining({ id: 'cust-1' }), expect.anything(), { unresolvedFails: true });
+      } finally {
+        strict.mockRestore();
+      }
+    });
+
+    test("a visit that is not this customer's is refused", async () => {
+      expect(await follow(visitDb(null))).toEqual({ option: null, reason: 'premises' });
+    });
+
+    // Without the visit nothing proves which home the offer is about: the account-level proof skips a visit
+    // whose link cannot be resolved. So the visit is required, and its absence is never a price.
+    test.each([[undefined], [null], ['']])('a call with no visit (%p) is a programming error, never a price', async (visitId) => {
+      await expect(start(noPlanDb(), { visitId })).rejects.toThrow('the visit the offer follows');
+    });
+
+    test.each([
+      ['a link that cannot be resolved (an estimate with no address)', { key: null, hasEvidence: true }],
+      ['a link that resolves to another home', { key: linkage.normalizedStampedStreet('9 Other St', null, 'Venice', '34285'), hasEvidence: true }],
+    ])('%s is refused, never priced at the primary home', async (_label, scope) => {
+      const answer = await withScope(async () => scope, () => follow(visitDb({ source_estimate_id: 'est-1' })));
+      expect(answer).toEqual({ option: null, reason: 'premises' });
+    });
+
+    test('a failed read of the link throws: an outage is never read as "another home"', async () => {
+      const failing = async (_row, _db, { onLookupFailure }) => { onLookupFailure(); return { key: null, hasEvidence: true }; };
+      await expect(withScope(failing, () => follow(visitDb({ source_estimate_id: 'est-1' })))).rejects.toMatchObject({ code: 'PREMISES_LOOKUP_FAILED' });
+    });
+  });
+
+  test('an inactive, multi-home or address-less account is refused on the premises proof', async () => {
+    for (const customer of [{ active: false }, { has_multi_home: true }, { address_line1: null, city: null, zip: null }]) {
+      expect(await start(noPlanDb({ customer }))).toEqual({ option: null, reason: 'premises' });
+    }
+  });
+
+  test("another cadence is never priced under the standard plan's name (pickOption's fallback is refused)", async () => {
+    const spy = jest.spyOn(require('../services/customer-pricing-ai'), 'buildCustomerPricingResponse');
+    try {
+      spy.mockResolvedValueOnce({
+        ok: true, alreadyIncluded: [], currentServiceKeys: [], property: {},
+        options: [{ id: 'pest-bimonthly', serviceKey: 'pest_control', label: 'Bi-monthly pest control', perVisit: 80, setupFee: 99, confidence: 'high' }],
+      });
+      expect(await start(noPlanDb())).toEqual({ option: null, reason: 'not_priced' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('an outage throws: a job must never read it as "this home cannot be priced"', async () => {
+    const db = noPlanDb();
+    await expect(start(db, { propertyLookup: async () => { throw new Error('lookup down'); } })).rejects.toThrow('lookup down');
+    hasVerifiedOverrides.mockImplementation(async () => { throw new Error('probe down'); });
+    await expect(start(db, { propertyLookup: missLookup })).rejects.toThrow('probe down');
+    hasVerifiedOverrides.mockImplementation(async () => false);
+    const spy = jest.spyOn(require('../services/customer-pricing-ai'), 'buildCustomerPricingResponse');
+    try {
+      spy.mockResolvedValueOnce({ ok: false, code: 'PRICING_UNAVAILABLE' });
+      await expect(start(db)).rejects.toMatchObject({ code: 'PRICING_UNAVAILABLE' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // The pest plan's price never reads the turf profile. The pricer's turf-profile read answers a FAILED read as
+  // an empty profile, so a lawn price here could come from a fallback size with nobody watching. Lawn care and
+  // tree & shrub are ladder families for the cards, and they are refused here.
+  test.each([['lawn_care'], ['tree_shrub'], ['mosquito'], [undefined]])('family %p is refused: the start offer prices the pest plan only', async (family) => {
+    await expect(buildStartOffer('cust-1', noPlanDb(), family, { propertyLookup: savedLookup, visitId: VISIT.id })).rejects.toThrow('a start offer family');
+  });
+
+  test('a missing customer or database is a programming error', async () => {
+    const options = { propertyLookup: savedLookup, visitId: VISIT.id };
+    await expect(buildStartOffer(null, noPlanDb(), 'pest_control', options)).rejects.toThrow('buildStartOffer');
+    await expect(buildStartOffer('cust-1', null, 'pest_control', options)).rejects.toThrow('buildStartOffer');
+  });
+
+  // The bridge answers a failed refresh of the price settings with the values it had (the code defaults on a
+  // cold start). The start offer prices with nobody watching, so a refresh that is due and fails is no price.
+  describe('the live price settings', () => {
+    let sync;
+    beforeEach(() => { sync = jest.spyOn(pricingEngine, 'syncConstantsFromDB'); });
+    afterEach(() => { sync.mockRestore(); });
+
+    test('fresh settings are not loaded again', async () => {
+      expect(await start(noPlanDb())).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+      expect(sync).not.toHaveBeenCalled();
+    });
+
+    test('a refresh that is due and succeeds prices, from the database the caller passed', async () => {
+      needsSync.mockReturnValueOnce(true);
+      sync.mockResolvedValueOnce(true);
+      const db = noPlanDb();
+      expect(await start(db)).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+      expect(sync).toHaveBeenCalledWith(db);
+    });
+
+    test.each([[false], [undefined]])('a refresh that is due and answers %p throws: never a price from the old values or the code defaults', async (answer) => {
+      needsSync.mockReturnValueOnce(true);
+      sync.mockResolvedValueOnce(answer);
+      await expect(start(noPlanDb())).rejects.toMatchObject({ code: 'PRICING_CONFIG_UNAVAILABLE' });
+    });
+
+    test('a customer who is refused before the price costs no refresh', async () => {
+      needsSync.mockReturnValue(true);
+      sync.mockResolvedValue(false);
+      expect(await start(noPlanDb({ serviceTypes: ['Lawn Care Program'] }))).toEqual({ option: null, reason: 'has_plan' });
+      expect(sync).not.toHaveBeenCalled();
+    });
+  });
+
+  // With GATE_PLAN_RATE_LEDGER off the ledger answers a failed table probe as "no ledger". A billed rate is
+  // evidence of a plan in either mode, so this caller asks for the failure itself.
+  test('a failed probe of the plan-rate ledger throws, also while the ledger gate is off', async () => {
+    const db = noPlanDb();
+    const hasTable = db.schema.hasTable;
+    db.schema.hasTable = async (name) => {
+      if (name === 'customer_plan_rates') throw Object.assign(new Error('metadata query timeout'), { code: '57014' });
+      return hasTable(name);
+    };
+    expect(require('../config/feature-gates').isEnabled('planRateLedger')).toBe(false);
+    await expect(start(db)).rejects.toThrow('metadata query timeout');
   });
 });

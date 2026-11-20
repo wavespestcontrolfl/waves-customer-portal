@@ -9,6 +9,7 @@
 const {
   isMembershipCustomerRow,
   isActivePlanCustomer,
+  isLiveObligationRow,
   loadExistingRecurringQualifyingRows,
   loadExistingQualifyingServiceKeys,
   toQualifyingKeys,
@@ -41,6 +42,39 @@ describe('isMembershipCustomerRow', () => {
   test('falls back to a positive recurring monthly_rate when no tier is set', () => {
     expect(isMembershipCustomerRow({ waveguard_tier: null, monthly_rate: 95 })).toBe(true);
     expect(isMembershipCustomerRow({ waveguard_tier: null, monthly_rate: 0 })).toBe(false);
+  });
+});
+
+// The row rule of loadLiveRecurringObligationRows, exported for a reader of another row shape (the legacy plan
+// visit in service-report/cross-sell.js). `today` is an ET calendar day.
+describe('isLiveObligationRow', () => {
+  const TODAY = '2026-11-20';
+  const row = (change = {}) => ({ status: 'confirmed', scheduled_date: '2026-11-25', source: 'admin', is_callback: false, ...change });
+
+  test('an upcoming visit is live: today counts, a date as a string or as a pg DATE value', () => {
+    expect(isLiveObligationRow(row(), TODAY)).toBe(true);
+    expect(isLiveObligationRow(row({ scheduled_date: TODAY }), TODAY)).toBe(true);
+    expect(isLiveObligationRow(row({ scheduled_date: new Date('2026-11-25T05:00:00Z') }), TODAY)).toBe(true);
+  });
+
+  test.each([
+    ['a date before today', { scheduled_date: '2026-11-19' }],
+    ['no date', { scheduled_date: null }],
+    ['a free re-service callback', { is_callback: true }],
+    ['a one-time booking source', { source: 'estimate-accept' }],
+    ['a one-time booking source in another case', { source: 'Quote-Wizard-Onetime' }],
+  ])('%s is not live', (_label, change) => {
+    expect(isLiveObligationRow(row(change), TODAY)).toBe(false);
+  });
+
+  test.each([['en_route'], ['on_site'], ['in_progress'], ['ON_SITE']])('a visit %s is live whatever its date', (status) => {
+    expect(isLiveObligationRow(row({ status, scheduled_date: '2026-11-19' }), TODAY)).toBe(true);
+    expect(isLiveObligationRow(row({ status, scheduled_date: null }), TODAY)).toBe(true);
+  });
+
+  test('a visit in progress is still not live as a callback or a one-time booking', () => {
+    expect(isLiveObligationRow(row({ status: 'on_site', is_callback: true }), TODAY)).toBe(false);
+    expect(isLiveObligationRow(row({ status: 'en_route', source: 'admin-manual-booking-resend' }), TODAY)).toBe(false);
   });
 });
 

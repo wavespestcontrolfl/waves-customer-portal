@@ -699,24 +699,31 @@ async function loadLiveRecurringObligationRows(database, customerId) {
   // to keep the QUALIFYING path byte-identical when off — does not apply.
   // Only the lifecycle predicate is shared; the qualifying loader's
   // commercial/rodent exclusions are qualification-only.
-  // EXCEPT live in-progress rows (codex #3253 r7, same precedent as the
-  // billed-plan logic per #3241 r5): a visit still en_route/on_site across
-  // ET midnight is the customer's plan all the same — those bypass the date
-  // cutoff but never the callback/one-time exclusions.
   const { etDateString } = require('../utils/datetime-et');
-  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
-  const LIVE_IN_PROGRESS_STATUSES = new Set(['en_route', 'on_site', 'in_progress']);
   const today = etDateString();
-  return joined.filter((r) => (
-    LIVE_IN_PROGRESS_STATUSES.has(String(r.status || '').toLowerCase())
-      ? (!isCallbackRow(r) && !isOneTimeBookingSource(r.source))
-      : rowPassesGatedPricingEvidence(r, today)
-  ));
+  return joined.filter((r) => isLiveObligationRow(r, today));
+}
+
+// One row's lifecycle test for "a live recurring obligation": upcoming, not a
+// callback, not a one-time booking source (rowPassesGatedPricingEvidence).
+// EXCEPT live in-progress rows (codex #3253 r7, same precedent as the
+// billed-plan logic per #3241 r5): a visit still en_route/on_site across
+// ET midnight is the customer's plan all the same — those bypass the date
+// cutoff but never the callback/one-time exclusions.
+// Exported so a reader of another row SHAPE judges "live" by this one rule
+// (the legacy plan visit in service-report/cross-sell.js). `today` is the ET
+// calendar day (etDateString()).
+const LIVE_IN_PROGRESS_STATUSES = new Set(['en_route', 'on_site', 'in_progress']);
+function isLiveObligationRow(row, today) {
+  if (!LIVE_IN_PROGRESS_STATUSES.has(String(row.status || '').toLowerCase())) return rowPassesGatedPricingEvidence(row, today);
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  return !isCallbackRow(row) && !isOneTimeBookingSource(row.source);
 }
 
 module.exports = {
   TERMINAL_STATUSES,
   loadLiveRecurringObligationRows,
+  isLiveObligationRow,
   toQualifyingKey,
   toQualifyingKeys,
   filterRowsToStreet,
