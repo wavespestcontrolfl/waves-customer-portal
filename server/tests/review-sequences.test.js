@@ -8449,6 +8449,16 @@ describe('Yearly review ask at dispatch', () => {
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('tap_pause');
   });
 
+  test('a non-NANP number at dispatch is not texted (no +1 rewrite), and no email fallback', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const mock = makeMock({ customers: [cust('y-7n', { phone: '+6581234567' })], review_sequences: [yearly('y-7n')] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0].status).toBe('stopped');
+  });
+
   test('texts off: no email fallback, the row is retired', async () => {
     mockGates.reviewYearlyAsk = true;
     const mock = makeMock({ customers: [cust('y-5')], review_sequences: [yearly('y-5')],

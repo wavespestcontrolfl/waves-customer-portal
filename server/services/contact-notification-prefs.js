@@ -368,7 +368,8 @@ function contactStillListed(customer, contact, channel) {
   return slots.some((s) => emailKey(s.email || customer.email) === address);
 }
 
-async function contactDeclinesChannel(customerId, contact, channel = 'sms', { dbh = db, requireSlot = false } = {}) {
+// failClosed: a read error throws instead of holding the contact (a caller that must not act on a guess).
+async function contactDeclinesChannel(customerId, contact, channel = 'sms', { dbh = db, requireSlot = false, failClosed = false } = {}) {
   if (!contactPrefsLive() || !contact || !contact.phone) return false;
   if (!require('./customer-contact').isServiceContactRole(contact.role)) return false;
   if (requireSlot) {
@@ -376,7 +377,7 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
     try {
       customer = await dbh('customers').where({ id: customerId }).first();
     } catch (err) {
-      if (dbh && dbh.isTransaction) throw err;
+      if ((dbh && dbh.isTransaction) || failClosed) throw err;
       logger.warn(`[contact-prefs] customer read failed (${err.message}) — holding the service contact's ${channel}`);
       return true;
     }
@@ -386,7 +387,7 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
   try {
     row = await getContactPrefRow(customerId, contact.phone, { dbh });
   } catch (err) {
-    if (dbh && dbh.isTransaction) throw err;
+    if ((dbh && dbh.isTransaction) || failClosed) throw err;
     logger.warn(`[contact-prefs] read failed (${err.message}) — holding the service contact's ${channel}`);
     return true;
   }
