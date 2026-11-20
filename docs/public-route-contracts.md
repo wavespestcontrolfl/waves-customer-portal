@@ -7626,8 +7626,9 @@ and `needs_address: true` — the page asks for an address via `POST
 /:token/availability { address }` (not persisted by the availability
 call; the commit persists the validated, in-area address onto the customer
 in its phase 1, keeping the profile's city name when the address matches the
-profile (same street and unit, and ZIP or pin; far-south zones read the city
-name), and KEEPS it even if the booking attempt then fails — owner
+profile (same street and unit, and ZIP or pin) and, with the far-south funnel
+on, that city decides the address's zone (the typed city is in no zone; a
+place the area check refuses is never kept), and KEEPS it even if the booking attempt then fails — owner
 ruling 2026-09-24, since undoing it raced concurrent bookings that had
 already adopted it; a retry with a different address writes that one)
 before showing times. GET is routed through the SAME
@@ -7673,9 +7674,12 @@ stamp and its check match the list. A booking at the profile's own address
 reads that address from the booking's own customer row, not from a copy the
 commit read earlier. An address that resolves to no zone takes
 the customer's city on file, as a visit with no zone stamp is read later by its
-customer's city. Phase one keeps the profile's city when a typed address
-matches the profile, so the booking, a refusal's fresh times and the retry
-read the zone the list read. A profile phase one corrects in place to another
+customer's city. Phase one keeps the profile's city when that city decides
+the zone of a typed address that matches the profile, so the booking, a
+refusal's fresh times and the retry read the zone the list read. Any other
+typed address writes its own city: a city the funnel does not need, a place
+the area check refuses (that booking then reads no zone), and, with the
+funnel off, every city. A profile phase one corrects in place to another
 typed address takes that address's city for all three: the city on file
 named the old address. With the funnel on, the booking transaction also refuses with
 `CUSTOMER_CHANGED_RETRY` when the customer's address changed after its zone read it, and the

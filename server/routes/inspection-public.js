@@ -2137,13 +2137,18 @@ async function provisionLinkedCustomer(trx, {
     // validated resolution back so a missing/bad address isn't
     // asked for again (this file's own contract — see the header).
     // An address that matches this row (same street and unit, and ZIP or
-    // pin) keeps the row's city on file: the two names are one place, and
-    // the far-south funnel reads the city name, so a typed name no zone lists
-    // would take the property out of the zone its list read, for this commit,
-    // its refusal's times and every retry (owner rule B, pre-push P1s on
-    // 850a6a79f0 and 7a682696f6). Another address takes its own city: the
-    // city on file named the old one.
-    const city = storedCustRow.city && matchesStoredAddress ? storedCustRow.city : resolved.address.city;
+    // pin) keeps the row's city on file only when the far-south funnel's zone
+    // comes from it: the typed city is in no zone and the row's city is in one
+    // (slot-zone.js leadBookingZone), so a typed name no zone lists would take
+    // the property out of the zone its list read, for this commit, its
+    // refusal's times and every retry (owner rule B, pre-push P1s on
+    // 850a6a79f0 and 7a682696f6). A place the area check refuses (Punta Gorda)
+    // is never kept: the typed address passed that check. Every other address
+    // takes the typed city, the validated correction (pre-push P1 on
+    // 63e29d5511); with the funnel off no zone is read from it.
+    const keepCity = [matchesStoredAddress, funnelOn(), !isExcludedLocality(storedCustRow.city)].every(Boolean)
+      && (await leadBookingZone(trx, zoneFunnelInputs(resolved.address), storedCustRow.city)).fromCustomer;
+    const city = keepCity ? storedCustRow.city : resolved.address.city;
     const after = {
       address_line1: resolved.address.line1,
       address_line2: resolved.address.line2,
@@ -2788,9 +2793,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // With the funnel on, createSelfBooking reads its zone from that address,
     // else from its customer's city on file (slot-zone.js leadBookingZone;
     // owner rule B, pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f).
-    // Phase 1 keeps the profile's city when a typed address matches the
-    // profile (provisionLinkedCustomer; pre-push P1s on 850a6a79f0 and
-    // 7a682696f6), so that city stays the one the first build read.
+    // Phase 1 keeps the profile's city when that city decides the zone of a
+    // typed address that matches the profile (provisionLinkedCustomer;
+    // pre-push P1s on 850a6a79f0, 7a682696f6 and 63e29d5511), so that city
+    // stays the one the first build read. A place the area check refuses is
+    // not kept, so that booking reads no zone.
     // Every build here passes that address and this customer, so it reads the
     // same zone. When the city decides and is not the city the first build
     // read, the slot is re-checked; a 409 answers fresh times only as
