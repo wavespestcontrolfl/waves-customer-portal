@@ -52,7 +52,10 @@ beforeEach(() => {
   reported.calls = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.pushState({}, '', '/'); });
+afterEach(() => {
+  cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.pushState({}, '', '/');
+  document.getElementById('chunk-reload-toast')?.remove();
+});
 
 test('the first stale-chunk preload error reloads once and marks the reload pending', () => {
   const reload = vi.fn();
@@ -239,6 +242,27 @@ test('an offline staff tab keeps its page: no reload for a missing chunk, and th
   expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
   expect(isStaleChunkReloadPending()).toBe(false);
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+});
+
+test('a staff page with nothing held reloads at once for a missing chunk, with no delay in which work could start', async () => {
+  window.history.pushState({}, '', '/admin/communications');
+  const reload = vi.fn();
+  vi.stubGlobal('location', { ...window.location, reload });
+  const GonePage = lazyWithRetry(() => Promise.reject(new Error('Failed to fetch dynamically imported module: /assets/Gone-abc123.js')));
+  renderInBoundary(GonePage);
+  await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  expect(document.getElementById('chunk-reload-toast')).toBeNull();
+  expect(isStaleChunkReloadPending()).toBe(true);
+});
+
+test('a customer page still shows the toast for a missing chunk, then reloads 1.2 s later', async () => {
+  const reload = vi.fn();
+  vi.stubGlobal('location', { ...window.location, reload });
+  const GonePage = lazyWithRetry(() => Promise.reject(new Error('Failed to fetch dynamically imported module: /assets/Gone-abc123.js')));
+  renderInBoundary(GonePage);
+  await vi.waitFor(() => expect(document.getElementById('chunk-reload-toast')).not.toBeNull());
+  expect(reload).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1), { timeout: 3000 });
 });
 
 test('on a customer page, held work leaves the stale-chunk reload as it was', () => {

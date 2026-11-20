@@ -101,6 +101,25 @@ describe("completion resume store (IndexedDB)", () => {
     expect(deviceWritesInFlight()).toBe(before);
   });
 
+  it("keeps a Fast Complete write that outlives its 5 s bound counted until its transaction settles, so a reload never cuts it off", async () => {
+    vi.useFakeTimers();
+    const factory = globalThis.indexedDB;
+    const requests = [];
+    try {
+      globalThis.indexedDB = { open: () => { const request = {}; requests.push(request); return request; } };
+      const before = deviceWritesInFlight();
+      const put = putFastCompletionAttempt("svc-slow", "tech-s", { body: { idempotencyKey: "slow" }, summary: "Slow" });
+      await vi.advanceTimersByTimeAsync(FAST_COMPLETION_TIMEOUT_MS);
+      expect(await put).toBe(false);
+      expect(deviceWritesInFlight()).toBe(before + 1);
+      requests[0].onerror();
+      await vi.waitFor(() => expect(deviceWritesInFlight()).toBe(before));
+    } finally {
+      globalThis.indexedDB = factory;
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps Fast Complete attempts exact and private to operator plus service", async () => {
     const attempt = {
       body: committedBody(),

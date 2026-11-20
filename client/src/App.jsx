@@ -391,8 +391,15 @@ export function lazyWithRetry(factory) {
         if (!sessionStorage.getItem(CHUNK_RELOAD_FLAG)) {
           sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
           markStaleChunkReloadPending();
-          showReloadToast();
-          setTimeout(() => window.location.reload(), 1200);
+          // A staff page reloads at once: in a delay, held work could start,
+          // or the signal drop, after the check above. Other pages show the
+          // toast first.
+          if (isAdminPath(window.location.pathname)) {
+            window.location.reload();
+          } else {
+            showReloadToast();
+            setTimeout(() => window.location.reload(), 1200);
+          }
           return { default: () => null };
         }
         // Already auto-reloaded once — show a retry screen instead of

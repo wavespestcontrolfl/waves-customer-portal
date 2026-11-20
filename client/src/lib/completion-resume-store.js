@@ -18,7 +18,8 @@
 
 // Every write below counts from its call until it settles, also while it
 // waits behind another on the same key, so a reload waits for it
-// (deviceWrites.js).
+// (deviceWrites.js). Prunes are not counted: a reload that cuts one off
+// loses nothing, and the next prune finishes it.
 import { countDeviceWrite } from "./deviceWrites";
 
 const DB_NAME = "waves-completion-resume";
@@ -207,7 +208,10 @@ function withFastCompletionAttempt(serviceId, operatorId, operation, timedOut) {
 // transaction lock and the mutation predicate are what keep another tab's
 // newer idempotency key from being overwritten or deleted by a late result.
 function mutateFastCompletionRow(key, mutate) {
-  return countDeviceWrite(withFastCompletionKey(key, () => openDb(FAST_COMPLETION_DB_NAME).then((db) => {
+  // Counted twice: from the call until the queue answers, and from the open
+  // until the transaction settles. The 5 s bound answers the caller, but a
+  // write that outlives it still runs, and a reload would cut it off.
+  return countDeviceWrite(withFastCompletionKey(key, () => countDeviceWrite(openDb(FAST_COMPLETION_DB_NAME).then((db) => {
     if (!db) return false;
     return new Promise((resolve) => {
       let settled = false;
@@ -246,7 +250,7 @@ function mutateFastCompletionRow(key, mutate) {
         done(false);
       }
     });
-  })));
+  }))));
 }
 
 // Fast Complete's final request is a committed retry attempt, not an editable
