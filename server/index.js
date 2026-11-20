@@ -1184,6 +1184,8 @@ app.use('/api/admin/email', require('./routes/admin-email'));
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
 // Bid kit (admin only).
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
+// Prospects: the Builders permit list (admin only, read only).
+app.use('/api/admin/prospects', require('./routes/admin-prospects'));
 // Trip link summary (staff only, read only).
 app.use('/api/admin/trip-link', require('./routes/admin-trip-link'));
 app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));
