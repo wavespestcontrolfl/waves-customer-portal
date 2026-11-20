@@ -5,9 +5,15 @@
  */
 jest.mock('../models/db', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/estimate-slot-availability', () => ({
-  resolveEstimateCoords: jest.fn(), resolveCatalogSlotProfile: jest.fn(), appointmentServicesFor: jest.fn((profile) => profile.services),
-}));
+jest.mock('../services/estimate-slot-availability', () => {
+  const actual = jest.requireActual('../services/estimate-slot-availability');
+  return {
+    resolveEstimateCoords: jest.fn(), resolveCatalogSlotProfile: jest.fn(), appointmentServicesFor: jest.fn((profile) => profile.services),
+    estimateMoveInDate: jest.fn(async () => null),
+    // The booking page's own season rule.
+    seasonalSelectionProfile: actual.seasonalSelectionProfile, inMosquitoSeason: actual.inMosquitoSeason,
+  };
+});
 jest.mock('../services/auto-dispatch/preferences', () => {
   const actual = jest.requireActual('../services/auto-dispatch/preferences');
   return { ...actual, getCustomerSchedulingPreferences: jest.fn(async (_id, type) => ({ ...actual.normalizePreferences(null, type), service_category: 'pest_control' })) };
@@ -44,21 +50,26 @@ const stop = (id, start, extra = {}) => ({ id, technician_id: TECH, status: 'con
   estimated_duration_minutes: 60, lat: HQ.lat, lng: HQ.lng, ...extra });
 const estimate = (id, extra = {}) => ({ id, customer_id: `c-${id}`, customer_name: `Pat ${id}`, status: 'sent', ...extra });
 
-// A fake knex: each table's chain records its calls; a where(fn) runs fn on a recorder of its own.
-function fakeConn({ estimates = [], taken = [], inactive = [] } = {}) {
+// A fake knex: each table's chain records its calls; a where(fn) runs fn on a recorder of its own. `inactive` maps a
+// capability category to the technicians set to off for it; `scheduleBlocks` are the tech_schedule_blocks rows.
+function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = [] } = {}) {
   const calls = [];
   const conn = (table) => {
-    const q = {};
+    const q = { categories: [] };
     for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'orWhere', 'orderBy', 'limit']) {
-      q[m] = (...args) => { calls.push([table, m, args]); return q; };
+      q[m] = (...args) => {
+        calls.push([table, m, args]);
+        if (m === 'whereIn' && args[0] === 'service_category') q.categories = args[1];
+        return q;
+      };
     }
     q.where = (...args) => {
       if (typeof args[0] === 'function') args[0](q);
       else calls.push([table, 'where', args]);
       return q;
     };
-    q.select = async () => (table === 'estimates' ? estimates : []);
-    q.pluck = async () => (table === 'scheduled_services' ? taken : inactive);
+    q.select = async () => ({ estimates, tech_schedule_blocks: scheduleBlocks }[table] || []);
+    q.pluck = async () => (table === 'scheduled_services' ? taken : q.categories.flatMap((category) => inactive[category] || []));
     return q;
   };
   return { conn, calls };
@@ -71,9 +82,10 @@ function dayStops(byDay) {
   }));
 }
 
-// Each estimate's stored location (null: none can stand in).
+// Each estimate's stored location (absent: none can stand in; an Error: the read failed).
 function locations(byId) {
   slots.resolveEstimateCoords.mockImplementation(async (row) => {
+    if (byId[row.id] instanceof Error) throw byId[row.id];
     if (!byId[row.id]) throw Object.assign(new Error('estimate coordinates need a geocode'), { code: 'COORDS_NEED_GEOCODE' });
     return byId[row.id];
   });
@@ -95,10 +107,20 @@ describe('open estimates', () => {
     expect(calls).toEqual(expect.arrayContaining([
       ['estimates', 'whereIn', ['status', ['sent', 'viewed']]], ['estimates', 'whereNull', ['archived_at']],
       ['estimates', 'whereNotNull', ['customer_id']], ['estimates', 'whereNull', ['expires_at']], ['estimates', 'orWhere', ['expires_at', '>', NOW]],
-      ['estimates', 'orderBy', ['created_at', 'desc']], ['estimates', 'limit', [_internals.MAX_ESTIMATES]],
+      ['estimates', 'orderBy', ['created_at', 'desc']],
       ['scheduled_services', 'whereIn', ['source_estimate_id', ['e1', 'e3']]], ['scheduled_services', 'whereNot', ['status', 'cancelled']],
       ['scheduled_services', 'whereNull', ['reservation_expires_at']], ['scheduled_services', 'orWhere', ['reservation_expires_at', '>', NOW]],
     ]));
+  });
+
+  test('the cap counts open estimates only: newer test contacts and taken estimates never take a place', async () => {
+    const tests = Array.from({ length: 45 }, (_, i) => estimate(`t${i}`, { customer_name: 'Shakedown Test' }));
+    const older = Array.from({ length: 45 }, (_, i) => estimate(`o${i}`));
+    const { conn, calls } = fakeConn({ estimates: [...tests, ...older], taken: ['o0'] });
+    const open = await _internals.openEstimates(conn, NOW);
+    expect(open).toHaveLength(_internals.MAX_ESTIMATES);
+    expect(open[0].id).toBe('o1');
+    expect(calls.some(([table, m]) => table === 'estimates' && m === 'limit')).toBe(false);
   });
 
   test('none open: the visits are not read, and with no block nothing else is read', async () => {
@@ -147,7 +169,7 @@ describe('fillList', () => {
     }
     // Never geocoded: each location is the stored one or none.
     expect(slots.resolveEstimateCoords).toHaveBeenCalledTimes(4);
-    for (const [, opts] of slots.resolveEstimateCoords.mock.calls) expect(opts).toEqual({ paidCalls: false });
+    for (const [, opts] of slots.resolveEstimateCoords.mock.calls) expect(opts).toEqual({ paidCalls: false, strictReads: true });
     expect(slots.resolveCatalogSlotProfile).toHaveBeenCalledWith(expect.objectContaining({ id: 'near' }), {}, conn);
     expect(getCustomerSchedulingPreferences).toHaveBeenCalledWith('c-near', 'Pest Control', conn, { serviceKey: 'pest_control' });
     // The gap tool's read of the day, with its statuses and columns.
@@ -229,26 +251,75 @@ describe('fillList', () => {
     expect((await fillList(near.conn, nine, NOW)).byBlock[0]).toEqual([]);
   });
 
-  test('no stored location is counted, a failed read is counted and logged, and the rest still fit', async () => {
+  test('no stored location is counted, a failed read is counted and logged (never as no location), and the rest still fit', async () => {
     dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
-    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng }, broken: { lat: HQ.lat, lng: HQ.lng } });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng }, broken: { lat: HQ.lat, lng: HQ.lng }, dbdown: new Error('connection reset') });
     slots.resolveCatalogSlotProfile.mockImplementation(async (row) => {
       if (row.id === 'broken') throw new Error('catalog down');
       return PROFILE;
     });
-    const { conn } = fakeConn({ estimates: [estimate('near'), estimate('nowhere'), estimate('broken')] });
+    const { conn } = fakeConn({ estimates: [estimate('near'), estimate('nowhere'), estimate('broken'), estimate('dbdown')] });
     const out = await fillList(conn, [morning], NOW);
-    expect(out).toMatchObject({ checked: 3, fitted: 1, noLocation: 1, unread: 1 });
+    expect(out).toMatchObject({ checked: 4, fitted: 1, noLocation: 1, unread: 2 });
     expect(out.byBlock[0].map((l) => l.estimateId)).toEqual(['near']);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate broken unread (catalog down)'));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate dbdown unread (connection reset)'));
   });
 
   test('a technician without the service\'s capability gets no line', async () => {
     dayStops({ [DAY]: [stop('first', '08:00')] });
     locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
-    const { conn } = fakeConn({ estimates: [estimate('near')], inactive: [TECH] });
+    const { conn, calls } = fakeConn({ estimates: [estimate('near')], inactive: { general: [TECH] } });
     const out = await fillList(conn, [morning], NOW);
     expect(out).toMatchObject({ checked: 1, fitted: 0, byBlock: [[]] });
+    expect(calls).toContainEqual(['technician_capabilities', 'whereIn', ['service_category', ['general']]]);
+  });
+
+  test('a combined visit needs the capability for each service it performs', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00')] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, reservationServiceMix: true, serviceLabel: 'Pest Control + Lawn Care',
+      services: [{ service: 'pest_control', label: 'Pest Control' }, { service: 'lawn_care', label: 'Lawn Care' }] });
+    const offForLawn = fakeConn({ estimates: [estimate('near')], inactive: { lawn: [TECH] } });
+    expect((await fillList(offForLawn.conn, [morning], NOW)).byBlock[0]).toEqual([]);
+    expect(offForLawn.calls).toContainEqual(['technician_capabilities', 'whereIn', ['service_category', ['general', 'lawn']]]);
+    const offForMosquito = fakeConn({ estimates: [estimate('near')], inactive: { mosquito: [TECH] } });
+    expect((await fillList(offForMosquito.conn, [morning], NOW)).byBlock[0]).toEqual([expect.objectContaining({ label: 'Pest Control + Lawn Care' })]);
+  });
+
+  test('the day\'s schedule blocks hold the technician: the technician\'s own and everyone\'s, not another technician\'s', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const block = (technicianId) => ({ id: 'b1', technician_id: technicianId, start_time: '09:00:00', end_time: '12:00:00' });
+    const linesWith = async (scheduleBlocks) => {
+      const { conn, calls } = fakeConn({ estimates: [estimate('near')], scheduleBlocks });
+      const [lines] = (await fillList(conn, [morning], NOW)).byBlock;
+      expect(calls).toEqual(expect.arrayContaining([['tech_schedule_blocks', 'where', [{ date: DAY }]],
+        ['tech_schedule_blocks', 'whereNot', ['block_type', 'available']]]));
+      return lines;
+    };
+    expect(await linesWith([])).toEqual([expect.objectContaining({ estimateId: 'near', startMin: expect.any(Number) })]);
+    expect((await linesWith([]))[0].startMin).toBeLessThan(10 * 60);
+    // A 9:00 to noon block holds the van too: it reaches the customer after noon, and the visit runs past the 1:00 PM
+    // end of the opening.
+    expect(await linesWith([block(TECH)])).toEqual([]);
+    expect(await linesWith([block(null)])).toEqual([]);
+    expect((await linesWith([block('00000000-0000-4000-8000-000000000002')]))[0].startMin).toBeLessThan(10 * 60);
+  });
+
+  test('only on a day the booking page allows a first visit: a seasonal mosquito program in season, a new home from its move-in date', async () => {
+    const NOV = '2040-11-13';
+    dayStops({ [DAY]: [stop('first', '08:00')], [NOV]: [stop('first-nov', '08:00')] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const { conn } = fakeConn({ estimates: [estimate('near')] });
+    const blocks = [morning, { ...morning, day: NOV }];
+    slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, serviceLabel: 'Seasonal Mosquito Control',
+      services: [{ service: 'mosquito', label: 'Mosquito', visitsPerYear: 9 }] });
+    expect((await fillList(conn, blocks, NOW)).byBlock.map((lines) => lines.length)).toEqual([1, 0]);
+    slots.resolveCatalogSlotProfile.mockResolvedValue(PROFILE);
+    slots.estimateMoveInDate.mockResolvedValueOnce('2040-09-11');
+    expect((await fillList(conn, blocks, NOW)).byBlock.map((lines) => lines.length)).toEqual([0, 1]);
+    expect(slots.estimateMoveInDate).toHaveBeenCalledWith(expect.objectContaining({ id: 'near' }));
   });
 
   test('the server keeps answering while the list is built: the checks yield to the event loop between them', async () => {

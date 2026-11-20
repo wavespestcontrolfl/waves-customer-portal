@@ -6,11 +6,13 @@
  * booked or sent.
  *
  * The fit is the schedule gap tool's check (scheduling/gap-candidates.js analyzeGapCandidate): the staff arrival search
- * on the technician's day as booked, the customer's day and time rules, the technician's capability for the service,
- * and the van home by the route check's day end (route-check.js DISPATCH_DAY_END). The estimate stands in as a new
- * stop (estimateGapCandidate): the customer's stored location, never geocoded, with the service and length its booking
- * page offers, tried at every place in the route as the staff finder tries a new customer. A visit fits a block when it
- * runs inside it: from the van's arrival (or the window's start, when the van is early) to the visit's end.
+ * on the technician's day as booked, with the day's schedule blocks (lunch, time off), the customer's day and time
+ * rules, the technician's capability for every service the visit performs, and the van home by the route check's day
+ * end (route-check.js DISPATCH_DAY_END). The estimate stands in as a new stop (estimateGapCandidate): the customer's
+ * stored location, never geocoded, with the service and length its booking page offers, tried at every place in the
+ * route as the staff finder tries a new customer, and only on a day its booking page allows a first visit (season,
+ * move-in date). A visit fits a block when it runs inside it: from the van's arrival (or the window's start, when the
+ * van is early) to the visit's end.
  *
  * Open estimate: sent or viewed, not archived or expired, with a customer who is not an internal test contact, and no
  * visit or live hold made from it. Nothing here is paid: no geocoding and no road times.
@@ -25,7 +27,7 @@ const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-p
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { DISPATCH_DAY_END } = require('./route-check');
 
-// The newest open estimates read each morning (9 were open on 2026-11-20).
+// The newest open estimates checked each morning (9 were open on 2026-11-20).
 const MAX_ESTIMATES = 40;
 // The lines under one block: its best fits.
 const MAX_PER_BLOCK = 3;
@@ -35,11 +37,14 @@ const toMin = (hhmm) => {
   return h * 60 + m;
 };
 
-/** The open estimates, newest first: internal test contacts and the ones a visit or live hold was made from left out. */
+/**
+ * The newest MAX_ESTIMATES open estimates: internal test contacts and the ones a visit or live hold was made from are
+ * left out first, so they never take a place in the count.
+ */
 async function openEstimates(conn, now) {
   const rows = await conn('estimates').whereIn('status', ['sent', 'viewed']).whereNull('archived_at').whereNotNull('customer_id')
     .where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', now))
-    .orderBy('created_at', 'desc').limit(MAX_ESTIMATES).select('*');
+    .orderBy('created_at', 'desc').select('*');
   const open = rows.filter((row) => {
     const [firstName, ...rest] = String(row.customer_name || '').trim().split(/\s+/);
     return !isInternalTestContact({ customerId: row.customer_id, firstName, lastName: rest.join(' '), email: row.customer_email, phone: row.customer_phone });
@@ -49,7 +54,7 @@ async function openEstimates(conn, now) {
     .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', now))
     .pluck('source_estimate_id');
   const takenIds = new Set(taken.map(String));
-  return open.filter((row) => !takenIds.has(String(row.id)));
+  return open.filter((row) => !takenIds.has(String(row.id))).slice(0, MAX_ESTIMATES);
 }
 
 /**
@@ -73,12 +78,19 @@ const byFit = (a, b) => a.addedDriveMin - b.addedDriveMin || a.startMin - b.star
 // between them so the server keeps answering requests while it is built.
 const yieldToLoop = () => new Promise((resolve) => { setImmediate(resolve); });
 
-/** Every listed block's day as booked (the gap tool's read: its statuses, columns and live holds). */
-async function stopsByDay(conn, blocks) {
+/**
+ * Every listed block's day as booked (the gap tool's read: its statuses, columns and live holds) and its schedule
+ * blocks: every tech_schedule_blocks row but 'available', a technician's own or everyone's (technician_id null), as
+ * the staff finder reads them (arrival-route.js loadArrivalRouteContext).
+ */
+async function readDays(conn, blocks) {
   const out = new Map();
   for (const day of new Set(blocks.map((b) => b.day))) {
-    out.set(day, await dayStopsQuery(conn, { dateStr: day, excludeStatuses: QUALITY_EXCLUDED_STATUSES, select: dayStopSelect(conn) })
-      .whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())'));
+    const stops = await dayStopsQuery(conn, { dateStr: day, excludeStatuses: QUALITY_EXCLUDED_STATUSES, select: dayStopSelect(conn) })
+      .whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())');
+    const scheduleBlocks = await conn('tech_schedule_blocks').where({ date: day }).whereNot('block_type', 'available')
+      .select('id', 'technician_id', 'start_time', 'end_time', 'updated_at');
+    out.set(day, { stops, scheduleBlocks });
   }
   return out;
 }
@@ -103,7 +115,7 @@ async function fillList(conn, blocks, now) {
     }
   }
   if (!candidates.length) return result;
-  const days = await stopsByDay(conn, blocks);
+  const days = await readDays(conn, blocks);
   const homes = await loadTechStartPoints(conn, [...new Set(blocks.map((b) => b.techId))]);
   const departure = await dayDepartureMinutes(conn);
   const today = etDateString(now);
@@ -116,10 +128,13 @@ async function fillList(conn, blocks, now) {
   const fitted = new Set();
   for (const indexes of techDays.values()) {
     const { day, techId } = blocks[indexes[0]];
+    const { stops, scheduleBlocks } = days.get(day);
+    const own = scheduleBlocks.filter((row) => row.technician_id == null || String(row.technician_id) === techId);
     for (const { estimate, candidate } of candidates) {
-      const { routeFits = [] } = analyzeGapCandidate(candidate, days.get(day), {
+      if (!candidate.firstVisitOpen(day)) continue;
+      const { routeFits = [] } = analyzeGapCandidate(candidate, stops, {
         date: day, technicianId: techId, now, today, closed: false, home: homeFromMap(homes, techId),
-        modeledDepartureMinutes: departure, targetReturnMinutes: DISPATCH_DAY_END,
+        modeledDepartureMinutes: departure, targetReturnMinutes: DISPATCH_DAY_END, blocks: own,
       });
       await yieldToLoop();
       for (const i of indexes) {
