@@ -81,9 +81,9 @@ function Where() {
   return <output data-testid="where">{useLocation().pathname}</output>;
 }
 
-function renderWithIndex(landing) {
+function renderWithIndex(landing, start = '/admin/pipeline') {
   return render(
-    <MemoryRouter initialEntries={['/admin/pipeline']}>
+    <MemoryRouter initialEntries={[start]}>
       <Where />
       <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
         <Routes>
@@ -91,6 +91,7 @@ function renderWithIndex(landing) {
           <Route path="/admin/pipeline" element={<Home />} />
           <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
           <Route path="/admin/today" element={<Page name="Today" />} />
+          <Route path="/admin/today/visit" element={<Home />} />
         </Routes>
       </PortalUpdateGate>
     </MemoryRouter>,
@@ -189,6 +190,17 @@ describe('PortalUpdateGate', () => {
     expect(await screen.findByText('Today')).toBeTruthy();
     await act(async () => {});
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a move from a field page through the /admin index keeps the tab, as field work can still be on its way; the next move reloads', async () => {
+    renderWithIndex('/admin/dashboard', '/admin/today/visit');
+    goLive('bbb222bbb222');
+    fireEvent.click(screen.getByText('Home'));
+    expect(await screen.findByText('Dashboard')).toBeTruthy();
+    await act(async () => {});
+    expect(reload).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Open Pipeline'));
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
   });
 
   test('held work keeps the tab: the move opens the page and the bar stays', async () => {

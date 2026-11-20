@@ -50,8 +50,16 @@ function hasSignal(now) {
 // The /admin index only redirects: to Today for a technician or with Field
 // view on, else to the dashboard (AdminFieldViewEntry, AdminIndexRedirect).
 // So a move to it is not a page move: the move on to the page it lands on
-// decides.
+// decides, judged from the page before the index (pageAfterMove).
 const adminIndex = (pathname) => /^\/admin\/?$/i.test(String(pathname ?? ''));
+
+// The page a tab shows after a move from `page` to `pathname`. The bare index
+// shows no page of its own, so a move to it keeps the page before it. The
+// gate passes that page as `from`, so a move from Today through the index on
+// to the dashboard still leaves a field page.
+export function pageAfterMove(page, pathname) {
+  return adminIndex(pathname) ? page : pathname;
+}
 
 // `from`: the page the move leaves.
 export function reloadDueAtMove(pathname, now = Date.now(), from = null) {

@@ -3,7 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { Button } from './ui';
 import { isAdminPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
-import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
+import { pageAfterMove, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
 // (lib/portalReload.js) it shows `fallback` in place of the routes, so the old
@@ -20,8 +20,12 @@ import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/porta
 // without this gate, held work or not; a follow-up PR makes it obey the holds.
 export function PortalUpdateGate({ fallback, children }) {
   const { pathname } = useLocation();
-  const [gate, setGate] = useState({ pathname, reloading: false });
-  if (gate.pathname !== pathname) setGate({ pathname, reloading: reloadDueAtMove(pathname, Date.now(), gate.pathname) });
+  // `page`: the page the tab shows. The bare /admin index, a redirect, never
+  // replaces it (lib/portalReload.js, pageAfterMove).
+  const [gate, setGate] = useState({ pathname, page: pathname, reloading: false });
+  if (gate.pathname !== pathname) {
+    setGate({ pathname, page: pageAfterMove(gate.page, pathname), reloading: reloadDueAtMove(pathname, Date.now(), gate.page) });
+  }
 
   useEffect(() => {
     if (!gate.reloading) return undefined;
