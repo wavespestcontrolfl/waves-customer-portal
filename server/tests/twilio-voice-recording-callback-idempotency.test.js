@@ -56,7 +56,6 @@ function makeDb(tables) {
   const COLUMN_DEFAULTS = { call_log: { processing_generation: 0 } };
   const withDefaults = (table, row) => ({ ...(COLUMN_DEFAULTS[table] || {}), ...row });
   const pick = (row, cols) => Object.fromEntries(cols.map((c) => [c, row[c] ?? null]));
-  const { FIRST_RECORDING_STATUS_SQL, FIRST_RECORDING_ATTEMPTS_SQL } = require('../config/call-extraction-retry');
 
   function evalClause(row, clause) {
     switch (clause.type) {
@@ -128,13 +127,6 @@ function makeDb(tables) {
     const before = { ...row };
     for (const [k, v] of Object.entries(patch)) {
       if (v && v.__raw) {
-        if (v.sql === FIRST_RECORDING_STATUS_SQL || v.sql === FIRST_RECORDING_ATTEMPTS_SQL) {
-          // A first recording resets a retry state, read on the row before the write.
-          const reset = ['no_transcription', 'extraction_failed'].includes(before.processing_status)
-            && !String(before.recording_url || '').trim();
-          row[k] = reset ? (k === 'processing_status' ? null : 0) : before[k];
-          continue;
-        }
         if (v.sql.startsWith('CASE WHEN transcription_status = \'rejected\'')) {
           // The replace path's voicemail-stamp reset.
           row[k] = (before.transcription_status === 'rejected' && before[k] === 'voicemail') ? null : before[k];
@@ -369,39 +361,22 @@ describe('POST /recording-status', () => {
     ]);
   });
 
-  // A pass with no audio (the live-text pass) can leave a retry state before the first recording arrives. That
-  // recording starts its own first pass: the write that lands it resets the state and the count, so a short late
-  // recording is never read as a short call's settled failure (pre-push Codex P1, round 9).
-  test('a first recording on a row a pass with no audio left in a retry state resets it to a first pass', async () => {
-    tables.call_log.push({
-      id: 'c1', twilio_call_sid: PARENT, recording_sid: null, recording_url: null,
-      processing_status: 'no_transcription', extraction_attempts: 2, processing_generation: 3,
-    });
-    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1, RecordingDuration: '8' }));
-    expect(tables.call_log[0]).toMatchObject({ recording_sid: REC_1, processing_status: null, extraction_attempts: 0 });
-    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 3 });
-  });
-
   // The Studio branch: no row by either SID at the first read, then a peer (/call-status) inserts the call before
-  // this callback's transaction. Its write resets a retry state the same way, only when the row had no recording,
-  // and the timers fence on the generation that write returned (pre-push Codex P1, round 9).
-  test.each([
-    ['with no recording yet resets to a first pass', { recording_sid: null, recording_url: null }, { processing_status: null, extraction_attempts: 0 }],
-    ['with a recording already keeps its state', { recording_sid: REC_2, recording_url: `${URL_2}.mp3` }, { processing_status: 'no_transcription', extraction_attempts: 2 }],
-  ])('a Studio call a peer inserted after the first read, %s; its timers carry the written generation', async (_what, recording, after) => {
+  // this callback's transaction. The timers fence on the generation that branch's write returned (pre-push Codex P1,
+  // round 9), as they do on an attach.
+  test('a Studio call a peer inserted after the first read: its timers carry the generation the write returned', async () => {
     let inserted = false;
     tables.__afterMiss = (table) => {
       if (inserted || table !== 'call_log') return;
       inserted = true;
       tables.call_log.push({
-        id: 'c9', twilio_call_sid: PARENT, ...recording, transcription_metadata: null,
-        processing_status: 'no_transcription', extraction_attempts: 2, processing_generation: 5,
+        id: 'c9', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, transcription_metadata: null,
+        processing_status: null, processing_generation: 5,
       });
     };
     await post('/recording-status', recordingCallback({ CallSid: PARENT, ParentCallSid: undefined, RecordingSid: REC_1, RecordingUrl: URL_1, RecordingDuration: '8' }));
     expect(tables.call_log).toHaveLength(1);
-    expect(tables.call_log[0]).toMatchObject({ recording_sid: REC_1, ...after });
+    expect(tables.call_log[0]).toMatchObject({ id: 'c9', recording_sid: REC_1 });
     jest.advanceTimersByTime(2 * 60 * 1000 + 5);
     expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 5 });
   });

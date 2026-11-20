@@ -437,15 +437,7 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000004');
     expect(recordingsSpy.list.mock.calls.map((c) => c[0].callSid)).toEqual(['CAtest0000000000000000000000000004', child]);
     expect(out).toMatchObject({ success: true, recovered: true, recordingSid: 'REchild00000000000000000000000001' });
-    // The recovered recording starts its first pass: a retry state a pass with no audio left resets in the same
-    // write, decided on the row as written (pre-push Codex P1, round 9). This mock's db.raw returns the SQL text.
-    const { FIRST_RECORDING_STATUS_SQL, FIRST_RECORDING_ATTEMPTS_SQL } = require('../config/call-extraction-retry');
-    expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({
-      recording_sid: 'REchild00000000000000000000000001',
-      transcription_status: 'pending',
-      processing_status: FIRST_RECORDING_STATUS_SQL,
-      extraction_attempts: FIRST_RECORDING_ATTEMPTS_SQL,
-    }));
+    expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: 'REchild00000000000000000000000001', transcription_status: 'pending' }));
     recordingsSpy.list.mockImplementation(async () => []);
   });
 

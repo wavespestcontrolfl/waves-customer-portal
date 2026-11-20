@@ -1013,9 +1013,7 @@ function isImplausibleTranscript(transcription, recordingSeconds) {
 // under this cap (≥10 min between attempts via the sweep's age gate), which
 // rides out transient provider errors. At the cap a blocking triage item is
 // filed so the call can't die silently.
-const {
-  CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, sweepLengthSql, shortRetrySettledSql, firstRecordingReset,
-} = require('../config/call-extraction-retry');
+const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, sweepLengthSql } = require('../config/call-extraction-retry');
 
 // Human-readable "confirm before dispatch" reasons surfaced by the address /
 // identity bridge below. Shown on the lead's AI-triage activity so Virginia
@@ -4622,32 +4620,23 @@ function whereSweepCandidate(qb) {
 }
 
 // The ordinary (non-force) claim's fences for a pass nobody pressed a button
-// for, in one place. The claim is the one gate every pass goes through, so a
-// rule the readers rely on is enforced here instead of in each caller.
+// for, in one place: the claim is the one gate every pass goes through.
 // - `sweep` (processAllPending only): the sweep's whole candidate rule,
 //   re-checked atomically (pre-push Codex P1, rounds 4 and 5). A timer can
 //   finish a selected row as voicemail or spam, or quarantine a card number,
 //   before the sweep reaches it, and the rest of this claim accepts those.
-// - Not `operator`: a retry state on a recording of 10 s or less is settled
-//   (config/call-extraction-retry, shortRetrySettledSql). The sweep never
-//   retried one, but a duplicate recording-status callback's timer could, so
-//   the estimate guard and the callback readers could not read it as settled
-//   (pre-push Codex P0, round 8). An operator's Process (`operator`) and
-//   Reprocess (`force`, the other claim branch) still run it.
 // - `scheduledGeneration` (the recording webhook's timers): the
 //   processing_generation the webhook's own write left on the row. A pass
 //   that claimed the row since (a higher generation) overtook the timer, so
-//   the timer runs only on a state that is still owed a pass: a first-pass
-//   state (NULL or pending, which a deferral restores), a claim (the heartbeat
-//   rule above decides), or a retry state (the cap, the backoff and the
-//   short-retry rule decide). A finished verdict, a creation failure the
-//   office reviews, or any other state refuses it, so a call the sweep
-//   finished before the timer fired is not run again (pre-push Codex P1,
-//   rounds 8 and 9).
+//   the timer runs only on a state still owed a pass: a first-pass state
+//   (NULL or pending, which a deferral restores), a claim (the heartbeat rule
+//   decides), or a retry state (the cap and the backoff decide). A finished
+//   verdict, a creation failure the office reviews, or any other state
+//   refuses it, so a call the sweep finished before the timer fired is not
+//   run again (pre-push Codex P1, rounds 8 and 9).
 const OVERTAKEN_TIMER_STATES = ['pending', 'processing', 'no_transcription', 'extraction_failed'];
 function whereUnattendedClaim(qb, opts = {}) {
   if (opts.sweep) qb.where(function sweepStillSelects() { whereSweepCandidate(this); });
-  if (!opts.operator) qb.whereRaw(`NOT ${shortRetrySettledSql()}`);
   if (opts.scheduledGeneration != null) {
     qb.where(function noVerdictSinceScheduled() {
       this.where('processing_generation', '<=', Number(opts.scheduledGeneration))
@@ -11706,11 +11695,10 @@ const CallRecordingProcessor = {
           // audio the operator never chose (Codex #3736 r6 P1).
           .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
           // The fences for an unattended pass (whereUnattendedClaim): a sweep
-          // pass re-checks the sweep's candidate rule; no automatic pass takes
-          // a short call's failed retry state; a webhook timer that a newer
-          // pass overtook runs only on a row still owed a pass. Each refusal
-          // leaves the row untouched instead of running the paid pipeline
-          // again.
+          // pass re-checks the sweep's candidate rule, and a webhook timer
+          // that a newer pass overtook runs only on a row still owed a pass.
+          // Each refusal leaves the row untouched instead of running the paid
+          // pipeline again.
           .where(function unattendedClaim() { whereUnattendedClaim(this, opts); })
           .update({
             processing_status: 'processing',
@@ -26005,11 +25993,7 @@ const CallRecordingProcessor = {
         recording_sid: recording.sid,
         recording_duration_seconds: parseInt(recording.duration || call.duration_seconds || 0),
         transcription_status: 'pending',
-        // The recording starts its first pass: a retry state left by a pass
-        // with no audio resets with a fresh budget, decided on the row as
-        // written, never on this read (config/call-extraction-retry,
-        // firstRecordingReset; pre-push Codex P1, round 9).
-        ...firstRecordingReset((sql) => db.raw(sql)),
+        processing_status: call.processing_status || null,
         updated_at: new Date(),
       });
 

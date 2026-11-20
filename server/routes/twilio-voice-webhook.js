@@ -4,7 +4,6 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { callStartedAt } = require('../utils/call-timeline');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { firstRecordingReset } = require('../config/call-extraction-retry');
 const { ringTargetForLine } = require('../services/tech-line');
 const conferencePath = require('../services/call-conference-path');
 const callHold = require('../services/call-hold');
@@ -2898,13 +2897,6 @@ router.post('/recording-status', async (req, res) => {
           break;
         }
         const write = { ...recordingData };
-        if (attach.action === 'attach') {
-          // The row's first recording starts its first pass: a retry state
-          // that a pass with no audio left (the live-text pass) resets with
-          // a fresh budget in this statement, as a replace does below
-          // (firstRecordingReset; pre-push Codex P1, round 9).
-          Object.assign(write, firstRecordingReset((sql) => db.raw(sql)));
-        }
         if (attach.action === 'replace') {
           // The row's transcript/extraction (if any) describe the OLD
           // audio. Reset processing_status atomically with the swap so the
@@ -3123,11 +3115,10 @@ router.post('/recording-status', async (req, res) => {
               // between the earlier lookup and this transaction means the
               // guarded update silently skips, and the just-arrived
               // recording must be quarantine-deleted, not left at Twilio.
-              // A first recording here resets a retry state too, and the
-              // timers fence on the generation it landed at (pre-push Codex
-              // P1, round 9).
+              // The timers fence on the generation this write left (pre-push
+              // Codex P1, round 9).
               const guarded = await trx('call_log').where({ id: existing.id }).where(notQuarantined)
-                .update({ ...recordingData, ...firstRecordingReset((sql) => db.raw(sql)) }, ['processing_generation']);
+                .update(recordingData, ['processing_generation']);
               if (guarded.length === 0) {
                 stampedRaceRow = existing;
               } else {

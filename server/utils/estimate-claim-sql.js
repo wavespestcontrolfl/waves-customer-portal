@@ -50,12 +50,7 @@ const INVALIDATION_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngin
 // / pending / no_transcription row with a NULL token is NOT settled — the
 // retry that will claim it can change the call's identity and linkage
 // (pre-push P0, PR #3304 — the guard below treated the queue-to-claim
-// window as settled and could disclose or charge during it). A retry state
-// no automatic pass takes (a recording of 10 s or less: the ordinary claim
-// refuses it) is settled.
-// config/call-extraction-retry is a leaf (no top-level requires), so this
-// module stays dependency-free.
-const { SHORT_RETRY_COLUMNS, shortRetrySettled } = require('../config/call-extraction-retry');
+// window as settled and could disclose or charge during it).
 const CALL_IN_FLIGHT_STATUSES = new Set(['processing', 'pending']);
 const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
 const CALL_EXTRACTION_RETRY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -64,14 +59,6 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
   if (callRow.processing_token != null) return true;
   const status = callRow.processing_status == null ? null : String(callRow.processing_status).toLowerCase();
   if (CALL_IN_FLIGHT_STATUSES.has(status)) return true;
-  // A retry state on a recording of 10 s or less is settled below the cap:
-  // no automatic pass takes it again, the claim itself refuses it
-  // (config/call-extraction-retry, shortRetrySettled; pre-push Codex P1
-  // round 7, P0 round 8). An operator's pass holds a token, read above as in
-  // flight. Every caller selects
-  // SHORT_RETRY_COLUMNS (here: CALL_VERDICT_COLUMNS, settledCallGeneration);
-  // a row read without them stays in flight.
-  if (shortRetrySettled(callRow)) return false;
   // no_transcription retries under the sweep's attempt cap (no age window: a
   // recording adoption resets the count); at the cap the lane has ended and
   // the row is settled. Forever-in-flight blocked its estimate for good
@@ -101,8 +88,7 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
 async function settledCallGeneration(dbc, callLogId) {
   if (!callLogId) return null;
   const row = await dbc('call_log').where({ id: callLogId })
-    .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation',
-      ...SHORT_RETRY_COLUMNS);
+    .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
   if (!row || callReprocessInFlight(row) || row.processing_generation == null) return null;
   return Number(row.processing_generation);
 }
@@ -314,8 +300,7 @@ function callDraftVerdict(md, {
 }
 
 // The columns of a call row the call-side verdict reads.
-const CALL_VERDICT_COLUMNS = ['metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'twilio_call_sid',
-  ...SHORT_RETRY_COLUMNS];
+const CALL_VERDICT_COLUMNS = ['metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'twilio_call_sid'];
 
 // The call-side verdict for one engine draft up to the live-linkage step,
 // shared by callSideBlockForEstimateData and its batch form so the two can

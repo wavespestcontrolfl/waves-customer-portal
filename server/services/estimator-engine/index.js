@@ -1596,10 +1596,8 @@ async function sweepPendingReconciles({ limit = 50 } = {}) {
     })();
     if (!pending?.at) continue;
     try {
-      // SHORT_RETRY_COLUMNS: callReprocessInFlight reads a short call's failed retry state as settled.
       const live = await db('call_log').where({ id: row.id })
-        .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at',
-          ...require('../../config/call-extraction-retry').SHORT_RETRY_COLUMNS);
+        .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at');
       if (!live) continue;
       {
         const { callReprocessInFlight } = require('../admin-estimate-persistence');
@@ -1807,8 +1805,7 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     // every current draft — including the valid replacement — and then
     // clear the queue.
     const live = await db('call_log').where({ id: row.id })
-      .first('processing_token', 'processing_status', 'metadata', 'extraction_attempts', 'created_at', 'processing_generation',
-        ...require('../../config/call-extraction-retry').SHORT_RETRY_COLUMNS);
+      .first('processing_token', 'processing_status', 'metadata', 'extraction_attempts', 'created_at', 'processing_generation');
     if (!live) continue;
     // EVERY unsettled status defers, not just a live token or literal
     // 'processing' (codex P1, PR #3304 GH r10): the failed spam/voicemail

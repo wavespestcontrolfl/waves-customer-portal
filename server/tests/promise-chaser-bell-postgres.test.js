@@ -734,23 +734,6 @@ const OUR_NUMBER = '+19415550100';
 
       expect(await sweepPromiseChasers()).toBe(1);
     });
-
-    // The sweep keeps its 10-second floor for retry states, gate on or off, so a failed pass on a short recording is
-    // settled below the cap; a longer one is still a retry (pre-push Codex P1, short-recording sweep).
-    test.each([
-      ['extraction_failed', 8, 1], ['no_transcription', 8, 1], ['no_transcription', 45, 0],
-    ])('a recorded %s call of %i s under the cap rings %i time(s)', async (status, seconds, rings) => {
-      const earlier = callRow(240);
-      const commitment = commitmentRow(earlier.id);
-      const failed = callRow(12, {
-        processing_status: status, extraction_attempts: 1,
-        recording_url: 'https://example.test/recording.mp3', recording_duration_seconds: seconds,
-      });
-      await mockConn('call_log').insert([earlier, failed]);
-      await mockConn('call_commitments').insert(commitment);
-
-      expect(await sweepPromiseChasers()).toBe(rings);
-    });
   });
 
   test("a human-typed commitment's alert reports its OWN created_at as when the promise was made, never the linked call's time; an AI-extracted one still uses the call time (Codex #5019 r8 P2)", async () => {

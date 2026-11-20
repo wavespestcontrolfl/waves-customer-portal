@@ -5,8 +5,6 @@ const {
   DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callReprocessInFlight, callDraftVerdict,
   isRowScopedDraftBlockReason, TERMINAL_ESTIMATE_STATUSES,
 } = require('../utils/estimate-claim-sql');
-// callReprocessInFlight reads these too: a short call's failed retry state is settled.
-const { SHORT_RETRY_COLUMNS } = require('../config/call-extraction-retry');
 const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
@@ -264,7 +262,7 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
     // estimate and its public token permanently blocked.
     const callRow = await trx('call_log').where({ id: verdictCallId }).forUpdate()
       .first('processing_generation', 'processing_status', 'processing_token',
-        'extraction_attempts', 'created_at', 'metadata', ...SHORT_RETRY_COLUMNS);
+        'extraction_attempts', 'created_at', 'metadata');
     const liveGen = callRow?.processing_generation != null ? Number(callRow.processing_generation) : null;
     liveGenForRecheck = liveGen;
     if (callRow && liveGen != null && liveGen > Number(pending.generation)) {
@@ -586,8 +584,7 @@ async function staleCallLinkageReason(dbc, data, {
   const callQuery = dbc('call_log').where({ id: draftCallLogId });
   if (lockCallRow) callQuery.forUpdate();
   const callRow = await callQuery
-    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation',
-      ...SHORT_RETRY_COLUMNS);
+    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
   if (!callRow) return 'invalidated_before_delivery';
   // A reprocess IN FLIGHT means the linkage verdict is about to change —
   // abort; the row is sendable again once the call settles. In-flight is a

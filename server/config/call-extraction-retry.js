@@ -16,8 +16,9 @@ const EXTRACTION_RETRY_WINDOW_DAYS = 7;
 // call that ended during a deploy (often a cancel) still gets its transcript.
 // Every other state keeps the 10-second floor, gate on or off: a short call
 // that ended in no_transcription or extraction_failed is not retried, and a
-// finished one is not run again. So the gate adds no retries; such a short
-// retry state is settled below the attempt cap (shortRetrySettled, below).
+// finished one is not run again. So the gate adds no retries, and a reader
+// that judges a retry by the attempt cap alone (callback reconciliation, the
+// estimate guard) meets no new state.
 // Every reader that mirrors the sweep's eligibility (getStats, the stall
 // watchdog, the ops queue, the agent-control run list) uses this rule, so
 // none of them can disagree with the sweep. Callers keep their own
@@ -61,70 +62,6 @@ function sweepLengthOk(row, now = Date.now()) {
   return Number.isFinite(created) && created > new Date(now).getTime() - SHORT_RECORDING_SWEEP_HOURS * 3600 * 1000;
 }
 
-// A retry state (no_transcription / extraction_failed) on a recording of
-// 10 s or less, not PAN-quarantined, is SETTLED below the attempt cap: no
-// automatic pass takes it. The sweep keeps its floor for retry states, gate
-// on or off; every other unattended claim refuses it too (the processor's
-// whereUnattendedClaim, pre-push Codex P0, round 8); and recording recovery
-// and the live-text pass take only calls with no recording. Only an
-// operator's Process or Reprocess runs it again, and that claim holds a token,
-// which every reader below reads as in flight. Readers that judge "still
-// retrying" by the cap and the 7-day window read it as settled too: the
-// estimate guard (callReprocessInFlight), the callback reconciliation
-// (call-commitments' exhaustedExtractionSql) and the promise-chaser bell, so a
-// linked estimate, a parent's cards or a chaser alert never wait on a retry
-// that will not come (pre-push Codex P1, round 7).
-// The rule is about a failure ON that recording: a first recording installed
-// on a row in a retry state resets the row to a first pass (below).
-// Every JS caller selects processing_status and SHORT_RETRY_COLUMNS.
-const SHORT_RETRY_COLUMNS = ['recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription_metadata'];
-const RETRY_STATES = ['no_transcription', 'extraction_failed'];
-
-// One call_log row. Fails closed: a row read without processing_status or
-// SHORT_RETRY_COLUMNS is never settled by this rule.
-function shortRetrySettled(row) {
-  const read = (c) => row != null && Object.prototype.hasOwnProperty.call(row, c);
-  if (!read('processing_status') || !SHORT_RETRY_COLUMNS.every(read)) return false;
-  if (!RETRY_STATES.includes(row.processing_status) || !String(row.recording_url || '').trim()) return false;
-  let meta = row.transcription_metadata;
-  try {
-    if (typeof meta === 'string') meta = JSON.parse(meta);
-  } catch {
-    meta = null;
-  }
-  if (String(meta?.pan_detected) === 'true') return false;
-  return (Number(row.recording_duration_seconds ?? row.duration_seconds ?? 0) || 0) <= SWEEP_MIN_SECONDS;
-}
-
-// The SQL twin, over a call_log alias (the table itself by default). Never
-// NULL (a NULL status reads false), so the claim can negate it safely.
-function shortRetrySettledSql(t = 'call_log') {
-  return `(COALESCE(${t}.processing_status IN (${RETRY_STATES.map((s) => `'${s}'`).join(', ')}), false)`
-    + ` AND NULLIF(btrim(${t}.recording_url), '') IS NOT NULL`
-    + ` AND COALESCE(${t}.recording_duration_seconds, ${t}.duration_seconds, 0) <= ${SWEEP_MIN_SECONDS}`
-    + ` AND (${t}.transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true')`;
-}
-
-// A recording installed on a row that had none starts that audio's FIRST
-// pass. A retry state on such a row came from a pass that had no audio (the
-// live-text pass), so every writer that installs a first recording (the
-// recording webhook's attach and its Studio branch, recording recovery)
-// resets it to NULL with a fresh attempt budget in the same statement, as a
-// replaced recording already is. Otherwise the claim's short-retry rule above
-// would refuse every automatic pass on a late recording of 10 s or less, and
-// the sweep's retry floor would skip it (pre-push Codex P1, round 9). SQL
-// reads every SET expression against the row as it was before the write, so
-// a row in another state, or one that already had a recording (a duplicate
-// delivery), keeps its status and its count.
-const FIRST_RECORDING_RESET_WHEN = `processing_status IN (${RETRY_STATES.map((s) => `'${s}'`).join(', ')})`
-  + " AND NULLIF(btrim(recording_url), '') IS NULL";
-const FIRST_RECORDING_STATUS_SQL = `CASE WHEN ${FIRST_RECORDING_RESET_WHEN} THEN NULL ELSE processing_status END`;
-const FIRST_RECORDING_ATTEMPTS_SQL = `CASE WHEN ${FIRST_RECORDING_RESET_WHEN} THEN 0 ELSE extraction_attempts END`;
-// The two columns for a writer's update: firstRecordingReset((sql) => db.raw(sql)).
-function firstRecordingReset(raw) {
-  return { processing_status: raw(FIRST_RECORDING_STATUS_SQL), extraction_attempts: raw(FIRST_RECORDING_ATTEMPTS_SQL) };
-}
-
 module.exports = {
   CALL_EXTRACTION_MAX_ATTEMPTS,
   EXTRACTION_RETRY_WINDOW_DAYS,
@@ -133,10 +70,4 @@ module.exports = {
   sweepLengthSql,
   failureReportLengthSql,
   sweepLengthOk,
-  SHORT_RETRY_COLUMNS,
-  shortRetrySettled,
-  shortRetrySettledSql,
-  FIRST_RECORDING_STATUS_SQL,
-  FIRST_RECORDING_ATTEMPTS_SQL,
-  firstRecordingReset,
 };
