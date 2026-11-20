@@ -56,6 +56,7 @@ const { dayDepartureMinutes } = require('../services/scheduling/departure-time')
 const { HQ } = require('../services/route-optimizer');
 const { analyzeGapCandidate, loadGapCandidate } = require('../services/scheduling/gap-candidates');
 const { getServices } = require('../services/service-library');
+const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
 const { loadReminderOffIds } = require('../services/auto-dispatch/reminder-off');
 const { fillList, MAX_PER_BLOCK, MOVE_UP_DAYS, _internals } = require('../services/day-replan/fill-list');
 
@@ -86,8 +87,16 @@ const loaded = (row, extra = {}) => ({
     window_start: '14:00', window_end: '15:00', estimated_duration_minutes: 60, service_type: row.service_type, is_recurring: true,
     recurring_parent_id: 'series-root', lat: HQ.lat + 0.01, lng: HQ.lng, ...extra },
   preferences: { ...normalizePreferences(null, row.service_type), service_category: 'pest_control' }, holds: [], siblingDates: [], deactivated: [],
+  families: ['pest_control'],
 });
 const ZERO_LEADS = { checked: 0, fitted: 0, noLocation: 0, unread: 0 };
+// The scheduler's own rule for a booked visit or live hold (reservation-occupancy.js), as the fake records it.
+const BOOKED_OR_LIVE_HOLD = (() => {
+  const recorded = [];
+  const q = new Proxy({}, { get: (_target, m) => (...args) => { recorded.push(['scheduled_services', m, args]); return q; } });
+  bookedVisitOrLiveHold(q);
+  return recorded;
+})();
 const ZERO_VISITS = { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 };
 
 // A fake knex: each table's chain records its calls; a where(fn) runs fn on a recorder of its own. `inactive` maps a
@@ -99,24 +108,30 @@ const ZERO_VISITS = { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unre
 function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = [], leads = [], leadEstimates = [], customerVisits = [],
   plan = [], sameDay = null, addOns = [], planHolds = [] } = {}) {
   const calls = [];
+  // The plan visits' own read (the one joined to customers), apart: other reads use some of the same clauses.
+  const planCalls = [];
   const conn = (table) => {
     const q = { categories: [], families: [], match: {}, joined: false };
-    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereBetween', 'orWhere', 'orWhereNotIn', 'orderBy', 'limit']) {
+    const record = (m, args) => {
+      calls.push([table, m, args]);
+      if (q.joined) planCalls.push([table, m, args]);
+    };
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereBetween', 'orWhere', 'orWhereNotIn', 'orWhereRaw', 'orderBy', 'limit']) {
       q[m] = (...args) => {
-        calls.push([table, m, args]);
+        record(m, args);
         if (m === 'whereIn' && args[0] === 'service_category') q.categories = args[1];
         if (m === 'whereIn' && args[0] === 'family_key') q.families = args[1];
         return q;
       };
     }
     q.join = (...args) => {
-      calls.push([table, 'join', args]);
       q.joined = true;
+      record('join', args);
       return q;
     };
     q.where = (...args) => {
       if (typeof args[0] === 'function') args[0](q);
-      else calls.push([table, 'where', args]);
+      else record('where', args);
       if (args[0] && typeof args[0] === 'object') Object.assign(q.match, args[0]);
       return q;
     };
@@ -143,7 +158,7 @@ function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = 
   };
   const db = require('../models/db');
   db.current = conn;
-  return { conn: db, calls };
+  return { conn: db, calls, planCalls };
 }
 
 // Every listed day's stops (the gap tool's read): by date, numbered in route order as dispatch saves them.
@@ -326,14 +341,15 @@ describe('leads that asked for a look (owner *1a*)', () => {
     expect((await _internals.openLeads(conn, NOW)).leads.map(({ lead: row }) => row.id))
       .toEqual(['old-decline', 'old-job', 'lapsed-quote', 'archived-quote', 'served-before', 'open']);
     const customers = ids.map((id) => `c-${id}`);
-    // Live visits only: a cancelled, skipped, no-show or rescheduled visit, or a lapsed hold, never hides the ask (a NULL
-    // status is a live row); a completed visit does.
+    // Live visits only: a cancelled, skipped, no-show or rescheduled visit never hides the ask (a NULL status is a live
+    // row); a completed one does. A booked visit or live hold counts as the scheduler counts it (a booked hold keeps its
+    // expiry).
     expect(calls).toEqual(expect.arrayContaining([
       ['estimates', 'whereIn', ['customer_id', customers]],
       ['scheduled_services', 'whereIn', ['customer_id', customers]], ['scheduled_services', 'whereNull', ['status']],
-      ['scheduled_services', 'orWhereNotIn', ['status', ['cancelled', 'skipped', 'no_show', 'rescheduled']]],
-      ['scheduled_services', 'whereNull', ['reservation_expires_at']], ['scheduled_services', 'orWhere', ['reservation_expires_at', '>', NOW]],
+      ['scheduled_services', 'orWhereNotIn', ['status', ['cancelled', 'skipped', 'no_show', 'rescheduled']]], ...BOOKED_OR_LIVE_HOLD,
     ]));
+    expect(calls).not.toContainEqual(['scheduled_services', 'orWhere', ['reservation_expires_at', '>', NOW]]);
     expect(calls).not.toContainEqual(['scheduled_services', 'whereNot', ['status', 'cancelled']]);
     expect(calls).not.toContainEqual(['estimates', 'whereNull', ['archived_at']]);
   });
@@ -365,13 +381,13 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     const dateOnly = planVisit('date-only', '2040-09-14', { window_start: null });
     const unplaced = planVisit('unplaced', '2040-09-13', { window_start: null, recurring_dispatch_due_date: '2040-09-13' });
     loadGapCandidate.mockResolvedValue(loaded(row));
-    const { conn, calls } = fakeConn({ plan: [row, unplaced, dateOnly, planVisit('shakedown', '2040-09-13', { first_name: 'Shakedown', last_name: 'Test' })] });
-    const { visits, counts } = await _internals.movableVisits(conn, blocks, NOW);
+    const { conn, calls, planCalls } = fakeConn({ plan: [row, unplaced, dateOnly, planVisit('shakedown', '2040-09-13', { first_name: 'Shakedown', last_name: 'Test' })] });
+    const { visits, counts } = await _internals.movableVisits(conn, blocks);
     expect(visits.map((v) => v.row.id)).toEqual(['v1', 'date-only']);
     expect(counts).toEqual({ ...ZERO_VISITS, checked: 2 });
     expect(loadReminderOffIds).toHaveBeenCalledWith(conn, [row, dateOnly]);
     expect(calls).toContainEqual(['scheduled_service_addons', 'whereIn', ['scheduled_service_id', ['v1', 'date-only']]]);
-    expect(calls).toEqual(expect.arrayContaining([
+    expect(planCalls).toEqual(expect.arrayContaining([
       ['scheduled_services', 'join', ['customers', 'customers.id', 'scheduled_services.customer_id']],
       ['scheduled_services', 'where', ['scheduled_services.is_recurring', true]],
       ['scheduled_services', 'whereNull', ['scheduled_services.is_callback']], ['scheduled_services', 'orWhere', ['scheduled_services.is_callback', false]],
@@ -394,19 +410,19 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
       // Another visit of the customer on another day splits nothing.
       { id: 'ok', customer_id: 'c-ok', scheduled_date: '2040-09-15' }, { id: 'ok-next', customer_id: 'c-ok', scheduled_date: '2040-09-16' },
     ] });
-    const { visits, counts } = await _internals.movableVisits(conn, blocks, NOW);
+    const { visits, counts } = await _internals.movableVisits(conn, blocks);
     expect(visits.map((v) => v.row.id)).toEqual(['ok']);
     expect(counts).toEqual({ ...ZERO_VISITS, checked: 1, remindersOff: 1, sharedDay: 1 });
     // The senders' own rule reads the visits; neither left-out visit is loaded.
     expect(loadReminderOffIds).toHaveBeenCalledWith(conn, rows);
     expect(loadGapCandidate.mock.calls.map(([id]) => id)).toEqual(['ok']);
     // The customer's live stops in the range: not cancelled, skipped, no-show or rescheduled (a NULL status is live), and
-    // no lapsed hold.
+    // a booked visit or live hold as the scheduler counts it.
     expect(calls).toEqual(expect.arrayContaining([
       ['scheduled_services', 'whereIn', ['customer_id', ['c-quiet', 'c-pair', 'c-ok']]],
       ['scheduled_services', 'whereBetween', ['scheduled_date', ['2040-09-11', '2040-09-19']]],
       ['scheduled_services', 'whereNull', ['status']], ['scheduled_services', 'orWhereNotIn', ['status', ['cancelled', 'skipped', 'no_show', 'rescheduled']]],
-      ['scheduled_services', 'whereNull', ['reservation_expires_at']], ['scheduled_services', 'orWhere', ['reservation_expires_at', '>', NOW]],
+      ...BOOKED_OR_LIVE_HOLD,
     ]));
   });
 
@@ -418,7 +434,7 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
       return loaded(rows[2]);
     });
     const { conn } = fakeConn({ plan: rows });
-    const { visits, counts } = await _internals.movableVisits(conn, blocks, NOW);
+    const { visits, counts } = await _internals.movableVisits(conn, blocks);
     expect(visits.map((v) => v.row.id)).toEqual(['ok']);
     expect(counts).toEqual({ ...ZERO_VISITS, checked: 3, unread: 1 });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('plan visit down unread (read timeout)'));
@@ -428,11 +444,38 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     const row = planVisit('v1', '2040-09-17');
     loadGapCandidate.mockResolvedValue(loaded(row));
     const { conn } = fakeConn({ plan: [row] });
-    const [{ day, candidate }] = (await _internals.movableVisits(conn, blocks, NOW)).visits;
+    const [{ day, candidate }] = (await _internals.movableVisits(conn, blocks)).visits;
     expect(day).toBe('2040-09-17');
     expect(MOVE_UP_DAYS).toBe(7);
     expect(candidate).toMatchObject({ prospective: true, label: 'Quarterly Pest Control Service' });
     expect(['2040-09-09', '2040-09-10', '2040-09-16', '2040-09-17', '2040-09-18'].map(candidate.dayOpen)).toEqual([false, true, true, false, false]);
+  });
+
+  test('a combined catalog row needs the technician\'s capability for each of its families (pest + termite bait)', async () => {
+    const rows = [planVisit('combo', '2040-09-13'), planVisit('pest', '2040-09-13')];
+    // The gap tool loads the combined row with its plan families (gap-candidates.js planFamilies).
+    loadGapCandidate.mockImplementation(async (id) => (id === 'combo' ? { ...loaded(rows[0]), families: ['pest_control', 'termite_bait'] } : loaded(rows[1])));
+    const { conn } = fakeConn({ plan: rows, inactive: { termite: [TECH] } });
+    const byId = Object.fromEntries((await _internals.movableVisits(conn, blocks)).visits.map((v) => [v.row.id, v.candidate]));
+    expect([byId.combo.deactivated, byId.pest.deactivated]).toEqual([[TECH], []]);
+  });
+
+  test('a lawn round visit moves only where the move stays a one-off: inside its round, at most 7 days from its regular date', async () => {
+    // A round runs Aug 22 to Sep 30, 2040; the next starts Oct 1.
+    const roundBlocks = [{ day: '2040-09-28', techId: TECH, start: 540, min: 240 }];
+    const rows = [planVisit('rounds', '2040-10-02'), planVisit('excepted', '2040-10-02'), planVisit('pest', '2040-10-02')];
+    const extra = {
+      rounds: { recurring_pattern: 'lawn_rounds_9' },
+      // Moved off its regular date (Oct 9) once: the window is measured from Oct 9.
+      excepted: { recurring_pattern: 'lawn_rounds_9', date_exception: true, date_exception_cadence_date: '2040-10-09' },
+      pest: { recurring_pattern: 'quarterly' },
+    };
+    loadGapCandidate.mockImplementation(async (id) => loaded(rows.find((row) => row.id === id), extra[id]));
+    const { conn } = fakeConn({ plan: rows });
+    const byId = Object.fromEntries((await _internals.movableVisits(conn, roundBlocks)).visits.map((v) => [v.row.id, v.candidate]));
+    expect(['2040-09-28', '2040-10-01'].map(byId.rounds.dayOpen)).toEqual([false, true]);
+    expect(['2040-09-28', '2040-10-01'].map(byId.excepted.dayOpen)).toEqual([false, false]);
+    expect(['2040-09-28', '2040-10-01'].map(byId.pest.dayOpen)).toEqual([true, true]);
   });
 
   test('its add-on services count: the capability for each, the plan holds of their families, and the mowing-day rule', async () => {
@@ -448,7 +491,7 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     const { conn, calls } = fakeConn({ plan: rows, inactive: { mosquito: [TECH] },
       addOns: [addOn('mosquito', 'Mosquito Control Service'), addOn('lawn', 'Lawn Care Service')],
       planHolds: [{ ...pause, customer_id: 'c-lawn' }, { ...pause, customer_id: 'c-mosquito' }] });
-    const byId = Object.fromEntries((await _internals.movableVisits(conn, blocks, NOW)).visits.map((v) => [v.row.id, v.candidate]));
+    const byId = Object.fromEntries((await _internals.movableVisits(conn, blocks)).visits.map((v) => [v.row.id, v.candidate]));
     expect([byId.mosquito, byId.lawn, byId.plain].map((c) => c.deactivated)).toEqual([[TECH], [], []]);
     expect(byId.lawn.holds).toEqual([expect.objectContaining({ starts_on: '2040-09-01', resume_on: '2040-09-12' })]);
     expect([byId.mosquito.holds, byId.plain.holds]).toEqual([[], []]);
@@ -462,22 +505,22 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     const rows = Array.from({ length: 65 }, (_, i) => planVisit(`v${String(i).padStart(2, '0')}`, '2040-09-13'));
     loadGapCandidate.mockImplementation(async (id) => loaded(rows.find((row) => row.id === id)));
     const { conn } = fakeConn({ plan: rows });
-    const { visits } = await _internals.movableVisits(conn, blocks, NOW);
+    const { visits } = await _internals.movableVisits(conn, blocks);
     expect(visits.map((v) => v.row.id)).toEqual(rows.slice(0, _internals.MAX_VISITS).map((row) => row.id));
     expect(loadGapCandidate).toHaveBeenCalledTimes(_internals.MAX_VISITS);
     // A backlog of visits the gap tool refuses (locked, a stopped plan) is read no further than the cap.
     loadGapCandidate.mockReset();
     loadGapCandidate.mockResolvedValue({ unavailable: 'candidate_locked_or_excluded' });
-    expect(await _internals.movableVisits(fakeConn({ plan: rows }).conn, blocks, NOW))
+    expect(await _internals.movableVisits(fakeConn({ plan: rows }).conn, blocks))
       .toEqual({ visits: [], counts: { ...ZERO_VISITS, checked: _internals.MAX_VISITS } });
     expect(loadGapCandidate).toHaveBeenCalledTimes(_internals.MAX_VISITS);
     loadReminderOffIds.mockClear();
     const none = fakeConn();
-    expect(await _internals.movableVisits(none.conn, blocks, NOW)).toEqual({ visits: [], counts: ZERO_VISITS });
+    expect(await _internals.movableVisits(none.conn, blocks)).toEqual({ visits: [], counts: ZERO_VISITS });
     expect(loadReminderOffIds).not.toHaveBeenCalled();
     expect(none.calls.filter(([table, m]) => table === 'scheduled_services' && m === 'join')).toHaveLength(1);
     loadReminderOffIds.mockRejectedValueOnce(new Error('reminders down'));
-    await expect(_internals.movableVisits(fakeConn({ plan: rows }).conn, blocks, NOW)).rejects.toThrow('reminders down');
+    await expect(_internals.movableVisits(fakeConn({ plan: rows }).conn, blocks)).rejects.toThrow('reminders down');
   });
 });
 
