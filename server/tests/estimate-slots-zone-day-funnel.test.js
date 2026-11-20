@@ -443,6 +443,23 @@ describe('getAvailableSlots — funnel end to end', () => {
     });
   });
 
+  // A far-south list is never cached (main's rule: funneled results are never cached), so rule B reads the calendar on
+  // every read: tech-2 takes the zone's first stop after tech-1's list was built, and the very next read no longer offers
+  // tech-1 on that day (pre-push P1 on 9f6070c996, not reachable: no cached list skips the per-truck filter).
+  test('per truck, a zone stop taken after a list was built reshapes the very next read (never cached)', async () => {
+    await withGates({ GATE_MULTI_TECH_CONFIRM: 'true' }, async () => {
+      findAvailableSlots.mockResolvedValue(routeOpenings([['2027-05-20', 'tech-1', 3], ['2027-05-21', 'tech-1', 3]]));
+      mockDb({ realStopDates: true, scheduledRows: [], techs: TWO_TRUCKS });
+      const first = await getAvailableSlots('est-funnel-1', WINDOW);
+      expect(first.metadata.zoneDayFunnel.mode).toBe('seeded');
+      expect(offered(first).some((s) => s.date === '2027-05-20' && s.techId === 'tech-1')).toBe(true);
+      mockDb({ realStopDates: true, scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })], techs: TWO_TRUCKS });
+      const second = await getAvailableSlots('est-funnel-1', WINDOW);
+      expect(second.metadata.cacheHit).toBe(false);
+      expect(offered(second).some((s) => s.date === '2027-05-20' && s.techId === 'tech-1')).toBe(false);
+    });
+  });
+
   // Both trucks open at 10:00 on the zone day; the one-per-hour collapse keeps one slot per start (the closer route
   // first: tech-1's). Per truck the filter runs before the collapse, so the zone day's 10:00 is tech-2's, never lost
   // to tech-1's slot.

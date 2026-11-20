@@ -2469,7 +2469,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // opts.paidCalls === false (explicit, off by default; the read-only daily check): no geocode and no Google road
   // estimate, and no make-room row written. Everything else answers as the page does.
   const paidCalls = userOpts.paidCalls !== false;
-  // A ranked list is never cached: a map edit must show at once.
+  // A ranked list is never cached: a map edit must show at once. Nor is a far-south list (the funnel's day set read;
+  // see the write at the end), so the funnel and owner rule B per truck always read the current calendar.
   const cached = bypassCache || routeDayPolicyKey == null || lineRanking ? undefined : wrapperCache.get(cacheKey);
   if (cached && !serviceProfile.reservationServiceMix) {
     // The result was cached for 5 min but the bucket can straddle a lead-time
