@@ -145,10 +145,6 @@ const LABEL_CHECKS = [
   // The trenching box confirms the label rate and trench depth too ("Label rate and trench depth confirmed").
   { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", serviceField: "svcTrenching", name: "trenching", resolve: normalizeTrenchingProductKey, alsoConfirms: ["trenchingApplicationRate", "trenchingDepthFt"] },
 ];
-// The bifenthrin high rate is the label's 0.12% dilution at half the labeled finished volume. The label allows a reduced volume only
-// where the soil will not accept the labeled volume, and only while a continuous barrier can still be achieved, so the box names both
-// there (pre-push audit 29). A rate or product change clears the box, so a check at that rate was ticked with this text.
-const TRENCHING_REDUCED_VOLUME_CHECK = "Label rate, trench depth and reduced volume confirmed (soil will not accept the labeled volume; a continuous barrier can still be achieved)";
 const LABEL_CHECK_FOR_FIELD = Object.fromEntries(LABEL_CHECKS.flatMap(({ productField, checkField, alsoConfirms = [] }) =>
   [productField, ...alsoConfirms].map((field) => [field, checkField])));
 
@@ -7807,11 +7803,12 @@ export default function EstimateToolViewV2({
                           label="Estimate trenching perimeter from footprint"
                         />
                       )}
+                      {/* The box confirms the label rate and trench depth, never a volume: the server alone knows whether its
+                          configured dilution reduces the volume, so its line names the label's conditions and stays in review
+                          (pre-push audit at the second push). */}
                       <CheckboxV2
                         k="trenchingLabelConfirmed"
-                        label={normalizeTrenchingRate(form.trenchingApplicationRate) === "high" && BIFENTHRIN_OPTION_KEYS.has(normalizeTrenchingProductKey(form.trenchingProductKey))
-                          ? TRENCHING_REDUCED_VOLUME_CHECK
-                          : "Label rate and trench depth confirmed"}
+                        label="Label rate and trench depth confirmed"
                       />
                       <div className="text-14 text-zinc-600 leading-snug mb-1">
                         {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).warning}

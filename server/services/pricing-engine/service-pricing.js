@@ -7164,8 +7164,8 @@ function priceTrenching(property = {}, options = {}, replay) {
   ];
   if (volumeFactor < 1) {
     // The label allows a reduced volume only where the soil will not accept the labeled volume and a continuous barrier can still
-    // be achieved (pre-push audit 29). The bifenthrin label check, whose box names both at the high rate, holds the line in review
-    // until it is ticked (label_confirmation_required); at any other rate the line stays in review (reduced_volume_confirmation_required).
+    // be achieved (pre-push audit 29). Only this engine knows whether it applies the volume adjustment (the configured dilution and
+    // bottle), so this warning names both conditions on the line, and the line stays in review (reduced_volume_confirmation_required).
     warningList.push('Stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). The label allows it only where the soil will not accept the labeled volume and a continuous barrier can still be achieved. Requires label confirmation.');
   } else if (rateResolution.applicationRate === 'high') {
     warningList.push('High/problem-soil rate increases chemical usage and requires label confirmation.');
@@ -7188,10 +7188,10 @@ function priceTrenching(property = {}, options = {}, replay) {
   if (labelConfirmationRequiredForPayload && !labelConfirmed) {
     manualReviewReasons.push('label_confirmation_required');
   }
-  // The estimate tool's label box names the reduced-volume conditions only at the bifenthrin high rate, and a rate change clears
-  // the box, so only there does a counted check confirm them. A reduced volume at any other rate (a standard dilution configured
-  // or typed at the label's 2 fl oz) stays in review (pre-push audit 30).
-  if (volumeFactor < 1 && rateResolution.applicationRate !== 'high') {
+  // A reduced volume stays in review at every rate, a counted label check included: the estimate tool's label box confirms the
+  // label rate and trench depth, never a volume, because the tool cannot see the configured dilution that decides it (pre-push
+  // audits 30 and at the second push: a configured high rate of 1.5 fl oz per gallon keeps the full volume).
+  if (volumeFactor < 1) {
     manualReviewReasons.push('reduced_volume_confirmation_required');
   }
   if (hasValue(options.customProductCost) || hasValue(options.customProductOzPerFinishedGallon)) {

@@ -255,16 +255,18 @@ describe('termite measurement overrides and safeguards', () => {
     expect(high.includedChemicalCost).toBe(standard.includedChemicalCost); // the install price includes the labeled volume
     expect(high.price).toBe(4480); // the +12% install premium, as before
     expect(high.warnings.join(' ')).toMatch(/reduced finished volume, the same active ingredient per foot/);
-    // The label's two conditions for a reduced volume, and the line stays in review until the label check counts: a check sent
-    // without the Crosscheck Plus bottle mark does not (pre-push audit 29).
+    // The label's two conditions for a reduced volume, named on the line by the engine that applies it; a check sent without the
+    // Crosscheck Plus bottle mark does not count (pre-push audit 29). The reduced volume stays in review whatever the label check: the
+    // estimate tool's box confirms the label rate and trench depth, and cannot see the configured dilution (pre-push audit at the
+    // second push).
     expect(high.warnings.join(' '))
       .toMatch(/only where the soil will not accept the labeled volume and a continuous barrier can still be achieved/);
     expect(high).toMatchObject({ requiresManualReview: true, labelConfirmed: false });
-    expect(high.manualReviewReasons).toContain('label_confirmation_required');
+    expect(high.manualReviewReasons).toEqual(expect.arrayContaining(['label_confirmation_required', 'reduced_volume_confirmation_required']));
     const confirmed = trench({ applicationRate: 'high', labelBottle: 'lesco_crosscheck_plus' });
-    expect(confirmed.labelConfirmed).toBe(true);
+    expect(confirmed).toMatchObject({ labelConfirmed: true, requiresManualReview: true });
     expect(confirmed.manualReviewReasons).not.toContain('label_confirmation_required');
-    expect(confirmed.manualReviewReasons).not.toContain('reduced_volume_confirmation_required'); // its box names the conditions
+    expect(confirmed.manualReviewReasons).toContain('reduced_volume_confirmation_required');
     expect(standard.manualReviewReasons || []).not.toContain('reduced_volume_confirmation_required'); // the labeled volume
     const products = require('../services/pricing-engine/constants').SPECIALTY.trenching.products;
     const savedHigh = products.talstar_p.productOzPerFinishedGallonAtHighRate;
@@ -275,15 +277,19 @@ describe('termite measurement overrides and safeguards', () => {
     const savedStandard = products.talstar_p.productOzPerFinishedGallonAtStandardRate;
     try {
       products.talstar_p.productOzPerFinishedGallonAtHighRate = 1.5;
-      expect(trench({ applicationRate: 'high' })).toMatchObject({ finishedGallons: 80, productOz: 120 });
+      const fullHigh = trench({ applicationRate: 'high', labelBottle: 'lesco_crosscheck_plus' });
+      expect(fullHigh).toMatchObject({ finishedGallons: 80, productOz: 120, labelConfirmed: true });
+      // The full volume: no reduced-volume warning and no reduced-volume review (the configured high rate decides it, not the tool).
+      expect(fullHigh.warnings.join(' ')).not.toMatch(/reduced finished volume/);
+      expect(fullHigh.manualReviewReasons).not.toContain('reduced_volume_confirmation_required');
       products.talstar_p.productOzPerFinishedGallonAtStandardRate = 0.75;
       const movedPair = trench({ applicationRate: 'high' });
       expect(movedPair).toMatchObject({ finishedGallons: 80, productOz: 120 });
       expect(movedPair.warnings.join(' ')).not.toMatch(/reduced finished volume/);
       products.talstar_p.productOzPerFinishedGallonAtHighRate = 2;
       expect(trench({ applicationRate: 'high' })).toMatchObject({ finishedGallons: 40, productOz: 80 });
-      // A standard rate configured at the label's 2 oz halves the volume too. The label box names the reduced-volume conditions
-      // only at the high rate, so that line stays in review whatever its label check (pre-push audit 30).
+      // A standard rate configured at the label's 2 oz halves the volume too, and that line stays in review like every reduced
+      // volume, whatever its label check (pre-push audit 30).
       products.talstar_p.productOzPerFinishedGallonAtStandardRate = 2;
       const standardAtTwo = trench({ labelBottle: 'lesco_crosscheck_plus' });
       expect(standardAtTwo).toMatchObject({ finishedGallons: 40, productOz: 80, labelConfirmed: true, requiresManualReview: true });
