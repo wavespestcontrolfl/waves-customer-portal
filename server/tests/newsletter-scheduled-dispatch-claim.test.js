@@ -20,6 +20,11 @@ jest.mock('../services/newsletter-event-selection', () => ({
   parseLockedEventIds: jest.fn(() => []),
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: mockTrigger }));
+// The mailbox the send-time HOLD check searches: it holds no reply.
+jest.mock('../services/email/gmail-client', () => ({
+  listAllMessages: jest.fn(async () => ({ messages: [], truncated: false, nextPageToken: null })),
+  getMessage: jest.fn(),
+}));
 jest.mock('../services/newsletter-validator', () => ({
   validateNewsletterDraft: jest.fn(() => ({ errors: [], warnings: [] })),
   lockedPricesForSend: jest.fn(async () => []),
@@ -29,7 +34,12 @@ const db = require('../models/db');
 // The pre-send archived-link relink sweep runs a raw UPDATE in its own
 // transaction; nothing stale here, so it is a 0-row no-op.
 db.raw = jest.fn(async () => ({ rowCount: 0 }));
-db.transaction = jest.fn(async (cb) => cb({ raw: db.raw }));
+// A transaction reaches the same tables too (a stop at send time reverts in one).
+db.transaction = jest.fn(async (cb) => {
+  const trx = (table) => db(table);
+  trx.raw = db.raw;
+  return cb(trx);
+});
 const { sendCampaign, processScheduledSends } = require('../services/newsletter-sender');
 
 const READ_AT = new Date('2026-10-06T14:00:00Z');
@@ -103,6 +113,8 @@ test('the scheduler binds the claim to the version it validated, and an empty cl
   expect(claim.whereNotNull).toHaveBeenCalledWith('proof_approved_at');
   expect(claim.where).toHaveBeenCalledWith('proof_approved_at', '<', new Date(APPROVED_AT.getTime() + 1));
   expect(claim.whereIn).not.toHaveBeenCalled();
+  // An issue approved by a reply has no send window: no deadline on its claim.
+  expect(claim.whereRaw).not.toHaveBeenCalled();
   expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending' }));
   // The row was NOT flipped to failed: the only newsletter_sends writes are the claim attempt.
 });
@@ -111,6 +123,8 @@ test('the scheduler returns a Waves Pest Insider issue with no plan to draft wit
   const revert = chain();
   wire({
     newsletter_sends: [chain({ rows: [{ ...SEND, segment_filter: null }] }), chain({ first: { ...SEND, segment_filter: null } }), revert],
+    // A draft made by hand: no planned issue row moves, so the alert goes out right away.
+    pest_insider_issues: [chain({ updated: 0 })],
   });
 
   const result = await processScheduledSends();
@@ -201,4 +215,56 @@ test.each([
   expect(mockValidateEventSelection).not.toHaveBeenCalled();
   expect(db.transaction).not.toHaveBeenCalled();
   expect(claim.update).not.toHaveBeenCalled();
+});
+
+describe('a planned Waves Pest Insider issue the switch queued (GATE_PEST_INSIDER_AUTO_SEND)', () => {
+  // Thursday, December 3, 2026: its 7:00 AM EST send time, and the 10:00 AM end of its window.
+  const ISSUE_SEND_AT = new Date('2026-12-03T12:00:00Z');
+  const WINDOW_END = new Date('2026-12-03T15:00:00Z');
+  // Queued by the auto-send switch after its FYI copy, whose token a HOLD reply would carry.
+  const QUEUED = { ...SEND, id: 'send-pi-2', scheduled_for: ISSUE_SEND_AT, proof_approval_email_id: null, proof_token: 'ab12cd34', proof_sent_at: new Date('2026-12-02T12:05:00Z') };
+  const PLANNED = { id: 'issue-1', issue_date: '2026-12-03', status: 'scheduled', send_id: 'send-pi-2' };
+
+  beforeEach(() => {
+    process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true';
+    // The FYI copy's address (the default) can reply HOLD.
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'contact@wavespestcontrol.com';
+    delete process.env.NEWSLETTER_PROOF_EMAIL;
+    // Only the clock is fake; the send path's own timers and ticks run as usual.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    jest.setSystemTime(new Date('2026-12-03T14:59:00Z')); // 9:59 AM EST: inside the window
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
+    delete process.env.NEWSLETTER_PROOF_APPROVERS;
+  });
+
+  test('its claim must land before 10:00 AM ET: a claim the window closed on stops the issue for good', async () => {
+    const claim = chain({ returning: [] });
+    // The checks before the claim ran past 10:00 AM, so the claim finds nothing.
+    claim.update.mockImplementation(() => {
+      jest.setSystemTime(new Date('2026-12-03T15:00:01Z'));
+      return { returning: jest.fn(async () => []) };
+    });
+    const revert = chain();
+    const issueRow = chain();
+    wire({
+      newsletter_sends: [chain({ rows: [QUEUED] }), chain({ first: QUEUED }), claim, chain({ first: { status: 'scheduled' } }), revert],
+      newsletter_subscribers: [chain({ rows: PLANNED_ROWS }), chain({ rows: PLANNED_ROWS })],
+      pest_insider_issues: [chain({ first: PLANNED }), issueRow],
+    });
+
+    const result = await processScheduledSends();
+
+    expect(result).toEqual({ processed: 0 });
+    expect(claim.whereRaw).toHaveBeenCalledWith('clock_timestamp() < ?::timestamptz', [WINDOW_END]);
+    expect(revert.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft', scheduled_for: null, proof_approved_at: null }));
+    expect(issueRow.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', reason: 'stopped at send time: its send window closed before the send could start',
+    }));
+    // Its one alert comes from settlePlannedIssues, which retries it until it reaches the owner.
+    expect(mockTrigger).not.toHaveBeenCalled();
+    expect(require('../services/sendgrid-mail').sendBroadcast).not.toHaveBeenCalled();
+  });
 });

@@ -1,6 +1,7 @@
 /**
- * The Pest Insider shadow planner's two Wednesday crons (server/services/scheduler.js):
- * 7:00 AM and a 1:00 PM catch-up, both ET, both under runExclusive. A failed run is logged,
+ * The Waves Pest Insider planner's two Wednesday crons (server/services/scheduler.js):
+ * 7:00 AM and a 1:00 PM catch-up, both ET, both under runExclusive. Only the 1:00 PM run is the
+ * final tick (the one that may raise the "will not send" notice). A failed run is logged,
  * never thrown out of the tick.
  *
  * Mock baseline copied from scheduler-monday-review-bell-cron.test.js.
@@ -31,19 +32,19 @@ jest.mock('../services/intelligence-bar/threads', () => ({ purgeExpiredThreads: 
 jest.mock('../services/intelligence-bar/tasks', () => ({ purgeExpiredTasks: jest.fn().mockResolvedValue(1) }));
 jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUpSweep: jest.fn() }));
 
-jest.mock('../services/pest-insider/schedule', () => ({ runShadowIssue: jest.fn(async () => ({ skipped: true, reason: 'not_build_day' })) }));
+jest.mock('../services/pest-insider/schedule', () => ({ runIssuePlanner: jest.fn(async () => ({ skipped: true, reason: 'not_build_day' })) }));
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
 const { isEnabled } = require('../config/feature-gates');
-const { runShadowIssue } = require('../services/pest-insider/schedule');
+const { runIssuePlanner } = require('../services/pest-insider/schedule');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
 function ticks(expression) {
   isEnabled.mockImplementation((name) => name === 'cronJobs');
   initScheduledJobs();
-  const registrations = cron.schedule.mock.calls.filter(([e, task]) => e === expression && String(task).includes('runShadowIssue'));
+  const registrations = cron.schedule.mock.calls.filter(([e, task]) => e === expression && String(task).includes('runIssuePlanner'));
   expect(registrations).toHaveLength(1);
   expect(registrations[0][2]).toEqual({ timezone: 'America/New_York' });
   return registrations[0][1];
@@ -53,15 +54,16 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-test.each(['0 7 * * 3', '0 13 * * 3'])('%s runs the planner once inside runExclusive', async (expression) => {
+test.each([['0 7 * * 3', false], ['0 13 * * 3', true]])('%s runs the planner once inside runExclusive (final tick: %s)', async (expression, finalTick) => {
   await ticks(expression)();
-  expect(runExclusive).toHaveBeenCalledWith('pest-insider-shadow-issue', expect.any(Function));
-  expect(runShadowIssue).toHaveBeenCalledTimes(1);
+  expect(runExclusive).toHaveBeenCalledWith('pest-insider-issue-planner', expect.any(Function));
+  expect(runIssuePlanner).toHaveBeenCalledTimes(1);
+  expect(runIssuePlanner).toHaveBeenCalledWith({ finalTick });
   expect(logger.error).not.toHaveBeenCalled();
 });
 
 test('a failed run is logged, not thrown', async () => {
-  runShadowIssue.mockRejectedValueOnce(new Error('boom'));
+  runIssuePlanner.mockRejectedValueOnce(new Error('boom'));
   await expect(ticks('0 7 * * 3')()).resolves.toBeUndefined();
-  expect(logger.error).toHaveBeenCalledWith('Pest Insider shadow planner failed: boom');
+  expect(logger.error).toHaveBeenCalledWith('Pest Insider planner failed: boom');
 });
