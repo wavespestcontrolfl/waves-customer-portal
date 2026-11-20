@@ -6,11 +6,13 @@
 //   GET  /portal-messages[?before=ISO]  { messages oldest->newest, hasMore, unread }
 //   POST /portal-messages               { body, requestId } -> { message }
 //   POST /portal-messages/read          { throughId } -> { unread }
+// PortalChat is the same thread as the Waves Chat sheet (owner 2026-11-20): the
+// thread scrolls and the message box stays pinned under it.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import api from '../../utils/api';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE as SHELL } from '../../theme-customer';
-import { formatETDateTime } from '../../lib/timezone';
+import { etNowMinutes, formatETDateTime } from '../../lib/timezone';
 import { scrollBehavior } from '../../lib/scrollMotion';
 import Icon from '../Icon';
 
@@ -28,6 +30,30 @@ export const MESSAGES_COPY = {
   help: 'We answer between 8 AM and 8 PM, usually within one business hour.',
   tooMany: 'Too many messages in a short time. Please wait a little, or call or text our office.',
   sendFailed: 'Your message didn’t send. Check your connection and try again.',
+  chatTitle: 'Waves Chat',
+  chatPlaceholder: 'Message Waves',
+  chatOpen: 'Open until 8 PM',
+  chatClosed: 'Closed. Back at 8 AM',
+  chatIntro: 'Your message goes straight to the Waves team. We usually answer within one business hour, and the reply shows up right here.',
+  chatReceived: 'We got your message',
+  chatReceivedDetail: 'Our team answers between 8 AM and 8 PM. The reply will show up here after we open.',
+};
+
+// What a new chat offers to start from. A tap fills the message box; nothing is
+// sent until the customer presses Send.
+export const CHAT_STARTERS = [
+  { label: 'Pest, lawn or plant problem', draft: 'I have a pest, lawn or plant problem: ' },
+  { label: 'Schedule or move a visit', draft: 'I would like to schedule or move a visit: ' },
+  { label: 'Question about my bill', draft: 'I have a question about my bill: ' },
+  { label: 'Something else', draft: '' },
+];
+
+// The hours MESSAGES_COPY.help promises, on the Eastern clock.
+const OPEN_FROM = 8 * 60;
+const OPEN_UNTIL = 20 * 60;
+export const chatOpenNow = () => {
+  const minutes = etNowMinutes();
+  return minutes >= OPEN_FROM && minutes < OPEN_UNTIL;
 };
 
 // One UUID v4 per draft. crypto.randomUUID needs a secure context, so older
@@ -212,8 +238,8 @@ function useMarkRead(messages, ready, onUnread) {
 // for: a failed send keeps both, so Try again with the same text can never save
 // the message twice, and changed text gets a new id (the first try may have been
 // saved). The draft is read-only while it sends, so nothing typed then is lost.
-function useComposer(onSent) {
-  const [draft, setDraft] = useState('');
+function useComposer(onSent, initialDraft = '') {
+  const [draft, setDraft] = useState(initialDraft);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const requestRef = useRef(null);
@@ -431,6 +457,187 @@ function Thread({ thread }) {
         </div>
       )}
     </div>
+  );
+}
+
+// The message box of the Waves Chat sheet: one growing line and a round Send.
+function ChatComposer({ composer, inputRef }) {
+  const { draft, setDraft, sending, error, send } = composer;
+  const idle = sending || !draft.trim();
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 132)}px`;
+  }, [draft, inputRef]);
+  return (
+    <form
+      onSubmit={(e) => { e.preventDefault(); send(); }}
+      style={{
+        flexShrink: 0,
+        padding: '10px calc(12px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px))',
+        borderTop: `1px solid ${SHELL.softBorder}`,
+        background: '#fff',
+        display: 'grid',
+        gap: 6,
+      }}
+    >
+      {draft.length >= COUNTER_FROM && (
+        <div style={{ fontSize: 14, color: draft.length >= MAX_MESSAGE_LENGTH ? B.red : SHELL.muted, textAlign: 'right' }}>
+          {draft.length} / {MAX_MESSAGE_LENGTH}
+        </div>
+      )}
+      {error && (
+        <div role="alert" style={{ fontSize: 14, color: B.red, fontWeight: 700 }}>{error}</div>
+      )}
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+        <textarea
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          readOnly={sending}
+          maxLength={MAX_MESSAGE_LENGTH}
+          rows={1}
+          placeholder={MESSAGES_COPY.chatPlaceholder}
+          aria-label={MESSAGES_COPY.chatPlaceholder}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            boxSizing: 'border-box',
+            minHeight: 44,
+            padding: '9px 14px',
+            borderRadius: 10,
+            border: `1px solid ${SHELL.borderStrong}`,
+            background: SHELL.soft,
+            color: SHELL.text,
+            fontFamily: FONTS.body,
+            // 16px floor: smaller makes iOS zoom the page on focus.
+            fontSize: 16,
+            lineHeight: 1.5,
+            resize: 'none',
+          }}
+        />
+        <button
+          data-glass-accent=""
+          type="submit"
+          disabled={idle}
+          aria-label={sending ? 'Sending message' : 'Send message'}
+          style={{
+            width: 44, height: 44, flexShrink: 0, borderRadius: 999, border: 'none', padding: 0,
+            background: B.yellow, color: B.glassNavy,
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            opacity: idle ? 0.5 : 1, cursor: idle ? 'default' : 'pointer',
+          }}
+        >
+          <Icon name="arrowUp" size={20} strokeWidth={2.5} />
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// The Waves Chat sheet's content: header, the thread, and the message box.
+// PortalPage owns the sheet around it and passes its close button.
+export function PortalChat({ onUnread, firstName = '', initialDraft = '', closeButton = null } = {}) {
+  const thread = useThread();
+  const inputRef = useRef(null);
+  const logRef = useRef(null);
+  const composer = useComposer(thread.add, initialDraft);
+  useMarkRead(thread.messages, thread.status === 'ready', onUnread);
+  // Re-read the clock each minute so the header turns over at 8 AM and 8 PM.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTick((n) => n + 1), REFRESH_MS);
+    return () => clearInterval(timer);
+  }, []);
+  const open = chatOpenNow();
+
+  const { messages } = thread;
+  const newest = messages[messages.length - 1] || null;
+  // A new message (theirs or ours) shows at the bottom; earlier pages do not move the view.
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [newest?.id, thread.status]);
+
+  const start = (text) => {
+    if (text) composer.setDraft(text);
+    inputRef.current?.focus();
+  };
+  const fresh = thread.status === 'ready' && messages.length === 0;
+  const gutter = 'calc(16px + env(safe-area-inset-right, 0px)) 16px calc(16px + env(safe-area-inset-left, 0px))';
+
+  return (
+    <>
+      <div style={{
+        flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12,
+        padding: `12px calc(12px + env(safe-area-inset-right, 0px)) 12px calc(16px + env(safe-area-inset-left, 0px))`,
+        borderBottom: `1px solid ${SHELL.softBorder}`,
+      }}>
+        <span style={{
+          width: 40, height: 40, borderRadius: 8, background: SHELL.soft, color: B.glassNavy,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+        }}>
+          <Icon name="message" size={19} strokeWidth={2} />
+        </span>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <h2 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: B.glassNavy, lineHeight: 1.15 }}>{MESSAGES_COPY.chatTitle}</h2>
+          <div style={{ fontSize: 14, color: SHELL.muted, marginTop: 2 }}>{open ? MESSAGES_COPY.chatOpen : MESSAGES_COPY.chatClosed}</div>
+        </div>
+        {closeButton}
+      </div>
+
+      <div ref={logRef} style={{
+        flex: '1 1 0', minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', WebkitOverflowScrolling: 'touch',
+        padding: `16px ${gutter}`, display: 'flex', flexDirection: 'column',
+      }}>
+        {thread.status === 'loading' && (
+          <div role="status" style={{ fontSize: 16, color: SHELL.muted }}>Loading messages&hellip;</div>
+        )}
+        {thread.status === 'error' && (
+          <div role="alert">
+            <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{MESSAGES_COPY.loadError}</div>
+            <button data-glass-accent="" type="button" onClick={thread.load} style={{ ...secondaryButton, marginTop: 10 }}>Try again</button>
+          </div>
+        )}
+        {fresh && (
+          <div style={{ marginTop: 'auto', display: 'grid', gap: 16 }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: B.glassNavy, lineHeight: 1.2 }}>
+                {firstName ? `Hi ${firstName}, what can we help with?` : 'What can we help with?'}
+              </h3>
+              <p style={{ margin: '8px 0 0', fontSize: 16, lineHeight: 1.5, color: SHELL.body }}>{MESSAGES_COPY.chatIntro}</p>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {CHAT_STARTERS.map((s) => (
+                <button key={s.label} type="button" onClick={() => start(s.draft)} style={{ ...secondaryButton, borderRadius: 999, padding: '8px 16px', borderColor: SHELL.softBorder }}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {thread.status === 'ready' && !fresh && (
+          <div style={{ marginTop: 'auto', display: 'grid', gap: 14 }}>
+            <Thread thread={thread} />
+            {!open && newest?.from === 'you' && (
+              <div role="status" style={{
+                display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 14px', borderRadius: 12,
+                background: '#fff', border: `1px solid ${SHELL.softBorder}`,
+              }}>
+                <Icon name="clock" size={20} strokeWidth={2} style={{ color: B.glassNavy, flexShrink: 0, marginTop: 2 }} />
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{MESSAGES_COPY.chatReceived}</div>
+                  <div style={{ fontSize: 14, lineHeight: 1.5, color: SHELL.body, marginTop: 2 }}>{MESSAGES_COPY.chatReceivedDetail}</div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {thread.status === 'ready' && <ChatComposer composer={composer} inputRef={inputRef} />}
+    </>
   );
 }
 
