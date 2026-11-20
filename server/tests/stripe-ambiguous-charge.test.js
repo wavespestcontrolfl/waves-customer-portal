@@ -558,7 +558,7 @@ function failedAttemptDb({ invoiceStatus = 'processing', invoicePaymentIntentId 
   };
   const trx = jest.fn((table) => {
     const query = {};
-    ['where', 'whereIn', 'whereNull', 'forUpdate'].forEach((method) => {
+    ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orderBy', 'forUpdate'].forEach((method) => {
       query[method] = jest.fn(() => query);
     });
     query.first = jest.fn(async () => {
@@ -578,8 +578,11 @@ function failedAttemptDb({ invoiceStatus = 'processing', invoicePaymentIntentId 
       return query;
     });
     query.returning = jest.fn(async () => [state.ledger.at(-1)]);
+    query.then = (resolve, reject) => Promise.resolve(table === 'invoices' ? [state.invoice] : [])
+      .then(resolve, reject);
     return query;
   });
+  trx.raw = jest.fn(async () => ({ rows: [] }));
   trx.fn = { now: jest.fn(() => 'NOW') };
   return {
     database: { transaction: jest.fn(async (callback) => callback(trx)) },
@@ -664,6 +667,28 @@ describe('saved-card failed-webhook attempt repair', () => {
       attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
     })).resolves.toBe(true);
     expect(state.invoice.stripe_payment_intent_id).toBe('pi_customer_checkout');
+    expect(state.invoice.credit_applied).toBe(25);
+    expect(state.customer.account_credits).toBe(10);
+    expect(state.ledger).toEqual([]);
+  });
+
+  test('an exact failure releases credit and stale stamps for the checkout this worker canceled', async () => {
+    const { database, state } = failedAttemptDb({
+      invoiceStatus: 'sent', invoicePaymentIntentId: 'pi_canceled_checkout',
+    });
+    state.attempt.canceled_checkout_payment_intent_id = 'pi_canceled_checkout';
+
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1',
+      stripePaymentIntentId: 'pi-failed', database,
+    })).resolves.toBe(true);
+
+    expect(state.invoice).toEqual(expect.objectContaining({
+      stripe_payment_intent_id: null,
+      credit_applied: 10,
+    }));
+    expect(state.customer.account_credits).toBe(25);
+    expect(state.ledger).toContainEqual(expect.objectContaining({ delta: 15 }));
   });
 
   test('does not release a fence beside a terminal invoice', async () => {
@@ -694,6 +719,9 @@ describe('saved-card failed-webhook attempt repair', () => {
     })).resolves.toBe(true);
 
     expect(state.invoice.stripe_payment_intent_id).toBe('pi_pay_page');
+    expect(state.invoice.credit_applied).toBe(25);
+    expect(state.customer.account_credits).toBe(10);
+    expect(state.ledger).toEqual([]);
     expect(state.updates.find(({ table }) => table === 'invoices').payload)
       .not.toHaveProperty('stripe_payment_intent_id');
   });

@@ -685,7 +685,6 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
   requestIdempotencyKey = null,
   originalCustomerId = null,
   bankReturnAmountCents = null,
-  preserveReplacementCheckout = false,
   // Codex #4971 r24 P1: the asynchronous failure's own code (a bank
   // return, an async card decline) — persisted as decline_code so the
   // termite renewal's crash recovery reads this as the CUSTOMER-side
@@ -696,21 +695,19 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
   if (!attemptId || !invoiceId || !customerId || !stripePaymentIntentId) return false;
 
   return database.transaction(async (trx) => {
-    // A collectible invoice can already carry a replacement public checkout
-    // when the original saved-card cancellation arrives. Freeze that checkout
-    // namespace before locking either money row so a credit return cannot make
-    // the replacement's quoted amount stale.
-    if (preserveReplacementCheckout) {
-      const PayCombined = require('./pay-combined');
-      const stableCustomerId = await PayCombined.lockCombinedCustomerStable(
-        trx,
-        invoiceId,
-        customerId,
-      );
-      if (String(stableCustomerId || '') !== String(customerId)) {
-        if (originalCustomerId) throw new Error('Saved-card invoice owner changed while locking the cancellation; retry');
-        return false;
-      }
+    // Every terminal saved-card failure can return posted account credit. A
+    // public checkout may be minted between the webhook's preliminary lookup
+    // and this transaction, so freeze its owner/allocation namespace for every
+    // caller (failure as well as cancellation) before changing that credit.
+    const PayCombined = require('./pay-combined');
+    const stableCustomerId = await PayCombined.lockCombinedCustomerStable(
+      trx,
+      invoiceId,
+      customerId,
+    );
+    if (String(stableCustomerId || '') !== String(customerId)) {
+      if (originalCustomerId) throw new Error('Saved-card invoice owner changed while locking the failure; retry');
+      return false;
     }
     // Codex pre-push P2 (round 2 of the owner's audit): lock the customer
     // row before the invoice row — postCreditMovement below also locks the
@@ -720,21 +717,16 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
     // caller (a function parameter, no extra read needed); the mismatch
     // check right below still refuses if the locked invoice disagrees.
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
-    let invoice;
-    if (preserveReplacementCheckout) {
-      const invoiceSnapshot = await trx('invoices').where({ id: invoiceId })
-        .first('stripe_payment_intent_id');
-      const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
-      invoice = await lockInvoicePaymentIntentAllocation(trx, {
-        id: invoiceId,
-        piId: invoiceSnapshot?.stripe_payment_intent_id || null,
-        customerId,
-        combinedCustomerLocked: true,
-        targetForUpdate: true,
-      });
-    } else {
-      invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
-    }
+    const invoiceSnapshot = await trx('invoices').where({ id: invoiceId })
+      .first('stripe_payment_intent_id');
+    const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
+    const invoice = await lockInvoicePaymentIntentAllocation(trx, {
+      id: invoiceId,
+      piId: invoiceSnapshot?.stripe_payment_intent_id || null,
+      customerId,
+      combinedCustomerLocked: true,
+      targetForUpdate: true,
+    });
     if (!invoice) return false;
     if (originalCustomerId
       && !await require('./invoice-payment-authentication').invoiceHasRecordedOwner(invoice, originalCustomerId, trx)) return false;
@@ -755,7 +747,7 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       .whereIn('status', ['claimed', 'ambiguous'])
       .whereNull('resolved_at')
       .forUpdate()
-      .first('id', 'status', 'created_at', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'worker_create_timed_out_at', 'payment_method_id', 'amount', 'credit_applied_delta', 'credit_applied_total');
+      .first('id', 'status', 'created_at', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'worker_create_timed_out_at', 'payment_method_id', 'amount', 'credit_applied_delta', 'credit_applied_total', 'canceled_checkout_payment_intent_id');
     if (!attempt || (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId)) return false;
     if (attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== stripePaymentIntentId) return false;
     const originalCreateFailed = Boolean(attempt.submitted_at && requestIdempotencyKey
@@ -800,15 +792,27 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
     const original = Math.max(0, round2(target - delta));
     const current = Math.max(0, round2(invoice.credit_applied || 0));
     let creditToRelease = Math.min(delta, Math.max(0, round2(current - original)));
-    const replacementCheckout = invoice.stripe_payment_intent_id
+    const canceledPredecessor = invoice.stripe_payment_intent_id
+      && attempt.canceled_checkout_payment_intent_id
+      && String(invoice.stripe_payment_intent_id) === String(attempt.canceled_checkout_payment_intent_id);
+    const replacementCheckout = !canceledPredecessor && invoice.stripe_payment_intent_id
       && String(invoice.stripe_payment_intent_id) !== String(stripePaymentIntentId);
-    if (preserveReplacementCheckout && replacementCheckout && creditToRelease > 0) {
+    if (replacementCheckout && creditToRelease > 0) {
       // The replacement was priced after this credit was applied. Resolve the
       // canceled attempt but leave the credit on the invoice: it is now ordinary
       // applied credit backing that checkout, and returning it would leave the
       // confirmable amount too low. This gives the one-shot webhook a terminal,
       // replay-independent outcome without canceling a valid replacement.
       creditToRelease = 0;
+    }
+    if (canceledPredecessor) {
+      // The saved-card worker canceled this checkout at Stripe before create,
+      // but a later local rollback restored its old pointer. It is not a live
+      // replacement and must not strand the reservation. Allocation rows were
+      // locked above, so clear every collectible sibling stamp atomically with
+      // the credit return and attempt resolution.
+      await PayCombined.clearPaymentIntentStamps(trx, attempt.canceled_checkout_payment_intent_id);
+      invoice.stripe_payment_intent_id = null;
     }
     if (creditToRelease > 0) {
       await postCreditMovement({

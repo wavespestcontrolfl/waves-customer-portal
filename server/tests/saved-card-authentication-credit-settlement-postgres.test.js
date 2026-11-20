@@ -15,7 +15,11 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async () => {}) }));
 
-const { _handlePaymentIntentSucceeded: settle } = require('../routes/stripe-webhook');
+const {
+  _handlePaymentIntentSucceeded: settle,
+  _resolveMetadataCanceledSavedCardAttempt: resolveCanceledAttempt,
+} = require('../routes/stripe-webhook');
+const StripeService = require('../services/stripe');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const schema = `auth_settlement_${randomUUID().replaceAll('-', '')}`;
 jest.setTimeout(20000);
@@ -103,6 +107,82 @@ jest.setTimeout(20000);
       repointed_ids: { version: 1, tables: { 'invoices.customer_id': [invoiceId] } },
     });
   }
+
+  async function armFailedSavedCardReservation(invoicePaymentIntentId, canceledCheckoutPaymentIntentId = null) {
+    await mockDatabase('customers').where({ id: customerId }).update({ account_credits: 15 });
+    await mockDatabase('invoices').where({ id: invoiceId }).update({
+      status: 'sent', credit_applied: 25, stripe_payment_intent_id: invoicePaymentIntentId,
+    });
+    await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+      status: 'ambiguous', resolved_at: null, decline_code: null,
+      stripe_payment_intent_id: intent.id, worker_payment_intent_id: intent.id,
+      canceled_checkout_payment_intent_id: canceledCheckoutPaymentIntentId,
+    });
+  }
+
+  test('a failure followed by cancellation keeps $25 applied behind a different live checkout', async () => {
+    const liveCheckout = `pi_live_${attemptId}`;
+    await armFailedSavedCardReservation(liveCheckout);
+
+    await expect(StripeService.resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId,
+      invoiceId,
+      customerId,
+      stripePaymentIntentId: intent.id,
+      failureMessage: 'payment_intent.payment_failed',
+      database: mockDatabase,
+    })).resolves.toBe(true);
+    await expect(resolveCanceledAttempt({ ...intent, status: 'canceled' }, mockDatabase)).resolves.toBe(false);
+
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+      status: 'sent', stripe_payment_intent_id: liveCheckout, credit_applied: '25.00',
+    });
+    expect(await mockDatabase('customers').where({ id: customerId }).first())
+      .toMatchObject({ account_credits: '15.00' });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
+    expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ status: 'failed', stripe_payment_intent_id: intent.id });
+  });
+
+  test('a failure followed by cancellation returns $25 once and clears the checkout its worker canceled', async () => {
+    const canceledCheckout = `pi_canceled_${attemptId}`;
+    const siblingId = randomUUID();
+    await armFailedSavedCardReservation(canceledCheckout, canceledCheckout);
+    await mockDatabase('invoices').insert({
+      id: siblingId,
+      customer_id: customerId,
+      invoice_number: `STALE-${siblingId.slice(0, 12)}`,
+      token: randomUUID(),
+      status: 'sent',
+      subtotal: 30,
+      total: 30,
+      line_items: '[]',
+      stripe_payment_intent_id: canceledCheckout,
+    });
+
+    await expect(StripeService.resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId,
+      invoiceId,
+      customerId,
+      stripePaymentIntentId: intent.id,
+      failureMessage: 'payment_intent.payment_failed',
+      database: mockDatabase,
+    })).resolves.toBe(true);
+    await expect(resolveCanceledAttempt({ ...intent, status: 'canceled' }, mockDatabase)).resolves.toBe(false);
+
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+      status: 'sent', stripe_payment_intent_id: null, credit_applied: '0.00',
+    });
+    expect(await mockDatabase('invoices').where({ id: siblingId }).first())
+      .toMatchObject({ stripe_payment_intent_id: null, total: '30.00' });
+    expect(await mockDatabase('customers').where({ id: customerId }).first())
+      .toMatchObject({ account_credits: '40.00' });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toEqual([
+      expect.objectContaining({ delta: '25.00', balance_after: '40.00' }),
+    ]);
+    expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ status: 'failed', stripe_payment_intent_id: intent.id });
+  });
 
   test('two deliveries settle $75 cash and $25 credit once on a $100 invoice', async () => {
     await Promise.all([settle(intent), settle(intent)]);

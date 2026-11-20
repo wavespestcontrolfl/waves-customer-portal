@@ -316,16 +316,10 @@ test('every production caller of postCreditMovement that locks an invoice first 
       invoiceLock: "const locked = await trx('invoices').where({ id: claimedInvoice.id }).forUpdate().first();",
     },
     {
-      file: 'services/stripe.js', label: 'resolveFailedInvoiceSavedCardChargeAttempt',
+      file: 'services/stripe.js', label: 'all saved-card terminal failure paths',
       anchor: 'async function resolveFailedInvoiceSavedCardChargeAttempt(',
       customerLock: "await trx('customers').where({ id: customerId }).forUpdate().first('id');",
-      invoiceLock: "invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
-    },
-    {
-      file: 'services/stripe.js', label: 'saved-card cancellation with a replacement checkout',
-      anchor: 'async function resolveFailedInvoiceSavedCardChargeAttempt(',
-      customerLock: "await trx('customers').where({ id: customerId }).forUpdate().first('id');",
-      invoiceLock: 'invoice = await lockInvoicePaymentIntentAllocation(trx, {',
+      invoiceLock: 'const invoice = await lockInvoicePaymentIntentAllocation(trx, {',
     },
     {
       file: 'services/stripe.js', label: 'persistSavedCardChargeCreditDelta',

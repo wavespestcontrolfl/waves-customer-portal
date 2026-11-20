@@ -838,8 +838,11 @@ Amount edits to the held invoice wait for the challenge to resolve.
 A cancellation clears the hold only when the original charge worker recorded
 that exact PaymentIntent independently of the webhook. A disagreement between
 the two IDs keeps checkout held. If another checkout already uses credit posted
-to the invoice, canceling the original card attempt keeps that credit applied
-so the replacement checkout still quotes the amount due. A legacy ID without worker provenance
+to the invoice, failure or cancellation of the original card attempt keeps that
+credit applied so the replacement checkout still quotes the amount due. When
+the worker recorded that it already canceled the checkout shown on the invoice,
+settlement clears that stale reference and returns the attempt's posted credit.
+A legacy ID without worker provenance
 keeps checkout on HTTP 409 even if the supplied intent was canceled. After webhook history expires, an operator can
 verify the PaymentIntent directly using the saved-card cancellation command
 in `ops/agents/README.md`. A successful challenge settles the matching card

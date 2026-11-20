@@ -101,10 +101,10 @@ async function withServer(fn) {
   app.use(express.json());
   app.use('/admin/invoices', router);
   app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
-  const server = app.listen(0);
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const server = app.listen(0, '127.0.0.1');
   try {
-    return await fn(baseUrl);
+    if (!server.listening) await require('node:events').once(server, 'listening');
+    return await fn(`http://127.0.0.1:${server.address().port}`);
   } finally {
     await new Promise((r) => server.close(r));
   }

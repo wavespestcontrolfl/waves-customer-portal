@@ -9,6 +9,7 @@
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const migration = require('../models/migrations/20261119081500_saved_card_authentication_cancellation');
+const canceledCheckoutMigration = require('../models/migrations/20261119090100_saved_card_canceled_checkout');
 const provenanceMigration = require('../models/migrations/20261119160000_saved_card_intent_binding_provenance');
 const workerIdentityMigration = require('../models/migrations/20261119190000_original_saved_card_payment_intent');
 const { recordAuthenticationCancellation, recordAuthenticationSettlement, verifySavedCardCancellation } = require('../services/invoice-payment-authentication');
@@ -104,6 +105,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       t.jsonb('payload');
     });
     await migration.up(app);
+    await canceledCheckoutMigration.up(app);
     await provenanceMigration.up(app);
     await workerIdentityMigration.up(app);
     await require('../models/migrations/20261119190100_saved_card_worker_timeout').up(app);

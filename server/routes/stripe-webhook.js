@@ -7265,7 +7265,6 @@ async function resolveMetadataCanceledSavedCardAttempt(paymentIntent, database =
     originalCustomerId: metadataCustomerId,
     stripePaymentIntentId: paymentIntent.id,
     failureMessage: 'PaymentIntent canceled before settling',
-    preserveReplacementCheckout: true,
     database,
   });
 }
