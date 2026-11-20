@@ -2320,8 +2320,9 @@ function initScheduledJobs() {
   // =========================================================================
   // WEEKLY SITEONE DEALS BELL (gated: cronJobs)
   // Reads the last 7 days of contact@ mail (the emails table), keeps SiteOne and
-  // product-maker deal mail, rings ONE admin bell. Plain rules, no model call and
-  // no paid API. Monday 8:00am ET.
+  // product-maker deal mail, rings ONE admin bell. Plain rules; the one paid step is
+  // dark behind GATE_SITEONE_DEAL_AI_END_DATE (a Claude Haiku read of each deal's end
+  // date, under 1 cent a month). Monday 8:00am ET.
   // =========================================================================
   cron.schedule('0 8 * * 1', async () => {
     logger.info('Running: Weekly SiteOne deals digest');

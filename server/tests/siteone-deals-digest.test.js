@@ -6,6 +6,9 @@
  * names and addresses are synthetic.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The AI end-date read (GATE_SITEONE_DEAL_AI_END_DATE) has its own suite; here it is a fake.
+const mockReadEndDates = jest.fn();
+jest.mock('../services/procurement/siteone-deal-end-date', () => ({ readDealEndDates: (...args) => mockReadEndDates(...args) }));
 
 const logger = require('../services/logger');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
@@ -340,6 +343,68 @@ describe('runSiteOneDealsDigest', () => {
   test('a bell that was not saved fails the run so job health goes red', async () => {
     const { db } = fakeDb({ emails: weekEmails() });
     await expect(runSiteOneDealsDigest({ now, db, notify: jest.fn().mockResolvedValue(null) })).rejects.toThrow(/not saved/);
+  });
+
+  describe('GATE_SITEONE_DEAL_AI_END_DATE (AI end dates)', () => {
+    const GATE = 'GATE_SITEONE_DEAL_AI_END_DATE';
+    beforeEach(() => mockReadEndDates.mockReset());
+    afterEach(() => { delete process.env[GATE]; });
+
+    const at = (iso) => new Date(iso);
+    const gateEmails = () => [
+      email({ id: 31, subject: 'Pest Specials', has_attachments: true, received_at: at('2026-10-30T15:00:00Z'), body_text: "Flyer attached. I'll be on PTO Thursday Nov 5." }),
+      email({ id: 32, from_name: 'SiteOne', from_address: 'news@grow.siteone.com', subject: 'Last Chance for 10% Off', received_at: at('2026-10-31T15:00:00Z'), body_text: 'Stock up now on Demand CS.' }),
+      email({ id: 33, subject: 'Fall rebate', received_at: at('2026-10-29T15:00:00Z'), body_text: 'Rebate through Nov 12.' }),
+      email({ id: 34, subject: 'Early order program', received_at: at('2026-10-28T15:00:00Z'), body_text: 'Book now.' }),
+    ];
+
+    test.each([['unset', undefined], ['not exactly true', '1']])('gate %s: no AI read, the date patterns decide', async (_label, value) => {
+      if (value !== undefined) process.env[GATE] = value;
+      const { db } = fakeDb({ emails: gateEmails() });
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify });
+      expect(mockReadEndDates).not.toHaveBeenCalled();
+      expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual([
+        'deadline not stated', 'deadline 2026-11-05', 'deadline 2026-11-12', 'deadline not stated',
+      ]);
+    });
+
+    test('gate on: an AI date shows with its words, an AI "no end" wins over a pattern date, a failed read keeps the pattern', async () => {
+      process.env[GATE] = 'true';
+      const { db } = fakeDb({ emails: gateEmails() });
+      mockReadEndDates.mockResolvedValue(new Map([
+        [31, { endDate: null, quote: null }],
+        [32, { endDate: '2026-11-30', quote: 'Offers valid November 1 – November 30, 2026.' }],
+        [34, { endDate: '2027-01-15', quote: 'Orders must be placed by January 15, 2027' }],
+      ]));
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify });
+
+      // One read for the week's deals, newest first, on the same connection.
+      expect(mockReadEndDates).toHaveBeenCalledTimes(1);
+      const [conn, deals] = mockReadEndDates.mock.calls[0];
+      expect(conn).toBe(db);
+      expect(deals.map((e) => e.id)).toEqual([32, 31, 33, 34]);
+      expect(notify.mock.calls[0][2].detail.split('\n')).toEqual([
+        'Oct 31 · SiteOne · Last Chance for 10% Off · ends Nov 30 ("Offers valid November 1 – November 30, 2026.") · your products: Demand CS',
+        'Oct 30 · Sam Rep · Pest Specials · deadline not stated · your products: none named',
+        'Oct 29 · Sam Rep · Fall rebate · deadline 2026-11-12 · your products: none named',
+        'Oct 28 · Sam Rep · Early order program · ends Jan 15, 2027 ("Orders must be placed by January 15, 2027") · your products: none named',
+      ]);
+    });
+
+    test('gate on: a long quote is clipped in the line', async () => {
+      process.env[GATE] = 'true';
+      const { db } = fakeDb({ emails: [gateEmails()[1]] });
+      const quote = `Offers valid November 1 – November 30, 2026. ${'Terms apply to select items only. '.repeat(6)}`;
+      mockReadEndDates.mockResolvedValue(new Map([[32, { endDate: '2026-11-30', quote }]]));
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify });
+      const note = notify.mock.calls[0][2].detail.split(' · ')[3];
+      expect(note.startsWith('ends Nov 30 ("Offers valid November 1 – November 30, 2026. Terms apply')).toBe(true);
+      expect(note.endsWith('…")')).toBe(true);
+      expect(note.length).toBe('ends Nov 30 ("'.length + 140 + '")'.length);
+    });
   });
 });
 

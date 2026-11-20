@@ -1,0 +1,255 @@
+/**
+ * siteone-deal-end-date — the AI end-date read for the Monday SiteOne deals bell
+ * (GATE_SITEONE_DEAL_AI_END_DATE, owner 2026-11-19 "B").
+ *
+ * Pins: what the model reads (whole email, links removed, entities decoded, HTML tags out with
+ * line breaks kept, capped) and that the HTML scan stays linear on a hostile body; an answer is
+ * kept only with a real calendar day from the received ET day to a year on and with the email's
+ * own words (spaces, case, curly quotes, dashes and edge marks aside); null = no end; the request
+ * (Haiku pin, lane, prompt, one call per deal up to the cap, bodies re-read in one query); and
+ * every miss (no key, body read failure, API error, refusal, cut reply, bad JSON, words not found)
+ * leaves no entry, so the bell keeps its date-pattern line. Fakes only: no network, no database.
+ * All names and text are synthetic.
+ */
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const mockCreate = jest.fn();
+const mockSdk = jest.fn(() => ({ messages: { create: (...args) => mockCreate(...args) } }));
+// A plain function, so `new Anthropic(...)` works and hands back the fake client.
+jest.mock('@anthropic-ai/sdk', () => function MockAnthropic(...args) { return mockSdk(...args); });
+
+const mockLedger = jest.fn((provider, model, fn) => fn());
+const mockRejected = jest.fn();
+jest.mock('../services/llm-dispatch-metrics', () => ({
+  ledgerCall: (...args) => mockLedger(...args),
+  ledgerCallRejected: (...args) => mockRejected(...args),
+}));
+
+const logger = require('../services/logger');
+const MODELS = require('../config/models');
+const {
+  readDealEndDates, MAX_READS, BODY_TEXT_CHARS, BODY_HTML_CHARS, MODEL_TEXT_CHARS,
+  _test: { endDateText, checkAnswer, parseAnswer, SYSTEM_PROMPT },
+} = require('../services/procurement/siteone-deal-end-date');
+
+const PROMO = 'Last chance for 10% off select items. View online: https://click.example.com/abc?u=1\n*Offers valid March 1 &ndash; April 30, 2026. Bid projects are not eligible.';
+
+describe('endDateText', () => {
+  test('body_text: links out, entities decoded, spaces and blank lines collapsed', () => {
+    const text = endDateText({ body_text: `${PROMO}\r\n\r\n \r\n\tSee you &#8211; Sam &#x2014; &bogus; &#99999999;` });
+    expect(text).toBe('Last chance for 10% off select items. View online:\n*Offers valid March 1 – April 30, 2026. Bid projects are not eligible.\nSee you – Sam — &bogus; &#99999999;');
+  });
+
+  test('body_html when there is no text part: scripts and styles out, line breaks kept, tags out', () => {
+    const html = '<style>p{color:red}</style><p>Fall <b>rebate</b> on Demand CS</p><script>var x = "<p>ends May 1</p>";</script>Ends Oct 31<br/>Thanks';
+    expect(endDateText({ body_text: '  ', body_html: html })).toBe('Fall rebate on Demand CS\nEnds Oct 31\nThanks');
+  });
+
+  test('an unclosed script, or a "<" with no ">", ends the text', () => {
+    expect(endDateText({ body_html: 'Ends Nov 30 <script>junk ends Dec 1' })).toBe('Ends Nov 30');
+    expect(endDateText({ body_html: 'Ends Nov 30 < and more' })).toBe('Ends Nov 30');
+  });
+
+  test('caps what the model reads', () => {
+    expect(endDateText({ body_text: 'x '.repeat(MODEL_TEXT_CHARS) }).length).toBe(MODEL_TEXT_CHARS);
+  });
+
+  test('stays linear on a hostile HTML body the size of the re-read', () => {
+    const started = Date.now();
+    endDateText({ body_html: '<'.repeat(BODY_HTML_CHARS) });
+    endDateText({ body_html: '<script'.repeat(BODY_HTML_CHARS / 7) });
+    endDateText({ body_html: `${'<p'.repeat(BODY_HTML_CHARS / 4)}>` });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe('checkAnswer', () => {
+  const email = 'Subject line\nLast chance for 10% off. *Offers valid March 1 – April 30, 2026. Early Order Program ending on Thursday.';
+  const received = new Date('2026-04-15T14:00:00Z');
+
+  test.each([
+    ['exact words', 'Offers valid March 1 – April 30, 2026.'],
+    ['case, spaces and a plain hyphen for the en dash', 'offers  valid MARCH 1 - April 30, 2026'],
+    ['curly quotes and edge marks', '“*Offers valid March 1 – April 30, 2026.”'],
+    ['an end in words', 'Early Order Program ending on Thursday'],
+  ])('kept: %s', (_label, quote) => {
+    expect(checkAnswer({ end_date: '2026-04-30', quote }, email, received)).toEqual({ ok: true, endDate: '2026-04-30', quote: quote.replace(/\s+/g, ' ').trim() });
+  });
+
+  test('null = the email states no end', () => {
+    expect(checkAnswer({ end_date: null, quote: null }, email, received)).toEqual({ ok: true, endDate: null, quote: null });
+  });
+
+  test.each([
+    ['no answer', null, 'invalid_json'],
+    ['no end_date key', { quote: 'Offers valid March 1' }, 'invalid_json'],
+    ['not a calendar day', { end_date: '2026-02-30', quote: 'Offers valid March 1 – April 30, 2026' }, 'bad_date'],
+    ['words for a date', { end_date: 'April 30', quote: 'Offers valid March 1 – April 30, 2026' }, 'bad_date'],
+    ['before the email came', { end_date: '2026-04-14', quote: 'Offers valid March 1 – April 30, 2026' }, 'date_out_of_range'],
+    ['more than a year on', { end_date: '2027-04-17', quote: 'Offers valid March 1 – April 30, 2026' }, 'date_out_of_range'],
+    ['no quote', { end_date: '2026-04-30', quote: null }, 'no_quote'],
+    ['a stray number', { end_date: '2026-04-30', quote: '30, 2026' }, 'no_quote'],
+    ['a whole paragraph', { end_date: '2026-04-30', quote: 'x'.repeat(301) }, 'no_quote'],
+    ['words not in the email', { end_date: '2026-04-30', quote: 'Offer ends April 30, 2026' }, 'quote_not_found'],
+  ])('dropped: %s', (_label, answer, reason) => {
+    expect(checkAnswer(answer, email, received)).toEqual({ ok: false, reason });
+  });
+
+  test('the range starts on the ET day the email came, a year on is still kept', () => {
+    const lateNight = new Date('2026-04-15T03:00:00Z'); // Apr 14, 11 PM ET
+    expect(checkAnswer({ end_date: '2026-04-14', quote: 'Offers valid March 1' }, email, lateNight).ok).toBe(true);
+    expect(checkAnswer({ end_date: '2027-04-16', quote: 'Offers valid March 1' }, email, received).ok).toBe(true);
+  });
+
+  test('a long run of marks in the quote is refused fast', () => {
+    const started = Date.now();
+    expect(checkAnswer({ end_date: '2026-04-30', quote: `a${'.'.repeat(8000)}a` }, email, received)).toEqual({ ok: false, reason: 'no_quote' });
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+});
+
+describe('parseAnswer', () => {
+  test('reads the JSON object in a reply, with or without a code fence', () => {
+    expect(parseAnswer('```json\n{"end_date": null, "quote": null}\n```')).toEqual({ end_date: null, quote: null });
+    expect(parseAnswer('Here: {"end_date": "2026-04-30", "quote": "x"}')).toEqual({ end_date: '2026-04-30', quote: 'x' });
+    expect(parseAnswer('no json')).toBeNull();
+    expect(parseAnswer('{not json}')).toBeNull();
+    expect(parseAnswer('[1, 2]')).toBeNull();
+  });
+});
+
+describe('readDealEndDates', () => {
+  const OLD_KEY = process.env.ANTHROPIC_API_KEY;
+  beforeEach(() => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    mockCreate.mockReset();
+    mockSdk.mockClear();
+    mockLedger.mockClear();
+    mockRejected.mockClear();
+    logger.info.mockClear();
+    logger.warn.mockClear();
+  });
+  afterAll(() => {
+    if (OLD_KEY === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = OLD_KEY;
+  });
+
+  // The candidate query's rows carry 6,000-character excerpts; the whole bodies come from one re-read.
+  function fakeConn(rows, { fail = false } = {}) {
+    const calls = { tables: [], selects: [], whereIn: null, raws: [] };
+    const conn = (table) => {
+      calls.tables.push(table);
+      const chain = {
+        select(...cols) { calls.selects.push(...cols); return chain; },
+        whereIn(col, ids) { calls.whereIn = [col, ids]; return chain; },
+        then(resolve, reject) {
+          return Promise.resolve().then(() => {
+            if (fail) throw new Error('db down');
+            return rows.filter((r) => calls.whereIn[1].includes(r.id));
+          }).then(resolve, reject);
+        },
+      };
+      return chain;
+    };
+    conn.raw = (sql, bindings) => { calls.raws.push({ sql, bindings }); return { sql, bindings }; };
+    return { conn, calls };
+  }
+
+  const deal = (id, over = {}) => ({ id, subject: `Deal ${id}`, received_at: new Date('2026-04-15T14:00:00Z'), body_text: 'excerpt', ...over });
+  const reply = (text, stop = 'end_turn') => ({ stop_reason: stop, content: [{ type: 'thinking', thinking: 'reading' }, { type: 'text', text }] });
+
+  test('one Haiku call per deal under the lane, with the whole email links removed; kept answers by email id', async () => {
+    const { conn, calls } = fakeConn([
+      { id: 1, body_text: PROMO, body_html: null },
+      { id: 2, body_text: 'Partners Program members are a step ahead. Earn points all year.', body_html: null },
+    ]);
+    mockCreate
+      .mockResolvedValueOnce(reply('{"end_date": "2026-04-30", "quote": "Offers valid March 1 – April 30, 2026."}'))
+      .mockResolvedValueOnce(reply('{"end_date": null, "quote": null}'));
+
+    const found = await readDealEndDates(conn, [deal(1, { subject: 'Last Chance  for 10% Off' }), deal(2)]);
+
+    expect([...found.entries()]).toEqual([
+      [1, { endDate: '2026-04-30', quote: 'Offers valid March 1 – April 30, 2026.' }],
+      [2, { endDate: null, quote: null }],
+    ]);
+    // Bodies: one query, by id, under their own column names and widths.
+    expect(calls.tables).toEqual(['emails']);
+    expect(calls.whereIn).toEqual(['id', [1, 2]]);
+    expect(calls.raws).toEqual([
+      { sql: 'left(body_text, ?) as body_text', bindings: [BODY_TEXT_CHARS] },
+      { sql: 'left(body_html, ?) as body_html', bindings: [BODY_HTML_CHARS] },
+    ]);
+    // The request: the registry pin, its lane, the fixed prompt, the email as read.
+    expect(mockSdk).toHaveBeenCalledTimes(1);
+    expect(mockSdk).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'test-key', maxRetries: 0 }));
+    expect(mockLedger).toHaveBeenCalledWith('anthropic', MODELS.DEAL_END_DATE, expect.any(Function), { laneId: 'siteone_deal_end_date' });
+    const request = mockCreate.mock.calls[0][0];
+    expect(request).toMatchObject({ model: MODELS.DEAL_END_DATE, system: SYSTEM_PROMPT });
+    expect(request).not.toHaveProperty('temperature');
+    expect(request.messages).toEqual([{
+      role: 'user',
+      content: `Received: 2026-04-15 (US Eastern)\nSubject: Last Chance for 10% Off\n\n${endDateText({ body_text: PROMO })}`,
+    }]);
+    expect(request.messages[0].content).not.toContain('https://');
+    expect(mockRejected).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 2 of 2 deals read by AI');
+  });
+
+  test('every miss leaves no entry, and a reply the code refuses is marked failed in the ledger', async () => {
+    const ids = [1, 2, 3, 4, 5, 6, 7];
+    const { conn } = fakeConn(ids.filter((id) => id !== 7).map((id) => ({ id, body_text: PROMO, body_html: null })));
+    const refusal = reply('', 'refusal');
+    const notJson = reply('The offer ends April 30.');
+    const wrongWords = reply('{"end_date": "2026-04-30", "quote": "Sale ends April 30"}');
+    mockCreate
+      .mockRejectedValueOnce(Object.assign(new Error('overloaded'), { status: 529 }))
+      .mockResolvedValueOnce(refusal)
+      .mockResolvedValueOnce(reply('{"end_date": "2026-04-30"', 'max_tokens'))
+      .mockResolvedValueOnce(notJson)
+      .mockResolvedValueOnce(wrongWords)
+      .mockResolvedValueOnce(reply('{"end_date": "2026-04-30", "quote": "Offers valid March 1 – April 30, 2026."}'));
+
+    const found = await readDealEndDates(conn, ids.map((id) => deal(id)));
+
+    expect([...found.keys()]).toEqual([6]);
+    expect(mockCreate).toHaveBeenCalledTimes(6); // no body row for 7, so no call
+    expect(mockRejected.mock.calls).toEqual([[notJson, 'invalid_json'], [wrongWords, 'schema_invalid']]);
+    expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 1 of 7 deals read by AI; date patterns kept for 1 api_529, 1 refusal, 1 max_tokens, 1 invalid_json, 1 quote_not_found, 1 no_body');
+  });
+
+  test(`reads at most ${MAX_READS} deals, newest first as given`, async () => {
+    const ids = Array.from({ length: MAX_READS + 3 }, (_, i) => i + 1);
+    const { conn, calls } = fakeConn(ids.map((id) => ({ id, body_text: PROMO, body_html: null })));
+    mockCreate.mockResolvedValue(reply('{"end_date": null, "quote": null}'));
+    const found = await readDealEndDates(conn, ids.map((id) => deal(id)));
+    expect(calls.whereIn[1]).toEqual(ids.slice(0, MAX_READS));
+    expect(mockCreate).toHaveBeenCalledTimes(MAX_READS);
+    expect(found.size).toBe(MAX_READS);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('date patterns kept for 3 over_cap'));
+  });
+
+  test('no API key, or the body read fails: no call, no entries, one warning', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    const first = fakeConn([{ id: 1, body_text: PROMO }]);
+    expect((await readDealEndDates(first.conn, [deal(1)])).size).toBe(0);
+    expect(first.calls.tables).toEqual([]);
+
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    const second = fakeConn([], { fail: true });
+    expect((await readDealEndDates(second.conn, [deal(1)])).size).toBe(0);
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(logger.warn.mock.calls.map(([line]) => line)).toEqual([
+      '[siteone-deals] end dates not read by AI: no Anthropic API key',
+      '[siteone-deals] end dates not read by AI: email bodies not read: db down',
+    ]);
+  });
+
+  test('no deals: nothing read', async () => {
+    const { conn, calls } = fakeConn([]);
+    expect((await readDealEndDates(conn, [])).size).toBe(0);
+    expect(calls.tables).toEqual([]);
+    expect(mockSdk).not.toHaveBeenCalled();
+  });
+});

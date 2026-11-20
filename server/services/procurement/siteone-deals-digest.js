@@ -11,8 +11,12 @@
  * A sender must also pass Gmail's SPF/DKIM check for its own domain (a typed From
  * header proves nothing), and quarantined, SPAM, TRASH or spam rows are skipped.
  *
- * Costs $0: plain string and regex rules over rows already in the database. No
- * model call, no paid API, no network. Read-only: it writes nothing but the bell.
+ * Deal tests, deadlines and product names are plain string and regex rules over rows
+ * already in the database: $0, no network. One exception, dark behind
+ * GATE_SITEONE_DEAL_AI_END_DATE (owner 2026-11-19 "B"): with it on, each deal's end date
+ * comes from one Claude Haiku read of the whole email, shown with the email's own words
+ * (siteone-deal-end-date.js, under 1 cent a month); a read that fails keeps the date-
+ * pattern deadline. Read-only: it writes nothing but the bell.
  *
  * The bell follows docs/admin-notifications.md: it is raised through
  * raiseAdminAlert (headline and why inside the copy rules), and the one-line-
@@ -252,20 +256,38 @@ const clip = (s, n) => {
   return t.length <= n ? t : `${t.slice(0, n - 1).trimEnd()}…`;
 };
 
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const QUOTE_CLIP = 140;
+
 function shortDate(date) {
   const p = etParts(date);
-  return `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][p.month - 1]} ${p.day}`;
+  return `${MONTH_NAMES[p.month - 1]} ${p.day}`;
 }
 
-function dealLine(email, products) {
+/**
+ * The deadline part of a line. `aiRead` is the AI end-date read ({ endDate, quote }; endDate
+ * null = the email states no end), absent when the gate is off or the read failed; then the
+ * date patterns decide, as they always have.
+ */
+function deadlineNote(email, received, aiRead) {
+  if (aiRead?.endDate) {
+    const [year, month, day] = aiRead.endDate.split('-').map(Number);
+    const sameYear = year === etParts(received).year;
+    return `ends ${MONTH_NAMES[month - 1]} ${day}${sameYear ? '' : `, ${year}`} ("${clip(aiRead.quote, QUOTE_CLIP)}")`;
+  }
+  if (aiRead) return 'deadline not stated';
+  const deadline = extractDeadline(`${email.subject || ''}\n${bodyPlainText(email)}`, received);
+  return `deadline ${deadline || 'not stated'}`;
+}
+
+function dealLine(email, products, aiRead) {
   const received = new Date(email.received_at);
   const who = clip(email.from_name, 60) || clip(email.from_address, 80);
-  const deadline = extractDeadline(`${email.subject || ''}\n${bodyPlainText(email)}`, received);
   return [
     shortDate(received),
     who,
     clip(email.subject, SUBJECT_CLIP) || '(no subject)',
-    `deadline ${deadline || 'not stated'}`,
+    deadlineNote(email, received, aiRead),
     `your products: ${matchProducts(`${email.subject || ''}\n${bodyPlainText(email)}`, products).join(', ') || 'none named'}`,
   ].join(' · ');
 }
@@ -328,6 +350,12 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
     logger.warn(`[siteone-deals] product names not read: ${err.message}`);
   }
 
+  // Gate off: no model call, and every line keeps its date-pattern deadline.
+  let endDates = new Map();
+  if (require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true) {
+    endDates = await require('./siteone-deal-end-date').readDealEndDates(conn, deals);
+  }
+
   const dedupeKey = `siteone-deals:${etWeekStart(now)}`;
   const count = deals.length;
   const result = await raise('system', {
@@ -342,7 +370,7 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
   }, {
     // 'system' alone is suppressed under the bell policy; a deal list is a handoff.
     bell: true,
-    detail: [...deals.map((e) => dealLine(e, productNames)), ...(capped ? [CAP_NOTE] : [])].join('\n'),
+    detail: [...deals.map((e) => dealLine(e, productNames, endDates.get(e.id))), ...(capped ? [CAP_NOTE] : [])].join('\n'),
     dedupeKey,
     refreshOnDedupe: true,
     metadata: { source: 'siteone-deals-digest', dealCount: count, emailIds: deals.map((e) => e.id) },
