@@ -31,7 +31,7 @@ const logger = require('../logger');
 const gbp = require('../google-business');
 const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
-const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix, removedOwnerReplyFields, whereNeedsRealReply } = require('./draft-prefix');
+const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix, removedOwnerReplyFields, whereNeedsRealReply, whereHasRealReply } = require('./draft-prefix');
 const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint, groundingCustomerId } = require('./grounding');
 const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
@@ -317,9 +317,9 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
 // draft the agent could not post, so while its review is still on Google and
 // still has no real reply it PARKS (retry_expired) and rings the same "needs
 // you" bell as any other park, instead of vanishing from the lane; a FAILED
-// row whose review is gone from Google leaves silently like a QUEUED one.
-// This is the backstop for the runner's early park, which already parks a
-// retry that would fall due past the window.
+// row whose review is gone from Google or already answered leaves silently
+// like a QUEUED one. This is the backstop for the runner's early park, which
+// already parks a retry that would fall due past the window.
 // Returns how many rows left the lane (expired + parked).
 async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
   const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
@@ -327,18 +327,31 @@ async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
     .whereIn('auto_reply_status', statuses)
     .where('review_created_at', '<', cutoff)
     .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()]);
-  // Park first, so the expiry below only sees the FAILED rows not parked.
   const parked = await overAge([STATUS.FAILED])
     .whereNull('missing_since')
     .modify(whereNeedsRealReply)
     .update({ auto_reply_status: STATUS.PARKED, auto_reply_reason: 'retry_expired', auto_reply_due_at: null, auto_reply_claimed_until: null })
-    .returning(['id', 'location_id', 'star_rating', 'reviewer_name', 'auto_reply_draft']);
+    .returning(['id', 'location_id', 'star_rating', 'reviewer_name', 'auto_reply_draft', 'review_reply']);
   for (const r of parked) {
+    // A failed publish can hold its draft only in auto_reply_draft, but the
+    // Reviews card shows, and Post now checks, the "[DRAFT]" in review_reply.
+    // Fill that slot only while it is empty: a person's text is never replaced.
+    if (r.auto_reply_draft && r.review_reply == null) {
+      await db('google_reviews').where({ id: r.id }).whereNull('review_reply')
+        .update({ review_reply: asDraft(r.auto_reply_draft), reply_updated_at: null });
+    }
     await bell(r, { title: 'Review reply needs you', body: `${summarize(r)} — the reply agent ran out of time to post it.${r.auto_reply_draft ? ' The draft is saved on the review.' : ''}`, reason: 'retry_expired', action: true });
   }
-  const n = await overAge([STATUS.QUEUED, STATUS.FAILED])
-    .update({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: null });
-  const count = (Array.isArray(n) ? n.length : (n || 0)) + parked.length;
+  // Only a row no person needs leaves silently: a QUEUED row (never tried) and
+  // a FAILED row whose review is gone from Google or already has a real reply.
+  // Any other FAILED row stays for the park above, so one that a publish
+  // released while the bells rang parks on the next sweep.
+  const expired = { auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: null };
+  const counted = (n) => (Array.isArray(n) ? n.length : (n || 0));
+  const n = counted(await overAge([STATUS.QUEUED]).update(expired))
+    + counted(await overAge([STATUS.FAILED]).whereNotNull('missing_since').update(expired))
+    + counted(await overAge([STATUS.FAILED]).whereNull('missing_since').modify(whereHasRealReply).update(expired));
+  const count = n + parked.length;
   if (count) logger.info(`[review-auto-reply] ${count} pending review(s) older than ${cfg.maxQueueAgeHours}h left the lane unposted (${parked.length} parked as retry_expired)`);
   return count;
 }

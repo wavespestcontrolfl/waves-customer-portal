@@ -214,6 +214,7 @@ async function loadOpenPastVisits({ now = new Date(), database = db, findStaleVi
 async function loadParkedReviews({ database = db } = {}) {
   const { WAVES_LOCATIONS } = require('../config/locations');
   const { whereNeedsRealReply } = require('./review-reply/draft-prefix');
+  const { whereNoReconcilePark } = require('./review-reply/runner');
   const rows = await database('google_reviews')
     .where('auto_reply_status', 'parked')
     .whereIn('location_id', WAVES_LOCATIONS.map((l) => l.id))
@@ -221,6 +222,11 @@ async function loadParkedReviews({ database = db } = {}) {
     .where((q) => q.where('dismissed', false).orWhereNull('dismissed'))
     .whereNull('missing_since')
     .modify((q) => whereNeedsRealReply(q))
+    // google_uncertain / persist_failed: our reply may already be live on
+    // Google. Those parks ring their own "needs reconciling" bell, and the
+    // sync records a live reply when it reads one, so they are not listed as
+    // "no reply".
+    .modify((q) => whereNoReconcilePark(q))
     .orderByRaw('review_created_at ASC NULLS LAST, id ASC')
     .select('id', 'reviewer_name', 'review_created_at', 'location_id');
   const locationNames = new Map(WAVES_LOCATIONS.map((l) => [l.id, l.name]));
