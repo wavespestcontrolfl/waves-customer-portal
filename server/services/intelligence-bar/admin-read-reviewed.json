@@ -1340,15 +1340,20 @@
     },
     {
       "endpoint": "/admin/invoices/:id/credit-context",
-      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): the select adds amount_paid and amount_due comes from invoiceAmountDue (invoice-helpers.js, cents arithmetic only); response fields unchanged. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller. Re-reviewed 2026-11-18 (#7957 checkout receipt): only the feature-gates import line in admin-invoices.js gained checkoutTenderReceiptLive; the handler chain, signals and unresolved are unchanged.",
+      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): the select adds amount_paid and amount_due comes from invoiceAmountDue (invoice-helpers.js, cents arithmetic only); response fields unchanged. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller. Re-reviewed 2026-11-18 (#7957 checkout receipt): only the feature-gates import line in admin-invoices.js gained checkoutTenderReceiptLive; the handler chain, signals and unresolved are unchanged. Re-reviewed 2026-11-19 (#7945 saved-card credit reservation): the balance read is now accountCreditSnapshotForInvoice, which reads customers.account_credits and auto_apply_account_credit together with the sum of still-unposted credit reserved by submitted stripe_invoice_charge_attempts joined to their invoices. The response adds spendable, a rounded numeric amount equal to balance minus reservations; identifiers and all other amounts remain explicit numeric or fixed-shape fields. No free text, write, outside call or unresolved callee.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
         "id": "uuid"
       },
-      "signals": [],
+      "acceptSignals": [
+        "credential_table:invoices"
+      ],
+      "signals": [
+        "credential_table:invoices"
+      ],
       "unresolved": [],
-      "hash": "c2df787d07aa93cea89ee17a539b5e9d"
+      "hash": "9c828cc653b72665467639d2ab84a219"
     },
     {
       "endpoint": "/admin/invoices/:id/receipt-address",
