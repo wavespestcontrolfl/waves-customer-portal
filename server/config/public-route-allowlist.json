@@ -73,11 +73,11 @@
     {
       "router": "server/routes/public-form-steps.js",
       "mount": "/api/public/form-steps",
-      "reason": "Anonymous, cookie-free form step counter for the marketing sites' quote form and the hub's two quiz pages (owner *build* 2026-11-19, quiz funnel scope: step counts with no cookie; a near copy of the blog read-depth beacon above). No gate: it only counts, and cannot message, charge, reprice, delete data or spend money. Mounted above the global cors(), the /api/ limiter and the body parsers; own per-IP limiter (120/min) ahead of a 1 KB text parse; a fixed form + step allowlist; site from the Origin header only, through the fleet registry; the same 204 for every POST, sent before any write; each (day, site, form, step) bucket stops at 2000 a day; terminal 404. Stores only the ET day, site, form, step and a count: no IP, user agent, referrer, cookie or body.",
+      "reason": "Anonymous, cookie-free form step counter for the marketing sites' quote form and the hub's two quiz pages (owner *build* 2026-11-19, quiz funnel scope: step counts with no cookie; a near copy of the blog read-depth beacon above). No gate: it only counts, and cannot message, charge, reprice, delete data or spend money. Mounted above the global cors(), the /api/ limiter and the body parsers; own per-IP limiter (120/min) ahead of a 1 KB text parse; a fixed form + step allowlist; site from the Origin header only, through the fleet registry; the same 204 for every POST, sent before any write; each (day, site, form, step) bucket stops at 2000 a day; terminal 404. Every answer is marked Cross-Origin-Resource-Policy: cross-origin so a browser accepts the no-cors reply (two answers have no body, the 404 is the generic one). Stores only the ET day, site, form, step and a count: no IP, user agent, referrer, cookie or body.",
       "routes": [
         "POST /api/public/form-steps",
         "USE /api/public/form-steps (express-rate-limit({ handler#8c637dbe }))",
-        "USE /api/public/form-steps (inline function#0a11ff46)",
+        "USE /api/public/form-steps (inline function#c72894ce)",
         "USE /api/public/form-steps (inline function#e7d9b29e)"
       ]
     },
