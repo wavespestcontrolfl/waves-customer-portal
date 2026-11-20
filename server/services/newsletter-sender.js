@@ -6,7 +6,7 @@
  * Segment filter shape (stored in newsletter_sends.segment_filter jsonb):
  *   SQL-expressible (applied directly in buildSubscriberQuery):
  *     { sources?: string[], tags?: string[], customersOnly?: boolean,
- *       leadsOnly?: boolean, region_zone?: string[] }
+ *       leadsOnly?: boolean, region_zone?: string[], subscriber_ids?: number[] }
  *   Service-line / membership (NOT a column — resolved to a customer_id set
  *   via newsletter-audience-profiles, then injected as a whereIn):
  *     { has_service?: string[], missing_service?: string[],
@@ -471,7 +471,21 @@ function buildSubscriberQuery(segmentFilter, customerIds = null) {
   if (Array.isArray(f.tags) && f.tags.length) {
     q = q.whereRaw('tags \\?| array[' + f.tags.map(() => '?').join(',') + ']', f.tags);
   }
-  return q;
+  return narrowToSubscriberIds(q, f.subscriber_ids);
+}
+
+// subscriber_ids: an exact list of newsletter_subscribers ids (a Waves Pest
+// Insider issue's audience, fixed when the issue is planned: see
+// services/pest-insider/audience.js). Absent or null = no constraint. Present =
+// only those ids, still under every rule in buildSubscriberQuery. A present-but-
+// unusable value (not an array, an empty array, or any element that is not a
+// positive integer) matches nobody: an exact list must never broaden to every
+// active subscriber. One array binding, so a long list cannot hit Postgres's
+// bind-parameter limit.
+function narrowToSubscriberIds(q, ids) {
+  if (ids == null) return q;
+  const usable = Array.isArray(ids) && ids.length > 0 && ids.every((id) => Number.isSafeInteger(id) && id > 0);
+  return usable ? q.whereRaw('newsletter_subscribers.id = ANY(?::int[])', [ids]) : q.whereRaw('1 = 0');
 }
 
 function assignAbVariant() {
