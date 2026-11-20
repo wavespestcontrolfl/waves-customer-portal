@@ -23,7 +23,7 @@ let mockPg;
 const NOW = new Date('2026-11-19T17:00:00Z');
 
 const pool = (over) => ({ record_id: `P-${Math.random().toString(36).slice(2, 10)}`, record_status: 'Permit Issued', issued_date: '2026-11-10', address_line1: '200 SAMPLE TRL', city: 'PARRISH', zip: '34219', contractor_name: 'SAMPLE POOLS LLC', contractor_license: 'CPC111', ...over });
-const home = (over) => ({ permit_no: `H-${Math.random().toString(36).slice(2, 10)}`, status: 'Permit Issued', type_of_work: 'New Single Family', issued_date: '2026-11-10', address_raw: '300 SAMPLE CT  PARRISH 34219', zip: '34219', contractor_name: 'SAMPLE HOMES INC', contractor_license: 'CGC333', ...over });
+const home = (over) => ({ permit_no: `H-${Math.random().toString(36).slice(2, 10)}`, status: 'Permit Issued', permit_type: 'Residential', type_of_work: 'New Single Family', issued_date: '2026-11-10', address_raw: '300 SAMPLE CT  PARRISH 34219', zip: '34219', contractor_name: 'SAMPLE HOMES INC', contractor_license: 'CGC333', ...over });
 
 describeDb('Builders list (PostgreSQL)', () => {
   beforeAll(async () => {
@@ -70,16 +70,34 @@ describeDb('Builders list (PostgreSQL)', () => {
     expect(result.week).toEqual({ from: '2026-11-09', through: '2026-11-15', permits: 2, builders: 1 });
   });
 
-  test('home: only new builds, canceled and withdrawn left out, ordered by 90-day permits', async () => {
+  test('home: only new builds on a residential permit, canceled and withdrawn left out, ordered by 90-day permits', async () => {
     await mockPg('construction_permit_records').insert([
       home(), home({ issued_date: '2026-11-11' }),
       home({ type_of_work: 'New Villa', contractor_name: 'SAMPLE VILLAS CORP', contractor_license: 'CGC444' }),
+      home({ type_of_work: 'New Duplex', contractor_name: 'SAMPLE VILLAS CORP', contractor_license: 'CGC444' }),
       home({ type_of_work: 'Alteration' }),
       home({ status: 'Canceled' }),
       home({ status: 'Withdrawn' }),
+      // Commercial new builds are not homes, even when the work type starts with "New".
+      home({ permit_type: 'Commercial', type_of_work: 'New', contractor_name: 'SAMPLE COMMERCIAL BUILDERS INC', contractor_license: 'CGC555' }),
+      home({ permit_type: 'Commercial', type_of_work: 'New Multi-Family Residential', contractor_name: 'SAMPLE COMMERCIAL BUILDERS INC', contractor_license: 'CGC555' }),
     ]);
     const result = await listBuilders({ kind: 'home', now: NOW });
-    expect(result.builders.map((builder) => [builder.key, builder.permits90])).toEqual([['SAMPLE HOMES', 2], ['SAMPLE VILLAS', 1]]);
+    expect(result.builders.map((builder) => [builder.key, builder.permits90])).toEqual([['SAMPLE HOMES', 2], ['SAMPLE VILLAS', 2]]);
+    const sites = await builderPermits({ kind: 'home', key: 'SAMPLE COMMERCIAL BUILDERS' });
+    expect(sites).toEqual([]);
+  });
+
+  test('a permit dated after today counts nowhere: not in the windows, not as the first or newest permit', async () => {
+    await mockPg('pool_permit_records').insert([
+      pool({ issued_date: '2026-11-15' }),
+      pool({ issued_date: '2026-11-20' }), // tomorrow, Eastern time
+      pool({ contractor_name: 'FUTURE POOLS INC', contractor_license: 'CPC777', issued_date: '2026-11-21' }),
+    ]);
+    const result = await listBuilders({ kind: 'pool', now: NOW });
+    expect(result.dataThrough).toBe('2026-11-15');
+    expect(result.builders).toEqual([expect.objectContaining({ key: 'SAMPLE POOLS', permits30: 1, permits365: 1, lastPermit: '2026-11-15' })]);
+    expect(result.week).toEqual({ from: '2026-11-09', through: '2026-11-15', permits: 1, builders: 1 });
   });
 
   test('a builder that matches an active payer or a live customer company is flagged; an inactive payer is not', async () => {

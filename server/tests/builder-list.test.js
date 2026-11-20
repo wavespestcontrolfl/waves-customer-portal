@@ -128,7 +128,10 @@ describe('listBuilders', () => {
 
     const aggregate = mockRaw.mock.calls.find(([sql]) => /FROM pool_permit_records/.test(sql) && /GROUP BY/.test(sql));
     // The week is the 7 days ending on the newest permit (Nov 16); the other windows count back from today (Nov 19).
-    expect(aggregate[1]).toEqual(['2026-11-10', '2026-11-16', '2026-10-21', '2026-08-22', '2025-11-20']);
+    // The last value is today: a permit dated after today counts nowhere.
+    expect(aggregate[1]).toEqual(['2026-11-10', '2026-11-16', '2026-10-21', '2026-08-22', '2025-11-20', '2026-11-19']);
+    const newest = mockRaw.mock.calls.find(([sql]) => /AS newest/.test(sql));
+    expect(newest[1]).toEqual(['2026-11-19']);
     expect(aggregate[0]).not.toMatch(/current_date/i);
     expect(aggregate[0]).toMatch(/NOT LIKE 'OWN%'/);
     expect(result).toEqual({
@@ -142,22 +145,22 @@ describe('listBuilders', () => {
     });
   });
 
-  test('home builders read the construction table and only new builds', async () => {
+  test('home builders read the construction table and only new builds on a residential permit', async () => {
     answer();
     await listBuilders({ kind: 'home', now: new Date('2026-11-19T15:00:00Z') });
     const aggregate = mockRaw.mock.calls.find(([sql]) => /GROUP BY/.test(sql));
     expect(aggregate[0]).toMatch(/FROM construction_permit_records/);
     expect(aggregate[0]).toMatch(/type_of_work ILIKE 'New%'/);
+    expect(aggregate[0]).toMatch(/LOWER\(COALESCE\(permit_type, ''\)\) = 'residential'/);
   });
 
-  test('a failed customer lookup leaves the list in place with no Customer flags', async () => {
+  test('a failed customer lookup fails the list, so no customer is shown as a fresh prospect', async () => {
     mockRaw.mockImplementation(async (sql) => {
       if (/FROM customers/.test(sql)) throw new Error('boom');
       if (/AS newest/.test(sql)) return { rows: [{ newest: '2026-11-16' }] };
       return { rows: [{ name: 'ACME POOLS INC', license: 'CPC3', permits7: 0, permits30: 0, permits90: 1, permits365: 1, first_permit: '2026-02-01', last_permit: '2026-10-01' }] };
     });
-    const result = await listBuilders({ kind: 'pool', now: new Date('2026-11-19T15:00:00Z') });
-    expect(result.builders[0].isCustomer).toBe(false);
+    await expect(listBuilders({ kind: 'pool', now: new Date('2026-11-19T15:00:00Z') })).rejects.toThrow('boom');
   });
 
   test('an unknown kind is refused before any query', async () => {

@@ -21,7 +21,8 @@ const DEFAULT_PERMIT_LIMIT = 25;
 const MAX_PERMIT_LIMIT = 100;
 
 // Table and column names are fixed here and picked by a validated kind; every value is a bound parameter.
-// Pool: a canceled permit is not a pool (the table keeps them on purpose). Home: only new builds count.
+// Pool: a canceled permit is not a pool (the table keeps them on purpose). Home: only new builds on a residential
+// permit count; the table also holds commercial permits ("New", "New Multi-Family Residential"), which are not homes.
 const SOURCES = {
   pool: {
     table: 'pool_permit_records',
@@ -39,7 +40,7 @@ const SOURCES = {
     address: 'address_raw',
     city: 'NULL',
     typeOfWork: 'type_of_work',
-    where: "AND type_of_work ILIKE 'New%' AND LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')",
+    where: "AND LOWER(COALESCE(permit_type, '')) = 'residential' AND type_of_work ILIKE 'New%' AND LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')",
   },
 };
 
@@ -147,6 +148,7 @@ function mergeBuilders(rows, { newSince, customerKeys = new Set() }) {
 }
 
 // Counts are per name and license across the whole table, so the first permit really is the first one on file.
+// A permit dated after today (a county typing slip) is left out, so the counts and the first and newest dates agree.
 async function readGroups(source, cut) {
   const result = await db.raw(
     `SELECT UPPER(BTRIM(contractor_name)) AS name,
@@ -158,41 +160,38 @@ async function readGroups(source, cut) {
             MIN(issued_date) AS first_permit,
             MAX(issued_date) AS last_permit
        FROM ${source.table}
-      WHERE issued_date IS NOT NULL ${BUILDER_ONLY} ${source.where}
+      WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}
       GROUP BY 1, 2`,
-    [cut.weekStart, cut.weekEnd, cut.d30, cut.d90, cut.d365],
+    [cut.weekStart, cut.weekEnd, cut.d30, cut.d90, cut.d365, cut.today],
   );
   return result.rows.map(toRow);
 }
 
-async function readDataThrough(source) {
-  const result = await db.raw(`SELECT MAX(issued_date) AS newest FROM ${source.table}`);
+async function readDataThrough(source, today) {
+  const result = await db.raw(`SELECT MAX(issued_date) AS newest FROM ${source.table} WHERE issued_date <= ?::date`, [today]);
   return dateOnlyString(result.rows[0] && result.rows[0].newest);
 }
 
-// The keys of every active payer and every live customer company. The caller gets booleans only.
+// The keys of every active payer and every live customer company. The caller gets booleans only. A failed read
+// fails the whole list (the office presses Try again): an empty set would show every customer as a fresh prospect.
 async function readCustomerKeys() {
-  try {
-    const result = await db.raw(
-      `SELECT company_name AS name FROM customers WHERE deleted_at IS NULL AND BTRIM(COALESCE(company_name, '')) <> ''
-       UNION
-       SELECT company_name AS name FROM payers WHERE active AND BTRIM(COALESCE(company_name, '')) <> ''
-       UNION
-       SELECT display_name AS name FROM payers WHERE active AND BTRIM(COALESCE(display_name, '')) <> ''`,
-    );
-    return new Set(result.rows.map((row) => builderKey(row.name)).filter(Boolean));
-  } catch (err) {
-    logger.warn(`[builder-list] customer match skipped: ${err.message}`);
-    return new Set();
-  }
+  const result = await db.raw(
+    `SELECT company_name AS name FROM customers WHERE deleted_at IS NULL AND BTRIM(COALESCE(company_name, '')) <> ''
+     UNION
+     SELECT company_name AS name FROM payers WHERE active AND BTRIM(COALESCE(company_name, '')) <> ''
+     UNION
+     SELECT display_name AS name FROM payers WHERE active AND BTRIM(COALESCE(display_name, '')) <> ''`,
+  );
+  return new Set(result.rows.map((row) => builderKey(row.name)).filter(Boolean));
 }
 
 async function listBuilders({ kind, now = new Date() }) {
   const source = SOURCES[kind];
   if (!source) throw new Error(`unknown builder kind: ${kind}`);
   const started = Date.now();
-  const dataThrough = await readDataThrough(source);
-  const cut = cutoffsFor(etDateString(now), dataThrough);
+  const today = etDateString(now);
+  const dataThrough = await readDataThrough(source, today);
+  const cut = cutoffsFor(today, dataThrough);
   const [rows, customerKeys] = await Promise.all([readGroups(source, cut), readCustomerKeys()]);
   const merged = mergeBuilders(rows, { newSince: cut.d30, customerKeys });
   logger.info(`[builder-list] ${kind}: ${merged.builders.length} builders in ${Date.now() - started} ms`);
