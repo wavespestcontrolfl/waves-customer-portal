@@ -221,17 +221,16 @@ describe('the sweep\'s verdict decides who is listed', () => {
   const relevance = (over = {}) => ({
     classify: jest.fn(() => ({ key: 'inbound_sms', contact: 'sms' })),
     subjectFor: jest.fn(() => ({ contact: { anchor: new Date() }, contactUnknown: false })),
-    judge: jest.fn(() => ({ reason: null, would: null })),
+    judge: jest.fn(() => ({ reason: null })),
     ...over,
   });
   const state = () => ({ warned: false });
 
   beforeEach(() => logger.warn.mockClear());
 
-  test('a verdict of either kind (it would close, or it closes) means handled', () => {
-    for (const verdict of [{ reason: 'Answered by text', would: null }, { reason: null, would: 'Answered by text' }]) {
-      expect(judgeOne(relevance({ judge: jest.fn(() => verdict) }), row(), {}, '2026-11-02', state())).toEqual({ handled: true });
-    }
+  test('a verdict that closes means handled', () => {
+    const verdict = { reason: 'Answered by text' };
+    expect(judgeOne(relevance({ judge: jest.fn(() => verdict) }), row(), {}, '2026-11-02', state())).toEqual({ handled: true });
   });
 
   test('the sweep is asked for the row\'s class, and is handed the day in Eastern time', () => {

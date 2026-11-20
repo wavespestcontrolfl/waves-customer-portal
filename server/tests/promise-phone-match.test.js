@@ -1,19 +1,19 @@
 /**
  * Phone-matched promise and alert rules (owner 2026-11-04, "FOR ALL COMUNNICATION LINES"; AI choice 2026-11-05):
- * the two gates, the phone-keyed witness (call-promise-phone-evidence.js), the unknown-sender text bell rule
- * (admin-alert-relevance.js `unknown_sms`) and the quiet-call filter on the pagers' promise list. Pure: no
+ * the no-customer AI gate, the phone-keyed witness (call-promise-phone-evidence.js) and the quiet-call filter on
+ * the pagers' promise list. Pure: no
  * database. The SQL these lean on is covered in promise-phone-match-db.test.js and
  * call-promise-ai-close-no-customer-db.test.js (CI's DATABASE_URL step). Fixtures fictitious.
  */
 const fs = require('fs');
 const path = require('path');
 
-const GATES = ['GATE_CALL_PROMISE_AI_NO_CUSTOMER', 'GATE_PROMISE_PHONE_MATCH_CLOSE'];
+const GATES = ['GATE_CALL_PROMISE_AI_NO_CUSTOMER'];
 const saved = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
 afterEach(() => { for (const g of GATES) { if (saved[g] === undefined) delete process.env[g]; else process.env[g] = saved[g]; } });
 beforeEach(() => { for (const g of GATES) delete process.env[g]; });
 
-describe('the gates', () => {
+describe('the gate', () => {
   const gates = () => require('../config/feature-gates');
   test('GATE_CALL_PROMISE_AI_NO_CUSTOMER is strict true, unset = off', () => {
     expect(gates().callPromiseAiNoCustomerLive()).toBe(false);
@@ -22,13 +22,6 @@ describe('the gates', () => {
     for (const value of ['TRUE', '1', 'shadow', ' true', '']) {
       process.env.GATE_CALL_PROMISE_AI_NO_CUSTOMER = value;
       expect([value, gates().callPromiseAiNoCustomerLive()]).toEqual([value, false]);
-    }
-  });
-  test('GATE_PROMISE_PHONE_MATCH_CLOSE is shadow, true or off', () => {
-    expect(gates().promisePhoneMatchCloseMode()).toBe('off');
-    for (const [value, mode] of [['shadow', 'shadow'], [' TRUE ', 'true'], ['1', 'off'], ['on', 'off'], ['', 'off']]) {
-      process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = value;
-      expect([value, gates().promisePhoneMatchCloseMode()]).toEqual([value, mode]);
     }
   });
 });
@@ -172,55 +165,6 @@ describe('phone identity and the witness (call-promise-phone-evidence.js)', () =
   });
 });
 
-describe('the unknown-sender text bell (admin-alert-relevance.js unknown_sms)', () => {
-  const relevance = () => require('../services/admin-alert-relevance');
-  const bellRow = () => ({ category: 'inbound_sms', created_at: new Date('2026-11-04T18:00:00Z'), link: '/admin/communications?message=SM1',
-    metadata: { triggerKey: 'sms_reply', dedupeKey: 'sms-reply:SM1', payload: { twilioSid: 'SM1', threadId: null } } });
-  const anchor = new Date('2026-11-04T18:00:00Z');
-  const minutes = (m) => new Date(anchor.getTime() + m * 60000);
-  const subject = (contact) => ({ contact: { anchor, unknownSender: true, ...contact } });
-
-  test('the emitter\'s key prefix is the one this class matches', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../services/sms-reply-alert-delivery.js'), 'utf8');
-    expect(source).toContain('`sms-reply:${MessageSid}`');
-    expect(fs.readFileSync(path.join(__dirname, '../services/admin-alert-relevance.js'), 'utf8')).toContain("const UNKNOWN_SMS_PREFIX = 'sms-reply:';");
-  });
-  test('gate off: the row is the old inbound_sms class; shadow or true: its own class', () => {
-    expect(relevance().classify(bellRow()).key).toBe('inbound_sms');
-    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'shadow';
-    expect(relevance().classify(bellRow()).key).toBe('unknown_sms');
-    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
-    expect(relevance().classify(bellRow()).key).toBe('unknown_sms');
-    // A known sender's thread bell is not this class.
-    const known = bellRow();
-    known.metadata.dedupeKey = 'sms-thread:11111111-1111-4111-8111-111111111111';
-    expect(relevance().classify(known).key).toBe('inbound_sms');
-  });
-  test('a person\'s delivered reply after the text closes it; a person\'s call closes it', () => {
-    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
-    const cls = relevance().classify(bellRow());
-    expect(relevance().judge(cls, subject({ textAt: minutes(5) }))).toEqual({ reason: 'Answered by text', would: null });
-    expect(relevance().judge(cls, subject({ backAt: minutes(5) }))).toEqual({ reason: 'Answered by a call', would: null });
-    expect(relevance().judge(cls, subject({ inAt: minutes(5) }))).toEqual({ reason: 'Answered by a call', would: null });
-  });
-  test('an automated reply (no person witness), a reply from before the text, and a reply before the sender\'s latest text leave it open', () => {
-    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
-    const cls = relevance().classify(bellRow());
-    const open = { reason: null, would: null };
-    expect(relevance().judge(cls, subject({ textAt: null, pending: false }))).toEqual(open); // the Messages reader's verdict is never used
-    expect(relevance().judge(cls, subject({ textAt: minutes(-5) }))).toEqual(open);
-    expect(relevance().judge(cls, subject({ textAt: minutes(10), lastInboundAt: minutes(30) }))).toEqual(open);
-    expect(relevance().judge(cls, subject({ textAt: minutes(40), lastInboundAt: minutes(30) })).reason).toBe('Answered by text');
-  });
-  test('shadow records the verdict and closes nothing; a known customer item (no unknownSender flag) is not this rule\'s', () => {
-    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'shadow';
-    const cls = relevance().classify(bellRow());
-    expect(relevance().judge(cls, subject({ textAt: minutes(5) }))).toEqual({ reason: null, would: 'Answered by text' });
-    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
-    expect(relevance().judge(cls, { contact: { anchor, textAt: minutes(5) } })).toEqual({ reason: null, would: null });
-  });
-});
-
 describe('promises on vendor, spam and applicant calls raise no pager alert (call-commitments.js)', () => {
   const rows = [{ id: 'vendor', quiet_call: true }, { id: 'prospect', quiet_call: false }];
 
@@ -230,19 +174,9 @@ describe('promises on vendor, spam and applicant calls raise no pager alert (cal
     expect(sql).toContain("call_nature' = 'job_applicant'");
     expect(sql).not.toMatch(/\?/);
   });
-  test('the pagers\' page drops them only under the gate; shadow keeps every row and logs once; off is the page as read', () => {
+  test('the pagers\' page drops them and keeps every other row', () => {
     const { pagerRows } = require('../services/call-commitments');
-    const logger = require('../services/logger');
-    const info = jest.spyOn(logger, 'info').mockImplementation(() => {});
-    delete process.env.GATE_PROMISE_PHONE_MATCH_CLOSE;
-    expect(pagerRows(rows)).toBe(rows);
-    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'shadow';
-    expect(pagerRows(rows)).toBe(rows);
-    pagerRows(rows);
-    expect(info.mock.calls.filter(([m]) => String(m).includes('would raise no pager alert'))).toHaveLength(1);
-    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
     expect(pagerRows(rows).map((r) => r.id)).toEqual(['prospect']);
-    info.mockRestore();
   });
   test('the three pagers read their page through it', () => {
     for (const file of ['promise-chaser-bell.js', 'followup-sla-watcher.js', 'call-commitments-watchdog.js']) {

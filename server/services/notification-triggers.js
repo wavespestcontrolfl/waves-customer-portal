@@ -537,7 +537,7 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=calls',
     }),
   },
-  // The reminder banner for a lead's call request (GATE_LEAD_CALL_REMINDER, owner 2026-11-05, "remind"). A missed
+  // The reminder banner for a lead's call request (owner 2026-11-05, "remind"). A missed
   // press-1 ring ("Missed call request") and a night call-back bell reach only the portal bell; one still open after
   // one business hour, with nobody reaching the lead since, sends this ONE banner (services/lead-call-reminder.js,
   // run by the alert-relevance sweep). pushOnly: the bell row already exists and is not rewritten, so `rule` is the

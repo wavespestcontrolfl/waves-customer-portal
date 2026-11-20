@@ -110,8 +110,8 @@ describe('the relevance sweep classes are not captured by the labels', () => {
         const dedupeKey = prefix ? `${prefix}x` : undefined;
         const base = { ...extra, ...(dedupeKey ? { dedupeKey } : {}) };
         const row = (meta) => ({ category: trigger.category, link: '/admin/communications?lead=' + UUID, metadata: meta });
-        const before = classify(row(metaFor(key, { labels: false, extra: base })), { anyMode: true });
-        const after = classify(row(metaFor(key, { extra: base })), { anyMode: true });
+        const before = classify(row(metaFor(key, { labels: false, extra: base })));
+        const after = classify(row(metaFor(key, { extra: base })));
         expect({ key, prefix, extra, cls: after?.key ?? null }).toEqual({ key, prefix, extra, cls: before?.key ?? null });
       }
     }
