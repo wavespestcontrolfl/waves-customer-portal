@@ -799,14 +799,19 @@ describe('mintRestartEstimate', () => {
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-13', requestId: null, source: 'case_scope' });
   });
 
-  test('strict (the accept re-check): a failing request lookup or churn-correlation read throws instead of falling back (codex pre-push P1)', async () => {
+  test('strict (the accept re-check): a failing request lookup, churn-correlation read or attempt prepay read throws instead of falling back (codex pre-push P1)', async () => {
+    // A whole-account attempt (empty scope), so the evidence reaches the prepay terms.
     tables.cancellation_cases = [{
-      id: 'case-14', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-23',
+      id: 'case-14', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-23',
     }];
-    for (const failing of ['service_requests', 'customers']) {
+    for (const failing of ['service_requests', 'customers', 'annual_prepay_terms']) {
       const t = fakeTrx(null, (table) => {
         const b = builder(table);
-        if (table.startsWith(failing)) { b.first = async () => { throw new Error(`${failing} read boom`); }; }
+        if (table.startsWith(failing)) {
+          const boom = () => { throw new Error(`${failing} read boom`); };
+          b.first = async () => boom();
+          b.then = boom;
+        }
         return b;
       });
       await expect(actualRestart.cancelledFamiliesFor('cust-1', t, true)).rejects.toThrow(`${failing} read boom`);
@@ -1327,6 +1332,25 @@ describe('assertRestartAcceptEligible', () => {
       return b;
     });
     await expect(actualRestart.assertRestartAcceptEligible(failingTrx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_RECHECK_RETRY' });
+  });
+
+  test('a failed historical prepay read answers the retry code, never a narrower family set read as a changed account (codex pre-push P1)', async () => {
+    // A whole-account attempt (empty scope): its families come from rows and the attempt's prepay
+    // terms. Only the historical prepay read, in its savepoint, fails; today's ownership read of
+    // the same table runs on the transaction itself and succeeds.
+    tables.cancellation_cases = [{ id: 'case-1', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-22' }];
+    const t = fakeTrx();
+    t.transaction = async (fn) => {
+      const sp = (table) => {
+        const b = t(table);
+        if (table.startsWith('annual_prepay_terms')) b.then = () => { throw new Error('historical prepay read boom'); };
+        return b;
+      };
+      Object.assign(sp, { raw: t.raw, transaction: t.transaction, busy: t.busy });
+      return fn(sp);
+    };
+    await expect(actualRestart.assertRestartAcceptEligible(t, RESTART_ESTIMATE))
       .rejects.toMatchObject({ status: 409, code: 'RESTART_RECHECK_RETRY' });
   });
 

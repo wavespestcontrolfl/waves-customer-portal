@@ -210,8 +210,35 @@ async function latestCancellationRequest(dbh, customerId, strict) {
   }
 }
 
-// `strict` (true from the accept re-check only): an unreadable evidence read throws instead of
-// falling back.
+// Annual-prepay family evidence for a cancellation attempt (codex GH r10 P1): a live prepay term is
+// a plan even with ZERO schedule evidence. The last coverage visit can be completed with
+// recurring_ongoing=false, so neither the sweep nor the recurrence stop leaves a stamped row, and
+// the processor never touches annual_prepay_terms. Anchored to the term that covered the ATTEMPT
+// date, not today, so an old expired term never resurrects a family; the terminal-transition lower
+// bound is the same attempt anchor (minus the processor's stamping slack) the row correlation uses.
+// (Ownership reads the same terms as of TODAY, fail-closed: ownedResidualFamilies, so a
+// still-covered term is owned, not quoted.) Savepoint-isolated (codex GH r18 P2): dbh is usually
+// the mint's or the accept's transaction, and a pg statement error here (schema skew, a partial
+// deploy) would abort it. For the mint a failed read only narrows the evidence (fewer families,
+// logged). Under `strict` (the accept re-check) it throws instead: a narrower family set would fail
+// the quote as a changed account and drop a valid hold (codex pre-push P1).
+async function attemptPrepayFamilyKeys(dbh, customerId, attemptAnchor, strict) {
+  try {
+    const { etDateString } = require('../../utils/datetime-et');
+    const attemptDate = etDateString(attemptAnchor ? new Date(attemptAnchor) : new Date());
+    return await dbh.transaction((sp) => prepayTermFamilyKeys(sp, customerId, attemptDate, {
+      historical: true,
+      attemptBound: attemptAnchor ? attemptBoundFor(attemptAnchor) : null,
+    }));
+  } catch (err) {
+    if (strict) throw err;
+    logger.warn(`[plan-restart] prepay family evidence failed for ${customerId}: ${err.message}`);
+    return [];
+  }
+}
+
+// `strict` (true from the accept re-check only): every evidence read that would fall back for the
+// mint (the request lookup, the churn correlation, the attempt's prepay terms) throws instead.
 async function cancelledFamiliesFor(customerId, dbh = db, strict) {
   // Newest case regardless of status: when a cancellation partially
   // completes (case left 'open' while the customer is already stamped
@@ -363,36 +390,10 @@ async function cancelledFamiliesFor(customerId, dbh = db, strict) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
     for (const key of detectWaveGuardPlanKeys(row)) if (!keys.includes(key)) keys.push(key);
   }
-  // Annual-prepay evidence (codex GH r10 P1): a live prepay term is a plan
-  // even with ZERO schedule evidence — the last coverage visit can be
-  // completed with recurring_ongoing=false, so neither the sweep nor the
-  // recurrence stop leaves a stamped row, and the processor never touches
-  // annual_prepay_terms. Anchored to the term that covered the ATTEMPT
-  // date — not today — so an old expired term never resurrects a family.
-  // A failed read only narrows the evidence (fewer families), never widens
-  // it. (Ownership reads the same terms as of TODAY, fail-closed —
-  // ownedResidualFamilies — so a still-covered term is owned, not quoted.)
-  try {
-    const { etDateString } = require('../../utils/datetime-et');
-    const attemptDate = etDateString(attemptAnchor ? new Date(attemptAnchor) : new Date());
-    // Savepoint-isolated (codex GH r18 P2): dbh is usually the mint's
-    // outer transaction, and a pg statement error here (schema skew, a
-    // partial deploy) would abort IT — the catch would swallow the error
-    // yet every later ownership/pricing query still fails, making Restart
-    // unavailable instead of merely narrowing the evidence. A nested
-    // transaction scopes the abort to this optional lookup, same shape as
-    // the mint's seed lookup.
-    const prepayKeys = await dbh.transaction((sp) => prepayTermFamilyKeys(sp, customerId, attemptDate, {
-      historical: true,
-      // Terminal-transition lower bound: the same attempt anchor (minus
-      // the processor's stamping slack) the row correlation uses.
-      attemptBound: attemptAnchor ? attemptBoundFor(attemptAnchor) : null,
-    }));
-    for (const key of prepayKeys) {
-      if (!keys.includes(key)) keys.push(key);
-    }
-  } catch (err) {
-    logger.warn(`[plan-restart] prepay family evidence failed for ${customerId}: ${err.message}`);
+  // Annual-prepay evidence (attemptPrepayFamilyKeys): a prepay term is a
+  // plan even with zero schedule evidence.
+  for (const key of await attemptPrepayFamilyKeys(dbh, customerId, attemptAnchor, strict)) {
+    if (!keys.includes(key)) keys.push(key);
   }
   const fromRows = uniqueServiceFamilies(keys).filter((f) => RESTARTABLE_FAMILIES.includes(f));
   if (fromRows.length) return { families: fromRows, caseId: current ? current.id : null, requestId: latestRequest ? latestRequest.id : null, source: 'cancelled_rows' };
