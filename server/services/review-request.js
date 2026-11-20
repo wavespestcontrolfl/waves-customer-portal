@@ -123,27 +123,62 @@ function resultsVisitSkip({ serviceLine, completedCount, gateOn = reviewAskResul
   if (!min || !Number.isFinite(completedCount)) return null;
   return completedCount < min ? "results_not_yet" : null;
 }
-// The skip reason for one recurring visit, or null. Counts the customer's completed visits
-// of the same line (callbacks excluded) plus this visit. Never throws; a failed read asks.
+// Lines (lawn_care, tree_shrub) one visit's service name belongs to. A combined name counts for each.
+function resultsVisitLines(name) {
+  const { toQualifyingKeys } = require("./waveguard-existing-services");
+  return toQualifyingKeys(name).filter((k) => RESULTS_VISIT_MIN[k]);
+}
+// Completed visits per line that come BEFORE cur: an earlier day, or the same day and earlier
+// in compareSameDayVisits order (an indeterminate same-day order counts nothing, so it asks).
+function resultsVisitPriorCounts(rows, cur, lines) {
+  const curDay = etDayWindow(cur.scheduled_date, 0).anchorStr;
+  const counts = Object.fromEntries(lines.map((k) => [k, 0]));
+  for (const r of rows) {
+    const day = etDayWindow(r.scheduled_date, 0).anchorStr;
+    if (day > curDay || (day === curDay && compareSameDayVisits(r, cur) >= 0)) continue;
+    for (const k of resultsVisitLines(r.service_type)) if (k in counts) counts[k] += 1;
+  }
+  return counts;
+}
+// The skip reason for one recurring visit, or null. Counts the customer's earlier completed
+// recurring visits of each line the visit belongs to (callbacks are not visits) plus this
+// visit. Asks when ANY of its lines is at its threshold. Never throws; a failed read asks.
 async function resultsVisitSkipForVisit(customerId, visitId) {
-  if (!reviewAskResultsVisitOn()) return null;
+  if (!reviewAskResultsVisitOn() || !visitId) return null;
   try {
-    const { toQualifyingKeys } = require("./waveguard-existing-services");
-    const lineOf = (name) => toQualifyingKeys(name).find((k) => RESULTS_VISIT_MIN[k]) || null;
-    const cur = await db("scheduled_services").where({ id: visitId }).first("service_type", "scheduled_date");
-    const serviceLine = lineOf(cur?.service_type);
-    if (!serviceLine || !cur.scheduled_date) return null;
-    // Visits up to this one's day: a late enrollment of an early visit still counts as that early visit.
+    const cur = await db("scheduled_services").where({ id: visitId })
+      .first("service_type", "scheduled_date", "window_start", "created_at", "is_recurring", "is_callback");
+    if (!cur || cur.is_recurring !== true || !cur.scheduled_date) return null;
+    const lines = resultsVisitLines(cur.service_type);
+    if (!lines.length) return null;
     const rows = await db("scheduled_services")
-      .where({ customer_id: customerId, status: "completed" })
+      .where({ customer_id: customerId, status: "completed", is_recurring: true })
       .where("id", "!=", visitId)
-      .where("scheduled_date", "<=", etDayWindow(cur.scheduled_date, 0).anchorStr)
       .whereRaw("is_callback IS DISTINCT FROM true")
-      .select("service_type");
-    const completedCount = rows.filter((r) => lineOf(r.service_type) === serviceLine).length + 1;
-    return resultsVisitSkip({ serviceLine, completedCount, gateOn: true });
+      .where("scheduled_date", "<=", etDayWindow(cur.scheduled_date, 0).anchorStr)
+      .select("service_type", "scheduled_date", "window_start", "created_at");
+    const prior = resultsVisitPriorCounts(rows, cur, lines);
+    const self = cur.is_callback === true ? 0 : 1;
+    const skips = lines.map((k) => resultsVisitSkip({ serviceLine: k, completedCount: prior[k] + self, gateOn: true }));
+    return skips.every(Boolean) ? "results_not_yet" : null;
   } catch (err) {
     logger.warn(`[review] results-visit count failed (customerId=${customerId}): ${err.message}`);
+    return null;
+  }
+}
+// The same rule for the paths that know a service record, not a visit (the legacy single ask
+// and the link riding the completion text). A missing visit link asks as today.
+async function resultsVisitSkipForRecord({ customerId, serviceRecordId = null, scheduledServiceId = null }) {
+  if (!reviewAskResultsVisitOn()) return null;
+  try {
+    let visitId = scheduledServiceId;
+    if (!visitId && serviceRecordId) {
+      const sr = await db("service_records").where({ id: serviceRecordId }).first("scheduled_service_id");
+      visitId = sr?.scheduled_service_id || null;
+    }
+    return await resultsVisitSkipForVisit(customerId, visitId);
+  } catch (err) {
+    logger.warn(`[review] results-visit visit lookup failed (customerId=${customerId}): ${err.message}`);
     return null;
   }
 }
@@ -1907,6 +1942,14 @@ const ReviewService = {
     }
     const { isEnabled } = require("../config/feature-gates");
     if (!isEnabled("reviewSequences")) {
+      // GATE_REVIEW_ASK_RESULTS_VISIT: the automatic legacy ask follows the same rule.
+      if (triggeredBy === "auto") {
+        const resultsSkip = await resultsVisitSkipForRecord({ customerId, serviceRecordId, scheduledServiceId });
+        if (resultsSkip) {
+          logger.info(`[review] Post-service ask skipped (customerId=${customerId} reason=${resultsSkip})`);
+          return { started: false, reason: resultsSkip };
+        }
+      }
       // GATE_REVIEW_ASK_AFTER_REPORT is cadence mode only: this legacy path
       // ignores it (no anchor, no +10), exactly as before.
       return this.create({
@@ -3064,6 +3107,8 @@ const ReviewService = {
     // CSR flagged this customer as already-reviewed — caller treats null
     // as "skip the review suffix" so the completion SMS goes out clean.
     if (customer.has_left_google_review) return null;
+    // GATE_REVIEW_ASK_RESULTS_VISIT: no link rides the completion text before the results visit.
+    if (serviceRecordId && await resultsVisitSkipForRecord({ customerId, serviceRecordId })) return null;
 
     const consent = await this.reviewSmsAllowedNow(customerId);
     if (!consent.allowed) {
