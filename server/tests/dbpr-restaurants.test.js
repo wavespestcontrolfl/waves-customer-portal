@@ -26,7 +26,7 @@ const INSP_HEAD = [
   ...Array.from({ length: 58 }, (_, i) => `Violation ${String(i + 1).padStart(2, '0')}`),
   'License ID', 'Inspection Visit ID',
 ];
-function inspRow({ county = 'Manatee', date = '10/20/2026', v35 = 1, visit = '9001', licenseId = '5001', name = 'SAMPLE DINER', city = 'BRADENTON', zip = '34208' } = {}) {
+function inspRow({ county = 'Manatee', date = '11/16/2026', v35 = 1, visit = '9001', licenseId = '5001', name = 'SAMPLE DINER', city = 'BRADENTON', zip = '34208' } = {}) {
   const v = Array.from({ length: 58 }, (_, i) => (i === 34 ? String(v35) : '0'));
   return csvLine(['D7', '41', county, '2010', 'SEA0000001', name, '200 SAMPLE TRL', city, zip, '1', '1', 'Food',
     'Routine - Food', 'Warning Issued', date, '2', ...v, licenseId, visit]);
@@ -41,7 +41,7 @@ const LIC_HEAD = ['Application Number', 'Application Type', 'Application Approva
   'Location Zip Code', 'Location County Code', 'Location County', 'Secondary Phone Number', 'District', 'Region', 'License Number',
   'Primary Status Code', 'Secondary Status Code', 'License Expiry Date', 'Last Inspection Date', 'Number of Seats',
   'Base Risk Level', 'Secondary Risk Level'];
-function licRow({ app = '7001', county = 'Sarasota', primary = '555-010-0000', mailCounty = '51', secondary = '941-555-0101', seats = '40', date = '08/21/2026', city = 'SARASOTA', zip = '34231-1234', line3 = '' } = {}) {
+function licRow({ app = '7001', county = 'Sarasota', primary = '555-010-0000', mailCounty = '51', secondary = '941-555-0101', seats = '40', date = '11/12/2026', city = 'SARASOTA', zip = '34231-1234', line3 = '' } = {}) {
   return csvLine([app, 'Plan Review and Initial (COMBO SEAT)', date, '200', '2010', 'SAMPLE DINER LLC', 'SEAT', '', 'SAMPLE DINER LLC', '', '1 MAIL ST', ' ',
     'TAMPA', 'FL', '33601', primary, mailCounty, 'SAMPLE DINER', ' ', '200 SAMPLE TRL', 'UNIT 3', line3, city, 'FL', zip, '68', county,
     secondary, 'D7', '07', 'SEA0000002', '20', '20', '12/01/2026', '10/29/2026', seats]);
@@ -120,7 +120,7 @@ describe('parseInspectionRows', () => {
     expect(out.map((r) => r.source_key)).toEqual(['9001', '9002', '9003', '9009']);
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
-      address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-10-20',
+      address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-11-16',
       detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2 },
     });
   });
@@ -140,7 +140,7 @@ describe('parseLicenseRows and the phone rule', () => {
     expect(out[2]).toMatchObject({ address: '200 SAMPLE TRL UNIT 3 BLDG B', zip: '34236' });
     expect(out[0]).toMatchObject({
       kind: 'new_license', license_number: 'SEA0000002', business_name: 'SAMPLE DINER', address: '200 SAMPLE TRL UNIT 3',
-      city: 'SARASOTA', zip: '34231', county: 'Sarasota', phone: '9415550101', seats: 40, event_date: '2026-08-21',
+      city: 'SARASOTA', zip: '34231', county: 'Sarasota', phone: '9415550101', seats: 40, event_date: '2026-11-12',
       detail: { applicationType: 'Plan Review and Initial (COMBO SEAT)' },
     });
     expect(out[1].seats).toBeNull();
@@ -230,6 +230,15 @@ describe('syncRestaurantProspects', () => {
     'newfood.csv': () => licCsv([licRow({ app: '7001' })]),
     'chgownr_food.csv': () => licCsv([licRow({ app: '7001' })]),
   };
+  // A fixed day (Thursday Nov 19, 2026, 10:36 AM ET), so the fiscal year and the freshness of the default rows never
+  // depend on the day the tests run. A test may pass its own `now`.
+  const NOW = new Date('2026-11-19T15:36:00Z');
+  const sync = (deps) => svc.syncRestaurantProspects({ now: NOW, ...deps });
+  // Both license files with one row on the given day, for a test with its own `now`.
+  const licFiles = (date) => ({
+    'newfood.csv': () => licCsv([licRow({ app: '7001', date })]),
+    'chgownr_food.csv': () => licCsv([licRow({ app: '7001', date })]),
+  });
   function makeFetch(overrides = {}) {
     return jest.fn(async (url) => {
       const name = url.split('/').pop();
@@ -247,7 +256,7 @@ describe('syncRestaurantProspects', () => {
   test('upserts every kind under its own key, once per (kind, source_key)', async () => {
     store = makeStore();
     fetchText = makeFetch();
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(upserts.map((r) => `${r.kind}:${r.source_key}`)).toEqual(['inspection:9001', 'new_license:7001', 'owner_change:7001']);
     expect(result.failures).toBe(0);
     expect(result.files.inspection).toEqual({ kept: 1, malformed: 0, upserted: 1 });
@@ -256,7 +265,7 @@ describe('syncRestaurantProspects', () => {
   test('a failed download is logged by count, other files still load, and nothing throws', async () => {
     store = makeStore();
     fetchText = makeFetch({ 'newfood.csv': () => new Error('HTTP 403 for SAMPLE DINER'), 'chgownr_food.csv': () => '<html>Not a CSV</html>' });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.failures).toBe(2);
     expect(result.files.new_license).toEqual({ failed: true });
     expect(result.files.owner_change).toEqual({ failed: true });
@@ -268,7 +277,7 @@ describe('syncRestaurantProspects', () => {
   test('rows skipped for a bad key are counted per file, and the log carries the count only', async () => {
     store = makeStore();
     fetchText = makeFetch({ 'newfood.csv': () => licCsv([licRow({ app: '7001' }), licRow({ app: 'X'.repeat(41) })]) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.failures).toBe(0);
     expect(result.files.new_license).toEqual({ kept: 1, malformed: 1, upserted: 1 });
     expect(logger.info.mock.calls.map((c) => c[0]).join('\n')).toMatch(/new_license=1\(1 malformed\)/);
@@ -283,7 +292,7 @@ describe('syncRestaurantProspects', () => {
   ])('a renamed stored column (%s in %s) refuses that file whole, so blanks are never stored', async (column, name, kind) => {
     store = makeStore();
     fetchText = makeFetch({ [name]: () => files[name]().replace(`"${column}"`, `"${column} (renamed)"`) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.files[kind]).toEqual({ failed: true });
     expect(result.failures).toBe(1);
     expect(upserts.some((r) => r.kind === kind)).toBe(false);
@@ -292,21 +301,21 @@ describe('syncRestaurantProspects', () => {
   test('a file with a header and no rows fails; a file whose rows all fall outside the area does not', async () => {
     store = makeStore();
     fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]), 'newfood.csv': () => licCsv([licRow({ county: 'Polk' })]) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
+    const result = await sync({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
     expect(result.failures).toBe(1);
     expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 0, malformed: 0 }, owner_change: { kept: 1 } });
   });
 
   test('in the first week of July a header alone is a new fiscal year, not a failed file', async () => {
     store = makeStore();
-    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]) });
+    fetchText = makeFetch({ ...licFiles('06/28/2030'), '7fdinspi.csv': () => inspCsv([]) });
     // Monday 1 July 2030, 10:36 AM ET; then Sunday 7 July late in the evening ET (already 8 July in UTC); then 8 July.
     for (const at of ['2030-07-01T14:36:00Z', '2030-07-08T03:30:00Z']) {
-      const result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date(at) });
+      const result = await sync({ fetchText, store, now: new Date(at) });
       expect(result.failures).toBe(0);
       expect(result.files.inspection).toEqual({ kept: 0, malformed: 0, upserted: 0 });
     }
-    const later = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2030-07-08T14:36:00Z') });
+    const later = await sync({ fetchText, store, now: new Date('2030-07-08T14:36:00Z') });
     expect(later.files.inspection).toEqual({ failed: true });
   });
 
@@ -316,7 +325,7 @@ describe('syncRestaurantProspects', () => {
       'newfood.csv': () => licCsv([licRow({ app: '7001', date: '2026-08-21' }), licRow({ app: '7002', date: '2026-08-22' })]),
       'chgownr_food.csv': () => licCsv([licRow({ app: '7003', date: '2026-08-21' }), licRow({ app: '7004' })]),
     });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.failures).toBe(1);
     expect(result.files).toMatchObject({ new_license: { failed: true }, owner_change: { kept: 1, malformed: 1 } });
   });
@@ -324,7 +333,7 @@ describe('syncRestaurantProspects', () => {
   test('good inspections that cite nothing, beside a malformed row, are a quiet week, not a failed file', async () => {
     store = makeStore();
     fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9301', v35: 0 }), inspRow({ visit: '9302', date: 'not a date' })]) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.failures).toBe(0);
     expect(result.files.inspection).toEqual({ kept: 0, malformed: 1, upserted: 0 });
   });
@@ -334,7 +343,7 @@ describe('syncRestaurantProspects', () => {
     // An extra cell before the ids: License ID would read it, and Inspection Visit ID would read the License ID.
     const wide = inspRow({ visit: '9003' }).replace('"5001","9003"', '"0","5001","9003"');
     fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9001' }), wide]) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.files.inspection).toEqual({ kept: 1, malformed: 1, upserted: 1 });
     expect(upserts.filter((r) => r.kind === 'inspection').map((r) => r.source_key)).toEqual(['9001']);
   });
@@ -345,7 +354,7 @@ describe('syncRestaurantProspects', () => {
       '7fdinspi.csv': () => files['7fdinspi.csv']().replace('"License ID"', '"License Ref"'),
       'newfood.csv': () => files['newfood.csv']().replace('"Location City"', '"Location Town"'),
     });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { failed: true }, owner_change: { kept: 1 } });
     expect(upserts.map((r) => r.kind)).toEqual(['owner_change']);
   });
@@ -353,7 +362,7 @@ describe('syncRestaurantProspects', () => {
   test('a database failure fails that file only: it goes into the result, never out of the sync', async () => {
     store = makeStore();
     store.upsertRecords.mockRejectedValueOnce(new Error('connection lost'));
-    const result = await svc.syncRestaurantProspects({ fetchText: makeFetch(), store });
+    const result = await sync({ fetchText: makeFetch(), store });
     expect(result.failures).toBe(1);
     expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 1 }, owner_change: { kept: 1 } });
   });
@@ -365,16 +374,16 @@ describe('syncRestaurantProspects', () => {
     reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
     // 17 rows, every one whole: a download that stopped early on a row end.
     fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(17) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.files.inspection).toEqual({ kept: 17, malformed: 0, upserted: 17, short: true });
     expect(result.failures).toBe(1);
     expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is short: 17 rows, the fullest complete read had 20');
     // A short read never becomes the measure: the same cut fails again.
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
-    expect((await svc.syncRestaurantProspects({ fetchText, store })).files.inspection.short).toBe(true);
+    expect((await sync({ fetchText, store })).files.inspection.short).toBe(true);
     // A full file passes and moves the measure up.
     fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22) });
-    expect((await svc.syncRestaurantProspects({ fetchText, store })).failures).toBe(0);
+    expect((await sync({ fetchText, store })).failures).toBe(0);
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 22 });
   });
 
@@ -384,7 +393,7 @@ describe('syncRestaurantProspects', () => {
     // 18 rows: 2 kept, 16 outside the area.
     const rows = Array.from({ length: 18 }, (_, i) => inspRow({ visit: String(9001 + i), county: i < 2 ? 'Manatee' : 'Hillsborough' }));
     fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv(rows) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.files.inspection).toEqual({ kept: 2, malformed: 0, upserted: 2 });
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
   });
@@ -394,18 +403,18 @@ describe('syncRestaurantProspects', () => {
     reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
     // July 6, 2027, and the state has not started the file over: its rows are last year's, one stray date aside.
     const late = [...Array.from({ length: 19 }, (_, i) => inspRow({ visit: String(9001 + i), date: '06/28/2027' })), inspRow({ visit: '9101', date: '07/02/2027' })];
-    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv(late) });
-    expect((await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2027-07-06T15:36:00Z') })).failures).toBe(0);
+    fetchText = makeFetch({ ...licFiles('07/02/2027'), '7fdinspi.csv': () => inspCsv(late) });
+    expect((await sync({ fetchText, store, now: new Date('2027-07-06T15:36:00Z') })).failures).toBe(0);
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
     // Started over: 3 rows of the new year are its first measure, not a short read.
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(3, '07/06/2027') });
-    const restarted = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2027-07-13T15:36:00Z') });
+    fetchText = makeFetch({ ...licFiles('07/12/2027'), '7fdinspi.csv': () => visitsCsv(3, '07/06/2027') });
+    const restarted = await sync({ fetchText, store, now: new Date('2027-07-13T15:36:00Z') });
     expect(restarted.files.inspection).toEqual({ kept: 3, malformed: 0, upserted: 3 });
     expect(reads.inspection).toEqual({ fiscalYear: '2027-07-01', rows: 3 });
     // Under 20 rows in the measure the check waits: 1 row after 19 passes.
     reads.inspection = { fiscalYear: '2027-07-01', rows: 19 };
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(1, '07/06/2027') });
-    expect((await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2027-07-20T15:36:00Z') })).failures).toBe(0);
+    fetchText = makeFetch({ ...licFiles('07/19/2027'), '7fdinspi.csv': () => visitsCsv(1, '07/15/2027') });
+    expect((await sync({ fetchText, store, now: new Date('2027-07-20T15:36:00Z') })).failures).toBe(0);
   });
 
   test('a read is saved only after every row is stored: a failed write keeps the measure', async () => {
@@ -418,7 +427,7 @@ describe('syncRestaurantProspects', () => {
     });
     // 22 rows: a full read, so only the failed write keeps it from becoming the measure.
     fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.files.inspection).toEqual({ failed: true });
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
     expect(store.saveRead).not.toHaveBeenCalledWith('inspection', expect.anything());
@@ -429,24 +438,46 @@ describe('syncRestaurantProspects', () => {
     store = makeStore();
     // July 3, 2030: a read of the new year already held 100 rows, so a header alone is a cut download.
     reads.inspection = { fiscalYear: '2030-07-01', rows: 100 };
-    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]) });
+    fetchText = makeFetch({ ...licFiles('07/02/2030'), '7fdinspi.csv': () => inspCsv([]) });
     const now = new Date('2030-07-03T14:36:00Z');
-    expect((await svc.syncRestaurantProspects({ fetchText, store, now })).files.inspection).toEqual({ failed: true });
+    expect((await sync({ fetchText, store, now })).files.inspection).toEqual({ failed: true });
     // Only last year's measure: the header is the new year starting.
     reads.inspection = { fiscalYear: '2029-07-01', rows: 6700 };
-    expect((await svc.syncRestaurantProspects({ fetchText, store, now })).failures).toBe(0);
+    expect((await sync({ fetchText, store, now })).failures).toBe(0);
     // August: last year's copy after a read of the new year is stale. Its rows go in; the new year's measure stays.
     reads.inspection = { fiscalYear: '2030-07-01', rows: 50 };
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(20, '06/28/2030') });
-    const stale = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2030-08-05T14:36:00Z') });
+    fetchText = makeFetch({ ...licFiles('08/01/2030'), '7fdinspi.csv': () => visitsCsv(20, '06/28/2030') });
+    const stale = await sync({ fetchText, store, now: new Date('2030-08-05T14:36:00Z') });
     expect(stale.files.inspection).toEqual({ kept: 20, malformed: 0, upserted: 20, stale: true });
     expect(stale.failures).toBe(1);
     expect(reads.inspection).toEqual({ fiscalYear: '2030-07-01', rows: 50 });
-    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is stale: rows of the fiscal year from 2029-07-01 after a read of 2030-07-01');
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is stale: its rows are from the fiscal year that began 2029-07-01, after a read of 2030-07-01');
     // A cut copy of this year is still measured against the 50 rows.
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(10, '07/20/2030') });
-    const cut = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2030-08-12T14:36:00Z') });
+    fetchText = makeFetch({ ...licFiles('08/10/2030'), '7fdinspi.csv': () => visitsCsv(10, '08/10/2030') });
+    const cut = await sync({ fetchText, store, now: new Date('2030-08-12T14:36:00Z') });
     expect(cut.files.inspection.short).toBe(true);
+  });
+
+  test('a later fiscal year than today\'s, or no row from the last 14 days, fails and never becomes the measure', async () => {
+    store = makeStore();
+    reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
+    // A cut file whose one row has a mistyped year: a later fiscal year than today's (Nov 19, 2026).
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(1, '03/02/2031') });
+    const future = await sync({ fetchText, store });
+    expect(future.files.inspection).toEqual({ kept: 1, malformed: 0, upserted: 1, future: true });
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is from a later fiscal year (2030-07-01) than today\'s');
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
+    // So the next full file is measured as before, and passes.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22) });
+    expect((await sync({ fetchText, store })).failures).toBe(0);
+    // Frozen: the newest row is 15 days old, and the state posts every day.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22, '11/04/2026') });
+    const frozen = await sync({ fetchText, store });
+    expect(frozen.files.inspection).toEqual({ kept: 22, malformed: 0, upserted: 22, stale: true });
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is stale: no row from the last 14 days (newest 2026-11-04)');
+    // 14 days old still passes.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22, '11/05/2026') });
+    expect((await sync({ fetchText, store })).failures).toBe(0);
   });
 
   test('a license row with a cell added or lost is malformed; the usual 36 cells and a full 38 load', async () => {
@@ -456,7 +487,7 @@ describe('syncRestaurantProspects', () => {
     const lost = licRow({ app: '7003' }).replace('"UNIT 3",', ''); // 35 cells
     const full = `${licRow({ app: '7004' })},"1","1"`; // 38 cells: the two risk levels filled
     fetchText = makeFetch({ 'newfood.csv': () => licCsv([licRow({ app: '7001' }), added, lost, full]) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.files.new_license).toEqual({ kept: 2, malformed: 2, upserted: 2 });
     expect(upserts.filter((r) => r.kind === 'new_license').map((r) => r.source_key)).toEqual(['7001', '7004']);
   });
@@ -465,7 +496,7 @@ describe('syncRestaurantProspects', () => {
     store = makeStore();
     const short = licRow({ app: '7002' }).split(',').slice(0, 27).join(',');
     fetchText = makeFetch({ 'newfood.csv': () => licCsv([short, licRow({ app: '7001' })]) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.failures).toBe(0);
     expect(result.files.new_license).toEqual({ kept: 1, malformed: 1, upserted: 1 });
   });
@@ -474,7 +505,7 @@ describe('syncRestaurantProspects', () => {
     process.env.DBPR_PROSPECT_SYNC_DISABLED = value;
     store = makeStore();
     fetchText = makeFetch();
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await sync({ fetchText, store });
     expect(result.skipped).toBe('disabled');
     expect(fetchText).not.toHaveBeenCalled();
     expect(store.upsertRecords).not.toHaveBeenCalled();

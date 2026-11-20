@@ -24,8 +24,9 @@
  * elapsed time only, never a business name, address or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true
  * or on); the scheduler checks it before the run starts, so job_health keeps the last real outcome. A read with under
  * 90% of the rows of the fullest complete read of the same file and fiscal year is short (a download that stopped
- * early): its rows are written and the run fails (isShort). That measure is kept in system_settings. A copy of an
- * older fiscal year than one already read is stale and fails the same way.
+ * early): its rows are written and the run fails (readProblem). That measure is kept in system_settings. A copy of
+ * an older fiscal year than one already read, a file with no row from the last 14 days, or a file of a later fiscal
+ * year than today's fails the same way.
  */
 
 const db = require('../../models/db');
@@ -318,9 +319,12 @@ async function loadFile(kind, fetchText, now, last) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
   const counts = { malformed: 0, valid: 0 };
   const records = [];
+  const today = etDateString(now);
   let rowsRead = 0;
-  // How many rows fall in each fiscal year, by the row's own date.
+  // How many rows fall in each fiscal year, by the row's own date, and the newest date up to today (a mistyped later
+  // date never makes a file look fresh).
   const years = new Map();
+  let newest = null;
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
   const header = await eachDbprCsvRow(text, (row, { cells, columns }) => {
     rowsRead += 1;
@@ -332,6 +336,7 @@ async function loadFile(kind, fetchText, now, last) {
     if (day) {
       const year = fiscalYearOf(day);
       years.set(year, (years.get(year) || 0) + 1);
+      if (day <= today && (!newest || day > newest)) newest = day;
     }
     records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts) : parseLicenseRows([row], kind, counts)));
   });
@@ -342,7 +347,6 @@ async function loadFile(kind, fetchText, now, last) {
   // with nothing in it yet, until a read of the new year has held a row. A file whose rows all fall outside the area
   // is fine.
   if (!rowsRead) {
-    const today = etDateString(now);
     const newYearHasRows = Boolean(last && last.fiscalYear === fiscalYearOf(today) && last.rows > 0);
     if (!/-07-0[1-7]$/.test(today) || newYearHasRows) throw new Error('empty file');
   }
@@ -351,7 +355,7 @@ async function loadFile(kind, fetchText, now, last) {
   if (!counts.valid && counts.malformed) throw new Error('no good row in the area');
   // The fiscal year most rows fall in (null when no row has a date), so one stray date never moves a file.
   const fiscalYear = [...years].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
-  return { records, malformed: counts.malformed, rowsRead, fiscalYear };
+  return { records, malformed: counts.malformed, rowsRead, fiscalYear, newest };
 }
 
 // The first day (July 1) of the fiscal year a day (YYYY-MM-DD) falls in.
@@ -361,39 +365,55 @@ function fiscalYearOf(day) {
 }
 
 // Each file holds one fiscal year and only grows until the state starts it over, so a full read holds at least about
-// as many rows as the fullest complete read of the same year. A download that stopped early but ends on a whole row
-// passes every check in loadFile; a read with under 90% of those rows is short. Its rows are still written (each one
-// is whole and valid) and the run fails in job_health. A short read never becomes the measure, so a download cut at
-// the same place each week fails each week. Every row counts, kept or not. A read belongs to the fiscal year of its
-// rows, so a file the state starts over late is still last year's file. Under 20 rows the check waits. If the state
-// truly removed rows, check the file by hand, then delete the system_settings row restaurant_prospects_read_<kind>:
-// the next read sets the measure again.
+// as many rows as the fullest complete read of the same year (the measure). A download that stopped early but ends on
+// a whole row passes every check in loadFile. So a complete read also fails when (readProblem):
+//   future  its fiscal year is later than today's: a mistyped year or a wrong file;
+//   stale   its fiscal year is earlier than the measure's (an older copy, a cache say), or no row is from the last
+//           14 days (a frozen file: the state posts every day; this also ends a June file served on into July);
+//   short   it holds under 90% of the measure's rows (under 20 rows in the measure the check waits).
+// Its rows are still written (each one is whole and valid), the run fails in job_health, and the read never becomes
+// the measure, so a download cut at the same place each week fails each week. Every row counts, kept or not. A read
+// belongs to the fiscal year of its rows, so a file the state starts over late is still last year's file. If the
+// state truly removed rows, check the file by hand, then delete the system_settings row
+// restaurant_prospects_read_<kind>: the next read sets the measure again.
 const SHORT_SHARE = 0.9;
 const SHORT_MIN_ROWS = 20;
+const FRESH_DAYS = 14;
+const READ_FLAGS = ['future', 'stale', 'short'];
 
-function isShort(last, read) {
-  if (!last || !read.fiscalYear || last.fiscalYear !== read.fiscalYear || last.rows < SHORT_MIN_ROWS) return false;
-  return read.rows < last.rows * SHORT_SHARE;
+// Whole days from one plain date to a later one.
+const dayDiff = (from, to) => Math.round((Date.parse(to) - Date.parse(from)) / (24 * 60 * 60 * 1000));
+
+function readProblem(last, read, today) {
+  if (!read.fiscalYear) return null;
+  if (read.fiscalYear > fiscalYearOf(today)) {
+    return { flag: 'future', text: `is from a later fiscal year (${read.fiscalYear}) than today's` };
+  }
+  if (last && read.fiscalYear < last.fiscalYear) {
+    return { flag: 'stale', text: `is stale: its rows are from the fiscal year that began ${read.fiscalYear}, after a read of ${last.fiscalYear}` };
+  }
+  if (!read.newest || dayDiff(read.newest, today) > FRESH_DAYS) {
+    return { flag: 'stale', text: `is stale: no row from the last ${FRESH_DAYS} days (newest ${read.newest || 'none'})` };
+  }
+  if (last && last.fiscalYear === read.fiscalYear && last.rows >= SHORT_MIN_ROWS && read.rows < last.rows * SHORT_SHARE) {
+    return { flag: 'short', text: `is short: ${read.rows} rows, the fullest complete read had ${last.rows}` };
+  }
+  return null;
 }
 
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
       const last = await deps.store.lastRead(kind);
-      const { records, malformed, rowsRead, fiscalYear } = await loadFile(kind, deps.fetchText, deps.now, last);
+      const { records, malformed, rowsRead, fiscalYear, newest } = await loadFile(kind, deps.fetchText, deps.now, last);
       const unique = dedupeByKey(records);
-      const read = { fiscalYear, rows: rowsRead };
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
-      // A file of an older fiscal year than one already read is a stale copy (a cache, say): it fails, and the newer
-      // year's measure stays for the next read. Its rows are whole and valid, so they are written.
-      if (last && fiscalYear && fiscalYear < last.fiscalYear) {
+      // The rows are whole and valid, so they are written even when the read fails.
+      const problem = readProblem(last, { fiscalYear, rows: rowsRead, newest }, etDateString(deps.now));
+      if (problem) {
         result.failures += 1;
-        result.files[kind].stale = true;
-        logger.warn(`[dbpr-prospects] ${kind} file is stale: rows of the fiscal year from ${fiscalYear} after a read of ${last.fiscalYear}`);
-      } else if (isShort(last, read)) {
-        result.failures += 1;
-        result.files[kind].short = true;
-        logger.warn(`[dbpr-prospects] ${kind} file is short: ${read.rows} rows, the fullest complete read had ${last.rows}`);
+        result.files[kind][problem.flag] = true;
+        logger.warn(`[dbpr-prospects] ${kind} file ${problem.text}`);
       } else if (fiscalYear) {
         // Saved only once every row of this read is stored. Within a year the measure only grows.
         const rows = last && last.fiscalYear === fiscalYear ? Math.max(last.rows, rowsRead) : rowsRead;
@@ -419,7 +439,8 @@ async function syncRestaurantProspects(deps = {}) {
   await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
   result.elapsedMs = Date.now() - started;
   const counts = Object.entries(result.files)
-    .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${f.short ? '(short)' : ''}${f.malformed ? `(${f.malformed} malformed)` : ''}`)
+    .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${READ_FLAGS.filter((flag) => f[flag]).map((flag) => `(${flag})`).join('')}`
+      + `${f.malformed ? `(${f.malformed} malformed)` : ''}`)
     .join(' ');
   logger.info(`[dbpr-prospects] ${counts} failures=${result.failures} ${result.elapsedMs}ms`);
   return result;
