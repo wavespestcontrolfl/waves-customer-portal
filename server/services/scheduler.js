@@ -9380,6 +9380,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 10:36 AM ET — yearly review ask (GATE_REVIEW_YEARLY_ASK, owner 2026-11-20, Tech Rewards
+  // plan D6-R1). Runs every day, gate on or off: off only counts and logs the volume and writes
+  // nothing; on enrolls one ask per customer near their service anniversary through the normal
+  // review cadence (every guard applies there). A re-run the same day finds the yearly
+  // sequence and picks nobody.
+  cron.schedule('36 10 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('review-yearly-ask', () => require('./review-yearly-ask').runYearlyReviewAsk());
+    } catch (err) {
+      logger.error(`[review-yearly-ask] daily run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // EVERY 5 MIN — Automatic Google review replies. Rows the GBP sync queued
   // (jittered due time) are claimed atomically and drafted; 4-5★ post to
