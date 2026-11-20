@@ -208,6 +208,15 @@ const ON_TIME_COHORT_SQL = `
      AND service_date >= ?::date AND service_date <= ?::date
      AND report_template_version = 'service_report_v1'`;
 
+// A delivered-only email's send fell somewhere in [from, to] (queued .. delivered). Against the closeout
+// window [start, end]: wholly before = another closeout's, ignored; wholly inside = a send in the window;
+// wholly after = a late send; anything else may or may not have gone out in time (unknown).
+function classifyInterval({ from, to }, start, end) {
+  if (to.getTime() < start) return 'before';
+  if (from.getTime() > end) return 'after';
+  return from.getTime() >= start && to.getTime() <= end ? 'inside' : 'overlap';
+}
+
 /**
  * On-time share, or null when there is nothing to measure OR a record's on-time answer is unknown:
  * a confirmed send with no readable time and no other on-time proof (a send that may have been on
@@ -231,9 +240,12 @@ async function readOnTime(rawTechnicianId, window, conn = db) {
     const completedMs = (found.completedAt || new Date(row.created_at)).getTime();
     const deadline = completedMs + limitMs;
     // only a send of THIS closeout counts: one long before completion belongs to an earlier closeout of a reused record
-    const eligible = found.sendTimes.map((at) => at.getTime()).filter((ms) => ms >= completedMs - CLOSEOUT_SLACK_MS);
-    if (eligible.some((ms) => ms <= deadline)) onTime += 1;
-    else if (found.confirmedWithoutTime) return null; // may have gone out on time: unknown, not late
+    const windowStart = completedMs - CLOSEOUT_SLACK_MS;
+    const eligible = found.sendTimes.map((at) => at.getTime()).filter((ms) => ms >= windowStart);
+    const intervals = found.deliveredIntervals.map((i) => classifyInterval(i, windowStart, deadline));
+    // a delivered-only email wholly inside the window was sent in it
+    if (eligible.some((ms) => ms <= deadline) || intervals.includes('inside')) onTime += 1;
+    else if (found.confirmedWithoutTime || intervals.includes('overlap')) return null; // may have gone out on time: unknown, not late
   }
   return owed ? percent(onTime, owed) : null;
 }

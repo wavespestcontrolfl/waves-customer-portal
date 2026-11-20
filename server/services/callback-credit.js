@@ -39,17 +39,21 @@ const performedCompleted = (alias) => `
 // sibling record is flagged, it counts when some sibling is completed with a performed outcome, and ONE canonical
 // record (the newest such sibling, id as the tie break) supplies its date, category and technician before any
 // source is looked up.
-function callbackSide({ distinctVisits, performedSourcesOnly }) {
+function callbackSide({ distinctVisits, performedSourcesOnly, start, endDate }) {
   if (!distinctVisits) {
-    return { from: 'service_records', where: `cb.is_callback = true${performedSourcesOnly ? performedCompleted('cb') : ''}`, visit: 'NULL' };
+    return { from: 'service_records', where: `cb.is_callback = true${performedSourcesOnly ? performedCompleted('cb') : ''}`, visit: 'NULL', params: [] };
   }
   return {
     from: `(SELECT DISTINCT ON (${visitKey('x')}) x.id, x.customer_id, x.service_type, x.technician_id, x.service_date, x.created_at, x.scheduled_service_id
           FROM service_records x
-         WHERE ${VISIT_IS_CALLBACK_SQL('x')}${performedSourcesOnly ? performedCompleted('x') : ''}
+         WHERE ${visitKey('x')} IN (SELECT ${visitKey('y')} FROM service_records y WHERE y.service_date >= ? AND y.service_date <= ?)
+           AND ${VISIT_IS_CALLBACK_SQL('x')}${performedSourcesOnly ? performedCompleted('x') : ''}
          ORDER BY ${visitKey('x')}, x.created_at DESC, x.id DESC)`,
     where: 'TRUE',
     visit: visitKey('cb'),
+    // candidates are bounded to visits with a record in the window BEFORE the canonical sibling is chosen
+    // (so a short window never scans the whole history); the canonical record's own date is rechecked below
+    params: [start, endDate],
   };
 }
 
@@ -64,7 +68,7 @@ function callbackSide({ distinctVisits, performedSourcesOnly }) {
  * (no technician anywhere) -> count.
  */
 async function callbackCreditByTechnician(conn, { start, endDate, distinctVisits = false, performedSourcesOnly = false }) {
-  const side = callbackSide({ distinctVisits, performedSourcesOnly });
+  const side = callbackSide({ distinctVisits, performedSourcesOnly, start, endDate });
   const result = await conn.raw(`
     SELECT cb.id AS callback_id,
            cb.service_type AS callback_type,
@@ -86,7 +90,7 @@ async function callbackCreditByTechnician(conn, { start, endDate, distinctVisits
        AND cb.service_date >= ?
        AND cb.service_date <= ?
      ORDER BY cb.id, sr.service_date DESC NULLS LAST, sr.created_at DESC NULLS LAST
-  `, [LOOKBACK_DAYS, start, endDate]);
+  `, [...side.params, LOOKBACK_DAYS, start, endDate]);
   const rows = result?.rows || [];
 
   // Rows arrive grouped by callback, newest candidate first: the first
