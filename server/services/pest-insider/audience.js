@@ -9,7 +9,10 @@
  * and the open belongs to the address that opened it: an open by a former address, before an
  * address correction, never qualifies the new one. The window is on the open's own time
  * (occurred_at, SendGrid's event timestamp); a row logged before that column existed uses the
- * time the webhook logged it. A later phase widens this to every opted-in reader.
+ * time the webhook logged it. An open SendGrid marks as a machine open (sg_machine_open: Apple
+ * Mail Privacy Protection fetched the email, whether or not a person read it) never qualifies;
+ * a row logged before that flag was kept has none and still counts, as nothing tells it apart.
+ * A later phase widens this to every opted-in reader.
  *
  * The plan keeps, for each reader, a key of the address that qualified (address_keys), and the
  * sender mails a reader only at that address: if the subscriber's address changes before the
@@ -75,7 +78,8 @@ function isAddressKey(value) {
 /**
  * The warm readers as a query: every subscriber the send path would mail whose CURRENT address
  * has an open event in the SendGrid webhook log from `since` through `until` (both inclusive,
- * on the open's own time), so a plan made for a past moment counts only the opens before it.
+ * on the open's own time), so a plan made for a past moment counts only the opens before it,
+ * and that SendGrid did not mark as a machine open.
  * Ordered by id; selects the id, the linked customer, the address and the customers behind the
  * mailbox (mailbox_customer_ids), in one snapshot.
  */
@@ -92,7 +96,10 @@ function warmAudienceQuery({ since, until }) {
           .where('opened.event_type', 'open')
           .whereRaw('lower(opened.email) = lower(newsletter_subscribers.email)')
           .whereRaw('coalesce(opened.occurred_at, opened.created_at) >= ?', [since])
-          .whereRaw('coalesce(opened.occurred_at, opened.created_at) <= ?', [until]);
+          .whereRaw('coalesce(opened.occurred_at, opened.created_at) <= ?', [until])
+          // An open Apple Mail Privacy Protection made is not a reader. A row logged before the
+          // flag was kept (NULL) still counts: nothing tells it apart.
+          .whereRaw('opened.machine_open IS NOT TRUE');
       });
     }))
     .orderBy('newsletter_subscribers.id', 'asc');

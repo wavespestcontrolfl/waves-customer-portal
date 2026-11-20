@@ -1665,9 +1665,12 @@ describe('resumeCampaign — preconditions', () => {
     ['a failed issue with no ledger returns to draft', 'failed', 0,
       { status: 'draft', scheduled_for: null, proof_approved_at: null, sending_claim_token: null }, 'returned to draft for editing'],
     ['a failed issue with a ledger stays failed', 'failed', 2, null, 'repair its audience and resume again'],
-  ])('resume: a refused audience on %s, and nothing is claimed', async (_label, status, ledger, written, outcome) => {
+    // Bound to the version read: an issue repaired meanwhile is not reset by a stale refusal.
+    ['a failed issue with no ledger, repaired since it was read, is left as it is', 'failed', 0,
+      { status: 'draft' }, 'it changed state meanwhile and was left as is', 0],
+  ])('resume: a refused audience on %s, and nothing is claimed', async (_label, status, ledger, written, outcome, updated = 1) => {
     let payload = null;
-    const transition = chain({ updated: 1, onUpdate: (p) => { payload = p; } });
+    const transition = chain({ updated, onUpdate: (p) => { payload = p; } });
     const queues = {
       newsletter_sends: [
         chain({ first: {
@@ -1690,6 +1693,8 @@ describe('resumeCampaign — preconditions', () => {
     if (written) {
       expect(payload).toMatchObject(written);
       expect(transition.where).toHaveBeenCalledWith(expect.objectContaining({ id: 's', status }));
+      // The version read, as the resume claim binds it.
+      expect(transition.where).toHaveBeenCalledWith('updated_at', '<', new Date(Date.parse('2026-01-01T00:00:00Z') + 1));
       if (status === 'sending') expect(transition.where).toHaveBeenCalledWith('updated_at', '<=', expect.any(Date));
     }
     expect(mockSendBroadcast).not.toHaveBeenCalled();

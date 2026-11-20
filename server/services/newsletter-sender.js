@@ -1616,6 +1616,9 @@ async function prepareResumeCampaign(sendId) {
       // with its approval cleared (codex round 13 P2) — compare-and-set on
       // the inspected state and lease, like every other transition here.
       const reset = db('newsletter_sends').where({ id: send.id, status: send.status });
+      // Bound to the version read, as the resume claim is: a row repaired or
+      // edited since then is left as it is now.
+      if (send.updated_at) reset.where('updated_at', '<', noLaterThan(send.updated_at));
       if (reclaimingStaleSend) reset.where('updated_at', '<=', leaseCutoff);
       const returned = (await reset.update({
         status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_refused_at: null,
@@ -1623,9 +1626,11 @@ async function prepareResumeCampaign(sendId) {
       })) > 0;
       outcome = returned ? 'returned to draft for editing (nobody received it)' : 'it changed state meanwhile and was left as is';
     } else if (reclaimingStaleSend) {
-      const released = (await db('newsletter_sends')
+      const release = db('newsletter_sends')
         .where({ id: send.id, status: 'sending' })
-        .where('updated_at', '<=', leaseCutoff)
+        .where('updated_at', '<=', leaseCutoff);
+      if (send.updated_at) release.where('updated_at', '<', noLaterThan(send.updated_at));
+      const released = (await release
         .update({ status: 'failed', sending_claim_token: null, updated_at: new Date() })) > 0;
       if (released) outcome = `its stale send claim was released; ${repair} and resume again`;
     }

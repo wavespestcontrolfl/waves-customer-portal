@@ -257,4 +257,15 @@ describe('SendGrid event webhook → event ledger', () => {
       occurred_at: new Date(1790000000 * 1000),
     });
   });
+
+  test.each([
+    ['an open Apple Mail Privacy Protection made', { sg_machine_open: true }, true],
+    ['a conventional open', { sg_machine_open: false }, false],
+    ['an open with no flag', {}, null],
+  ])("the logged event keeps SendGrid's machine-open flag: %s", async (_label, flag, expected) => {
+    mockState.message = { ...MESSAGE, template_key: 'billing.invoice' };
+    const ev = event({ event: 'open', type: undefined, reason: undefined, sg_event_id: 'evt-open-machine', ...flag });
+    expect((await post([ev])).status).toBe(200);
+    expect(mockState.ledgerRows.find((row) => row.event_id === 'evt-open-machine')).toMatchObject({ event_type: 'open', machine_open: expected });
+  });
 });

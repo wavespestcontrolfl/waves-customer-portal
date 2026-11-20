@@ -617,6 +617,9 @@ async function processWebhookEvent(ev, messageId, email, handler) {
         // late, and the Waves Pest Insider warm audience counts opens by when
         // they happened (services/pest-insider/audience.js).
         occurred_at: eventOccurredAt(ev),
+        // An open Apple Mail Privacy Protection made, not a person: the warm
+        // audience leaves these out (machineOpenFlag).
+        machine_open: machineOpenFlag(ev),
         status: 'processing',
       })
       .onConflict('event_id')
@@ -790,6 +793,16 @@ function eventOccurredAt(ev, fallback = new Date()) {
   const ts = Number(ev?.timestamp);
   if (!Number.isFinite(ts)) return fallback;
   return new Date(ts > 1e12 ? ts : ts * 1000);
+}
+
+// SendGrid's `sg_machine_open` on an open event: true when Apple Mail Privacy
+// Protection fetched the email (a person may never have read it), false for a
+// conventional open. Null when the event carries no flag.
+function machineOpenFlag(ev) {
+  const flag = ev?.sg_machine_open;
+  if (flag === true || flag === 'true') return true;
+  if (flag === false || flag === 'false') return false;
+  return null;
 }
 
 function computeEmailMessageEventUpdates(ev, message, now = new Date()) {
