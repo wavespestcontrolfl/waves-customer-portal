@@ -54,7 +54,7 @@ async function readSouth(dbc, window) {
     const dates = new Set();
     let techDays = null;
     for (const estimateZone of zones) {
-      const { days, techDays: zoneTechs, failed } = await f.getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo });
+      const { days, techDays: zoneTechs, failed } = await f.getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo, pool: zones });
       if (failed || !days) return null;
       days.forEach((d) => dates.add(d));
       if (zoneTechs) {

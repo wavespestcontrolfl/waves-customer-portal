@@ -753,6 +753,26 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
       });
     });
 
+    // Pre-push P1 on da74da7dc7: the funneled zones are one pool for an unstamped stop's city too, as they are for a
+    // stamp (slugMatchesZone). The Port Charlotte row the 2026-08-24 consolidation emptied (no cities; a hold stamped
+    // with it is checked in it) still sees another truck's unstamped stop by its city in the Venice row, in the check
+    // and in the offer's days. A zone the funnel does not cover never takes the pool's cities.
+    test('an emptied funneled zone reads unstamped stops by every funneled zone\'s cities; an unfunneled zone does not', async () => {
+      const PORT_CHARLOTTE_ZONE = { id: 'z-pc', zone_name: 'Port Charlotte', cities: [] };
+      await withTruckGate('true', async () => {
+        mockDb({
+          scheduledRows: [zoneStopRow({ technician_id: 'tech-2', zone: null, customer_city: 'Nokomis' })],
+          zones: [PORT_CHARLOTTE_ZONE, VENICE_ZONE, SARASOTA_ZONE],
+        });
+        expect(await take('tech-1', PORT_CHARLOTTE_ZONE)).toBe(false);
+        expect(await take('tech-2', PORT_CHARLOTTE_ZONE)).toBe(true);
+        const { days } = await getZoneFunnelDays(db, { estimateZone: PORT_CHARLOTTE_ZONE, dateFrom: '2027-05-20', dateTo: '2027-05-20' });
+        expect([...days]).toEqual(['2027-05-20']);
+        const { dates } = await funnelInternals.zoneStopDays(db, SARASOTA_ZONE, '2027-05-20', '2027-05-20');
+        expect(dates.size).toBe(0);
+      });
+    });
+
     // Not fail-open like the offer: the booking transaction refuses rather than books past a read it could not do.
     test('a stop-read failure throws, so the booking transaction fails closed', async () => {
       await withTruckGate('true', async () => {

@@ -71,11 +71,13 @@
  * waits on the date lock, and an unstamped hold is no zone stop at all). A
  * hold's zone stamp decides its zone; an unstamped hold takes the funneled zone
  * its check read. The stop read counts a hold by the real clock
- * (clock_timestamp), not the writer's transaction start. The assessment link's list and its booking
- * resolve the zone from the one booking address the same way
- * (resolveEstimateZone: its city decides, its text only without one; createSelfBooking
- * callbackVisit.zoneAddress), so the offer never shows a time the check
- * refuses, and the visit's stamp makes it a zone stop for the next booking.
+ * (clock_timestamp), not the writer's transaction start, and an unstamped
+ * stop by the cities of every funneled zone (one pool, as for a stamp). The
+ * assessment link's list and its booking resolve the zone from the one booking
+ * address the same way (resolveEstimateZone: its city decides, its text only
+ * without one; createSelfBooking callbackVisit.zoneAddress, read only with the
+ * funnel on), so the offer never shows a time the check refuses, and the
+ * visit's stamp makes it a zone stop for the next booking.
  * Off, every zone day is the fleet's, as with one truck.
  *
  * Fail-open like blackout-dates: any lookup failure disables the funnel for
@@ -209,7 +211,7 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 // estimate's zone. `techs`: each of those dates -> the technician ids of its
 // stops (null = an unassigned stop). Hold rows count only while unexpired,
 // mirroring filterCollidingSlots.
-async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo) {
+async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, pool = null) {
   const rows = await dbc('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
@@ -228,8 +230,13 @@ async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo) {
     );
 
   const zoneSlug = zoneSlugOf(estimateZone);
+  // The funneled zones are one far-south pool (slugMatchesZone), for an unstamped stop's city too: a zone row the
+  // 2026-08-24 consolidation emptied (Port Charlotte, kept for its stamp) would otherwise match no unstamped stop,
+  // and a hold stamped with it would miss another truck's stop that only its city places down south (owner rule B).
+  // `pool` = the funneled zone rows when the caller already read them (funnelZoneRows; the night run reads them once).
+  const poolZones = isFunnelZone(estimateZone) ? (pool || await funnelZoneRows(dbc)) : [];
   const zoneCities = new Set(
-    (estimateZone?.cities || []).map((c) => String(c || '').toLowerCase()).filter(Boolean),
+    [estimateZone, ...poolZones].flatMap((z) => z?.cities || []).map((c) => String(c || '').toLowerCase()).filter(Boolean),
   );
   const dates = new Set();
   const techs = new Map();
@@ -254,11 +261,12 @@ async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo) {
 // every zone day is the fleet's. `failed` distinguishes a transient lookup
 // failure from genuinely-inactive so the caller can keep fail-open
 // REQUEST-scoped (e.g. not cache the unfunneled result and extend one bad
-// lookup across the whole cache TTL).
-async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
+// lookup across the whole cache TTL). `pool`: the funneled zone rows
+// (funnelZoneRows) when the caller already read them, so they are not read again.
+async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo, pool = null }) {
   if (!isFunnelZone(estimateZone)) return { days: null, techDays: null, failed: false };
   try {
-    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo);
+    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo, pool);
     return { days: dates, techDays: perTruckLive() ? techs : null, failed: false };
   } catch (err) {
     logger.warn(`[zone-day-funnel] zone-stop lookup failed (failing open): ${err.message}`);

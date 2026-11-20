@@ -1424,10 +1424,12 @@ same-slot re-tap, an extend and an accept), in the zone stamped on the hold; an
 unstamped hold is stamped with the funneled zone its check read, so the next
 booking sees it. The answer is the existing `SLOT_UNAVAILABLE`. The stop read
 counts a hold by the real clock, so a hold that ran out while its writer waited
-on the date lock no longer holds the day. The assessment
+on the date lock no longer holds the day, and it counts an unstamped stop by the
+cities of every funneled zone, as it counts a stamp. The assessment
 link's list and its booking resolve the zone from the one booking address the
-same way (its city decides, its text only without one; `callbackVisit.zoneAddress`), so a list
-never offers a time that check refuses. No field or status changes.
+same way (its city decides, its text only without one; `callbackVisit.zoneAddress`,
+read only with the far-south funnel on), so a list never offers a time that
+check refuses. No field or status changes.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
@@ -7608,9 +7610,10 @@ The booking transaction checks it again under the date lock (`createSelfBooking`
 stamped with): when another commit booked a different technician south on that
 day first, it answers `SLOT_TAKEN`. Every list reads the zone from the address's
 own city (the zone that lists it, else the zone whose city its name contains;
-the address text only when there is no city), and the booking resolves its zone
-from the same address the same way (`callbackVisit.zoneAddress`), so its stamp
-and its check match the list. A refused booking's `SLOT_TAKEN` refresh uses the
+the address text only when there is no city), and with the far-south funnel on
+the booking resolves its zone from the same address the same way
+(`callbackVisit.zoneAddress`; off, from the customer's city as before), so its
+stamp and its check match the list. A refused booking's `SLOT_TAKEN` refresh uses the
 address that booking checked. No field, status, error code, limiter or header
 changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and

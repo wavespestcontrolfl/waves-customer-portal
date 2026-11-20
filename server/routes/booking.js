@@ -167,7 +167,7 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
   return durationMinutes;
 }
 const {
-  fallbackCenterZoneName, funnelOfferPool, offerFunnelView, dropOtherTruckDays,
+  fallbackCenterZoneName, funnelOfferPool, offerFunnelView, dropOtherTruckDays, funnelOn,
 } = require('../services/scheduling/zone-day-funnel');
 const {
   CUSTOMER_HOUR_GRID, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
@@ -3468,8 +3468,10 @@ async function createSelfBooking(payload = {}) {
     // Resolve zone from city (best-effort, for reporting). A caller that names
     // the booking address its list resolved a zone from (callbackVisit.zoneAddress)
     // gets that zone: a city no zone lists ('North Venice') takes the zone whose
-    // city its name contains, as its list did.
-    const zone = callbackVisit?.zoneAddress
+    // city its name contains, as its list did. Only with the far-south funnel on
+    // (GATE_SOUTH_ZONE_DAY_FUNNEL): off, no list resolved a zone, and the
+    // customer's city decides as before.
+    const zone = callbackVisit?.zoneAddress && funnelOn()
       ? await resolveEstimateZone(db, callbackVisit.zoneAddress)
       : (await db('service_zones').select('*')).find(z => (z.cities || []).some(c =>
         c.toLowerCase() === (customer.city || '').toLowerCase()
