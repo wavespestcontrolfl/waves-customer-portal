@@ -133,3 +133,21 @@ it('a Gemini network error after the request was sent is spend unknown: kept as 
   expect(mockRows).toHaveLength(1);
   expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', cost_estimate_cents: svc.FALLBACK_COST_CENTS }));
 });
+
+it('a Gemini answer with no usageMetadata (null counters) books the 5-cent ceiling, not 1 cent', async () => {
+  global.fetch = jest.fn(async (url) => {
+    if (String(url).includes('generativelanguage.googleapis.com')) {
+      providerCalls.gemini += 1;
+      const body = geminiBody('not json');
+      delete body.usageMetadata;
+      return { ok: true, status: 200, json: async () => body };
+    }
+    providerCalls.image += 1;
+    return { ok: true, headers: { get: (n) => (n === 'content-type' ? 'image/jpeg' : null) }, body: (async function* () { yield Uint8Array.from([0xff, 0xd8, 1]); }()) };
+  });
+  const out = await svc.runRoofEntryRead({ lat: 27.46, lng: -82.57, county: 'Manatee' });
+  expect(providerCalls.gemini).toBe(1);
+  expect(out.status).toBe('model_failed');
+  // No usage means the call is spend-unknown: a failed row at the ceiling, from one provider call.
+  expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', cost_estimate_cents: svc.FALLBACK_COST_CENTS }));
+});

@@ -250,7 +250,10 @@ async function loadPriceMap() {
 
 /** Estimated spend of one billed leg, in cents: from llm_model_prices, else the ceiling. Never queries. */
 function estimateCostCents({ provider, model, usage }, prices) {
-  if (prices) {
+  // No token counts captured (the provider omitted its usage block, so the counters are null): they would price to zero
+  // and book 1 cent for a call that may have cost more. Book the ceiling instead.
+  const counted = [usage?.input_tokens, usage?.output_tokens].some((n) => Number.isFinite(n));
+  if (prices && counted) {
     const usd = llmCost.costUsd(provider, usage || {}, llmCost.priceFor(prices, model));
     if (usd != null && Number.isFinite(usd)) return Math.max(1, Math.ceil(usd * 100));
   }
@@ -434,11 +437,14 @@ async function claimCrop(key, county, ctx) {
 
 // Just before the paid call, renew the claim: an atomic UPDATE that only a claim still pending can win. It returns the
 // new claimed_at (set to millisecond precision so it round-trips through a JS Date), or null when the claim was lost
-// (a 5-minute takeover marked it failed while this worker was fetching the image): then no call may be made.
+// (a 5-minute takeover marked it failed while this worker was fetching the image): then no call may be made. The same
+// UPDATE books the ceiling as the cost: once the call is about to be sent it may be billed, so a worker that dies after
+// the dispatch, or a result write that fails, leaves a row at 5 cents, never 0. The completion write replaces it with
+// the real figure; a confirmed-unbilled failure deletes the claim.
 async function renewClaim(claim) {
   const rows = await db(TABLE)
     .where({ id: claim.id, status: STATUS_PENDING })
-    .update({ claimed_at: db.raw("date_trunc('milliseconds', now())") })
+    .update({ claimed_at: db.raw("date_trunc('milliseconds', now())"), cost_estimate_cents: FALLBACK_COST_CENTS })
     .returning('claimed_at');
   return rows[0] ? rows[0].claimed_at : null;
 }

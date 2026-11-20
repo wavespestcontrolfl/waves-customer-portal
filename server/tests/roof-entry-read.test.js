@@ -84,7 +84,7 @@ jest.mock('../models/db', () => {
       },
       update(rawPatch) {
         const renewing = !!(rawPatch.claimed_at && rawPatch.claimed_at.raw);
-        const patch = renewing ? { claimed_at: new Date().toISOString() } : rawPatch;
+        const patch = renewing ? { ...rawPatch, claimed_at: new Date().toISOString() } : rawPatch;
         return settled(() => {
           mockEvents.push(renewing ? 'renew' : `update:${patch.status || ''}`);
           const rows = match();
@@ -464,14 +464,14 @@ describe('claim row', () => {
     expect(mockRows[0].cost_estimate_cents).toBe(2);
   });
 
-  it('claims with this request\'s context and the policy model before the call', async () => {
+  it('claims with this request\'s context and the policy model, renewed at the 5-cent ceiling before the call', async () => {
     let atCall;
     mockDispatch.mockImplementation(async () => {
       atCall = { ...mockRows[0] };
       return { ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} };
     });
     await post(home({ estimate_id: EST, customer_id: CUST }));
-    expect(atCall).toEqual(expect.objectContaining({ status: 'pending', ai_tier: 'pending', estimate_id: EST, customer_id: CUST, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, cost_estimate_cents: 0 }));
+    expect(atCall).toEqual(expect.objectContaining({ status: 'pending', ai_tier: 'pending', estimate_id: EST, customer_id: CUST, county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025, cost_estimate_cents: svc.FALLBACK_COST_CENTS }));
     expect(atCall.model).toBe(MODELS_PRIMARY_MODEL);
     expect(atCall.claimed_at).toEqual(expect.any(String));
   });
@@ -596,7 +596,8 @@ describe('claim ownership', () => {
     const res = await post(home());
     expect(res.json).toEqual({ status: 'in_progress', cached: false, read: null });
     expect(mockRows).toHaveLength(1);
-    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'pending', cost_estimate_cents: 0 }));
+    // The renewal's ceiling stays (the call was sent and may be billed); the lost result overwrote nothing.
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'pending', cost_estimate_cents: svc.FALLBACK_COST_CENTS }));
     expect(mockRows[0].ai_flags).toBe('{}');
     expect(logger.debug).toHaveBeenCalled();
   });
@@ -625,14 +626,50 @@ describe('claim ownership', () => {
 
   it('renews the claim with a fresh claimed_at right before the call, and writes only against that value', async () => {
     let atCall;
+    let costAtCall;
     mockDispatch.mockImplementation(async () => {
       atCall = mockRows[0].claimed_at;
-      return { ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} };
+      costAtCall = mockRows[0].cost_estimate_cents;
+      return { ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: { input_tokens: 1500, output_tokens: 600 } };
     });
     await post(home());
     expect(mockEvents.indexOf('renew')).toBeLessThan(mockEvents.indexOf('update:done'));
     expect(atCall).toEqual(expect.any(String));
+    // The renewal books the ceiling before the call is sent; the completion write replaces it with the real figure.
+    expect(costAtCall).toBe(svc.FALLBACK_COST_CENTS);
     expect(mockRows[0].status).toBe('done');
+    expect(mockRows[0].cost_estimate_cents).toBe(2);
+  });
+
+  it('keeps 5 cents on a claim renewed and then abandoned: an error after the dispatch, and a stale takeover', async () => {
+    mockDispatch.mockRejectedValue(new Error('boom'));
+    expect((await post(home())).status).toBe(500);
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', cost_estimate_cents: svc.FALLBACK_COST_CENTS }));
+    // A renewed claim whose worker died: stale after 5 minutes, taken over, still at the ceiling.
+    mockRows.length = 0;
+    mockRows.push(crop({ id: 'dead-worker', cost_estimate_cents: svc.FALLBACK_COST_CENTS, claimed_at: minutesAgo(6) }));
+    mockDispatch.mockResolvedValue({ ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: {} });
+    await post(home());
+    expect(mockRows.find((r) => r.id === 'dead-worker')).toEqual(expect.objectContaining({ status: 'failed', cost_estimate_cents: svc.FALLBACK_COST_CENTS }));
+  });
+
+  it('books the ceiling when no token counts were captured (null counters), never 1 cent', async () => {
+    mockCostUsd.mockReturnValue(0);
+    mockDispatch.mockResolvedValue({
+      ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(),
+      usage: { input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null },
+    });
+    await post(home());
+    expect(mockRows[0].status).toBe('done');
+    expect(mockRows[0].cost_estimate_cents).toBe(svc.FALLBACK_COST_CENTS);
+    expect(mockCostUsd).not.toHaveBeenCalled();
+  });
+
+  it('still prices a call from its counts when they were captured, even a tiny one (1 cent floor)', async () => {
+    mockCostUsd.mockReturnValue(0.0004);
+    mockDispatch.mockResolvedValue({ ok: true, provider: 'gemini', model: 'test-vision', json: goodJson(), usage: { input_tokens: 10, output_tokens: 1 } });
+    await post(home());
+    expect(mockRows[0].cost_estimate_cents).toBe(1);
   });
 });
 
@@ -642,7 +679,8 @@ describe('cleanup after the claim', () => {
     const res = await post(home());
     expect(res.status).toBe(500);
     expect(mockRows).toHaveLength(1);
-    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'unknown' }));
+    // The error came before the renewal, so no call was ever sent: nothing is booked.
+    expect(mockRows[0]).toEqual(expect.objectContaining({ status: 'failed', ai_tier: 'unknown', cost_estimate_cents: 0 }));
     expect(fetchSpy).not.toHaveBeenCalled();
     // The next request claims and pays normally.
     expect((await post(home())).json.read.tier).toBe('med');
