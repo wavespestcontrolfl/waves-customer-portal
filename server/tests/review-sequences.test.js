@@ -8773,6 +8773,9 @@ describe('resolveSequencePlanForEnrollment results-visit rule (GATE_REVIEW_ASK_R
     // A three-service label with its own pest segment keeps pest, even beside rodent: asks.
     db.mockImplementation(makeMock({ scheduled_services: [visit('tv-1', 'tv', 'Pest Control + Lawn Care + Rodent Control', 0)] }));
     expect((await resolve('tv', 'tv-1')).skip).toBeUndefined();
+    // The same label on a lawn-keyed catalog row still asks (the catalog names only lawn).
+    db.mockImplementation(makeMock({ scheduled_services: [visit('tw-1', 'tw', 'Pest Control + Lawn Care + Rodent Control', 0, lawnCatalog)] }));
+    expect((await resolve('tw', 'tw-1')).skip).toBeUndefined();
   });
 
   test('a failed packet, history or catalog read logs and asks; nothing is substituted', async () => {
