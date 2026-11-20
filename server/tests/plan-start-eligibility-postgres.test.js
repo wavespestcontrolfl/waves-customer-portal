@@ -139,6 +139,42 @@ postgres('planStartBlocker (live Postgres)', () => {
     return row;
   }
 
+  // A call of the account (call_log): by default a call about a home, as the call system saves it. The first
+  // format of the extraction is JSON text in a text column; the other verdicts and the address check are jsonb.
+  // `customer` null: a call no account was matched to.
+  const HOME_CALL = {
+    ai_extraction: { requested_service: 'Quarterly pest control', call_summary: 'Asked about ants in the kitchen.' },
+    ai_extraction_enriched: {
+      property: { property_type: 'single_family', commercial_subtype: null, service_address_occupancy: 'owner_occupied', hoa_common_area_service: false },
+      caller: { relationship_to_property: 'owner' },
+      commercial_signals: null,
+      triage_flags: ['quote_promised'],
+    },
+    ai_validation: { routing: { flags: ['quote_promised'], appointment_blocking_flags: [] } },
+    ai_address_validation: { status: 'validated_accept', granularity: 'PREMISE', addressUse: { business: false, residential: true, poBox: false } },
+  };
+  async function seedCall(customer, change = {}) {
+    const call = { ...HOME_CALL, ...change };
+    const json = (value) => (value === null ? null : JSON.stringify(value));
+    const [row] = await trx('call_log').insert({
+      customer_id: customer ? customer.id : null, ai_extraction: json(call.ai_extraction),
+      ai_extraction_enriched: json(call.ai_extraction_enriched), ai_validation: json(call.ai_validation),
+      ai_address_validation: json(call.ai_address_validation),
+    }).returning('*');
+    return row;
+  }
+
+  // A day-agreement decision of the account: by default one the judge let through. A skipped one needs a skip
+  // reason (the table's own check).
+  const SKIPPED = { verdict: 'skip', skip_reason: 'model_blocker' };
+  async function seedDecision(customer, { judged = { act: true, blockers: [] }, ...change } = {}) {
+    const [row] = await trx('day_agreement_decisions').insert({
+      customer_id: customer ? customer.id : null, source_kind: 'call', source_key: `synthetic-${hex(8)}`, verdict: 'would_book',
+      judged: judged === null ? null : JSON.stringify(judged), ...change,
+    }).returning('*');
+    return row;
+  }
+
   // A row of the service catalog (synthetic key and name).
   async function seedCatalogService(change = {}) {
     const [row] = await trx('services').insert({ service_key: `synthetic_${hex(6)}`, name: 'Synthetic Home Service', ...change }).returning('*');
@@ -371,6 +407,11 @@ postgres('planStartBlocker (live Postgres)', () => {
       ["the commercial tier in the estimate's own tier column", { waveguard_tier: 'Commercial' }],
       ['a service line that carries its commercial key under `key`', { estimate_data: { result: { recurring: { services: [{ key: 'commercial_pest', name: 'Monthly Service' }] } } } }],
       ['a commercial service key in a list of picked keys', { estimate_data: { selectedServiceKeys: ['pest_quarterly', 'commercial_pest'] } }],
+      // The estimate's own service label and notes: columns of the row, apart from the payload.
+      ['the service label of the estimate, with no payload', { service_interest: 'Commercial Pest Control', estimate_data: null }],
+      ['the service label beside home service lines', { service_interest: 'Lawn Care (commercial)' }],
+      ['notes the app sorts as a commercial line, on an estimate with no service line', { notes: 'Quote the commercial pest program for the bakery.', estimate_data: {} }],
+      ["a copy of the service label in the form's inputs", { estimate_data: { inputs: { leadServiceInterest: 'Commercial Lawn Care' } } }],
     ])('%s, beside a home estimate, on an account whose own row says nothing: commercial', async (_label, change) => {
       const customer = await seedCustomer();
       await seedEstimate(customer);
@@ -398,6 +439,30 @@ postgres('planStartBlocker (live Postgres)', () => {
 
     // A condo is a home. This is the estimate of a condo as the estimator saves one: a home tier, the empty
     // commercial fields and the pricing mode that every home estimate carries.
+    // The reader of service lines reads four columns of the row. The proof hands it all four, as the pipeline does.
+    test("the reader of service lines gets the row's label, notes, pricing authority and payload", async () => {
+      const owner = require('../services/estimate-service-lines');
+      const spy = jest.spyOn(owner, 'inferEstimateServiceLines');
+      try {
+        expect(await blockerFor((customer) => seedEstimate(customer, {
+          service_interest: 'Pest Control', notes: 'Side gate is open.', pricing_authority: 'SERVER',
+        }))).toBeNull();
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy).toHaveBeenCalledWith(expect.objectContaining({
+          service_interest: 'Pest Control', notes: 'Side gate is open.', pricing_authority: 'SERVER', estimate_data: HOME_ESTIMATE,
+        }));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('a home service label and home notes are not commercial, with or without service lines', async () => {
+      expect(await blockerFor(async (customer) => {
+        await seedEstimate(customer, { service_interest: 'Quarterly Pest Control', notes: 'Ants in the kitchen. Side gate is open.', estimate_data: {} });
+        await seedEstimate(customer, { service_interest: 'Pest Control', notes: 'Pest plan for the house. Not a commercial account.' });
+      })).toBeNull();
+    });
+
     test('the estimate of a condo is not commercial', async () => {
       expect(await blockerFor((customer) => seedEstimate(customer, {
         waveguard_tier: 'Bronze',
@@ -445,6 +510,14 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a lead the intake marked commercial', { is_commercial: true }],
       ['a commercial lead that also keeps the residential flag', { is_commercial: true, is_residential: true }],
       ['a commercial lead that was deleted', { is_commercial: true, deleted_at: new Date() }],
+      // The commercial flag is off (the column default) on each lead below: one other column carries the mark.
+      ['a lead with the residential flag set to no', { is_residential: false }],
+      ['a lead that asked for a commercial service, by its label', { service_interest: 'Commercial Pest Control' }],
+      ['a lead that asked for a commercial service, by its catalog key', { service_key: 'commercial_pest' }],
+      ['a lead with the commercial tier', { waveguard_tier: 'Commercial' }],
+      ["a lead with the commercial toggle in the intake's payload", { extracted_data: JSON.stringify({ isCommercial: 'YES' }) }],
+      ['a deleted lead with a commercial key in its payload', { extracted_data: JSON.stringify({ classification: { intent: 'commercial_inquiry' } }), deleted_at: new Date() }],
+      ["a quiz lead that answered 'business'", { extracted_data: JSON.stringify({ quiz: { kind: 'pest', seeing: 'ants', property: 'business' } }) }],
     ])('%s, beside a home lead: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedLead(customer);
@@ -455,8 +528,19 @@ postgres('planStartBlocker (live Postgres)', () => {
     test.each([
       ['a home lead', {}],
       ['a lead with no commercial flag at all', { is_commercial: null }],
+      ['a lead with no residential flag at all', { is_residential: null }],
+      ['a home lead with a label, a key, a tier and a payload', {
+        service_interest: 'Pest Control', service_key: 'pest_general_quarterly', waveguard_tier: 'Bronze',
+        extracted_data: JSON.stringify({ isCommercial: false, commercialSubtype: null, commercialDetectionSource: null, propertyType: 'Single Family' }),
+      }],
+      ["a quiz lead that answered 'house'", { extracted_data: JSON.stringify({ quiz: { kind: 'pest', seeing: 'ants', property: 'house' } }) }],
     ])('%s is not commercial', async (_label, change) => {
       expect(await blockerFor((customer) => seedLead(customer, change))).toBeNull();
+    });
+
+    test('the fixture: a lead payload comes back as an object', async () => {
+      const lead = await seedLead(await seedCustomer(), { extracted_data: JSON.stringify({ isCommercial: false }) });
+      expect(lead.extracted_data).toEqual({ isCommercial: false });
     });
 
     test("another customer's commercial lead, and one with no customer on it, say nothing about this customer", async () => {
@@ -465,6 +549,119 @@ postgres('planStartBlocker (live Postgres)', () => {
       await seedLead(customer);
       await seedLead(other, { is_commercial: true });
       await seedLead(null, { is_commercial: true });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+      expect(await planStartBlocker(trx, other.id)).toBe('commercial');
+    });
+
+    test("another customer's lead for a commercial service, and one with no customer on it, say nothing about this customer", async () => {
+      const customer = await seedCustomer();
+      const other = await seedCustomer();
+      await seedLead(customer, { service_interest: 'Pest Control' });
+      await seedLead(other, { service_interest: 'Commercial Pest Control' });
+      await seedLead(null, { service_key: 'commercial_pest', is_residential: false });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+      expect(await planStartBlocker(trx, other.id)).toBe('commercial');
+    });
+  });
+
+  // The call system's saved verdict on a call: the extraction and the triage. The words of the call are not read.
+  describe('a call of the account', () => {
+    const enriched = (change) => ({ ai_extraction_enriched: { ...HOME_CALL.ai_extraction_enriched, ...change } });
+
+    test('the fixture: a call keeps its first format as JSON text, and its verdicts and address check as objects', async () => {
+      const call = await seedCall(await seedCustomer());
+      expect(JSON.parse(call.ai_extraction)).toEqual(HOME_CALL.ai_extraction);
+      expect(call.ai_extraction_enriched).toEqual(HOME_CALL.ai_extraction_enriched);
+      expect(call.ai_validation).toEqual(HOME_CALL.ai_validation);
+      expect(call.ai_address_validation).toEqual(HOME_CALL.ai_address_validation);
+    });
+
+    test.each([
+      ['a commercial property type', enriched({ property: { property_type: 'commercial' } })],
+      ['a commercial subtype on a type that reads as a home', enriched({ property: { property_type: 'unknown', commercial_subtype: 'other' } })],
+      ['an HOA common area service at a condo', enriched({ property: { property_type: 'condo', hoa_common_area_service: true } })],
+      ['the owner of a multi-unit building', enriched({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'owner' } })],
+      ['a commercial occupancy of the service address', enriched({ property: { property_type: 'unknown', service_address_occupancy: 'commercial' } })],
+      ['a business name in the commercial-signals block', enriched({ commercial_signals: { business_name: 'Synthetic Bakery', annual_contract_interest: false } })],
+      ["the commercial flag among the extraction's own flags", enriched({ triage_flags: ['quote_promised', 'commercial_requires_quote'] })],
+      ['the commercial flag among the routing flags', { ai_validation: { routing: { flags: ['commercial_requires_quote'], appointment_blocking_flags: [] } } }],
+      ['the HOA flag among the flags that hold a booking', { ai_validation: { routing: { flags: [], appointment_blocking_flags: ['hoa_common_area_requires_approval'] } } }],
+      ['a commercial service in the first format, with no other verdict', { ai_extraction: { requested_service: 'Commercial pest control' }, ai_extraction_enriched: null, ai_validation: null }],
+      ['an address the check reads as a business and not as a home', { ai_address_validation: { status: 'validated_accept', addressUse: { business: true, residential: false, poBox: false } } }],
+    ])('%s, beside a call about a home: commercial', async (_label, change) => {
+      expect(await blockerFor(async (customer) => {
+        await seedCall(customer);
+        await seedCall(customer, change);
+      })).toBe('commercial');
+    });
+
+    test.each([
+      ['calls about a home only', {}],
+      ['a call with no extraction, no validation and no address check', { ai_extraction: null, ai_extraction_enriched: null, ai_validation: null, ai_address_validation: null }],
+      ['an address the check reads as a business and as a home', { ai_address_validation: { status: 'validated_accept', addressUse: { business: true, residential: true, poBox: false } } }],
+      ['the tenant of an apartment', enriched({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'tenant' } })],
+      ['a commercial-signals block with nothing set', enriched({ commercial_signals: { business_name: null, decision_authority_confirmed: false, insurance_or_compliance_requirements: [] } })],
+      ['the word in the summary of the call', { ai_extraction: { requested_service: 'Pest control at home', call_summary: 'Works at a commercial bakery. Wants service at home.' } }],
+    ])('%s: not commercial', async (_label, change) => {
+      expect(await blockerFor(async (customer) => {
+        await seedCall(customer);
+        await seedCall(customer, change);
+      })).toBeNull();
+    });
+
+    test("another customer's commercial call, and one no account was matched to, say nothing about this customer", async () => {
+      const customer = await seedCustomer();
+      const other = await seedCustomer();
+      await seedCall(customer);
+      await seedCall(other, enriched({ property: { property_type: 'commercial' } }));
+      await seedCall(null, { ai_validation: { routing: { flags: ['commercial_requires_quote'] } } });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+      expect(await planStartBlocker(trx, other.id)).toBe('commercial');
+    });
+
+    test('a commercial call is the answer also for an account that holds a plan', async () => {
+      const customer = await seedCustomer();
+      await seedFlaggedVisit(customer);
+      expect(await planStartBlocker(trx, customer.id)).toBe('has_plan');
+      await seedCall(customer, enriched({ property: { property_type: 'commercial' } }));
+      expect(await planStartBlocker(trx, customer.id)).toBe('commercial');
+    });
+  });
+
+  // The judge of a day agreement reads a call or a text thread. The app saves its blockers with the decision.
+  describe('a day-agreement decision of the account', () => {
+    test('the fixture: a decision comes back with its blockers as a list', async () => {
+      const decision = await seedDecision(await seedCustomer(), { judged: { act: false, blockers: ['commercial'] }, ...SKIPPED });
+      expect(decision.judged).toEqual({ act: false, blockers: ['commercial'] });
+    });
+
+    test.each([
+      ['a skipped call decision with the commercial blocker', { judged: { act: false, blockers: ['commercial'] }, ...SKIPPED }],
+      ['a text-thread decision with the commercial blocker among others', { judged: { act: false, blockers: ['vague_day', 'commercial'] }, ...SKIPPED, source_kind: 'sms' }],
+    ])('%s, beside a clean decision: commercial', async (_label, change) => {
+      expect(await blockerFor(async (customer) => {
+        await seedDecision(customer);
+        await seedDecision(customer, change);
+      })).toBe('commercial');
+    });
+
+    test.each([
+      ['clean decisions only', {}],
+      ['a decision with other blockers', { judged: { act: false, blockers: ['complaint', 'other'] }, ...SKIPPED }],
+      ['a source that was never judged', { judged: null, verdict: 'skip', skip_reason: 'call_too_long' }],
+    ])('%s: not commercial', async (_label, change) => {
+      expect(await blockerFor(async (customer) => {
+        await seedDecision(customer);
+        await seedDecision(customer, change);
+      })).toBeNull();
+    });
+
+    test("another customer's commercial decision, and one with no customer on it, say nothing about this customer", async () => {
+      const customer = await seedCustomer();
+      const other = await seedCustomer();
+      await seedDecision(customer);
+      await seedDecision(other, { judged: { act: false, blockers: ['commercial'] }, ...SKIPPED });
+      await seedDecision(null, { judged: { act: false, blockers: ['commercial'] }, ...SKIPPED });
       expect(await planStartBlocker(trx, customer.id)).toBeNull();
       expect(await planStartBlocker(trx, other.id)).toBe('commercial');
     });

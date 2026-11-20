@@ -6,26 +6,33 @@
 //   'not_live'    no such customer, an inactive account, or a deleted one
 //   'commercial'  a record of the account says commercial: the account row,
 //                 a saved property, an estimate, a lead, a visit, a service
-//                 report or a contract (never a residential plan)
+//                 report, a contract, a call or a day-agreement decision
+//                 (never a residential plan)
 //   'has_plan'    the customer already holds a plan (customerHoldsPlan below)
 // A failed read THROWS. An outage is never "nothing stands against it": the
 // caller is a job that tries again, or a pricer that must return no price.
 //
 // What it reads: the customers row, and the records that carry the id of that
 // ONE account. For the commercial rule: its saved properties, its estimates,
-// its leads, its visits, its service reports and its contracts
-// (hasCommercialRecord below). For the plan rule: its plan records
-// (customerHoldsPlan below lists them).
+// its leads, its visits, its service reports, its contracts, its calls and
+// its day-agreement decisions (hasCommercialRecord below). For the plan rule:
+// its plan records (customerHoldsPlan below lists them).
 // What it does not read:
 // - another account of the same person or home (a duplicate profile, a payer,
 //   a family link), and a lead or an estimate with no customer id on it (one
 //   that matches the person by phone, email or address only);
-// - what came in before a record was saved: a call, a message, a form post, a
-//   parcel lookup. The app sorts those when it saves a lead or an estimate,
-//   and the saved record is read;
-// - a copy of a service name on another table (an invoice, a reminder, a
-//   review request, the coverage text of a prepay term). No rule of the app
-//   reads one of those rows as commercial;
+// - free text: the transcript or the summary of a call, a note, the body of a
+//   text or an email, and what a model wrote about one of those. The verdict
+//   the app SAVED on such a record is read (a call's extraction and triage, a
+//   day-agreement decision), never its words. One exception: the notes of an
+//   estimate with no service line, which the app's own reader sorts into
+//   service lines;
+// - what came in before a record was saved: a form post, a parcel lookup, the
+//   page a visitor came from. The app sorts those when it saves a lead or an
+//   estimate, and the saved record is read;
+// - a copy on another table: a service name (an invoice, a reminder, a review
+//   request, the coverage text of a prepay term), or the flag of a call (its
+//   triage card, its route decision). The record it was copied from is read;
 // - an open estimate as a PLAN record (an accept writes the tier, the lane
 //   and the series, and those are read). The commercial rule reads every
 //   estimate of the account;
@@ -166,11 +173,12 @@ async function customerHoldsPlan(database, customer) {
 // proposal writes a building use only when it carries one (and the column
 // came with no backfill for the wins before it). So the rule also reads the
 // records of the account that the app itself sorts as commercial: its saved
-// properties, its estimates, its leads, its visits, its service reports and
-// its contracts (hasCommercialRecord). Each kind is read by the rules the app
-// applies to a SAVED record of that kind. ONE mark is enough, whatever its
-// age or status: an old estimate, a cancelled visit, a deleted lead, a
-// removed address. That is the fail-closed side, on purpose: this proof
+// properties, its estimates, its leads, its visits, its service reports, its
+// contracts, its calls and its day-agreement decisions (hasCommercialRecord).
+// Each kind is read by the rules the app applies to a SAVED record of that
+// kind. ONE mark is enough, whatever its age or status: an old estimate, a
+// cancelled visit, a deleted lead, a removed address, a call of last year.
+// That is the fail-closed side, on purpose: this proof
 // clears an account for an offer nobody reads before it goes out. A business
 // that gets a home price is the costly mistake. A home with one old
 // commercial mark only gets no automatic offer.
@@ -251,7 +259,10 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   rules for a line and neither holds the other: the word in any of the
 //   line's names (isCommercialRecurringLine), and the key it gives the line
 //   (recurringServiceKey, which also reads a line's `key`: the rule behind
-//   hasCommercialRecurringLine, the bait check and the accept's own check).
+//   hasCommercialRecurringLine, the bait check and the accept's own check);
+// - the property answer of a quiz page, where the object keeps a quiz
+//   ('business': quizIsCommercial in lead-quiz.js). A lead keeps the quiz in
+//   its payload, and the intake marks the lead by the same rule.
 function nodeSaysCommercial(node) {
   const converter = require('./estimate-converter');
   return saysYes(node.isCommercial) || saysYes(node.is_commercial)
@@ -260,7 +271,8 @@ function nodeSaysCommercial(node) {
     || isSetSubtype(node.commercial_subtype)
     || isSet(node.commercialRiskType) || isSet(node.commercial_risk_type)
     || converter.isCommercialRecurringLine(node)
-    || String(converter.recurringServiceKey(node) || '').startsWith('commercial_');
+    || String(converter.recurringServiceKey(node) || '').startsWith('commercial_')
+    || require('./lead-quiz').quizIsCommercial(node.quiz);
 }
 
 // Every object of the payload, at any depth. (The app's own scan stops 12
@@ -283,6 +295,26 @@ function payloadSaysCommercial(value) {
   return nodeSaysCommercial(value) || Object.values(value).some((item) => payloadSaysCommercial(item));
 }
 
+// A JSON column as the driver returns it: the parsed value, or a text that
+// still has to be parsed. A text that is not JSON is a failed read, as a
+// failed query is: never "nothing in it".
+function jsonValue(raw, what) {
+  if (typeof raw !== 'string') return raw;
+  if (raw.trim() === '') return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`planStartBlocker could not read ${what}`);
+  }
+}
+const asObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
+// Does one text of a JSON value, at any depth, pass the test?
+function someText(value, test) {
+  if (typeof value === 'string') return test(value);
+  if (!value || typeof value !== 'object') return false;
+  return Object.values(value).some((item) => someText(item, test));
+}
+
 // The payload of an estimate, null when the row has none. A payload that is
 // not an object or a list is a failed read, as a failed query is.
 function estimatePayload(raw) {
@@ -298,6 +330,10 @@ function estimatePayload(raw) {
 //   auto-priced commercial estimate can keep the default 'RESIDENTIAL';
 // - the estimate's own tier column, by the account's rule for the tier (the
 //   'commercial' value);
+// - the estimate's own service label (service_interest), by the rule for a
+//   service text (isCommercialServiceRow: the word in the label). A quote
+//   request and the office save the label apart from the payload, so it can
+//   be the only mark ('Commercial Pest Control' over an empty payload);
 // - a commercial proposal, authored or scaffolded (isCommercialProposalData).
 //   It is also the record of a WON proposal. A win marks the account
 //   commercial only when the proposal has taxable lines, and it writes a
@@ -308,7 +344,12 @@ function estimatePayload(raw) {
 // - the classifier of the accept and slot routes
 //   (isCommercialAutoAcceptEstimate): commercial service rows;
 // - a mark on any object of the payload (nodeSaysCommercial above), or a text
-//   in it that starts with 'commercial_' (payloadSaysCommercial).
+//   in it that starts with 'commercial_' (payloadSaysCommercial);
+// - the reader the pipeline shows an estimate's service lines with
+//   (inferEstimateServiceLines in estimate-service-lines.js): a line whose
+//   key starts with 'commercial_'. For an estimate with no service line it
+//   sorts the label, the label's copies in the payload and the notes by the
+//   app's text patterns.
 // Not the termite agreement's classifier itself (isCommercialEstimate in
 // termite-program-agreement.js). It is broad on purpose, and three of its
 // rules read homes: it parks a duplex, a condo and a townhome; it reads a
@@ -319,29 +360,61 @@ function estimatePayload(raw) {
 // key, a proposal).
 function isCommercialEstimateRow(estimate) {
   if (String(estimate.category || '').trim().toUpperCase() === 'COMMERCIAL') return true;
-  if (require('./self-booking-plan-sync').isCommercialAccount({ waveguard_tier: estimate.waveguard_tier })) return true;
+  const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
+  if (isCommercialAccount({ waveguard_tier: estimate.waveguard_tier })) return true;
+  if (isCommercialServiceRow({ service_type: estimate.service_interest })) return true;
   const data = estimatePayload(estimate.estimate_data);
   return require('./estimate-proposal').isCommercialProposalData(data)
     || require('./estimate-delivery-options').isCommercialEstimateData(data)
     || require('./estimate-commercial-identity').isCommercialAutoAcceptEstimate({ estimate_data: data })
-    || payloadSaysCommercial(data);
+    || payloadSaysCommercial(data)
+    || require('./estimate-service-lines').inferEstimateServiceLines({ ...estimate, estimate_data: data })
+      .some((line) => String(line.key || '').startsWith(COMMERCIAL_KEY_PREFIX));
 }
 
 // EVERY estimate of the account counts, whatever its status: a won one (the
 // customer bought commercial work), an open one (the office quotes commercial
 // work now) and an old one (the account was quoted as a business). An
 // archived one too.
+// The read carries the columns the rules above read. The reader of service
+// lines reads four of the row: the label, the notes, the payload, and the
+// pricing authority (it names the result the add-on lines come from).
 async function hasCommercialEstimate(database, customerId) {
-  const estimates = await database('estimates').where({ customer_id: customerId }).select('category', 'waveguard_tier', 'estimate_data');
+  const estimates = await database('estimates').where({ customer_id: customerId })
+    .select('category', 'waveguard_tier', 'service_interest', 'notes', 'pricing_authority', 'estimate_data');
   return estimates.some((estimate) => isCommercialEstimateRow(estimate));
 }
 
-// A lead of the account that the intake marked commercial (leads.is_commercial:
-// the flag the booking-link rule refuses on, call-booking-link-text.js). A
-// deleted lead counts too: the removal of a lead does not make the caller a
-// home.
+// Does this lead say commercial? A lead keeps what the intake knew, each fact
+// in a column of its own, and no writer keeps the columns in step (the office
+// form saves each one as it was typed). Any one is enough:
+// - the commercial flag (is_commercial: the flag the booking-link rule
+//   refuses on, call-booking-link-text.js);
+// - the residential flag set to no (is_residential = false). The intake
+//   writes it with the commercial flag, and the office form can clear it
+//   alone;
+// - the service the lead asked for, as a label (service_interest) or as a
+//   catalog key (service_key), by the rule for a service text. The intake
+//   reads a commercial service label as a commercial lead
+//   (lead-estimate-automation.js);
+// - the lead's own tier, by the account's rule for the tier;
+// - the payload the intake kept (extracted_data: a form, a quiz, the
+//   classification of an email), by the rules for an estimate payload. It
+//   keeps the same fields (isCommercial, commercialSubtype, propertyType).
+function isCommercialLeadRow(lead) {
+  const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
+  return lead.is_commercial === true || lead.is_residential === false
+    || isCommercialServiceRow({ service_type: lead.service_interest, service_key: lead.service_key })
+    || isCommercialAccount({ waveguard_tier: lead.waveguard_tier })
+    || payloadSaysCommercial(jsonValue(lead.extracted_data, 'a lead payload'));
+}
+
+// EVERY lead of the account counts. A deleted lead too: the removal of a lead
+// does not make the caller a home.
 async function hasCommercialLead(database, customerId) {
-  return Boolean(await database('leads').where({ customer_id: customerId, is_commercial: true }).first('id'));
+  const leads = await database('leads').where({ customer_id: customerId })
+    .select('is_commercial', 'is_residential', 'service_interest', 'service_key', 'waveguard_tier', 'extracted_data');
+  return leads.some((lead) => isCommercialLeadRow(lead));
 }
 
 // A visit or a service report of the account with a commercial service, by
@@ -380,6 +453,81 @@ async function hasCommercialContract(database, customerId) {
   return templates.some((contract) => String(contract.document_template_key || '').toLowerCase().includes('commercial'));
 }
 
+// Did the call system sort this call as commercial? A call keeps what the
+// extraction said about the caller's premises and request
+// (ai_extraction_enriched; ai_extraction is the first format, kept as JSON
+// text), what the triage decided (ai_validation) and what the address check
+// found (ai_address_validation). Those saved verdicts are read. The words of
+// the call (its transcript, its summary) are not.
+// - The app's rule for an extraction that typed the premises commercial
+//   (commercialCategoryConflict in estimator-engine/unit-scope-model.js): a
+//   commercial property type, any commercial subtype, an HOA common area, the
+//   owner or the manager of a multi-unit building. By that rule the tenant of
+//   an apartment and the owner of a condo stay homes.
+// - The occupancy the extraction gave the service address ('commercial': the
+//   mark a saved property carries in occupancy_type).
+// - The extraction's commercial-signals block with a value set in it (a
+//   business name, a budget or a procurement remark). The extraction leaves
+//   the block null for a home.
+// - One of the two flags the triage raises for such a call
+//   (computeDeterministicTriageFlags in call-triage-flags.js), anywhere in
+//   either verdict: the model's own flags, the routing flags, the flags that
+//   hold a booking, or a list a later gate moved the flag to.
+// - The service the caller asked for as the first format kept it
+//   (requested_service, a text or an object of texts): the word in it, as in
+//   the service label of a lead.
+// - The address check of the call's service address: Google reads it as a
+//   business and not as a home (addressUse). Both halves must be
+//   affirmative, as in the app's own rule for a business building
+//   (applyBusinessWholeBuildingUnitWaiver in call-triage-flags.js). An address
+//   Google reads as both (a home with a business listing), or does not know,
+//   says nothing.
+const COMMERCIAL_CALL_FLAGS = Object.freeze(['commercial_requires_quote', 'hoa_common_area_requires_approval']);
+const isCommercialCallFlag = (text) => COMMERCIAL_CALL_FLAGS.includes(text);
+const carriesCommercialWord = (text) => text.toLowerCase().includes('commercial');
+const hasSetValue = (block) => Object.values(asObject(block)).some((value) => (Array.isArray(value) ? value.length > 0 : isSet(value)));
+function isBusinessAddress(addressCheck) {
+  const use = asObject(asObject(addressCheck).addressUse);
+  return use.business === true && use.residential === false;
+}
+function isCommercialCallRow(call) {
+  const extraction = asObject(jsonValue(call.ai_extraction_enriched, "a call's extraction"));
+  const validation = jsonValue(call.ai_validation, "a call's validation");
+  const firstFormat = asObject(jsonValue(call.ai_extraction, "a call's first extraction"));
+  const addressCheck = jsonValue(call.ai_address_validation, "a call's address check");
+  const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
+  return Boolean(commercialCategoryConflict({ extraction, intent: null }))
+    || asObject(extraction.property).service_address_occupancy === 'commercial'
+    || hasSetValue(extraction.commercial_signals)
+    || someText(extraction, isCommercialCallFlag) || someText(validation, isCommercialCallFlag)
+    || someText(firstFormat.requested_service, carriesCommercialWord)
+    || isBusinessAddress(addressCheck);
+}
+
+// EVERY call of the account counts, whatever its age or direction: the caller
+// told the office about a business once. (Production, 2026-11-20: a call was
+// the only commercial mark of more live accounts than any other record.)
+async function hasCommercialCall(database, customerId) {
+  const calls = await database('call_log').where({ customer_id: customerId })
+    .select('ai_extraction', 'ai_extraction_enriched', 'ai_validation', 'ai_address_validation');
+  return calls.some((call) => isCommercialCallRow(call));
+}
+
+// A day-agreement decision of the account whose judge named the commercial
+// blocker (BLOCKERS in prompts/day-agreement-v1.js). The judge read a call or
+// a text thread of this customer as commercial work, and the app saved that
+// with the decision (day-agreement-rules.js keeps the judge's blockers as a
+// list of the vocabulary's words).
+const COMMERCIAL_DAY_BLOCKER = 'commercial';
+async function hasCommercialDayAgreement(database, customerId) {
+  const decisions = await database('day_agreement_decisions').where({ customer_id: customerId }).select('judged');
+  // A list of the vocabulary's words (or one bare word, if a writer ever saves it so).
+  return decisions.some((decision) => someText(
+    asObject(jsonValue(decision.judged, 'a day-agreement decision')).blockers,
+    (blocker) => blocker === COMMERCIAL_DAY_BLOCKER,
+  ));
+}
+
 // Does a record of the account say commercial? Each kind of record is one
 // read on the caller's handle.
 async function hasCommercialRecord(database, customerId) {
@@ -388,7 +536,9 @@ async function hasCommercialRecord(database, customerId) {
     || (await hasCommercialLead(database, customerId))
     || (await hasCommercialServiceIn(database, 'scheduled_services', customerId))
     || (await hasCommercialServiceIn(database, 'service_records', customerId))
-    || (await hasCommercialContract(database, customerId));
+    || (await hasCommercialContract(database, customerId))
+    || (await hasCommercialCall(database, customerId))
+    || (await hasCommercialDayAgreement(database, customerId));
 }
 
 async function planStartBlocker(database, customerId) {

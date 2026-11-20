@@ -314,6 +314,14 @@ describe('planStartBlocker', () => {
         ['a commercial service key in a list of picked keys', ESTIMATE({ estimate_data: { selectedServiceKeys: ['pest_quarterly', 'commercial_pest'] } })],
         ['a commercial key under a field no rule names, in another spelling', ESTIMATE({ estimate_data: { pricing: { program: ' Commercial_Lawn ' } } })],
         ['a commercial review reason', ESTIMATE({ estimate_data: { automation: { review: [['commercial_signal_on_residential_intake']] } } })],
+        // The estimate's own service label. A quote request and the office save it apart from the payload.
+        ['the service label of the estimate, over an empty payload', ESTIMATE({ service_interest: 'Commercial Pest Control', estimate_data: null })],
+        ['the service label beside home service lines', ESTIMATE({ service_interest: 'Lawn Care (commercial)' })],
+        // Marks only the pipeline's reader of service lines reads, on an estimate with no service line.
+        ["a copy of the service label in the form's inputs", ESTIMATE({ estimate_data: { inputs: { leadServiceInterest: 'Commercial Lawn Care' } } })],
+        ['notes the app sorts as a commercial line', ESTIMATE({ notes: 'Quote the commercial pest program for the bakery.', estimate_data: {} })],
+        // The quiz of the lead an estimate was drafted from, where the payload keeps it.
+        ["the 'business' answer of a quiz page, kept in the payload", ESTIMATE({ estimate_data: { lead: { quiz: { kind: 'lawn', property: 'business' } } } })],
         // The payload scan reads the toggle only as a boolean, and never the engine's spelling.
         ["the form's toggle as text", ESTIMATE({ estimate_data: { inputs: { isCommercial: 'YES' } } })],
         ["the form's toggle in another spelling, in another generation of the payload", ESTIMATE({ estimate_data: { engineInputs: { isCommercial: ' yes ' } } })],
@@ -353,6 +361,10 @@ describe('planStartBlocker', () => {
         ['a field whose NAME starts with the prefix', ESTIMATE({ estimate_data: { commercial_lawn: { selected: false }, commercial_notes: 'none' } })],
         ['a home tier on the estimate', ESTIMATE({ waveguard_tier: 'Bronze' })],
         ['no tier on the estimate', ESTIMATE({ waveguard_tier: null })],
+        ['a home service label and home notes', ESTIMATE({ service_interest: 'Quarterly Pest Control', notes: 'Ants in the kitchen. Side gate is open.', estimate_data: {} })],
+        ['no service label and no notes', ESTIMATE({ service_interest: null, notes: null })],
+        // The app's reader sorts the notes only when the estimate has no service line: the lines answer first.
+        ['notes with the word on an estimate that has home service lines', ESTIMATE({ notes: 'Pest plan for the house. Not a commercial account.' })],
       ])('%s is not commercial', async (_label, estimate) => {
         expect(await blocker(withEstimates([estimate, ESTIMATE()]))).toBeNull();
       });
@@ -410,6 +422,8 @@ describe('planStartBlocker', () => {
         ["the converter's rule for the names of a service line", '../services/estimate-converter', 'isCommercialRecurringLine', (given) => given],
         // This rule answers a key, not a yes.
         ["the converter's key for a service line", '../services/estimate-converter', 'recurringServiceKey', (given) => given, 'commercial_pest'],
+        // This one answers the estimate's service lines.
+        ["the pipeline's reader of service lines", '../services/estimate-service-lines', 'inferEstimateServiceLines', (given) => given?.estimate_data, [{ key: 'commercial_pest' }]],
       ])('a mark only %s reads counts', async (_label, modulePath, rule, payloadOf, hit = true) => {
         const owner = require(modulePath);
         const real = owner[rule];
@@ -452,23 +466,77 @@ describe('planStartBlocker', () => {
       });
     });
 
-    // The intake marks a commercial lead (leads.is_commercial), and the booking-link rule refuses on that flag.
+    // A lead keeps what the intake knew, each fact in its own column, and no writer keeps the columns in step.
     describe('a lead of the account', () => {
-      // The fake applies no filter: this table answers a row only to a read that asks for the commercial flag.
-      const commercialLeadOnly = (calls) => (whereHas(calls, (f) => f.is_commercial === true) ? [{ id: 'lead-1' }] : []);
+      // A home lead, as the intake saves it.
+      const LEAD = (change = {}) => ({
+        is_commercial: false, is_residential: true, service_interest: 'Pest Control', service_key: 'pest_general_quarterly', waveguard_tier: 'Bronze',
+        extracted_data: { isCommercial: false, commercialSubtype: null, commercialDetectionSource: null, propertyType: 'Single Family' },
+        ...change,
+      });
+      const withLeads = (leads, given = {}) => world({ ...given, tables: { leads } });
 
-      test('a lead the intake marked commercial: commercial, and no plan record is read', async () => {
+      // Each case carries ONE mark, between two home leads.
+      test.each([
+        ['the commercial flag', LEAD({ is_commercial: true })],
+        ['the residential flag set to no, with the commercial flag off', LEAD({ is_residential: false })],
+        ['a commercial service label, with the commercial flag off', LEAD({ service_interest: 'Commercial Pest Control' })],
+        ['a commercial catalog key', LEAD({ service_key: 'commercial_pest' })],
+        ['the commercial tier', LEAD({ waveguard_tier: 'Commercial' })],
+        ["the commercial toggle in the intake's payload", LEAD({ extracted_data: { isCommercial: 'YES' } })],
+        ['a business property type in the payload', LEAD({ extracted_data: { quiz: { propertyType: 'Restaurant' } } })],
+        ['a commercial key in the payload', LEAD({ extracted_data: { classification: { intent: 'commercial_inquiry' } } })],
+        ['a payload saved as JSON text', LEAD({ extracted_data: JSON.stringify({ engine: { is_commercial: true } }) })],
+        // A quiz page's property question. The lead keeps the quiz object as the visitor answered it.
+        ["the 'business' answer of a quiz page", LEAD({ extracted_data: { attribution: {}, quiz: { kind: 'pest', seeing: 'ants', property: 'business' } } })],
+      ])('%s: commercial, and no plan record is read', async (_label, lead) => {
         const reads = [];
-        const db = world({ ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; }, tables: { leads: commercialLeadOnly } });
+        const db = withLeads([LEAD(), lead, LEAD()], { ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
         expect(await blocker(db)).toBe('commercial');
         expect(reads).toEqual([]);
       });
 
-      // PostgreSQL proves that a home lead, and another customer's commercial lead, say nothing.
-      test("the read asks for this customer's commercial leads", async () => {
+      test.each([
+        ['a home lead', LEAD()],
+        ['flags that were never set', LEAD({ is_commercial: null, is_residential: null })],
+        ['a lead with no label, no key, no tier and no payload', LEAD({ service_interest: null, service_key: null, waveguard_tier: null, extracted_data: null })],
+        ['a blank payload text', LEAD({ extracted_data: '  ' })],
+        ['a payload with the commercial fields empty', LEAD({ extracted_data: { isCommercial: 'NO', commercialSubtype: '', commercialRiskType: null, commercialPricingMode: 'manual_quote' } })],
+        ['a payload that is a bare text', LEAD({ extracted_data: JSON.stringify('asked about pest control') })],
+        ['a quiz answered for a house, a townhome or a condo', LEAD({ extracted_data: { quiz: { kind: 'pest', property: 'house' }, earlier: [{ quiz: { kind: 'lawn', property: 'townhome' } }, { quiz: { kind: 'pest', property: 'condo' } }] } })],
+        ['a quiz with no property answer', LEAD({ extracted_data: { quiz: { kind: 'lawn', seeing: 'brown_patches' } } })],
+      ])('%s is not commercial', async (_label, lead) => {
+        expect(await blocker(withLeads([lead, LEAD()]))).toBeNull();
+      });
+
+      // The rule belongs to the quiz module. The proof asks it, so a new answer that means a business is followed.
+      test("a mark only the quiz's own rule reads counts", async () => {
+        const owner = require('../services/lead-quiz');
+        const real = owner.quizIsCommercial;
+        const spy = jest.spyOn(owner, 'quizIsCommercial').mockImplementation((quiz, ...rest) => (quiz?.depot === true ? true : real(quiz, ...rest)));
+        const leads = [LEAD(), LEAD({ extracted_data: { quiz: { kind: 'pest', depot: true } } })];
+        try {
+          expect(await blocker(withLeads(leads))).toBe('commercial');
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await blocker(withLeads(leads))).toBeNull();
+      });
+
+      test('a lead payload that is text and not JSON is a failed read', async () => {
+        await expect(blocker(withLeads([LEAD(), LEAD({ extracted_data: 'not json' })]))).rejects.toThrow('could not read a lead payload');
+      });
+
+      test('a commercial flag answers for a lead whose payload cannot be read', async () => {
+        expect(await blocker(withLeads([LEAD({ is_commercial: true, extracted_data: 'not json' })]))).toBe('commercial');
+      });
+
+      // The fake applies no filter, so this pins the filter itself: every lead of this customer, with no flag
+      // and no deleted-at in it. PostgreSQL proves a deleted lead and another customer's lead.
+      test('the read asks for every lead of this customer', async () => {
         const reads = [];
         await blocker(world({ tables: { leads: (calls) => { reads.push(calls.map((call) => [...call])); return []; } } }));
-        expect(reads).toEqual([[['where', { customer_id: 'cust-1', is_commercial: true }]]]);
+        expect(reads).toEqual([[['where', { customer_id: 'cust-1' }]]]);
       });
     });
 
@@ -544,7 +612,173 @@ describe('planStartBlocker', () => {
       });
     });
 
-    test('an account that is commercial by its own row is answered with no read of its estimates, leads, visits, service reports or contracts', async () => {
+    // The call system's own saved verdict on a call: what the extraction said about the premises and the request,
+    // and what the triage decided. Never the words of the call.
+    describe('a call of the account', () => {
+      // A call about a home, as the call system saves it.
+      const HOME_EXTRACTION = {
+        property: { property_type: 'single_family', commercial_subtype: null, service_address_occupancy: 'owner_occupied', hoa_common_area_service: false },
+        caller: { relationship_to_property: 'owner' },
+        commercial_signals: null,
+        call_summary: 'Asked about ants in the kitchen.',
+        triage_flags: ['quote_promised'],
+      };
+      const CALL = (change = {}) => ({
+        ai_extraction: JSON.stringify({ requested_service: 'Quarterly pest control', call_summary: 'Asked about ants in the kitchen.' }),
+        ai_extraction_enriched: HOME_EXTRACTION,
+        ai_validation: { routing: { flags: ['quote_promised'], appointment_blocking_flags: [] } },
+        ai_address_validation: { status: 'validated_accept', granularity: 'PREMISE', addressUse: { business: false, residential: true, poBox: false } },
+        ...change,
+      });
+      const extraction = (change) => ({ ai_extraction_enriched: { ...HOME_EXTRACTION, ...change } });
+      const addressUse = (use) => ({ ai_address_validation: { status: 'validated_accept', granularity: 'PREMISE', addressUse: use } });
+      const withCalls = (calls, given = {}) => world({ ...given, tables: { call_log: calls } });
+
+      // Each case carries ONE mark, between two calls about a home.
+      test.each([
+        // The app's rule for an extraction that typed the premises commercial.
+        ['a commercial property type', CALL(extraction({ property: { property_type: 'commercial' } }))],
+        ['a commercial subtype on a type that reads as a home', CALL(extraction({ property: { property_type: 'unknown', commercial_subtype: 'other' } }))],
+        ['an HOA common area service at a condo', CALL(extraction({ property: { property_type: 'condo', hoa_common_area_service: true } }))],
+        ['the owner of a multi-unit building', CALL(extraction({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'owner' } }))],
+        ['a commercial occupancy of the service address', CALL(extraction({ property: { property_type: 'unknown', service_address_occupancy: 'commercial' } }))],
+        // The commercial-signals block: the extraction leaves it null for a home.
+        ['a business name in the commercial-signals block', CALL(extraction({ commercial_signals: { business_name: 'Synthetic Bakery', annual_contract_interest: false } }))],
+        ['a compliance need in the commercial-signals block', CALL(extraction({ commercial_signals: { business_name: null, insurance_or_compliance_requirements: ['certificate of insurance'] } }))],
+        ['a confirmed decision authority in the commercial-signals block', CALL(extraction({ commercial_signals: { decision_authority_confirmed: true } }))],
+        // The two flags of the triage, wherever a verdict keeps them.
+        ["the commercial flag among the extraction's own flags", CALL(extraction({ triage_flags: ['quote_promised', 'commercial_requires_quote'] }))],
+        ['the commercial flag among the routing flags', CALL({ ai_validation: { routing: { flags: ['commercial_requires_quote'] } } })],
+        ['the commercial flag among the flags that hold a booking', CALL({ ai_validation: { routing: { flags: [], appointment_blocking_flags: ['commercial_requires_quote'] } } })],
+        ['the HOA flag in a list of another name', CALL({ ai_validation: { routing: { flags: [] }, gates: { demoted: ['hoa_common_area_requires_approval'] } } })],
+        ['a validation saved as JSON text', CALL({ ai_validation: JSON.stringify({ routing: { flags: ['commercial_requires_quote'] } }) })],
+        // The first format of the extraction: the service the caller asked for.
+        ['a commercial service in the first format', CALL({ ai_extraction: JSON.stringify({ requested_service: 'Commercial pest control' }) })],
+        ["a commercial service inside the first format's object", CALL({ ai_extraction: JSON.stringify({ requested_service: { primary: 'Pest control', also: ['Monthly COMMERCIAL kitchen service'] } }) })],
+        // The address check: Google reads the service address as a business and not as a home.
+        ['an address the check reads as a business and not as a home', CALL(addressUse({ business: true, residential: false, poBox: false }))],
+        ['an address check saved as JSON text', CALL({ ai_address_validation: JSON.stringify({ status: 'corrected', addressUse: { business: true, residential: false } }) })],
+      ])('%s: commercial, and no plan record is read', async (_label, call) => {
+        const reads = [];
+        const db = withCalls([CALL(), call, CALL()], { ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      test.each([
+        ['a call about a home', CALL()],
+        ['the tenant of an apartment', CALL(extraction({ property: { property_type: 'multi_family' }, caller: { relationship_to_property: 'tenant' } }))],
+        ['the owner of a condo', CALL(extraction({ property: { property_type: 'condo' }, caller: { relationship_to_property: 'owner' } }))],
+        ['a commercial-signals block with nothing set', CALL(extraction({
+          commercial_signals: { business_name: null, budget_signal: '  ', decision_authority_confirmed: false, annual_contract_interest: null, insurance_or_compliance_requirements: [] },
+        }))],
+        ['a call with no extraction and no validation', CALL({ ai_extraction: null, ai_extraction_enriched: null, ai_validation: null })],
+        ['a blank first format', CALL({ ai_extraction: '  ' })],
+        ['a first format with no requested service', CALL({ ai_extraction: JSON.stringify({ call_summary: 'Voicemail, no request.' }) })],
+        ['other flags', CALL({ ai_validation: { routing: { flags: ['quote_promised', 'out_of_service_area'], appointment_blocking_flags: ['caller_not_authorized'] } } })],
+        // Both halves of the address use must be affirmative.
+        ['an address the check reads as a business and as a home', CALL(addressUse({ business: true, residential: true }))],
+        ['a business address whose residential half is unknown', CALL(addressUse({ business: true, residential: null }))],
+        ['an address that is neither, by the check', CALL(addressUse({ business: false, residential: false }))],
+        ['an address use the check did not get', CALL(addressUse(null))],
+        ['a call with no address check', CALL({ ai_address_validation: null })],
+        // The words of a call are not read: the caller can name a workplace and want service at home.
+        ['the word in the summaries of the call', CALL({
+          ai_extraction: JSON.stringify({ requested_service: 'Pest control at home', call_summary: 'Works at a commercial bakery. Wants service at home.' }),
+          ...extraction({ call_summary: 'Mentioned the commercial bakery where he works.', triage_flags: ['commercial requires quote?'] }),
+        })],
+      ])('%s is not commercial', async (_label, call) => {
+        expect(await blocker(withCalls([call, CALL()]))).toBeNull();
+      });
+
+      // A saved verdict the proof cannot read is a failed read, as a failed query is: never "a home".
+      test.each([
+        ["a call's extraction", { ai_extraction_enriched: 'not json' }],
+        ["a call's validation", { ai_validation: '{"routing":' }],
+        ["a call's first extraction", { ai_extraction: 'extraction failed' }],
+        ["a call's address check", { ai_address_validation: 'not json' }],
+      ])('%s that is text and not JSON is a failed read', async (what, change) => {
+        await expect(blocker(withCalls([CALL(), CALL(change)]))).rejects.toThrow(`could not read ${what}`);
+      });
+
+      // The rule belongs to the estimator engine. A mark only that rule reads must count: the proof asks it.
+      test("a mark only the app's rule for a call extraction reads counts", async () => {
+        const owner = require('../services/estimator-engine/unit-scope-model');
+        const real = owner.commercialCategoryConflict;
+        const spy = jest.spyOn(owner, 'commercialCategoryConflict')
+          .mockImplementation((given, ...rest) => (given?.extraction?.depot === true ? 'depot' : real(given, ...rest)));
+        const calls = [CALL(), CALL(extraction({ depot: true }))];
+        try {
+          expect(await blocker(withCalls(calls))).toBe('commercial');
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await blocker(withCalls(calls))).toBeNull();
+      });
+
+      // The triage writes the two flags the rule reads (call-triage-flags.js). A rename there fails here.
+      test('the triage still raises the two flags by these names', () => {
+        const { computeDeterministicTriageFlags } = require('../services/call-triage-flags');
+        expect(computeDeterministicTriageFlags({ meta: {}, property: { property_type: 'commercial' } })).toContain('commercial_requires_quote');
+        expect(computeDeterministicTriageFlags({ meta: {}, property: { hoa_common_area_service: true } })).toContain('hoa_common_area_requires_approval');
+        expect(computeDeterministicTriageFlags({ meta: {}, property: { property_type: 'single_family' } }))
+          .toEqual(expect.not.arrayContaining(['commercial_requires_quote', 'hoa_common_area_requires_approval']));
+      });
+
+      test('home calls only, and a plan record: the plan is the answer', async () => {
+        const db = withCalls([CALL(), CALL()], { visits: onlyFor(isCalendarRead, [FLAGGED]) });
+        expect(await blocker(db)).toBe('has_plan');
+      });
+
+      test('the read asks for every call of this customer, whatever its age or direction', async () => {
+        const reads = [];
+        await blocker(world({ tables: { call_log: (calls) => { reads.push(calls.map((call) => [...call])); return []; } } }));
+        expect(reads).toEqual([[['where', { customer_id: 'cust-1' }]]]);
+      });
+    });
+
+    // The judge of a day agreement reads a call or a text thread, and the app saves its blockers with the decision.
+    describe('a day-agreement decision of the account', () => {
+      const withDecisions = (judgedList, given = {}) => world({ ...given, tables: { day_agreement_decisions: judgedList.map((judged) => ({ judged })) } });
+
+      test.each([
+        ['the commercial blocker', [{ act: false, blockers: ['commercial'] }]],
+        ['the commercial blocker among others, beside a clean decision', [{ act: true, blockers: [] }, { act: false, blockers: ['vague_day', 'commercial'] }]],
+        ['a decision saved as JSON text', [JSON.stringify({ act: false, blockers: ['commercial'] })]],
+        ['the blocker as a bare word, not a list', [{ act: false, blockers: 'commercial' }]],
+      ])('%s: commercial, and no plan record is read', async (_label, judgedList) => {
+        const reads = [];
+        const db = withDecisions(judgedList, { ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      test.each([
+        ['other blockers', [{ act: false, blockers: ['complaint', 'other'] }]],
+        ['no blockers', [{ act: true, blockers: [] }]],
+        ['a source that was never judged', [null]],
+        ['a blocker that only holds the word', [{ act: false, blockers: ['not_commercial', 'commercial work?'] }]],
+        ['the word in the reason of the judge, which is not read', [{ act: true, blockers: [], reason: 'commercial' }]],
+      ])('%s is not commercial', async (_label, judgedList) => {
+        expect(await blocker(withDecisions(judgedList))).toBeNull();
+      });
+
+      test("the judge's vocabulary names the blocker the rule reads", () => {
+        expect(require('../services/prompts/day-agreement-v1').BLOCKERS).toContain('commercial');
+      });
+
+      test('a decision that is text and not JSON is a failed read', async () => {
+        await expect(blocker(withDecisions(['not json']))).rejects.toThrow('could not read a day-agreement decision');
+      });
+
+      test('the read asks for every decision of this customer', async () => {
+        const reads = [];
+        await blocker(world({ tables: { day_agreement_decisions: (calls) => { reads.push(calls.map((call) => [...call])); return []; } } }));
+        expect(reads).toEqual([[['where', { customer_id: 'cust-1' }]]]);
+      });
+    });
+
+    test('an account that is commercial by its own row is answered with no read of any other record', async () => {
       const reads = [];
       const record = (name) => (calls) => { reads.push([name, calls]); return []; };
       const db = world({
@@ -552,6 +786,7 @@ describe('planStartBlocker', () => {
         tables: {
           estimates: record('estimates'), leads: record('leads'), 'scheduled_services as record': record('visits'),
           'service_records as record': record('reports'), customer_contracts: record('contracts'),
+          call_log: record('calls'), day_agreement_decisions: record('day agreements'),
         },
       });
       expect(await blocker(db)).toBe('commercial');
@@ -769,6 +1004,8 @@ describe('planStartBlocker', () => {
       ['the read of the visit services', { tables: { 'scheduled_services as record': failing('visit service read down') } }, 'visit service read down'],
       ['the read of the service report services', { tables: { 'service_records as record': failing('report service read down') } }, 'report service read down'],
       ['the read of the contracts', { tables: { customer_contracts: failing('contract read down') } }, 'contract read down'],
+      ['the read of the calls', { tables: { call_log: failing('call read down') } }, 'call read down'],
+      ['the read of the day-agreement decisions', { tables: { day_agreement_decisions: failing('decision read down') } }, 'decision read down'],
       ['the account read of the calendar reader', { tables: { customers: customersFailingAt(2, 'calendar account read down') } }, 'calendar account read down'],
       ['the calendar read', { visits: failFor(isCalendarRead, 'calendar read down') }, 'calendar read down'],
       ['the catalog join of the calendar read', { tables: { 'scheduled_services as s': failing('catalog join down') } }, 'ownership catalog join failed'],
