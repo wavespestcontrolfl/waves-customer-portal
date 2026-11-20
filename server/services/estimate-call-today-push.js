@@ -30,7 +30,7 @@ const logger = require('./logger');
 const { takeSendClaim, releaseSendClaim } = require('./sms-send-claims');
 const { etDateString } = require('../utils/datetime-et');
 const { isCallTodayEstimate } = require('../../shared/estimate-call-today.cjs');
-const { undeliveredSelfServeSql } = require('./self-serve-estimates');
+const { undeliveredSelfServeSql, selfServeDeliveredAtSql } = require('./self-serve-estimates');
 const {
   ESTIMATE_LIST_LIMIT, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId, callTodayFields,
 } = require('./estimate-call-list');
@@ -41,7 +41,8 @@ const CLAIM_PREFIX = 'estimate_call_today:';
 const PRE_HANDOFF_FAILURES = new Set(['recipient_lookup', 'before_handoff']);
 // The columns the count reads: callTodayFields, lastCalledAtByEstimateId (id, status, customer_phone) and the filter in
 // candidateRows. The rows and their order stay the list route's; estimate_data is not loaded for 2,000 rows: the
-// undelivered self-serve flag is the list route's rule as SQL (undeliveredSelfServeSql).
+// undelivered self-serve flag and a delivered one's first delivery are the list route's rules as SQL
+// (undeliveredSelfServeSql, selfServeDeliveredAtSql).
 const CALL_TODAY_COLUMNS = Object.freeze([
   'estimates.id', 'estimates.status', 'estimates.customer_phone', 'estimates.archived_at',
   'estimates.sent_at', 'estimates.viewed_at', 'estimates.last_viewed_at', 'estimates.last_follow_up_at',
@@ -54,8 +55,9 @@ async function candidateRows() {
   // One more column, not another filter: the rows and their order stay the list route's, and isCallTodayEstimate
   // reads the flag through callTodayFields, as the page does (zero-follow-up contract).
   const undeliveredSelfServe = db.raw(`${undeliveredSelfServeSql('estimates')} AS undelivered_self_serve`);
+  const selfServeDeliveredAt = db.raw(`${selfServeDeliveredAtSql('estimates')} AS self_serve_delivered_at`);
   const rows = await estimateListQuery(db, { sentOnly: true }).clearSelect().select(CALL_TODAY_COLUMNS)
-    .select(undeliveredSelfServe).limit(ESTIMATE_LIST_LIMIT);
+    .select(undeliveredSelfServe).select(selfServeDeliveredAt).limit(ESTIMATE_LIST_LIMIT);
   return rows.filter((row) => row.status === 'viewed' && !row.archived_at && String(row.customer_phone || '').trim());
 }
 
@@ -80,6 +82,7 @@ async function countCallToday(nowMs) {
       lastClickedAt: clicked.get(row.id),
       lastCalledAt: called.get(row.id),
       undeliveredSelfServe: row.undelivered_self_serve,
+      selfServeDeliveredAt: row.self_serve_delivered_at,
     }),
     nowMs,
   )).length;

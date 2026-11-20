@@ -411,6 +411,15 @@ describe('GET /admin/estimates list shape', () => {
         // Unreadable data carries no delivery proof.
         'e-garbled': true,
       });
+      // A delivered one carries its first delivery, so the page times its touches from it (codex pre-push P1).
+      expect(Object.fromEntries(estimates.map((e) => [e.id, e.selfServeDeliveredAt]))).toEqual({
+        'e-start': null,
+        'e-restart': null,
+        'e-start-sent': '2026-10-02T15:00:00.000Z',
+        'e-staff': null,
+        'e-legacy': null,
+        'e-garbled': null,
+      });
     });
   });
 

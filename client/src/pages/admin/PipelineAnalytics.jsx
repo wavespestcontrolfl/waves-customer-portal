@@ -123,16 +123,25 @@ export function resolutionDate(estimate) {
 // isGoingColdEstimate so the two "Needs attention" cards never double-count the
 // same offer — every open offer lands in at most one bucket.
 // None of the three follow-up buckets lists a self-serve quote nobody delivered
-// (undeliveredSelfServe, from the server: plan restart, plan start): the
-// customer opened it from the portal, and it carries a zero-follow-up contract.
+// (undeliveredSelfServe, from the server: plan restart, plan start, report
+// card): the customer opened it from the portal, and it carries a
+// zero-follow-up contract. A delivered one counts touches from its delivery
+// (selfServeDeliveredAt, read by lastEngagementMs), so one opened only before
+// the send is an unopened send.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   if (estimate?.undeliveredSelfServe) return false;
-  if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
+  const last = lastEngagementMs(estimate);
+  const unopened =
+    estimate?.status === "sent"
+      ? !estimate.viewedAt
+      : estimate?.status === "viewed" &&
+        !!estimate.selfServeDeliveredAt &&
+        last == null;
+  if (unopened && estimate.sentAt) {
     const sentAt = new Date(estimate.sentAt).getTime();
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
   }
   if (estimate?.status === "viewed") {
-    const last = lastEngagementMs(estimate);
     return last != null && nowMs - last >= 168 * HOUR;
   }
   return false;

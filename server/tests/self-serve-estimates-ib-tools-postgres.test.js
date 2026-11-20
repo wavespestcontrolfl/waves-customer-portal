@@ -11,8 +11,9 @@
 // pre-push P1). A delivered one counts as sent at its first delivery, which a
 // later suppressed resend never moves (sentAtSql; codex pre-push r16), and as
 // viewed only from its delivery on (countableViewAtSql; codex pre-push r15).
-// Only real rows prove the NULL-aware NOT IN, the JSON path and the guarded
-// timestamp cast.
+// The Pipeline board lists one once staff deliver it, never a plan restart
+// quote. Only real rows prove the NULL-aware NOT IN, the JSON path and the
+// guarded timestamp cast.
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => {
@@ -124,15 +125,46 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
   });
 
   test('the SQL form of the rule agrees with the row form on every seeded row (the 9 AM Call today push reads the SQL form)', async () => {
-    const { undeliveredSelfServeSql, isUndeliveredSelfServe } = require('../services/self-serve-estimates');
+    const {
+      undeliveredSelfServeSql, isUndeliveredSelfServe, selfServeDeliveredAtSql, selfServeDeliveredAt,
+    } = require('../services/self-serve-estimates');
     await seed();
     const rows = await trx('estimates as e').where('e.service_interest', SERVICE)
-      .select('e.source', 'e.estimate_data', trx.raw(`${undeliveredSelfServeSql('e')} AS flag`));
+      .select('e.source', 'e.estimate_data', trx.raw(`${undeliveredSelfServeSql('e')} AS flag`),
+        trx.raw(`${selfServeDeliveredAtSql('e')} AS delivered_at`));
     expect(rows).toHaveLength(13);
-    for (const row of rows) expect(Boolean(row.flag)).toBe(isUndeliveredSelfServe(row.source, row.estimate_data));
+    for (const row of rows) {
+      expect(Boolean(row.flag)).toBe(isUndeliveredSelfServe(row.source, row.estimate_data));
+      // The first delivery the Call today rule times touches from: the push's SQL and the list's JavaScript agree.
+      expect(row.delivered_at ? row.delivered_at.toISOString() : null).toBe(selfServeDeliveredAt(row.source, row.estimate_data));
+    }
+    expect(rows.filter((row) => row.delivered_at)).toHaveLength(4);
     // The six undelivered self-serve rows (two carry an empty or null stamp); a
     // source-NULL row and an unreadable stamp are not among them.
     expect(rows.filter((row) => row.flag)).toHaveLength(6);
+  });
+
+  test('the Pipeline board lists a self-serve quote once staff deliver it, and never a plan restart quote (codex pre-push P1)', async () => {
+    const { fetchEstimates } = require('../routes/admin-pipeline').__private;
+    await seed();
+    const customerId = await insertCustomer();
+    const reportCard = (estimateData) => ({
+      id: randomUUID(), customer_id: customerId, source: 'service_report_cta', status: 'viewed', sent_at: AT, viewed_at: AT,
+      service_interest: SERVICE, monthly_total: 50, onetime_total: 0, estimate_data: estimateData,
+    });
+    await trx('estimates').insert([reportCard({ deliveryState: { firstDeliveredAt: DELIVERED } }), reportCard({})]);
+    const listed = (await fetchEstimates({})).filter((e) => e.service_interest === SERVICE)
+      .map((e) => `${e.source}|${e.estimate_data?.deliveryState?.firstDeliveredAt ?? null}|${e.status}`);
+    expect(listed.sort()).toEqual([
+      'null|null|accepted',
+      'null|null|viewed',
+      `plan_start|${AT}|viewed`,
+      `plan_start|${DELIVERED}|viewed`,
+      `plan_start|${DELIVERED}|viewed`,
+      // A present but unreadable stamp still records a staff send.
+      'plan_start|not a date|viewed',
+      `service_report_cta|${DELIVERED}|viewed`,
+    ].sort());
   });
 
   test('a suppressed resend never moves a delivered self-serve quote across a reporting boundary (codex pre-push r16 P1)', async () => {
@@ -193,21 +225,26 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect([delta('period_a', 'estimates_sent'), delta('period_a', 'estimates_accepted')]).toEqual([0, 0]);
   });
 
-  test('a delivered self-serve quote counts as viewed at its first logged open after delivery; a later open never moves it (codex pre-push P1)', async () => {
-    // A portal look on Feb 20; staff delivered it March 1; the customer opened it March 5 and again April 10.
+  test('a delivered self-serve quote counts as viewed at its first known open after delivery; a later open never moves it (codex pre-push P1)', async () => {
     const viewedIn = async (from, to) => (await executeDashboardTool('get_estimate_funnel', { date_from: from, date_to: to })).funnel.viewed;
     const months = async () => [await viewedIn('2006-03-01', '2006-03-31'), await viewedIn('2006-04-01', '2006-04-30')];
     const before = await months();
-    const id = randomUUID();
-    await trx('estimates').insert({
-      id, customer_id: await insertCustomer(), source: 'plan_start', status: 'viewed',
-      sent_at: '2006-03-01T15:00:00Z', viewed_at: '2006-02-20T15:00:00Z', last_viewed_at: '2006-04-10T15:00:00Z',
-      service_interest: SERVICE, monthly_total: 50, onetime_total: 0,
-      estimate_data: { deliveryState: { firstDeliveredAt: '2006-03-01T15:00:00Z' } },
-    });
-    await trx('estimate_views').insert(['2006-02-20T15:00:00Z', '2006-03-05T15:00:00Z', '2006-04-10T15:00:00Z']
-      .map((viewedAt) => ({ estimate_id: id, viewed_at: viewedAt })));
+    const customerId = await insertCustomer();
+    const quote = async (viewedAt, lastViewedAt, loggedOpens) => {
+      const id = randomUUID();
+      await trx('estimates').insert({
+        id, customer_id: customerId, source: 'plan_start', status: 'viewed',
+        sent_at: '2006-03-01T15:00:00Z', viewed_at: viewedAt, last_viewed_at: lastViewedAt,
+        service_interest: SERVICE, monthly_total: 50, onetime_total: 0,
+        estimate_data: { deliveryState: { firstDeliveredAt: '2006-03-01T15:00:00Z' } },
+      });
+      await trx('estimate_views').insert(loggedOpens.map((at) => ({ estimate_id: id, viewed_at: at })));
+    };
+    // Staff delivered both March 1. One: a portal look Feb 20, then opens March 5 and April 10, all logged.
+    await quote('2006-02-20T15:00:00Z', '2006-04-10T15:00:00Z', ['2006-02-20T15:00:00Z', '2006-03-05T15:00:00Z', '2006-04-10T15:00:00Z']);
+    // Two: the March 7 open stamped viewed_at but its log insert failed; an April 12 reopen is logged.
+    await quote('2006-03-07T15:00:00Z', '2006-04-12T15:00:00Z', ['2006-04-12T15:00:00Z']);
     const after = await months();
-    expect([after[0] - before[0], after[1] - before[1]]).toEqual([1, 0]);
+    expect([after[0] - before[0], after[1] - before[1]]).toEqual([2, 0]);
   });
 });

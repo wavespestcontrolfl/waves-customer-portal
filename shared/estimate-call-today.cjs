@@ -10,15 +10,19 @@ const HOUR = 3600000;
 
 // Most recent customer touch on the estimate. First-view timestamps alone
 // misclassify customers who re-open or click days later, so idle-time checks
-// must key off the latest of view/re-view/click.
+// must key off the latest of view/re-view/click. A delivered self-serve quote
+// counts only touches at or after its first delivery (selfServeDeliveredAt,
+// set by callTodayFields for the page and the push alike): the customer's
+// portal look before the send is no response to it (codex pre-push P1).
 function lastEngagementMs(estimate) {
+  const from = estimate?.selfServeDeliveredAt ? new Date(estimate.selfServeDeliveredAt).getTime() : -Infinity;
   const stamps = [
     estimate?.lastViewedAt,
     estimate?.viewedAt,
     estimate?.lastClickedAt,
   ]
     .map((iso) => (iso ? new Date(iso).getTime() : NaN))
-    .filter((ts) => !Number.isNaN(ts));
+    .filter((ts) => !Number.isNaN(ts) && ts >= from);
   return stamps.length ? Math.max(...stamps) : null;
 }
 
@@ -26,10 +30,10 @@ function lastEngagementMs(estimate) {
 // offer whose last customer touch was 2h–48h ago and that nobody has phoned or followed up on since.
 // The upper edge is inclusive and isGoingColdEstimate starts strictly past 48h, so the two never
 // share an offer (and the 7d+ overdue bucket sits further out still). Needs a phone to call.
-// Never a self-serve quote nobody delivered (undeliveredSelfServe: plan restart, plan start). The
-// list route and the 9 AM push both set it through callTodayFields, from one rule
+// Never a self-serve quote nobody delivered (undeliveredSelfServe: plan restart, plan start, report
+// card). The list route and the 9 AM push both set it through callTodayFields, from one rule
 // (server/services/self-serve-estimates.js): the customer opened it from the portal, and the
-// mint promises no follow-up.
+// mint promises no follow-up. A delivered one counts touches from its delivery (lastEngagementMs).
 function isCallTodayEstimate(estimate, nowMs = Date.now()) {
   if (estimate?.status !== 'viewed' || estimate.archivedAt || estimate.undeliveredSelfServe) return false;
   if (!String(estimate.customerPhone || '').trim()) return false;
