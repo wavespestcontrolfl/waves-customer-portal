@@ -22,6 +22,14 @@ const HELP_LINE = "Don't see one of these buttons? Reply here and we will help."
 
 const SIGN_IN = "Sign in to the Waves app with your phone number.";
 
+// The app-alert guides' last step and closing line. The quoted status and the
+// button names are the labels in PortalPage.jsx AppNotificationSettings and its
+// Service notifications rows: "This device is connected.", Connect this device,
+// Turn on app notifications, and the App / Text delivery choice. Only alerts
+// with a delivery choice can go by text (the weather row is on/off only).
+const ALERTS_APP_STEP = "Open the Waves app, tap Visits and scroll down to Service notifications. It should say \"This device is connected.\" If you see Connect this device or Turn on app notifications, tap it. Each alert you want on your phone should show App.";
+const ALERTS_TEXT_CHOICE = "Rather get texts? In Service notifications, pick Text for any alert that offers it.";
+
 const GUIDES = [
   {
     key: "add_contact",
@@ -89,8 +97,6 @@ const GUIDES = [
   // app can only see that notifications are allowed, not the banner, sound,
   // Scheduled Summary or Focus settings, so the customer checks them. Visit
   // reminders go out in the morning, when a Sleep schedule can still be on.
-  // "This device is connected." and Connect this device are the labels in
-  // PortalPage.jsx AppNotificationSettings, under Service notifications.
   {
     key: "alerts_iphone",
     name: "Make app alerts show on iPhone",
@@ -101,10 +107,11 @@ const GUIDES = [
       "Open Settings, tap Notifications, then tap Waves.",
       "Turn on Allow Notifications. Under Alerts, check Lock Screen, Notification Center and Banners. Turn on Sounds.",
       "If you see Immediate Delivery, choose it.",
-      "Reminders go out in the morning. If you use Sleep, open Settings, tap Focus, then Sleep. Under Allow Notifications, tap Apps, tap Add, choose Waves and tap Done. Do the same for Do Not Disturb if you use it.",
-      "Open the Waves app, tap Visits and scroll down to Service notifications. It should say \"This device is connected.\" If you see Connect this device, tap it.",
+      // A Focus can allow listed apps or silence them, so the step names both lists.
+      "Reminders go out in the morning. If you use Sleep, open Settings, tap Focus, then Sleep, then tap Apps under Allow Notifications. If it says Allow Notifications From, tap Add, choose Waves and tap Done. If it says Silence Notifications From, take Waves off that list. Do the same for Do Not Disturb if you use it.",
+      ALERTS_APP_STEP,
     ],
-    after: "Rather get texts? In Service notifications, pick Text next to any alert.",
+    after: ALERTS_TEXT_CHOICE,
   },
   {
     key: "alerts_android",
@@ -118,9 +125,9 @@ const GUIDES = [
       "If you see a list of alert types, tap each one and choose Alert (some phones say Default), not Silent. Turn on Pop on screen if you see it.",
       "Back in App info, tap Battery and choose Unrestricted. On a Samsung phone, also search Settings for Background usage limits and make sure Waves is not under Sleeping apps or Deep sleeping apps.",
       "Reminders go out in the morning. If you use Do Not Disturb or Bedtime mode, search Settings for Do Not Disturb, open its apps list, tap Add apps and choose Waves.",
-      "Open the Waves app, tap Visits and scroll down to Service notifications. It should say \"This device is connected.\" If you see Connect this device, tap it.",
+      ALERTS_APP_STEP,
     ],
-    after: "Rather get texts? In Service notifications, pick Text next to any alert.",
+    after: ALERTS_TEXT_CHOICE,
   },
   {
     key: "documents",
