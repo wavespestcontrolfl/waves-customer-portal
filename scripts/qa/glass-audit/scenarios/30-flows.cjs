@@ -223,7 +223,7 @@ const careersOffer = {
       handle: offerHandle({ ...OFFER_PAYLOAD, state: 'signed', signedName: 'Jordan Rivera', signedAt: OFFER_SIGNED }),
     },
     {
-      name: 'date-requested', ready: 'Sam will look at your new date',
+      name: 'date-requested', ready: 'Sam will look at the new date',
       handle: offerHandle({ ...OFFER_PAYLOAD, state: 'date_requested', requestedStartDate: OFFER_START }),
     },
     {

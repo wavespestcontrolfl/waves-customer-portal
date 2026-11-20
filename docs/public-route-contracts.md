@@ -8632,7 +8632,8 @@ the not-valid page). A last segment that looks like a file name (`bad.pdf`) gets
 every SPA path, and never the page; no offer token has a dot. The page itself opens only the link as sent: a token of
 64 lowercase hex and no percent-encoding in the path (any letter case of `/careers/offer/` is fine). Any other spelling
 shows the not-valid state with no API read. Stored messages hide the token in every spelling of the link
-(`utils/offer-link-redaction.js`). The text is read in units, each what a browser takes as one link: a quoted HTML
+(`utils/offer-link-redaction.js`): the comms history, the email ledger row (its subject too, since the editor takes a
+custom subject), the deferred queue row, and the SMS log and messages rows. The text is read in units, each what a browser takes as one link: a quoted HTML
 attribute value or an unbroken run of text. The link as sent keeps its host with the token hidden. Each other unit is
 read as a browser reads it (as typed and with its HTML character references decoded: tabs and line breaks dropped,
 backslashes as slashes, the path cut at the first `?` or `#`, dot segments resolved also when written with `%2e`, an
@@ -8655,7 +8656,8 @@ breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply 
 every piece: the marker in the first unit, nothing in the rest, the tags kept. Decoding stops after four passes; a unit
 that would still decode further may hide a route word, so it is hidden whole, and in such a text so is every unit that
 a run of 64 or more hex touches in the joined reading. Tags are found in one pass over the text, so malformed markup
-costs time in proportion to its length. The
+costs time in proportion to its length. Tokens are found, and put in source order, in one pass over each run of hex,
+so many links in one text, or in one unit, also cost time in proportion to its length. The
 service worker never handles an offer page, in any request mode (`client/public/sw.js` `isOfferLinkPath`: the path,
 percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the
 server routes `/API/` as `/api/`). It stores no URL that could carry the link, because a stored response or request
@@ -8691,8 +8693,10 @@ a date request or a decline never fixes a text choice the applicant did not see.
 contract before it and is answered as before, with no version check; the page always sends one. Each acts only from state `open`; any
 other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter
 case, answers 200 with the stored signature and a replay mark, `{state:'signed', signedAt, signedName, replay: true}`:
-it signs nothing, so the page names the signer and never says "You signed"; the page says "You signed" only on a 200
-without that mark to its own sign). Every action runs in one transaction that
+it signs nothing, so the page names the signer and never says "You signed"). The page tells an answer in the first
+person ("You signed", "You declined", "You asked to start on") only when it is the 200 answer to this tab's own action
+(a sign without the replay mark); an answer it learns from a read or a 409 is told in neutral words that name the
+signer and the date, since another tab may have given it. Every action runs in one transaction that
 locks the application row, then the offer row, and re-reads the state under the lock, so a double tap or a replay
 cannot sign twice. Accept records the IP, user agent and a signature hash (sha256 of the snapshot hash, the Terms
 content hash, the typed name and the signing instant), moves the application to `hired` and raises an owner bell;

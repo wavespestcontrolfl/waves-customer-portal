@@ -322,8 +322,9 @@ describe('a large text costs work in proportion to its length', () => {
   // Every stored text is redacted on the request, inbound ones with no offer link included, so the work must grow with
   // the length of the text only. Measured in CPU time, which a busy machine does not stretch as it does wall time.
   // On the code before round 25: 100 KB of "<a " took about 6 s of CPU (the tag pattern rescanned the rest of the body
-  // from each "<"), and 6,000 distinct links about 7 s (one search of the whole text per found token). Both now take
-  // under 1 s.
+  // from each "<"), and 6,000 distinct links about 7 s (one search of the whole text per found token). On the round 26
+  // code, 6,000 links run together in one unit took about 4 s (a search of the unit for each sort comparison). All now
+  // take under 1 s.
   const cpuMs = (run) => {
     const start = process.cpuUsage();
     run();
@@ -347,6 +348,17 @@ describe('a large text costs work in proportion to its length', () => {
     expect(cpuMs(() => { stored = redactOfferLinks(text); })).toBeLessThan(3000);
     expect(stored).not.toMatch(/[0-9a-f]{32}/);
     expect(stored.split(portalUrl('/careers/offer/[link hidden]')).length - 1).toBe(6000);
+  }, 120000);
+
+  test('8,000 distinct links run together in one unit are all hidden and pinned in order', () => {
+    const tokens = Array.from({ length: 8000 }, (_, i) => createHash('sha256').update(`one unit ${i}`).digest('hex'));
+    // Not the sent spelling, so the unit is hidden whole: one standard hidden link per token, in source order.
+    const text = tokens.map((t) => portalUrl(`/Careers/Offer/${t}`)).join(',');
+    let stored;
+    expect(cpuMs(() => { stored = redactOfferLinks(text); })).toBeLessThan(2500);
+    expect(stored).not.toMatch(/[0-9a-f]{32}/);
+    expect(stored.split(portalUrl('/careers/offer/[link hidden]')).length - 1).toBe(8000);
+    expect(offerLinkTokens(text)).toEqual(tokens);
   }, 120000);
 });
 

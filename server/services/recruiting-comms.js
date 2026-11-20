@@ -101,8 +101,8 @@ async function outboundNumberForApplicants() {
   }
 }
 
-// The job-offer link is the applicant's signing credential: every STORED copy (comms history, email ledger, deferred
-// queue row; the SMS log and messages rows through twilio.js) keeps the path with the token hidden
+// The job-offer link is the applicant's signing credential: every STORED copy (comms history, email ledger subject, html
+// and text, deferred queue row; the SMS log and messages rows through twilio.js) keeps the path with the token hidden
 // (utils/offer-link-redaction.js). The provider still gets the full body.
 const maskOfferLink = (text) => redactOfferLinks(String(text == null ? '' : text));
 
@@ -352,7 +352,8 @@ async function insertEmailLedgerRow({ app, to, subject, html, text, templateKey,
     from_name_snapshot: FROM_NAME,
     from_email_snapshot: FROM_EMAIL,
     reply_to_snapshot: CONTACT_EMAIL,
-    subject_snapshot: subject,
+    // The editor takes a custom subject, so it is staff text like the body: an offer link in it is hidden too.
+    subject_snapshot: redactOfferLinks(subject),
     html_snapshot: redactOfferLinks(html),
     text_snapshot: redactOfferLinks(text),
     categories: JSON.stringify([templateKey]),

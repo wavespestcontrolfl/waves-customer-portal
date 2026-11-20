@@ -176,11 +176,15 @@ function offerTokensOf(unit, seen = readable(unit)) {
     ...pathTokens(browserSegments(decodeHTML(unit)), BROWSER),
     ...seen.split(/[?#]/).flatMap((part) => pathTokens(part.split('/'), READER)),
   ]);
-  const at = (token) => {
-    const i = seen.indexOf(token);
-    return i === -1 ? seen.length : i;
-  };
-  return [...found].sort((a, b) => at(a) - at(b));
+  // Each token's first place in the reader's text, from one pass over its runs of hex (foundAt), not a search per
+  // comparison: one unit may hold thousands of links.
+  const first = new Map();
+  for (const at of foundAt(seen, found)) {
+    const token = seen.slice(at, at + 64);
+    if (!first.has(token)) first.set(token, at);
+  }
+  const place = (token) => (first.has(token) ? first.get(token) : seen.length);
+  return [...found].sort((a, b) => place(a) - place(b));
 }
 
 // The units of `text` in order: each with where it starts, its reader's text, whether that reading is undecided, and

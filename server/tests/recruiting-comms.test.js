@@ -684,6 +684,22 @@ describe('the email ledger snapshot', () => {
     expect(mockSendOne.mock.calls[0][0].html).toContain(token); // the provider still gets the real link
   });
 
+  // Codex P0 (round 27): the editor takes a custom subject, and the ledger stored it as typed.
+  test('hides an offer link pasted into a custom subject; the provider still gets the subject as typed', async () => {
+    const token = require('crypto').createHash('sha256').update('ledger subject').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.email_messages = [];
+    mockSendOne.mockClear();
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: `Your offer: ${link}`, emailBody: 'Pick a time for your interview.' });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.subject_snapshot).toBe('Your offer: https://portal.wavespestcontrol.com/careers/offer/[link hidden]');
+    expect(mockSendOne.mock.calls[0][0].subject).toBe(`Your offer: ${link}`);
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    expect(history.find((e) => e.channel === 'email').body).not.toContain(token);
+  });
+
   // An email may also show the link as text with an &nbsp; or a <wbr> inside the token; a reader still reads it whole.
   test('hides a token the email shows split by an &nbsp; or a tag, beside the hidden href', async () => {
     const token = require('crypto').createHash('sha256').update('ledger split').digest('hex');

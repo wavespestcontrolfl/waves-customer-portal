@@ -210,30 +210,29 @@ function ClosedState({ data }) {
   );
 }
 
-// signer: who signed, as far as this page can tell. 'self': the server answered
-// this tab's own sign as the one that signed. 'record': the page opened on a
-// signed offer, or it shows the name this tab last sent but the server never
-// answered that send as the one that signed (its reply was lost, it was
-// refused, or it was answered as a replay of the same name signed first), so
-// the page cannot tell whose signature it is; it names the signer and the
-// date, never "you". 'other': the page saw the offer open, and the name on
-// record is not the one this tab last sent.
-function resultMessage(data, signer) {
+// own: this tab's own action got this answer from the server (a 200 to its
+// sign, date request or decline; a sign answered as a replay is not its own).
+// Only then is it told in the first person, in the words the owner approved.
+// Any other answer (a page opened on it, or one learned from a 409 or a read:
+// another tab, or a send whose reply was lost) may not be the reader's doing,
+// so it is told in neutral words that name the signer and the date.
+function resultMessage(data, own) {
   const who = ownerFirstName(data);
   if (data.state === 'signed') {
     const when = formatLongInstant(data.signedAt);
-    const by = data.signedName ? ` by ${data.signedName}` : '';
-    const lead = { self: 'You signed this offer', other: `This offer was already signed${by}`, record: `This offer was signed${by}` }[signer];
+    const lead = own ? 'You signed this offer' : `This offer was signed${data.signedName ? ` by ${data.signedName}` : ''}`;
     return `${lead}${when ? ` on ${when}` : ''}. Welcome to Waves. ${who} will contact you about your first day.`;
   }
   if (data.state === 'date_requested') {
-    return `Thanks. ${who} will look at your new date. If it works, he will send you an updated offer.`;
+    return own
+      ? `Thanks. ${who} will look at your new date. If it works, he will send you an updated offer.`
+      : `${who} will look at the new date. If it works, he will send an updated offer.`;
   }
-  return 'You declined this offer. Thank you for your time.';
+  return own ? 'You declined this offer. Thank you for your time.' : 'This offer was declined. Thank you for your time.';
 }
 
-// signed / declined / date_requested: the answer the applicant already gave.
-function ResultState({ data, signer }) {
+// signed / declined / date_requested: the answer given (see resultMessage).
+function ResultState({ data, own }) {
   return (
     <Column>
       <div style={EYEBROW}>Waves</div>
@@ -241,10 +240,10 @@ function ResultState({ data, signer }) {
       <BrandCard padding={24}>
         {data.state === 'date_requested' && data.requestedStartDate && (
           <p style={{ ...BODY_STYLE, marginBottom: 10, fontWeight: 700, color: TEXT }}>
-            You asked to start on {formatLongDate(data.requestedStartDate)}.
+            {own ? 'You asked to start on' : 'A new start date was asked for:'} {formatLongDate(data.requestedStartDate)}.
           </p>
         )}
-        <p style={BODY_STYLE} role="status">{resultMessage(data, signer)}</p>
+        <p style={BODY_STYLE} role="status">{resultMessage(data, own)}</p>
       </BrandCard>
     </Column>
   );
@@ -629,7 +628,7 @@ function SignBlock({ name, onName, onAccept, busy, saving, frozen }) {
   );
 }
 
-function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onOwnSign }) {
+function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onOwnAnswer }) {
   const [name, setName] = useState('');
   const [panel, setPanel] = useState('none'); // none | date | decline
   const [unknown, setUnknown] = useState(false);
@@ -640,9 +639,9 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
     onApplied: (b, sent) => {
       // A replay signed nothing: the same name was signed first (another tab,
       // or an earlier send of this one whose reply was lost). It names the
-      // stored signature, and it is not this tab's to claim.
+      // stored signature, and it is not this tab's own answer.
       const { replay, ...answer } = b || {};
-      onOwnSign({ name: sent.signedName, answered: !replay });
+      if (!replay) onOwnAnswer(answer.state);
       onApplied({ ...answer, signedName: answer.signedName || sent.signedName });
     },
     onRefused,
@@ -650,8 +649,28 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
     onInvalid,
     onUnknown: markUnknown,
   });
-  const dateReq = useOfferAction({ token, onApplied: (b, sent) => onApplied({ requestedStartDate: sent.requestedStartDate, ...b }), onRefused, onReload, onInvalid, onUnknown: markUnknown });
-  const decline = useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUnknown: markUnknown });
+  const dateReq = useOfferAction({
+    token,
+    onApplied: (b, sent) => {
+      onOwnAnswer(b?.state);
+      onApplied({ requestedStartDate: sent.requestedStartDate, ...b });
+    },
+    onRefused,
+    onReload,
+    onInvalid,
+    onUnknown: markUnknown,
+  });
+  const decline = useOfferAction({
+    token,
+    onApplied: (b) => {
+      onOwnAnswer(b?.state);
+      onApplied(b);
+    },
+    onRefused,
+    onReload,
+    onInvalid,
+    onUnknown: markUnknown,
+  });
   const [consentPending, setConsentPending] = useState(false);
   // The last write may or may not have gone through and the offer could not be
   // read: every action stays locked until a read works.
@@ -688,7 +707,6 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
           saving={accept.busy}
           frozen={accept.frozen}
           onAccept={() => {
-            onOwnSign({ name: name.trim(), answered: false });
             accept.run('/accept', { signedName: name.trim(), version: data.version });
           }}
         />
@@ -755,11 +773,6 @@ const CLOSED_STATES = ['expired', 'withdrawn', 'superseded'];
 // with the closed page itself: { state, message, contactPhone }. On an answered
 // offer (signed, declined, date asked) it names only the state: { state }.
 const isClosedAnswer = (body) => Boolean(body) && CLOSED_STATES.includes(body.state) && typeof body.message === 'string';
-// One person's signature as the server stores and compares it (job-offers.js cleanText and sameName): control
-// characters dropped, each run of spaces one space, trimmed, in any letter case.
-const NAME_CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
-const signatureKey = (value) => String(value || '').replace(NAME_CONTROL_CHARS, '').replace(/\s+/g, ' ').trim().toLowerCase();
-const sameName = (a, b) => Boolean(a) && signatureKey(a) === signatureKey(b);
 const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 
 async function readOffer(token) {
@@ -795,12 +808,9 @@ function OfferPage({ token }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null); // null | 'notfound' | 'temporary'
-  const [firstState, setFirstState] = useState(null); // the state the first read showed
-  // The last signature this tab sent, { name, answered }, or null. answered:
-  // the server answered that sign as the one that signed (a 200 with no replay
-  // mark). Only then does the page say "You signed": a sent name alone may be
-  // in flight, lost, refused or a replay.
-  const [ownSign, setOwnSign] = useState(null);
+  // The answer this tab's own action got from the server ('signed', 'declined'
+  // or 'date_requested'), or null: only that answer is told in the first person.
+  const [ownAnswer, setOwnAnswer] = useState(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const seq = useRef(0);
 
@@ -813,7 +823,6 @@ function OfferPage({ token }) {
       .then((body) => {
         if (cancelled || mine !== seq.current) return;
         setData(body);
-        setFirstState((prev) => prev || body.state);
         setLoading(false);
       })
       .catch((err) => {
@@ -870,16 +879,7 @@ function OfferPage({ token }) {
   }
   if (CLOSED_STATES.includes(data.state)) return <ClosedState data={data} />;
   if (ANSWERED_STATES.includes(data.state)) {
-    // Opened as signed: anyone with the link may be reading, so the page names
-    // the signer. Seen open first: "You signed" only on the server's own answer
-    // to this tab's sign; a read alone cannot tell whose it is, so it names the
-    // signer too.
-    let signer = 'record';
-    if (firstState !== 'signed') {
-      if (!sameName(ownSign?.name, data.signedName)) signer = 'other';
-      else if (ownSign.answered) signer = 'self';
-    }
-    return <ResultState data={data} signer={signer} />;
+    return <ResultState data={data} own={ownAnswer === data.state} />;
   }
-  return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} onOwnSign={setOwnSign} />;
+  return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} onOwnAnswer={setOwnAnswer} />;
 }
