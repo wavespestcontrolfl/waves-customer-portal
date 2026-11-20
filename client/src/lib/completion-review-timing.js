@@ -327,7 +327,9 @@ export const COMPLAINT_ON_SITE_PROMPT = "Turn it off for a complaint on site? OK
 export const ALREADY_REVIEWED_SUPPRESSION = "already_reviewed";
 export const ALREADY_REVIEWED_LABEL = "Already left a Google review";
 // GATE_REVIEW_LATE_CLOSE_ASK: a backdated closeout within 3 days of the worked day still sends the review ask.
-export const LATE_CLOSE_ASK_LABEL = "Review ask still goes (closed within 3 days)";
+export const LATE_CLOSE_ASK_LABEL = "Keep the review request (closed within 3 days)";
+// Shown when a fresh preview says a closeout that looked suppressed now keeps its review request; the operator confirms by submitting again.
+export const LATE_CLOSE_NOW_KEPT_MESSAGE = "This closeout now keeps its review request (closed within 3 days). Check the review box, then submit again.";
 
 // The label of the review box: the suppressed, included and plain wordings are today's.
 // `reviewedOn` ('YYYY-MM-DD' or null) dates the already-reviewed label.
@@ -347,7 +349,7 @@ export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firs
 export function backfillCheckboxHint({ backfillCloseout = false, reviewAskGoes = false } = {}) {
   if (!backfillCloseout) return "Unchecked: completes as today with the normal customer messages.";
   return reviewAskGoes === true
-    ? "Records to the visit day, sends no customer messages except the review ask (closed within 3 days), and skips auto-charge."
+    ? "Records to the visit day, sends no customer messages, keeps the review request under the normal review rules, and skips auto-charge."
     : "Records to the visit day, sends no customer messages, and skips auto-charge.";
 }
 
@@ -469,7 +471,7 @@ export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failure
   if (fresh && typeof lateCloseShown === "boolean" && lateCloseAskKeptFrom(fresh) !== lateCloseShown) {
     return { message: lateCloseShown
       ? "This closeout is now past the 3 days after the visit, so no review request will be sent. Submit again to confirm."
-      : "This closeout now keeps its review request (closed within 3 days). Check the review box, then submit again." };
+      : LATE_CLOSE_NOW_KEPT_MESSAGE };
   }
   if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
     return { message: `The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.` };

@@ -79,6 +79,7 @@ import {
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
   runPreviewReadWithRetry,
+  LATE_CLOSE_NOW_KEPT_MESSAGE,
   backfillCheckboxHint,
   customReviewTimeProblem,
   firstAskReasonsFrom,
@@ -18722,6 +18723,25 @@ export function CompletionPanel({
     // that GATE_CRON_JOBS may never send (codex #4140 r18 P1).
     const schedulerStateKnown = typeof reviewSendPreviewRef.current?.schedulerEnabled === "boolean";
     const lateCloseShown = backfillQuietCloseout && reviewLateCloseAskKept === true;
+    // The backdate box is the ONLY thing keeping the review box off (the preview was pending, failed or said no): read once more,
+    // and if it now says the closeout keeps its review request, show that and stop, so the operator confirms the choice.
+    // null or false submits as today: suppressed.
+    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && !willReview && backfillQuietCloseout
+      && visitOutcome === "completed" && reviewSuppressionReason === "backfill" && !previewRecheckRef.current) {
+      previewRecheckRef.current = true;
+      let probe;
+      try {
+        probe = await fetchReviewSendPreview();
+      } finally {
+        previewRecheckRef.current = false;
+      }
+      if (lateCloseAskKeptFrom(probe)) {
+        setReviewSendPreview(probe);
+        setReviewLateCloseAskKept(true);
+        alert(LATE_CLOSE_NOW_KEPT_MESSAGE);
+        return;
+      }
+    }
     if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && (reviewTiming === "auto" || !schedulerStateKnown || lateCloseShown)) {
       if (previewRecheckRef.current) return;
       previewRecheckRef.current = true;

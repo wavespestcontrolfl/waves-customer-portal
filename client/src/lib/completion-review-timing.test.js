@@ -299,7 +299,7 @@ describe('late close ask (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
 
   test('the label says the ask still goes, never over a suppression or a first ask', () => {
     expect(reviewBoxLabel({ reviewSuppressionReason: null, lateCloseAskKept: true, willReview: true })).toBe(LATE_CLOSE_ASK_LABEL);
-    expect(LATE_CLOSE_ASK_LABEL).toBe('Review ask still goes (closed within 3 days)');
+    expect(LATE_CLOSE_ASK_LABEL).toBe('Keep the review request (closed within 3 days)');
     expect(reviewBoxLabel({ reviewSuppressionReason: 'backfill', lateCloseAskKept: true, willReview: true })).toBe('Review request suppressed');
     expect(reviewBoxLabel({ reviewSuppressionReason: null, firstAsk: true, lateCloseAskKept: true, willReview: true })).toBe(FIRST_REVIEW_ASK_LABEL);
     expect(reviewBoxLabel({ reviewSuppressionReason: null })).toBe('Send review request');
@@ -310,8 +310,8 @@ describe('backdate checkbox hint (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
   test('checked and no ask: today\'s words', () => {
     expect(backfillCheckboxHint({ backfillCloseout: true })).toBe('Records to the visit day, sends no customer messages, and skips auto-charge.');
   });
-  test('checked and the review ask goes: names the one exception', () => {
-    expect(backfillCheckboxHint({ backfillCloseout: true, reviewAskGoes: true })).toBe('Records to the visit day, sends no customer messages except the review ask (closed within 3 days), and skips auto-charge.');
+  test('checked and the review ask goes: keeps the review request without promising delivery', () => {
+    expect(backfillCheckboxHint({ backfillCloseout: true, reviewAskGoes: true })).toBe('Records to the visit day, sends no customer messages, keeps the review request under the normal review rules, and skips auto-charge.');
   });
   test('unchecked: the normal-messages line either way', () => {
     expect(backfillCheckboxHint({ backfillCloseout: false, reviewAskGoes: true })).toBe('Unchecked: completes as today with the normal customer messages.');
