@@ -4,17 +4,23 @@
 // planStartBlocker(database, customerId) answers null when none of the records
 // it reads stands against it, or the first reason that does:
 //   'not_live'    no such customer, an inactive account, or a deleted one
-//   'commercial'  a commercial account or property (never a residential plan)
+//   'commercial'  a commercial account, a customer of a won commercial
+//                 proposal, or a commercial property among the saved ones
+//                 (never a residential plan)
 //   'has_plan'    the customer already holds a plan (customerHoldsPlan below)
 // A failed read THROWS. An outage is never "nothing stands against it": the
 // caller is a job that tries again, or a pricer that must return no price.
 //
-// What it reads: the customers row, and the plan records of that ONE account
-// (customerHoldsPlan below lists them). What it does not read:
+// What it reads: the customers row, the active saved properties of the account
+// (customer_properties, for the commercial rule) and the plan records of that
+// ONE account (customerHoldsPlan below lists them). What it does not read:
 // - another account of the same person or home (a duplicate profile, a payer,
 //   a family link);
 // - an estimate that is still open (an accept writes the tier, the lane and
 //   the series, and those are read);
+// - what a lead, an estimate or a visit says about "commercial" (a lead's
+//   flag, an estimate's category, a service name). Those describe one sale or
+//   one job. The flow that acts on the job judges its kind;
 // - termite_bonds, customer_contracts, payment_plans. A bond rides the
 //   quarterly station check, whose recurring visits are read; a bond alone is
 //   a warranty with a renewal date (no tier count, no bundle discount). A
@@ -75,7 +81,10 @@ async function hasLiveLegacyPlanVisit(database, customerId) {
 //   the account is a billed plan amount whatever the tier column says. And a
 //   billing lane that only a plan has, by the lane's one reader
 //   (resolveBillingLane): an accept or the office set it, also on an account
-//   with no tier and no rate;
+//   with no tier and no rate. A churn keeps the per-application lane on the
+//   account on purpose (cancellation-processor.js: it is the price of work
+//   not settled yet), so such an account reads as a plan holder until the
+//   office clears the lane. That is the fail-closed side;
 // - the calendar: any live recurring obligation, at any property. The test is
 //   the live rows, never the owned keys: a recurring palm injection or a
 //   termite bond maps to no service family and is still the customer's plan.
@@ -121,6 +130,31 @@ async function customerHoldsPlan(database, customer) {
   return Boolean(await require('./admin-cancellation').findPendingPrepayInvoice(customer.id, null, database));
 }
 
+// One rule for a property type, wherever it is saved: the account-level list
+// (commercial, business: isCommercialAccount in self-booking-plan-sync.js) or
+// the pricing engine's own rule (isCommercialProperty).
+function isCommercialPropertyType(propertyType) {
+  const { isCommercialAccount } = require('./self-booking-plan-sync');
+  const { isCommercialProperty } = require('./pricing-engine/commercial-helpers');
+  return isCommercialAccount({ property_type: propertyType }) || isCommercialProperty({ propertyType });
+}
+
+// Is one of the account's saved properties commercial? The account row carries
+// only a mirror of the PRIMARY property's type (and the mirror can be behind),
+// and nothing on it mirrors a property's occupancy. So an account that reads
+// residential by its own row can have a saved property that says commercial:
+// by its occupancy (the mark the office sets, and the tax and estimate tools
+// read) or by its own type.
+// EVERY active property counts, not only the primary one: this proof gets no
+// property to answer for, so it answers for the account, fail closed. A
+// property that was removed (active = false) says nothing.
+async function hasCommercialProperty(database, customerId) {
+  const properties = await database('customer_properties')
+    .where({ customer_id: customerId, active: true })
+    .select('occupancy_type', 'property_type');
+  return properties.some((property) => property.occupancy_type === 'commercial' || isCommercialPropertyType(property.property_type));
+}
+
 async function planStartBlocker(database, customerId) {
   if (!database || !customerId) throw new Error('planStartBlocker needs a database handle and a customer id');
   const customer = await database('customers').where({ id: customerId }).first();
@@ -133,9 +167,15 @@ async function planStartBlocker(database, customerId) {
   // membership predicate reads the 'commercial' tier as "no plan", so without
   // this a commercial account between visits would read as a home with no
   // plan.
+  // Also a building use on the account. Only a won commercial proposal writes
+  // one (recordProposalBuildingUse in proposal-win.js), and it marks the
+  // account commercial only when the proposal has taxable lines. So the
+  // account of a community or a builder ('residential': homes and their
+  // common areas, not taxed) reads residential by the rule above, and it is a
+  // commercial-proposal customer all the same.
   const { isCommercialAccount } = require('./self-booking-plan-sync');
-  const { isCommercialProperty } = require('./pricing-engine/commercial-helpers');
-  if (isCommercialAccount(customer) || isCommercialProperty({ propertyType: customer.property_type })) return 'commercial';
+  if (isCommercialAccount(customer) || isCommercialPropertyType(customer.property_type) || customer.building_use) return 'commercial';
+  if (await hasCommercialProperty(database, customer.id)) return 'commercial';
   return (await customerHoldsPlan(database, customer)) ? 'has_plan' : null;
 }
 

@@ -1,8 +1,9 @@
 // planStartBlocker against real PostgreSQL (one rolled-back transaction per test). The unit suite
 // (plan-start-eligibility.test.js) pins the decisions on a fake that applies no filter. This one proves what only
-// a database can: the SQL of each plan read on the real tables (the calendar read, the legacy plan visit, the
-// ongoing series root, the billed plan rate, the two annual prepay reads), and that the account values the rules
-// name are values the schema accepts. No network, no spend. All names and addresses are synthetic.
+// a database can: the SQL of each read on the real tables (the saved properties, the calendar read, the legacy
+// plan visit, the ongoing series root, the billed plan rate, the plan hold, the two annual prepay reads), and
+// that the account and property values the rules name are values the schema accepts. No network, no spend. All
+// names and addresses are synthetic.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -32,9 +33,12 @@ postgres('planStartBlocker (live Postgres)', () => {
 
   beforeAll(async () => {
     const target = new URL(process.env.DATABASE_URL);
-    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
+    // This worktree's OWN QA database, never another checkout's: the managed runner sets both marks and names
+    // the database after the worktree id (scripts/dev/context.js, scripts/qa/server.js). Or CI's database.
+    const worktreeId = String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '');
+    const privateQa = process.env.WAVES_LOCAL_DEV === '1' && /^[a-f0-9]{32}$/.test(worktreeId) && target.pathname === `/waves_qa_${worktreeId}`;
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
-    if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
+    if (!privateQa && !ci) throw new Error("Use this worktree's private QA database or the isolated CI database");
     // The driver copies every query parameter of a connection string into its settings, so ?host=, ?port= or
     // ?connectionString= would name another server than the one checked above. A URL with a query is refused,
     // and the pool gets the parts this guard read, never the URL text.
@@ -75,6 +79,18 @@ postgres('planStartBlocker (live Postgres)', () => {
       phone: `+1941${String(parseInt(tag, 16) % 10000000).padStart(7, '0')}`,
       address_line1: `${(parseInt(tag, 16) % 9000) + 100} Example Test Ln`, city: 'Parrish', state: 'FL', zip: '34219',
       active: true, pipeline_stage: 'won', ...change,
+    }).returning('*');
+    return row;
+  }
+
+  // A saved property of the account: by default the primary one, a home the owner lives in. The customers row
+  // carries only a mirror of the primary property's type, and seedCustomer leaves that mirror empty.
+  async function seedProperty(customer, change = {}) {
+    const tag = hex(4);
+    const [row] = await trx('customer_properties').insert({
+      customer_id: customer.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: true, property_type: 'single_family',
+      address_line1: `${(parseInt(tag, 16) % 9000) + 100} Example Test Ct`, city: 'Parrish', state: 'FL', zip: '34219',
+      address_key: `synthetic-${tag}`, source: 'manual', active: true, ...change,
     }).returning('*');
     return row;
   }
@@ -157,6 +173,9 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a business property type', { property_type: 'business' }],
       ['a commercial property type', { property_type: 'commercial' }],
       ['an office', { property_type: 'office' }],
+      // The two values the building-use check constraint takes. Only a won commercial proposal writes one.
+      ['the building use of a business building', { building_use: 'nonresidential' }],
+      ['the building use of a residential community', { building_use: 'residential', property_type: 'single_family' }],
     ])('%s: commercial', async (_label, change) => {
       expect(await planStartBlocker(trx, (await seedCustomer(change)).id)).toBe('commercial');
     });
@@ -181,6 +200,67 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['the one-time lane', { billing_mode: 'one_time' }],
     ])('%s is not a plan record', async (_label, change) => {
       expect(await planStartBlocker(trx, (await seedCustomer(change)).id)).toBeNull();
+    });
+  });
+
+  // The customers row mirrors only the TYPE of the primary property, and the mirror can be behind. A property's
+  // occupancy is saved on the property alone. Every active property of the account counts.
+  describe('a saved property of the account', () => {
+    const SECOND = { is_primary: false };
+
+    test.each([
+      ['the primary property has the commercial occupancy', [{ occupancy_type: 'commercial' }]],
+      ['the commercial occupancy, with no property type', [{ occupancy_type: 'commercial', property_type: null }]],
+      ['the primary property has a commercial type', [{ property_type: 'commercial' }]],
+      ['the primary property has a business type', [{ property_type: 'business' }]],
+      ['a second property has the commercial occupancy, beside a home', [{}, { ...SECOND, occupancy_type: 'commercial' }]],
+      ['a second property has a commercial type, beside a home', [{}, { ...SECOND, property_type: 'commercial' }]],
+    ])('%s, on an account whose own row says nothing: commercial', async (_label, properties) => {
+      const customer = await seedCustomer();
+      for (const property of properties) await seedProperty(customer, property);
+      expect(customer.property_type).toBeNull();
+      expect(await planStartBlocker(trx, customer.id)).toBe('commercial');
+    });
+
+    // Every occupancy the column's check constraint takes beside commercial.
+    test.each([['owner_occupied'], ['family_occupied'], ['rental_investment'], ['seasonal'], ['vacant'], ['unknown']])(
+      'a home with the occupancy %s is not commercial', async (occupancy_type) => {
+        expect(await blockerFor((customer) => seedProperty(customer, { occupancy_type }))).toBeNull();
+      });
+
+    test('two homes on one account are not commercial', async () => {
+      expect(await blockerFor(async (customer) => {
+        await seedProperty(customer);
+        await seedProperty(customer, { ...SECOND, occupancy_type: 'rental_investment', property_type: 'townhome' });
+      })).toBeNull();
+    });
+
+    test('a commercial property that was removed from the account (not active) says nothing', async () => {
+      expect(await blockerFor(async (customer) => {
+        await seedProperty(customer);
+        await seedProperty(customer, { ...SECOND, active: false, occupancy_type: 'commercial', property_type: 'commercial' });
+      })).toBeNull();
+    });
+
+    test("another customer's commercial property says nothing about this customer", async () => {
+      const customer = await seedCustomer();
+      const other = await seedCustomer();
+      await seedProperty(customer);
+      await seedProperty(other, { occupancy_type: 'commercial' });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+      expect(await planStartBlocker(trx, other.id)).toBe('commercial');
+    });
+
+    test('a commercial property is the answer also for an account that holds a plan', async () => {
+      const customer = await seedCustomer({ waveguard_tier: 'Gold' });
+      await seedProperty(customer, { occupancy_type: 'commercial' });
+      expect(await planStartBlocker(trx, customer.id)).toBe('commercial');
+    });
+
+    test('an inactive account with a commercial property is not live', async () => {
+      const customer = await seedCustomer({ active: false });
+      await seedProperty(customer, { occupancy_type: 'commercial' });
+      expect(await planStartBlocker(trx, customer.id)).toBe('not_live');
     });
   });
 

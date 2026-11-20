@@ -84,6 +84,10 @@ const FLAGGED = { id: 'svc-1', service_type: 'Quarterly Pest Control', is_recurr
 const LEGACY = { id: 'legacy-1', is_recurring: null, recurring_parent_id: 'root-1', status: 'confirmed', scheduled_date: FUTURE };
 const ROOT = { id: 'root-1', is_recurring: true, recurring_ongoing: true, recurring_parent_id: null, status: 'completed', scheduled_date: PAST };
 const ONGOING_COLUMN = { scheduledColumns: { recurring_ongoing: {} } };
+// A saved property of the account (customer_properties): a home, the primary one.
+const PROPERTY = (change = {}) => ({
+  id: 'prop-1', customer_id: 'cust-1', active: true, is_primary: true, occupancy_type: 'owner_occupied', property_type: 'single_family', ...change,
+});
 const PREPAY_INVOICE = (status) => ({
   annual_prepay_terms: [{ id: 'term-1', prepay_invoice_id: 'inv-1' }], invoices: [{ id: 'inv-1', status }],
 });
@@ -114,6 +118,7 @@ describe('planStartBlocker', () => {
       ['an inactive member', { customer: { active: false, waveguard_tier: 'Gold' } }],
       ['a deleted account with a plan visit on the calendar', { customer: { deleted_at: '2026-10-01T12:00:00Z' }, visits: [FLAGGED] }],
       ['an inactive commercial account', { customer: { active: false, waveguard_tier: 'Commercial' } }],
+      ['an inactive account with a commercial saved property', { customer: { active: false }, tables: { customer_properties: [PROPERTY({ occupancy_type: 'commercial' })] } }],
     ])('%s: not_live', async (_label, given) => {
       expect(await blocker(world(given))).toBe('not_live');
     });
@@ -137,6 +142,10 @@ describe('planStartBlocker', () => {
       ['an office', { property_type: 'office' }],
       ['an apartment complex', { property_type: 'multi_family' }],
       ['a commercial account that also carries a monthly rate', { waveguard_tier: 'Commercial', monthly_rate: 120 }],
+      // A building use: only a won commercial proposal writes one. It marks the account commercial only when
+      // the proposal has taxable lines, so a residential community or a builder keeps a residential row.
+      ['the building use of a business building', { building_use: 'nonresidential' }],
+      ['the building use of a residential community, with a residential property type', { building_use: 'residential', property_type: 'single_family' }],
     ])('%s: commercial, and no plan record is read', async (_label, customer) => {
       const reads = [];
       const db = world({ ...ONGOING_COLUMN, customer, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
@@ -146,6 +155,84 @@ describe('planStartBlocker', () => {
 
     test.each([['single_family'], ['condo_ground'], ['unknown'], [null], ['']])('a property type of %j with no tier is not commercial', async (property_type) => {
       expect(await blocker(world({ customer: { property_type } }))).toBeNull();
+    });
+
+    test.each([[null], [undefined], ['']])('a building use of %j (no commercial proposal was won) is not commercial', async (building_use) => {
+      expect(await blocker(world({ customer: { building_use } }))).toBeNull();
+    });
+
+    // The account row carries only a mirror of the primary property's TYPE, and nothing on it mirrors a
+    // property's occupancy. So an account that reads residential by its own row can have a saved property that
+    // says commercial. Every active property of the account counts: the proof gets no property to answer for.
+    describe('a saved property of the account', () => {
+      test.each([
+        ['the primary property has the commercial occupancy', [PROPERTY({ occupancy_type: 'commercial' })]],
+        ['the commercial occupancy, with no property type', [PROPERTY({ occupancy_type: 'commercial', property_type: null })]],
+        ['the primary property has a commercial type the account row does not carry', [PROPERTY({ property_type: 'commercial' })]],
+        ['a business type in another case', [PROPERTY({ property_type: 'Business' })]],
+        // A type only the engine's rule knows.
+        ['an office', [PROPERTY({ property_type: 'office' })]],
+        ['a second property is commercial and the primary one is a home', [PROPERTY(), PROPERTY({ id: 'prop-2', is_primary: false, occupancy_type: 'commercial' })]],
+        ['a second property has a commercial type and the primary one is a home', [PROPERTY(), PROPERTY({ id: 'prop-2', is_primary: false, property_type: 'commercial' })]],
+      ])('%s: commercial, and no plan record is read', async (_label, properties) => {
+        const reads = [];
+        const db = world({
+          ...ONGOING_COLUMN, customer: { property_type: null }, visits: (calls) => { reads.push(calls); return [FLAGGED]; },
+          tables: { customer_properties: properties },
+        });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      // Every occupancy the schema knows beside commercial, and a property with none.
+      test.each([['owner_occupied'], ['family_occupied'], ['rental_investment'], ['seasonal'], ['vacant'], ['unknown'], [null]])(
+        'a home with the occupancy %j is not commercial', async (occupancy_type) => {
+          expect(await blocker(world({ tables: { customer_properties: [PROPERTY({ occupancy_type })] } }))).toBeNull();
+        });
+
+      test.each([['single_family'], ['townhome'], ['condo'], [null], ['']])('a saved property with the type %j is not commercial', async (property_type) => {
+        expect(await blocker(world({ tables: { customer_properties: [PROPERTY({ property_type }), PROPERTY({ id: 'prop-2', is_primary: false, property_type })] } }))).toBeNull();
+      });
+
+      // Two owners each keep a list of commercial property types: the account rule (self-booking-plan-sync.js)
+      // and the pricing engine. Today the engine's list holds every type of the other one. Both are asked, for
+      // the account's type and for a saved property's, so a type that either owner adds counts.
+      test.each([
+        ['the account rule', '../services/self-booking-plan-sync', 'isCommercialAccount'],
+        ['the pricing engine', '../services/pricing-engine/commercial-helpers', 'isCommercialProperty'],
+      ])('a type only %s calls commercial counts, on the account row and on a saved property', async (_label, modulePath, rule) => {
+        const owner = require(modulePath);
+        const real = owner[rule];
+        const spy = jest.spyOn(owner, rule).mockImplementation((given, ...rest) => (
+          given?.property_type === 'depot' || given?.propertyType === 'depot' || real(given, ...rest)));
+        try {
+          expect(await blocker(world({ customer: { property_type: 'depot' } }))).toBe('commercial');
+          expect(await blocker(world({ tables: { customer_properties: [PROPERTY({ property_type: 'depot' })] } }))).toBe('commercial');
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await blocker(world({ tables: { customer_properties: [PROPERTY({ property_type: 'depot' })] } }))).toBeNull();
+      });
+
+      test('homes only, and a plan record: the plan is the answer', async () => {
+        const db = world({ visits: onlyFor(isCalendarRead, [FLAGGED]), tables: { customer_properties: [PROPERTY(), PROPERTY({ id: 'prop-2', is_primary: false, occupancy_type: 'rental_investment' })] } });
+        expect(await blocker(db)).toBe('has_plan');
+      });
+
+      // The fake applies no filter, so this pins the filter itself: this customer's properties, and only the
+      // active ones (a removed address says nothing). PostgreSQL proves both.
+      test("the read asks for this customer's active properties", async () => {
+        const reads = [];
+        await blocker(world({ tables: { customer_properties: (calls) => { reads.push(calls.map((call) => [...call])); return []; } } }));
+        expect(reads).toEqual([[['where', { customer_id: 'cust-1', active: true }]]]);
+      });
+
+      test('an account that is commercial by its own row is answered with no property read', async () => {
+        const reads = [];
+        const db = world({ customer: { waveguard_tier: 'Commercial' }, tables: { customer_properties: (calls) => { reads.push(calls); return []; } } });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
     });
   });
 
@@ -319,6 +406,7 @@ describe('planStartBlocker', () => {
 
     test.each([
       ['the account read', { tables: { customers: customersFailingAt(1, 'account read down') } }, 'account read down'],
+      ['the saved property read', { tables: { customer_properties: failing('property read down') } }, 'property read down'],
       ['the account read of the calendar reader', { tables: { customers: customersFailingAt(2, 'calendar account read down') } }, 'calendar account read down'],
       ['the calendar read', { visits: failFor(isCalendarRead, 'calendar read down') }, 'calendar read down'],
       ['the catalog join of the calendar read', { tables: { 'scheduled_services as s': failing('catalog join down') } }, 'ownership catalog join failed'],
