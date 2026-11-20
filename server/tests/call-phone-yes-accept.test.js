@@ -64,7 +64,7 @@ describe('wiring', () => {
     }
   });
 
-  test('the tap\'s link step takes its locks in order: property-preferences, the customers row, the triage lock, the estimates (then the send check), the catalog, then the visit', () => {
+  test('the tap\'s link step takes its locks in order: property-preferences, the customers row, the triage lock, the booking call, the estimates (then the send check), the catalog, then the visit', () => {
     const service = read('../services/call-phone-yes-accept.js');
     const inOrder = (text, needles) => {
       const order = needles.map((needle) => text.indexOf(needle));
@@ -75,6 +75,7 @@ describe('wiring', () => {
       "['property-preferences', String(customerId)]",
       "trx('customers').where({ id: customerId }).forUpdate()",
       "lockNoWaitOrStop(trx, [TRIAGE_LOCK_NAMESPACE, bookingCallId], 'call_busy')",
+      "trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().noWait()",
       'await lockCustomerEstimates(trx, customerId);',
       "require('./scheduling/catalog-lock').lockCatalogIdentity(trx)",
       "trx('scheduled_services').where({ id: visit.id }).forUpdate()",

@@ -112,6 +112,7 @@ const REASONS = {
   visit_address_hold: 'The booked visit waits for the office to confirm its address.',
   visit_unreviewed: 'The booked visit waits for the office to review it (the customer cannot see it yet).',
   visit_off_hour: 'The booked visit starts off the hour, and the plan would copy that start to every next visit.',
+  visit_call_rate: "The booking call recorded a rate that is not the plan's per-visit price. Set up the plan from the estimate at the agreed rate.",
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
   existing_plan: 'The customer already has a live plan, a WaveGuard membership, or an annual prepay (paid, or invoiced and not yet paid).',
   estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
@@ -299,7 +300,7 @@ async function visitProblem(conn, visit, estimate, now) {
   if (visit.estimated_price != null || require('./completion-pricing').visitPriceDecisionRecorded(visit)) return 'visit_priced';
   // An invoice completion would reuse (a pre-minted one) or park the visit on: the bill would not be the plan price.
   if ((await require('./completion-invoice-candidate').completionInvoicesOnVisits(conn, [visit.id])).length) return 'visit_invoiced';
-  const ownRule = TAP_ROW_RULES.find(([, breaks]) => breaks(visit));
+  const ownRule = TAP_ROW_RULES.find(([, breaks]) => breaks(visit, estimate));
   if (ownRule) return ownRule[0];
   // A street-level address hold: the office still confirms the address, and the plan's next visits would not wait.
   if (await require('./street-level-hold').isStreetLevelHoldVisit(visit.id, conn)) return 'visit_address_hold';
@@ -318,7 +319,16 @@ function ownBillingParty(row) {
   return row.payer_id != null || row.self_pay_override === true;
 }
 
-// The tap's own rules on the booked visit row, in order (visitProblem reads them after the price and invoice checks).
+// The rate the booking call quoted for a recurring service, as call processing records it on the visit: internal_notes
+// "Rate quoted on call: $X.XX" (call-recording-processor.js leaves estimated_price empty, and plan setup honors this
+// rate). A number, or null.
+function callQuotedRateOf(row) {
+  const m = /Rate quoted on call: \$(\d+(?:\.\d+)?)/.exec(String(row.internal_notes || ''));
+  return m ? Number(m[1]) : null;
+}
+
+// The tap's own rules on the booked visit row and the estimate, in order (visitProblem reads them after the price and
+// invoice checks).
 const TAP_ROW_RULES = [
   // A billing party set on this visit alone: the converter's next visits do not carry it, so the plan's first visit and
   // the rest would bill different parties.
@@ -329,6 +339,12 @@ const TAP_ROW_RULES = [
   // A start off the hour (AGENTS.md: window_start is always HH:00:00), read on the whole stored time: the seeder copies
   // the parent's start to every next visit. A visit with no start time is not refused.
   ['visit_off_hour', (row) => row.window_start != null && !/^\d{2}:00(:00)?$/.test(String(row.window_start))],
+  // A rate the booking call quoted: the tap bills the plan's per-visit price (planTermsOf), so a quoted rate must be that
+  // price to the cent. The quote names no unit, so a yearly or monthly figure differs and refuses.
+  ['visit_call_rate', (row, estimate) => {
+    const quoted = callQuotedRateOf(row);
+    return quoted != null && !(Math.abs(quoted - Number(planTermsOf(estimate, row)?.perVisit)) < 0.005);
+  }],
 ];
 
 // The customer already holds a plan: a WaveGuard membership (tier or legacy monthly rate; strict, so a failed read
@@ -944,12 +960,7 @@ async function tapStateOf(card, { now = new Date() } = {}) {
 // waits for the commit. A change in flight right now refuses at once (NOWAIT): the step never waits on an estimate row
 // while it holds the accept's locks. The accepted estimate is this transaction's own lock already.
 async function lockCustomerEstimates(trx, customerId) {
-  try {
-    await trx('estimates').where({ customer_id: customerId }).orderBy('id').forShare().noWait().select('id');
-  } catch (err) {
-    if (err.code === '55P03') throw stop('estimate_being_sent');
-    throw err;
-  }
+  await noWaitOrStop(trx('estimates').where({ customer_id: customerId }).orderBy('id').forShare().noWait().select('id'), 'estimate_being_sent');
   if (await estimateBeingSent(trx, customerId, new Date())) throw stop('estimate_being_sent');
 }
 
@@ -959,6 +970,17 @@ async function lockCustomerEstimates(trx, customerId) {
 async function lockNoWaitOrStop(trx, [namespace, key], code) {
   const taken = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS ok', [namespace, String(key)]);
   if (taken.rows[0].ok !== true) throw stop(code);
+}
+
+// Runs a NOWAIT row-lock read, or refuses with `code` when another transaction holds one of its rows (55P03): the step
+// never waits on a row while it holds the accept's locks.
+async function noWaitOrStop(query, code) {
+  try {
+    return await query;
+  } catch (err) {
+    if (err.code === '55P03') throw stop(code);
+    throw err;
+  }
 }
 
 // Step 1, inside the accept's transaction before the conversion: lock and read again every fact the tap read outside it
@@ -986,8 +1008,10 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     // so a wait here could deadlock (call_busy). The card's Resolve later in this transaction takes it again at once.
     await lockNoWaitOrStop(trx, [TRIAGE_LOCK_NAMESPACE, bookingCallId], 'call_busy');
     // FOR UPDATE, as the sweep's filing takes it: no read of the call changes until the commit, and the card's Resolve
-    // (transitionCore, same transaction) needs no lock upgrade.
-    const booking = await trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().first(Word.CALL_COLUMNS);
+    // (transitionCore, same transaction) needs no lock upgrade. NOWAIT: a re-read of the call can hold its row apart from
+    // the triage lock, and the step never waits on a row while it holds the accept's locks (call_busy).
+    const booking = await noWaitOrStop(trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().noWait()
+      .first(Word.CALL_COLUMNS), 'call_busy');
     const bookingWhy = bookingCallProblem(booking);
     if (bookingWhy) throw stop(bookingWhy);
     // The card, locked: still open, the version the office saw (a missing version never matches a card's time), and

@@ -284,6 +284,9 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ yes_heard: false, auto_reason: 'no_yes_heard' });
   });
 
+  // The note call processing writes on a call-booked recurring visit when the agent quoted a rate
+  // (call-recording-processor.js).
+  const callRateNote = (rate) => `Rate quoted on call: $${rate} (recurring service — set up plan billing at this rate; intentionally not stamped on this visit).`;
   const invoiceOn = async (customerId, visitId, status = 'draft') => {
     const id = randomUUID();
     await trx('invoices').insert({
@@ -344,6 +347,9 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     // A start off the hour: the seeder copies the parent's start to every next visit (AGENTS.md: starts on the hour).
     ['the visit starts off the hour', { visitOver: { window_start: '09:30', window_end: '11:30' } }, 'visit_off_hour'],
     ['the visit starts seconds after the hour', { visitOver: { window_start: '09:00:30', window_end: '11:00' } }, 'visit_off_hour'],
+    // A rate the booking call quoted for the recurring service (call processing's own note): the tap bills the plan's
+    // per-visit price (45 here), so another rate refuses.
+    ['the booking call quoted another rate for the plan', { visitOver: { internal_notes: callRateNote('30.00') } }, 'visit_call_rate'],
     // Visit types completion never bills, by the label or the catalog key: a plan from one would bill $0.
     ['the visit is a re-service by its label', { visitOver: { service_type: 'Pest Control Re-Service' } }, 'visit_free_type'],
     ['the visit is a re-service by its catalog key', { visitOver: { service_key_snapshot: 'pest_re_service' } }, 'visit_free_type'],
@@ -1134,6 +1140,11 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       await unchanged(ctx);
     });
 
+    test("a rate the booking call quoted that is the plan's per-visit price still offers the tap (another rate refuses)", async () => {
+      const ctx = await filed({ visitOver: { internal_notes: callRateNote('45.00') } });
+      expect((await listed(ctx.card.id)).call_phone_yes).toMatchObject({ can_accept: true });
+    });
+
     test('no yes heard: the tap is still offered (the person decides) and accepts the same way', async () => {
       const { est, card } = await filed({ yesChoice: null });
       expect(payloadOf(card).yes_heard).toBe(false);
@@ -1638,6 +1649,32 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
           }
           await expect(write(pool)).resolves.toBe(1);
           await pool('estimates').where({ id }).update(undo);
+        }
+      });
+
+      test("a re-read of the booking call holds its row: the link step refuses at once (call_busy), never waiting while it holds the accept's locks", async () => {
+        const perTest = trx;
+        try {
+          trx = pool;
+          mockConn = pool;
+          made = await phoneYes();
+        } finally {
+          trx = perTest;
+          mockConn = perTest;
+        }
+        const { customerId, bookingCallId } = made;
+        // The step refuses before it reads the card, the visit or the estimate, so none is needed here.
+        const step = PhoneYesPrivate.linkVisitStepForTest({ visit: {}, customerId, bookingCallId, cardId: null, expectedUpdatedAt: null, word: {} });
+        const other = await pool.transaction();
+        const accept = await pool.transaction();
+        try {
+          await other('call_log').where({ id: bookingCallId }).forUpdate().first('id');
+          // A bounded wait: a blocking take would fail as a raw lock timeout, not as call_busy.
+          await accept.raw("SET LOCAL lock_timeout = '2s'");
+          await expect(step(accept, { estimate: {} })).rejects.toMatchObject({ phoneYesRefusal: 'call_busy' });
+        } finally {
+          await accept.rollback();
+          await other.rollback();
         }
       });
 
