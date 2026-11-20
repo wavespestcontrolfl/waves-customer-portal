@@ -8870,14 +8870,15 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) {
             // A timer someone else saved while this screen was open (staff, in Customer 360) comes back in this
-            // save's row. Show it while the screen still shows the timer the server held before, i.e. the customer
-            // has no timer pick of their own on screen (unsaved or refused). Left stale, an app answer here would
-            // send the old timer back over the new one.
+            // save's row. Show it only while the customer has no timer pick of their own: none waits in the queue
+            // (a batch leaves pendingRef only when its save starts, so every newer edit is still there), and the
+            // screen still shows the timer the server held before (no unsaved or refused pick). Left stale, an app
+            // answer here would send the old timer back over the new one.
             const timerBefore = sprinklerTimerKey(lastSavedRef.current);
             const timerNow = sprinklerTimerKey(result.preferences);
             lastSavedRef.current = result.preferences;
             setSavedTimerKey(timerNow);
-            if (timerNow !== timerBefore) {
+            if (timerNow !== timerBefore && !SPRINKLER_TIMER_FIELDS.some((field) => field in pendingRef.current)) {
               setPrefs((prev) => (sprinklerTimerKey(prev) === timerBefore ? { ...prev, ...sprinklerTimerOf(result.preferences) } : prev));
             }
           }

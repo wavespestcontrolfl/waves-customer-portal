@@ -3,7 +3,7 @@
 // "typical head rates" only. A typed Weekly Inches entry still wins over the derived figure.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
@@ -115,6 +115,36 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 8000 });
     expect(await screen.findByText(afterNextSave)).toBeInTheDocument();
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
+  }, 20000);
+
+  // X2 on file; the customer picks the Pro-C, then the X2 again while the Pro-C save is in flight. The Pro-C answer
+  // must not replace the X2 waiting in the queue, and when the X2 save then fails, nothing is on file.
+  it('a newer pick waiting behind a save in flight stays on screen when that save returns', async () => {
+    api.getPropertyPreferences.mockResolvedValue({
+      preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: null },
+      hasLawnCare: true,
+    });
+    let answerFirstSave;
+    api.updatePropertyPreferences
+      .mockImplementationOnce((payload) => new Promise((resolve) => {
+        answerFirstSave = () => resolve({ saved: true, preferences: { ...SPRAY_PREFS, ...payload } });
+      }))
+      .mockRejectedValueOnce(new Error('Failed to fetch'));
+    render(<PropertyTab customer={lawnCustomer} />);
+    expect(await screen.findByText('Hunter X2')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Change my timer' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Pro-C/ }));
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 8000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Change my timer' }));
+    fireEvent.click(screen.getByRole('button', { name: /^X2/ }));
+    await act(async () => { answerFirstSave(); });
+    expect(screen.getByText('Hunter X2')).toBeInTheDocument();
+
+    expect(await screen.findByText('Could not save. Please check your connection and try again.', {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({ irrigationControllerModel: 'x2' });
+    expect(screen.getByText('Hunter X2')).toBeInTheDocument();
+    expect(screen.getByText('Not saved yet')).toBeInTheDocument();
+    expect(screen.queryByText('On file')).not.toBeInTheDocument();
   }, 20000);
 
   it('a timer staff saved while the page was open replaces the old one after the next save', async () => {
