@@ -414,6 +414,15 @@ postgres('commercial prepay Stripe reversal writers', () => {
       });
     }
     mockStripeChargeRetrieve.mockResolvedValue({ id: chargeId, amount: 11000 });
+    const review = require('../services/commercial-prepay-dispatch-review');
+    const realReconcile = review.reconcileInvoice;
+    const reviewConnections = [];
+    jest.spyOn(review, 'reconcileInvoice').mockImplementation(async (conn, invoiceId) => {
+      if ([first.invoiceId, second.invoiceId].includes(invoiceId)) {
+        reviewConnections.push({ invoiceId, isTransaction: conn.isTransaction === true });
+      }
+      return realReconcile(conn, invoiceId);
+    });
 
     await require('../routes/stripe-webhook')._handleDisputeClosed({
       id: `dp_combined_${randomUUID().slice(0, 12)}`,
@@ -439,6 +448,68 @@ postgres('commercial prepay Stripe reversal writers', () => {
         }),
       ]);
     }
+    expect(reviewConnections).toEqual(expect.arrayContaining([
+      { invoiceId: first.invoiceId, isTransaction: true },
+      { invoiceId: second.invoiceId, isTransaction: true },
+    ]));
+  });
+
+  test('a replacement that lands before the combined-loss invoice lock owns the invoice and suppresses the old loss review', async () => {
+    const customerId = await seedCustomer();
+    const paymentIntentId = `pi_dispute_race_${randomUUID().slice(0, 12)}`;
+    const chargeId = `ch_dispute_race_${randomUUID().slice(0, 12)}`;
+    const replacementPi = `pi_replacement_${randomUUID().slice(0, 12)}`;
+    const sale = await seedSale({ customerId, paymentIntentId, chargeId });
+    await seedPayment(sale, {
+      paymentIntentId,
+      chargeId,
+      metadata: {
+        invoice_id: sale.invoiceId,
+        combined_payment: true,
+        combined_anchor_invoice_id: sale.invoiceId,
+        base_amount: 55,
+        card_surcharge: 0,
+      },
+    });
+    mockStripeChargeRetrieve.mockResolvedValue({ id: chargeId, amount: 5500 });
+
+    const renewals = require('../services/annual-prepay-renewals');
+    const realGate = renewals.acquireTermiteGateAtEntry;
+    let replacementInjected = false;
+    jest.spyOn(renewals, 'acquireTermiteGateAtEntry').mockImplementation(async (conn, args) => {
+      const result = await realGate(conn, args);
+      if (!replacementInjected && args?.invoiceIds?.includes(sale.invoiceId)) {
+        replacementInjected = true;
+        await conn('invoices').where({ id: sale.invoiceId }).update({
+          status: 'paid',
+          paid_at: new Date(),
+          stripe_payment_intent_id: replacementPi,
+          stripe_charge_id: `ch_replacement_${randomUUID().slice(0, 12)}`,
+        });
+      }
+      return result;
+    });
+    const review = require('../services/commercial-prepay-dispatch-review');
+    const realReconcile = review.reconcileInvoice;
+    const reviewed = [];
+    jest.spyOn(review, 'reconcileInvoice').mockImplementation(async (conn, invoiceId) => {
+      reviewed.push(invoiceId);
+      return realReconcile(conn, invoiceId);
+    });
+
+    await require('../routes/stripe-webhook')._handleDisputeClosed({
+      id: `dp_race_${randomUUID().slice(0, 12)}`,
+      charge: chargeId,
+      payment_intent: paymentIntentId,
+      status: 'lost',
+      amount: 5500,
+    });
+
+    expect(replacementInjected).toBe(true);
+    expect(await trx('invoices').where({ id: sale.invoiceId }).first('status', 'stripe_payment_intent_id'))
+      .toMatchObject({ status: 'paid', stripe_payment_intent_id: replacementPi });
+    expect(reviewed).not.toContain(sale.invoiceId);
+    expect(await reviews(sale.invoiceId)).toEqual([]);
   });
 
   test('synchronous confirm records restoration before a later refund starts a new returned episode', async () => {
@@ -452,7 +523,9 @@ postgres('commercial prepay Stripe reversal writers', () => {
       metadata: { invoice_id: sale.invoiceId, base_amount: 55, card_surcharge: 0 },
     });
     const webhook = require('../routes/stripe-webhook');
-    await refundAndAcknowledge(webhook, sale, { paymentIntentId: originalPi, chargeId: originalCharge });
+    const returnedEpisode = await refundAndAcknowledge(webhook, sale, {
+      paymentIntentId: originalPi, chargeId: originalCharge,
+    });
 
     const replacementPi = `pi_confirm_replacement_${randomUUID().slice(0, 12)}`;
     const replacementCharge = `ch_confirm_replacement_${randomUUID().slice(0, 12)}`;
@@ -477,11 +550,12 @@ postgres('commercial prepay Stripe reversal writers', () => {
     expect(reviewConnections).toContain(true);
     let episodes = await reviews(sale.invoiceId);
     expect(episodes).toHaveLength(2);
-    expect(episodes[0]).toEqual(expect.objectContaining({
+    expect(episodes.find((row) => row.id === returnedEpisode.id)).toEqual(expect.objectContaining({
       resolved_at: expect.any(Date),
       payload: expect.objectContaining({ superseded_at: expect.any(String) }),
     }));
-    expect(episodes[1]).toEqual(expect.objectContaining({
+    const restoredEpisode = episodes.find((row) => row.id !== returnedEpisode.id);
+    expect(restoredEpisode).toEqual(expect.objectContaining({
       resolved_at: null,
       payload: expect.objectContaining({ paymentRestored: true }),
     }));
@@ -494,11 +568,13 @@ postgres('commercial prepay Stripe reversal writers', () => {
     }));
     episodes = await reviews(sale.invoiceId);
     expect(episodes).toHaveLength(3);
-    expect(episodes[1]).toEqual(expect.objectContaining({ resolved_at: expect.any(Date) }));
-    expect(episodes[2]).toEqual(expect.objectContaining({
+    expect(episodes.find((row) => row.id === restoredEpisode.id))
+      .toEqual(expect.objectContaining({ resolved_at: expect.any(Date) }));
+    expect(episodes.find((row) => ![returnedEpisode.id, restoredEpisode.id].includes(row.id)))
+      .toEqual(expect.objectContaining({
       resolved_at: null,
       payload: expect.not.objectContaining({ paymentRestored: true }),
-    }));
+      }));
   });
 
   test('webhook first-delivery settlement records restoration inside its transaction', async () => {
@@ -512,7 +588,9 @@ postgres('commercial prepay Stripe reversal writers', () => {
       metadata: { invoice_id: sale.invoiceId, base_amount: 55, card_surcharge: 0 },
     });
     const webhook = require('../routes/stripe-webhook');
-    await refundAndAcknowledge(webhook, sale, { paymentIntentId: originalPi, chargeId: originalCharge });
+    const returnedEpisode = await refundAndAcknowledge(webhook, sale, {
+      paymentIntentId: originalPi, chargeId: originalCharge,
+    });
 
     const replacementPi = `pi_webhook_replacement_${randomUUID().slice(0, 12)}`;
     const replacementCharge = `ch_webhook_replacement_${randomUUID().slice(0, 12)}`;
@@ -537,8 +615,9 @@ postgres('commercial prepay Stripe reversal writers', () => {
     expect(reviewConnections).toContain(true);
     const episodes = await reviews(sale.invoiceId);
     expect(episodes).toHaveLength(2);
-    expect(episodes[0]).toEqual(expect.objectContaining({ resolved_at: expect.any(Date) }));
-    expect(episodes[1]).toEqual(expect.objectContaining({
+    expect(episodes.find((row) => row.id === returnedEpisode.id))
+      .toEqual(expect.objectContaining({ resolved_at: expect.any(Date) }));
+    expect(episodes.find((row) => row.id !== returnedEpisode.id)).toEqual(expect.objectContaining({
       resolved_at: null,
       payload: expect.objectContaining({ paymentRestored: true }),
     }));
@@ -555,7 +634,9 @@ postgres('commercial prepay Stripe reversal writers', () => {
       metadata: { invoice_id: sale.invoiceId, base_amount: 55, card_surcharge: 0 },
     });
     const webhook = require('../routes/stripe-webhook');
-    await refundAndAcknowledge(webhook, sale, { paymentIntentId: originalPi, chargeId: originalCharge });
+    const returnedEpisode = await refundAndAcknowledge(webhook, sale, {
+      paymentIntentId: originalPi, chargeId: originalCharge,
+    });
 
     const [wrongPayer] = await trx('payers').insert({
       display_name: 'Synthetic Wrong AP',
@@ -588,7 +669,7 @@ postgres('commercial prepay Stripe reversal writers', () => {
 
     const episodes = await reviews(sale.invoiceId);
     expect(episodes).toHaveLength(1);
-    expect(episodes[0]).toEqual(expect.objectContaining({
+    expect(episodes.find((row) => row.id === returnedEpisode.id)).toEqual(expect.objectContaining({
       resolved_at: expect.any(Date),
       payload: expect.not.objectContaining({ paymentRestored: true }),
     }));

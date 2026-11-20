@@ -1,3 +1,7 @@
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({
+  reconcileInvoice: jest.fn(async () => null),
+}));
+
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({
   info: jest.fn(),

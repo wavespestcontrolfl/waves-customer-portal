@@ -269,6 +269,70 @@ postgres('commercial prepay Dispatch review observes only recovered receipt proo
     expect(await reviews(ids.invoiceId)).toHaveLength(0);
   });
 
+  test('an owner mismatch is accepted only through the active merge journal row that names this invoice', async () => {
+    const pi = `pi_merged_sale_${randomUUID().slice(0, 12)}`;
+    const ids = await seedOriginal({ status: 'refunded', paymentIntentId: pi });
+    await insertCardPayment(ids, {
+      paymentIntentId: pi, status: 'refunded', refundStatus: 'full', refundAmount: 55,
+      invoiceId: ids.invoiceId,
+    });
+    const winnerId = randomUUID();
+    await trx('customers').insert({
+      id: winnerId,
+      first_name: 'Synthetic',
+      last_name: 'Merge Winner',
+      phone: `+1202555${String(parseInt(winnerId.slice(0, 8), 16) % 10000).padStart(4, '0')}`,
+      property_type: 'commercial',
+    });
+    await trx('invoices').where({ id: ids.invoiceId }).update({ customer_id: winnerId });
+    await trx('annual_prepay_terms').where({ id: ids.termId }).update({ customer_id: winnerId });
+    await trx('estimates').where({ id: ids.estimateId }).update({ customer_id: winnerId });
+    await trx('payments').where({ stripe_payment_intent_id: pi }).update({ customer_id: winnerId });
+
+    const saleRecord = require('../services/commercial-prepay-sale-record');
+    await expect(saleRecord.findUnbookedSale(trx, ids.invoiceId)).resolves.toBeNull();
+
+    const loser = await trx('customers').where({ id: ids.customerId }).first();
+    const [journal] = await trx('customer_merge_journal').insert({
+      winner_customer_id: winnerId,
+      loser_customer_id: ids.customerId,
+      loser_snapshot: loser,
+      repointed: {},
+      repointed_ids: { version: 1, tables: { 'annual_prepay_terms.customer_id': [ids.termId] } },
+      winner_backfills: {},
+      tier: 'manual',
+      evidence: { synthetic: true },
+      performed_by: 'test:commercial-prepay-merge',
+      created_at: trx.raw('clock_timestamp()'),
+    }).returning('*');
+    // The pair really merged, but this journal does not claim the invoice.
+    await expect(saleRecord.findUnbookedSale(trx, ids.invoiceId)).resolves.toBeNull();
+
+    await trx('customer_merge_journal').where({ id: journal.id }).update({
+      repointed_ids: {
+        version: 1,
+        tables: {
+          'invoices.customer_id': [ids.invoiceId],
+          'annual_prepay_terms.customer_id': [ids.termId],
+        },
+      },
+    });
+    await expect(saleRecord.findUnbookedSale(trx, ids.invoiceId)).resolves.toMatchObject({
+      invoice: { id: ids.invoiceId, customer_id: winnerId },
+    });
+    await expect(require('../services/commercial-prepay-dispatch-review')
+      .reconcileInvoice(trx, ids.invoiceId)).resolves.toBe('cancelled');
+    expect(await reviews(ids.invoiceId)).toEqual([
+      expect.objectContaining({
+        resolved_at: null,
+        payload: expect.objectContaining({ sourceInvoiceId: ids.invoiceId, customerId: winnerId }),
+      }),
+    ]);
+
+    await trx('customer_merge_journal').where({ id: journal.id }).update({ undone_at: trx.fn.now() });
+    await expect(saleRecord.findUnbookedSale(trx, ids.invoiceId)).resolves.toBeNull();
+  });
+
   test('the real full-refund webhook, office cash repayment, and old replay keep one current original-invoice card', async () => {
     const pi = `pi_e2e_${randomUUID().slice(0, 12)}`;
     const chargeId = `ch_e2e_${randomUUID().slice(0, 12)}`;

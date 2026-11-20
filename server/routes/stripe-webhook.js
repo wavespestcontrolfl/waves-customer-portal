@@ -8678,37 +8678,43 @@ async function handleDisputeClosed(dispute) {
             // it), the lost closure must not clear that valid payment and
             // reopen collection a third time — and must not claw back the
             // coverage the replacement money funds.
-            const lostInvoice = await db('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');
-            const lostInvoicePi = lostInvoice?.stripe_payment_intent_id ? String(lostInvoice.stripe_payment_intent_id) : null;
             const lostDisputedPi = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
-            const lostStatus = String(lostInvoice?.status || '').toLowerCase();
-            if (lostInvoice && ['paid', 'processing'].includes(lostStatus)
-              && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
-              // Gate first (Codex #4971 r4 P1): the reopen revokes a termite
-              // parent's paid evidence when this is its prepay invoice.
-              await db.transaction(async (trx) => {
-                await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invId] });
+            // Gate and lock first, then decide ownership from the locked row.
+            // The reopen and Dispatch observation are one transaction: a
+            // replacement payment cannot commit between them and make the
+            // lost-money episode disappear behind a newly paid invoice.
+            const lostDisputeOwnsInvoice = await db.transaction(async (trx) => {
+              await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invId] });
+              const lockedLostInvoice = await trx('invoices').where({ id: invId }).forUpdate()
+                .first('id', 'status', 'stripe_payment_intent_id');
+              const lockedPi = lockedLostInvoice?.stripe_payment_intent_id
+                ? String(lockedLostInvoice.stripe_payment_intent_id) : null;
+              const lockedStatus = String(lockedLostInvoice?.status || '').toLowerCase();
+              const stillBacksDisputedPi = !!lockedLostInvoice
+                && ['paid', 'processing'].includes(lockedStatus)
+                && !!lockedPi && !!lostDisputedPi && lockedPi === lostDisputedPi;
+              const alreadyReopenedForDispute = !!lockedLostInvoice
+                && !lockedPi && lockedStatus === 'overdue';
+              if (stillBacksDisputedPi) {
                 await trx('invoices')
                   .where({ id: invId })
                   .update({ status: 'overdue', paid_at: null, amount_paid: handPartsPaidSql(trx, invId), stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: trx.fn.now() });
-              });
-            }
+              }
+              const ownsInvoice = stillBacksDisputedPi || alreadyReopenedForDispute;
+              if (ownsInvoice) {
+                await require('../services/commercial-prepay-dispatch-review')
+                  .reconcileInvoice(trx, invId);
+              }
+              return ownsInvoice;
+            });
             // Refund-shaped term sync (codex r4 P1): lost money cancels the
             // prepaid coverage this invoice funded — but only when the
-            // DISPUTED payment still owns the invoice: PI match above, or
-            // the created-reopen shape (PI cleared, invoice sitting
-            // 'overdue' under this dispute's recorded binding). UNCAUGHT
-            // (codex r5 P1): critical lifecycle write, propagate for
-            // Stripe redelivery.
-            const lostDisputeOwnsInvoice = !!lostInvoice && (
-              (lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi)
-              || (!lostInvoicePi && lostStatus === 'overdue')
-            );
+            // DISPUTED payment still owns the invoice under the locked check
+            // above. UNCAUGHT (codex r5 P1): critical lifecycle write,
+            // propagate for Stripe redelivery.
             if (lostDisputeOwnsInvoice) {
               await require('../services/annual-prepay-renewals')
                 .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null });
-              await require('../services/commercial-prepay-dispatch-review')
-                .reconcileInvoice(db, invId);
             }
           }
         }

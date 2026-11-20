@@ -54,10 +54,16 @@ async function reconcileOriginalInvoice(conn, invoiceId) {
   return state;
 }
 
-function reconcileInvoice(conn, invoiceId) {
-  return typeof conn.transaction === 'function' && !conn.isTransaction
-    ? conn.transaction((trx) => reconcileOriginalInvoice(trx, invoiceId))
-    : reconcileOriginalInvoice(conn, invoiceId);
+async function reconcileInvoice(conn, invoiceId) {
+  if (typeof conn.transaction !== 'function') return reconcileOriginalInvoice(conn, invoiceId);
+  try {
+    return await conn.transaction((trx) => reconcileOriginalInvoice(trx, invoiceId));
+  } catch (err) {
+    // A schema without the sale-event table cannot own a recorded setup.
+    // The savepoint lets ordinary invoice collection continue in that schema.
+    if (err.code === '42P01' && !(await conn.schema.hasTable('audit_log'))) return null;
+    throw err;
+  }
 }
 
 module.exports = {
