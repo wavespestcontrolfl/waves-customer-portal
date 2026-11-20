@@ -675,6 +675,24 @@ describe("saving only what changed", () => {
     expect(lastBody().expected_pins).toEqual(SAVED);
   });
 
+  it("does not let a late points answer roll back flags a count save stored meanwhile", async () => {
+    await opened(READ({ tech_pins: SAVED, tech_final_flags: null }));
+    let finishPoints;
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finishPoints = resolve; }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    fetchMock.mockImplementationOnce((url, init) => reply({ read: READ({ tech_pins: SAVED, tech_final_flags: JSON.parse(init.body).flags }) }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Tech saw: Plumbing vent stacks" }));
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    await screen.findByText("Saved.");
+    expect(screen.getByTestId("roof-read-saved-plumbing_vent_stacks")).not.toHaveTextContent("None");
+    finishPoints(await reply({ read: READ({ tech_pins: [...SAVED, { x: 0.5, y: 0.5, type: "other", note: null }], tech_final_flags: null }) }));
+    await screen.findByText("Points saved.");
+    // The "Tech saved" column still shows the flag the count save stored.
+    expect(screen.getByTestId("roof-read-saved-plumbing_vent_stacks")).not.toHaveTextContent("None");
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(2);
+  });
+
   it("sends the list the edits started from, and on a 409 keeps the edits and offers to read again", async () => {
     await opened();
     fireEvent.click(frame(), { clientX: 100, clientY: 50 });

@@ -22,6 +22,7 @@ let mockEvents;
 let mockOnConflict;
 let mockOnClaimed;
 let mockSelectError;
+let mockUpdateError;
 let mockOnTransaction;
 const mockForShare = jest.fn();
 jest.mock('../models/db', () => {
@@ -102,6 +103,7 @@ jest.mock('../models/db', () => {
         const mergeFlags = patch.tech_final_flags && patch.tech_final_flags.raw ? JSON.parse(patch.tech_final_flags.bindings[0]) : null;
         if (mergeFlags) delete patch.tech_final_flags;
         return settled(() => {
+          if (mockUpdateError && name === 'roof_entry_reads') { const err = mockUpdateError; mockUpdateError = null; throw err; }
           mockEvents.push(renewing ? 'renew' : `update:${patch.status || ''}`);
           const rows = match();
           rows.forEach((r) => {
@@ -211,6 +213,7 @@ beforeEach(() => {
   mockOnConflict = null;
   mockOnClaimed = null;
   mockSelectError = null;
+  mockUpdateError = null;
   mockOnTransaction = null;
   mockForShare.mockClear();
   require('../models/db').transaction.mockClear();
@@ -1695,6 +1698,17 @@ describe('PATCH /:id/tech-count with points', () => {
     expect(stale.status).toBe(409);
     expect(stale.json).toEqual({ error: 'These points were changed in another window. Read the roof again to load them.' });
     expect(JSON.parse(mockRows[0].tech_pins)).toHaveLength(2);
+  });
+
+  it('logs and answers a database failure without the notes or the crop centre in either', async () => {
+    logger.error.mockClear();
+    mockUpdateError = Object.assign(new Error('update "roof_entry_reads" set "tech_pins" = $1 - SECRET NOTE 27.46 failed'), { code: '57014' });
+    const res = await patch({ pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'SECRET NOTE' }], crop: CROP, expected_pins: null });
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(res.json)).not.toMatch(/SECRET|27\.46/);
+    const logged = logger.error.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('57014');
+    expect(logged).not.toMatch(/SECRET|27\.46/);
   });
 
   it('answers 404 for an unknown read, and keeps a technician out', async () => {

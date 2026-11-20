@@ -447,7 +447,11 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
         return;
       }
       // What the server holds now, then clear the edited marker.
-      setResult((prev) => ({ ...prev, read: body.read }));
+      // A points answer updates only the point fields, so it cannot roll back a count or flags saved meanwhile.
+      setResult((prev) => ({
+        ...prev,
+        read: { ...prev.read, tech_pins: body.read.tech_pins, hide_on_estimate: body.read.hide_on_estimate },
+      }));
       setPoints(pointsFrom(body.read, nextId));
       setSelectedId(null);
       setShowOnEstimate(!body.read.hide_on_estimate);

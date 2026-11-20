@@ -133,8 +133,10 @@ router.patch('/:id/tech-count', async (req, res, next) => {
     if (err.code === 'crop_mismatch') return res.status(400).json({ error: 'These points were not drawn on this roof photo' });
     if (err.code === 'read_not_usable') return res.status(400).json({ error: 'This roof read did not work. Read the roof again before adding points.' });
     if (err.code === 'points_changed') return res.status(409).json({ error: 'These points were changed in another window. Read the roof again to load them.' });
-    logger.error(`[admin-roof-entry-read] tech count failed: ${err.message}`);
-    return next(err);
+    // A database error can carry the bound values (the technician's notes, the crop centre): log and forward only the
+    // read id and the error code.
+    logger.error(`[admin-roof-entry-read] tech count failed for read ${req.params.id}: ${err.code || 'error'}`);
+    return next(Object.assign(new Error('Roof read tech count save failed'), { code: err.code }));
   }
 });
 
