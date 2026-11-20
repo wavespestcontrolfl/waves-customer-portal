@@ -1779,8 +1779,11 @@ function initScheduledJobs() {
   // deploy kill is harmless.
   // =========================================================================
   const runRestaurantProspectSyncTick = async () => {
+    const prospects = require('./prospects/dbpr-restaurants');
+    // The kill switch returns before the lease: a run that did nothing must not read as a success in job_health.
+    if (prospects.syncDisabled()) return;
     await runExclusive('restaurant-prospect-sync', async () => {
-      const result = await require('./prospects/dbpr-restaurants').syncRestaurantProspects();
+      const result = await prospects.syncRestaurantProspects();
       // A failed file or a database failure must read as a FAILED run in job_health: rethrow (a count only) so
       // runExclusive records it.
       if (result.failures > 0) throw new Error(`restaurant prospect sync: ${result.failures} failure(s)`);

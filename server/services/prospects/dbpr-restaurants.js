@@ -22,7 +22,7 @@
  * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
  * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
  * elapsed time only, never a business name, address or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true
- * or on).
+ * or on); the scheduler checks it before the run starts, so job_health keeps the last real outcome.
  */
 
 const db = require('../../models/db');
@@ -273,9 +273,15 @@ async function bumpAttempts(id) {
   await db('restaurant_prospects').where({ id }).increment('detail_attempts', 1);
 }
 
+// The keys of one kind on file from a day on (the fiscal year's first day): a full file shows them all again.
+async function keysSince(kind, since) {
+  const rows = await db('restaurant_prospects').where({ kind }).where('event_date', '>=', since).select('source_key');
+  return rows.map((row) => row.source_key);
+}
+
 // ── Weekly job ──────────────────────────────────────────────────
 
-const defaultStore = { upsertRecords };
+const defaultStore = { upsertRecords, keysSince };
 
 async function loadFile(kind, fetchText, now) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
@@ -305,11 +311,33 @@ async function loadFile(kind, fetchText, now) {
   return { records, malformed: counts.malformed };
 }
 
+// The first day of the fiscal year the files hold: July 1, by the Eastern date.
+function fiscalYearStart(now) {
+  const [year, month] = etDateString(now).split('-').map(Number);
+  return `${month >= 7 ? year : year - 1}-07-01`;
+}
+
+// A full file shows again nearly every row of its fiscal year that is already on file. A download that stopped early
+// but ends on a whole row passes every check in loadFile, so it would report success with rows missing; a file that
+// shows under 90% of those rows fails, and none of its rows are written. A row can leave the kept set between reads
+// (a corrected violation count), hence 90%. Under 20 rows on file (early July) the check waits.
+const WHOLE_YEAR_SHARE = 0.9;
+const WHOLE_YEAR_MIN_ROWS = 20;
+
+async function checkWholeYear(kind, unique, deps) {
+  const onFile = await deps.store.keysSince(kind, fiscalYearStart(deps.now));
+  if (onFile.length < WHOLE_YEAR_MIN_ROWS) return;
+  const seen = new Set(unique.map((record) => record.source_key));
+  const shown = onFile.filter((key) => seen.has(key)).length;
+  if (shown < onFile.length * WHOLE_YEAR_SHARE) throw new Error('file shorter than the rows on file');
+}
+
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
       const { records, malformed } = await loadFile(kind, deps.fetchText, deps.now);
       const unique = dedupeByKey(records);
+      await checkWholeYear(kind, unique, deps);
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
     } catch (err) {
       result.failures += 1;
@@ -347,4 +375,5 @@ module.exports = {
   pendingInspections,
   saveReport,
   bumpAttempts,
+  keysSince,
 };

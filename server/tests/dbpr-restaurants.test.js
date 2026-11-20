@@ -217,7 +217,10 @@ describe('syncRestaurantProspects', () => {
 
   function makeStore() {
     upserts = [];
-    return { upsertRecords: jest.fn(async (records) => { upserts.push(...records); return records.length; }) };
+    return {
+      upsertRecords: jest.fn(async (records) => { upserts.push(...records); return records.length; }),
+      keysSince: jest.fn(async () => []),
+    };
   }
   const files = {
     '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9001' }), inspRow({ visit: '9001' }), inspRow({ visit: '9002', county: 'Hillsborough' })]),
@@ -352,6 +355,50 @@ describe('syncRestaurantProspects', () => {
     expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 1 }, owner_change: { kept: 1 } });
   });
 
+  // Twenty inspections already on file for this fiscal year: visits 9001 to 9020.
+  const ON_FILE = Array.from({ length: 20 }, (_, i) => String(9001 + i));
+  const inspectionsOnFile = (keys) => jest.fn(async (kind) => (kind === 'inspection' ? keys : []));
+  const visitsCsv = (keys) => inspCsv(keys.map((visit) => inspRow({ visit })));
+
+  test('a file that shows under 90% of this year\'s rows on file is cut short: it fails and writes nothing', async () => {
+    store = makeStore();
+    store.keysSince = inspectionsOnFile(ON_FILE);
+    // 17 of the 20 visits on file, and every row whole: a download that stopped early on a row end.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(ON_FILE.slice(0, 17)) });
+    const result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
+    expect(store.keysSince).toHaveBeenCalledWith('inspection', '2026-07-01');
+    expect(result.files.inspection).toEqual({ failed: true });
+    expect(result.failures).toBe(1);
+    expect(upserts.some((r) => r.kind === 'inspection')).toBe(false);
+  });
+
+  test('90% of the rows on file passes, new rows count for nothing, and under 20 on file the check waits', async () => {
+    store = makeStore();
+    store.keysSince = inspectionsOnFile(ON_FILE);
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv([...ON_FILE.slice(0, 18), '9101']) });
+    let result = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(result.files.inspection).toEqual({ kept: 19, malformed: 0, upserted: 19 });
+    // New visits never make up for missing ones: 17 known and 5 new still fails.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv([...ON_FILE.slice(0, 17), '9101', '9102', '9103', '9104', '9105']) });
+    result = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(result.files.inspection).toEqual({ failed: true });
+    store.keysSince = inspectionsOnFile(ON_FILE.slice(0, 19));
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(['9101']) });
+    result = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(result.files.inspection).toEqual({ kept: 1, malformed: 0, upserted: 1 });
+  });
+
+  test.each([
+    ['2026-07-01T03:59:00Z', '2025-07-01'], // 11:59 PM on June 30, Eastern
+    ['2026-07-01T04:00:00Z', '2026-07-01'],
+    ['2027-03-01T15:00:00Z', '2026-07-01'],
+  ])('at %s the rows on file are counted from %s, the fiscal year the files hold', async (now, since) => {
+    store = makeStore();
+    fetchText = makeFetch();
+    await svc.syncRestaurantProspects({ fetchText, store, now: new Date(now) });
+    expect(store.keysSince.mock.calls.map(([, day]) => day)).toEqual([since, since, since]);
+  });
+
   test('a short first row never hides a column: the file loads and the short row is counted', async () => {
     store = makeStore();
     const short = licRow({ app: '7002' }).split(',').slice(0, 27).join(',');
@@ -374,7 +421,8 @@ describe('syncRestaurantProspects', () => {
   test('the Monday job runs under its own lease and a deploy-kill retry, and a failure fails the run', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
     expect(src).toMatch(/cron\.schedule\('36 10 \* \* 1', \(\) => runRestaurantProspectSyncTick\(\), \{ timezone: 'America\/New_York' \}\)/);
-    expect(src).toMatch(/runExclusive\('restaurant-prospect-sync', async \(\) => \{\s*const result = await require\('\.\/prospects\/dbpr-restaurants'\)\.syncRestaurantProspects\(\);/);
+    // The kill switch returns before the lease, so a run that did nothing never reads as a success in job_health.
+    expect(src).toMatch(/const runRestaurantProspectSyncTick = async \(\) => \{\s*const prospects = require\('\.\/prospects\/dbpr-restaurants'\);\s*\/\/[^\n]*\n\s*if \(prospects\.syncDisabled\(\)\) return;\s*await runExclusive\('restaurant-prospect-sync', async \(\) => \{\s*const result = await prospects\.syncRestaurantProspects\(\);/);
     // A failed file or database call must read as a failed run in job_health: the leased callback throws (a count only).
     expect(src).toMatch(/if \(result\.failures > 0\) throw new Error\(`restaurant prospect sync: \$\{result\.failures\} failure\(s\)`\);/);
     expect(src).toMatch(/registerDeployKillRetry\('restaurant-prospect-sync'/);
