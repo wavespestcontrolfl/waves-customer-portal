@@ -395,7 +395,7 @@ const HOLD_SEARCH_CAP = 50;
 
 /**
  * The send-time HOLD check for a planned issue whose FYI copy offered HOLD: is there a HOLD reply
- * to that copy since it went out (an hour of margin), from a verified sender (verifiedHoldSender)?
+ * to any copy of it (every copy carries one token) from a verified sender (verifiedHoldSender)?
  * The reply handler applies a HOLD as it reads one; this finds one it could not apply then (the
  * proof gate off, the FYI address outside NEWSLETTER_PROOF_APPROVERS, a write that failed, a
  * self-reply archived before the sync, which stores it as outbound, or mail the sync never
@@ -410,8 +410,9 @@ async function holdReplyOnRecord(send, issue = null) {
   if (!isProofToken(send?.proof_token)) throw new Error('its FYI copy has no valid token');
   const token = send.proof_token.toLowerCase();
   const fyiTo = issueFyiAddress(issue);
-  // The token is new with each FYI copy; an hour of margin covers clock differences.
-  const since = send.proof_sent_at ? new Date(new Date(send.proof_sent_at).getTime() - 60 * 60 * 1000) : null;
+  // Every FYI copy of this draft carries its token (a retry keeps it), so the search starts at the
+  // draft, not at the latest copy; an hour of margin covers clock differences.
+  const since = send.created_at ? new Date(new Date(send.created_at).getTime() - 60 * 60 * 1000) : null;
   const stored = db('emails').where('subject', 'ilike', `%[PROOF-${token}]%`);
   if (since) stored.where('received_at', '>=', since);
   const rows = await stored.select('from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'label_ids', 'authentication_results');
@@ -789,7 +790,12 @@ async function sendNewsletterProof(sendId) {
   // our read and this write would otherwise be silently overwritten with
   // updated_at === proof_sent_at — masking the edit from the staleness
   // gate while we email a proof rendered from the pre-edit body.
-  const token = crypto.randomBytes(4).toString('hex');
+  // A planned issue keeps the token an earlier FYI attempt left (the failure release below keeps
+  // it), so every copy of its FYI carries one token: a copy SendGrid accepted before an error
+  // still names this issue, for the reply handler and for the send-time HOLD check.
+  const token = issueContext && isProofToken(send.proof_token)
+    ? send.proof_token.toLowerCase()
+    : crypto.randomBytes(4).toString('hex');
   const now = new Date();
   const delivery = proofDelivery(calendarContext, recipientCount, issueContext);
   const claimQuery = db('newsletter_sends')
@@ -860,10 +866,13 @@ async function sendNewsletterProof(sendId) {
     // Release OUR claim (token-scoped) so the catch-up tick can retry a
     // transient SendGrid failure instead of the week silently losing its
     // proof (an auto-send issue is not queued yet, so nothing else to undo).
+    // A planned issue keeps its token: SendGrid may have accepted the copy
+    // before the error (a timeout), and a HOLD reply to that copy must still
+    // name this issue. Its retry sends the same token.
     try {
       await db('newsletter_sends')
         .where({ id: send.id, proof_token: token })
-        .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+        .update({ ...(issueContext ? {} : { proof_token: null }), proof_sent_at: null, updated_at: new Date() });
     } catch (clearErr) {
       logger.error(`[newsletter-proof] failed to release proof claim for ${send.id}: ${clearErr.message}`);
     }

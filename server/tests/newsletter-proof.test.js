@@ -908,6 +908,25 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(mockTrigger).not.toHaveBeenCalledWith('newsletter_proof_sent', expect.anything());
   });
 
+  test('a SendGrid error releases the claim but keeps its token: SendGrid may have accepted the copy, so a HOLD reply to it still names the issue', async () => {
+    mockSendOne.mockImplementation(async () => { throw new Error('ETIMEDOUT'); });
+    const { sendsChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
+    const r = await sendNewsletterProof('send-1');
+
+    expect(r.reason).toBe('proof_send_failed');
+    const release = sendsChain.update.mock.calls.at(-1)[0];
+    expect(release).toEqual({ proof_sent_at: null, updated_at: expect.any(Date) });
+  });
+
+  test('its retry sends the token the failed attempt kept, so every copy of its FYI carries one token', async () => {
+    const { sendsChain } = wireDb({ sends: { first: { ...PI_DRAFT, proof_token: 'AB12CD34' } }, issues: { first: ISSUE } });
+    const r = await sendNewsletterProof('send-1');
+
+    expect(r).toEqual(expect.objectContaining({ sent: true, token: 'ab12cd34', queued: true }));
+    expect(sendsChain.update.mock.calls[0][0]).toEqual(expect.objectContaining({ proof_token: 'ab12cd34' }));
+    expect(mockSendOne.mock.calls[0][0].subject).toBe('FYI: [PROOF-ab12cd34] Bubbles & Sea Lions');
+  });
+
   test('an issue row that is no longer drafted rolls the queueing back, and the owner is told', async () => {
     // The send's queue update matches, but its issue row does not move: the transaction fails.
     wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE, update: 0 } });
@@ -1059,8 +1078,9 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
 });
 
 describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
+  // Drafted by the 7:00 AM planner tick; its FYI copy went out again at 1:05 PM (a retry keeps the token).
   const SEND = {
-    id: 'send-1', proof_token: 'ab12cd34', proof_sent_at: new Date('2026-08-05T11:05:00Z'),
+    id: 'send-1', proof_token: 'ab12cd34', created_at: new Date('2026-08-05T11:00:00Z'), proof_sent_at: new Date('2026-08-05T17:05:00Z'),
     from_email: 'newsletter@news.wavespestcontrol.com',
   };
   const FYI_SUBJECT = 'FYI: [PROOF-ab12cd34] Native termites can swarm in winter';
@@ -1072,7 +1092,8 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
   // A reply that arrived from another mail server, with Gmail's own verdict on it.
   const received = (from, authentication_results, fields = {}) => reply({ from_address: from, label_ids: ['INBOX'], authentication_results, ...fields });
   const signedBy = (domain) => `mx.google.com; dkim=pass header.i=@${domain} header.s=s1 header.b=abc; spf=pass smtp.mailfrom=bounce@${domain}`;
-  const SINCE = new Date('2026-08-05T10:05:00Z');
+  // The search starts an hour before the draft, not at the latest copy: a HOLD to an earlier copy counts.
+  const SINCE = new Date('2026-08-05T10:00:00Z');
 
   // Two witnesses: the stored inbox (emails) and the mailbox itself (a Gmail search, then each message).
   function wireMailbox({ stored = [], searched = [], truncated = false } = {}) {
@@ -1083,7 +1104,7 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     return { emails };
   }
 
-  test('a HOLD the inbox sync stored stops the issue, read from mail since about the FYI copy, with no mailbox search', async () => {
+  test('a HOLD the inbox sync stored stops the issue, read from mail since about the draft (every copy of its FYI), with no mailbox search', async () => {
     const { emails } = wireMailbox({ stored: [reply({ body_text: 'HOLD' })] });
     expect(await holdReplyOnRecord(SEND)).toBe(true);
     expect(emails.where).toHaveBeenCalledWith('subject', 'ilike', '%[PROOF-ab12cd34]%');
@@ -1091,7 +1112,7 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     expect(mockListAllMessages).not.toHaveBeenCalled();
   });
 
-  test('a HOLD the inbox sync never stored is found in the mailbox itself: a Gmail search for the token since the FYI copy', async () => {
+  test('a HOLD the inbox sync never stored is found in the mailbox itself: a Gmail search for the token since the draft', async () => {
     wireMailbox({ searched: [received('newsletter@news.wavespestcontrol.com', null, { subject: FYI_SUBJECT }), reply({ body_text: 'HOLD please' })] });
     expect(await holdReplyOnRecord(SEND)).toBe(true);
     // Spam and Trash too: a HOLD the spam filter moved, or one deleted after it was sent, still holds.

@@ -2110,11 +2110,11 @@ async function ledgerProgress(trx, send) {
 }
 
 /**
- * What became of a 'scheduled' planned issue's send: { sent: true }, why it did not go out
- * ({ status: 'failed', reason, revert, revokeClaim }), or null while it still may.
+ * What became of a 'scheduled' planned issue's send: sent ({ status: 'sent' }, quietly), why it did
+ * not go out ({ status: 'failed', reason, alert, revert, revokeClaim }), or null while it still may.
  */
 async function plannedSendOutcome(issue, send, now, trx) {
-  const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, ...more });
+  const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, alert: 'outcome', ...more });
   if (!send) return notOut('its draft no longer exists');
   if (send.status === 'sent' && !(Number(send.recipient_count) > 0)) return notOut('no planned reader was still eligible when it sent');
   // sendingClaimIsStale is false for any status but 'sending'. A stale claim is revoked with the
@@ -2122,7 +2122,7 @@ async function plannedSendOutcome(issue, send, now, trx) {
   const stale = sendingClaimIsStale(send, now);
   if (['sent', 'failed'].includes(send.status) || stale) {
     const { got, left } = await ledgerProgress(trx, send);
-    if (send.status === 'sent' && left === 0) return { sent: true };
+    if (send.status === 'sent' && left === 0) return { status: 'sent' };
     const how = { sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' }[send.status];
     return got > 0
       ? notOut(`${how} after ${got} of ${got + left} readers got it; Resume in Newsletter → History sends it to the rest`, { revokeClaim: stale })
@@ -2140,42 +2140,57 @@ async function plannedSendOutcome(issue, send, now, trx) {
 }
 
 /**
- * A planned issue nobody was told about yet: a 'failed' one (its reason), or a 'sent' one whose
- * finished send has readers a Resume would still mail (a provider block after SendGrid accepted
- * the batch resets a reader's delivery), which stays 'sent'. Null when there is nothing to tell.
+ * A planned issue that is no longer 'scheduled', read again. A 'failed' one whose send has since
+ * recovered to 'sent' with every planned reader done (delivery confirmations that came after the
+ * send was marked failed, as after a lost SendGrid response; the webhook's
+ * reconcileNewsletterSendStatus then sets it 'sent') becomes 'sent': quietly if nobody was told it
+ * failed, else with one correction (alert 'recovered'). Otherwise what nobody was told yet: a
+ * 'failed' one (its reason), or a 'sent' one whose finished send has readers a Resume would still
+ * mail (a provider block after SendGrid accepted the batch resets a reader's delivery), which
+ * stays 'sent'. Null when there is nothing to change or tell.
  */
-async function untoldOutcome(issue, send, trx) {
+async function settledOutcome(issue, send, trx) {
   const diagnostics = issueDiagnostics(issue);
-  if (diagnostics.outcomeToldAt) return null;
-  if (issue.status === 'failed') {
-    return { status: 'failed', reason: issue.reason || 'did not go out' };
+  if (issue.status === 'failed' && send?.status === 'sent') {
+    const { got, left } = await ledgerProgress(trx, send);
+    if (got > 0 && left === 0) {
+      if (!diagnostics.outcomeToldAt) return { status: 'sent', reason: null };
+      return {
+        status: 'sent',
+        reason: `went out after all: all ${got} readers got it, but their delivery confirmations came after the alert that said it did not go out; there is nothing to resume`,
+        alert: 'recovered',
+        // The failure was told; this correction is not yet.
+        failureToldAt: diagnostics.outcomeToldAt,
+      };
+    }
   }
+  if (diagnostics.outcomeToldAt) return null;
+  if (issue.status === 'failed') return { status: 'failed', reason: issue.reason || 'did not go out', alert: 'outcome' };
   if (issue.status !== 'sent' || send?.status !== 'sent') return null;
+  // A correction an earlier minute could not deliver.
+  if (diagnostics.failureToldAt) return { status: 'sent', reason: issue.reason, alert: 'recovered' };
   const { got, left } = await ledgerProgress(trx, send);
   return left > 0
-    ? { status: 'sent', reason: `went out to ${got} readers, but ${left} readers' mail servers refused it after SendGrid accepted it; Resume in Newsletter → History sends it to them` }
+    ? { status: 'sent', reason: `went out to ${got} readers, but ${left} readers' mail servers refused it after SendGrid accepted it; Resume in Newsletter → History sends it to them`, alert: 'outcome' }
     : null;
 }
 
 /**
- * One planned issue, in one transaction that locks its send row, then its row (the order every
- * writer of both uses). A 'scheduled' issue whose send has an outcome becomes 'sent' or 'failed'
- * (the row always records the outcome); an untold one gets its one alert, raised inside the
- * transaction and keyed per issue, and is marked told only when the alert reached someone. An
- * untold row is tried again each minute, within the lookback. Returns whether it changed the row.
+ * One planned issue. Its outcome is recorded in one transaction that locks its send row, then its
+ * row (the order every writer of both uses). Its alert follows the commit, so no lock or pooled
+ * connection is held while the alert is delivered; the alert is keyed per issue, so a retry after
+ * a crash between the two writes no second row. The row is marked told only after its alert
+ * reached someone, and only while it still holds the outcome that alert told; an untold row is
+ * tried again each minute, within the lookback. Returns whether it changed the row.
  */
 async function settlePlannedIssue({ id, send_id: sendId }, now) {
-  return db.transaction(async (trx) => {
+  const settled = await db.transaction(async (trx) => {
     const send = sendId ? await trx('newsletter_sends').where({ id: sendId }).forUpdate().first() : null;
     const issue = await trx('pest_insider_issues').where({ id }).forUpdate().first();
     // Changed since the list was read: the next minute reads it again.
-    if (!issue || issue.send_id !== sendId) return false;
-    const outcome = issue.status === 'scheduled' ? await plannedSendOutcome(issue, send, now, trx) : await untoldOutcome(issue, send, trx);
-    if (!outcome) return false;
-    if (outcome.sent) {
-      await trx('pest_insider_issues').where({ id }).update({ status: 'sent', updated_at: new Date() });
-      return true;
-    }
+    if (!issue || issue.send_id !== sendId) return null;
+    const outcome = issue.status === 'scheduled' ? await plannedSendOutcome(issue, send, now, trx) : await settledOutcome(issue, send, trx);
+    if (!outcome) return null;
     if (outcome.revert) {
       await trx('newsletter_sends').where({ id: send.id, status: 'scheduled' }).update({
         status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_refused_at: null, updated_at: new Date(),
@@ -2186,22 +2201,41 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
     if (outcome.revokeClaim) {
       await trx('newsletter_sends').where({ id: send.id, status: 'sending' }).update({ status: 'failed', sending_claim_token: null, updated_at: new Date() });
     }
-    const alertText = outcome.reason.charAt(0).toUpperCase() + outcome.reason.slice(1);
-    const told = await raiseSendAlert(sendId, send?.subject || issue.subject, alertText, {
-      outcome: true, dedupeKey: `pest-insider-outcome:${id}`,
-    });
-    if (!told) logger.error(`[newsletter-scheduler] Pest Insider issue ${id}: its alert reached no one; the next minute tries again`);
-    // A row whose status stays as it is changes only when its alert went out.
-    if (!told && issue.status === outcome.status) return false;
-    await trx('pest_insider_issues').where({ id }).update({
-      status: outcome.status,
-      reason: outcome.reason.slice(0, 500),
-      ...(told ? { diagnostics: trx.raw("coalesce(diagnostics, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ outcomeToldAt: now.toISOString() })]) } : {}),
+    // The row always records the outcome.
+    const reason = 'reason' in outcome ? (outcome.reason && outcome.reason.slice(0, 500)) : issue.reason;
+    const changed = outcome.status !== issue.status || reason !== issue.reason || Boolean(outcome.failureToldAt);
+    if (changed) {
+      await trx('pest_insider_issues').where({ id }).update({
+        status: outcome.status,
+        reason,
+        ...(outcome.failureToldAt ? {
+          diagnostics: trx.raw("(coalesce(diagnostics, '{}'::jsonb) - 'outcomeToldAt') || ?::jsonb", [JSON.stringify({ failureToldAt: outcome.failureToldAt })]),
+        } : {}),
+        updated_at: new Date(),
+      });
+    }
+    return { changed, outcome, reason, subject: send?.subject || issue.subject };
+  });
+  if (!settled) return false;
+  const { outcome, reason } = settled;
+  if (!outcome.alert) return settled.changed;
+  const told = await raiseSendAlert(sendId, settled.subject, reason.charAt(0).toUpperCase() + reason.slice(1), {
+    outcome: true, dedupeKey: `pest-insider-${outcome.alert}:${id}`,
+  });
+  if (!told) {
+    logger.error(`[newsletter-scheduler] Pest Insider issue ${id}: its alert reached no one; the next minute tries again`);
+    return settled.changed;
+  }
+  const marked = await db('pest_insider_issues').where({ id, status: outcome.status })
+    .whereRaw("diagnostics->>'outcomeToldAt' is null")
+    .update({
+      diagnostics: db.raw("coalesce(diagnostics, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ outcomeToldAt: now.toISOString() })]),
       updated_at: new Date(),
     });
-    return true;
-  });
+  return settled.changed || marked > 0;
 }
+
+const SETTLE_LOOKBACK_SQL = "issue_date >= (now() at time zone 'America/New_York')::date - ?::int";
 
 /**
  * The one place that tells the owner a planned Waves Pest Insider issue did not go out as its
@@ -2213,16 +2247,28 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
  *   finish, and a send a person scheduled by hand to go at its time. A send the switch still has
  *   queued goes back to a draft, so it never goes out late;
  * - every 'failed' issue, also one a send-time stop failed, gets one alert that says why, and so
- *   does a 'sent' one whose readers' mail servers refused it after SendGrid accepted it.
+ *   does a 'sent' one whose readers' mail servers refused it after SendGrid accepted it;
+ * - a 'failed' issue whose send has since recovered to 'sent' becomes 'sent', with one
+ *   correction if the owner was told it failed.
  */
 async function settlePlannedIssues(now = new Date()) {
   const scheduled = await db('pest_insider_issues').where({ status: 'scheduled' }).select('id', 'send_id');
   const untold = await db('pest_insider_issues').whereIn('status', ['failed', 'sent'])
     .whereRaw("diagnostics->>'outcomeToldAt' is null")
-    .whereRaw("issue_date >= (now() at time zone 'America/New_York')::date - ?::int", [SETTLE_LOOKBACK_DAYS])
+    .whereRaw(SETTLE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
+    .select('id', 'send_id');
+  // A failed issue the owner was told about, whose send has since recovered to 'sent'.
+  const recovered = await db('pest_insider_issues').where({ status: 'failed' })
+    .whereRaw("diagnostics->>'outcomeToldAt' is not null")
+    .whereRaw(SETTLE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
+    .whereExists(function recoveredSend() {
+      this.select(db.raw('1')).from('newsletter_sends')
+        .whereRaw('newsletter_sends.id = pest_insider_issues.send_id')
+        .where('newsletter_sends.status', 'sent');
+    })
     .select('id', 'send_id');
   let settled = 0;
-  for (const row of [...scheduled, ...untold]) {
+  for (const row of [...scheduled, ...untold, ...recovered]) {
     try {
       if (await settlePlannedIssue(row, now)) settled += 1;
     } catch (err) {
