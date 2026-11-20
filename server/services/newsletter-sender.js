@@ -1836,15 +1836,16 @@ async function revertBlockedScheduledSend(row, reason) {
 }
 
 // One newsletter_proof_blocked alert about a send. Never throws. Returns whether it reached
-// anyone (a bell row or a push), as the proof step's notifyProof reads it. sentCount > 0: some
-// readers got it before it stopped. dedupeKey: the alert's identity, so a retry of one already
-// written neither writes a second row nor sends a second push.
-function raiseSendAlert(sendId, subject, text, { sentCount = 0, dedupeKey = null } = {}) {
+// anyone (a bell row or a push), as the proof step's notifyProof reads it. outcome: the text
+// says what became of a planned issue's send (its settle step), not a blocked gate. dedupeKey:
+// the alert's identity, so a retry of one already written neither writes a second row nor
+// sends a second push.
+function raiseSendAlert(sendId, subject, text, { outcome = false, dedupeKey = null } = {}) {
   return require('./newsletter-proof').notifyProof('newsletter_proof_blocked', {
     sendId,
     subject,
     errors: [text],
-    ...(sentCount > 0 ? { sentCount } : {}),
+    ...(outcome ? { outcome: true } : {}),
   }, dedupeKey ? { dedupeKey } : null);
 }
 
@@ -1861,8 +1862,8 @@ async function notifyStoppedAtSendTime(row, reason) {
  * when it may: it needs its planned issue (pest_insider_issues), still
  * 'scheduled', with scheduled_for at that issue's 7:00 AM ET send time, now
  * inside the 7:00-10:00 AM ET window of that day, and no HOLD reply to its FYI
- * copy in the stored inbox. Throws while the inbox is not being read: the
- * caller leaves the row scheduled for the next tick.
+ * copy from a verified sender (holdReplyOnRecord). Throws while the mailbox
+ * cannot be read: the caller leaves the row scheduled for the next tick.
  */
 async function pestInsiderDispatchStop(row, now = new Date()) {
   const context = await issueContextForSend(row, { now });
@@ -1874,15 +1875,17 @@ async function pestInsiderDispatchStop(row, now = new Date()) {
   }
   if (!inSendWindow(context.issueDate, now)) return `missed the ${context.issueDate} 7:00-10:00 AM ET send window`;
   // The send-time HOLD check (holdReplyOnRecord) finds a HOLD reply the reply handler could not
-  // apply when it read it. It first reads the inbox through now (inboxReadThrough): a read that did
-  // not finish clean waits for the next tick, and the window still bounds the wait
+  // apply when it read it, in the stored inbox and in the mailbox itself. A check that cannot
+  // answer in full waits for the next tick, and the window still bounds the wait
   // (settlePlannedIssues tells the owner if it closes).
-  const { inboxReadThrough, holdReplyOnRecord } = require('./newsletter-proof');
-  if (!(await inboxReadThrough())) {
-    throw new Error('the inbox sync could not read the mailbox through now, so a HOLD reply could be unread');
+  const { holdReplyOnRecord } = require('./newsletter-proof');
+  let held;
+  try {
+    held = await holdReplyOnRecord(row, context.issue);
+  } catch (err) {
+    throw new Error(`the HOLD check could not read the mailbox (${err.message}), so a HOLD reply could be unread`);
   }
-  if (await holdReplyOnRecord(row)) return 'a HOLD reply to its FYI copy is in the inbox';
-  return null;
+  return held ? 'a HOLD reply to its FYI copy is in the mailbox' : null;
 }
 
 /**
@@ -2065,7 +2068,7 @@ async function processScheduledSends() {
   return { processed };
 }
 
-/** A failed planned issue older than this is past telling (its alert never reached anyone). */
+/** A planned issue untold for longer than this is past telling (its alert never reached anyone). */
 const SETTLE_LOOKBACK_DAYS = 14;
 
 function issueDiagnostics(issue) {
@@ -2075,25 +2078,43 @@ function issueDiagnostics(issue) {
 }
 
 /**
+ * A send's delivery ledger: how many readers got it (any success signal, as
+ * hasDeliverySuccessSignal reads one) and how many a Resume would still mail:
+ * outstandingEligibleDeliveries (the resume precheck's own predicate), and for
+ * a planned issue only the readers its plan still holds, as each batch
+ * re-checks them (narrowToPlannedAudience, then plannedEligibleRows on the
+ * address on file now and every customer behind its mailbox).
+ */
+async function ledgerProgress(trx, send) {
+  const ledger = () => trx('newsletter_send_deliveries').where({ send_id: send.id });
+  const total = await ledger().count('* as c').first();
+  const notYet = await applyDeliveryNoSuccessFilter(ledger()).whereNotIn('status', TERMINAL_SUCCESS_STATUSES).count('* as c').first();
+  const outstanding = outstandingEligibleDeliveries(send.id, { database: trx });
+  const plan = sendHoldout(send.segment_filter);
+  const left = plan
+    ? plannedEligibleRows(plan, send.segment_filter, await withMailboxCustomers(narrowToPlannedAudience(outstanding, send.segment_filter))).length
+    : Number((await outstanding.count('newsletter_send_deliveries.id as c').first())?.c) || 0;
+  return { got: (Number(total?.c) || 0) - (Number(notYet?.c) || 0), left };
+}
+
+/**
  * What became of a 'scheduled' planned issue's send: { sent: true }, why it did not go out
- * ({ reason, sentCount, revert }), or null while it still may.
+ * ({ status: 'failed', reason, revert, revokeClaim }), or null while it still may.
  */
 async function plannedSendOutcome(issue, send, now, trx) {
-  const notOut = (why, more = {}) => ({ reason: `did not go out: ${why}`, ...more });
+  const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, ...more });
   if (!send) return notOut('its draft no longer exists');
   if (send.status === 'sent' && !(Number(send.recipient_count) > 0)) return notOut('no planned reader was still eligible when it sent');
-  // sendingClaimIsStale is false for any status but 'sending'.
-  if (['sent', 'failed'].includes(send.status) || sendingClaimIsStale(send, now)) {
-    // The ledger says who got it (sent_at) and who a Resume would still send it to.
-    const got = await trx('newsletter_send_deliveries').where({ send_id: send.id }).count('sent_at as c').first();
-    const left = await applyRetryableDeliveryFilter(trx('newsletter_send_deliveries').where({ send_id: send.id })).count('* as c').first();
-    const sentCount = Number(got?.c) || 0;
-    const leftCount = Number(left?.c) || 0;
-    if (send.status === 'sent' && leftCount === 0) return { sent: true };
+  // sendingClaimIsStale is false for any status but 'sending'. A stale claim is revoked with the
+  // outcome, so its paused worker can send no further batch.
+  const stale = sendingClaimIsStale(send, now);
+  if (['sent', 'failed'].includes(send.status) || stale) {
+    const { got, left } = await ledgerProgress(trx, send);
+    if (send.status === 'sent' && left === 0) return { sent: true };
     const how = { sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' }[send.status];
-    return sentCount > 0
-      ? notOut(`${how} after ${sentCount} of ${sentCount + leftCount} readers got it; Resume in Newsletter → History sends it to the rest`, { sentCount })
-      : notOut(`${how}, and no reader got it`);
+    return got > 0
+      ? notOut(`${how} after ${got} of ${got + left} readers got it; Resume in Newsletter → History sends it to the rest`, { revokeClaim: stale })
+      : notOut(`${how}, and no reader got it`, { revokeClaim: stale });
   }
   const windowEnd = issueSendAt(dateOnlyString(issue.issue_date)).getTime() + SEND_WINDOW_MS;
   // Still able to go out: before the window's end, or a send in progress (its deadline stops it).
@@ -2106,19 +2127,30 @@ async function plannedSendOutcome(issue, send, now, trx) {
   return notOut(`it was ${send.status === 'draft' ? 'back in drafts' : send.status} when its 7:00-10:00 AM ET window closed`);
 }
 
-/** A 'failed' planned issue nobody was told about yet: its reason, and how many readers got it. */
-function untoldFailure(issue) {
+/**
+ * A planned issue nobody was told about yet: a 'failed' one (its reason), or a 'sent' one whose
+ * finished send has readers a Resume would still mail (a provider block after SendGrid accepted
+ * the batch resets a reader's delivery), which stays 'sent'. Null when there is nothing to tell.
+ */
+async function untoldOutcome(issue, send, trx) {
   const diagnostics = issueDiagnostics(issue);
-  if (issue.status !== 'failed' || diagnostics.outcomeToldAt) return null;
-  return { reason: issue.reason || 'did not go out', sentCount: Number(diagnostics.sentCount) || 0 };
+  if (diagnostics.outcomeToldAt) return null;
+  if (issue.status === 'failed') {
+    return { status: 'failed', reason: issue.reason || 'did not go out' };
+  }
+  if (issue.status !== 'sent' || send?.status !== 'sent') return null;
+  const { got, left } = await ledgerProgress(trx, send);
+  return left > 0
+    ? { status: 'sent', reason: `went out to ${got} readers, but ${left} readers' mail servers refused it after SendGrid accepted it; Resume in Newsletter → History sends it to them` }
+    : null;
 }
 
 /**
  * One planned issue, in one transaction that locks its send row, then its row (the order every
  * writer of both uses). A 'scheduled' issue whose send has an outcome becomes 'sent' or 'failed'
- * (the row always records the outcome); a 'failed' one gets its one alert, raised inside the
- * transaction, and is marked told only when the alert reached someone. An untold row is tried
- * again each minute, within the lookback. Returns whether it changed the row.
+ * (the row always records the outcome); an untold one gets its one alert, raised inside the
+ * transaction and keyed per issue, and is marked told only when the alert reached someone. An
+ * untold row is tried again each minute, within the lookback. Returns whether it changed the row.
  */
 async function settlePlannedIssue({ id, send_id: sendId }, now) {
   return db.transaction(async (trx) => {
@@ -2126,7 +2158,7 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
     const issue = await trx('pest_insider_issues').where({ id }).forUpdate().first();
     // Changed since the list was read: the next minute reads it again.
     if (!issue || issue.send_id !== sendId) return false;
-    const outcome = issue.status === 'scheduled' ? await plannedSendOutcome(issue, send, now, trx) : untoldFailure(issue);
+    const outcome = issue.status === 'scheduled' ? await plannedSendOutcome(issue, send, now, trx) : await untoldOutcome(issue, send, trx);
     if (!outcome) return false;
     if (outcome.sent) {
       await trx('pest_insider_issues').where({ id }).update({ status: 'sent', updated_at: new Date() });
@@ -2138,20 +2170,21 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
       });
       await trx('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
     }
+    // The stale claim's release, as the resume path releases one: its worker's next heartbeat finds no claim.
+    if (outcome.revokeClaim) {
+      await trx('newsletter_sends').where({ id: send.id, status: 'sending' }).update({ status: 'failed', sending_claim_token: null, updated_at: new Date() });
+    }
     const alertText = outcome.reason.charAt(0).toUpperCase() + outcome.reason.slice(1);
     const told = await raiseSendAlert(sendId, send?.subject || issue.subject, alertText, {
-      sentCount: outcome.sentCount, dedupeKey: `pest-insider-outcome:${id}`,
+      outcome: true, dedupeKey: `pest-insider-outcome:${id}`,
     });
     if (!told) logger.error(`[newsletter-scheduler] Pest Insider issue ${id}: its alert reached no one; the next minute tries again`);
-    // A row already 'failed' changes only when its alert went out.
-    if (!told && issue.status === 'failed') return false;
+    // A row whose status stays as it is changes only when its alert went out.
+    if (!told && issue.status === outcome.status) return false;
     await trx('pest_insider_issues').where({ id }).update({
-      status: 'failed',
+      status: outcome.status,
       reason: outcome.reason.slice(0, 500),
-      diagnostics: trx.raw("coalesce(diagnostics, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
-        ...(outcome.sentCount > 0 ? { sentCount: outcome.sentCount } : {}),
-        ...(told ? { outcomeToldAt: now.toISOString() } : {}),
-      })]),
+      ...(told ? { diagnostics: trx.raw("coalesce(diagnostics, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ outcomeToldAt: now.toISOString() })]) } : {}),
       updated_at: new Date(),
     });
     return true;
@@ -2161,16 +2194,18 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
 /**
  * The one place that tells the owner a planned Waves Pest Insider issue did not go out as its
  * FYI copy said (the plan's skip rule: one admin alert). Runs every minute, after the dispatcher:
- * - a 'scheduled' issue whose send reached readers becomes 'sent', quietly;
- * - one whose send ended without that (failed, or sent to nobody), stopped part way (its claim
- *   went stale), or is still not out when its 7:00-10:00 AM ET window closed becomes 'failed'.
- *   A send in progress is left to finish, and a send a person scheduled by hand to go at its
- *   time. A send the switch still has queued goes back to a draft, so it never goes out late;
- * - every 'failed' issue, also one a send-time stop failed, gets one alert that says why.
+ * - a 'scheduled' issue whose send reached every reader becomes 'sent', quietly;
+ * - one whose send ended without that (failed, sent to nobody, or with readers a Resume would
+ *   still mail), stopped part way (its claim went stale; the claim is revoked), or is still not
+ *   out when its 7:00-10:00 AM ET window closed becomes 'failed'. A send in progress is left to
+ *   finish, and a send a person scheduled by hand to go at its time. A send the switch still has
+ *   queued goes back to a draft, so it never goes out late;
+ * - every 'failed' issue, also one a send-time stop failed, gets one alert that says why, and so
+ *   does a 'sent' one whose readers' mail servers refused it after SendGrid accepted it.
  */
 async function settlePlannedIssues(now = new Date()) {
   const scheduled = await db('pest_insider_issues').where({ status: 'scheduled' }).select('id', 'send_id');
-  const untold = await db('pest_insider_issues').where({ status: 'failed' })
+  const untold = await db('pest_insider_issues').whereIn('status', ['failed', 'sent'])
     .whereRaw("diagnostics->>'outcomeToldAt' is null")
     .whereRaw("issue_date >= (now() at time zone 'America/New_York')::date - ?::int", [SETTLE_LOOKBACK_DAYS])
     .select('id', 'send_id');

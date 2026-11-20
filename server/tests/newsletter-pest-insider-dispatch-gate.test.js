@@ -17,9 +17,13 @@ jest.mock('../services/newsletter-event-selection', () => ({
   parseLockedEventIds: jest.fn(() => []),
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: mockTrigger }));
-// The inbox sync the send-time HOLD check runs to read the inbox through now (inboxReadThrough).
-const mockSyncEmails = jest.fn(async () => ({ newEmails: 0 }));
-jest.mock('../services/email/email-sync', () => ({ syncEmails: (...args) => mockSyncEmails(...args) }));
+// The mailbox itself, which the send-time HOLD check searches for the FYI copy's token: by default it holds no reply.
+const mockListAllMessages = jest.fn(async () => ({ messages: [], truncated: false, nextPageToken: null }));
+const mockGetMessage = jest.fn();
+jest.mock('../services/email/gmail-client', () => ({
+  listAllMessages: (...args) => mockListAllMessages(...args),
+  getMessage: (...args) => mockGetMessage(...args),
+}));
 
 const db = require('../models/db');
 const { processScheduledSends } = require('../services/newsletter-sender');
@@ -170,18 +174,17 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
   };
   const PLANNED = { id: 'issue-1', issue_date: '2026-12-03', status: 'scheduled', send_id: 'send-pi-2' };
 
-  // The send-time HOLD check: by default the sync run it starts finishes clean (it writes
-  // last_sync_at as it ends, so at the read's time), and no reply is stored.
-  function withInbox(table, q, { synced = true, replies = [] } = {}) {
-    if (table === 'email_sync_state') {
-      q.first = jest.fn(async () => ({
-        last_sync_at: new Date(),
-        errors: synced ? null : 'incremental sync incomplete: 1 message(s) failed — cursor withheld, retrying next run',
-      }));
-    }
+  // The send-time HOLD check's stored witness: by default the inbox sync stored no reply.
+  function withInbox(table, q, { replies = [] } = {}) {
     if (table === 'emails') q.select = jest.fn(async () => replies);
     return q;
   }
+  // The owner's reply from the synced mailbox itself: Gmail labels it SENT, and it reached this inbox.
+  const HOLD_REPLY = {
+    from_address: 'contact@wavespestcontrol.com', subject: 'Re: FYI: [PROOF-ab12cd34] Native termites', body_text: 'HOLD', body_html: null,
+    label_ids: ['SENT', 'INBOX'], authentication_results: null,
+  };
+  const WITH_TOKEN = { ...AUTO_QUEUED_INSIDER, proof_token: 'ab12cd34', proof_sent_at: new Date('2026-12-02T12:05:00Z'), from_email: 'newsletter@news.wavespestcontrol.com' };
 
   function wireInsider(rows, { issue = PLANNED, updated = 1, inbox } = {}) {
     const updates = [];
@@ -256,9 +259,16 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     expect(mockTrigger).not.toHaveBeenCalled();
   });
 
-  test('a HOLD reply to its FYI copy in the inbox stops it for good, also one the reply handler could not apply', async () => {
-    const hold = { from_address: 'adam@example.com', subject: 'Re: FYI: [PROOF-ab12cd34] Native termites', body_text: 'HOLD', body_html: null };
-    const updates = wireInsider([{ ...AUTO_QUEUED_INSIDER, proof_token: 'ab12cd34', from_email: 'newsletter@news.wavespestcontrol.com' }], { inbox: { replies: [hold] } });
+  test.each([
+    ['the inbox sync stored it', { inbox: { replies: [HOLD_REPLY] } }, []],
+    ['only the mailbox itself holds it (the sync never stored it)', {}, [HOLD_REPLY]],
+  ])('a HOLD reply to its FYI copy stops it for good, also one the reply handler could not apply: %s', async (_label, wiring, searched) => {
+    // Queued only when the search runs: a stored HOLD stops the check before it searches.
+    if (searched.length) {
+      mockListAllMessages.mockImplementationOnce(async () => ({ messages: searched.map((_, i) => ({ id: `gm-${i}` })), truncated: false }));
+      mockGetMessage.mockImplementation(async (id) => searched[Number(id.slice(3))]);
+    }
+    const updates = wireInsider([WITH_TOKEN], wiring);
 
     await processScheduledSends();
 
@@ -266,17 +276,16 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     expect(updates.map(({ table, patch }) => [table, patch.status])).toEqual([
       ['newsletter_sends', 'draft'], ['newsletter_calendar', 'drafted'], ['pest_insider_issues', 'failed'],
     ]);
-    expect(updates[2].patch.reason).toBe('stopped at send time: a HOLD reply to its FYI copy is in the inbox');
-    // It read the inbox through now first: a run in flight, then one of its own.
-    expect(mockSyncEmails).toHaveBeenCalledTimes(2);
+    expect(updates[2].patch.reason).toBe('stopped at send time: a HOLD reply to its FYI copy is in the mailbox');
   });
 
-  test('an inbox the sync could not read through now (its run did not finish clean) leaves it scheduled for the next tick', async () => {
-    const updates = wireInsider([{ ...AUTO_QUEUED_INSIDER, proof_token: 'ab12cd34' }], { inbox: { synced: false } });
+  test('a mailbox Gmail cannot read (not connected) leaves it scheduled for the next tick', async () => {
+    mockListAllMessages.mockImplementationOnce(async () => { throw new Error('Gmail not connected. Please authorize via OAuth.'); });
+    const updates = wireInsider([WITH_TOKEN]);
 
     await processScheduledSends();
 
-    expect(mockSyncEmails).toHaveBeenCalledTimes(2);
+    expect(mockListAllMessages).toHaveBeenCalledTimes(1);
     expect(mockValidateEventSelection).not.toHaveBeenCalled();
     expect(updates).toEqual([]);
     expect(mockTrigger).not.toHaveBeenCalled();

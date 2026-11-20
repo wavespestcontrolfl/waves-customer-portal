@@ -271,10 +271,10 @@ describe('notification trigger push tags', () => {
     expect(blocked.link).toBe('/admin/newsletter?tab=history');
     expect(blocked.body).toMatch(/Nothing was sent\.$/);
     expect(blocked.body).not.toMatch(/composer/i);
-    // A send that stopped part way says how many readers got it, never "Nothing was sent".
-    const partial = TRIGGER_REGISTRY.newsletter_proof_blocked.build({ sendId: 'send-7', subject: 'x', errors: ['e'], sentCount: 40 });
-    expect(partial.body).toMatch(/40 readers got it before it stopped; nothing more was sent\.$/);
-    expect(partial.body).not.toMatch(/Nothing was sent/);
+    // A planned issue's outcome (its settle step) is told in its own words: some readers may have got
+    // it, so never "did not pass the send gate" or "Nothing was sent".
+    const outcome = TRIGGER_REGISTRY.newsletter_proof_blocked.build({ sendId: 'send-7', subject: 'x', errors: ['Did not go out: its send failed after 40 of 85 readers got it'], outcome: true });
+    expect(outcome.body).toBe('"x": Did not go out: its send failed after 40 of 85 readers got it.');
     expect(TRIGGER_REGISTRY.newsletter_send_not_dispatched).toBeUndefined();
     expect(TRIGGER_REGISTRY.pest_insider_draft).toBeUndefined();
     for (const type of Object.keys(TRIGGER_REGISTRY).filter((t) => t.startsWith('newsletter_'))) {

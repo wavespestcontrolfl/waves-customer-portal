@@ -44,9 +44,13 @@ jest.mock('../services/newsletter-event-selection', () => ({
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: mockTrigger,
 }));
-// The inbox sync (the send-time HOLD check reads the inbox through now with it).
-const mockSyncEmails = jest.fn(async () => ({ newEmails: 0 }));
-jest.mock('../services/email/email-sync', () => ({ syncEmails: (...args) => mockSyncEmails(...args) }));
+// The mailbox itself: the send-time HOLD check searches it for the FYI copy's token.
+const mockListAllMessages = jest.fn(async () => ({ messages: [], truncated: false, nextPageToken: null }));
+const mockGetMessage = jest.fn();
+jest.mock('../services/email/gmail-client', () => ({
+  listAllMessages: (...args) => mockListAllMessages(...args),
+  getMessage: (...args) => mockGetMessage(...args),
+}));
 jest.mock('../services/email-template', () => ({
   wrapNewsletter: ({ body }) => `<wrapped>${body}</wrapped>`,
   bodyIsDarkAware: () => true,
@@ -69,7 +73,6 @@ const {
   sendNewsletterProof,
   maybeHandleProofApproval,
   approvalSenders,
-  inboxReadThrough,
   holdReplyOnRecord,
 } = require('../services/newsletter-proof');
 
@@ -122,7 +125,11 @@ function wireDb({ sends, subscribers, calendar, issues } = {}) {
     return subsChain;
   });
   // A transaction reaches the same tables; a throw inside it rejects, as knex's does.
-  db.transaction = jest.fn(async (work) => work((table) => db(table)));
+  db.transaction = jest.fn(async (work) => {
+    const trx = (table) => db(table);
+    trx.raw = (sql, bindings) => ({ sql, bindings });
+    return work(trx);
+  });
   return { sendsChain, subsChain, calendarChain, issuesChain };
 }
 
@@ -855,11 +862,14 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     ...PROOFED_DRAFT, newsletter_type: 'pest-insider-monthly', status: 'scheduled',
     scheduled_for: ISSUE_SEND_AT, proof_approved_at: PROOF_STAMP, proof_approval_email_id: null,
   };
+  // The owner's reply from the synced mailbox itself: Gmail labels it SENT, and it reached this inbox.
   const HOLD = {
     id: 'email-3',
     subject: 'Re: FYI: [PROOF-ab12cd34] Native termites can swarm in winter',
     from_address: 'contact@wavespestcontrol.com',
     body_text: 'hold',
+    label_ids: ['SENT', 'INBOX'],
+    authentication_results: null,
   };
 
   beforeEach(() => { process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true'; });
@@ -875,6 +885,10 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(queue).toEqual(expect.objectContaining({ status: 'scheduled', scheduled_for: ISSUE_SEND_AT, proof_approval_email_id: null }));
     expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted']);
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    // The address the copy went to is recorded with the row: it may HOLD the issue.
+    expect(issuesChain.update).toHaveBeenCalledWith({
+      diagnostics: { sql: "coalesce(diagnostics, '{}'::jsonb) || ?::jsonb", bindings: [JSON.stringify({ fyiTo: 'contact@wavespestcontrol.com' })] },
+    });
     // The send and its issue row are queued in one transaction.
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(calendarChain.update).not.toHaveBeenCalled();
@@ -956,6 +970,7 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(await sendNewsletterProof('send-1')).toEqual(expect.objectContaining({ sent: true, queued: true }));
     expect(mockSendOne.mock.calls[0][0].to).toBe('proofs@wavespestcontrol.com');
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    expect(issuesChain.update).toHaveBeenCalledWith({ diagnostics: expect.objectContaining({ bindings: [JSON.stringify({ fyiTo: 'proofs@wavespestcontrol.com' })] }) });
   });
 
   test('HOLD before its queueing landed holds the planned row, and a send queued in between goes back to draft', async () => {
@@ -1006,6 +1021,31 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     }));
   });
 
+  test('a HOLD whose sender Gmail cannot verify (an approver address typed into a From line) holds nothing, and the owner is told once per send', async () => {
+    const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
+    expect(await maybeHandleProofApproval({ ...HOLD, label_ids: ['INBOX'], authentication_results: null })).toBe(true);
+
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(issuesChain.update).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', {
+      sendId: 'send-1',
+      subject: PI_QUEUED.subject,
+      errors: ['A HOLD reply from co***@wavespestcontrol.com was ignored: Gmail could not verify that this address sent it, so this issue still sends. If you sent it, reply HOLD from the inbox the FYI copy reached, or press Cancel schedule in Newsletter → History'],
+      outcome: true,
+    }, { dedupeKey: 'pest-insider-unverified-hold:send-1' });
+  });
+
+  test("a HOLD from an approver's own mail server, which Gmail authenticated for its domain, holds the queued issue", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
+    expect(await maybeHandleProofApproval({
+      ...HOLD, from_address: 'owner@example.com', label_ids: ['INBOX'],
+      authentication_results: 'mx.google.com; dkim=pass header.i=@example.com header.s=s1 header.b=abc',
+    })).toBe(true);
+    expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
+  });
+
   test('HOLD holds the queued issue and its planned row, in one transaction', async () => {
     const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_QUEUED } });
     expect(await maybeHandleProofApproval(HOLD)).toBe(true);
@@ -1023,68 +1063,83 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     from_email: 'newsletter@news.wavespestcontrol.com',
   };
   const FYI_SUBJECT = 'FYI: [PROOF-ab12cd34] Native termites can swarm in winter';
-  const reply = (fields) => ({ from_address: 'contact@wavespestcontrol.com', subject: `Re: ${FYI_SUBJECT}`, body_text: 'hold', body_html: null, ...fields });
+  // The owner's reply from the synced mailbox itself: Gmail labels it SENT, and it reached this inbox.
+  const reply = (fields) => ({
+    from_address: 'contact@wavespestcontrol.com', subject: `Re: ${FYI_SUBJECT}`, body_text: 'hold', body_html: null,
+    label_ids: ['SENT', 'INBOX'], authentication_results: null, ...fields,
+  });
+  // A reply that arrived from another mail server, with Gmail's own verdict on it.
+  const received = (from, authentication_results, fields = {}) => reply({ from_address: from, label_ids: ['INBOX'], authentication_results, ...fields });
+  const signedBy = (domain) => `mx.google.com; dkim=pass header.i=@${domain} header.s=s1 header.b=abc; spf=pass smtp.mailfrom=bounce@${domain}`;
+  const SINCE = new Date('2026-08-05T10:05:00Z');
 
-  function wireInbox({ state, replies = [] } = {}) {
-    const emails = { where: jest.fn(() => emails), whereRaw: jest.fn(() => emails), select: jest.fn(async () => replies) };
-    const order = [];
-    mockSyncEmails.mockImplementation(async () => { order.push('sync'); return { newEmails: 0 }; });
-    // The state as the last sync run left it, read after the runs: a function of the read time.
-    const syncState = { first: jest.fn(async () => { order.push('state'); return typeof state === 'function' ? state() : state; }) };
-    db.mockImplementation((table) => (table === 'emails' ? emails : syncState));
-    return { emails, syncState, order };
+  // Two witnesses: the stored inbox (emails) and the mailbox itself (a Gmail search, then each message).
+  function wireMailbox({ stored = [], searched = [], truncated = false } = {}) {
+    const emails = { where: jest.fn(() => emails), select: jest.fn(async () => stored) };
+    db.mockImplementation(() => emails);
+    mockListAllMessages.mockImplementation(async () => ({ messages: searched.map((_, i) => ({ id: `gm-${i}` })), truncated, nextPageToken: null }));
+    mockGetMessage.mockImplementation(async (id) => searched[Number(id.slice(3))]);
+    return { emails };
   }
 
-  test('it reads the inbox through now: it waits for a sync run in flight, runs one more, then needs that run to have finished clean', async () => {
-    // The run finished after the read began: it wrote last_sync_at then, with no errors.
-    const { order } = wireInbox({ state: () => ({ last_sync_at: new Date(), errors: null }) });
-    expect(await inboxReadThrough()).toBe(true);
-    // A run already in flight may have listed the mailbox before the HOLD deadline, so a second run follows it.
-    expect(order).toEqual(['sync', 'sync', 'state']);
-  });
-
-  test.each([
-    ['no run finished after the read began (Gmail not connected: the state is older)', () => ({ last_sync_at: new Date(Date.now() - 60 * 1000), errors: null })],
-    ['the run did not finish clean (a message failed, so the sync holds its cursor)', () => ({ last_sync_at: new Date(), errors: 'incremental sync incomplete: 1 message(s) failed' })],
-    ['there is no sync state at all', () => undefined],
-  ])('the inbox does not count as read when %s', async (_label, state) => {
-    wireInbox({ state });
-    expect(await inboxReadThrough()).toBe(false);
-  });
-
-  test('a sync run that throws makes the read throw, so the send waits for the next tick', async () => {
-    wireInbox({ state: () => ({ last_sync_at: new Date(), errors: null }) });
-    mockSyncEmails.mockImplementationOnce(async () => { throw new Error('gmail 500'); });
-    await expect(inboxReadThrough()).rejects.toThrow('gmail 500');
-  });
-
-  test('a Gmail draft or a copy only in Sent never counts: the read leaves out mail the sync stored as outbound_skipped', async () => {
-    // A reply this mailbox sent to itself reached the inbox (SENT and INBOX), so the sync stores it as inbound and it counts.
-    const { emails } = wireInbox({ replies: [reply({ body_text: 'HOLD' })] });
-    expect(await holdReplyOnRecord(SEND)).toBe(true);
-    expect(emails.whereRaw).toHaveBeenCalledWith("coalesce(auto_action, '') <> 'outbound_skipped'");
-  });
-
-  test('a HOLD reply from any sender stops the issue, also one outside NEWSLETTER_PROOF_APPROVERS', async () => {
-    const { emails } = wireInbox({ replies: [reply({ from_address: 'adam@example.com', body_text: 'HOLD please' })] });
+  test('a HOLD the inbox sync stored stops the issue, read from mail since about the FYI copy, with no mailbox search', async () => {
+    const { emails } = wireMailbox({ stored: [reply({ body_text: 'HOLD' })] });
     expect(await holdReplyOnRecord(SEND)).toBe(true);
     expect(emails.where).toHaveBeenCalledWith('subject', 'ilike', '%[PROOF-ab12cd34]%');
-    // Only mail since about the FYI copy is read.
-    expect(emails.where).toHaveBeenCalledWith('received_at', '>=', new Date('2026-08-05T10:05:00Z'));
+    expect(emails.where).toHaveBeenCalledWith('received_at', '>=', SINCE);
+    expect(mockListAllMessages).not.toHaveBeenCalled();
+  });
+
+  test('a HOLD the inbox sync never stored is found in the mailbox itself: a Gmail search for the token since the FYI copy', async () => {
+    wireMailbox({ searched: [received('newsletter@news.wavespestcontrol.com', null, { subject: FYI_SUBJECT }), reply({ body_text: 'HOLD please' })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+    expect(mockListAllMessages).toHaveBeenCalledWith(`subject:"PROOF-ab12cd34" after:${SINCE.getTime() / 1000}`, 50);
+    expect(mockGetMessage.mock.calls.map(([id]) => id)).toEqual(['gm-0', 'gm-1']);
   });
 
   test.each([
-    ['the FYI copy itself, synced back in (it quotes the HOLD line)', { from_address: 'Newsletter@News.WavesPestControl.com', subject: FYI_SUBJECT, body_text: 'To skip this issue, reply HOLD by 6:30 AM ET that day' }],
-    ['an APPROVED reply that only quotes the HOLD line', { body_text: 'approved\n\nOn Wed, Aug 5 wrote:\n> To skip this issue, reply HOLD by 6:30 AM ET that day' }],
-    ['a reply whose subject carries a different token that only starts the same', { subject: 'Re: FYI: [PROOF-ab12cd34x] other', body_text: 'hold' }],
-  ])('not a HOLD: %s', async (_label, fields) => {
-    wireInbox({ replies: [reply(fields)] });
+    ['Gmail is not connected', () => mockListAllMessages.mockImplementation(async () => { throw new Error('Gmail not connected. Please authorize via OAuth.'); }), 'Gmail not connected'],
+    ['more messages carry the token than the search reads', () => mockListAllMessages.mockImplementation(async () => ({ messages: [], truncated: true })), 'more than 50 messages'],
+  ])('a mailbox it cannot read in full throws, so the send waits for the next tick: %s', async (_label, fail, message) => {
+    wireMailbox();
+    fail();
+    await expect(holdReplyOnRecord(SEND)).rejects.toThrow(message);
+  });
+
+  test("a HOLD from an approver counts when Gmail authenticated it for the approver's domain", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    wireMailbox({ searched: [received('Owner@Example.com', signedBy('example.com'))] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+  });
+
+  test('the address its FYI copy went to may HOLD it, as recorded with the issue, also after the proof address changed', async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    process.env.NEWSLETTER_PROOF_EMAIL = 'office@wavespestcontrol.com';
+    const issue = { diagnostics: { fyiTo: 'proofs@wavespestcontrol.com' } };
+    wireMailbox({ searched: [received('proofs@wavespestcontrol.com', signedBy('wavespestcontrol.com'))] });
+    expect(await holdReplyOnRecord(SEND, issue)).toBe(true);
+    // With no recorded address, the current proof address is the one that may HOLD.
+    expect(await holdReplyOnRecord(SEND, null)).toBe(false);
+  });
+
+  test.each([
+    ['an approver address typed into the From line of mail Gmail did not authenticate', received('contact@wavespestcontrol.com', null)],
+    ["an approver address on mail Gmail authenticated for another domain", received('contact@wavespestcontrol.com', signedBy('evil.example'))],
+    ['someone the FYI copy was forwarded to (neither an approver nor the FYI address)', received('neighbor@example.com', signedBy('example.com'))],
+    ['a Gmail draft (never sent)', reply({ label_ids: ['DRAFT'] })],
+    ['a copy this mailbox sent elsewhere, such as a forward (it never reached this inbox)', reply({ label_ids: ['SENT'] })],
+    ['the FYI copy itself (it quotes the HOLD line, and the newsletter address cannot HOLD)', received('newsletter@news.wavespestcontrol.com', signedBy('news.wavespestcontrol.com'), { subject: FYI_SUBJECT, body_text: 'To skip this issue, reply HOLD by 6:30 AM ET that day' })],
+    ['an APPROVED reply that only quotes the HOLD line', reply({ body_text: 'approved\n\nOn Wed, Aug 5 wrote:\n> To skip this issue, reply HOLD by 6:30 AM ET that day' })],
+    ['a reply whose subject carries a different token that only starts the same', reply({ subject: 'Re: FYI: [PROOF-ab12cd34x] other' })],
+  ])('not a HOLD, in either witness: %s', async (_label, email) => {
+    wireMailbox({ stored: [email], searched: [email] });
     expect(await holdReplyOnRecord(SEND)).toBe(false);
   });
 
   test('a send with no FYI token reads nothing', async () => {
-    const { emails } = wireInbox();
+    const { emails } = wireMailbox();
     expect(await holdReplyOnRecord({ ...SEND, proof_token: null })).toBe(false);
     expect(emails.select).not.toHaveBeenCalled();
+    expect(mockListAllMessages).not.toHaveBeenCalled();
   });
 });
