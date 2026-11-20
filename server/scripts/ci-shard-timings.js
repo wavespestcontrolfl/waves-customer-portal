@@ -11,8 +11,12 @@
  * `server-db (N)` jobs of a few green main runs, then run this script on them:
  *
  *   gh run view <run-id> --log --job <job-id> > /tmp/ci-logs/<job-id>.log
- *   node server/scripts/ci-shard-timings.js /tmp/ci-logs/*.log \
- *     > server/tests/helpers/ci-shard-timings.json
+ *   node server/scripts/ci-shard-timings.js \
+ *     --out server/tests/helpers/ci-shard-timings.json /tmp/ci-logs/*.log
+ *
+ * The script refuses to write when the logs give no times for one of the two
+ * jobs (a missing job, or a log format it does not recognise), so a partial
+ * refresh can never replace the measured times with defaults.
  *
  * A file's time is the median over the logs that ran it. Jest prints a file's
  * time only when it is slow ("PASS tests/x.test.js (12.3 s)"); in a serial
@@ -62,9 +66,12 @@ function timingsFromLog(text) {
   return found;
 }
 
-function main(paths) {
-  if (!paths.length) {
-    process.stderr.write('usage: node server/scripts/ci-shard-timings.js <job log>...\n');
+function main(args) {
+  const outIndex = args.indexOf('--out');
+  const outPath = outIndex >= 0 ? args[outIndex + 1] : undefined;
+  const paths = args.filter((_, i) => i !== outIndex && i !== outIndex + 1);
+  if (!outPath || !paths.length) {
+    process.stderr.write('usage: node server/scripts/ci-shard-timings.js --out <timings.json> <job log>...\n');
     process.exit(2);
   }
   const samples = { unit: new Map(), db: new Map() };
@@ -77,16 +84,23 @@ function main(paths) {
       }
     }
   }
+  const missing = Object.keys(samples).filter((section) => !samples[section].size);
+  if (missing.length) {
+    process.stderr.write(`No ${missing.join(' or ')} times in these logs; ${outPath} left unchanged.\n`);
+    process.exit(1);
+  }
   const round = (seconds) => Math.round(seconds * 10) / 10;
   const out = {};
   for (const [section, bySection] of Object.entries(samples)) {
     const files = {};
     for (const file of [...bySection.keys()].sort()) files[file] = round(median(bySection.get(file)));
     const measured = Object.values(files);
-    const defaultSeconds = section === 'unit' || !measured.length ? UNIT_DEFAULT_SECONDS : round(median(measured));
+    const defaultSeconds = section === 'unit' ? UNIT_DEFAULT_SECONDS : round(median(measured));
     out[section] = { defaultSeconds, files };
   }
-  process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+  fs.writeFileSync(`${outPath}.tmp`, `${JSON.stringify(out, null, 2)}\n`);
+  fs.renameSync(`${outPath}.tmp`, outPath);
+  process.stdout.write(`${outPath}: ${Object.keys(out.unit.files).length} unit and ${Object.keys(out.db.files).length} DB file times\n`);
 }
 
 if (require.main === module) main(process.argv.slice(2));
