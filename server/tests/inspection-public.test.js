@@ -63,13 +63,9 @@ jest.mock('../services/scheduling/parse-when', () => ({
 // The commit's far-south truck re-check (owner rule B per truck): its own behavior is
 // estimate-slots-zone-day-funnel.test.js's; here only what the commit hands it.
 const mockTruckMayTakeDate = jest.fn(async () => true);
-// The two far-south gates the commit's same-pin re-check reads (feature-gates is mocked down to two names here).
-const mockFarSouthGates = { perTruck: false, funnel: false };
 jest.mock('../services/scheduling/zone-day-funnel', () => ({
   ...jest.requireActual('../services/scheduling/zone-day-funnel'),
   truckMayTakeDate: (...args) => mockTruckMayTakeDate(...args),
-  perTruckLive: () => mockFarSouthGates.perTruck,
-  funnelOn: () => mockFarSouthGates.funnel,
 }));
 
 const mockBookingConfig = jest.fn(async () => ({}));
@@ -256,8 +252,6 @@ afterEach(() => {
   insertCalls.length = 0;
   gateState.live = true;
   gateState.reviewLive = false;
-  mockFarSouthGates.perTruck = false;
-  mockFarSouthGates.funnel = false;
   mockLoserBlockers.mockClear();
   mockLoserBlockers.mockImplementation(async () => []);
   mockGeocode.mockClear();
@@ -1962,51 +1956,35 @@ describe('POST /:token commit', () => {
       expect(bookingArgs.callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
     });
 
-    // Owner rule B per truck (pre-push P1s on e81d7ed7c0, 3e6fd14320 and 2b747741a9): at the SAME pin, a matched profile
-    // with another city on file books with the profile's own address for its zone. The visit stores no address of its
-    // own, so a later stop read (zone-day-funnel.js zoneStopDays) reads it by the profile's city when it has no zone
-    // stamp; the zone is checked and stamped, and a 409's fresh times built, from that same city, never the typed one (a
-    // typed city no zone lists would let the check pass a visit later read as south). The slot is not built again at
-    // the same pin only per truck (both far-south gates on; pre-push P1 on a921f81680): that city's zone can leave the
-    // hour to another truck, and the re-check books it. With one truck a one-day build funnels to itself, so a second
-    // build would only repeat the first. A profile with no city on file keeps the typed address (its zone stamp alone
-    // decides then).
-    const WEST = { zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton' };
-    const TYPED = { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' };
-    test.each([
-      ['another city on file, per truck', 'West Bradenton', { perTruck: true, funnel: true }, WEST, ['Bradenton', 'West Bradenton', 'West Bradenton'], 'tech-2'],
-      ['another city on file, one truck', 'West Bradenton', { perTruck: false, funnel: true }, WEST, ['Bradenton', 'West Bradenton'], 'tech-1'],
-      ['another city on file, funnel off', 'West Bradenton', { perTruck: true, funnel: false }, WEST, ['Bradenton', 'West Bradenton'], 'tech-1'],
-      ['no city on file, per truck', null, { perTruck: true, funnel: true }, TYPED, ['Bradenton', 'Bradenton'], 'tech-1'],
-    ])('a matched profile at the same pin with %s: the booking and a 409\'s fresh times use that address', async (_label, profileCity, gates, expected, builtCities, bookedTech) => {
-      Object.assign(mockFarSouthGates, gates);
+    // Owner rule B per truck (pre-push P1s on e81d7ed7c0, 3e6fd14320 and 3b494d3581): at the SAME pin, a matched
+    // profile with another city on file books with the typed address, as the list read it. Its zone address, the
+    // anti-forgery build and a 409's fresh times all read the typed city, so a refreshed time is one the next commit's
+    // own check admits, and no second build runs. createSelfBooking takes its own customer row's city only when that
+    // address resolves to no zone (booking-confirm-signed-offer.test.js).
+    test('a matched profile at the same pin with another city on file: the booking and a 409\'s fresh times use the typed address', async () => {
       firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       const existingCustomer = {
         id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
-        address_line1: '123 Palm Ave', city: profileCity, state: 'FL', zip: '34209', phone: '9415550101',
+        address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
         latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
       };
       seedPhoneHousehold(existingCustomer);
       listResults.scheduled_services = [];
-      const nineAm = (tech) => ({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: tech }] }] });
-      mockBuildAvailability
-        .mockResolvedValueOnce(nineAm('tech-1')) // the anti-forgery build, at the typed address
-        .mockResolvedValueOnce(nineAm('tech-2')); // the same-pin re-check (per truck), else the 409's fresh times
+      mockBuildAvailability.mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
       mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
 
       const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
 
       expect(res.statusCode).toBe(409);
       expect(res.body.code).toBe('SLOT_TAKEN');
-      // The anti-forgery build reads the typed city, as the list did; the re-check (per truck only) and the 409's fresh
-      // times read the booking's.
-      expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(builtCities);
-      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject(TYPED);
-      expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject(expected);
-      expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe(bookedTech);
-      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: expected.zoneFunnelAddress, city: expected.zoneFunnelCity });
+      const typed = { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' };
+      // The anti-forgery build, then the 409's fresh times: both at the typed address.
+      expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(['Bradenton', 'Bradenton']);
+      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(typed);
+      expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe('tech-1');
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: typed.zoneFunnelAddress, city: 'Bradenton' });
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its

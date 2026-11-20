@@ -3470,12 +3470,18 @@ async function createSelfBooking(payload = {}) {
     // gets that zone: a city no zone lists ('North Venice') takes the zone whose
     // city its name contains, as its list did. Only with the far-south funnel on
     // (GATE_SOUTH_ZONE_DAY_FUNNEL): off, no list resolved a zone, and the
-    // customer's city decides as before.
-    const zone = callbackVisit?.zoneAddress && funnelOn()
+    // customer's city decides as before. The customer's city also decides when
+    // that address resolves to no zone: a visit with no zone stamp is read later
+    // by its customer's city (zone-day-funnel.js zoneStopDays), so the far-south
+    // check and the stamp read that city, from this booking's own customer row,
+    // which the fence's fingerprint re-checks (owner rule B, pre-push P1s on
+    // 3e6fd14320 and 3b494d3581).
+    const addressZone = callbackVisit?.zoneAddress && funnelOn()
       ? await resolveEstimateZone(db, callbackVisit.zoneAddress)
-      : (await db('service_zones').select('*')).find(z => (z.cities || []).some(c =>
-        c.toLowerCase() === (customer.city || '').toLowerCase()
-      )) || null;
+      : null;
+    const zone = addressZone || (await db('service_zones').select('*')).find(z => (z.cities || []).some(c =>
+      c.toLowerCase() === (customer.city || '').toLowerCase()
+    ));
 
     // ALLOWLIST, never echo: the persisted/displayed label derives from the
     // slot_sig-VERIFIED serviceKey first, then from allowlist-matching the

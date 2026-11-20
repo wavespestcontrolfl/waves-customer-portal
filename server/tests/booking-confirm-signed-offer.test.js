@@ -828,9 +828,10 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     });
 
     // callbackVisit.zoneAddress (the lead link), with the far-south funnel on (GATE_SOUTH_ZONE_DAY_FUNNEL): the zone
-    // resolves from the booking address as the link's list resolved it, never from the customer's city: its city alone
-    // decides (the zone that lists it, else the zone whose city its name contains), so the guard checks, and the visit
-    // is stamped with, the zone the list offered under.
+    // resolves from the booking address as the link's list resolved it: its city alone decides (the zone that lists it,
+    // else the zone whose city its name contains), so the guard checks, and the visit is stamped with, the zone the list
+    // offered under. An address that resolves to no zone takes the customer's city, as a visit with no zone stamp is
+    // read later (pre-push P1s on 3e6fd14320 and 3b494d3581); this customer's city is Sarasota's.
     const { gates } = require('../config/feature-gates');
     async function bookWithZoneAddress(zoneAddress, funnel) {
       const VENICE_ZONE = { id: 'zone-2', zone_name: 'Venice / North Port', cities: ['Venice', 'North Port'] };
@@ -853,7 +854,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     test.each([
       ['a city no zone lists: the zone city its name contains', NORTH_VENICE, 'venice'],
       ['a listed city decides over the text', { address: '100 Venice Ave, Osprey, FL, 34229', city: 'Osprey' }, 'sarasota'],
-      ['a city no zone lists on a street named for one: no zone', { address: '100 Venice Ave, Wimauma, FL, 33598', city: 'Wimauma' }, null],
+      ['a city no zone lists on a street named for one: the customer\'s city decides', { address: '100 Venice Ave, Wimauma, FL, 33598', city: 'Wimauma' }, 'sarasota'],
     ])('zoneAddress, %s', async (_label, zoneAddress, stamped) => {
       const { slotGuard, VENICE_ZONE } = await bookWithZoneAddress(zoneAddress, true);
       const zone = { venice: VENICE_ZONE, sarasota: CITY_ZONE }[stamped] || null;

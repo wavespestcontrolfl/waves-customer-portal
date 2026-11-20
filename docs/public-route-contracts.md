@@ -7613,13 +7613,13 @@ own city (the zone that lists it, else the zone whose city its name contains;
 the address text only when there is no city), and with the far-south funnel on
 the booking resolves its zone from the same address the same way
 (`callbackVisit.zoneAddress`; off, from the customer's city as before), so its
-stamp and its check match the list. A matched profile with another city on
-file, at its stored location or at the same pin, books with its own address
-for its zone: a visit with no zone stamp is read later by its customer's city.
-The slot is built again with that address at the stored location, and at the
-same pin only per truck (both far-south gates on), where that city's zone can
-leave the hour to another truck; the booking takes the truck that build finds.
-A refused booking's `SLOT_TAKEN` refresh uses the address that booking checked. No field, status, error code, limiter or header
+stamp and its check match the list. An address that resolves to no zone takes
+the customer's city, as a visit with no zone stamp is read later by its
+customer's city. A matched profile at another stored location books with its
+own address (the slot is checked again with it); at the same pin the booking
+keeps the typed address, as the list read it, also when the profile has
+another city on file. A refused booking's `SLOT_TAKEN` refresh uses the address
+that booking checked. No field, status, error code, limiter or header
 changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
