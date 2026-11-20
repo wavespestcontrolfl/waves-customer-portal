@@ -733,6 +733,29 @@ jest.setTimeout(30000);
       expect(metadata.missed_call_settled_at).toEqual(expect.any(String));
     });
 
+    // The shadow read is the evidence for the gate flip, so a later pass of the
+    // call replaces an earlier pass's shadow with its own result (pre-push audit r26).
+    test('gate off: a pass whose delivery failed leaves no repeat shadow on the call a later pass finds no repeat on (pre-push audit r26)', async () => {
+      isEnabled.mockImplementation((name) => name === 'missedCallUnknownCallers');
+      await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
+      const row = judged();
+      await database('call_log').insert(row);
+      // Pass 1 stamps the shadow, then its delivery fails before any bell row.
+      triggerNotification.mockImplementationOnce(async () => { throw new Error('push service down'); });
+      await ringMissedCallIfUnanswered(row.twilio_call_sid);
+      let { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_repeat_shadow).toBe(true);
+      expect(metadata.missed_call_notified_at).toBeUndefined();
+      // The caller texts before the next pass, which finds no repeat.
+      await inbox(CALLER, { channel: 'sms', direction: 'inbound', body: 'who is this' });
+      reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      ({ metadata } = await stored(row));
+      expect(metadata.missed_call_spam_repeat_shadow).toBeUndefined();
+      expect(metadata.missed_call_spam_wave).toBeUndefined();
+      expect(metadata.missed_call_settled_at).toEqual(expect.any(String));
+    });
+
     test('gate off: the call rings as before, titled unknown caller, stamped for the shadow read', async () => {
       isEnabled.mockImplementation((name) => name === 'missedCallUnknownCallers');
       await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
@@ -768,30 +791,38 @@ jest.setTimeout(30000);
 
     // The absence case reads every footprint table, so the largest keep an
     // index of the number the record read reaches by a lookup (pre-push audit
-    // r23, r24; migration 20261120020000, as in
+    // r23, r24, r26; migration 20261120040000 replaces 20261120020000's, as in
     // hot-sweep-lookup-indexes-postgres). Synthetic rows never outweigh a full
     // scan on real costs, so the plan runs with sequential scans off and asks
     // for an index lookup (an Index Cond): a drift between FOOTPRINT_PHONE_SQL
     // and an index expression orphans the index.
-    test('the record read reaches the number index of each large footprint table by a lookup (pre-push audit r23, r24)', async () => {
-      const indexes = require('../models/migrations/20261120020000_footprint_phone_indexes');
-      const NAMES = ['customers_phone_footprint_index', 'customers_secondary_phone_footprint_index', 'customers_service_contact_phone_footprint_index',
-        'customers_service_contact2_phone_footprint_index', 'customers_service_contact3_phone_footprint_index', 'customer_accounts_phone_footprint_index',
-        'property_preferences_hoa_phone_footprint_index', 'estimates_customer_phone_footprint_index', 'estimates_customer_phone_typed_footprint_index',
-        'leads_phone_footprint_index'];
-      const present = async () => (await database.raw('SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY(?) ', [NAMES])).rows.map((r) => r.indexname).sort();
+    test('the record read reaches the number index of each large footprint table by a lookup (pre-push audit r23, r24, r26)', async () => {
+      const earlier = require('../models/migrations/20261120020000_footprint_phone_indexes');
+      const indexes = require('../models/migrations/20261120040000_footprint_phone_ext_indexes');
+      const COLUMNS = ['customers_phone', 'customers_secondary_phone', 'customers_service_contact_phone', 'customers_service_contact2_phone',
+        'customers_service_contact3_phone', 'customer_accounts_phone', 'property_preferences_hoa_phone', 'estimates_customer_phone',
+        'estimates_customer_phone_typed', 'leads_phone'];
+      const EARLIER = COLUMNS.map((name) => `${name}_footprint_index`);
+      const NAMES = COLUMNS.map((name) => `${name}_footprint_ext_index`);
+      const present = async () => (await database.raw('SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY(?) ', [[...EARLIER, ...NAMES]])).rows.map((r) => r.indexname).sort();
       const lookupsIn = (node, name) => [
         ...(node['Index Name'] === name && node['Index Cond'] ? [node['Index Cond']] : []),
         ...(node.Plans || []).flatMap((child) => lookupsIn(child, name)),
       ];
       try {
-        // up() twice and down() twice are safe.
+        // In migration order the later one replaces the earlier indexes; up()
+        // twice and down() twice are safe, and down() restores the earlier set.
+        await earlier.up(database);
+        expect(await present()).toEqual([...EARLIER].sort());
         await indexes.up(database);
         await indexes.up(database);
         expect(await present()).toEqual([...NAMES].sort());
         await indexes.down(database);
         await indexes.down(database);
+        expect(await present()).toEqual([...EARLIER].sort());
+        await earlier.down(database);
         expect(await present()).toEqual([]);
+        await earlier.up(database);
         await indexes.up(database);
         await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
         const row = judged();
@@ -819,11 +850,13 @@ jest.setTimeout(30000);
         }
       } finally {
         await indexes.down(database);
+        await earlier.down(database);
       }
     });
 
     // A free-text phone field can hold the number with an extension; the
-    // footprint reads the number before it (pre-push audit r24).
+    // footprint reads the number before it (pre-push audit r24, r26), and a
+    // label before the number never takes its digits.
     test.each([
       ['an HOA phone', 'property_preferences', 'hoa_phone', '(727) 555-0611 ext 42'],
       ['an HOA phone', 'property_preferences', 'hoa_phone', '727.555.0611 x42'],
@@ -831,7 +864,12 @@ jest.setTimeout(30000);
       ['an HOA phone', 'property_preferences', 'hoa_phone', '727 555 0611 extension: 7'],
       ['a second customer phone', 'customers', 'secondary_phone', '727-555-0611 Ext. 12'],
       ['an estimate phone', 'estimates', 'customer_phone', '727 555 0611 ext:7'],
-    ])('%s saved with an extension (%s.%s = %s) means it is never a repeat (pre-push audit r24)', async (label, table, column, value) => {
+      ['an HOA phone', 'property_preferences', 'hoa_phone', 'tel:+17275550611;ext=42'],
+      ['an HOA phone', 'property_preferences', 'hoa_phone', '727-555-0611 extn. 42'],
+      ['an HOA phone', 'property_preferences', 'hoa_phone', '727-555-0611 x 42 (office)'],
+      ['an HOA phone', 'property_preferences', 'hoa_phone', 'Fax: 7275550611'],
+      ['a second customer phone', 'customers', 'secondary_phone', '727-555-0611 ext-42'],
+    ])('%s saved with an extension or a label (%s.%s = %s) means it is never a repeat (pre-push audit r24, r26)', async (label, table, column, value) => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);

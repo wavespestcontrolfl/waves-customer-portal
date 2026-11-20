@@ -552,9 +552,11 @@ function whereCallOfNumber(qb, table, key) {
 //    days have rows in the same three tables and in no other.
 // A phone column is a text column whose name says phone, mobile or msisdn, or
 // is a plain number, caller, recipient or sender column. It matches by the
-// last 10 digits of its number once a conventional extension (ext, extension,
-// x or #, then digits, at the end) is removed (FOOTPRINT_PHONE_SQL; pre-push
-// audit r24): the form migration 20261120020000 indexes on the largest tables,
+// last 10 digits of its number once a conventional extension (ext, extn,
+// extension, x or #, an optional :, =, . or -, then 1 to 6 digits and no
+// other digit to the end, as in `x 42 (office)` or `tel:+17275550611;ext=42`)
+// is removed (FOOTPRINT_PHONE_SQL; pre-push audit r24, r26): the form
+// migration 20261120040000 indexes on the largest tables,
 // since the absence case reads every table and those grow with customers
 // (pre-push audit r23). Every value whose phone key is the number's ends in
 // its 10 digits, so this finds all of them, and one saved with an extension
@@ -586,10 +588,11 @@ const FOOTPRINT_ALLOWED_SQL = {
 };
 const quoteIdent = (name) => `"${String(name).replace(/"/g, '""')}"`;
 // The number of a phone column: its extension removed, then its last 10
-// digits, character for character as migration 20261120020000's indexes
-// build it, or the planner cannot use them. Knex reads ? as a binding, so the
-// pattern writes {0,1}.
-const FOOTPRINT_PHONE_SQL = (column) => `right(regexp_replace(regexp_replace(${column}, '\\s*(ext(ension){0,1}\\.{0,1}|x|#)\\s*:{0,1}\\s*\\d+\\s*$', '', 'i'), '\\D', '', 'g'), 10)`;
+// digits, character for character as migration 20261120040000's indexes
+// build it, or the planner cannot use them. An extension has at most 6
+// digits, so `Fax: 7275550611` or `x7275550611` keeps its number. Knex reads
+// ? as a binding, so the pattern writes {0,1}.
+const FOOTPRINT_PHONE_SQL = (column) => `right(regexp_replace(regexp_replace(${column}, '\\s*(ext(ension|n){0,1}\\.{0,1}|x|#)\\s*[:=.-]{0,1}\\s*\\d{1,6}\\D*$', '', 'i'), '\\D', '', 'g'), 10)`;
 // The footprint tables and their phone columns, from pg_catalog (a domain
 // counts as its base type, as information_schema reports it). A partitioned
 // table is read once, through its parent.
@@ -929,6 +932,8 @@ const QUIET_RULES = [
   { flag: 'repeat', gate: 'missedCallSpamRepeat', quiet: 'repeat_quiet', shadow: 'missed_call_spam_repeat_shadow' },
   { flag: 'screen', gate: 'callScreenExchangeHistory', quiet: 'screen_quiet', shadow: 'missed_call_screen_quiet_shadow' },
 ];
+// The stamps one pass writes: the quiet marker and each gated rule's shadow.
+const PASS_STAMP_KEYS = ['missed_call_spam_wave', ...QUIET_RULES.filter((rule) => rule.shadow).map((rule) => rule.shadow)];
 
 async function quietRobodialerPush(row, fenced) {
   const flags = {
@@ -947,12 +952,15 @@ async function quietRobodialerPush(row, fenced) {
     else quietAs = quietAs || rule.quiet;
   }
   if (quietAs) stamps.missed_call_spam_wave = quietAs;
-  // This pass's decision replaces one an earlier pass of the call left (its
-  // delivery failed, or it died before its bell), so the call's marker is the
-  // latest decision (pre-push audit r16). The re-push reads each bell's own
-  // decision (payload.pushQuieted), so a failed clear changes no push (r17).
-  await fenced().whereRaw("metadata->>'missed_call_spam_wave' IS NOT NULL")
-    .update({ metadata: db.raw("metadata - 'missed_call_spam_wave'") }).catch(() => 0);
+  // This pass's result replaces the stamps an earlier pass of the call left
+  // (its delivery failed, or it died before its bell): the quiet marker, so
+  // the call carries the latest decision (pre-push audit r16), and every
+  // shadow, so a shadow read counts only a call the rule still matched (r26).
+  // The re-push reads each bell's own decision (payload.pushQuieted), so a
+  // failed clear changes no push (r17). jsonb_exists_any is the ?| operator,
+  // which Knex would read as a binding.
+  await fenced().whereRaw('jsonb_exists_any(metadata, ?::text[])', [PASS_STAMP_KEYS])
+    .update({ metadata: db.raw('metadata - ?::text[]', [PASS_STAMP_KEYS]) }).catch(() => 0);
   if (!Object.keys(stamps).length) return false;
   // Quiet only when the marker is durable: the re-push recognises a quiet call by
   // it. A failed or empty stamp write fails open (the push goes as usual). A
