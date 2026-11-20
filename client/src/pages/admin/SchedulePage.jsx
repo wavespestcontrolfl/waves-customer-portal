@@ -18769,6 +18769,8 @@ export function CompletionPanel({
       // A failed request is the same as an unknown answer: clear the verdict (fewer texts); the next submit goes suppressed.
       if (fresh) setReviewLateCloseAskKept(lateCloseAskKeptFrom(fresh));
       else if (lateCloseShown) setReviewLateCloseAskKept(false);
+      // The notice says the review request is off: set the box itself off, so a later preview recovery never turns it back on.
+      if (lateCloseShown && lateCloseAskKeptFrom(fresh) !== true) setRequestReview(false);
       const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, lateCloseShown: lateCloseShown ? true : null, failureNoticed: previewFailureNoticedRef.current, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone: service?.customerPhone }) });
       if (verdict) {
         if (verdict.noticed) previewFailureNoticedRef.current = true;

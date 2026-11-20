@@ -732,6 +732,13 @@ function effectiveReviewAskDecision({ lateCloseReviewKept, packetEffects, standa
   return lateCloseReviewKept === true ? !packetEffects : standardRequestReview;
 }
 
+// The late-close ask is kept only when the pre-read eligibility (which also ran the first-ask rules), the unchanged customer and
+// the locked verdict ALL say so. The verdict is not even asked otherwise. Exported for testability.
+async function lateCloseEligibleAfterPreRead({ preReadEligible, customerMoved, verdict }) {
+  if (preReadEligible !== true || customerMoved !== false) return false;
+  return (await verdict()) === true;
+}
+
 // The first-ask check ran for one customer before the visit row was locked. A locked visit that belongs to another customer
 // (or whose customer cannot be read) voids that choice: no "already reviewed" mark, no kept late-close ask. Exported for testability.
 function firstAskCustomerMoved(checkedCustomerId, lockedVisit) {
@@ -3424,8 +3431,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let firstAskLockCustomerId = null;
     let reviewTimingBody = completionInput.body || {};
     // A backdated closeout that keeps the ask (GATE_REVIEW_LATE_CLOSE_ASK) gets the same first-ask rule as a normal completion.
-    const lateCloseFirstAsk = requestReviewPosted === false && backfill === true && visitOutcome === 'completed'
+    // The pre-read runs for every backdated closeout: the ask is kept only when it AND the locked verdict agree (a failed or
+    // false pre-read leaves the visit quiet, today's backfill behavior).
+    const lateClosePreRead = backfill === true && visitOutcome === 'completed'
       && await lateCloseFirstAskEligible({ backfill, completionInput, database: db });
+    const lateCloseFirstAsk = requestReviewPosted === false && lateClosePreRead === true;
     if (requestReviewPosted === false && visitOutcome === 'completed' && !oneTimeRecapOnly && (backfill !== true || lateCloseFirstAsk)
       && (!reviewSuppression || reviewSuppression === 'invoice_created')
       && customerRecapMode !== require('./reservice-fixed-recap').MODE
@@ -7356,11 +7366,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           // THE verdict (review-visit-day.js lateCloseAskVerdict, also the panel preview's): the locked row against the
           // pre-lock row, a strict profile read, every closeout kind. Anything unknown fails closed.
-          const lateCloseEligible = !firstAskCustomerMoved(firstAskLockCustomerId, lockedSvcRow) && await require('./review-visit-day').lateCloseAskVerdict({
-            isBackfill: isBackfillCompletion, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, recapReviewOnly,
-            isInternalOnlyCompletion, deliverySuppressed: deliveryPosture.suppressCustomerComms,
-            // The wall-clock closeout time, never completionEndedAt: a combined-visit packet's end can be a member's historical end.
-            visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: new Date(),
+          const lateCloseEligible = await lateCloseEligibleAfterPreRead({
+            preReadEligible: lateClosePreRead,
+            customerMoved: firstAskCustomerMoved(firstAskLockCustomerId, lockedSvcRow),
+            verdict: () => require('./review-visit-day').lateCloseAskVerdict({
+              isBackfill: isBackfillCompletion, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, recapReviewOnly,
+              isInternalOnlyCompletion, deliverySuppressed: deliveryPosture.suppressCustomerComms,
+              // The wall-clock closeout time, never completionEndedAt: a combined-visit packet's end can be a member's historical end.
+              visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: new Date(),
+            }),
           });
           // The review choice resolved once, as the initial enrollment reads it (an omitted requestReview is no ask): the one
           // boolean frozen below and restored on a resume. A backdated closeout the commit finds ineligible drops the
@@ -16607,6 +16621,7 @@ module.exports = {
   backfillCompletionPlan,
   lateCloseFirstAskEligible,
   firstAskCustomerMoved,
+  lateCloseEligibleAfterPreRead,
   effectiveReviewAskDecision,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   backfillTimeOnSiteMinutes,

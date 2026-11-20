@@ -321,6 +321,7 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     expect(src).toMatch(/\(reviewTiming === "auto" \|\| !schedulerStateKnown \|\| lateCloseShown\)/);
     expect(src).toMatch(/if \(fresh\) setReviewLateCloseAskKept\(lateCloseAskKeptFrom\(fresh\)\);/);
     expect(src).toMatch(/else if \(lateCloseShown\) setReviewLateCloseAskKept\(false\);/);
+    expect(src).toMatch(/if \(lateCloseShown && lateCloseAskKeptFrom\(fresh\) !== true\) setRequestReview\(false\);/);
     expect(src).toMatch(/reviewPreviewSubmitVerdict\(\{ reviewTiming, fresh, shown, lateCloseShown: lateCloseShown \? true : null,/);
   });
 
