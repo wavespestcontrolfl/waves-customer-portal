@@ -714,31 +714,31 @@ describe('sendStageComms — a held owner reply that pastes an offer link', () =
     expect(JSON.parse(queued.metadata).offer_links).toEqual([{ job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }]);
   });
 
-  test('a pasted link in another spelling is queued as the standard hidden link and pinned, so the replay sends a working link', async () => {
-    const { portalUrl } = require('../utils/portal-url');
-    const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
-    const result = await holdReply([{ id: 'offer-7', token: TOKEN }], `Here is your offer again: https://portal.wavespestcontrol.com/careers/%6Fffer/./${TOKEN}`);
-    expect(result.sms).toBe('deferred');
-    const queued = mockDb.__tables.sms_log.find((r) => r.status === 'scheduled');
-    expect(queued.message_body).toBe(`Here is your offer again: ${portalUrl('/careers/offer/[link hidden]')}`);
-    expect(JSON.stringify(queued)).not.toContain(TOKEN.slice(0, 40));
-    expect(JSON.parse(queued.metadata).offer_links).toEqual([{ job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }]);
-    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: [TOKEN] }, queued.message_body))
-      .toBe(`Here is your offer again: ${portalUrl(`/careers/offer/${TOKEN}`)}`);
-  });
-
   test('a pasted link that matches no offer is not queued, so it never waits with a link it cannot send', async () => {
     const result = await holdReply([]);
     expect(result.sms).toBe('blocked');
     expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(0);
   });
 
-  // The stored body hides a copy of the token, or a link split by a space, as the bare marker; the replay rebuilds only
-  // the hidden link, so the applicant would get the words "[link hidden]" in place of what the owner wrote.
+  test('two links in two runs of text are queued and pinned in order, and the replay gives back the text as written', async () => {
+    const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
+    const smsBody = `Your offer: ${LINK} (or ${LINK}).`;
+    expect((await holdReply([{ id: 'offer-7', token: TOKEN }], smsBody)).sms).toBe('deferred');
+    const queued = mockDb.__tables.sms_log.find((r) => r.status === 'scheduled');
+    const pins = JSON.parse(queued.metadata).offer_links;
+    expect(pins).toEqual([{ job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }, { job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }]);
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: [TOKEN, TOKEN] }, queued.message_body)).toBe(smsBody);
+  });
+
+  // The replay rebuilds only the hidden link in its sent spelling, one token per hidden link. A text it cannot give back
+  // as written is not queued, so the applicant never gets words the owner did not write: the bare marker "[link hidden]"
+  // left by a copy of the token or a split link, a link the replay would respell, or a second link merged into the first.
   test.each([
     ['a copy of the token beside the link', `Here is your offer again: ${LINK} (code ${TOKEN})`],
     ['a link split by a no-break space', `Here is your offer again: ${LINK.slice(0, 70)}\u00a0${LINK.slice(70)}`],
-  ])('a held reply with %s is not queued, so the applicant never gets the words "[link hidden]"', async (_, smsBody) => {
+    ['a link in another spelling', `Here is your offer again: https://portal.wavespestcontrol.com/careers/%6Fffer/./${TOKEN}`],
+    ['two links to the offer in one run of text', `Here it is: ${LINK},${LINK.replace('/offer/', '/%6Fffer/')}`],
+  ])('a held reply with %s is not queued, so the replay never sends words the owner did not write', async (_, smsBody) => {
     const result = await holdReply([{ id: 'offer-7', token: TOKEN }], smsBody);
     expect(result.sms).toBe('blocked');
     expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(0);

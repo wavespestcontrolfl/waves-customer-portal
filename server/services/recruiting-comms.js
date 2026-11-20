@@ -30,7 +30,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { formatETTime } = require('../utils/datetime-et');
 const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
-const { redactOfferLinks, offerLinkTokens, OFFER_LINK_HIDDEN } = require('../utils/offer-link-redaction');
+const { redactOfferLinks, offerLinkTokens } = require('../utils/offer-link-redaction');
 const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -889,18 +889,21 @@ async function queuedInviteRivals(app, stage, handoffEntry, trx) {
 
 // Offer links pasted into any other held text (an owner reply), pinned in order as { job_offer_id, token_hash } so the
 // replay can put each real link back (deferred-replay-registry replayBodyFor): the stored body hides them and the token
-// is never stored. null = no link to pin; false = a text that cannot be rebuilt, so it is not queued (the owner sees it
-// did not go out) rather than queued with a link that could never be sent: a link that matches no offer, or a piece
-// the replay cannot put back (a copy of a token, or a link split by spaces, hidden as the bare marker), which would
-// reach the applicant as the words "[link hidden]".
-const bareMarkers = (text) => text.split(OFFER_LINK_HIDDEN).length - text.split(`/careers/offer/${OFFER_LINK_HIDDEN}`).length;
+// is never stored. The replay must give back the text exactly as written. A text whose stored form it cannot undo (a
+// link in another spelling, two links in one run of text, a hidden copy of a token, a link split by spaces) or whose
+// link matches no offer is not queued: false, and the owner sees it did not go out, rather than the applicant getting
+// words the owner did not write. null = nothing to pin (no link, or the offer text, whose replay reads its own link
+// from the offer row).
 async function pinPastedOfferLinks(stage, body, trx) {
-  if (bareMarkers(redactOfferLinks(body)) > bareMarkers(body)) {
-    logger.warn(`[recruiting-comms] held ${stage} text not queued: it carries a hidden offer link the replay cannot put back`);
+  const stored = redactOfferLinks(body);
+  if (stored === body) return null;
+  const tokens = offerLinkTokens(body);
+  const { replayBodyFor } = require('./messaging/deferred-replay-registry');
+  if (replayBodyFor('recruiting_comms_deferred', { offerTokens: tokens }, stored) !== body) {
+    logger.warn(`[recruiting-comms] held ${stage} text not queued: its replay would not give back the text as written`);
     return false;
   }
-  const tokens = stage === 'offer_sent' ? [] : offerLinkTokens(body);
-  if (!tokens.length) return null;
+  if (stage === 'offer_sent') return null;
   const rows = await trx('job_offers').whereIn('token', [...new Set(tokens)]).select('id', 'token');
   const idOf = new Map(rows.map((r) => [r.token, r.id]));
   if (tokens.some((t) => !idOf.has(t))) {

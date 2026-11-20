@@ -502,6 +502,16 @@ describe('service-worker private link pages', () => {
     expect(redirected.response.redirected).toBe(true);
     await tick();
     expect(await (await cache.match('/')).text()).toContain('index-2');
+    // Nor a shell whose asset reference is not a plain /assets/ path: each reference becomes a cache key.
+    for (const ref of [
+      `/assets/index-7.js?next=/careers/offer/${token}`, `/assets/index-7.js#/careers/offer/${token}`,
+      `/assets/../careers/offer/${token}`, `/assets/%2e%2e/careers/offer/${token}`, `/assets/careers/offer/${token}`,
+    ]) {
+      worker.setFetch(async (request) => (String(request.url).includes('/assets/') ? fakeResponse('asset') : fakeResponse(shellHtml([ref]))));
+      await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+      await tick();
+      expect(await (await cache.match('/')).text()).toContain('index-2');
+    }
     for (const inner of nested) {
       for (const path of [`/go?next=${inner}`, `/assets/chunk.js?next=${inner}`, `/manifest.json#${inner}`]) {
         const { response } = await worker.dispatchFetch(path, { mode: 'cors' });

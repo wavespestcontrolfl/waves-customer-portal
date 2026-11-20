@@ -8645,7 +8645,9 @@ delimiters and backslashes. The same scan pins only those tokens (a 64-hex query
 so a held text replays each one as the standard link. Any other copy of a token found on an offer path, anywhere in
 the text (the link's own query or fragment, or another word), is hidden too: that unit is stored as the standard link
 for each offer-path token it holds, or as the bare marker when it holds none. The replay rebuilds only the standard
-link, so a held text whose stored form gains a bare marker is not queued (the owner sees it did not go out). The
+link, one pinned token per hidden link, so a held text is queued only when its replay gives back the text exactly as
+written; any other (a bare marker, a link in another spelling, two links in one run of text) is not queued, and the
+owner sees it did not go out. The
 units' reader text is also read run together (once with every unit, once with the units outside tags only) with
 every character a reader does not see dropped, so a link or a copy split by markup, white space (also `&nbsp;`), line
 breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
@@ -8654,8 +8656,9 @@ service worker never handles an offer page, in any request mode (`client/public/
 percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the
 server routes `/API/` as `/api/`). It stores no URL that could carry the link, because a stored response or request
 keeps its URL: every entry is rebuilt without its URL (`withoutUrl`, `tagWithBuild`) and stored under a key with no
-query or fragment (the shell under `/`, any other same-origin GET under its own path), and a redirected response is
-served but not stored (the shell and its assets included). A request with a query or fragment that is not a page load is left to the browser. Its cache
+query or fragment (the shell under `/`, any other same-origin GET under its own path; a shell whose asset reference is
+not a plain same-origin `/assets/` path is not stored), and a redirected response is served but not stored (the shell
+and its assets included). A request with a query or fragment that is not a page load is left to the browser. Its cache
 has a new name (`waves-customer-v13-private-links`), so activation drops the older worker's bucket whole, offer links
 included, before the worker claims a page, and each page load drops any older bucket found again
 (`sweepOlderCaches`). It never serves its offline shell in the page's place, so the browser always fetches the page
@@ -8676,7 +8679,8 @@ shows the stored choice and says "That did not go through. Please try again."); 
 'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500), version}` -> `{state:'date_requested'}`; `decline {reason?
 (<= 500), version}` -> `{state:'declined'}`. Each answer carries the `version` the page shows, the text choice included,
 and a change since then (another tab's text choice) answers the same 409 `{state:'open'}` with no write, so a signature,
-a date request or a decline never fixes a text choice the applicant did not see. Each acts only from state `open`; any
+a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is the
+contract before it and is answered as before, with no version check; the page always sends one. Each acts only from state `open`; any
 other state answers 409 with the current state body (an identical replay of a signature answers 200 with the stored
 signature). Every action runs in one transaction that
 locks the application row, then the offer row, and re-reads the state under the lock, so a double tap or a replay

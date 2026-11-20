@@ -962,8 +962,9 @@ async function lockByToken(trx, token) {
 // save the page last applied, the text-consent choice included. A change since then (another tab's consent save, a
 // save that landed late) refuses the write with the state still open (409), so the page reads the offer again and the
 // applicant answers on what it now shows. A signature, a date request or a decline therefore never fixes a consent
-// choice the applicant did not see.
-const changedSince = (offer, version) => version !== iso(offer.updated_at);
+// choice the applicant did not see. The page always sends it. A body without one is the contract these routes served
+// before the version, and it is answered as before.
+const changedSince = (offer, version) => version !== undefined && version !== iso(offer.updated_at);
 const CHANGED = Object.freeze({ refused: true, body: Object.freeze({ state: 'open' }) });
 
 const refusal = (state, offer) => ({

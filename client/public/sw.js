@@ -46,6 +46,15 @@ const OFFLINE_FALLBACK_HTML = `<!doctype html>
   setTimeout(() => { if (navigator.onLine) location.reload(); }, 4000);
 </script></body></html>`;
 
+// A shell's asset reference becomes a cache key, so it must be a plain same-origin /assets/ path: no query or
+// fragment (either could hold an offer link), nothing the URL parser rewrites (dot segments, backslashes, encoded
+// characters) and never an offer path.
+function isPlainAssetPath(ref) {
+  const url = new URL(ref, self.location.origin);
+  return url.origin === self.location.origin && url.pathname === ref && ref.startsWith('/assets/')
+    && !ref.includes('%') && !isOfferLinkPath(ref);
+}
+
 function shellAssetUrls(html) {
   const urls = new Set();
   const re = /(?:src|href)=["'](\/assets\/[^"']+)["']/g;
@@ -359,6 +368,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   const html = await shellResponse.clone().text();
   const assets = shellAssetUrls(html);
   if (!assets.length) throw new Error('Shell contains no build assets');
+  if (!assets.every(isPlainAssetPath)) throw new Error('Shell asset reference is not a plain /assets/ path');
   const buildId = buildIdOf(assets);
 
   // Fetch every hashed dependency before storing the new HTML. If any fetch

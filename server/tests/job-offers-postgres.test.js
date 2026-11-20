@@ -318,7 +318,6 @@ jest.setTimeout(120000);
         expect(await stamp()).toBeNull();
         // The first save of "on" lands only now: refused, and "off" stays.
         expect(await JobOffers.setTextConsent(token, true, first)).toEqual({ refused: true, body: { state: 'open' } });
-        expect(await JobOffers.setTextConsent(token, true, undefined)).toEqual({ refused: true, body: { state: 'open' } });
         expect(await stamp()).toBeNull();
         expect((await JobOffers.publicView(token)).version).toBe(off.body.version);
         expect(await JobOffers.setTextConsent(token, 'yes', off.body.version)).toMatchObject({ invalid: expect.any(String) });
@@ -386,18 +385,16 @@ jest.setTimeout(120000);
       });
 
       // Another tab saved a text choice after this page read the offer. A sign, a date request or a decline made on the
-      // older read (or with no version) is refused with the offer still open and writes nothing, so none of them fixes a
-      // choice the applicant did not see; made on the version the page now shows, the sign goes through.
+      // older read is refused with the offer still open and writes nothing, so none of them fixes a choice the applicant
+      // did not see; made on the version the page now shows, the sign goes through.
       test('a sign, date request or decline made on an older read is refused and writes nothing', async () => {
         const first = await shownVersion(token);
         const on = await JobOffers.setTextConsent(token, true, first);
         expect(on.body.version).not.toBe(first);
         const monday = addStaffWorkDays(JobOffers.suggestStartDate(), 7);
-        for (const stale of [first, undefined]) {
-          expect(await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version: stale })).toEqual({ refused: true, body: { state: 'open' } });
-          expect(await JobOffers.requestDate(token, { requestedStartDate: monday, version: stale })).toEqual({ refused: true, body: { state: 'open' } });
-          expect(await JobOffers.declineOffer(token, { reason: 'Changed my mind', version: stale })).toEqual({ refused: true, body: { state: 'open' } });
-        }
+        expect(await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version: first })).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await JobOffers.requestDate(token, { requestedStartDate: monday, version: first })).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await JobOffers.declineOffer(token, { reason: 'Changed my mind', version: first })).toEqual({ refused: true, body: { state: 'open' } });
         expect(await root('job_offers').where({ id: offer.id }).first()).toMatchObject({
           status: 'sent', signed_at: null, signed_name: null, declined_at: null, date_requested_at: null,
         });
@@ -407,6 +404,18 @@ jest.setTimeout(120000);
         const signed = await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version: on.body.version });
         expect(signed.body).toMatchObject({ state: 'signed' });
         expect((await root('job_offers').where({ id: offer.id }).first()).text_consent_at).toBeTruthy();
+      });
+
+      // A body with no version is the contract these routes served before the version, so it is answered as before,
+      // even after a change its sender did not see. The page always sends one (CareersOfferPage.test.jsx).
+      test.each([
+        ['text choice', (t) => JobOffers.setTextConsent(t, false), { textConsent: false, version: expect.any(String) }],
+        ['sign', (t) => JobOffers.acceptOffer(t, { signedName: 'Jordan Rivera' }), expect.objectContaining({ state: 'signed' })],
+        ['date request', (t) => JobOffers.requestDate(t, { requestedStartDate: addStaffWorkDays(JobOffers.suggestStartDate(), 7) }), { state: 'date_requested' }],
+        ['decline', (t) => JobOffers.declineOffer(t, { reason: 'Took another job' }), { state: 'declined' }],
+      ])('a %s sent with no version is answered as before', async (_, answer, body) => {
+        await JobOffers.setTextConsent(token, true, await shownVersion(token));
+        expect((await answer(token)).body).toEqual(body);
       });
 
       test('past its expiry the offer reads expired before any sweep, and nothing can be signed', async () => {
