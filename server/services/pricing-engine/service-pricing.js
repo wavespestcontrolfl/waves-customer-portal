@@ -7099,6 +7099,25 @@ function trenchReplayPinApplies(replay, priced) {
   return samePricing && Number.isInteger(pinned) && pinned >= 0;
 }
 
+// The label volume chart's verdict on a trench line (priceTrenching), by the chart pair its final dilution and volume make: the 0.06%
+// pair (0) has none; the half-volume pair (1) and no pair (-1, off the chart) each keep the line in review, at every rate and with a
+// counted label check, with their own warning and reason (Codex review: a table, not a branch per case in priceTrenching).
+const TRENCH_CHART_VERDICTS = new Map([
+  // The label allows a reduced volume only where the soil will not accept the labeled volume and a continuous barrier can still be
+  // achieved (pre-push audit 29). Only this engine knows whether it applies the volume adjustment (the configured dilution and
+  // bottle), so the warning names both conditions on the line, and the estimate tool's label box confirms the label rate and trench
+  // depth, never a volume (pre-push audits 30 and at the second push: a configured high rate of 1.5 fl oz per gallon keeps the full
+  // volume).
+  [1, {
+    reason: 'reduced_volume_confirmation_required',
+    warning: () => 'Stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). The label allows it only where the soil will not accept the labeled volume and a continuous barrier can still be achieved. Requires label confirmation.',
+  }],
+  [-1, {
+    reason: 'off_label_chart_confirmation_required',
+    warning: (chartPairs, oz, gallons) => `The configured dilution and finished volume, ${roundMoney(oz)} fl oz a finished gallon at ${roundMoney(gallons)} gal per 10 linear feet per foot of depth, are not a pair on the label's volume adjustment chart (${chartPairs.map(([pairOz, pairGallons]) => `${roundMoney(pairOz)} fl oz at ${roundMoney(pairGallons)} gal`).join(', or ')}). Requires review before sending.`,
+  }],
+]);
+
 function priceTrenching(property = {}, options = {}, replay) {
   const measurements = resolveTrenchingMeasurements(property || {}, options || {});
   const cfg = SPECIALTY.trenching;
@@ -7139,35 +7158,28 @@ function priceTrenching(property = {}, options = {}, replay) {
   // own volume (labelFinishedGallonsPer10LFPerFtDepth, 4.0 gal per 10 LF per foot of depth): a configured volume off the chart keeps
   // it too, since half of it is not the label's reduced volume (pre-push audit at the fourth push). That stronger dilution at a
   // volume off the chart is neither labeled amount, so its line goes to review (pre-push audit at the eighth push).
-  const gallonsPer10LFPerFtDepth = cfg.finishedGallonsPer10LFPerFtDepth || 4;
-  const halfVolumeLabel = product.labelHalfVolumeOzPerFinishedGallon > 0 && namesHalfVolumeLabel(product);
-  const labelStrongerDilution = halfVolumeLabel
-    && Math.abs(productOzPerFinishedGallon - product.labelHalfVolumeOzPerFinishedGallon) < 1e-9;
-  const labelHalfVolume = labelStrongerDilution
-    && Math.abs(gallonsPer10LFPerFtDepth - product.labelFinishedGallonsPer10LFPerFtDepth) < 1e-9;
-  const volumeFactor = labelHalfVolume ? 0.5 : 1;
   // The label's volume adjustment chart lists two pairs per 10 LF per foot of depth: its 0.06% (half the stronger dilution) at its
   // full volume, then its 0.12% at half that volume. The final dilution and volume must be one of them, at either rate, whatever the
-  // label check and however the volume was set (this engine's half, or a configured volume). Any other pair goes to review and never
-  // shows the 0.06% label. A list of the label's own pairs, not a rule per case: the pre-push audits at the eighth to twelfth pushes
-  // each named another pair (2 fl oz at 3 gal, 1 fl oz at 3 gal, 2 fl oz at a configured 2 gal, 1.6 fl oz at 2.5 gal).
-  const finalGallonsPer10LFPerFtDepth = gallonsPer10LFPerFtDepth * volumeFactor;
-  const chartPairs = halfVolumeLabel ? [
+  // label check and however the volume was set (this engine's half, or a configured volume); any other pair takes the off-chart
+  // verdict and never shows the 0.06% label. A list of the label's own pairs, not a rule per case: the pre-push audits at the eighth
+  // to twelfth pushes each named another pair (2 fl oz at 3 gal, 1 fl oz at 3 gal, 2 fl oz at a configured 2 gal, 1.6 fl oz at 2.5 gal).
+  const gallonsPer10LFPerFtDepth = cfg.finishedGallonsPer10LFPerFtDepth || 4;
+  const chartPairs = product.labelHalfVolumeOzPerFinishedGallon > 0 && namesHalfVolumeLabel(product) ? [
     [product.labelHalfVolumeOzPerFinishedGallon / 2, product.labelFinishedGallonsPer10LFPerFtDepth],
     [product.labelHalfVolumeOzPerFinishedGallon, product.labelFinishedGallonsPer10LFPerFtDepth / 2],
   ] : [];
-  const chartPair = chartPairs.findIndex(([oz, gallons]) => Math.abs(productOzPerFinishedGallon - oz) < 1e-9
-    && Math.abs(finalGallonsPer10LFPerFtDepth - gallons) < 1e-9);
-  const labelReducedVolume = chartPair === 1;
-  const offLabelChart = halfVolumeLabel && chartPair < 0;
+  const chartPairAt = (gallons) => chartPairs.findIndex(([oz, chartGallons]) => Math.abs(productOzPerFinishedGallon - oz) < 1e-9
+    && Math.abs(gallons - chartGallons) < 1e-9);
+  // The stronger dilution at the label's full volume makes the half-volume pair at half that volume, so this engine halves it.
+  const volumeFactor = chartPairAt(gallonsPer10LFPerFtDepth / 2) === 1 ? 0.5 : 1;
+  const finalGallonsPer10LFPerFtDepth = gallonsPer10LFPerFtDepth * volumeFactor;
+  const chartVerdict = chartPairs.length > 0 && TRENCH_CHART_VERDICTS.get(chartPairAt(finalGallonsPer10LFPerFtDepth));
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
-  const trenchDepthFt = optionPositiveNumber(options, 'trenchDepthFt', cfg.defaultTrenchDepthFt || 1);
-  const concreteVolumePadPct = optionNonNegativeNumber(
-    options,
-    'concreteVolumePadPct',
-    cfg.defaultConcreteVolumePadPct || 0,
-  );
+  const defaultTrenchDepthFt = cfg.defaultTrenchDepthFt || 1;
+  const trenchDepthFt = optionPositiveNumber(options, 'trenchDepthFt', defaultTrenchDepthFt);
+  const defaultConcreteVolumePadPct = cfg.defaultConcreteVolumePadPct || 0;
+  const concreteVolumePadPct = optionNonNegativeNumber(options, 'concreteVolumePadPct', defaultConcreteVolumePadPct);
   const warrantyResolution = normalizeTrenchingWarrantyTier(options.warrantyTier, product);
   const warrantyTier = cfg.warrantyTiers?.[warrantyResolution.warrantyTier]
     ? warrantyResolution.warrantyTier
@@ -7183,14 +7195,8 @@ function priceTrenching(property = {}, options = {}, replay) {
     ...rateResolution.warnings,
     ...warrantyResolution.warnings,
   ];
-  if (labelReducedVolume) {
-    // The label allows a reduced volume only where the soil will not accept the labeled volume and a continuous barrier can still
-    // be achieved (pre-push audit 29). Only this engine knows whether it applies the volume adjustment (the configured dilution and
-    // bottle), so this warning names both conditions on the line, and the line stays in review (reduced_volume_confirmation_required).
-    warningList.push('Stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). The label allows it only where the soil will not accept the labeled volume and a continuous barrier can still be achieved. Requires label confirmation.');
-  } else if (offLabelChart) {
-    const listed = chartPairs.map(([oz, gallons]) => `${roundMoney(oz)} fl oz at ${roundMoney(gallons)} gal`).join(', or ');
-    warningList.push(`The configured dilution and finished volume, ${roundMoney(productOzPerFinishedGallon)} fl oz a finished gallon at ${roundMoney(finalGallonsPer10LFPerFtDepth)} gal per 10 linear feet per foot of depth, are not a pair on the label's volume adjustment chart (${listed}). Requires review before sending.`);
+  if (chartVerdict) {
+    warningList.push(chartVerdict.warning(chartPairs, productOzPerFinishedGallon, finalGallonsPer10LFPerFtDepth));
   } else if (rateResolution.applicationRate === 'high') {
     warningList.push('High/problem-soil rate increases chemical usage and requires label confirmation.');
   }
@@ -7212,27 +7218,23 @@ function priceTrenching(property = {}, options = {}, replay) {
   if (labelConfirmationRequiredForPayload && !labelConfirmed) {
     manualReviewReasons.push('label_confirmation_required');
   }
-  // A reduced volume stays in review at every rate, a counted label check included: the estimate tool's label box confirms the
-  // label rate and trench depth, never a volume, because the tool cannot see the configured dilution that decides it (pre-push
-  // audits 30 and at the second push: a configured high rate of 1.5 fl oz per gallon keeps the full volume).
-  if (labelReducedVolume) {
-    manualReviewReasons.push('reduced_volume_confirmation_required');
-  } else if (offLabelChart) {
-    manualReviewReasons.push('off_label_chart_confirmation_required');
+  if (chartVerdict) {
+    manualReviewReasons.push(chartVerdict.reason);
   }
   if (hasValue(options.customProductCost) || hasValue(options.customProductOzPerFinishedGallon)) {
     manualReviewReasons.push('product_manual_override_used');
   }
-  if (hasValue(options.trenchDepthFt) && Number(options.trenchDepthFt) !== Number(cfg.defaultTrenchDepthFt || 1)) {
+  if (hasValue(options.trenchDepthFt) && Number(options.trenchDepthFt) !== Number(defaultTrenchDepthFt)) {
     manualReviewReasons.push('trench_depth_manual_override_used');
   }
-  if (hasValue(options.concreteVolumePadPct) && concreteVolumePadPct > (cfg.defaultConcreteVolumePadPct || 0)) {
+  if (hasValue(options.concreteVolumePadPct) && concreteVolumePadPct > defaultConcreteVolumePadPct) {
     manualReviewReasons.push('significant_concrete_volume_pad_applied');
   }
 
   const chemistryAllowedForWarranty = (warrantyConfig.allowedChemistryTypes || []).includes(product.chemistryType);
+  const repellentWarrantyRisk = !chemistryAllowedForWarranty && product.chemistryType === 'repellent_pyrethroid';
   let warrantyQuoteRequired = false;
-  if (!chemistryAllowedForWarranty && product.chemistryType === 'repellent_pyrethroid') {
+  if (repellentWarrantyRisk) {
     warningList.push('Long repair-and-retreat warranty on bifenthrin is high risk and requires admin approval or custom quote.');
     if (warrantyConfig.repellentQuoteRequired && !(
       options.allowWarrantyOverride || options.managerOverride || options.customManagerOverride
@@ -7257,9 +7259,9 @@ function priceTrenching(property = {}, options = {}, replay) {
     // only at that dilution (the chart's first pair's), at either rate, and the high rate's label at any other; an off-chart volume
     // goes to review on its own reason (pre-push audits 28, and at the ninth, twelfth and fifteenth pushes: 1 fl oz a gallon at 3 gal
     // is still the 0.06% dilution). Any other bottle names its rate, as on main.
-    concentrationLabel: (halfVolumeLabel ? Math.abs(productOzPerFinishedGallon - chartPairs[0][0]) > 1e-9 : rateResolution.applicationRate === 'high')
-      ? product.highConcentrationLabel || rateConfig.concentrationLabel
-      : product.standardConcentrationLabel || rateConfig.concentrationLabel,
+    concentrationLabel: ((chartPairs.length > 0 ? Math.abs(productOzPerFinishedGallon - chartPairs[0][0]) > 1e-9 : rateResolution.applicationRate === 'high')
+      ? product.highConcentrationLabel
+      : product.standardConcentrationLabel) || rateConfig.concentrationLabel,
     trenchDepthFt,
     perimeter: measurements.perimeter,
     perimeterSource: measurements.perimeterSource,
@@ -7311,15 +7313,12 @@ function priceTrenching(property = {}, options = {}, replay) {
       ...warrantyResolution.warnings,
     ]),
     requiresMeasurement: measurements.requiresMeasurement,
+    // A reason pushed above already counts here: an invalid product, the rate's warnings, a missing label check and a product
+    // override each push one. A custom price counts here too, before it adds its own reason to the priced line.
     requiresManualReview: manualReviewReasons.length > 0 ||
       measurements.requiresManualReview ||
-      productResolution.requiresManualReview ||
       !!rateConfig.requiresManualReview ||
-      rateResolution.warnings.length > 0 ||
-      (labelConfirmationRequiredForPayload && !labelConfirmed) ||
-      (!chemistryAllowedForWarranty && product.chemistryType === 'repellent_pyrethroid') ||
-      hasValue(options.customProductCost) ||
-      hasValue(options.customProductOzPerFinishedGallon) ||
+      repellentWarrantyRisk ||
       hasValue(options.customPriceOverride),
     manualReviewReasons: uniqueList(manualReviewReasons),
     inputSourceSummary: {
@@ -7423,7 +7422,6 @@ function priceTrenching(property = {}, options = {}, replay) {
     priceBeforeWarranty,
     price,
     quoteRequired: warrantyQuoteRequired,
-    requiresManualReview: baseResult.requiresManualReview || finalManualReviewReasons.length > 0,
     manualReviewReasons: finalManualReviewReasons,
   };
 }

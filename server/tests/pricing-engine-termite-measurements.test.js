@@ -1036,6 +1036,32 @@ describe('termite measurement overrides and safeguards', () => {
   });
 });
 
+// priceTrenching reads the line's review flag from its base result, where a custom price counts before it adds its own reason, and
+// a bottle with no concentration label of its own takes its rate's (Codex round 1 on #8140: the function keeps only the checks a
+// review reason does not already count).
+describe('trench review flag and concentration label', () => {
+  const trench = (extra) => priceTrenching({ perimeter: 200 }, { productKey: 'termidor_sc', labelConfirmed: true, ...extra });
+
+  test('a custom price alone sends the line to review', () => {
+    expect(trench({})).toMatchObject({ price: 2250, requiresManualReview: false, manualReviewReasons: [] });
+    expect(trench({ customPriceOverride: 950 }))
+      .toMatchObject({ price: 950, requiresManualReview: true, manualReviewReasons: ['product_manual_override_used'] });
+  });
+
+  test("a bottle with no concentration label of its own takes its rate's", () => {
+    const product = require('../services/pricing-engine/constants').SPECIALTY.trenching.products.termidor_sc;
+    const saved = { standard: product.standardConcentrationLabel, high: product.highConcentrationLabel };
+    try {
+      delete product.standardConcentrationLabel;
+      delete product.highConcentrationLabel;
+      expect(trench({}).concentrationLabel).toBe('0.06%');
+      expect(trench({ applicationRate: 'high' }).concentrationLabel).toBe('0.125% / high rate');
+    } finally {
+      Object.assign(product, { standardConcentrationLabel: saved.standard, highConcentrationLabel: saved.high });
+    }
+  });
+});
+
 describe('termite bait per-application cadence (owner 2026-07-20)', () => {
   test('pricer emits visitsPerYear + perApp, exact against the annual', () => {
     const basic = priceTermiteBait(
