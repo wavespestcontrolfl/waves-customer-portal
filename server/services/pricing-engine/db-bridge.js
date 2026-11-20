@@ -857,12 +857,34 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 // values that will not stay. So a caller asks in the same tick as it
 // computes the price, with no await in between: yes then means that the
 // engine holds what the last successful sync loaded, and nothing newer.
-const PEST_REQUIRED_FEATURE_ROW_FIELDS = Object.freeze([
-  'pool_cage', 'pool_cage_small', 'pool_cage_medium', 'pool_cage_large', 'pool_cage_oversized', 'pool_no_cage',
-  'shrubs_heavy', 'shrubs_moderate', 'shrubs_light', 'landscape_complex', 'landscape_moderate', 'landscape_simple',
-  'near_water', 'indoor',
+// The pest_features row, one line per field: the adjustment it sets
+// (PEST.additionalAdjustments) and how the sync reads its value. The sync's
+// loader and the answer both walk THIS table, so the sync cannot load a
+// field of the row that the answer does not judge. A field is required
+// unless its line says optional. An optional field needs one value in every
+// process when the row leaves it out, so the sync must rebase it to its
+// in-code value before it reads the row (as it does for attached_garage).
+const roundSigned = (val) => (val >= 0 ? r(val) : -r(Math.abs(val)));
+const asStored = (val) => val;
+const PEST_FEATURE_ROW_FIELDS = Object.freeze([
+  { field: 'pool_cage', adjustment: 'poolCage', read: r },
+  { field: 'pool_cage_small', adjustment: 'poolCageSmall', read: r },
+  { field: 'pool_cage_medium', adjustment: 'poolCageMedium', read: r },
+  { field: 'pool_cage_large', adjustment: 'poolCageLarge', read: r },
+  { field: 'pool_cage_oversized', adjustment: 'poolCageOversized', read: r },
+  { field: 'pool_no_cage', adjustment: 'poolNoCage', read: r },
+  { field: 'shrubs_heavy', adjustment: 'shrubs_heavy', read: r },
+  { field: 'shrubs_moderate', adjustment: 'shrubs_moderate', read: r },
+  { field: 'shrubs_light', adjustment: 'shrubs_light', read: roundSigned },
+  { field: 'landscape_complex', adjustment: 'complexity_complex', read: roundSigned },
+  { field: 'landscape_moderate', adjustment: 'complexity_moderate', read: roundSigned },
+  { field: 'landscape_simple', adjustment: 'complexity_simple', read: roundSigned },
+  { field: 'near_water', adjustment: 'nearWater', read: asStored },
+  { field: 'indoor', adjustment: 'indoor', read: r },
+  { field: 'attached_garage', adjustment: 'attachedGarage', read: r, optional: true },
 ]);
-const PEST_OPTIONAL_FEATURE_ROW_FIELDS = Object.freeze(['attached_garage']);
+const PEST_REQUIRED_FEATURE_ROW_FIELDS = Object.freeze(PEST_FEATURE_ROW_FIELDS.filter((entry) => !entry.optional).map((entry) => entry.field));
+const PEST_OPTIONAL_FEATURE_ROW_FIELDS = Object.freeze(PEST_FEATURE_ROW_FIELDS.filter((entry) => entry.optional).map((entry) => entry.field));
 const pestPriceRow = (config, key) => (config[key] && typeof config[key] === 'object' ? config[key] : {});
 const RECURRING_PEST_PRICE_ROW_FIELDS = Object.freeze([
   'pest_base.base', 'pest_base.floor', 'pest_footprint.breakpoints',
@@ -1387,23 +1409,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // process that just started (standardPestPriceRowsAreComplete).
     constants.PEST.additionalAdjustments.attachedGarage = PEST_ATTACHED_GARAGE_DEFAULT;
     if (config.pest_features) {
-      const f = config.pest_features;
       const adj = constants.PEST.additionalAdjustments;
-      if (f.pool_cage != null) adj.poolCage = r(f.pool_cage);
-      if (f.pool_cage_small != null) adj.poolCageSmall = r(f.pool_cage_small);
-      if (f.pool_cage_medium != null) adj.poolCageMedium = r(f.pool_cage_medium);
-      if (f.pool_cage_large != null) adj.poolCageLarge = r(f.pool_cage_large);
-      if (f.pool_cage_oversized != null) adj.poolCageOversized = r(f.pool_cage_oversized);
-      if (f.pool_no_cage != null) adj.poolNoCage = r(f.pool_no_cage);
-      if (f.shrubs_heavy != null) adj.shrubs_heavy = r(f.shrubs_heavy);
-      if (f.shrubs_moderate != null) adj.shrubs_moderate = r(f.shrubs_moderate);
-      if (f.shrubs_light != null) adj.shrubs_light = f.shrubs_light >= 0 ? r(f.shrubs_light) : -r(Math.abs(f.shrubs_light));
-      if (f.landscape_complex != null) adj.complexity_complex = f.landscape_complex >= 0 ? r(f.landscape_complex) : -r(Math.abs(f.landscape_complex));
-      if (f.landscape_moderate != null) adj.complexity_moderate = f.landscape_moderate >= 0 ? r(f.landscape_moderate) : -r(Math.abs(f.landscape_moderate));
-      if (f.landscape_simple != null) adj.complexity_simple = f.landscape_simple >= 0 ? r(f.landscape_simple) : -r(Math.abs(f.landscape_simple));
-      if (f.near_water != null) adj.nearWater = f.near_water;
-      if (f.indoor != null) adj.indoor = r(f.indoor);
-      if (f.attached_garage != null) adj.attachedGarage = r(f.attached_garage);
+      for (const { field, adjustment, read } of PEST_FEATURE_ROW_FIELDS) {
+        const value = config.pest_features[field];
+        if (value != null) adj[adjustment] = read(value);
+      }
     }
     if (config.pest_footprint?.breakpoints) {
       constants.PEST.footprintBrackets = config.pest_footprint.breakpoints.map(bp => ({

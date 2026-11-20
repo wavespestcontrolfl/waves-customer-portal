@@ -47,6 +47,10 @@ const FEATURE_ADJUSTMENT = {
   landscape_complex: 'complexity_complex', landscape_moderate: 'complexity_moderate', landscape_simple: 'complexity_simple',
   near_water: 'nearWater', indoor: 'indoor',
 };
+const ALL_FEATURE_ADJUSTMENTS = { ...FEATURE_ADJUSTMENT, attached_garage: 'attachedGarage' };
+// The fields whose value the sync rounds apart from its sign. It stores near_water as the row has it, and rounds
+// every other field whole.
+const SIGNED_FEATURE_FIELDS = ['shrubs_light', 'landscape_complex', 'landscape_moderate', 'landscape_simple'];
 const PROPERTY_TYPES = ['single_family', 'townhome_end', 'townhome_interior', 'duplex', 'condo_ground', 'condo_upper'];
 const TIERS = ['bronze', 'silver', 'gold', 'platinum'];
 const ROW_KEYS = ['pest_base', 'pest_footprint', 'pest_features', 'pest_property_type', 'waveguard_tiers'];
@@ -160,6 +164,37 @@ describe('the answer after one sync', () => {
       .toEqual(Object.fromEntries(REQUIRED_FEATURE_FIELDS.map((field, index) => [field, 20 + index])));
     PROPERTY_TYPES.forEach((type, index) => expect(constants.PROPERTY_TYPE_ADJ[type]).toBe(-(30 + index)));
     TIERS.forEach((tier, index) => expect(constants.WAVEGUARD.tiers[tier]).toMatchObject({ discount: discounts[index], minServices: counts[index] }));
+  });
+
+  // How the sync reads a value of the features row: rounded whole, rounded apart from its sign, or as stored.
+  // -12.5 tells the three apart: rounded whole it is -12, apart from its sign -13, as stored -12.5.
+  test('a features value is read by its field: rounded, rounded apart from its sign, or as stored', async () => {
+    const worker = freshWorker();
+    const { constants } = worker;
+    const factor = constants.PROCESSING_ADJUSTMENT;
+    const kinds = { rounded: Math.round(-12.5 * factor), signed: -Math.round(12.5 * factor), stored: -12.5 };
+    expect(new Set(Object.values(kinds)).size).toBe(3);
+    const config = fullRows(constants);
+    for (const field of FEATURE_FIELDS) config.pest_features[field] = -12.5;
+    await expect(sync(worker, config)).resolves.toBe(true);
+    const kindOf = (field) => (field === 'near_water' ? 'stored' : SIGNED_FEATURE_FIELDS.includes(field) ? 'signed' : 'rounded');
+    expect(Object.fromEntries(FEATURE_FIELDS.map((field) => [field, constants.PEST.additionalAdjustments[ALL_FEATURE_ADJUSTMENTS[field]]])))
+      .toEqual(Object.fromEntries(FEATURE_FIELDS.map((field) => [field, kinds[kindOf(field)]])));
+  });
+
+  // 0 is a value the row states (no pool cage, moderate shrubs). The answer counts the field as carried, so a
+  // warm worker must take the 0 and not keep what it held.
+  test('a zero in the features row replaces what a warm worker held', async () => {
+    const worker = freshWorker();
+    const { constants } = worker;
+    const config = fullRows(constants);
+    for (const field of FEATURE_FIELDS) config.pest_features[field] = 9;
+    await expect(sync(worker, config)).resolves.toBe(true);
+    for (const field of FEATURE_FIELDS) config.pest_features[field] = 0;
+    await expect(sync(worker, config)).resolves.toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
+    expect(Object.fromEntries(FEATURE_FIELDS.map((field) => [field, constants.PEST.additionalAdjustments[ALL_FEATURE_ADJUSTMENTS[field]]])))
+      .toEqual(Object.fromEntries(FEATURE_FIELDS.map((field) => [field, 0])));
   });
 });
 
@@ -472,8 +507,13 @@ describe('the tier thresholds are the ones the engine\'s tier picker uses', () =
   });
 });
 
-// The lists in the bridge must be the fields its sync reads. A new field needs a decision: required, or
-// optional with an explicit default.
+// The answer must know every field of these rows that the sync reads. A new field needs a decision: required,
+// or optional with an explicit default.
+// - pest_features: the bridge loads the row through ONE table, and the answer takes its fields from the same
+//   table. So the sync cannot load a field the answer does not judge, and the test below is about behavior.
+// - pest_property_type and the tier names: the sync and the answer both go by the keys the engine holds.
+// - pest_base, pest_footprint and the two fields of a tier are single reads in the sync. The tests on them read
+//   the source: each fails when the sync starts to read another field of its row.
 describe('the bridge reads no field of these rows that the answer does not know', () => {
   const source = fs.readFileSync(require.resolve('../services/pricing-engine/db-bridge'), 'utf8');
   const fieldsRead = (text, pattern) => [...new Set([...text.matchAll(pattern)].map((match) => match[1]))].sort();
@@ -485,9 +525,21 @@ describe('the bridge reads no field of these rows that the answer does not know'
     return source.slice(start, end);
   };
 
-  test('pest_features: the fourteen required fields and attached_garage', () => {
-    const features = block('if (config.pest_features) {', 'if (config.pest_footprint?.breakpoints) {');
-    expect(fieldsRead(features, /\bf\.([a-z_]+) != null/g)).toEqual([...FEATURE_FIELDS].sort());
+  // Each field sets its one adjustment and no other, and every adjustment the engine holds has its field. An
+  // adjustment the engine gains needs a line in the bridge's table, and with it the decision.
+  test('pest_features: each field sets its one adjustment, and every adjustment the engine holds has its field', async () => {
+    const setBy = {};
+    for (const field of FEATURE_FIELDS) {
+      const worker = freshWorker();
+      const before = { ...worker.constants.PEST.additionalAdjustments };
+      await expect(sync(worker, { ...fullRows(worker.constants), pest_features: { [field]: 77 } })).resolves.toBe(true);
+      const after = worker.constants.PEST.additionalAdjustments;
+      const changed = Object.keys(after).filter((key) => after[key] !== before[key]);
+      expect([field, changed]).toEqual([field, [ALL_FEATURE_ADJUSTMENTS[field]]]);
+      expect([field, after[changed[0]]]).toEqual([field, 77]);
+      setBy[changed[0]] = field;
+    }
+    expect(Object.keys(setBy).sort()).toEqual(Object.keys(freshWorker().constants.PEST.additionalAdjustments).sort());
   });
 
   test('pest_base: base and floor (required), enforce_floor_post_discount (optional, a boolean), initial_roach (the visit-1 knockdown, not this price)', () => {
@@ -503,16 +555,6 @@ describe('the bridge reads no field of these rows that the answer does not know'
   test('waveguard_tiers: discount and min_services of each tier', () => {
     const tiers = block('if (config.waveguard_tiers) {', '// ── Mosquito');
     expect(fieldsRead(tiers, /\bval\.([a-z_]+)/g)).toEqual(['discount', 'min_services']);
-  });
-
-  test.each(FEATURE_FIELDS)('pest_features.%s alone is read into one adjustment', async (field) => {
-    const worker = freshWorker();
-    const before = { ...worker.constants.PEST.additionalAdjustments };
-    await expect(sync(worker, { ...fullRows(worker.constants), pest_features: { [field]: 77 } })).resolves.toBe(true);
-    const after = worker.constants.PEST.additionalAdjustments;
-    const changed = Object.keys(after).filter((key) => after[key] !== before[key]);
-    expect(changed).toHaveLength(1);
-    expect(after[changed[0]]).toBe(77);
   });
 
   test('the engine knows the six property types and the four tiers the rows carry', () => {
