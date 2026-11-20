@@ -70,7 +70,7 @@ function confirmBlock(card, sure, { milestone, deferred }) {
   return null;
 }
 
-// GATE_REFERRAL_STEP2: the credits vary (a near member gets more, a member at the yearly limit gets none), so the
+// GATE_REFERRAL_STEP2: the credit varies (a member at the yearly limit gets none), so the
 // card states the rule instead of a flat $25 each. Gate off: the flat words below, unchanged.
 const { formatDollars } = require('./referral-step2');
 const step2Live = () => (typeof isEnabled === 'function' ? isEnabled('referralStep2') : false);

@@ -2,22 +2,17 @@
  * Referral Step 2, member side (owner 2026-11-20; GATE_REFERRAL_STEP2, off): the pure rules. No database, no gate
  * read; referral-engine.js reads the gate and does the money moves with these answers.
  *
- *   amount   the member's credit: the near amount when both homes have a map point and the straight-line distance
- *            is within step2_near_radius_miles, else the standard amount
+ *   amount   the member's credit: a flat standard amount (step2_referrer_reward_cents, $25), $0 at the yearly limit
  *   year     the member's credit cap counts a calendar year in America/New_York
+ * (Owner 2026-11-20, "C": no half-mile bonus. The two near columns the first migration added stay in the table and
+ * nothing reads, writes or shows them.)
  */
-const { haversine } = require('./route-optimizer');
-// The one rule for "this home has a map point" (customer-geocode review): a missing, non-numeric or ZERO latitude or
-// longitude is no pin, so two placeholder (0, 0) homes are never "zero miles apart".
-const { hasPin } = require('./customer-geocode-review');
 const { parseETDateTime, etParts } = require('../utils/datetime-et');
 
 // The owner's numbers, also the values the migration puts on the settings row. A settings row read before that
 // migration ran has none of the columns, so each falls back here.
 const STEP2_DEFAULTS = Object.freeze({
   step2_referrer_reward_cents: 2500,
-  step2_near_referrer_reward_cents: 5000,
-  step2_near_radius_miles: 0.5,
   step2_annual_credit_cap: 10,
 });
 
@@ -32,17 +27,9 @@ function step2Settings(settings = {}) {
   return out;
 }
 
-// The member's credit in cents and why: 'near' or 'standard'. A home without a map point is never near.
-function memberCredit(memberHome, friendHome, settings) {
-  const s = step2Settings(settings);
-  if (memberHome && friendHome && hasPin(memberHome) && hasPin(friendHome)) {
-    const miles = haversine(
-      Number(memberHome.latitude), Number(memberHome.longitude),
-      Number(friendHome.latitude), Number(friendHome.longitude),
-    );
-    if (miles <= s.step2_near_radius_miles) return { cents: s.step2_near_referrer_reward_cents, reason: 'near' };
-  }
-  return { cents: s.step2_referrer_reward_cents, reason: 'standard' };
+// The member's credit in cents and why: always 'standard' (the cap is applied by the caller).
+function memberCredit(settings) {
+  return { cents: step2Settings(settings).step2_referrer_reward_cents, reason: 'standard' };
 }
 
 // [start, end) of the America/New_York calendar year holding `now`, as instants.
@@ -65,8 +52,6 @@ const formatDollars = (dollarAmount) => {
   return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
 };
 const dollars = (cents) => formatDollars(Number(cents) / 100);
-const miles = (n) => (n === 0.5 ? 'half a mile' : `${n} ${n === 1 ? 'mile' : 'miles'}`);
-
 // The rule as staff read it before confirming a referral, from the EFFECTIVE settings (the live row, never literals)
 // and whether the member is already at the yearly limit (then the member gets $0, and no member thank-you email
 // follows because the email goes out for a posted credit). `text` for the full line, `short` for a button prompt.
@@ -74,14 +59,12 @@ function ruleTerms(settings, atCap = false) {
   const s = step2Settings(settings);
   const friend = dollars(Number(settings?.referee_discount_cents) || 0);
   const std = dollars(s.step2_referrer_reward_cents);
-  const near = dollars(s.step2_near_referrer_reward_cents);
-  const within = miles(s.step2_near_radius_miles);
   // `conditional`: for a member whose standing is not known (staff picked someone other than the suggested member).
-  const conditional = `Member: ${std}, or ${near} within ${within}, unless at the yearly limit; friend: ${friend} credit`;
+  const conditional = `Member: ${std}, unless at the yearly limit; friend: ${friend} credit`;
   if (atCap) {
     return { atCap: true, text: `Member is at the yearly limit: $0; friend: ${friend} credit`, short: `member at the yearly limit: $0; friend ${friend}`, conditional };
   }
-  return { atCap: false, text: `Member: ${std}, or ${near} within ${within}; friend: ${friend} credit`, short: `member ${std} or ${near} within ${within}; friend ${friend}`, conditional };
+  return { atCap: false, text: `Member: ${std}; friend: ${friend} credit`, short: `member ${std}; friend ${friend}`, conditional };
 }
 
 module.exports = { STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars };

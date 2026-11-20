@@ -382,7 +382,7 @@ function inboundEvidenceLine(evidence) {
 function inboundConfirmedMessage(result) {
   if (result.error === "convert_failed")
     return "Error: referral saved, but the conversion failed. Use Convert on it in the queue below.";
-  // result.step2: the amounts vary (near, yearly limit), so the words come from what posted.
+  // result.step2: the amount varies (the yearly limit), so the words come from what posted.
   if (result.error === "credit_failed")
     return result.step2
       ? "Referral confirmed, but the credits did not post. They post at the next plan visit."
@@ -1877,8 +1877,6 @@ export default function ReferralsPageV2() {
                     section: "Step 2 member credit",
                     items: [
                       { key: "step2_referrer_reward_cents", label: "Member credit (cents)", type: "number" },
-                      { key: "step2_near_referrer_reward_cents", label: "Member credit when the friend lives near (cents)", type: "number" },
-                      { key: "step2_near_radius_miles", label: "Near distance (miles)", type: "number", decimal: true },
                       { key: "step2_annual_credit_cap", label: "Member credits per year", type: "number" },
                     ],
                   },
@@ -2121,13 +2119,13 @@ export default function ReferralsPageV2() {
                             onChange={(e) =>
                               upd(
                                 f.key,
-                                f.type === "number" && !f.decimal
+                                f.type === "number"
                                   ? Math.max(0, parseInt(e.target.value) || 0)
                                   : e.target.value,
                               )
                             }
                             disabled={!isEditing}
-                            {...(f.type === "number" ? { min: 0, step: f.decimal ? 0.05 : 1 } : {})}
+                            {...(f.type === "number" ? { min: 0, step: 1 } : {})}
                             style={{ ...inputSt, opacity: isEditing ? 1 : 0.6 }}
                           />
                         )}

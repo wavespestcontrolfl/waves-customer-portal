@@ -1284,7 +1284,7 @@ async function fetchChannelAttribution(since, months = 1, exclude = null) {
         .where('asa.lead_date', '>=', since),
       exclude,
     );
-    // The recorded amounts for a referral with a Step 2 settlement (a near $50 or a capped $0 member credit, plus the
+    // The recorded amounts for a referral with a Step 2 settlement (a $25 or a capped $0 member credit, plus the
     // friend's credit), whatever the gate says now; the flat settings for every other referral.
     const ids = (await completedReferrals().distinct('asa.customer_id')).map((r) => r.customer_id).filter(Boolean);
     const refCost = round(await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion), 2);

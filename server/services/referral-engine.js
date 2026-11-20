@@ -13,7 +13,6 @@ const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-
 const { promoterPhoneInUseError } = require('./referral-errors');
 const { isEnabled } = require('../config/feature-gates');
 const step2 = require('./referral-step2');
-const { reviewedCustomerLocation } = require('./customer-geocode-review');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -770,15 +769,15 @@ function referralRewardAlreadyStaged(referral) {
 async function convertReferral(referralId, { customerId, tier, monthlyValue, trx: callerTrx = null, deferredOnly = false } = {}) {
   if (callerTrx && !deferredOnly) throw new Error('convertReferral joins a caller transaction only when deferredOnly');
   // GATE_REFERRAL_STEP2: Step 2 governs the member's reward, so conversion is deferred to the friend's first paid
-  // service whatever require_service_completion says. The immediate promoter-balance payout would skip the near
-  // rate and the yearly cap (creditReferralOnFirstService never selects an already-earned referral).
+  // service whatever require_service_completion says. The immediate promoter-balance payout would skip
+  // the yearly cap (creditReferralOnFirstService never selects an already-earned referral).
   // Under the gate the live row is required before anything is staged or paid (milestone bonuses included): getSettings()
   // would stand in defaults for a failed read. Gate off: getSettings(), as before.
   const settings = withStep2Deferral(isEnabled('referralStep2') ? await liveSettingsOrThrow(callerTrx || db) : await getSettings());
 
   // Calculate reward (base + tier bonus)
   // GATE_REFERRAL_STEP2: the amount staged on the promoter's pending earnings is the Step 2 standard member credit
-  // (the settlement moves total earned by actual minus staged, so a near or capped credit shows truly).
+  // (the settlement moves total earned by actual minus staged, so a capped credit shows truly).
   let rewardCents = isEnabled('referralStep2') ? step2.step2Settings(settings).step2_referrer_reward_cents : settings.referrer_reward_cents;
   if (tier) {
     const tierKey = `bonus_${tier.toLowerCase()}_cents`;
@@ -1177,7 +1176,7 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   const refereeDollars = round2(refereeCents / 100);
   // GATE_REFERRAL_STEP2: the member is paid at the same moment and call site as the live program today, the friend's
   // first performed recurring plan visit (the caller contract already excludes an inspection, a decline and an
-  // incomplete visit); only the amount changes ($25, $50 near, nothing at the yearly cap). Payment settlement is
+  // incomplete visit); only the amount changes ($25, nothing at the yearly cap). Payment settlement is
   // deliberately not checked: an account credit has no cash value and only reduces the member's own invoices, and
   // detecting settlement across ACH, prepay, dues, packet and payer-billed lanes is out of scope.
   const step2On = isEnabled('referralStep2');
@@ -1206,9 +1205,9 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // tier bonuses (bonus_<tier>_cents) live ONLY in the bypassed promoter-balance
     // ledger and must never inflate the real account credit — the agreed reward is
     // a flat $25, so a Silver/Gold/Platinum signup still credits a flat $25.
-    // GATE_REFERRAL_STEP2: the amount is $25, $50 near, or nothing at the yearly cap (step2MemberCredit).
+    // GATE_REFERRAL_STEP2: the amount is $25, or nothing at the yearly cap (step2MemberCredit).
     const memberCredit = step2On
-      ? await step2MemberCredit(trx, { referral, friendCustomerId: customerId, settings: rules })
+      ? await step2MemberCredit(trx, { referral, settings: rules })
       : null;
     // Step 2 bookkeeping (the amount posted and its reason recorded, total earned reconciled): when the gate is on, or
     // the referral was staged under Step 2 and the gate has since been switched off. A referral with no marker settled
@@ -1273,7 +1272,7 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     await supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId: referral.id });
 
     // Promoter bookkeeping: drain the exact pending amount staged at conversion. The member's real credit can differ
-    // from the amount staged ($50 near, $0 at the cap, or a different rule after a gate flip), so total earned moves
+    // from the amount staged ($0 at the cap, or a different rule after a gate flip), so total earned moves
     // by the difference and the promoter dashboard shows what was truly earned.
     if (referral.promoter_id) {
       // Posted minus staged for a Step 2 row (see step2Row); a legacy row adjusts by nothing, as before.
@@ -1397,7 +1396,7 @@ async function memberCreditsThisYear(conn, memberId) {
 }
 
 // The Step 2 offer as the member's own referral screen will state it (PR 2 renders it; nothing customer-facing
-// changes in this PR): the member's amounts, the near radius, the yearly limit and where the member stands.
+// changes in this PR): the member's amount, the yearly limit and where the member stands.
 async function step2OfferFor(conn, memberId, settings) {
   const s = step2.step2Settings(settings);
   // The count is for the customer the credit is paid to (a household shares its promoter's customer).
@@ -1408,8 +1407,6 @@ async function step2OfferFor(conn, memberId, settings) {
     // alone); the configured standard amount is exposed as standardReward.
     rewardPerReferral: capReached ? 0 : s.step2_referrer_reward_cents / 100,
     standardReward: s.step2_referrer_reward_cents / 100,
-    nearReward: s.step2_near_referrer_reward_cents / 100,
-    nearRadiusMiles: s.step2_near_radius_miles,
     annualCap: s.step2_annual_credit_cap,
     creditsThisYear,
     capReached,
@@ -1425,7 +1422,7 @@ async function step2OfferStrict(conn, memberId) {
     const offer = await step2OfferFor(conn, memberId, live);
     // A paused program (program_active off) promises nothing, as the rest of the engine treats it.
     return live.program_active === false || live.program_active === 0
-      ? { ...offer, rewardPerReferral: 0, standardReward: 0, nearReward: 0, programPaused: true }
+      ? { ...offer, rewardPerReferral: 0, standardReward: 0, programPaused: true }
       : offer;
   } catch (err) {
     logger.warn(`[ReferralEngine] Step 2 offer unavailable: ${err.code || err.message}`);
@@ -1434,40 +1431,18 @@ async function step2OfferStrict(conn, memberId) {
 }
 
 // Step 2's member credit for the friend's first performed recurring service, inside creditReferralOnFirstService's
-// transaction with the referral row locked. { dollars, reason }: 'near' (both homes have a map point and the
-// straight-line distance is within step2_near_radius_miles), 'standard', or 'cap_reached' (dollars 0: the member
-// already has step2_annual_credit_cap credits this America/New_York calendar year). The member's customer row is
-// locked first, so two friends' first services for one member count one after the other, and the credit posted
-// next (postCreditMovement locks the same row) is inside that count for the next one.
-// True when the phone belongs to more than one live (not deleted or merged away) customer profile.
-async function phoneSharedByLiveProfiles(conn, phone) {
-  const variants = phoneMatchDigits(normalizePhone(phone) || phone || '');
-  if (!variants.length) return false;
-  const row = await conn('customers').whereNull('deleted_at')
-    .whereRaw(`${PHONE_DIGITS_SQL('phone')} IN (${variants.map(() => '?').join(', ')})`, variants)
-    .count('id as n').first();
-  return Number(row && row.n) > 1;
-}
-
-async function step2MemberCredit(trx, { referral, friendCustomerId, settings }) {
+// transaction with the referral row locked. { dollars, reason }: 'standard' (step2_referrer_reward_cents, $25) or
+// 'cap_reached' (dollars 0: the member already has step2_annual_credit_cap credits this America/New_York calendar
+// year). The member's customer row is locked first, so two friends' first services for one member count one after the
+// other, and the credit posted next (postCreditMovement locks the same row) is inside that count for the next one.
+async function step2MemberCredit(trx, { referral, settings }) {
   const memberId = referral.referrer_customer_id;
   if (!memberId) return { dollars: 0, reason: null };
   await trx('customers').where({ id: memberId }).forUpdate().first('id');
 
   if (step2.capReached(await memberCreditsThisYear(trx, memberId), settings)) return { dollars: 0, reason: 'cap_reached' };
 
-  // Both homes through the review-aware reader (customer-geocode-review), not the raw columns: a pin the office
-  // marked needs_pin, outside_area or unverified is no map point, and a valid primary-property pin counts.
-  const rows = await trx('customers').whereIn('id', [memberId, friendCustomerId])
-    .select('id', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
-  const homes = await Promise.all(rows.map((row) => reviewedCustomerLocation(row, trx)));
-  const homeOf = (id) => homes.find((h) => h.id === id);
-  // The referral finds its friend by phone, and two households can share one. When the completing customer's phone
-  // belongs to more than one live profile, the referral is not provably for this home, so the near bonus is not paid:
-  // $25 standard, the lower amount on doubt. (An ambiguous friend home is treated as no map point.)
-  const friendRow = rows.find((r) => r.id === friendCustomerId);
-  const ambiguous = await phoneSharedByLiveProfiles(trx, friendRow && friendRow.phone);
-  const { cents, reason } = step2.memberCredit(homeOf(memberId), ambiguous ? null : homeOf(friendCustomerId), settings);
+  const { cents, reason } = step2.memberCredit(settings);
   return { dollars: round2(cents / 100), reason };
 }
 
@@ -1610,15 +1585,6 @@ const SETTING_COUNT_KEYS = ['max_referrals_per_month', 'cooldown_days', 'step2_a
 // upper bound on purpose: that is a business decision. Every column is
 // nullable and the form posts the whole row back, so a stored null passes
 // through unchanged rather than blocking an unrelated save.
-// A distance setting: a number of miles, fractions allowed.
-function validateMiles(key, value) {
-  const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
-  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
-    throw referralError(400, 'INVALID_SETTING', `${key} must be a number that is 0 or more`);
-  }
-  return n;
-}
-
 function validateSettingValue(key, value) {
   if (value === null) return null;
   if (key.endsWith('_cents') || SETTING_COUNT_KEYS.includes(key)) {
@@ -1630,7 +1596,6 @@ function validateSettingValue(key, value) {
     }
     return n;
   }
-  if (key === 'step2_near_radius_miles') return validateMiles(key, value);
   if (SETTING_BOOLEAN_KEYS.includes(key)) {
     if (typeof value !== 'boolean') throw referralError(400, 'INVALID_SETTING', `${key} must be true or false`);
     return value;
@@ -1652,7 +1617,7 @@ async function updateSettings(updates) {
     'milestone_3_bonus_cents', 'milestone_5_bonus_cents', 'milestone_10_bonus_cents',
     'min_payout_cents', 'auto_credit_enabled', 'require_service_completion',
     'max_referrals_per_month', 'cooldown_days',
-    'step2_referrer_reward_cents', 'step2_near_referrer_reward_cents', 'step2_near_radius_miles', 'step2_annual_credit_cap',
+    'step2_referrer_reward_cents', 'step2_annual_credit_cap',
     'invite_sms_template', 'reward_sms_template', 'milestone_sms_template',
   ];
 

@@ -1,6 +1,6 @@
 // Runs with the existing CI PostgreSQL pass; never a production connection.
 // Referral Step 2, member side (GATE_REFERRAL_STEP2) against real Postgres and the real credit ledger: the member's
-// $25 / $50-near credit at the friend's first performed recurring service, the 10-a-year cap, the promoter's total
+// flat $25 credit at the friend's first performed recurring service, the 10-a-year cap, the promoter's total
 // earned, and the gate-off path that must stay exactly as it was. A private schema keeps CI's migrated tables
 // untouched; the Step 2 migration builds its own columns.
 const SKIP = !process.env.DATABASE_URL;
@@ -102,7 +102,6 @@ const DAY = 86400000;
   const amounts = async (customerId) => (await credits(customerId)).map((c) => Number(c.delta));
   const row = (id) => db('referrals').where({ id }).first();
 
-  // 0.005 degree of latitude is about 0.35 mile; 0.01 is about 0.69 mile.
   const HOME = { latitude: 27.499, longitude: -82.57 };
 
   // A performed first plan visit, the referral converted.
@@ -356,9 +355,9 @@ const DAY = 86400000;
   });
 
   describe('the member credit amount', () => {
-    test('a friend farther than half a mile: the member gets $25 and the friend the flat $25', async () => {
+    test('the member gets a flat $25 and the friend the flat $25, wherever they live', async () => {
       const { member, friend, visit, ref } = await performed({
-        memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.01, longitude: HOME.longitude },
+        memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.001, longitude: HOME.longitude },
       });
       const result = await firstService(friend, visit);
       expect(result).toMatchObject({ referralId: ref.id, referrerDollars: 25, refereeDollars: 25, referrerReason: 'standard' });
@@ -370,45 +369,13 @@ const DAY = 86400000;
       });
     });
 
-    test('two live households share the friend\'s phone: the near home completing is paid $25 standard, never $50', async () => {
-      const member = await customer(HOME);
-      const near = await planFriend({ latitude: HOME.latitude + 0.005, longitude: HOME.longitude });
-      await planFriend({ phone: near.phone, latitude: HOME.latitude + 0.02, longitude: HOME.longitude });
-      const visit = await recurringVisit(near.id, { status: 'completed' });
-      const ref = await referral(member, near, { ageDays: 2 });
-      await convert(ref, near);
-      await firstService(near, visit);
-      expect(await amounts(member.id)).toEqual([25]);
-      expect(await row(ref.id)).toMatchObject({ referrer_credit_cents: 2500, referrer_reward_reason: 'standard' });
-    });
-
-    test('the same phone on a deleted profile does not make the friend ambiguous: near still pays $50', async () => {
-      const member = await customer(HOME);
-      const near = await planFriend({ latitude: HOME.latitude + 0.005, longitude: HOME.longitude });
-      await planFriend({ phone: near.phone, deleted_at: new Date() });
-      const visit = await recurringVisit(near.id, { status: 'completed' });
-      const ref = await referral(member, near, { ageDays: 2 });
-      await convert(ref, near);
-      await firstService(near, visit);
-      expect(await amounts(member.id)).toEqual([50]);
-    });
-
-    test('a friend within half a mile: the member gets $50', async () => {
-      const { member, friend, visit, ref } = await performed({
-        memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.005, longitude: HOME.longitude },
-      });
-      await firstService(friend, visit);
-      expect(await amounts(member.id)).toEqual([50]);
-      expect(await row(ref.id)).toMatchObject({ referrer_credit_cents: 5000, referrer_reward_reason: 'near' });
-    });
-
-    test("the promoter's total earned follows the real credit: $50 near, $0 at the cap", async () => {
-      const near = await performed({ memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
-      const staged = await db('referral_promoters').where({ id: near.ref.promoter_id }).first();
+    test("the promoter's total earned follows the real credit: $25, $0 at the cap", async () => {
+      const first = await performed({ memberFields: HOME });
+      const staged = await db('referral_promoters').where({ id: first.ref.promoter_id }).first();
       expect(staged).toMatchObject({ total_earned_cents: 2500, pending_earnings_cents: 2500 });
-      await firstService(near.friend, near.visit);
-      expect(await db('referral_promoters').where({ id: near.ref.promoter_id }).first())
-        .toMatchObject({ total_earned_cents: 5000, pending_earnings_cents: 0 });
+      await firstService(first.friend, first.visit);
+      expect(await db('referral_promoters').where({ id: first.ref.promoter_id }).first())
+        .toMatchObject({ total_earned_cents: 2500, pending_earnings_cents: 0 });
 
       // At the cap: the staged $25 comes back out of total earned.
       const capped = await performed({ memberFields: HOME });
@@ -426,17 +393,6 @@ const DAY = 86400000;
       expect(await row(capped.ref.id)).toMatchObject({ referrer_reward_reason: 'cap_reached' });
       expect(await db('referral_promoters').where({ id: capped.ref.promoter_id }).first())
         .toMatchObject({ total_earned_cents: 0, pending_earnings_cents: 0 });
-    });
-
-    test('two placeholder (0, 0) pins are no map point: $25, never the near $50', async () => {
-      const both = await performed({ memberFields: { latitude: 0, longitude: 0 }, friendFields: { latitude: 0, longitude: 0 } });
-      await firstService(both.friend, both.visit);
-      expect(await amounts(both.member.id)).toEqual([25]);
-      expect(await row(both.ref.id)).toMatchObject({ referrer_reward_reason: 'standard' });
-      // One zero coordinate is a placeholder too.
-      const half = await performed({ memberFields: { latitude: 27.499, longitude: 0 }, friendFields: { latitude: 27.499, longitude: 0 } });
-      await firstService(half.friend, half.visit);
-      expect(await amounts(half.member.id)).toEqual([25]);
     });
 
     test('the amount staged on the promoter at conversion is the Step 2 standard credit', async () => {
@@ -631,10 +587,10 @@ const DAY = 86400000;
   });
 
   describe('the member offer the portal route returns under the gate', () => {
-    test('amounts, near radius, yearly limit and where the member stands', async () => {
+    test('amount, yearly limit and where the member stands', async () => {
       const member = await customer();
       expect(await engine.step2OfferFor(db, member.id, await engine.getSettings())).toEqual({
-        rewardPerReferral: 25, standardReward: 25, nearReward: 50, nearRadiusMiles: 0.5, annualCap: 10, creditsThisYear: 0, capReached: false,
+        rewardPerReferral: 25, standardReward: 25, annualCap: 10, creditsThisYear: 0, capReached: false,
       });
       for (let i = 0; i < 10; i += 1) {
         const [prior] = await db('referrals').insert({
@@ -776,7 +732,7 @@ const DAY = 86400000;
     test('gate on, program paused: the offer promises nothing and no invitation goes', async () => {
       const member = await customer({ email: 'member@example.invalid' });
       await db('referral_program_settings').where({ id: 1 }).update({ program_active: false });
-      expect(await engine.step2OfferStrict(db, member.id)).toMatchObject({ programPaused: true, rewardPerReferral: 0, standardReward: 0, nearReward: 0 });
+      expect(await engine.step2OfferStrict(db, member.id)).toMatchObject({ programPaused: true, rewardPerReferral: 0, standardReward: 0 });
       expect(await sendReferralInviteEmail({ customerId: member.id })).toBeNull();
       expect(sendTemplate).not.toHaveBeenCalled();
       await db('referral_program_settings').where({ id: 1 }).update({ program_active: true });
@@ -853,50 +809,13 @@ const DAY = 86400000;
     });
   });
 
-  describe('homes are read through the geocode review', () => {
-    const ADDRESS = { address_line1: '1 Test St', city: 'Bradenton', state: 'FL', zip: '34202' };
-    const snapshot = (c) => JSON.stringify([c.address_line1 ?? null, c.address_line2 ?? null, c.city ?? null, c.state ?? null, c.zip ?? null]);
-    const NEAR = { latitude: HOME.latitude + 0.005, longitude: HOME.longitude };
-    const OLD = process.env.GATE_GEOCODE_REVIEW;
-    beforeEach(() => { process.env.GATE_GEOCODE_REVIEW = 'true'; });
-    afterEach(() => {
-      if (OLD === undefined) delete process.env.GATE_GEOCODE_REVIEW; else process.env.GATE_GEOCODE_REVIEW = OLD;
-    });
-
-    test('a pin the office marked needs_pin or outside_area is no map point: $25, not the near $50', async () => {
-      for (const status of ['needs_pin', 'outside_area']) {
-        const ctx = await performed({ memberFields: { ...HOME, ...ADDRESS }, friendFields: { ...NEAR, ...ADDRESS, address_line1: '2 Test St' } });
-        await db('customer_geocode_reviews').insert({
-          customer_id: ctx.friend.id, address_snapshot: snapshot({ ...ADDRESS, address_line1: '2 Test St' }), status, reason: 'fixture',
-        });
-        await firstService(ctx.friend, ctx.visit);
-        expect(await amounts(ctx.member.id)).toEqual([25]);
-        expect(await row(ctx.ref.id)).toMatchObject({ referrer_reward_reason: 'standard' });
-      }
-    });
-
-    test('a valid primary-property pin counts when the customer row has none: $50', async () => {
-      const ctx = await performed({ memberFields: { ...HOME, ...ADDRESS }, friendFields: { ...ADDRESS, address_line1: '3 Test St' } });
-      await db('customer_properties').insert({ customer_id: ctx.friend.id, is_primary: true, active: true, ...ADDRESS, address_line1: '3 Test St', ...NEAR });
-      await firstService(ctx.friend, ctx.visit);
-      expect(await amounts(ctx.member.id)).toEqual([50]);
-      expect(await row(ctx.ref.id)).toMatchObject({ referrer_reward_reason: 'near' });
-    });
-
-    test('an ordinary pin with no review row is still a pin', async () => {
-      const ctx = await performed({ memberFields: { ...HOME, ...ADDRESS }, friendFields: { ...NEAR, ...ADDRESS, address_line1: '4 Test St' } });
-      await firstService(ctx.friend, ctx.visit);
-      expect(await amounts(ctx.member.id)).toEqual([50]);
-    });
-  });
-
   describe('what staff are told, and the reward email at the limit', () => {
     test('the terms come from the live row and the member\'s standing', async () => {
       await db('referral_program_settings').where({ id: 1 }).update({
-        referee_discount_cents: 2000, step2_referrer_reward_cents: 3000, step2_near_referrer_reward_cents: 6000, step2_near_radius_miles: 1,
+        referee_discount_cents: 2000, step2_referrer_reward_cents: 3000,
       });
       const member = await customer();
-      expect(await engine.step2TermsFor(db, member.id)).toMatchObject({ atCap: false, text: 'Member: $30, or $60 within 1 mile; friend: $20 credit' });
+      expect(await engine.step2TermsFor(db, member.id)).toMatchObject({ atCap: false, text: 'Member: $30; friend: $20 credit' });
       for (let i = 0; i < 10; i += 1) {
         const [prior] = await db('referrals').insert({
           referrer_customer_id: member.id, referee_name: `Prior ${i}`, referee_phone: `+1941563${String(1000 + i)}`,
@@ -933,8 +852,8 @@ const DAY = 86400000;
 
   describe('referral cost in finance views', () => {
     test('a settled Step 2 referral costs what was recorded, whatever the gate says now; every other referral the flat settings', async () => {
-      const near = await performed({ memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
-      await firstService(near.friend, near.visit);
+      const settled = await performed({ memberFields: HOME });
+      await firstService(settled.friend, settled.visit);
       const capped = await performed();
       for (let i = 0; i < 10; i += 1) {
         const [prior] = await db('referrals').insert({
@@ -947,38 +866,38 @@ const DAY = 86400000;
       }
       await firstService(capped.friend, capped.visit);
       const legacy = await planFriend();
-      const ids = [near.friend.id, capped.friend.id, legacy.id];
-      // near: $50 member + $25 friend; capped: $0 + $25; legacy: the flat $40.
-      expect(await engine.referralAcquisitionCost(db, ids, 40)).toBe(140);
+      const ids = [settled.friend.id, capped.friend.id, legacy.id];
+      // settled: $25 member + $25 friend; capped: $0 + $25; legacy: the flat $40.
+      expect(await engine.referralAcquisitionCost(db, ids, 40)).toBe(115);
       // After the gate is turned off the recorded amounts still stand; a customer with no Step 2 settlement is flat.
       gates.referralStep2 = false;
-      expect(await engine.referralAcquisitionCost(db, ids, 40)).toBe(140);
+      expect(await engine.referralAcquisitionCost(db, ids, 40)).toBe(115);
       expect(await engine.referralAcquisitionCost(db, [legacy.id], 40)).toBe(40);
       expect(await engine.referralAcquisitionCost(db, [], 40)).toBe(0);
     });
 
     test('a $0 friend credit still costs the member amount (the friend is found by referee_customer_id)', async () => {
       await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 0 });
-      const ctx = await performed({ memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
+      const ctx = await performed({ memberFields: HOME });
       await firstService(ctx.friend, ctx.visit);
       expect(await credits(ctx.friend.id)).toHaveLength(0);
-      expect(await row(ctx.ref.id)).toMatchObject({ referee_customer_id: ctx.friend.id, referrer_credit_cents: 5000 });
-      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id], 40)).toBe(50);
+      expect(await row(ctx.ref.id)).toMatchObject({ referee_customer_id: ctx.friend.id, referrer_credit_cents: 2500 });
+      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id], 40)).toBe(25);
       // An older settled row with no referee_customer_id falls back to the friend's ledger row.
       await db('referrals').where({ id: ctx.ref.id }).update({ referee_customer_id: null });
       expect(await engine.referralAcquisitionCost(db, [ctx.friend.id], 40)).toBe(40);
     });
 
     test('a formatted friend phone and a household sharing it cannot misattribute the cost (no phone matching)', async () => {
-      const ctx = await performed({ memberFields: HOME, friendFields: { phone: '(941) 555-0199', latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
+      const ctx = await performed({ memberFields: HOME, friendFields: { phone: '(941) 555-0199' } });
       await db('referrals').where({ id: ctx.ref.id }).update({ referee_phone: '+19415550199' });
       await firstService(ctx.friend, ctx.visit);
       expect(await amounts(ctx.friend.id)).toEqual([25]);
       // Another profile on the same phone, never credited: flat.
       const sibling = await customer({ phone: '941-555-0199', waveguard_tier: 'Silver', monthly_rate: 119.1 });
-      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id], 40)).toBe(75);
+      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id], 40)).toBe(50);
       expect(await engine.referralAcquisitionCost(db, [sibling.id], 40)).toBe(40);
-      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id, sibling.id], 40)).toBe(115);
+      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id, sibling.id], 40)).toBe(90);
     });
   });
 
@@ -990,7 +909,7 @@ const DAY = 86400000;
       expect(await inbound.previewTerms(db, member.id)).toBeNull();
       spy.mockRestore();
       expect(await inbound.previewTerms(db, member.id)).toMatchObject({
-        atCap: false, forCustomerId: String(member.id), conditional: 'Member: $25, or $50 within half a mile, unless at the yearly limit; friend: $25 credit',
+        atCap: false, forCustomerId: String(member.id), conditional: 'Member: $25, unless at the yearly limit; friend: $25 credit',
       });
       expect(await inbound.previewTerms(db, null)).toMatchObject({ forCustomerId: null });
     });
@@ -1039,7 +958,7 @@ const DAY = 86400000;
     test('require_service_completion off + gate on: conversion defers and the member gets the Step 2 amount', async () => {
       await db('referral_program_settings').where({ id: 1 }).update({ require_service_completion: false });
       const member = await customer(HOME);
-      const friend = await planFriend({ latitude: HOME.latitude + 0.005, longitude: HOME.longitude });
+      const friend = await planFriend();
       const visit = await recurringVisit(friend.id, { status: 'completed' });
       const ref = await referral(member, friend, { ageDays: 1 });
       const result = await convert(ref, friend);
@@ -1049,19 +968,19 @@ const DAY = 86400000;
       expect(promoter).toMatchObject({ available_balance_cents: 0, referral_balance_cents: 0 });
       expect(promoter.pending_earnings_cents).toBeGreaterThan(0);
       await firstService(friend, visit);
-      expect(await amounts(member.id)).toEqual([50]);
-      expect(await row(ref.id)).toMatchObject({ referrer_reward_reason: 'near' });
+      expect(await amounts(member.id)).toEqual([25]);
+      expect(await row(ref.id)).toMatchObject({ referrer_reward_reason: 'standard' });
     });
   });
 
   describe('reporting shows what the member earned', () => {
     test('analytics and the promoter list use the actual credit, $0 at the cap included, and the staged amount otherwise', async () => {
       const member = await customer(HOME);
-      const near = await planFriend({ latitude: HOME.latitude + 0.005, longitude: HOME.longitude });
-      const nearVisit = await recurringVisit(near.id, { status: 'completed' });
-      const nearRef = await referral(member, near, { ageDays: 1 });
-      await convert(nearRef, near);
-      await firstService(near, nearVisit);
+      const settledFriend = await planFriend();
+      const settledVisit = await recurringVisit(settledFriend.id, { status: 'completed' });
+      const nearRef = await referral(member, settledFriend, { ageDays: 1 });
+      await convert(nearRef, settledFriend);
+      await firstService(settledFriend, settledVisit);
       // Converted, still waiting on its first payment: the staged $25 counts.
       const waiting = await planFriend();
       await recurringVisit(waiting.id, { status: 'completed' });
@@ -1075,29 +994,28 @@ const DAY = 86400000;
       });
 
       const analytics = await engine.getProgramAnalytics(new Date(Date.now() - 7 * DAY), new Date(Date.now() + DAY));
-      expect(analytics.financial.totalRewardsDollars).toBe(75); // 50 near + 25 staged + 0 capped
+      expect(analytics.financial.totalRewardsDollars).toBe(50); // 25 settled + 25 staged + 0 capped
       const stats = await engine.getPromoterStats(promoterId);
-      expect(stats.referrals.map((r) => r.rewardAmount).sort((x, y) => x - y)).toEqual([0, 25, 50]);
+      expect(stats.referrals.map((r) => r.rewardAmount).sort((x, y) => x - y)).toEqual([0, 25, 25]);
     });
   });
 
   describe('settings', () => {
-    test('the four Step 2 numbers are saved and validated', async () => {
-      await engine.updateSettings({ step2_annual_credit_cap: 12, step2_near_radius_miles: '0.75', step2_referrer_reward_cents: 3000 });
+    test('the two Step 2 numbers are saved and validated, and the near columns are not writable', async () => {
+      await engine.updateSettings({ step2_annual_credit_cap: 12, step2_referrer_reward_cents: 3000, step2_near_radius_miles: '9', step2_near_referrer_reward_cents: 9000 });
       expect(await db('referral_program_settings').where({ id: 1 }).first()).toMatchObject({
-        step2_annual_credit_cap: 12, step2_near_radius_miles: '0.75', step2_referrer_reward_cents: 3000,
+        step2_annual_credit_cap: 12, step2_referrer_reward_cents: 3000, step2_near_radius_miles: '0.50', step2_near_referrer_reward_cents: 5000,
       });
-      await expect(engine.updateSettings({ step2_near_radius_miles: -1 })).rejects.toMatchObject({ code: 'INVALID_SETTING' });
       await expect(engine.updateSettings({ step2_annual_credit_cap: 1.5 })).rejects.toMatchObject({ code: 'INVALID_SETTING' });
-      await engine.updateSettings({ step2_annual_credit_cap: 10, step2_near_radius_miles: 0.5, step2_referrer_reward_cents: 2500 });
+      await engine.updateSettings({ step2_annual_credit_cap: 10, step2_referrer_reward_cents: 2500 });
     });
   });
 
   describe('the gate off is today', () => {
-    test('conversion and first service pay the flat $25 and $25 with no Step 2 column written, near or not, cap or not', async () => {
+    test('conversion and first service pay the flat $25 and $25 with no Step 2 column written, cap or not', async () => {
       gates.referralStep2 = false;
       const member = await customer(HOME);
-      const friend = await planFriend({ latitude: HOME.latitude + 0.005, longitude: HOME.longitude }); // near, but the gate is off
+      const friend = await planFriend();
       const visit = await recurringVisit(friend.id);
       const ref = await referral(member, friend, { ageDays: 2 });
       for (let i = 0; i < 10; i += 1) {

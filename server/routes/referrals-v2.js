@@ -184,7 +184,7 @@ router.get('/', async (req, res, next) => {
         convertedAt: r.converted_at,
       })),
       rewardPerReferral: settings.referrer_reward_cents / 100,
-      // GATE_REFERRAL_STEP2: the member's real offer (amounts, near radius, yearly limit, where the member stands).
+      // GATE_REFERRAL_STEP2: the member's real offer (amount, yearly limit, where the member stands).
       // Server side only here; PR 2 renders it. rewardPerReferral above keeps its meaning as the standard amount.
       ...(isEnabled('referralStep2') ? (await engine.step2OfferStrict(db, promoter.customer_id || req.customerId)) || { rewardPerReferral: 0 } : {}),
     });
