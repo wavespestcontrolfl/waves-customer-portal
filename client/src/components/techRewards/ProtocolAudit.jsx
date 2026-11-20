@@ -25,12 +25,16 @@ async function call(path, options = {}) {
 
 const LINE_WORDS = { lawn: 'Lawn', tree_shrub: 'Tree & shrub' };
 const photoCountWords = counts => Object.entries(counts || {}).map(([type, n]) => `${n} ${type}`).join(', ');
-const productAmount = p => [p.rate != null ? `${p.rate} ${p.rateUnit || ''}`.trim() : null, p.area].filter(Boolean).join(' · ');
+const productAmount = p => [
+  p.rate != null ? `${p.rate} ${p.rateUnit || ''}`.trim() : null,
+  p.area,
+  p.totalAmount != null ? `total ${p.totalAmount} ${p.amountUnit || ''}`.trim() : null,
+].filter(Boolean).join(' · ');
 
 function Products({ products }) {
   if (!products.length) return <p className="m-0 text-ui-caption text-ink-secondary">No products on the record.</p>;
   return <Table aria-label="Products on the record">
-    <THead><TR><TH>Product</TH><TH>Rate and area</TH><TH>Targets</TH></TR></THead>
+    <THead><TR><TH>Product</TH><TH>Rate, area and total</TH><TH>Targets</TH></TR></THead>
     <TBody>
       {products.map((p, i) => <TR key={`${p.name}-${i}`}>
         <TD>{p.name}</TD>
@@ -65,7 +69,7 @@ function MarkForm({ visit, onSaved }) {
     if (result === 'mismatch' && !note.trim()) { setError('A mismatch needs a note.'); return; }
     setBusy(true); setError('');
     try {
-      const data = await call(`/visits/${visit.scheduledServiceId}`, { method: 'PUT', body: { result, note } });
+      const data = await call(`/visits/${visit.scheduledServiceId}`, { method: 'PUT', body: { result, note, recordId: visit.recordId } });
       onSaved(data.mark);
     } catch (failure) {
       setError(failure.message);
@@ -121,7 +125,8 @@ export default function ProtocolAudit() {
   }, [month]);
   useEffect(load, [load]);
 
-  const applyMark = (technicianId, mark) => setBoard(prev => ({
+  // A save that returns after the month changed (the board reloads) belongs to the old board: drop it.
+  const applyMark = (technicianId, mark, boardMonth) => setBoard(prev => (!prev || prev.month !== boardMonth ? prev : {
     ...prev,
     technicians: prev.technicians.map(t => {
       if (t.id !== technicianId) return t;
@@ -145,7 +150,7 @@ export default function ProtocolAudit() {
       <h3 className="m-0 text-ui-title font-medium">
         {tech.name} <span className="text-ui-caption font-normal text-ink-secondary">{tech.markedCount} of {tech.visits.length} marked · {tech.eligibleCount} eligible visits</span>
       </h3>
-      {tech.visits.map(visit => <VisitCard key={visit.scheduledServiceId} visit={visit} onSaved={mark => applyMark(tech.id, mark)} />)}
+      {tech.visits.map(visit => <VisitCard key={visit.scheduledServiceId} visit={visit} onSaved={mark => applyMark(tech.id, mark, board.month)} />)}
     </section>)}
   </Card>;
 }

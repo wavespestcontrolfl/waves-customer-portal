@@ -4,9 +4,10 @@
  * GET /?month=YYYY-MM          the month's board (default: this ET month): per technician with eligible visits,
  *                              five sampled completed lawn / tree & shrub visits with products, rates, targets,
  *                              counts, photos and the current mark.
- * PUT /visits/:scheduledServiceId   { result: 'match' | 'mismatch', note? } mark one sampled visit (a mismatch needs
- *                              a note). One row per visit: marking again changes it. 404 not an eligible visit,
- *                              409 not in the technician's sample for the month.
+ * PUT /visits/:scheduledServiceId   { result: 'match' | 'mismatch', note?, recordId? } mark one sampled visit (a mismatch
+ *                              needs a note; recordId = the record shown, refused with 409 if the visit's record changed).
+ *                              One row per visit: marking again changes it. 404 not an eligible visit, 409 not in the
+ *                              technician's sample for the month or changed since loaded.
  * Writes only tech_protocol_audits (read by tech-rewards-scores.js readAudit). Never touches visits or records.
  */
 const express = require('express');
@@ -37,6 +38,7 @@ router.put('/visits/:scheduledServiceId', async (req, res) => {
   try {
     const mark = await audit.saveMark({
       scheduledServiceId: req.params.scheduledServiceId,
+      recordId: req.body?.recordId,
       result: req.body?.result,
       note: req.body?.note,
       auditedBy: req.technicianId,

@@ -247,6 +247,49 @@ describe('pickSample (pure)', () => {
     expect(() => audit.parseMonth('2026-13')).toThrow(/month must be/);
   });
 
+  test("a visit's newest record decides its month and technician: an older record in another month never shows or saves", async () => {
+    const { svc } = await visit(tech, { service_date: '2026-04-28', created_at: new Date('2026-04-28T15:00:00Z') });
+    await db('service_records').insert({ technician_id: other, customer_id: customerId, scheduled_service_id: svc.id, status: 'completed',
+      service_date: '2026-05-02', service_type: 'Lawn Care Treatment', service_line: 'lawn', created_at: new Date('2026-05-02T15:00:00Z') });
+    expect(await board('2026-04')).toEqual([]); // the newest record moved it to May and to the other technician
+    const may = await board('2026-05');
+    expect(may.map((t) => [t.name, ids(t)])).toEqual([['Fixture Two', [svc.id]]]);
+    await audit.saveMark({ scheduledServiceId: svc.id, result: 'match', auditedBy: tech });
+    expect(await db('tech_protocol_audits').first()).toMatchObject({ technician_id: other });
+    expect((await db('tech_protocol_audits').first()).audit_month.getMonth() + 1).toBe(5);
+  });
+
+  test('a correction that moves a marked visit shows it unmarked, and marking again re-attributes the row', async () => {
+    const { svc, record } = await visit(tech);
+    await audit.saveMark({ scheduledServiceId: svc.id, result: 'match', auditedBy: tech });
+    expect((await board())[0].visits[0].audit).toMatchObject({ result: 'match' });
+    await db('service_records').where({ id: record.id }).update({ technician_id: other }); // the visit was corrected to another technician
+    const moved = (await board())[0];
+    expect(moved.name).toBe('Fixture Two');
+    expect(moved.visits[0].audit).toBeNull();
+    await audit.saveMark({ scheduledServiceId: svc.id, result: 'mismatch', note: 'wrong rate', auditedBy: tech });
+    const rows = await db('tech_protocol_audits');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ technician_id: other, result: 'mismatch' });
+    expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBeNull(); // the first technician's score no longer counts it
+  });
+
+  test('a save that names a record the visit no longer has is refused as stale', async () => {
+    const { svc, record } = await visit(tech);
+    await db('service_records').insert({ technician_id: tech, customer_id: customerId, scheduled_service_id: svc.id, status: 'completed',
+      service_date: '2026-04-11', service_type: 'Lawn Care Treatment', service_line: 'lawn', created_at: new Date(Date.now() + 60000) });
+    await expect(audit.saveMark({ scheduledServiceId: svc.id, recordId: record.id, result: 'match', auditedBy: tech })).rejects.toMatchObject({ status: 409, code: 'STALE_VISIT' });
+    expect(await db('tech_protocol_audits')).toHaveLength(0);
+  });
+
+  test('parallel marks never put more than five visits of one technician and month in the audit', async () => {
+    const all = await lawnVisits(tech, 12);
+    const inSample = new Set(ids((await board())[0]));
+    const attempts = await Promise.allSettled(all.map((v) => audit.saveMark({ scheduledServiceId: v.svc.id, result: 'match', auditedBy: tech })));
+    expect(attempts.filter((a) => a.status === 'fulfilled')).toHaveLength(5);
+    expect((await db('tech_protocol_audits')).map((r) => r.scheduled_service_id).sort()).toEqual([...inSample].sort());
+  });
+
   test('a marked visit stays on the board when more visits complete later, and the season score reads the marks', async () => {
     await lawnVisits(tech, 6);
     const [shown] = await board();

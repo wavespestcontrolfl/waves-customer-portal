@@ -61,10 +61,10 @@ describe('/api/admin/tech-protocol-audits', () => {
   });
 
   test('PUT saves the mark as the signed-in admin', async () => {
-    const res = await put({ result: 'mismatch', note: 'rate off' });
+    const res = await put({ result: 'mismatch', note: 'rate off', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ mark: { scheduledServiceId: VISIT } });
-    expect(audit.saveMark).toHaveBeenCalledWith({ scheduledServiceId: VISIT, result: 'mismatch', note: 'rate off', auditedBy: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    expect(audit.saveMark).toHaveBeenCalledWith({ scheduledServiceId: VISIT, result: 'mismatch', note: 'rate off', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', auditedBy: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
   });
 
   test("the service's refusals keep their status and code; any other failure is a plain 500", async () => {

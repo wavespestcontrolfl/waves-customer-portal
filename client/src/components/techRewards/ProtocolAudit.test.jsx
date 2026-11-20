@@ -11,8 +11,11 @@ const reply = (body, ok = true, status = ok ? 200 : 400) => Promise.resolve({ ok
 const VISIT = (over = {}) => ({
   scheduledServiceId: 'visit-1', recordId: 'rec-1', serviceDate: '2026-04-10', serviceType: 'Lawn Care Treatment', serviceLine: 'lawn',
   protocolName: 'Sample protocol', areaSqft: 5000, customerName: 'Sample Customer',
-  products: [{ name: 'Sample Product', rate: 2.5, rateUnit: 'oz/1000 sq ft', totalAmount: null, amountUnit: null, area: '5000 sq ft', targets: ['chinch bugs'] }],
-  counts: { products: 1, photos: 2, photosByType: { before: 1, after: 1 } },
+  products: [
+    { name: 'Sample Product', rate: 2.5, rateUnit: 'oz/1000 sq ft', totalAmount: null, amountUnit: null, area: '5000 sq ft', targets: ['chinch bugs'] },
+    { name: 'Total Only Product', rate: null, rateUnit: null, totalAmount: 12, amountUnit: 'oz', area: null, targets: [] },
+  ],
+  counts: { products: 2, photos: 2, photosByType: { before: 1, after: 1 } },
   photos: [{ id: 'p1', type: 'before', caption: 'Front lawn', url: 'https://photos.test/a.jpg' }, { id: 'p2', type: 'after', caption: null, url: null }],
   audit: null, ...over,
 });
@@ -44,9 +47,10 @@ describe('Protocol audit tab', () => {
     expect(within(tech).getByText(/1 of 2 marked · 9 eligible visits/)).toBeInTheDocument();
     const visit = within(tech).getAllByRole('heading', { level: 3 })[1];
     expect(visit).toHaveTextContent('Apr 10, 2026 · Lawn Care Treatment');
-    expect(within(tech).getAllByText(/1 products · 2 photos \(1 before, 1 after\)/)).toHaveLength(2);
+    expect(within(tech).getAllByText(/2 products · 2 photos \(1 before, 1 after\)/)).toHaveLength(2);
     expect(within(tech).getAllByText('Sample Product')).toHaveLength(2);
     expect(within(tech).getAllByText('chinch bugs')).toHaveLength(2);
+    expect(within(tech).getAllByText('total 12 oz')).toHaveLength(2); // a recorded total shows even with no rate or area
     expect(within(tech).getAllByAltText('Front lawn')[0]).toHaveAttribute('src', 'https://photos.test/a.jpg');
     expect(within(tech).getAllByText('Photo unavailable')).toHaveLength(2);
   });
@@ -61,7 +65,7 @@ describe('Protocol audit tab', () => {
     fireEvent.click(within(card).getByLabelText('Match'));
     fireEvent.click(within(card).getByRole('button', { name: 'Save mark' }));
     await waitFor(() => expect(calls.find(c => c.method === 'PUT')).toBeTruthy());
-    expect(calls.find(c => c.method === 'PUT')).toMatchObject({ path: '/admin/tech-protocol-audits/visits/visit-1', body: { result: 'match', note: '' } });
+    expect(calls.find(c => c.method === 'PUT')).toMatchObject({ path: '/admin/tech-protocol-audits/visits/visit-1', body: { result: 'match', note: '', recordId: 'rec-1' } });
     expect(await screen.findByText(/2 of 2 marked/)).toBeInTheDocument();
   });
 
@@ -80,5 +84,25 @@ describe('Protocol audit tab', () => {
     adminFetch.mockImplementation(() => reply({ month: '2026-04', sampleSize: 5, technicians: [] }));
     render(<ProtocolAudit />);
     expect(await screen.findByText(/No completed lawn or tree & shrub visits this month/)).toBeInTheDocument();
+  });
+});
+
+describe('Protocol audit tab, a save that returns after the month changed', () => {
+  it('is dropped and does not break the board', async () => {
+    let finishSave;
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (options.method === 'PUT') return new Promise(resolve => { finishSave = () => resolve({ ok: true, status: 200, json: async () => ({ mark: { scheduledServiceId: 'visit-1', result: 'match', note: null } }) }); });
+      return reply(path.includes('2026-03') ? { month: '2026-03', sampleSize: 5, technicians: [] } : BOARD([VISIT()]));
+    });
+    render(<ProtocolAudit />);
+    const card = (await screen.findAllByRole('form', { name: 'Mark this visit' }))[0];
+    fireEvent.click(within(card).getByLabelText('Match'));
+    fireEvent.click(within(card).getByRole('button', { name: 'Save mark' }));
+    await waitFor(() => expect(finishSave).toBeTypeOf('function'));
+    fireEvent.change(screen.getByLabelText('Month'), { target: { value: '2026-03' } });
+    await screen.findByText(/No completed lawn or tree & shrub visits this month/);
+    finishSave();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(screen.getByText(/No completed lawn or tree & shrub visits this month/)).toBeInTheDocument();
   });
 });
