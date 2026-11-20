@@ -1653,14 +1653,14 @@ describe('PATCH /:id/tech-count with points', () => {
 
   it.each([
     ['nothing but a crop', { crop: CROP }],
-    ['points without a crop', { pins: PINS }],
-    ['points with a crop that has no numbers', { pins: PINS, crop: { lat: 'a', lng: 'b' } }],
-    ['points with a crop out of range', { pins: PINS, crop: { lat: 91, lng: 0 } }],
-    ['21 points', { pins: Array.from({ length: 21 }, () => PINS[0]), crop: CROP }],
-    ['a point outside the photo', { pins: [{ x: 1.2, y: 0.5, type: 'other' }], crop: CROP }],
-    ['an unknown point type', { pins: [{ x: 0.5, y: 0.5, type: 'attic_door' }], crop: CROP }],
-    ['a note over 40 characters', { pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'n'.repeat(41) }], crop: CROP }],
-    ['points as an object', { pins: { x: 0.5 }, crop: CROP }],
+    ['points without a crop', { pins: PINS, expected_pins: null }],
+    ['points with a crop that has no numbers', { pins: PINS, crop: { lat: 'a', lng: 'b' }, expected_pins: null }],
+    ['points with a crop out of range', { pins: PINS, crop: { lat: 91, lng: 0 }, expected_pins: null }],
+    ['21 points', { pins: Array.from({ length: 21 }, () => PINS[0]), crop: CROP, expected_pins: null }],
+    ['a point outside the photo', { pins: [{ x: 1.2, y: 0.5, type: 'other' }], crop: CROP, expected_pins: null }],
+    ['an unknown point type', { pins: [{ x: 0.5, y: 0.5, type: 'attic_door' }], crop: CROP, expected_pins: null }],
+    ['a note over 40 characters', { pins: [{ x: 0.5, y: 0.5, type: 'other', note: 'n'.repeat(41) }], crop: CROP, expected_pins: null }],
+    ['points as an object', { pins: { x: 0.5 }, crop: CROP, expected_pins: null }],
     ['a string hide flag', { hide_on_estimate: 'true' }],
     ['a number hide flag', { hide_on_estimate: 1 }],
   ])('rejects %s with 400 and writes nothing', async (_name, body) => {
