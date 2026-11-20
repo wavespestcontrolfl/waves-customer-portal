@@ -756,9 +756,10 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
     });
 
     // Pre-push P1 on e78306a32d: a writer reads the stops under its date lock, after waiting for it. NOW() is its
-    // transaction's start, so a hold that ran out meanwhile would still count as its
-    // truck's stop; the read counts a hold by the real clock.
-    test('the stop read counts a hold by the real clock, not the transaction\'s NOW()', async () => {
+    // transaction's start, so a hold that ran out meanwhile would still count as its truck's stop; the read counts an
+    // unclaimed hold by the real clock. Pre-push P1 on 5061a1da2b: staff can book a hold without clearing its time, so
+    // a visit with a customer counts whatever its hold time says (the commit side's bookedVisitOrLiveHold, #7993).
+    test('the stop read counts a booked visit that keeps an old hold time, and an unclaimed hold by the real clock', async () => {
       await withTruckGate('true', async () => {
         const chain = scheduledServicesChain([]);
         db.mockImplementation(() => chain);
@@ -766,8 +767,21 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
         const q = { whereNull: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
         chain.andWhere.mock.calls[0][0](q);
         expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
-        expect(q.orWhereRaw).toHaveBeenCalledWith('scheduled_services.reservation_expires_at > clock_timestamp()');
+        expect(q.orWhereRaw).toHaveBeenCalledWith(
+          'scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > clock_timestamp()',
+        );
       });
+    });
+
+    // The shared rule's other readers (the reservation and confirmation checks, the route reads) keep main's SQL.
+    test('the shared hold rule keeps the transaction\'s NOW() for its other readers', () => {
+      const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
+      const q = { whereNull: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
+      bookedVisitOrLiveHold(q);
+      expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
+      expect(q.orWhereRaw).toHaveBeenCalledWith(
+        'scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()',
+      );
     });
 
     // Not fail-open like the offer: the booking transaction refuses rather than books past a read it could not do.

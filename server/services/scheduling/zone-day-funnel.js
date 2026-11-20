@@ -67,8 +67,9 @@
  * row. The estimate page's holds do not re-check it: like the cluster choice
  * (Deliberate boundaries), two offers held before either is written can send
  * a second truck south that day, bounded by the offer-token TTL. The stop read
- * counts a hold by the real clock (clock_timestamp), not the writer's
- * transaction start. The
+ * counts a visit staff booked even when it keeps its old hold time, and an
+ * unclaimed hold by the real clock (clock_timestamp), not the writer's
+ * transaction start (reservation-occupancy.js). The
  * assessment link's list and its booking resolve the zone from the one booking
  * address the same way (slot-zone.js leadBookingZone: its city decides, its text
  * only without one, else the customer's own city on file when the list knows the
@@ -84,6 +85,7 @@
 const logger = require('../logger');
 const { zoneSlugOf, leadBookingZone } = require('../slot-zone');
 const { isEnabled } = require('../../config/feature-gates');
+const { bookedVisitOrLiveHoldByRealClock } = require('./reservation-occupancy');
 
 // The per-truck switch: the scheduler's one technician-scope reader (occupancy.js techScopedConfirmActive,
 // GATE_MULTI_TECH_CONFIRM), read at call time. A read that throws (a suite that mocks occupancy or feature-gates
@@ -206,18 +208,18 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 // YYYY-MM-DD dates with at least one live scheduled service (assigned or
 // unassigned — either means a truck is in the zone that day) matching the
 // estimate's zone. `techs`: each of those dates -> the technician ids of its
-// stops (null = an unassigned stop). Hold rows count only while unexpired,
-// mirroring filterCollidingSlots.
+// stops (null = an unassigned stop). A visit staff booked counts even when it
+// keeps its old hold time; an unclaimed hold counts only while unexpired.
 async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo) {
   const rows = await dbc('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    .andWhere((q) => {
-      // The real clock, not NOW() (the transaction's start): a writer reads this under its date lock after waiting for
-      // it, and a hold that ran out meanwhile no longer holds the day (owner rule B).
-      q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > clock_timestamp()');
-    })
+    // The commit side's hold rule (bookedVisitOrLiveHold, #7993): staff can book a hold without clearing its time, and
+    // that visit is the truck's stop until the cleanup job clears it (pre-push P1 on 5061a1da2b). By the real clock,
+    // not NOW() (the transaction's start): a writer reads this under its date lock after waiting for it, and an
+    // unclaimed hold that ran out meanwhile no longer holds the day (owner rule B).
+    .andWhere(bookedVisitOrLiveHoldByRealClock)
     .select(
       'scheduled_services.scheduled_date',
       'scheduled_services.zone',
