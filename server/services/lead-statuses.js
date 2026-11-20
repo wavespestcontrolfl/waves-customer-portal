@@ -35,6 +35,28 @@ function applyOpenLeadPredicate(query) {
   return query.whereIn('status', OPEN_LEAD_STATUSES).whereNull('converted_at');
 }
 
+// The quiz hand-off's own rule (owner *build* 2026-11-19, quiz pages: "one
+// visitor makes one lead"). The lead webhook gives the visitor who filed a
+// quiz lead that lead's id and an attach token, so the price page can
+// continue the same lead (routes/lead-webhook.js quizHandoffFor). Every
+// public write that the hand-off opens keeps this rule: the lead is still
+// open by the canonical predicate, not deleted and not commercial. A lead
+// the office closed, converted, removed or marked as a business is not
+// continued; the visitor's run files its own quote_wizard lead instead.
+function applyQuizHandoffLeadPredicate(query) {
+  return applyOpenLeadPredicate(query).whereNull('deleted_at').whereRaw('is_commercial IS NOT TRUE');
+}
+
+// For a public write that takes a lead id of any type (the price calculation
+// and its add-on step). A web-form lead's id reaches a visitor only through
+// the quiz hand-off, so that lead must pass the hand-off's rule. Every other
+// lead type keeps the rule its own route already applies.
+function exceptClosedWebFormLead(query) {
+  return query.where((own) => own
+    .whereRaw("lead_type IS DISTINCT FROM 'form_submission'")
+    .orWhere((handedOff) => applyQuizHandoffLeadPredicate(handedOff)));
+}
+
 // Same predicate, evaluated against an already-fetched row (status,
 // converted_at) rather than a query builder — for a caller that already
 // holds the row (an explicit-id lookup checking eligibility) and would
@@ -191,6 +213,8 @@ module.exports = {
   unlessHandledSince,
   OPEN_LEAD_STATUSES,
   applyOpenLeadPredicate,
+  applyQuizHandoffLeadPredicate,
+  exceptClosedWebFormLead,
   isOpenLeadRow,
   scopeToProspects,
   PROSPECT_SCOPE_SQL,

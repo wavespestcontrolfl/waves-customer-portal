@@ -2,7 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, exceptClosedWebFormLead } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
 const { whereLiveCourtship } = require('../services/lead-courtship');
 const { heardAboutFromBody, heardAboutFillIfEmpty } = require('../services/heard-about');
@@ -2432,10 +2432,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // the answer and its prompt are judged on the same pre-write row.
       Object.assign(updateFields, heardAboutFillIfEmpty(db, wizardHeardAbout));
       const RETURNING = ['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'];
+      // A web-form lead reaches this route only through the quiz hand-off,
+      // and keeps the hand-off's rule on this write too (still open, not
+      // commercial): the lead webhook returns its id before the property
+      // lookup has judged it. A refused lead matches zero rows, like a wrong
+      // id, and this run files its own quote_wizard lead below.
       const ownRow = () => db('leads')
         .where({ id: leadId })
         .whereNull('deleted_at')
-        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()]);
+        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+        .modify(exceptClosedWebFormLead);
       // The normal wizard flow mints a 'new' row at the property-lookup
       // stage and hands its token here, so this is where a repeat through
       // the documented flow is first fully typed (codex #3834 r7 P1). And a
@@ -4512,11 +4518,15 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     }
 
     // leadId + email match = good-enough public auth (customer just typed the
-    // email in the same session). Avoids any-id-overwrite abuse.
+    // email in the same session). Avoids any-id-overwrite abuse. A web-form
+    // lead (the quiz hand-off) must also still pass the hand-off's rule, as
+    // on /calculate; the write below repeats it, so a lead the office closes
+    // between this read and that write is left alone.
     const lead = await db('leads')
       .where({ id: leadId })
       .whereNull('deleted_at')
       .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
+      .modify(exceptClosedWebFormLead)
       .first();
     if (!lead) return res.status(404).json({ error: 'Lead not found.' });
 
@@ -4538,11 +4548,12 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     const mergedUpsells = Array.from(new Set([...prevUpsells, ...valid]));
     const updatedData = { ...existingData, upsell_interests: mergedUpsells, upsell_added_at: new Date().toISOString() };
 
-    await db('leads').where({ id: leadId }).update({
+    const written = await db('leads').where({ id: leadId }).modify(exceptClosedWebFormLead).update({
       service_interest: mergedInterest,
       extracted_data: JSON.stringify(updatedData),
       updated_at: new Date(),
     });
+    if (!written) return res.status(404).json({ error: 'Lead not found.' });
 
     // Keep the quote_wizard estimate row in sync — admins viewing the pipeline
     // should see the merged service_interest after an upsell add, not the
