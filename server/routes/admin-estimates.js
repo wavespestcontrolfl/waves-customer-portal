@@ -5888,32 +5888,34 @@ router.post('/:id/unarchive', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/estimates/:id/follow-up — manually send a follow-up SMS
 // POST /:id/call-outcome — what a call from the Call today list came to (owner 2026-11-20, D1 A): Booked, Call back,
 // Not interested or No answer (shared/estimate-call-today.cjs CALL_OUTCOMES). One tap saves the outcome, who tapped and
 // when as an activity_log row on the estimate, and the row leaves Call today until the customer opens or taps the
 // estimate again. It only records: it texts, emails and calls nobody, books nothing and changes no estimate field.
-// "Not interested" also opens the page's Mark lost box, which saves through PATCH /:id as before.
+// "Not interested" also opens the page's Mark lost box, which saves through PATCH /:id as before. The log line carries
+// no customer name (the row's estimate_id and customer_id say whose it is), so a failed insert puts none in the error
+// log (AGENTS.md, PII in logs).
 router.post('/:id/call-outcome', async (req, res, next) => {
   try {
     const { CALL_OUTCOMES } = require('../../shared/estimate-call-today.cjs');
     const { CALL_OUTCOME_ACTION, staffFirstName } = require('../services/estimate-call-list');
     const outcome = CALL_OUTCOMES.find((o) => o.key === req.body?.outcome);
     if (!outcome) return res.status(400).json({ error: 'Pick an outcome: Booked, Call back, Not interested or No answer.' });
-    const estimate = await db('estimates').where({ id: req.params.id }).first('id', 'customer_id', 'customer_name');
+    const estimate = await db('estimates').where({ id: req.params.id }).first('id', 'customer_id');
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const [row] = await db('activity_log').insert({
       admin_user_id: req.technicianId || null,
       customer_id: estimate.customer_id || null,
       estimate_id: estimate.id,
       action: CALL_OUTCOME_ACTION,
-      description: `Call outcome for ${estimate.customer_name || 'an estimate'}: ${outcome.label}`,
+      description: `Call outcome: ${outcome.label}`,
       metadata: JSON.stringify({ outcome: outcome.key }),
     }).returning(['created_at']);
     res.status(201).json({ callOutcome: { outcome: outcome.key, at: row.created_at, by: staffFirstName(req.technician?.name) } });
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/estimates/:id/follow-up — manually send a follow-up SMS
 router.post('/:id/follow-up', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();

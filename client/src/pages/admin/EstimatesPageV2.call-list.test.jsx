@@ -18,6 +18,8 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import EstimatesPageV2, {
   CALL_OUTCOMES_UNREAD_NOTE,
+  HELD_REFRESH_INTERVAL_MS,
+  HELD_REFRESH_MAX_MS,
   callOutcomeLine,
   callOutcomesUnreadNote,
   useCallOutcomes,
@@ -113,6 +115,8 @@ let savedOutcomes;
 let listRows;
 // The list route's outcome read failed: every row comes back callOutcomeUnknown, with no outcome.
 let outcomesUnread;
+// The draft read's rows (status=draft), merged into the page's list.
+let draftRows;
 
 // The page's current URL and a navigate function, read from inside the router.
 const routerProbe = { search: null, navigate: null };
@@ -141,6 +145,7 @@ beforeEach(() => {
   savedOutcomes = new Map();
   listRows = ROWS;
   outcomesUnread = false;
+  draftRows = [];
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "fetch",
@@ -165,7 +170,7 @@ beforeEach(() => {
       }
       if (parsed.pathname === "/api/admin/estimates") {
         if (parsed.searchParams.get("archived") === "only") return response({ estimates: [] });
-        if (parsed.searchParams.get("status") === "draft") return response({ estimates: [] });
+        if (parsed.searchParams.get("status") === "draft") return response({ estimates: draftRows });
         const rows = outcomesUnread
           ? listRows.map((r) => ({ ...r, lastCallOutcome: null, callOutcomeUnknown: true }))
           : listRows.map((r) => (savedOutcomes.has(r.id) ? { ...r, lastCallOutcome: savedOutcomes.get(r.id) } : r));
@@ -483,23 +488,30 @@ it.each([
   expect(rowIds(container)).toEqual(["v-30h"]);
 });
 
+// The held row's own refresh, once a minute, brings the news: no reload, no navigation (codex pre-push P1).
 it.each([
   ["desktop", 1440],
   ["mobile", 390],
-])("(%s) a held row leaves when the customer accepts during the call", async (_label, width) => {
-  vi.spyOn(window, "confirm").mockReturnValue(true);
-  const { container } = renderPage(width, "?tab=estimates&view=call_today");
-  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
-  fireEvent.click(within(rowOf(container, "v-5h")).getByRole("button", { name: /via Waves$/ }));
-  await waitFor(() => expect(posts.map((p) => p.path)).toEqual(["/api/admin/communications/call"]));
-  listRows = ROWS.map((r) =>
-    r.id === "v-5h" ? { ...r, status: "accepted", lastCalledAt: new Date().toISOString() } : r,
-  );
-  act(() => routerProbe.navigate("/admin/pipeline?tab=estimates&view=call_today"));
-  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
-  await settle();
-  expect(rowIds(container)).toEqual(["v-30h"]);
-  expect(screen.queryByRole("group", { name: "Call outcome for Five Hours" })).not.toBeInTheDocument();
+])("(%s) a held row leaves at the next minute's quiet re-read when the customer accepts during the call", async (_label, width) => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { container } = renderPage(width, "?tab=estimates&view=call_today");
+    await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+    fireEvent.click(within(rowOf(container, "v-5h")).getByRole("button", { name: /via Waves$/ }));
+    await waitFor(() => expect(posts.map((p) => p.path)).toEqual(["/api/admin/communications/call"]));
+    listRows = ROWS.map((r) =>
+      r.id === "v-5h" ? { ...r, status: "accepted", lastCalledAt: new Date().toISOString() } : r,
+    );
+    expect(rowIds(container)).toEqual(["v-30h", "v-5h"]);
+    await act(async () => {
+      vi.advanceTimersByTime(HELD_REFRESH_INTERVAL_MS);
+    });
+    await waitFor(() => expect(rowIds(container)).toEqual(["v-30h"]));
+    expect(screen.queryByRole("group", { name: "Call outcome for Five Hours" })).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 // A failed outcome read must not put a logged row back on the list (codex pre-push P1): Call today withholds every
@@ -518,6 +530,19 @@ it.each([
   expect(posts).toEqual([{ path: "/api/admin/estimates/v-5h/call-outcome", body: { outcome: "no_answer" } }]);
 });
 
+// The page merges the sent list with the draft read (and, on desktop, the archived wins). A failed outcome read on
+// one of those never pauses a Call today list whose own rows were read (codex pre-push P1).
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) a draft read that lost its outcomes does not pause Call today", async (_label, width) => {
+  draftRows = [{ ...viewed("d-1", "Draft Offer", 5 * HOUR), status: "draft", callOutcomeUnknown: true }];
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  await settle();
+  expect(screen.queryByText(CALL_OUTCOMES_UNREAD_NOTE)).not.toBeInTheDocument();
+});
+
 it("the unread note shows only on Call today, and only when a row's outcomes could not be read", () => {
   const unread = [viewed("u-1", "Unread", 5 * HOUR, { callOutcomeUnknown: true })];
   const read = [viewed("r-1", "Read", 5 * HOUR, { callOutcomeUnknown: false })];
@@ -525,6 +550,37 @@ it("the unread note shows only on Call today, and only when a row's outcomes cou
   expect(callOutcomesUnreadNote(unread, "all")).toBe("");
   expect(callOutcomesUnreadNote(read, "call_today")).toBe("");
   expect(callOutcomesUnreadNote([], "call_today")).toBe("");
+  // Only a row Call today could list counts: a draft, an archived or an accepted row never does.
+  const unreadDraft = { ...unread[0], status: "draft" };
+  const unreadArchived = { ...unread[0], archivedAt: ago(HOUR) };
+  const unreadWon = { ...unread[0], status: "accepted" };
+  expect(callOutcomesUnreadNote([unreadDraft, unreadArchived, unreadWon, ...read], "call_today")).toBe("");
+});
+
+it("a held row re-reads the list quietly once a minute, for at most 15 minutes after the newest call", () => {
+  vi.useFakeTimers();
+  try {
+    const refresh = vi.fn();
+    const { result } = renderHook(() =>
+      useCallOutcomes({ setEstimates: vi.fn(), refresh, onNotInterested: vi.fn() }),
+    );
+    act(() => {
+      vi.advanceTimersByTime(5 * HELD_REFRESH_INTERVAL_MS);
+    });
+    expect(refresh).not.toHaveBeenCalled(); // nothing held, nothing re-read
+    act(() => result.current.hold("h-3"));
+    act(() => {
+      vi.advanceTimersByTime(HELD_REFRESH_INTERVAL_MS);
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith({ silent: true });
+    act(() => {
+      vi.advanceTimersByTime(HELD_REFRESH_MAX_MS + 5 * HELD_REFRESH_INTERVAL_MS);
+    });
+    expect(refresh).toHaveBeenCalledTimes(HELD_REFRESH_MAX_MS / HELD_REFRESH_INTERVAL_MS);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it.each([

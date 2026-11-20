@@ -352,6 +352,10 @@ function sortOldestEngagementFirst(rows) {
 // customer opens the estimate during the call, so whoever called can log it. A held row still passes the rule's row
 // checks (a viewed, unarchived offer with a phone): an estimate accepted during the call leaves. "Not interested" also
 // opens the Mark lost box. Only records: the route texts, emails and calls nobody.
+// While a row is held, the page re-reads the list quietly once a minute, for up to 15 minutes after the newest call, so
+// an estimate accepted during the call, or an outcome someone else logged, takes the row off without a reload.
+export const HELD_REFRESH_INTERVAL_MS = 60 * 1000;
+export const HELD_REFRESH_MAX_MS = 15 * 60 * 1000;
 function withoutKey(collection, key) {
   if (!collection.has(key)) return collection;
   const next = new collection.constructor(collection);
@@ -365,6 +369,20 @@ export function useCallOutcomes({ setEstimates, refresh, onNotInterested }) {
   const hold = useCallback((id) => {
     if (id) setHeld((prev) => new Map(prev).set(id, Date.now()));
   }, []);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const newestHold = held.size ? Math.max(...held.values()) : null;
+  useEffect(() => {
+    if (newestHold === null) return undefined;
+    const timer = setInterval(() => {
+      if (Date.now() - newestHold > HELD_REFRESH_MAX_MS) {
+        clearInterval(timer);
+        return;
+      }
+      refreshRef.current({ silent: true });
+    }, HELD_REFRESH_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [newestHold]);
   const onCallToday = useCallback(
     (e) => {
       if (isCallTodayEstimate(e)) return true;
@@ -408,11 +426,13 @@ function matchesListFilter(e, filter, callOutcomes) {
     ? callOutcomes.onCallToday(e)
     : estimateMatchesFilter(e, filter);
 }
-// The list route could not read the saved outcomes, so the shared rule withholds every row from Call today.
+// The list route could not read the saved outcomes, so the shared rule withholds every row from Call today. Only a row
+// Call today could list counts: the page also merges the draft and archived reads, whose rows it never lists.
 export const CALL_OUTCOMES_UNREAD_NOTE =
   "Call today is paused: the saved call outcomes could not be read. Reload the page to try again.";
 export function callOutcomesUnreadNote(estimates, filter) {
-  return filter === "call_today" && estimates.some((e) => e.callOutcomeUnknown)
+  return filter === "call_today" &&
+    estimates.some((e) => e.callOutcomeUnknown && isCallableEstimate(e))
     ? CALL_OUTCOMES_UNREAD_NOTE
     : "";
 }

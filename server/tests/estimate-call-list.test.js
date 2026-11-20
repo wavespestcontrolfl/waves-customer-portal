@@ -377,7 +377,7 @@ describe('call outcomes', () => {
   beforeEach(() => { db.mockReset(); });
 
   test('saves the outcome, who and when as one activity_log row, and changes nothing on the estimate', async () => {
-    const read = makeBuilder({ first: { id: 'e1', customer_id: 'c1', customer_name: 'Fixture Customer' } });
+    const read = makeBuilder({ first: { id: 'e1', customer_id: 'c1' } });
     const write = insertBuilder('2026-11-20T14:42:00.000Z');
     db.mockImplementationOnce(() => read).mockImplementationOnce(() => write);
     const res = makeRes();
@@ -386,13 +386,15 @@ describe('call outcomes', () => {
     expect(next).not.toHaveBeenCalled();
     expect(db.mock.calls.map(([table]) => table)).toEqual(['estimates', 'activity_log']);
     expect(read.where).toHaveBeenCalledWith({ id: 'e1' });
+    // No customer name is read or logged (AGENTS.md, PII in logs: a failed insert's error carries its bindings).
+    expect(read.first).toHaveBeenCalledWith('id', 'customer_id');
     expect(read.update).not.toHaveBeenCalled();
     expect(write.insert).toHaveBeenCalledWith({
       admin_user_id: 't1',
       customer_id: 'c1',
       estimate_id: 'e1',
       action: 'estimate_call_outcome',
-      description: 'Call outcome for Fixture Customer: No answer',
+      description: 'Call outcome: No answer',
       metadata: JSON.stringify({ outcome: 'no_answer' }),
     });
     expect(res.status).toHaveBeenCalledWith(201);
