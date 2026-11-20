@@ -518,6 +518,28 @@ describe('the confirmed roof style prices only the V2 model; legacy pricers read
   });
 });
 
+describe('only a missing, null or empty roof style is unconfirmed', () => {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const profile = { homeSqFt: 2000, stories: 1, lotSqFt: 9000, propertyType: 'single_family' };
+  const translate = (exclRoofStyle) => translateV2CallToV1Input(profile, ['EXCLUSION'], { exclAdvancedWireMesh: 1, exclRoofStyle });
+
+  test('missing, null and empty read as no pick, byte-identical to a request without the field', () => {
+    const plain = translateV2CallToV1Input(profile, ['EXCLUSION'], { exclAdvancedWireMesh: 1 });
+    for (const value of [undefined, null, '']) expect(translate(value)).toEqual(plain);
+  });
+
+  test('any other value passes through and the engine refuses it (INVALID with the gate on, GATED off)', () => {
+    for (const value of [0, 1, true, false, {}, [], ['flat_tile'], '  ', 'slate']) {
+      const request = translate(value);
+      expect([value, request.services.exclusion.roofStyle]).toEqual([value, value]);
+      let error;
+      try { gateOn(() => generateEstimate(request)); } catch (err) { error = err; }
+      expect([value, error && [error.statusCode, error.code]]).toEqual([value, [400, 'EXCLUSION_ROOF_STYLE_INVALID']]);
+      withGate(undefined, () => expect(() => generateEstimate(request)).toThrow(/Clear the roof style/));
+    }
+  });
+});
+
 describe('barrel eave feet are validated before any coercion', () => {
   const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
   const profile = { homeSqFt: 2000, stories: 1, lotSqFt: 9000, propertyType: 'single_family' };

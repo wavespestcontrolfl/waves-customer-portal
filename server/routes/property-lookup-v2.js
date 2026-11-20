@@ -5420,8 +5420,10 @@ function wholeHomeSealFields(options, home) {
 // The Roof style pick of the admin estimate tool, as services.exclusion fields: {} without a pick. The pick passes
 // through (the feet only with Barrel tile); the estimate engine makes the one GATE_EXCLUSION_ROOF_STYLE_PRICING decision.
 function roofStyleFields(options) {
-  const style = typeof options.exclRoofStyle === 'string' ? options.exclRoofStyle : '';
-  if (!style) return {};
+  // Only a missing, null or empty pick is "not confirmed"; any other value (a number, object, boolean) passes through
+  // so the engine's validation refuses it (EXCLUSION_ROOF_STYLE_INVALID) instead of the route silently dropping it.
+  const style = options.exclRoofStyle;
+  if (style === undefined || style === null || style === '') return {};
   if (style !== 'barrel_tile') return { roofStyle: style };
   const { parseBarrelEaveFt, invalidBarrelEaveFtError } = require('../services/estimate-roof-style-replay');
   const barrelEaveFt = parseBarrelEaveFt(options.exclBarrelEaveFt);

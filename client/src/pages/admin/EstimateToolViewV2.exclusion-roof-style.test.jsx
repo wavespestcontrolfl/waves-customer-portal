@@ -98,6 +98,22 @@ describe("Roof style choice", () => {
     expect(container.querySelector('[data-testid="exclusion-tile-note"]')).toBeNull();
   });
 
+  it("the Roof/High label drops its dollar figure while a tile roof is picked", async () => {
+    const { container } = await openExclusion({ data: {}, exclusionRoofStyle: true });
+    await waitFor(() => expect(container.querySelector("#estimate-exclRoofStyle")).toBeTruthy());
+    const label = () => container.querySelector('label[for="estimate-exclAdvancedWireMesh"]').textContent;
+    expect(label()).toBe("Roof/High — $150/pt");
+    const select = container.querySelector("#estimate-exclRoofStyle");
+    for (const value of ["flat_tile", "barrel_tile"]) {
+      fireEvent.change(select, { target: { value } });
+      expect(label()).toBe("Roof/High — tile rate applies");
+    }
+    for (const value of ["shingle", "metal", "other", ""]) {
+      fireEvent.change(select, { target: { value } });
+      expect(label()).toBe("Roof/High — $150/pt");
+    }
+  });
+
   it("changing the service address clears the roof style", async () => {
     const { container, getByLabelText } = await openExclusion({ data: {}, exclusionRoofStyle: true });
     await waitFor(() => expect(container.querySelector("#estimate-exclRoofStyle")).toBeTruthy());
@@ -217,6 +233,15 @@ describe("Deep-link prefill and the scope answer", () => {
     view.rerender(tree({ initialAddress: ADDRESS, initialCustomerId: "customer-b" }));
     await waitFor(() => expect(view.container.querySelector("#estimate-exclRoofStyle").value).toBe(""));
     expect(view.container.querySelector("#estimate-exclBarrelEaveFt")).toBeNull();
+  }, 30000);
+
+  it("a contact-only prefill change keeps the roof style and feet (same customer id and address)", async () => {
+    const base = { initialAddress: ADDRESS, initialCustomerId: "customer-a", initialCustomerPhone: "9415550100" };
+    const { view, tree } = await mountWithPick(base);
+    view.rerender(tree({ ...base, initialCustomerPhone: "9415550199", initialCustomerEmail: "new@example.com", initialCustomerName: "Jamie Fixture" }));
+    await waitFor(() => expect(document.getElementById("estimate-customerPhone")).toHaveValue("9415550199"));
+    expect(view.container.querySelector("#estimate-exclRoofStyle").value).toBe("barrel_tile");
+    expect(view.container.querySelector("#estimate-exclBarrelEaveFt").value).toBe("40");
   }, 30000);
 
   it("a new incoming lead id with no address clears the pick and the feet", async () => {

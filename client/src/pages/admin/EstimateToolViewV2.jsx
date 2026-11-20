@@ -2067,7 +2067,11 @@ export default function EstimateToolViewV2({
         }
       }
       if (initialAddress && initialAddress !== f.address) Object.assign(next, clearedPropertyFields());
-      else if (prefillIdentityChanged) Object.assign(next, { measuredTurfSf: "", ...roofStyleReset() });
+      else if (prefillIdentityChanged) {
+        // A contact-only change (name, phone, email) keeps the roof style; a different linked customer or lead is a different home.
+        const linkChanged = (initialLeadId && f.leadId !== initialLeadId) || (initialCustomerId && f.customerId !== initialCustomerId);
+        Object.assign(next, { measuredTurfSf: "", ...(linkChanged ? roofStyleReset() : {}) });
+      }
       return next;
     });
   }, [
@@ -8559,7 +8563,7 @@ export default function EstimateToolViewV2({
                     <Field label="Standard — $75/pt" id="estimate-exclStandardWireMesh" className="mb-4">
                       <InputV2 k="exclStandardWireMesh" type="number" min="0" />
                     </Field>
-                    <Field label="Roof/High — $150/pt" id="estimate-exclAdvancedWireMesh" className="mb-4">
+                    <Field label={["flat_tile", "barrel_tile"].includes(form.exclRoofStyle) ? "Roof/High — tile rate applies" : "Roof/High — $150/pt"} id="estimate-exclAdvancedWireMesh" className="mb-4">
                       <InputV2 k="exclAdvancedWireMesh" type="number" min="0" />
                     </Field>
                   </div>
