@@ -629,7 +629,7 @@ describe('ws upgrade — GPT-Live path', () => {
   test('a bad, missing, wrong-call or malformed token destroys the socket', async () => {
     const good = mintCallToken(LIVE_SID);
     for (const url of [
-      `/ws/voice-live/${LIVE_SID}/${good.slice(0, -2)}00`,
+      `/ws/voice-live/${LIVE_SID}/${good.slice(0, -1)}${good.endsWith('0') ? '1' : '0'}`, // last MAC digit always changes
       `/ws/voice-live/${LIVE_SID}/`,
       `/ws/voice-live/${LIVE_SID}`,
       `/ws/voice-live/CA-other/${good}`,

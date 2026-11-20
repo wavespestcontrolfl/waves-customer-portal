@@ -150,16 +150,18 @@ describe('model audio, barge-in and latency', () => {
     expect(t.twilio.sent).toContainEqual({ event: 'media', streamSid: STREAM_SID, media: { payload: b64(160) } });
   });
 
-  test('a caller transcript while model audio is still queued flushes Twilio and counts one interruption', async () => {
+  test('caller speech that runs into a reply still queued flushes Twilio and counts one interruption', async () => {
     const t = setup();
     await t.ready();
-    t.twilioMedia();
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // 1000 ms of audio
-    t.advance(300);
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 0, end_ms: 200 });
+    t.twilioMedia(); // session audio time 0 = now
+    t.advance(1000);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // reply starts at +1000, 1000 ms queued
+    t.advance(600);
+    // the caller talks from +1300 to +1500, well inside the reply
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 });
     expect(t.twilio.sent).toContainEqual({ event: 'clear', streamSid: STREAM_SID });
     // playback was reset: a second delta now finds nothing queued
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: ' hold on', start_ms: 200, end_ms: 400 });
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: ' hold on', start_ms: 1500, end_ms: 1600 });
     expect(t.twilio.sent.filter((m) => m.event === 'clear')).toHaveLength(1);
     t.twilioStop();
     await flush();
@@ -180,7 +182,34 @@ describe('model audio, barge-in and latency', () => {
     t.twilioMedia();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) });
     t.advance(900); // 100 ms left
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'yes', start_ms: 0, end_ms: 100 });
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'yes', start_ms: 700, end_ms: 850 });
+    expect(t.twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+  });
+
+  test('a late transcript of words the caller finished before the reply began is not a barge-in: the answer keeps playing', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    t.advance(2000);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // reply starts at +2000, 1000 ms queued
+    t.advance(300);
+    // transcription lag: the caller's last words ended at +1900, before the reply
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'next week', start_ms: 1500, end_ms: 1900 });
+    expect(t.twilio.sent.some((m) => m.event === 'clear')).toBe(false);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) });
+    expect(t.twilio.sent.filter((m) => m.event === 'media')).toHaveLength(2);
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).interruptions).toBe(0);
+  });
+
+  test('a caller transcript without timing never flushes', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) });
+    t.advance(300);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'stop' });
     expect(t.twilio.sent.some((m) => m.event === 'clear')).toBe(false);
   });
 
@@ -210,7 +239,7 @@ describe('model audio, barge-in and latency', () => {
     t.advance(2000);
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // reply starts: 1000 ms queued
     t.advance(100);
-    // a late transcript of the caller's last words, 100 ms into the reply (playback still queued, so also a clear)
+    // a late transcript of the caller's last words, 100 ms into the reply
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'okay', start_ms: 1500, end_ms: 1900 });
     t.advance(20);
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // mid-reply delta: no turn
@@ -326,6 +355,8 @@ describe('finish', () => {
     expect(raw[0]).toContain("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{gpt_live}'");
     expect(JSON.parse(raw[1][0])).toEqual({
       usage_seconds: 45, // session.closed wins over the running 12
+      backend_units: 0,
+      cost_usd: 0.0375, // 45 s at $0.05 a minute
       close_reason: 'close_requested',
       turns: [],
       latency_p50_ms: null,
@@ -402,16 +433,90 @@ describe('finish', () => {
     expect(logged).not.toContain('xxxxx');
     const s = summaryOf(t);
     expect(s.errors).toContain('rate_limit:server_error');
-    expect(s.transcript[0].text).toHaveLength(20000);
+    const stored = s.transcript.reduce((n, turn) => n + turn.text.length, 0);
+    expect(stored).toBeGreaterThan(0);
+    expect(stored).toBeLessThanOrEqual(20000);
   });
 
-  test('a failed summary write is logged and never throws', async () => {
+  test('a failed summary write logs a bounded code only, never the error message (it can echo the transcript), and never throws', async () => {
     const t = setup();
-    t.update.mockRejectedValue(new Error('pool down'));
+    const err = Object.assign(new Error('update "call_log" set metadata = my card is 4111 1111 1111 1111'), { code: '22P02' });
+    t.update.mockRejectedValue(err);
     await t.ready();
     t.twilioStop();
     await flush();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/summary write failed/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/summary write failed callSid=CA-live-1 code=22P02$/));
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('4111');
+  });
+
+  test('card numbers are scrubbed from the stored transcript, also across turns (the relay scrubber)', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'my card is 4111 1111', start_ms: 0, end_ms: 900 });
+    t.openai.receive({ type: 'session.output_transcript.delta', delta: 'Sorry, I cannot take a card here.', start_ms: 1000, end_ms: 1500 });
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: '1111 1111', start_ms: 1600, end_ms: 2000 });
+    t.twilioStop();
+    await flush();
+    const stored = JSON.stringify(summaryOf(t).transcript);
+    expect(stored).not.toMatch(/4111\s*1111/);
+    expect(stored).toContain('my card is');
+  });
+
+  test('a scrubber that cannot run stores no transcript text at all', async () => {
+    const t = setup({ deps: { scrubTurns: () => null } });
+    await t.ready();
+    t.twilioMedia();
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hello', start_ms: 0, end_ms: 400 });
+    t.twilioStop();
+    await flush();
+    const s = summaryOf(t);
+    expect(s.transcript).toEqual([]);
+    expect(s.errors).toContain('transcript_scrub_unavailable');
+  });
+});
+
+describe('spend cap', () => {
+  const delegation = (id) => ({ type: 'response.event', delegation_id: id, event: { type: 'response.created' } });
+
+  test('the per-call reservation covers the session cap plus close wait and the backend cap plus one unit', () => {
+    expect(bridgeMod.PER_CALL_RESERVE_USD).toBe(bridgeMod.callCostUsd(630, bridgeMod.MAX_BACKEND_UNITS + 1));
+    expect(bridgeMod.PER_CALL_RESERVE_USD).toBeLessThan(1);
+  });
+
+  test('each delegation counts once; past the backend cap the call ends and the cost is settled', async () => {
+    const t = setup();
+    await t.ready();
+    for (let i = 1; i <= bridgeMod.MAX_BACKEND_UNITS; i++) {
+      t.openai.receive(delegation(`d${i}`));
+      t.openai.receive(delegation(`d${i}`)); // a second event of the same delegation is not a new unit
+    }
+    await flush();
+    expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(false);
+    t.openai.receive(delegation('d-over'));
+    await flush();
+    expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(true);
+    expect(t.twilio.close).toHaveBeenCalled();
+    const s = summaryOf(t);
+    expect(s.backend_units).toBe(bridgeMod.MAX_BACKEND_UNITS + 1);
+    expect(s.errors).toContain('backend_cap');
+    expect(s.cost_usd).toBe(bridgeMod.callCostUsd(45, bridgeMod.MAX_BACKEND_UNITS + 1));
+  });
+
+  test('at the cap a tool call is refused without running, and no response.create is sent', async () => {
+    const t = setup();
+    await t.ready();
+    for (let i = 1; i < bridgeMod.MAX_BACKEND_UNITS; i++) t.openai.receive(delegation(`d${i}`));
+    // the 20th unit: this delegation; its tool run would be the 21st
+    t.openai.receive({
+      type: 'response.event',
+      delegation_id: 'd-last',
+      event: { type: 'response.output_item.done', item: { type: 'function_call', call_id: 'c9', name: 'find_slots', arguments: '{}', status: 'completed' } },
+    });
+    await flush();
+    expect(t.exec).not.toHaveBeenCalled();
+    expect(t.openai.sent.some((m) => m.type === 'response.create')).toBe(false);
+    expect(summaryOf(t).errors).toContain('backend_cap');
   });
 });
 
@@ -425,6 +530,7 @@ describe('instructions', () => {
     expect(text.startsWith(buildBasePrompt(isContextEnabled(), null, { officeOpen: null }))).toBe(true);
     expect(text.endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
     expect(bridgeMod.TRIAL_LIMITS).toMatch(/cannot book, take a lead, send a text, transfer/);
-    expect(bridgeMod.TRIAL_LIMITS).toMatch(/office will call them back/);
+    expect(bridgeMod.TRIAL_LIMITS).toMatch(/call or text the Waves office/);
+    expect(bridgeMod.TRIAL_LIMITS).not.toMatch(/will call (them|you) back/);
   });
 });

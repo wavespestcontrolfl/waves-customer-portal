@@ -13,6 +13,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), vo
 jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
 
 const db = require('../models/db');
+const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
 const logger = require('../services/logger');
 const { isRelayAttached } = require('../services/voice-agent/relay-server');
 const voiceRouter = require('../routes/twilio-voice-webhook');
@@ -446,44 +447,49 @@ describe('POST /relay-sandbox/cell', () => {
 });
 
 describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
-  // The cell handler's reads and writes: the ownership read (`first`), the
-  // 30-day budget read (`whereRaw(...).first(raw)` answers `seconds`), and the
-  // metadata stamp (`update`).
-  function primeLive({ seconds = 0, budgetFails = false, stampFails = false } = {}) {
-    const update = jest.fn(() => (stampFails ? Promise.reject(new Error('pool down')) : Promise.resolve(1)));
-    const first = jest.fn(async (arg) => {
-      if (arg && arg.sql) {
-        if (budgetFails) throw new Error('pool down');
-        return { seconds };
-      }
-      return { source: VOICE_RELAY_SANDBOX_SOURCE };
-    });
-    const builder = { where: jest.fn(() => builder), whereRaw: jest.fn(() => builder), first, update };
+  // The cell handler's reads and writes: the ownership read (db `first`; the
+  // production path stamps with db `update` = prodUpdate), then ONE transaction
+  // for GPT-Live: the budget lock, the spent read (`whereNot(...).first(raw)`
+  // answers `usd`) and the reservation stamp (trx `update`).
+  function primeLive({ usd = 0, budgetFails = false, stampFails = false, stampRows = 1 } = {}) {
+    const prodUpdate = jest.fn(() => Promise.resolve(1));
+    const builder = { where: jest.fn(() => builder), first: jest.fn(async () => ({ source: VOICE_RELAY_SANDBOX_SOURCE })), update: prodUpdate };
     db.mockImplementation(() => builder);
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
-    return { update, first, builder };
+    const update = jest.fn(() => (stampFails ? Promise.reject(new Error('pool down')) : Promise.resolve(stampRows)));
+    const spent = jest.fn(async () => {
+      if (budgetFails) throw new Error('pool down');
+      return { usd };
+    });
+    const tb = { where: jest.fn(() => tb), whereNot: jest.fn(() => tb), first: spent, update };
+    const trx = jest.fn(() => tb);
+    trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    return { update, prodUpdate, spent, tb, trx };
   }
   const cell = (digits, CallSid = 'CA-sb-live') => ({ body: { CallSid, To: SANDBOX, Digits: digits }, headers: {} });
 
   afterEach(() => {
     delete process.env.GATE_VOICE_GPT_LIVE_TEST;
-    delete process.env.VOICE_GPT_LIVE_TEST_MAX_MINUTES;
+    delete process.env.VOICE_GPT_LIVE_TEST_MAX_USD;
   });
 
   test('gate off: 71 is an unknown code and renders the unchanged production-profile TwiML', async () => {
     process.env.VOICE_RELAY_PROFILE = 'nova_hints_v1';
-    const { update } = primeLive();
+    const { prodUpdate, update } = primeLive();
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toContain('<ConversationRelay');
     expect(res.body).toContain('<Parameter name="relay_profile" value="nova_hints_v1" />');
     expect(res.body).not.toContain('<Stream');
-    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).relay_profile_id).toBe('nova_hints_v1');
+    expect(JSON.parse(prodUpdate.mock.calls[0][0].metadata.bindings[0]).relay_profile_id).toBe('nova_hints_v1');
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
   });
 
   test('gate on: 71 plays the disclosure, then connects a Stream with the CallSid and token as path segments and no query string', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    const { update } = primeLive();
+    const { update, trx, tb } = primeLive();
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Play>https:\/\/[^<]+\.mp3<\/Play><Connect action="\/api\/webhooks\/twilio\/relay-sandbox\/live-complete">/);
@@ -492,9 +498,13 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(url).not.toContain('?');
     expect(res.body).not.toContain('<ConversationRelay');
     expect(res.body).not.toContain('shh-secret-123');
-    // The stamp the WS upgrade later requires.
+    // The budget read and the stamp run under one lock, in one transaction.
+    expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['voice_gpt_live_budget']);
+    expect(tb.where).toHaveBeenCalledWith({ source: VOICE_RELAY_SANDBOX_SOURCE });
+    expect(tb.whereNot).toHaveBeenCalledWith({ twilio_call_sid: 'CA-sb-live' });
+    // The stamp the WS upgrade later requires, carrying this call's reservation.
     const stamp = JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live;
-    expect(stamp).toEqual({ cell: '71', voice: 'marin', started_at: expect.any(String) });
+    expect(stamp).toEqual({ cell: '71', voice: 'marin', started_at: expect.any(String), reserved_usd: PER_CALL_RESERVE_USD });
     expect(update.mock.calls[0][0].metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
   });
 
@@ -516,35 +526,36 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(res.body).not.toContain('<Stream');
   });
 
-  test('budget spent (60 minutes by default, sandbox rows over 30 days): a spoken notice and a hangup, no stamp, no stream', async () => {
+  test('a reservation that does not fit under $5 (settled costs, else reservations): a spoken notice and a hangup, no stamp, no stream', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    const { update, builder } = primeLive({ seconds: 3600 });
+    const { update, spent } = primeLive({ usd: 5 - PER_CALL_RESERVE_USD + 0.01 });
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toContain('The GPT-Live test budget is used up. Goodbye.');
     expect(res.body).toContain('<Hangup/>');
     expect(res.body).not.toContain('<Stream');
     expect(update).not.toHaveBeenCalled();
-    expect(builder.where).toHaveBeenCalledWith({ source: VOICE_RELAY_SANDBOX_SOURCE });
-    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("INTERVAL '30 days'"));
+    const sum = spent.mock.calls[0][0].sql;
+    expect(sum).toContain("metadata->'gpt_live'->>'cost_usd'");
+    expect(sum).toContain("metadata->'gpt_live'->>'reserved_usd'");
   });
 
-  test('VOICE_GPT_LIVE_TEST_MAX_MINUTES moves the cap', async () => {
+  test('VOICE_GPT_LIVE_TEST_MAX_USD moves the cap; the whole reservation must fit', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    process.env.VOICE_GPT_LIVE_TEST_MAX_MINUTES = '5';
-    primeLive({ seconds: 299 });
+    process.env.VOICE_GPT_LIVE_TEST_MAX_USD = '1';
+    primeLive({ usd: 0.2 });
     let res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toContain('<Stream');
-    primeLive({ seconds: 300 });
+    primeLive({ usd: 0.3 });
     res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toContain('budget is used up');
   });
 
-  test('a database error on the budget read or the stamp refuses the call (fail closed)', async () => {
+  test('a database error on the budget read or the stamp, or no row to stamp, refuses the call (fail closed)', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    for (const opts of [{ budgetFails: true }, { stampFails: true }]) {
+    for (const opts of [{ budgetFails: true }, { stampFails: true }, { stampRows: 0 }]) {
       primeLive(opts);
       const res = mockRes();
       await handlerFor('/relay-sandbox/cell')(cell('71'), res);

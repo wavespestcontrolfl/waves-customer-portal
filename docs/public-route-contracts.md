@@ -7907,8 +7907,9 @@ door in the same order: the token must verify for that CallSid, the call_log row
 `metadata.gpt_live` stamp the cell route wrote, the gate must be on, and the token is then burned (one session per
 token); any failure destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`. Its tools are a
 read-only allowlist (open appointment times, services list): no booking, lead, text or transfer. The cell route
-refuses the call when the last 30 days of GPT-Live seconds reach `VOICE_GPT_LIVE_TEST_MAX_MINUTES` (default 60), and
-on any database error there. Reply delay and transcript land on `call_log.metadata.gpt_live`.)
+reserves one call's worst-case OpenAI cost under an advisory lock before it issues the token, and refuses the call
+when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.
+Reply delay, cost and the scrubbed transcript land on `call_log.metadata.gpt_live`.)
 `/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —
 the voice URL of the staff-only "Waves Tech" voice line, `TECH_VOICE_NUMBER`,
 which a technician calls from their own cell; dark behind

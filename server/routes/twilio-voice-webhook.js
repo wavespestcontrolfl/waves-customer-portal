@@ -2602,8 +2602,12 @@ router.post('/relay-sandbox', async (req, res) => {
 const GPT_LIVE_COMPLETE_ACTION = '/api/webhooks/twilio/relay-sandbox/live-complete';
 const GPT_LIVE_CELLS = new Map([['71', 'marin'], ['72', 'delta']]);
 const GPT_LIVE_TIME_LIMIT_S = 600;
-const GPT_LIVE_DEFAULT_MAX_MINUTES = 60;
-const GPT_LIVE_BUDGET_WINDOW_SQL = "created_at > NOW() - INTERVAL '30 days'";
+const GPT_LIVE_DEFAULT_MAX_USD = 5; // the owner's spend yes, 2026-11-19: $5 of OpenAI charges in all
+const GPT_LIVE_BUDGET_LOCK = 'voice_gpt_live_budget';
+// A row counts its settled cost, else its reservation: a call whose summary
+// never landed (a crash, a failed write) keeps its reservation for good.
+const GPT_LIVE_SPENT_SQL = "COALESCE(SUM(COALESCE((metadata->'gpt_live'->>'cost_usd')::numeric, "
+  + "(metadata->'gpt_live'->>'reserved_usd')::numeric, 0)), 0) AS usd";
 
 function gptLiveCellFor(digits) {
   if (!GPT_LIVE_CELLS.has(digits)) return null;
@@ -2611,21 +2615,36 @@ function gptLiveCellFor(digits) {
   return { cell: digits, voice: GPT_LIVE_CELLS.get(digits) };
 }
 
-function gptLiveMaxSeconds() {
-  const raw = String(process.env.VOICE_GPT_LIVE_TEST_MAX_MINUTES || '').trim();
-  const minutes = raw === '' ? NaN : Number(raw);
-  return (Number.isFinite(minutes) && minutes >= 0 ? minutes : GPT_LIVE_DEFAULT_MAX_MINUTES) * 60;
+function gptLiveMaxUsd() {
+  const raw = String(process.env.VOICE_GPT_LIVE_TEST_MAX_USD || '').trim();
+  const usd = raw === '' ? NaN : Number(raw);
+  return Number.isFinite(usd) && usd >= 0 ? usd : GPT_LIVE_DEFAULT_MAX_USD;
 }
 
-// True when the last 30 days of GPT-Live seconds (sandbox rows only) reach the
-// cap. A database error throws: the caller refuses the call (fail closed).
-async function gptLiveBudgetSpent() {
+// Reserve one call's worst-case OpenAI cost (live-bridge PER_CALL_RESERVE_USD:
+// the 10 minute cap plus the backend cap) BEFORE a stream token exists, and
+// stamp the row the WS upgrade requires. One transaction-scoped lock makes the
+// read and the stamp one step, so two calls cannot both spend the same balance.
+// This call's own row is left out of the sum (a repeated cell request replaces
+// its stamp). Returns false when the reservation does not fit under the cap;
+// a database error throws, and the caller refuses the call (fail closed).
+async function reserveGptLiveCall(callSid, { cell, voice }) {
   const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
-  const row = await db('call_log')
-    .where({ source: VOICE_RELAY_SANDBOX_SOURCE })
-    .whereRaw(GPT_LIVE_BUDGET_WINDOW_SQL)
-    .first(db.raw("COALESCE(SUM((metadata->'gpt_live'->>'usage_seconds')::numeric), 0) AS seconds"));
-  return Number(row && row.seconds) >= gptLiveMaxSeconds();
+  const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [GPT_LIVE_BUDGET_LOCK]);
+    const row = await trx('call_log')
+      .where({ source: VOICE_RELAY_SANDBOX_SOURCE })
+      .whereNot({ twilio_call_sid: callSid })
+      .first(trx.raw(GPT_LIVE_SPENT_SQL));
+    if (Number(row && row.usd) + PER_CALL_RESERVE_USD > gptLiveMaxUsd()) return false;
+    const stamp = { gpt_live: { cell, voice, started_at: new Date().toISOString(), reserved_usd: PER_CALL_RESERVE_USD } };
+    const updated = await trx('call_log').where({ twilio_call_sid: callSid }).update({
+      metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stamp)]),
+    });
+    if (!updated) throw new Error('no call_log row to stamp');
+    return true;
+  });
 }
 
 // Twilio's own stop at 10 minutes, in case the bridge never closes. Fail-soft:
@@ -2660,15 +2679,12 @@ async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
     return gptLiveSayAndHangup(res, 'The voice relay is not attached on this deploy. Goodbye.');
   }
   try {
-    if (await gptLiveBudgetSpent()) {
+    const token = require('../services/voice-agent/relay-protocol').mintCallToken(callSid);
+    if (!token) throw new Error('no call token (VOICE_RELAY_WS_SECRET unset)');
+    if (!(await reserveGptLiveCall(callSid, { cell, voice }))) {
       logger.warn(`[gpt-live] budget used up — refused ${maskSid(callSid)} cell ${cell}`);
       return gptLiveSayAndHangup(res, 'The GPT-Live test budget is used up. Goodbye.');
     }
-    const token = require('../services/voice-agent/relay-protocol').mintCallToken(callSid);
-    if (!token) throw new Error('no call token (VOICE_RELAY_WS_SECRET unset)');
-    await db('call_log').where({ twilio_call_sid: callSid }).update({
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ gpt_live: { cell, voice, started_at: new Date().toISOString() } })]),
-    });
     capGptLiveCall(callSid);
     logger.info(`[gpt-live] cell ${cell} voice ${voice} ${maskSid(callSid)}`);
     return res.type('text/xml').send(gptLiveStreamXml(req, callSid, token));
