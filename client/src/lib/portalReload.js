@@ -56,13 +56,21 @@ const savesInFlight = () => writesInFlight() + deviceWritesInFlight();
 // and every write to the device's storage. The automatic reload waits for it.
 const workInFlight = () => requestsInFlight() + deviceWritesInFlight();
 
-// Everything that stops a reload right now: 'saving' for a save still open,
-// then each registered hold's name, then 'offline' when the browser reports
-// itself offline (a reload then opens an error page). Every reload button
-// names them before it reloads.
+// What a reload would cut off right now: 'saving' for a save still open, or
+// 'request' for a request still open with no save (a read can be the first
+// step of a send).
+function workBlockers() {
+  if (savesInFlight() > 0) return ['saving'];
+  return workInFlight() > 0 ? ['request'] : [];
+}
+
+// Everything that stops a reload right now: the work above, then each
+// registered hold's name, then 'offline' when the browser reports itself
+// offline (a reload then opens an error page). The automatic reload and the
+// Reload bar both read it; the bar names each item before it reloads.
 export function reloadBlockers() {
   return [
-    ...(savesInFlight() > 0 ? ['saving'] : []),
+    ...workBlockers(),
     ...reloadHoldNames(),
     ...(browserOffline() ? ['offline'] : []),
   ];
@@ -76,8 +84,9 @@ export function reloadBlocker() {
 const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 // Waits up to 10 s for open requests and device writes to settle (a closing
-// page can start one), then reloads once for the live build. Resolves the blocker's name when it
-// does not reload; `current()` turns false when the user moved on meanwhile.
+// page can start one), then reloads once for the live build. Resolves the
+// blocker's name when it does not reload; `current()` turns false when the
+// user moved on meanwhile.
 export async function reloadForNewBuild({
   current = () => true,
   reload = () => window.location.reload(),
@@ -85,7 +94,7 @@ export async function reloadForNewBuild({
 } = {}) {
   const until = now() + WRITE_WAIT_MS;
   while (workInFlight() > 0 && now() < until) await pause(200);
-  const blocker = current() ? (workInFlight() > 0 ? 'saving' : reloadBlocker()) : 'moved';
+  const blocker = current() ? reloadBlocker() : 'moved';
   if (blocker) return blocker;
   const build = newerBuild();
   if (!build) return 'current';

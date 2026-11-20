@@ -37,6 +37,7 @@ export function PortalUpdateGate({ fallback, children }) {
 
 const HOLD_TEXT = {
   saving: 'A save is still on its way.',
+  request: 'A request is still on its way.',
   'email-draft': 'An email draft or send is still open.',
   'visit-step': 'A visit step is still in progress.',
   'tap-to-pay': 'A Tap to Pay payment is still open.',
@@ -53,6 +54,7 @@ const HOLD_TEXT = {
   'visual-note': 'A visual note is still being saved.',
   'bank-import': 'A bank statement is still being imported.',
   'bank-link': 'A bank connection is still open.',
+  'push-setup': 'Push notifications are still being turned on or off.',
   'page-use': 'Anything not saved on this page will be lost.',
   offline: 'This device is offline. A reload may show an error page.',
 };

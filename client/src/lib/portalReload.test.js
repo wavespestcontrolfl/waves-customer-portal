@@ -95,6 +95,23 @@ describe('offline', () => {
 });
 
 describe('reloadBlockers', () => {
+  test('a request still open blocks every reload button: a read as request, a save as saving', async () => {
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const read = target.fetch('/api/admin/discounts/stacking');
+      expect(reloadBlockers()).toEqual(['request']);
+      const save = target.fetch('/api/admin/schedule/1/invoice', { method: 'POST' });
+      expect(reloadBlockers()).toEqual(['saving']);
+      pending.forEach((resolve) => resolve({ headers: new Headers() }));
+      await Promise.all([read, save]);
+      expect(reloadBlockers()).toEqual([]);
+    } finally {
+      uninstall();
+    }
+  });
+
   test('a browser that reports itself offline blocks every reload button, named after held work', () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     expect(reloadBlockers()).toEqual(['offline']);

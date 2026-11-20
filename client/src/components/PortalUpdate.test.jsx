@@ -11,7 +11,7 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 vi.mock('../native/platform', () => ({ isWavesAdminApp: () => false }));
 
-import { noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
+import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
 import { registerReloadHold } from '../lib/reloadHolds';
 import { countDeviceWrite } from '../lib/deviceWrites';
 import { PortalUpdateBar, PortalUpdateGate } from './PortalUpdate';
@@ -172,6 +172,26 @@ describe('PortalUpdateBar', () => {
     renderAt('/billing');
     goLive('bbb222bbb222');
     expect(screen.queryByText('A new version of the portal is ready.')).toBeNull();
+  });
+
+  test('a request still open, as when a checkout reads the discount setting before it posts, is named first; Reload anyway then reloads', async () => {
+    renderAt('/admin/dashboard');
+    goLive('bbb222bbb222');
+    let finishRead;
+    const target = { fetch: () => new Promise((resolve) => { finishRead = resolve; }) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const read = target.fetch('/api/admin/discounts/stacking');
+      fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+      expect(reload).not.toHaveBeenCalled();
+      expect(screen.getByText('A request is still on its way.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+      expect(reload).toHaveBeenCalledTimes(1);
+      finishRead({ headers: new Headers() });
+      await read;
+    } finally {
+      uninstall();
+    }
   });
 
   test('an offline tab: Reload names it first, then Reload anyway reloads', () => {
