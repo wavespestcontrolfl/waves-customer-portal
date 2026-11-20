@@ -9831,6 +9831,13 @@ async function handleEstimateView(req, res, next) {
         logger.warn(`[estimate-view] consumer-notice routing check failed, forcing the React view: ${e.message}`);
       }
     }
+    // A customer's own plan quote (plan_restart / plan_start) can be refused with a state-changed 409 that only the
+    // React page answers: its refused-quote banner sends the customer back to the portal for a current quote. The
+    // legacy page reads that 409 as a slot conflict, so the customer would pick time after time into the same
+    // refusal (codex pre-push P1). An accept-active plan quote therefore always gets the React view, like the forces
+    // above (holdback excluded, the /api/estimates mount redirects). The mint never sets use_v2_view.
+    const planQuoteForcesReactView = isEstimateAcceptActive(estimate)
+      && (estimate.source === 'plan_restart' || estimate.source === 'plan_start');
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
@@ -9839,7 +9846,8 @@ async function handleEstimateView(req, res, next) {
       || acceptanceTermsForcesReactView
       || contactGapsForceReactView
       || parkedForcesReactView
-      || consumerNoticeForcesReactView;
+      || consumerNoticeForcesReactView
+      || planQuoteForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -9866,6 +9874,7 @@ async function handleEstimateView(req, res, next) {
       && !contactGapsForceReactView
       && !parkedForcesReactView
       && !consumerNoticeForcesReactView
+      && !planQuoteForcesReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -9898,7 +9907,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView || consumerNoticeForcesReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView || consumerNoticeForcesReactView || planQuoteForcesReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
@@ -10579,7 +10588,22 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // customer, so the one blocking-state decision above never parks it. The locked re-check
     // refuses it again.
     const staffChangedQuote = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate);
-    if (staffChangedQuote) return res.status(409).json({ error: staffChangedQuote.message, code: staffChangedQuote.code });
+    if (staffChangedQuote) {
+      // The page drops a recurring card it captured on this 409 and sends the customer to a fresh
+      // quote, so retire the intent this request submits first, as the park above does (codex
+      // pre-push P0): a later accept of this estimate must never enroll the discarded card. Stripe
+      // unable to confirm = the existing 503, and the tab keeps its intent.
+      const droppedSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
+        ? req.body.recurringCardSetupIntentId.trim() : '';
+      if (droppedSetupIntentId) {
+        try {
+          await retireOrDenyDroppedCapture(estimate, droppedSetupIntentId);
+        } catch (retireErr) {
+          return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+        }
+      }
+      return res.status(409).json({ error: staffChangedQuote.message, code: staffChangedQuote.code });
+    }
     // Missing-contact capture (owner ruling 2026-09-27): the accept card
     // asks for whatever's actually missing — last name and/or email — right
     // above the Accept button. Only sanitize/validate here (a malformed
@@ -12507,17 +12531,30 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // churn-stamp + residual-ownership checks under the estimate row lock
       // taken just above; drifted or unreadable state refuses the accept
       // (fail closed, 409 with a message the portal renders).
-      if (estimate.source === 'plan_restart') {
-        const { assertRestartAcceptEligible } = require('../services/cancellation-resolution/restart');
-        await assertRestartAcceptEligible(trx, estimate);
-      }
       // Plan-start accept revalidation (GATE_PORTAL_PLAN_START): same point, same
       // lock — the account must still be active, not cancelled, and own no live
       // recurring service (the mint priced it standalone). Drift refuses with a
       // 409 the estimate page renders.
-      if (estimate.source === 'plan_start') {
-        const { assertPlanStartAcceptEligible } = require('../services/cancellation-resolution/restart');
-        await assertPlanStartAcceptEligible(trx, estimate);
+      // The page answers a state-changed refusal by dropping a card the tab
+      // captured and sending the customer back to the portal, so a verified
+      // capture is retired after the rollback, on the existing
+      // droppedCaptureToRetire path (codex pre-push P0). A *_RECHECK_RETRY 409
+      // is not one: the page keeps the time, the payment choice and the card
+      // for that retry.
+      const planAcceptCheck = {
+        plan_restart: 'assertRestartAcceptEligible',
+        plan_start: 'assertPlanStartAcceptEligible',
+      }[estimate.source];
+      if (planAcceptCheck) {
+        try {
+          await require('../services/cancellation-resolution/restart')[planAcceptCheck](trx, estimate);
+        } catch (planErr) {
+          const quoteRefused = planErr?.code === 'RESTART_STATE_CHANGED' || planErr?.code === 'PLAN_START_STATE_CHANGED';
+          if (quoteRefused && recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+          }
+          throw planErr;
+        }
       }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })

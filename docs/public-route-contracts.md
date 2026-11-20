@@ -2137,9 +2137,19 @@ The accept answers this refusal before it checks any field of the request body (
 slot, service mode, payment), so an invoice-mode quote, whose page sends no slot, gets it rather
 than `plan_start_slot_required`. The re-check answers it again on both options as the row reads
 under the estimate row lock, before the comms lock (a writer from before the write refusal can
-commit between the accept's read and that lock). The estimate page answers both state-changed codes with a banner that keeps the server's
-message and links back to the portal, never "Refresh times", shows no time picker, and turns
-off its payment choices for that quote. A re-check that cannot read its state, or that finds the
+commit between the accept's read and that lock). The page drops a recurring card it captured on
+either answer, so the accept retires that capture: the early refusal retires the
+`recurringCardSetupIntentId` the request sends before its 409, and the locked re-check marks a
+verified capture for the existing retirement after the rollback. A `PLAN_START_RECHECK_RETRY` or
+`RESTART_RECHECK_RETRY` keeps the capture, since the page reuses it on the retry. When Stripe cannot confirm a
+retirement, the accept answers the existing 503 `RECURRING_CARD_RETIRE_FAILED` and the tab keeps its
+intent. The estimate page answers both state-changed codes with a banner that keeps the server's
+message and links back to the portal, never "Refresh times". It turns off its one booking condition
+(the time picker, the pick-a-time prompts, the sticky booking bar and every book button) and its
+payment choices for that quote. Only the React page has that banner, so an accept-active
+`plan_start` or `plan_restart` estimate always gets the React view: the `/estimate/` mount skips the
+legacy renderer and the GrowthBook holdback, and the `/api/estimates` mount redirects to
+`/estimate/:token`. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never
 waits on it while it holds the comms key), answers 409
 `{ error, code: 'PLAN_START_RECHECK_RETRY' }` with a retry line and writes nothing; the estimate page
@@ -2157,7 +2167,8 @@ the quote was made for (the same eligible families, case id and request id). The
 still belong to the customer the accept read before its row lock: one that a merge or its undo
 moved to another customer refuses, and the re-check reads and locks no other customer. An estimate
 with the one-time option or invoice billing on refuses too, ahead of the request-body checks and
-again on the row as read under the estimate row lock (the plan_start rule above), so a one-time request on it gets this code
+again on the row as read under the estimate row lock (the plan_start rule above, with its card
+retirement, page banner and React view), so a one-time request on it gets this code
 rather than `restart_quote_frozen`. Otherwise it answers 409 `{ error, code: 'RESTART_STATE_CHANGED' }` and writes nothing. A re-check that cannot
 read its state, or that finds the customer's property-preferences key held by another change,
 answers 409 `{ error, code: 'RESTART_RECHECK_RETRY' }` with a retry line and writes nothing; the

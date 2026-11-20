@@ -9419,7 +9419,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     slug: estimate.slug,
   };
   const renderFlags = pricing?.renderFlags || {};
-  const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
+  // A refused plan quote (staleQuoteNote) books nothing: the picker, the pick-a-time prompts, the sticky
+  // booking bar and every "book" button read this one condition, so the banner's portal link is the
+  // only way forward (codex pre-push P1).
+  const canShowSlotPicker = acceptance.mode === 'standard_slot_pick' && !staleQuoteNote;
   // Resolve the tier label unconditionally; whether the badge actually renders
   // is decided by per-section eligibility (server-authoritative
   // section.waveGuardTierEligible — true iff the section covers >=1 WaveGuard
@@ -10706,11 +10709,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {/* Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): right above the accept controls; absent with the gate off. */}
             <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} />
-            {!staleQuoteNote && canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
+            {canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
               ? <SlotIssueBanner key={pickTimePrompt} kind="pick_time" /> : null}
-            {/* A refused plan quote shows no picker at all (codex pre-push P1): no time
-                on this page can accept it, and a frozen picker still took keyboard input. */}
-            {staleQuoteNote ? null : canShowSlotPicker ? (
+            {canShowSlotPicker ? (
               // SlotPicker takes no disabled prop, so freeze it from out here
               // while a reserve/accept is in flight (ctaPhase 'submitting'
               // renders this configure layout): pointer-events blocks taps,
