@@ -9732,10 +9732,11 @@ function wholeHomeSealTerms(options = {}) {
   if (options.sealScope !== 'whole_home') return null;
   if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true) return null;
   const sqFt = Number(options.homeSqFt) > 0 ? Number(options.homeSqFt) : 2000;
-  const tiers = RODENT.exclusionV2.wholeHomeMinimums;
-  const tier = tiers.find((t) => sqFt <= t.maxSqFt) || tiers[tiers.length - 1];
+  // The same home-size table the spot-seal pricer reads: Settings (pricing_config
+  // onetime_exclusion.minimums_by_home_sqft, hydrated by db-bridge) reaches whole-home quotes.
+  const tier = _bracketLookup(sqFt, SPECIALTY.exclusion.minimumsByHomeSqFt, 'maxSqFt');
   return {
-    minimum: tier.minimum, maxSqFt: tier.maxSqFt, homeSqFt: sqFt, stories: options.stories, roofType: options.roofType,
+    minimum: tier.minimum, homeSqFt: sqFt, stories: options.stories, roofType: options.roofType,
   };
 }
 
@@ -9768,11 +9769,10 @@ function exclusionMinimumRowText(wholeHome, floor) {
   if (!wholeHome) {
     return { component: 'job_minimum', label: 'Rodent Exclusion — Job Minimum', detail: `Exclusion jobs carry a $${floor} minimum.` };
   }
-  const upTo = wholeHome.maxSqFt === Infinity ? 'over 4,000' : `up to ${wholeHome.maxSqFt.toLocaleString('en-US')}`;
   return {
     component: 'whole_home_minimum',
     label: 'Rodent Exclusion — Whole-home seal minimum',
-    detail: `Whole-home seal minimum for a home ${upTo} sq ft.`,
+    detail: `Whole-home seal minimum for a ${wholeHome.homeSqFt.toLocaleString('en-US')} sq ft home.`,
   };
 }
 

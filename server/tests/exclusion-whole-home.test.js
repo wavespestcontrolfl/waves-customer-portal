@@ -10,6 +10,7 @@ const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-map
 const { resolveOneTimeServiceCopy } = require('../services/estimate-one-time-copy');
 const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
 const { exclusionWholeHomeLive } = require('../config/feature-gates');
+const { SPECIALTY } = require('../services/pricing-engine/constants');
 
 const BULLET = 'Includes a 1-year re-entry guarantee: if a rodent gets back in through the work we sealed, Waves reseals and traps at no extra charge.';
 
@@ -122,6 +123,26 @@ describe('priceRodentExclusionV2 whole-home seal', () => {
     });
   });
 
+  test('the minimum table is the Settings-hydrated one: a changed bracket changes the quote', () => {
+    const original = SPECIALTY.exclusion.minimumsByHomeSqFt;
+    try {
+      // The shape db-bridge hydrates from onetime_exclusion.minimums_by_home_sqft ('Infinity' becomes Infinity).
+      SPECIALTY.exclusion.minimumsByHomeSqFt = [
+        { maxSqFt: 1800, minimum: 450, customRecommended: false },
+        { maxSqFt: Infinity, minimum: 1400, customRecommended: false },
+      ];
+      gateOn(() => {
+        expect(priceRodentExclusionV2({ ...spot, sealScope: 'whole_home', homeSqFt: 1700 }).price).toBe(450);
+        expect(priceRodentExclusionV2({ ...spot, sealScope: 'whole_home', homeSqFt: 9000 }).price).toBe(1400);
+      });
+    } finally {
+      SPECIALTY.exclusion.minimumsByHomeSqFt = original;
+    }
+    gateOn(() => {
+      expect(priceRodentExclusionV2({ ...spot, sealScope: 'whole_home', homeSqFt: 1700 }).price).toBe(595);
+    });
+  });
+
   test('the renewal price follows the home tier (stories, equivalent points, mesh)', () => {
     gateOn(() => {
       const twoStory = priceRodentExclusionV2({ sealScope: 'whole_home', homeSqFt: 1800, stories: 2, waiveInspection: true });
@@ -150,6 +171,15 @@ describe('estimate engine with a whole-home exclusion', () => {
       const fromProperty = generateEstimate(baseInput({ homeSqFt: 1400, services: { exclusion: exclusion({ sealScope: 'whole_home' }) } }));
       expect(fromProperty.lineItems.filter((li) => li.service === 'rodent_exclusion')
         .reduce((sum, li) => sum + li.price, 0)).toBe(395);
+    });
+  });
+
+  test('gate on: a two-story home sized only at estimate level tiers on its TOTAL area, not its footprint', () => {
+    gateOn(() => {
+      const estimate = generateEstimate(baseInput({ homeSqFt: 4500, stories: 2, services: { exclusion: exclusion({ sealScope: 'whole_home' }) } }));
+      const rows = estimate.lineItems.filter((li) => li.service === 'rodent_exclusion');
+      expect(rows.reduce((sum, li) => sum + li.price, 0)).toBe(1295);
+      expect(rows.every((li) => li.guaranteeRenewalPrice === 299)).toBe(true);
     });
   });
 
@@ -188,6 +218,17 @@ describe('estimate engine with a whole-home exclusion', () => {
       const rows = normalizeOneTimeBreakdown({ result: mapped }).items.filter((r) => r.service === 'rodent_exclusion');
       expect(rows.length).toBeGreaterThan(0);
       expect(rows.every((r) => r.includesReentryGuarantee === true && r.guaranteeRenewalPrice === 199)).toBe(true);
+    });
+    // A rollback does not take a quoted guarantee away: the public rows read the SAVED flag.
+    const saved = gateOn(() => mapV1ToLegacyShape(generateEstimate(baseInput({
+      services: { exclusion: exclusion({ sealScope: 'whole_home', homeSqFt: 2000 }) },
+    }))));
+    withGate(undefined, () => {
+      const rows = normalizeOneTimeBreakdown({ result: saved }).items.filter((r) => r.service === 'rodent_exclusion');
+      expect(rows.every((r) => r.includesReentryGuarantee === true && r.guaranteeRenewalPrice === 199)).toBe(true);
+      const copy = resolveOneTimeServiceCopy(rows[0], { guaranteeScope: 'satisfaction' });
+      expect(copy.includes).toContain(BULLET);
+      expect(copy.terms).toBe('Pay on service day. Renew the guarantee yearly for $199.');
     });
     const spotMapped = withGate(undefined, () => mapV1ToLegacyShape(generateEstimate(baseInput({ services: { exclusion: exclusion() } }))));
     const spotRows = normalizeOneTimeBreakdown({ result: spotMapped }).items.filter((r) => r.service === 'rodent_exclusion');
