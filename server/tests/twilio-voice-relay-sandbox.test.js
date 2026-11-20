@@ -597,6 +597,19 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(res.body).toContain('budget is used up');
   });
 
+  test('a set VOICE_GPT_LIVE_TEST_MAX_USD that is not a plain number refuses the call; it never falls back to $5', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    for (const bad of ['$1', '-1', 'five', '1e3']) {
+      process.env.VOICE_GPT_LIVE_TEST_MAX_USD = bad;
+      const { insert } = primeLive();
+      const res = mockRes();
+      await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+      expect(res.body).toContain('not available right now');
+      expect(res.body).not.toContain('<Stream');
+      expect(insert).not.toHaveBeenCalled();
+    }
+  });
+
   test('a database error on the budget read or the stamp, or a call that already claimed a reservation (a repeated cell request), refuses the call (fail closed)', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
     for (const opts of [{ budgetFails: true }, { stampFails: true }, { stampRows: 0 }, { claimed: false }]) {

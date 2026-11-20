@@ -2623,10 +2623,14 @@ function gptLiveCellFor(digits) {
   return { cell: digits, voice: GPT_LIVE_CELLS.get(digits) };
 }
 
+// The default applies only when the variable is unset. A set value that is not
+// a plain non-negative number ("$1", "-1", "five") is a mistake: null, and the
+// reservation refuses the call rather than guess a cap.
 function gptLiveMaxUsd() {
-  const raw = String(process.env.VOICE_GPT_LIVE_TEST_MAX_USD || '').trim();
-  const usd = raw === '' ? NaN : Number(raw);
-  return Number.isFinite(usd) && usd >= 0 ? usd : GPT_LIVE_DEFAULT_MAX_USD;
+  const raw = String(process.env.VOICE_GPT_LIVE_TEST_MAX_USD ?? '').trim();
+  if (raw === '') return GPT_LIVE_DEFAULT_MAX_USD;
+  const usd = /^\d+(\.\d+)?$/.test(raw) ? Number(raw) : NaN;
+  return Number.isFinite(usd) ? usd : null;
 }
 
 // Reserve one call's worst-case OpenAI cost (live-bridge PER_CALL_RESERVE_USD:
@@ -2642,6 +2646,8 @@ async function reserveGptLiveCall(callSid, { cell, voice, token }) {
   const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
   const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
   return db.transaction(async (trx) => {
+    const maxUsd = gptLiveMaxUsd();
+    if (maxUsd === null) throw new Error('VOICE_GPT_LIVE_TEST_MAX_USD is not a plain non-negative number');
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [GPT_LIVE_BUDGET_LOCK]);
     await trx(GPT_LIVE_LEDGER)
       .whereNull('admitted_at')
@@ -2649,7 +2655,7 @@ async function reserveGptLiveCall(callSid, { cell, voice, token }) {
       .whereRaw("created_at < now() - (? * interval '1 second')", [GPT_LIVE_ADMIT_WINDOW_S])
       .update({ cost_usd: 0, settled_at: trx.fn.now() });
     const row = await trx(GPT_LIVE_LEDGER).first(trx.raw(GPT_LIVE_SPENT_SQL));
-    if (Number(row && row.usd) + PER_CALL_RESERVE_USD > gptLiveMaxUsd()) return false;
+    if (Number(row && row.usd) + PER_CALL_RESERVE_USD > maxUsd) return false;
     const claimed = await trx(GPT_LIVE_LEDGER)
       .insert({ call_sid: callSid, reserved_usd: PER_CALL_RESERVE_USD })
       .onConflict('call_sid').ignore()

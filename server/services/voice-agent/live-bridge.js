@@ -360,12 +360,15 @@ class LiveBridge {
     return false;
   }
 
-  // The pending measure is consumed only here, by a reply start.
+  // The pending measure is consumed only here, by a reply start. The first
+  // reply start is the greeting (sent at session.started): it is never timed,
+  // even when the caller spoke before it.
   onReplyStart(t) {
+    const greeting = this.replyStartWall === null;
     this.prevReplyStartWall = this.replyStartWall;
     this.replyStartWall = t;
     this.replySample = null;
-    if (this.awaitingReply && this.speechEndWall !== null) {
+    if (!greeting && this.awaitingReply && this.speechEndWall !== null) {
       this.latencies.push(Math.max(0, Math.round(t - this.speechEndWall)));
       this.replySample = { index: this.latencies.length - 1, speechEnd: this.speechEndWall };
     }

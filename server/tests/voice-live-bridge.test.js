@@ -387,6 +387,18 @@ describe('model audio, barge-in and latency', () => {
     expect(summaryOf(t).turns).toEqual([100]);
   });
 
+  test('a transcript that arrives before the greeting\'s first audio never times the greeting', async () => {
+    const t = setup();
+    await t.ready();
+    t.advance(300);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hello?', start_ms: 100, end_ms: 250 });
+    t.advance(500);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0 + 800
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([]);
+  });
+
   test('speech before the greeting never times the greeting', async () => {
     const t = setup();
     await t.ready();
@@ -402,6 +414,7 @@ describe('model audio, barge-in and latency', () => {
   test('a late first caller packet does not shift speech timing: it counts from session.started', async () => {
     const t = setup();
     await t.ready(); // session time 0 = t0
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting
     t.advance(3000);
     t.twilioMedia(); // the first packet arrives 3 s late
     t.advance(1000);
