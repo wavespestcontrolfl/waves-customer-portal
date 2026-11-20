@@ -44,6 +44,10 @@ describe('cutoffsFor', () => {
     expect(cutoffsFor('2026-01-03').weekStart).toBe('2025-12-28');
   });
 
+  test('a newest date that arrives as a pg DATE (a Date) ends the week on that day', () => {
+    expect(cutoffsFor('2026-11-19', new Date('2026-11-13T00:00:00Z'))).toMatchObject({ weekStart: '2026-11-07', weekEnd: '2026-11-13' });
+  });
+
   test('the week ends on the newest permit date on file, never after today, and the other windows stay on today', () => {
     expect(cutoffsFor('2026-11-19', '2026-11-13')).toMatchObject({ weekStart: '2026-11-07', weekEnd: '2026-11-13', d30: '2026-10-21' });
     expect(cutoffsFor('2026-11-19', '2026-11-19')).toMatchObject({ weekStart: '2026-11-13', weekEnd: '2026-11-19' });
@@ -98,6 +102,18 @@ describe('mergeBuilders', () => {
     ], opts);
     expect(merged.week).toEqual({ permits: 7, builders: 2 });
     expect(merged.builders.every((builder) => !('permits7' in builder))).toBe(true);
+  });
+
+  test('counts that arrive as text and days that arrive as Dates are numbers and plain days before they are added or sorted', () => {
+    const merged = mergeBuilders([
+      { ...row({ license: 'CPC111' }), permits7: '2', permits30: '2', permits90: '3', permits365: '10', firstPermit: new Date('2026-10-25T00:00:00Z'), lastPermit: new Date('2026-11-13T00:00:00Z') },
+      { ...row({ name: 'SAMPLE POOLS INC', license: 'CPC112' }), permits7: '3', permits30: '3', permits90: '4', permits365: '2', firstPermit: '2026-01-05', lastPermit: '2026-11-10' },
+    ], opts);
+    expect(merged.week).toEqual({ permits: 5, builders: 1 });
+    expect(merged.builders).toEqual([{
+      key: 'SAMPLE POOLS', name: 'SAMPLE POOLS LLC', license: 'CPC111', permits30: 5, permits90: 7, permits365: 12,
+      firstPermit: '2026-01-05', lastPermit: '2026-11-13', isNew: false, isCustomer: false,
+    }]);
   });
 
   test('empty input gives an empty list and a zero week', () => {

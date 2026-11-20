@@ -6,11 +6,10 @@
  * uses it to pick builders to pitch pre-slab termite treatment to. It sends nothing and calls no AI.
  *
  * A big builder files under several license numbers and several spellings, so rows are grouped by builder NAME key
- * (builderKey), not by license. Owner-builders (license OWN...) and permits with no contractor name are left out.
- * Logs carry counts and elapsed time only, never an address, owner name or parcel id.
+ * (builderKey), not by license.
  *
  * This file starts with the pure rules: the name key, the date windows and the merge. The database reads come in
- * the next change.
+ * the next change; they choose the rows (no owner-builder, no permit without a contractor name).
  */
 
 const { addETDays } = require('../../utils/datetime-et');
@@ -44,8 +43,10 @@ const shiftDay = (day, days) => dateOnlyString(addETDays(dateOnlyAtNoonUtc(day),
 
 // The county file arrives once a week (Mondays), so "the last 7 days from today" would fall to zero as the week goes on.
 // The week summary is the 7 days that end on the newest permit date on file (weekEnd), never a day after today.
+// The newest date can arrive as a pg DATE (a Date): it becomes a plain day before it is compared.
 function cutoffsFor(today, dataThrough = null) {
-  const weekEnd = dataThrough && dataThrough < today ? dataThrough : today;
+  const newest = dateOnlyString(dataThrough);
+  const weekEnd = newest && newest < today ? newest : today;
   return {
     today,
     weekStart: shiftDay(weekEnd, -6), // 7 days, weekEnd included
@@ -64,6 +65,21 @@ function heaviest(rows, field) {
   }
   const ranked = [...weight.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
   return ranked.length ? ranked[0][0] : null;
+}
+
+// A row as the database returns it: a COUNT arrives as text and a DATE can arrive as a Date. Every count becomes a
+// number and every day a plain 'YYYY-MM-DD' before anything is added, compared or sorted.
+function normalizeRow(row) {
+  return {
+    name: row.name,
+    license: row.license || null,
+    permits7: Number(row.permits7) || 0,
+    permits30: Number(row.permits30) || 0,
+    permits90: Number(row.permits90) || 0,
+    permits365: Number(row.permits365) || 0,
+    firstPermit: dateOnlyString(row.firstPermit),
+    lastPermit: dateOnlyString(row.lastPermit),
+  };
 }
 
 function mergeGroup(key, group, { newSince, customerKeys }) {
@@ -87,13 +103,15 @@ function mergeGroup(key, group, { newSince, customerKeys }) {
 }
 
 /**
- * Pure merge. rows: one per upper-cased name and license from the database. Returns the builders (permits in the last
- * 365 days only), sorted by 90-day permits, then 12-month permits, then name, and the newest-week summary. The week is
- * counted before the 12-month cut: it ends on the newest permit on file, which can be older than 12 months.
+ * Pure merge. rows: one per upper-cased name and license, as the database returns them (normalizeRow). Returns the
+ * builders (permits in the last 365 days only), sorted by 90-day permits, then 12-month permits, then name, and the
+ * newest-week summary. The week is counted before the 12-month cut: it ends on the newest permit on file, which can
+ * be older than 12 months.
  */
 function mergeBuilders(rows, { newSince, customerKeys = new Set() }) {
   const groups = new Map();
-  for (const row of rows) {
+  for (const raw of rows) {
+    const row = normalizeRow(raw);
     const key = builderKey(row.name);
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
