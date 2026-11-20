@@ -4466,9 +4466,10 @@ would get no draft). The server's own rule must agree (`quizContinuesToPrice`,
 `server/services/lead-quiz.js`: a named problem, `property` `house` |
 `townhome` | `condo`, `timeline` `this_week` | `this_month` | `browsing`),
 and the submission must name no service key (any nonblank `serviceKey` or
-`service_key` value, well-formed or not, confirmed or not: a keyed lead
-keeps its catalog label, and a key the catalog cannot confirm must reach
-the draft step, which parks it for review). When all hold AND this request INSERTS the `leads` row (never an
+`service_key` value). Such a submission takes the path every form takes,
+unchanged: a keyed lead keeps its catalog label, a well-formed key the
+catalog cannot confirm reaches the draft step, which parks it for review,
+and a value the webhook does not read as a key is drafted from its label. When all hold AND this request INSERTS the `leads` row (never an
 attach to a call lead, never the existing-customer or unverified-hold
 reply, never a row the readiness gate marked commercial), the response
 gains `handoff: { lead_id, token, expires_in }`: an ATTACH token for that

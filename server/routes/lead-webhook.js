@@ -761,11 +761,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // page and its browser can carry the hand-off there. The server's own
     // rule must agree (quizContinuesToPrice: a named problem, at a home,
     // that can wait). Never for a submission that names a service key
-    // (submitsServiceKey): a keyed lead's label is its catalog identity (the
-    // price page would rewrite the label beside the key), and a key the
-    // catalog cannot confirm must reach the draft step, which parks it for
-    // review. No other form sends the flag, and a saved replay never does,
-    // so nothing below changes for them.
+    // (submitsServiceKey): it takes the path every form takes, unchanged. A
+    // keyed lead's label is its catalog identity (the price page would
+    // rewrite the label beside the key), and a well-formed key the catalog
+    // cannot confirm must reach the draft step, which parks it for review.
+    // No other form sends the flag, and a saved replay never does, so
+    // nothing below changes for them.
     const quizPriceAsk = body.price_handoff === true && !submitsServiceKey(body) && quizContinuesToPrice(quiz, timeline);
 
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
