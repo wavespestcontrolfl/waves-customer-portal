@@ -2039,6 +2039,50 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
     });
 
+    // Pre-push P1 on e88162fc27: with no address typed, the page's retry sends none again, and the next commit's resolver
+    // (resolveServiceAddress) reads the profile phase 1 linked: at the same pin, its stored address. A refused booking's
+    // fresh times are built from that address, so the retry's own build reads the zone the refreshed times were built for.
+    test('no typed address: a 409 refreshes with the linked profile\'s address, the address the retry builds with', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [
+        { id: 'zone-s', zone_name: 'Sarasota', cities: ['Sarasota'] },
+        { id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis'] },
+      ];
+      const lead = {
+        ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test',
+        address: '123 Palm Ave, Sarasota, FL 34209', city: 'Sarasota', zip: '34209',
+      };
+      firstResults.leads = lead;
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'Nokomis', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      });
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+
+      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
+
+      expect(first.statusCode).toBe(409);
+      expect(first.body.code).toBe('SLOT_TAKEN');
+      // The commit's own build reads the lead's address, as its list did; the fresh times, the linked profile's.
+      expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(['Sarasota', 'Nokomis']);
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Sarasota, FL, 34209', city: 'Sarasota' });
+
+      // The retry: the lead is linked to that profile now, and nothing is typed again.
+      mockBuildAvailability.mockClear();
+      firstResults.leads = { ...lead, customer_id: 'cust-9' };
+      const second = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
+
+      expect(second.statusCode).toBe(200);
+      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject({ zoneFunnelCity: 'Nokomis' });
+      expect(mockCreateSelfBooking.mock.calls[1][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Nokomis, FL, 34209', city: 'Nokomis' });
+    });
+
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
     // comms fence; an address edited in between is a retry, never given the
     // old address's coordinates.

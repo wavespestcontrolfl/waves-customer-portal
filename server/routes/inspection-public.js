@@ -623,6 +623,18 @@ function storedAddressCandidates(lead, custRow) {
   return candidates;
 }
 
+// The zone address of the page's NEXT commit, which a refused booking's fresh
+// times are built from, so a refreshed time is one that commit's own list and
+// check read (pre-push P1 on e88162fc27). A typed address is sent again (the
+// page re-sends the address its gate resolved), so it keeps this commit's
+// `zoneSource`. With none typed, the next commit's resolver
+// (resolveServiceAddress) reads the profile phase 1 linked: its stored
+// address, else the lead's own (storedAddressCandidates' order).
+function nextCommitZoneAddress({ resolved, lead, custRow, zoneSource }) {
+  if (resolved.source === 'supplied') return zoneSource;
+  return storedAddressCandidates(lead, custRow)[0]?.address || zoneSource;
+}
+
 // Everything the page's own booking address resolves from when no address
 // is typed (storedCoordsResolution + storedAddressCandidates): the trusted
 // customer's identity, stored coordinates and address, and the lead's own
@@ -2725,10 +2737,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       })
       : { fromCustomer: false };
     const zoneSource = fromCustomer ? customerAddressFields(custRow) : bookingAddress;
+    const refreshAddress = nextCommitZoneAddress({ resolved, lead, custRow, zoneSource });
     const bookingSlot = await revalidateSlotAt(bookingLocation, {
       slot, moved: locationMoved, zoneMoved: fromCustomer, date, time, config, catalog, leadId: lead.id, address: zoneSource,
     });
-    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: zoneSource, range, config, catalog, leadId: lead.id });
+    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: refreshAddress, range, config, catalog, leadId: lead.id });
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps
@@ -2767,7 +2780,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
-      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress: zoneSource, range, config, catalog, verified });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress: refreshAddress, range, config, catalog, verified });
     }
 
     return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));
