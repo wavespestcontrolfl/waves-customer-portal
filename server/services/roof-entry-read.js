@@ -84,6 +84,27 @@ const ENTRY_TYPES = Object.freeze([
   'tile_eave_open_ends',
 ]);
 const LIKELY = Object.freeze(['yes', 'no', 'unsure']);
+// Owner ruling 2026-11-20 (choice 4A): the customer estimate shows only the points a technician confirmed on the roof
+// photo, never the AI read. 'other' covers a point the AI has no type for. PIN_LABELS are the customer-facing names the
+// estimate page prints; they are copied into the estimate when it is sent, so a later label change never alters a sent one.
+const TECH_PIN_TYPES = Object.freeze([...ENTRY_TYPES, 'other']);
+const PIN_LABELS = Object.freeze({
+  roof_returns_and_valleys: 'Roof return',
+  plumbing_vent_stacks: 'Vent pipe',
+  roof_vents_or_turbines: 'Roof vent',
+  chimney_or_flue: 'Chimney or flue',
+  ac_or_utility_line_entry: 'AC or utility line',
+  soffit_or_fascia_gaps: 'Soffit or fascia gap',
+  gable_vents: 'Gable vent',
+  trees_touching_roof: 'Branch touching the roof',
+  tile_eave_open_ends: 'Open tile end',
+  other: 'Entry point',
+});
+// What the exclusion does at each point, printed after the label ("Roof return, front left: seal").
+const PIN_ACTIONS = Object.freeze({ trees_touching_roof: 'trim back' });
+const pinAction = (type) => PIN_ACTIONS[type] || 'seal';
+const MAX_TECH_PINS = 20;
+const MAX_PIN_NOTE = 40;
 const TIER_UNKNOWN = 'unknown';
 const STATUS_DONE = 'done';
 const STATUS_PENDING = 'pending';
@@ -292,6 +313,8 @@ function publicRead(row) {
     flags: parseJson(row.ai_flags) || {},
     tech_final_count: row.tech_final_count ?? null,
     tech_final_flags: row.tech_final_flags == null ? null : parseJson(row.tech_final_flags),
+    tech_pins: row.tech_pins == null ? null : parseJson(row.tech_pins),
+    hide_on_estimate: Boolean(row.hide_on_estimate),
     created_at: row.created_at,
   };
 }
@@ -639,13 +662,101 @@ async function runRead(input) {
  * The technician's own final count and per-type flags, kept beside the AI read to compare them later. Only what is sent
  * changes: the count is written only when sent, and the flags are merged over the saved ones, never replaced.
  */
-async function saveTechCount(id, { count, flags }) {
+/**
+ * The technician's confirmed points, normalized, or null when the input is not a valid list: at most 20 points, each
+ * { x, y } a number from 0 to 1 (a fraction of the crop, as the AI pins), a type from TECH_PIN_TYPES, and an optional
+ * plain-text note of at most 40 characters (control characters become spaces; blank = no note). [] is valid (none).
+ */
+function validateTechPins(pins) {
+  if (!Array.isArray(pins) || pins.length > MAX_TECH_PINS) return null;
+  const out = [];
+  for (const p of pins) {
+    if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+    const { x, y, type } = p;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return null;
+    if (!TECH_PIN_TYPES.includes(type)) return null;
+    let note = null;
+    if (p.note != null) {
+      if (typeof p.note !== 'string') return null;
+       
+      note = p.note.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (note.length > MAX_PIN_NOTE) return null;
+      if (!note) note = null;
+    }
+    out.push({ x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000, type, note });
+  }
+  return out;
+}
+
+const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && Number.isFinite(c.lng)
+  && Math.abs(c.lat) <= 90 && Math.abs(c.lng) <= 180;
+
+/**
+ * Save the technician's answer. count / flags as before (flags merged in SQL, so two tabs keep both). hideOnEstimate:
+ * staff hid the points from this estimate's customer page. pins: the confirmed points (validateTechPins output), saved
+ * whole (null clears them). Pins are drawn on the read's crop, so the caller also names the crop centre it drew on
+ * ({ lat, lng }, the panel's map point): it must hash to this row's lookup_key, so no other roof's photo can carry these
+ * pins, and the rounded centre is stored so the estimate can rebuild the same county crop. A centre that does not match
+ * throws code 'crop_mismatch' and writes nothing. Returns the public read, or null for an unknown id.
+ */
+async function saveTechCount(id, { count, flags, pins, crop, hideOnEstimate } = {}) {
   const patch = {};
   if (count !== undefined) patch.tech_final_count = count;
   // Merged in SQL in one statement, so two saves of different types (or two tabs) keep both; a type sent again is replaced.
   if (flags !== undefined) patch.tech_final_flags = db.raw("COALESCE(tech_final_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify(flags)]);
-  const [row] = await db(TABLE).where({ id }).update(patch).returning('*');
+  if (hideOnEstimate !== undefined) patch.hide_on_estimate = Boolean(hideOnEstimate);
+  const where = { id };
+  if (pins === null) patch.tech_pins = null;
+  else if (pins !== undefined) {
+    const row = await db(TABLE).where({ id }).first('id', 'image_source', 'lookup_key');
+    if (!row) return null;
+    if (!isCentre(crop) || lookupKey({ source: row.image_source, lat: crop.lat, lng: crop.lng }) !== row.lookup_key) {
+      throw Object.assign(new Error('These points were not drawn on this roof photo'), { code: 'crop_mismatch' });
+    }
+    patch.tech_pins = JSON.stringify(pins);
+    patch.crop_lat = roundCentre(crop.lat);
+    patch.crop_lng = roundCentre(crop.lng);
+    // lookup_key never changes, so this also proves the row still names the crop that was checked.
+    where.lookup_key = row.lookup_key;
+  }
+  const [row] = await db(TABLE).where(where).update(patch).returning('*');
   return row ? publicRead(row) : null;
+}
+
+/** The county crop URL the stored pins sit on (built here from the stored centre, never from caller input), or null. */
+function cropImageUrl(row) {
+  if (row?.crop_lat == null || row?.crop_lng == null) return null;
+  const lat = Number(row.crop_lat);
+  const lng = Number(row.crop_lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const src = Object.values(IMAGE_SOURCES).find((s) => s.source === row.image_source);
+  return src ? exportRequestUrl(src, lat, lng) : null;
+}
+
+/**
+ * What the customer estimate may show from one read row (choice 4A), or null: only a finished read with at least one
+ * confirmed point, a stored crop centre, and not hidden by staff. Points are numbered in the order the technician saved
+ * them; each carries its customer-facing label (PIN_LABELS, plus ", <note>" when the technician typed one) and its
+ * action ('seal', or 'trim back' for a branch).
+ */
+function customerPointsFromRow(row) {
+  if (!row || row.status !== STATUS_DONE || row.hide_on_estimate) return null;
+  const pins = row.tech_pins == null ? null : parseJson(row.tech_pins);
+  if (!Array.isArray(pins) || !pins.length) return null;
+  const imageUrl = cropImageUrl(row);
+  if (!imageUrl) return null;
+  return {
+    imageUrl,
+    imageYear: row.image_year,
+    pins: pins.map((p, i) => ({
+      n: i + 1,
+      x: p.x,
+      y: p.y,
+      type: p.type,
+      label: p.note ? `${PIN_LABELS[p.type] || PIN_LABELS.other}, ${p.note}` : (PIN_LABELS[p.type] || PIN_LABELS.other),
+      action: pinAction(p.type),
+    })),
+  };
 }
 
 module.exports = {
@@ -663,4 +774,11 @@ module.exports = {
   lookupKey,
   runRoofEntryRead,
   saveTechCount,
+  TECH_PIN_TYPES,
+  PIN_LABELS,
+  pinAction,
+  MAX_TECH_PINS,
+  validateTechPins,
+  cropImageUrl,
+  customerPointsFromRow,
 };
