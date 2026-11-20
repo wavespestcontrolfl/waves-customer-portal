@@ -318,17 +318,36 @@ describe('isFunnelZone / zone matching', () => {
     expect(techs).toEqual(new Map([['2027-05-20', new Set(['tech-1', null])], ['2027-05-21', new Set(['tech-2'])]]));
   });
 
-  // Pre-push P1 on b4fc39b372: the offer reads keep main's offer-side hold rule (#7993), as the estimate page's
-  // collision and packing reads do, so a zone day never rests on a visit those reads leave out. Only the check under
-  // the date lock counts a visit staff booked that keeps an old hold time (truckMayTakeDate's tests).
-  test('the offer read counts a hold only while unexpired, by the real clock', async () => {
-    const chain = scheduledServicesChain([]);
-    const dbc = jest.fn(() => chain);
-    await getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' });
-    const q = { whereNull: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
-    chain.andWhere.mock.calls[0][0](q);
-    expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
-    expect(q.orWhereRaw.mock.calls).toEqual([['scheduled_services.reservation_expires_at > clock_timestamp()']]);
+  // Pre-push P1s on b4fc39b372 and e61d2e4cc0. Fleet-wide there is no check under the date lock, and the lists keep
+  // main's offer-side hold rule (#7993), as the estimate page's collision and packing reads do. Per truck they read
+  // holds as that check does (a visit staff booked counts whatever its hold time), so they offer a truck only the days
+  // the check admits.
+  test('the lists count a hold only while unexpired fleet-wide, and per truck read holds as the check does', async () => {
+    const prev = process.env.GATE_MULTI_TECH_CONFIRM;
+    const holdRuleOf = async (read) => {
+      const chain = scheduledServicesChain([]);
+      await read(jest.fn(() => chain));
+      return chain.andWhere.mock.calls[0][0];
+    };
+    const listRule = () => holdRuleOf((dbc) => getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' }));
+    const sqlOf = (rule) => {
+      const q = { whereNull: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
+      rule(q);
+      expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
+      return q.orWhereRaw.mock.calls;
+    };
+    try {
+      delete process.env.GATE_MULTI_TECH_CONFIRM;
+      expect(sqlOf(await listRule())).toEqual([['scheduled_services.reservation_expires_at > clock_timestamp()']]);
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      const checkRule = await holdRuleOf((dbc) => truckMayTakeDate(dbc, { estimateZone: VENICE_ZONE, date: '2027-05-20', technicianId: 'tech-1' }));
+      expect(await listRule()).toBe(checkRule);
+      expect(sqlOf(checkRule)).toEqual([
+        ['scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > clock_timestamp()'],
+      ]);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
+    }
   });
 
   test('getZoneFunnelDays: the per-truck view only with GATE_MULTI_TECH_CONFIRM on, read at call time', async () => {

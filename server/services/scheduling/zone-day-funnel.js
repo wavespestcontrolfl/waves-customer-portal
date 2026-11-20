@@ -209,14 +209,14 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 // unassigned — either means a truck is in the zone that day) matching the
 // estimate's zone. `techs`: each of those dates -> the technician ids of its
 // stops (null = an unassigned stop).
-// Holds follow main's split by side (occupancy.js occupiedHoldFilter, #7993). The offer reads count a hold only while
-// unexpired, as the estimate page's collision and packing reads and the booking lists do, so the zone days agree with
-// the openings those reads leave (pre-push P1 on b4fc39b372). The check under the date lock
+// Holds follow main's split by side (occupancy.js occupiedHoldFilter, #7993). The check under the date lock
 // (`includeClaimedReservations`, truckMayTakeDate) also counts a visit staff booked that keeps its old hold time, as
 // the reservation and confirmation checks do: that visit is its truck's stop until the cleanup job clears the time
-// (pre-push P1 on 5061a1da2b). Both read the real clock, not NOW() (the transaction's start): a writer reads this under
-// its date lock after waiting for it, and an unclaimed hold that ran out meanwhile no longer holds the day (owner
-// rule B).
+// (pre-push P1 on 5061a1da2b). Fleet-wide there is no such check, and the lists count a hold only while unexpired, as
+// the estimate page's collision and packing reads and the booking lists do (pre-push P1 on b4fc39b372); per truck
+// they read holds as the check does (getZoneFunnelDays). Both read the real clock, not NOW() (the transaction's
+// start): a writer reads this under its date lock after waiting for it, and an unclaimed hold that ran out meanwhile
+// no longer holds the day (owner rule B).
 function liveHoldByRealClock(q) {
   q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > clock_timestamp()');
 }
@@ -266,8 +266,11 @@ async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, { includeClaime
 async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
   if (!isFunnelZone(estimateZone)) return { days: null, techDays: null, failed: false };
   try {
-    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo);
-    return { days: dates, techDays: perTruckLive() ? techs : null, failed: false };
+    // Per truck, the lists read holds as the check under the date lock does (truckMayTakeDate), so they offer a
+    // truck only the days that check admits (pre-push P1 on e61d2e4cc0).
+    const perTruck = perTruckLive();
+    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo, { includeClaimedReservations: perTruck });
+    return { days: dates, techDays: perTruck ? techs : null, failed: false };
   } catch (err) {
     logger.warn(`[zone-day-funnel] zone-stop lookup failed (failing open): ${err.message}`);
     return { days: null, techDays: null, failed: true };

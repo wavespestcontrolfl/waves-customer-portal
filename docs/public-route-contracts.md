@@ -1424,8 +1424,9 @@ offers held before either is written can send a second technician south that
 day, bounded by the offer-token TTL. The stop read counts a hold by the real
 clock, so a hold that ran out while its writer waited on the date lock no
 longer holds the day. Under that lock it also counts a visit staff booked that
-keeps its old hold time (`bookedVisitOrLiveHold`); the lists count a hold only
-while unexpired, as main's other list reads do. The assessment
+keeps its old hold time (`bookedVisitOrLiveHold`), and so do the lists when that
+check runs (per truck); fleet-wide they count a hold only while unexpired, as
+main's other list reads do. The assessment
 link's list and its booking resolve the zone from the one booking address the
 same way (its city decides, its text only without one; `callbackVisit.zoneAddress`,
 read only with the far-south funnel on), so a list never offers a time that
