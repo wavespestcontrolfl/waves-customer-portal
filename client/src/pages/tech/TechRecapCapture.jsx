@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { deleteRecapClipDraft, getRecapClipDraft, putRecapClipDraft } from '../../lib/completion-resume-store';
+import { holdForRecapUpload } from '../../lib/recapUploads';
 
 // During-visit recap clip capture for the tech portal ("Your Visit, in Motion", P4b).
 // Native camera -> tag the action -> presigned PUT to S3 -> lands in the customer's
@@ -297,6 +298,7 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
     setShowMore(false);
     setUploading((n) => n + 1);
     setErr(null);
+    const uploadEnded = holdForRecapUpload();
     try {
       if (draft.durationMs === undefined) {
         const durationMs = draft.mediaType === 'video' ? await readVideoDurationMs(draft.file) : null;
@@ -375,6 +377,7 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
         setErr(message);
       }
     } finally {
+      uploadEnded();
       finishInFlightAttempt(recoveryStore, targetServiceId, attemptId, onRecoveryChange);
       showFinishedUpload(mountedRef.current, recoveryStore, serviceIdRef.current, targetServiceId, setUploading);
     }
