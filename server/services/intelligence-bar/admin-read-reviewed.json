@@ -4,11 +4,13 @@
   "reviewed": [
     {
       "endpoint": "/admin/call-recordings/stats",
-      "reviewed": "Handler + CallRecordingProcessor.getStats, whereNotSandboxCall (relay-protocol.js), reclaimableClaim (deploy-stamp clause always on, #6671): COUNT FILTER aggregates over call_log plus a call count grouped by receiving business number; no caller data returned; read end to end. Re-reviewed 11-02 (#7405): whereNotSandboxCall now also drops the staff-only tech voice line's rows (source tech_voice) with one more bound clause; nothing else in the chain changed.",
+      "reviewed": "Handler + CallRecordingProcessor.getStats, whereNotSandboxCall (relay-protocol.js), reclaimableClaim (deploy-stamp clause always on, #6671): COUNT FILTER aggregates over call_log plus a call count grouped by receiving business number; no caller data returned; read end to end. Re-reviewed 11-02 (#7405): whereNotSandboxCall now also drops the staff-only tech voice line's rows (source tech_voice) with one more bound clause; nothing else in the chain changed. Re-reviewed 11-20 (#8120): the retrying count and oldest_unfinished_minutes take their length clause from sweepLengthSql() (server/config/call-extraction-retry.js: SQL text from SWEEP_MIN_SECONDS and GATE_SHORT_CALL_RECORDING_SWEEP; no query, no outside call), and retrying counts a no_transcription row only with a recording and an extraction_failed row with a recording or a PAN transcript; still COUNT FILTER aggregates, no caller data. effect_call:sweepLengthSql is the name rule (\"sweep\" is an effect verb), not an effect.",
       "scope": "broad",
-      "signals": [],
+      "signals": [
+        "effect_call:sweepLengthSql"
+      ],
       "unresolved": [],
-      "hash": "bd379af545c08dc98af84e3344420ad1"
+      "hash": "c78e508699caa0da6feba1f6500c5397"
     },
     {
       "endpoint": "/admin/communications/blocked-numbers",
