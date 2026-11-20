@@ -29,6 +29,16 @@ const referralClickLimiter = rateLimit({
 // exactly like an unknown one (redirect home, no DB touch).
 const CODE_RE = /^[A-Za-z0-9_-]{4,32}$/;
 
+// Crawlers and link-preview fetchers (message and social app unfurls, search
+// bots, scripts) are not people: 21 of 62 clicks May-Nov 2026. They still get
+// the redirect and a click row (device_type 'bot'), but never count as a
+// unique click or raise the promoter's click total. An empty user agent is a
+// script, not a phone.
+const BOT_UA_RE = /bot\b|bot\/|crawl|spider|slurp|preview|facebookexternalhit|whatsapp|slack|discord|telegram|skype|curl\/|wget|python|headless|lighthouse/i;
+function isBotUserAgent(ua) {
+  return !ua || BOT_UA_RE.test(ua);
+}
+
 // =========================================================================
 // GET /r/:code — track click and redirect
 // =========================================================================
@@ -84,11 +94,14 @@ router.get('/:code', referralClickLimiter, async (req, res) => {
       .where('created_at', '>=', twentyFourHoursAgo)
       .first();
 
-    const isUnique = !recentClick;
+    const isBot = isBotUserAgent(ua);
+    const isUnique = !isBot && !recentClick;
 
     // Detect device type
     let deviceType = 'desktop';
-    if (/mobile|android|iphone|ipad/i.test(ua)) {
+    if (isBot) {
+      deviceType = 'bot';
+    } else if (/mobile|android|iphone|ipad/i.test(ua)) {
       deviceType = /ipad|tablet/i.test(ua) ? 'tablet' : 'mobile';
     }
 
@@ -125,3 +138,4 @@ router.get('/:code', referralClickLimiter, async (req, res) => {
 });
 
 module.exports = router;
+module.exports._isBotUserAgent = isBotUserAgent;

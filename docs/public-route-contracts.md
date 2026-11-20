@@ -5959,7 +5959,9 @@ token.
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
 url-safe 4-32 code format gate before any DB read; every hit below the
 gate writes a `referral_clicks` row, malformed/unknown codes redirect
-home without touching the DB).
+home without touching the DB; a crawler, link-preview or empty user agent
+still redirects and gets a row with `device_type` 'bot', but is never a
+unique click and never raises `total_clicks`).
 The estimate `/data` response includes `verifiedStaffPreview: true` only
 when `adminPreview=1` is accompanied by a valid staff bearer token. The
 customer SPA uses that verified field (or the existing verified
