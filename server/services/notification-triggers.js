@@ -1644,7 +1644,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
 
     const prefsByUser = new Map(prefs.map((p) => [p.admin_user_id, p]));
     // No row = the trigger's default (on, or off for quietByDefault triggers).
-    const anyBellEnabled = activeAdmins.some((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).bell_enabled !== false);
+    const anyBellEnabled = bellWanted(trigger, activeAdmins, prefs);
     const pushEnabledIds = activeAdmins
       .filter((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).push_enabled !== false)
       .map((u) => u.id);
@@ -1948,6 +1948,14 @@ function defaultPreference(trigger) {
   return { bell_enabled: on, push_enabled: on, sound_enabled: on };
 }
 
+// Whether the trigger's shared bell row is wanted: some recipient has its Bell switch on (Push Settings), an admin with
+// no preference row getting the trigger's default. `prefs`: the trigger's notification_preferences rows. Used by
+// triggerNotification for its bell write, and by call-phone-yes-bell.js, which writes its own rows.
+function bellWanted(trigger, recipients, prefs) {
+  const byUser = new Map(prefs.map((p) => [String(p.admin_user_id), p]));
+  return recipients.some((u) => (byUser.get(String(u.id)) || defaultPreference(trigger)).bell_enabled !== false);
+}
+
 function listTriggers() {
   return Object.entries(TRIGGER_REGISTRY).map(([key, t]) => ({
     key, label: t.label, group: t.group, priority: t.priority, quietByDefault: t.quietByDefault === true,
@@ -1958,6 +1966,7 @@ module.exports = {
   triggerNotification,
   listTriggers,
   defaultPreference,
+  bellWanted,
   TRIGGER_REGISTRY,
   technicianCopy,
   technicianRowCopy,

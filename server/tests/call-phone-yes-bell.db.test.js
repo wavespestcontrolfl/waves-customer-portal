@@ -30,7 +30,9 @@ const Compose = require('../services/admin-alert-compose');
 const Bell = require('../services/call-phone-yes-bell');
 const NotificationService = require('../services/notification-service');
 const { etDateString, formatETDayDate, parseETDateTime } = require('../utils/datetime-et');
-const { _private: { ringOpenCardsForTest, cardStateForTest, applyCardStateForTest } } = require('../services/call-phone-yes-accept');
+const {
+  _private: { ringOpenCardsForTest, cardStateForTest, applyCardStateForTest, openCardNowForTest },
+} = require('../services/call-phone-yes-accept');
 
 const describeDb = SKIP ? describe.skip : describe;
 const DAY = 86400000;
@@ -125,11 +127,11 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       const [row] = await trx('estimates').insert({
         customer_id: customerId, status: estimateStatus, token: randomUUID().replace(/-/g, ''), customer_name: 'Pat Sampleton',
         address: '100 Example Lane, Sampleton, FL 34200', monthly_total: 15, annual_total: 180, onetime_total: 0, category: 'RESIDENTIAL',
-        sent_at: new Date(Date.now() - 2 * DAY), expires_at: new Date(Date.now() + hours * HOUR),
+        created_at: new Date(Date.now() - 3 * DAY), sent_at: new Date(Date.now() - 2 * DAY), expires_at: new Date(Date.now() + hours * HOUR),
       }).returning('id');
       estimateIds.push(String(row.id || row));
     }
-    if (yes) await call(customerId, { choice: 'per_application', hoursAgo: 24 });
+    const yesCallId = yes ? await call(customerId, { choice: 'per_application', hoursAgo: 24 }) : null;
     const callLogId = await call(customerId, { hoursAgo: 2 });
     const visitId = await addVisit({ customerId, callLogId }, { days: visitDays });
     for (const more of moreVisits) await addVisit({ customerId, callLogId }, more);
@@ -142,7 +144,15 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     });
     await keepCurrent(id);
     expect(await trx('triage_items').where({ id }).first('status')).toEqual({ status: 'open' });
-    return { id, customerId, callLogId, visitId, estimateIds };
+    return { id, customerId, callLogId, visitId, estimateIds, yesCallId };
+  }
+
+  // Every active admin's Bell switch for the type in Push Settings (a preference row for each).
+  async function setBellSwitch(on) {
+    const admins = await trx('technicians').where({ active: true, role: 'admin' }).pluck('id');
+    await trx('notification_preferences')
+      .insert(admins.map((id) => ({ admin_user_id: id, trigger_key: 'call_phone_yes', bell_enabled: on })))
+      .onConflict(['admin_user_id', 'trigger_key']).merge(['bell_enabled']);
   }
 
   // The sweep's bell pass (its moot pass is keepCurrent).
@@ -436,10 +446,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     await pass();
     // Every active admin, a second one too, turns the type's Bell switch off in Push Settings.
     await trx('technicians').insert({ id: randomUUID(), name: 'Sample Admin Two', role: 'admin', active: true });
-    const admins = await trx('technicians').where({ active: true, role: 'admin' }).pluck('id');
-    await trx('notification_preferences')
-      .insert(admins.map((id) => ({ admin_user_id: id, trigger_key: 'call_phone_yes', bell_enabled: false })))
-      .onConflict(['admin_user_id', 'trigger_key']).merge(['bell_enabled']);
+    await setBellSwitch(false);
     const quiet = await phoneYesCard();
     await trx('scheduled_services').where({ id: rung.visitId }).update({ scheduled_date: etDay(1) });
     await pass();
@@ -460,5 +467,92 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     await pass();
     expect((await bellsOf(quiet.id)).filed.done_at).toBeNull();
     expect(bannersFor(quiet.id)).toBe(1);
+  });
+
+  test('the Bell switch is read for each ring, under the card\'s lock: turned off while the pass runs, the card rings nothing', async () => {
+    const card = await phoneYesCard();
+    const realPass = Bell.runBellPass;
+    const spy = jest.spyOn(Bell, 'runBellPass').mockImplementation(({ readCard, ...rest }) => realPass({
+      ...rest,
+      // The last admin with it on turns it off after the pass starts, while it waits for the card's lock.
+      readCard: async (conn, listed) => {
+        await setBellSwitch(false);
+        return readCard(conn, listed);
+      },
+    }));
+    try {
+      await pass();
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await bellsOf(card.id)).count).toBe(0);
+    expect(bannersFor(card.id)).toBe(0);
+  });
+
+  describe('the rows a ring reads, on two connections', () => {
+    // These rows are committed, on a pool of their own, so a second connection sees them; each test deletes its own.
+    let pool; let made = null;
+    beforeAll(() => { pool = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } }); });
+    afterAll(async () => { await pool.destroy(); });
+    afterEach(async () => {
+      if (!made) return;
+      const { id, customerId } = made;
+      made = null;
+      await pool('triage_items').where({ id }).del();
+      await pool('scheduled_services').where({ customer_id: customerId }).del();
+      await pool('call_log').where({ customer_id: customerId }).del();
+      await pool('estimates').where({ customer_id: customerId }).del();
+      await pool('customers').where({ id: customerId }).del();
+    });
+    // A read that must not wait: no lock timeout (a NOWAIT miss and a lock timeout both raise 55P03), and a statement
+    // timeout instead, so a lock that waits fails as a cancel (57014). Long: a loaded machine can stretch a statement.
+    const waitNoLonger = async (conn) => {
+      await conn.raw('SET LOCAL lock_timeout = 0');
+      await conn.raw("SET LOCAL statement_timeout = '30s'");
+    };
+
+    test.each([
+      ['the customer accepts the estimate', (card) => ['estimates', card.estimateIds[0], { status: 'accepted', accepted_at: new Date() }]],
+      ['the visit moves to tomorrow', (card) => ['scheduled_services', card.visitId, { scheduled_date: etDay(1) }]],
+      ['a re-read of the call with the yes', (card) => ['call_log', card.yesCallId, { v2_extraction_status: 'valid' }]],
+    ])("%s: in flight, the card rings nothing this run; after the ring's read, the change waits for its commit", async (_label, changeOf) => {
+      const perTest = trx;
+      try {
+        trx = pool;
+        mockConn = pool;
+        made = await phoneYesCard();
+      } finally {
+        trx = perTest;
+        mockConn = perTest;
+      }
+      const [table, rowId, change] = changeOf(made);
+      const write = (conn) => conn(table).where({ id: rowId }).update(change);
+      const listed = { id: made.id, call_log_id: made.callLogId };
+
+      // The change in flight on another connection (not committed): the ring's read skips the card at once.
+      const other = await pool.transaction();
+      let ring = await pool.transaction();
+      try {
+        await write(other);
+        await waitNoLonger(ring);
+        await expect(openCardNowForTest(ring, listed, new Date())).resolves.toBeNull();
+      } finally {
+        await ring.rollback();
+        await other.rollback();
+      }
+      // The ring's read first: the change after it waits until the ring commits.
+      ring = await pool.transaction();
+      try {
+        await expect(openCardNowForTest(ring, listed, new Date())).resolves.toEqual(expect.objectContaining({
+          card: expect.objectContaining({ id: made.id }),
+        }));
+        await expect(pool.transaction(async (later) => {
+          await later.raw("SET LOCAL lock_timeout = '300ms'");
+          await write(later);
+        })).rejects.toMatchObject({ code: '55P03' });
+      } finally {
+        await ring.rollback();
+      }
+    });
   });
 });

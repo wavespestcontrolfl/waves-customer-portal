@@ -736,12 +736,12 @@ async function runCallPhoneYesSweep({ now = new Date(), pageSize = SCAN_LIMIT } 
 
 // The bell pass (call-phone-yes-bell.js), after the filing and the moot close: each open card rings what it owes (once
 // when filed, once more when time runs short), then the rows of cards no longer open close. A card rings or is
-// rewritten only when, read again under its call's triage lock just before, it is still open and its evidence matches
-// it (cardState finds nothing to write): the sweep keeps only open cards current (applyCardState), so the bell never
-// says more than the card. A card the tap accepts or a person claims while the pass runs, a card whose estimate was
-// accepted or whose yes was taken back since the moot pass, and a card whose check fails ring nothing; the next run
-// writes the change first. A claimed card (in_progress) keeps its row until it closes, as does a card that rings
-// nothing in a run: the closes run for every card.
+// rewritten only when, read again under its call's triage lock just before, with the rows it reads held to the ring's
+// commit (holdCardRows), it is still open and its evidence matches it (cardState finds nothing to write): the sweep keeps
+// only open cards current (applyCardState), so the bell never says more than the card. A card the tap accepts or a
+// person claims while the pass runs, a card whose estimate was accepted or whose yes was taken back since the moot pass,
+// a card with a row busy, and a card whose check fails ring nothing; the next run reads it again. A claimed card
+// (in_progress) keeps its row until it closes, as does a card that rings nothing in a run: the closes run for every card.
 async function ringOpenCards(now) {
   const Bell = require('./call-phone-yes-bell');
   return Bell.runBellPass({
@@ -754,13 +754,38 @@ async function ringOpenCards(now) {
 
 // An open card read again under its call's triage lock (the lock every card writer takes first), with the times that
 // make it urgent. Null once it is no longer open (the tap accepted it, or a person claimed, resolved or dismissed it),
-// and while its evidence says something the card does not show yet (cardState: a close or a refresh the next run writes).
+// while a row it reads is busy (holdCardRows), and while its evidence says something the card does not show yet
+// (cardState: a close or a refresh the next run writes).
 async function openCardNow(trx, listed, now) {
   await lockTriageCall(trx, listed.call_log_id);
   const card = await trx('triage_items').where({ id: listed.id, reason_code: REASON_CODE, status: 'open' })
     .first('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload', 'summary');
-  if (!card || await cardState(card, trx)) return null;
+  if (!card || !(await holdCardRows(trx, card)) || await cardState(card, trx)) return null;
   return { card, ...(await cardTimes(trx, card, now)) };
+}
+
+// The rows a ring reads, held FOR SHARE to its commit, as the tap holds them: the customer's estimates (the tap's own
+// lock, which also refuses while one is being sent), the customer's calls since the card's estimates were made (the yes,
+// any later word and the booking call) and every visit the call booked. A change to one (an accept, a decline, an
+// extension, a re-read, a visit moved) either landed before, and the reads after the lock see it, or waits for the
+// ring's commit, so the ring says what was true when it committed. A change in flight right now: false, and the card
+// rings nothing this run (NOWAIT, in a savepoint, so the bell never waits on a row and its transaction stays usable). A
+// call or a visit inserted meanwhile has no row to hold; the next run reads it.
+async function holdCardRows(trx, card) {
+  const customerId = card.related_customer_id;
+  try {
+    await trx.transaction(async (sp) => {
+      await lockCustomerEstimates(sp, customerId);
+      const made = await sp('estimates').whereIn('id', cardEstimateIds(card)).where({ customer_id: customerId })
+        .min('created_at as at').first();
+      if (made?.at) await Word.lockCallsSince(sp, { customerId, since: made.at });
+      await visitsCallBooked(sp, card.call_log_id, customerId).orderBy('id').forShare().noWait().select('id');
+    });
+    return true;
+  } catch (err) {
+    if (err.code === '55P03' || err.phoneYesRefusal) return false;
+    throw err;
+  }
 }
 
 // The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and the
@@ -1304,6 +1329,6 @@ module.exports = {
     linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, notesKeyOfForTest: notesKeyOf, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
     lockCustomerEstimatesForTest: lockCustomerEstimates, PEST_CADENCE_PLANS, planTermsOfForTest: planTermsOf,
     // The sweep's bell pass alone, and its moot pass for one card (call-phone-yes-bell.db.test.js).
-    ringOpenCardsForTest: ringOpenCards, cardStateForTest: cardState,
+    ringOpenCardsForTest: ringOpenCards, cardStateForTest: cardState, openCardNowForTest: openCardNow,
   },
 };

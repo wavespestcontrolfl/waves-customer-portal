@@ -19,10 +19,11 @@
  * rings the time-short bell alone, and nothing rings for a card after its time-short bell. Between rings the open row is
  * rewritten quietly when the card's words change (a yes taken back, an estimate accepted, the visit moved): no ring, no
  * banner, and its read state kept. Each card rings in a transaction of its own that holds its call's triage lock and
- * reads the card and its evidence again, so a card closed, claimed or changed while the pass runs rings nothing (the
- * next run writes the change, then rings what the card says). Nothing rings while every active admin has this type's
- * Bell switch off in Push Settings, so no banner goes either; an open row is still kept current and closed. A card that
- * rang nothing while the switch was off rings once it is on again, if it is still open.
+ * reads the card and its evidence again, with the rows it reads held to its commit, so a card closed, claimed or
+ * changed while the pass runs rings nothing (the next run writes the change, then rings what the card says). Nothing
+ * rings while every active admin has this type's Bell switch off in Push Settings, read for each ring, so no banner
+ * goes either; an open row is still kept current and closed. A card that rang nothing while the switch was off rings
+ * once it is on again, if it is still open.
  *
  * Done-when `phone_yes_card_closed`: the sweep (call-phone-yes-accept.js, every 10 minutes while the gate is on) closes a
  * card's rows once the card is no longer open: the tap accepted it, a person resolved or dismissed it, or the sweep
@@ -138,12 +139,13 @@ function standingKey(cardId, written) {
 // has no open row. Returns { key, raised } (the key it raised and the raise's result), or null.
 // card: { id, call_log_id, related_customer_id, related_estimate_id, payload, summary }; expiresAt: the soonest an open
 // estimate on the card expires, after now; several: the card names more than one estimate; visit: the soonest visit to
-// come that keeps the card open ({ scheduled_date, window_start }) or null; written: as standingKey; ringsOn: the Bell
-// switch (bellSwitchOn), off = nothing new rings and an open row is still kept current; trx: the card's transaction
-// (runBellPass), which the write joins, so the banner goes only once it commits.
-async function ringCard({ card, expiresAt = null, several = false, visit = null, written, ringsOn, now = new Date(), trx }) {
+// come that keeps the card open ({ scheduled_date, window_start }) or null; written: as standingKey; trx: the card's
+// transaction (runBellPass), which the write joins, so the banner goes only once it commits. A key it owes rings only
+// while the Bell switch is on (bellSwitchOn, read here, under the card's lock); off, an open row is still kept current.
+async function ringCard({ card, expiresAt = null, several = false, visit = null, written, now = new Date(), trx }) {
   const due = dueReason({ expiresAt, visit, now });
-  const ringKey = ringsOn ? keyToRing({ cardId: card.id, due, rung: written }) : null;
+  const owed = keyToRing({ cardId: card.id, due, rung: written });
+  const ringKey = owed && (await bellSwitchOn(trx)) ? owed : null;
   const key = ringKey || standingKey(card.id, written);
   if (!key) return null;
   const name = (await Names.lookupCustomerName(trx, card.related_customer_id)) || 'a customer';
@@ -176,23 +178,15 @@ async function ringCard({ card, expiresAt = null, several = false, visit = null,
   return { key, raised };
 }
 
-// The Bell switch for this type in Push Settings (notification_preferences, trigger call_phone_yes): true while an
-// active admin has it on, no preference row meaning on, as triggerNotification decides a shared bell row for an
-// admin-only type. A failed read is off for this pass (fail closed, as the dispatcher).
-async function bellSwitchOn() {
-  try {
-    const { TRIGGER_REGISTRY, defaultPreference } = require('./notification-triggers');
-    const admins = await db('technicians').where({ active: true, role: 'admin' }).pluck('id');
-    if (!admins.length) return false;
-    const prefs = await db('notification_preferences').where({ trigger_key: BANNER_KIND }).whereIn('admin_user_id', admins)
-      .select('admin_user_id', 'bell_enabled');
-    const byAdmin = new Map(prefs.map((p) => [String(p.admin_user_id), p]));
-    const fallback = defaultPreference(TRIGGER_REGISTRY[BANNER_KIND]);
-    return admins.some((id) => (byAdmin.get(String(id)) || fallback).bell_enabled !== false);
-  } catch (e) {
-    logger.warn(`[call-phone-yes] Bell switch not read, no new rings this pass: ${e.code || e.name || 'error'}`);
-    return false;
-  }
+// The Bell switch for this type in Push Settings (notification_preferences, trigger call_phone_yes): on while an active
+// admin (the type's recipients: it is admin-only) has it on, by the rule triggerNotification writes a shared bell row
+// by (bellWanted). Read on the card's transaction; a failed read fails the card's ring for this pass.
+async function bellSwitchOn(conn) {
+  const { TRIGGER_REGISTRY, bellWanted } = require('./notification-triggers');
+  const admins = await conn('technicians').where({ active: true, role: 'admin' }).select('id');
+  const prefs = await conn('notification_preferences').where({ trigger_key: BANNER_KIND })
+    .whereIn('admin_user_id', admins.map((admin) => admin.id)).select('admin_user_id', 'bell_enabled');
+  return bellWanted(TRIGGER_REGISTRY[BANNER_KIND], admins, prefs);
 }
 
 // Each key already written for these cards (a closed row still holds its key), true while its row is open.
@@ -211,22 +205,22 @@ async function writtenKeys(cardIds) {
  * The bell pass, run by the sweep after its filing and its moot close. `listCards()`: every card still open or claimed,
  * each { id, status, call_log_id }. `readCard(trx, listed)`: an open card read again under its call's triage lock (the
  * lock every card writer takes first), with the times that make it urgent ({ card, expiresAt, several, visit }), or null
- * once it is no longer open or while its evidence says something it does not show yet. Each open card rings in a
- * transaction of its own that holds that lock, so a card the tap accepts or a person claims while the pass runs rings
- * nothing. With the Bell switch off (bellSwitchOn) nothing rings, and open rows are still rewritten. Then two closes,
- * each retried by every pass: a card's filed row once its time-short row exists (one open row per card), and the rows
- * of cards no longer open, listed again so a card closed during the pass loses its rows in this pass. A claimed card,
- * or one that could not be read, keeps its rows. Returns the number of rows the second close closed.
+ * once it is no longer open, while a row it reads is busy, or while its evidence says something it does not show yet.
+ * Each open card rings in a transaction of its own that holds that lock, so a card the tap accepts or a person claims
+ * while the pass runs rings nothing. With the Bell switch off (bellSwitchOn) nothing rings, and open rows are still
+ * rewritten. Then two closes, each retried by every pass: a card's filed row once its time-short row exists (one open
+ * row per card), and the rows of cards no longer open, listed again so a card closed during the pass loses its rows in
+ * this pass. A claimed card, or one that could not be read, keeps its rows. Returns the number of rows the second close
+ * closed.
  */
 async function runBellPass({ listCards, readCard, now = new Date() }) {
   const listed = await listCards();
   const written = await writtenKeys(listed.map((card) => card.id));
-  const ringsOn = await bellSwitchOn();
   for (const entry of listed.filter((card) => card.status === 'open')) {
     try {
       const out = await db.transaction(async (trx) => {
         const fresh = await readCard(trx, entry);
-        return fresh ? ringCard({ ...fresh, written, ringsOn, now, trx }) : null;
+        return fresh ? ringCard({ ...fresh, written, now, trx }) : null;
       });
       // A row now stands for this key; a raise that failed or was withheld returns no id, and the next run tries again.
       if (out?.raised?.id) written.set(out.key, true);
