@@ -78,6 +78,9 @@ describe('weightedScore', () => {
     expect(weightedScore(p)).toBe(89.99);
     expect(scoreBand(weightedScore(p))).toBe(250);
     expect(codeOf(() => weightedScore({ ...p, audit: 89.995 }))).toBe('INVALID_PARTS');
+    const near = { onTime: 89.999999999, audit: 89.999999999, callbacks: 89.999999999, truck: 89.999999999, ownerRating: 89.999999999 };
+    expect(codeOf(() => weightedScore(near))).toBe('INVALID_PARTS');
+    expect(codeOf(() => weightedScore(p, { onTime: 25.000000001, audit: 24.999999999, callbacks: 20, truck: 10, ownerRating: 20 }))).toBe('INVALID_WEIGHTS');
     expect(codeOf(() => weightedScore(p, { onTime: 25.001, audit: 24.999, callbacks: 20, truck: 10, ownerRating: 20 }))).toBe('INVALID_WEIGHTS');
   });
 

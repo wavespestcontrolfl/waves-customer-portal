@@ -140,10 +140,11 @@ function toSafeNumber(big) {
   return Number(big);
 }
 
-// A number with at most 2 decimals -> integer hundredths, exactly (else null).
+// A number that is exactly a 2-decimal value -> integer hundredths (else null).
+// Exact means hundredths / 100 gives back the very same double: no tolerance.
 function toHundredths(value) {
   const scaled = Math.round(value * 100);
-  return Math.abs(value * 100 - scaled) < 1e-6 ? scaled : null;
+  return Number.isFinite(value) && scaled / 100 === value ? scaled : null;
 }
 
 // ---------------------------------------------------------------------------
