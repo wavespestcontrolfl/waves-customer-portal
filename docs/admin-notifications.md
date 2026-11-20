@@ -384,8 +384,8 @@ customer's message by this rule.
    marked them read). A text promise the run only took off a customer's alert that stayed open goes back on that
    alert without a ring (`restoreSmsCommitmentAlerts`); when a person has closed that alert since, the promise's
    next overdue check rings a fresh one.
-   Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF";
-   `GATE_ALERT_QUIET_FALL_OFF`): a second policy of the same module, `runAdminAlertQuietPolicy` in
+   Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF"):
+   a second policy of the same module, `runAdminAlertQuietPolicy` in
    `server/services/admin-alert-retention.js`. It shares the nightly policy's candidates, activity stamps, `RERING`
    registry, version-fenced writer and cursor helpers, and differs in cadence (its own cron, every 10 minutes, its own
    lock and its own cursor key) and rules. An open bell row with no new activity for 72 hours is marked done
@@ -593,10 +593,10 @@ existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id
 `notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
 second banner, and no second bell row is written. Gate off: the unkeyed row and no banner, as before.
 
-Lead call-back reminder banner (owner 2026-11-05, "remind"; gate `GATE_LEAD_CALL_REMINDER`, dark): two kinds of lead
+Lead call-back reminder banner (owner 2026-11-05, "remind"): two kinds of lead
 bell reach only the portal bell. A "Missed call request" bell (`lead-call-reply-missed:<callLogId>`, a press-1 ring nobody
 answered) and a night call-back bell (`lead-call-text-followup:<requestId>`, raised by `lead-call-text-followup.js`
-`raiseLeadBell`) send no banner. With the gate on, the alert-relevance sweep (every 10 minutes, after its closes) runs
+`raiseLeadBell`) send no bell banner of their own. The alert-relevance sweep (every 10 minutes, after its closes) runs
 `server/services/lead-call-reminder.js`. A bell of those kinds that is still open one business hour after its latest
 event (the follow-up SLA's clock, 8 AM to 8 PM ET) sends ONE banner (`lead_call_reminder`, the Missed call sound) when
 nobody has reached the lead since. "Reached" uses the shared contact witnesses after that event: a person's text, a call
@@ -607,7 +607,7 @@ body and link, led by "Reminder: nobody has reached this lead yet.", `pushOnly` 
 The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in one statement fenced on the row being open
 and unchanged since it was read, so a row sends at most one banner. The stamp is not a ring, so the 3-day quiet fall-off
 still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
-still waits for a call") or by unsetting the gate. It sends nothing to a lead.
+still waits for a call"). It sends nothing to a lead.
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
@@ -625,6 +625,27 @@ trigger, sent `pushOnly`: no bell row, admin-role phones only, and one banner pe
 `sms_send_claims` row `morning_banner:<ET date>`, so a deploy overlap or a restart cannot send a second one; a
 day missed while the server was down is not made up). The owner turns it off in Push Settings (Alerts group,
 "Morning summary: items waiting for you"). It sends nothing to a customer.
+
+The 9 AM "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1; no gate, an internal admin
+push): one banner a day to the admin phones says "Call today: N estimates" ("1 estimate" when one), body "Follow up on
+these recently active estimates." (the list can include an estimate that was called before the customer reopened it,
+or one called without an answer, so the words never claim nobody has called), and a tap opens `/admin/estimates?view=call_today`, the Estimates page on its Call
+today filter. N is that page's own list: `services/estimate-call-today-push.js` takes the rows the page loads (`estimateListQuery` in
+`services/estimate-call-list.js`, the list route's own selection: sent-list rows, newest 2,000, unarchived), then applies `isCallTodayEstimate` from
+`shared/estimate-call-today.cjs` (the one home of the rule; the page imports it too) to rows built by
+`callTodayFields` in `services/estimate-call-list.js` (the same mapping the list route uses). The words carry a count
+only, never a customer name or phone. With nothing on the list it sends nothing. It is the `estimate_call_today`
+trigger (area Estimates, fyi, expires in 7 days), sent `pushOnly`: no bell row, admin-role phones only, one banner per ET
+day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>`; a day missed while the server was down
+is not made up). The banner expires with its day: it carries `expiresAt` (the next ET midnight, `pushExpiryFor` in
+`notification-triggers.js`), which web push sends as its TTL, APNs as `apns-expiration` and FCM as `android.ttl`, so a
+phone offline past the day never shows an old count. The banner counts as sent only when a phone accepted it: with push off, no device to send to, or one of the dispatcher's own pre-send skips (`claude_queue`, `bell_policy`, `superseded_before_push`; a failed device counter comes first) the day's claim is released
+(a later run may try); after a device failure, no result at all, or any result it does not recognize, it is kept (no second banner). A device the push service skipped because its provider has no credentials (APNs, FCM or web push not configured) is a failure, not a skip: its claim is released and the run reports `push_not_configured`, so job health shows a banner lost for want of keys. The dispatcher marks a
+throw in its push path (`pushFailed`; it leaves `push: null`, like a push that is off): a throw in its recipient lookup, or in the push
+block before the first device's banner is built (the subscription lookup), reached no provider, so its claim is released; a throw after a
+device send began may have reached a phone, so its claim is kept. Both are failures. A count, claim or delivery failure
+throws inside the cron's `runExclusive` callback, so job health records the run as failed; a skip stays a success. The cron is `0 9 * * *` in `America/New_York` (`scheduler.js`). Each admin turns it off in Push Settings
+(Alerts group, "Morning list: estimates to call today"). It sends nothing to a customer.
 
 The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BANNER`, dark): the 7 PM open-visit nudge
 (`server/services/tech-open-visit-nudge.js`) reaches the owner as a Waves Admin banner instead of a text. It is the

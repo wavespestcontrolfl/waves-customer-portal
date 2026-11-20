@@ -60,6 +60,12 @@ describe('builderKey', () => {
     // Letters of another alphabet stay letters: two such names never share a key.
     ['Пул Плюс LLC', 'ПУЛ ПЛЮС'],
     ['Пул Мир LLC', 'ПУЛ МИР'],
+    // Only Latin letters lose their accents. Elsewhere a mark is part of the letter or the word.
+    ['カナ LLC', 'カナ'],
+    ['ガナ LLC', 'ガナ'],
+    ['ｶﾞﾅ LLC', 'ガナ'],
+    ['Йод Пулс', 'ЙОД ПУЛС'],
+    ['राम बिल्डर्स LLC', 'राम बिल्डर्स'],
   ])('%s -> %s', (input, expected) => expect(builderKey(input)).toBe(expected));
 
   test('keeps a name that is only company words, and returns empty for blank input', () => {
@@ -73,6 +79,10 @@ describe('cutoffsFor', () => {
   test('counts back from the given day, today included, across a month and year end', () => {
     expect(cutoffsFor('2026-11-19')).toEqual({ today: '2026-11-19', weekStart: '2026-11-13', weekEnd: '2026-11-19', d30: '2026-10-21', d90: '2026-08-22', d365: '2025-11-20' });
     expect(cutoffsFor('2026-01-03').weekStart).toBe('2025-12-28');
+  });
+
+  test('a newest date that arrives as a pg DATE (a Date) ends the week on that day', () => {
+    expect(cutoffsFor('2026-11-19', new Date('2026-11-13T00:00:00Z'))).toMatchObject({ weekStart: '2026-11-07', weekEnd: '2026-11-13' });
   });
 
   test('the week ends on the newest permit date on file, never after today, and the other windows stay on today', () => {
@@ -131,6 +141,18 @@ describe('mergeBuilders', () => {
     expect(merged.builders.every((builder) => !('permits7' in builder))).toBe(true);
   });
 
+  test('counts that arrive as text and days that arrive as Dates are numbers and plain days before they are added or sorted', () => {
+    const merged = mergeBuilders([
+      { ...row({ license: 'CPC111' }), permits7: '2', permits30: '2', permits90: '3', permits365: '10', firstPermit: new Date('2026-10-25T00:00:00Z'), lastPermit: new Date('2026-11-13T00:00:00Z') },
+      { ...row({ name: 'SAMPLE POOLS INC', license: 'CPC112' }), permits7: '3', permits30: '3', permits90: '4', permits365: '2', firstPermit: '2026-01-05', lastPermit: '2026-11-10' },
+    ], opts);
+    expect(merged.week).toEqual({ permits: 5, builders: 1 });
+    expect(merged.builders).toEqual([{
+      key: 'SAMPLE POOLS', name: 'SAMPLE POOLS LLC', license: 'CPC111', permits30: 5, permits90: 7, permits365: 12,
+      firstPermit: '2026-01-05', lastPermit: '2026-11-13', isNew: false, isCustomer: false,
+    }]);
+  });
+
   test('empty input gives an empty list and a zero week', () => {
     expect(mergeBuilders([], opts)).toEqual({ week: { permits: 0, builders: 0 }, builders: [] });
   });
@@ -156,8 +178,8 @@ describe('listBuilders', () => {
   test('reads Eastern-date cutoffs as bound parameters, turns DATE values into plain days, and marks customers', async () => {
     answer({
       groups: [
-        { name: 'SAMPLE POOLS LLC', license: 'CPC111', permits7: '2', permits30: '4', permits90: '9', permits365: '30', first_permit: new Date(Date.UTC(2026, 0, 5)), last_permit: '2026-11-16' },
-        { name: 'ACME POOLS INC', license: 'CPC333', permits7: '0', permits30: '1', permits90: '1', permits365: '2', first_permit: '2026-02-01', last_permit: '2026-10-01' },
+        { name: 'SAMPLE POOLS LLC', license: 'CPC111', permits7: '2', permits30: '4', permits90: '9', permits365: '30', firstPermit: new Date(Date.UTC(2026, 0, 5)), lastPermit: '2026-11-16' },
+        { name: 'ACME POOLS INC', license: 'CPC333', permits7: '0', permits30: '1', permits90: '1', permits365: '2', firstPermit: '2026-02-01', lastPermit: '2026-10-01' },
       ],
       newest: new Date(Date.UTC(2026, 10, 16)),
       customers: [{ name: 'Acme Pools, LLC' }],
@@ -223,7 +245,7 @@ describe('listBuilders', () => {
     mockRaw.mockImplementation(async (sql) => {
       if (/from "customers"/.test(sql)) throw new Error('boom');
       if (/AS newest/.test(sql)) return { rows: [{ newest: '2026-11-16' }] };
-      return { rows: [{ name: 'ACME POOLS INC', license: 'CPC3', permits7: 0, permits30: 0, permits90: 1, permits365: 1, first_permit: '2026-02-01', last_permit: '2026-10-01' }] };
+      return { rows: [{ name: 'ACME POOLS INC', license: 'CPC3', permits7: 0, permits30: 0, permits90: 1, permits365: 1, firstPermit: '2026-02-01', lastPermit: '2026-10-01' }] };
     });
     await expect(listBuilders({ kind: 'pool', now: new Date('2026-11-19T15:00:00Z') })).rejects.toThrow('boom');
   });

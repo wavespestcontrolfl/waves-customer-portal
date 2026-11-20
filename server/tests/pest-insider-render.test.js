@@ -1,6 +1,7 @@
 // Pest Insider renderer: reviewed copy only, escaping, absolute links, dark-mode hooks.
-const { renderIssue, wrapIssueHtml, POST_LINK_TEXT } = require('../services/pest-insider/render');
+const { renderIssue, withToolBlock, wrapIssueHtml, POST_LINK_TEXT } = require('../services/pest-insider/render');
 const { POST_URLS } = require('../services/pest-insider/posts');
+const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 const { bodyIsDarkAware } = require('../services/email-template');
 
 // A reviewed post URL (posts.js): the only kind of blog link the body carries.
@@ -43,6 +44,48 @@ describe('renderIssue', () => {
       undefined,
     ]) {
       expect(() => renderIssue({ ...BASE, lead: { ...BASE.lead, postUrl } })).toThrow(/reviewed post URL/);
+    }
+  });
+
+  test('the shared body never has "A tool we\'d use": the archive serves it to anyone (pre-push PR 3 r1)', () => {
+    const shared = renderIssue(BASE);
+    expect(renderIssue({ ...BASE, toolId: 'acurite-glass-rain-gauge' })).toEqual(shared);
+    for (const part of [shared.html_body, shared.text_body]) expect(part).not.toMatch(/amazon/i);
+  });
+
+  test('withToolBlock adds the tool after "What\'s this?", with Amazon\'s sentence right after the link', () => {
+    const gauge = toolById('acurite-glass-rain-gauge');
+    const shared = renderIssue(BASE);
+    const r = withToolBlock(shared, gauge);
+    expect(r.subject).toBe(shared.subject);
+    expect(r.preview).toBe(shared.preview);
+    // the shared copy, unchanged, then the tool block
+    expect(r.html_body.startsWith(`${shared.html_body}\n<div class="dm-text">`)).toBe(true);
+    expect(r.text_body.startsWith(shared.text_body)).toBe(true);
+    const html = r.html_body.slice(shared.html_body.length);
+    expect(html).toContain('A tool we&#39;d use');
+    expect(html).toContain(`href="${gauge.url}"`);
+    const linkAt = html.indexOf(`>${toolLinkText(gauge)}</a>`);
+    const sentenceAt = html.indexOf(AMAZON_DISCLOSURE);
+    expect(linkAt).toBeGreaterThan(html.indexOf(gauge.lines[1]));
+    expect(sentenceAt).toBeGreaterThan(linkAt);
+    // in normal body text, not the muted small print
+    expect(html.slice(html.lastIndexOf('<p', sentenceAt), sentenceAt)).not.toMatch(/dm-muted/);
+    expect(r.text_body.slice(shared.text_body.length))
+      .toBe(`\nA TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}\n`);
+  });
+
+  test('withToolBlock leaves the shared copy for a tool not usable now, or whose link is not the checked one (pre-push PR 3 r3, r4)', () => {
+    const gauge = toolById('acurite-glass-rain-gauge');
+    const shared = renderIssue(BASE);
+    for (const picked of [
+      { productId: 'ks-adjustable-door-sweep', url: gauge.url },
+      { productId: 'no-such-tool', url: gauge.url },
+      { productId: gauge.productId, url: 'https://www.amazon.com/dp/B000000001?tag=wavespestcont-20' },
+      { productId: gauge.productId },
+      gauge.productId, null, 7,
+    ]) {
+      expect(withToolBlock(shared, picked)).toBe(shared);
     }
   });
 

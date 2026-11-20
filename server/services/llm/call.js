@@ -33,6 +33,7 @@ const logger = require('../logger');
 const { PROVIDER, MODEL_CATALOG } = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortFor } = require('./anthropic-wire');
 const agentContext = require('../agent-control/context');
+const { anthropicOnlyLane } = require('./max-plan-lanes');
 // Top-level (not lazy) so the ledger shares this module's agent-control
 // context instance; every use below is wrapped so it can never break a call.
 const metrics = require('../llm-dispatch-metrics');
@@ -931,7 +932,11 @@ function dispatchWithHardDeadline(route, routePayload, legMs) {
 }
 
 async function runFallbackChain(policy, payload, { validate, reserveFallbackBudget = false, maxAttemptMs, hardDeadline = false } = {}) {
-  const routes = [policy?.primary, policy?.fallback].filter(Boolean);
+  // The Mac job's fact-check lanes ride the Max plan, which answers Anthropic only: a fallback to
+  // another provider would bill a paid API, so those lanes keep the Anthropic route (max-plan-lanes.js).
+  const anthropicOnly = anthropicOnlyLane(payload?.laneId);
+  const routes = [policy?.primary, policy?.fallback].filter(Boolean)
+    .filter((route) => !anthropicOnly || route.provider === 'anthropic');
   if (!routes.length) return { ok: false, reason: 'no_route', failures: [] };
   if (routes.length > 1 && routes[0].provider === routes[1].provider) {
     logger.error(`[llm] invalid fallback policy: both routes use ${routes[0].provider}`);

@@ -24,14 +24,14 @@ jest.mock('../services/admin-alert-contact-witnesses', () => ({
   loadContactBundles: (...args) => mockLoadContactBundles(...args),
   visitsCompletedAfterBell: (...args) => mockVisitsCompletedAfterBell(...args),
 }));
-const mockAuditWouldClose = jest.fn(async ({ items }) => items.length);
-jest.mock('../services/audit-log', () => ({ auditAlertWouldClose: (...args) => mockAuditWouldClose(...args) }));
 // The quiet request resolve the portal item classes run after a close (its SQL runs in the Postgres suite).
 const mockResolveRequest = jest.fn(async () => 1);
 jest.mock('../services/portal-inbox', () => ({ resolveRequestQuietly: (...args) => mockResolveRequest(...args) }));
 // The unfinished-booking pass's SQL runs in portal-unfinished-bookings-postgres.test.js; here it is a stub.
 const mockRunUnfinished = jest.fn(async () => ({ skipped: false, found: 0, raised: 0 }));
 jest.mock('../services/portal-unfinished-bookings', () => ({ runPortalUnfinishedBookings: (...args) => mockRunUnfinished(...args) }));
+// The lead call-back reminder pass runs in lead-call-reminder.test.js and lead-call-reminder-postgres.test.js; here it is a stub.
+jest.mock('../services/lead-call-reminder', () => ({ runLeadCallReminder: jest.fn(async () => ({ skipped: false, due: 0, reminded: 0, sends: [] })) }));
 let mockTables;
 let mockQueries;
 let mockHooks;
@@ -879,7 +879,7 @@ describe('class rules', () => {
       mockFailTable = callTable;
       const data = await loadSubjects([callBell()]);
       expect(subjectFor(callBell(), data, TODAY)).toMatchObject({ callQuoteReason: null, callQuoteUnknown: true });
-      expect(judge(classify(callBell()), subjectFor(callBell(), data, TODAY))).toEqual({ reason: null, would: null });
+      expect(judge(classify(callBell()), subjectFor(callBell(), data, TODAY))).toEqual({ reason: null });
     });
   });
 
@@ -1392,7 +1392,7 @@ describe('customer-contact classes', () => {
   test('the emitter\'s thread-bell key prefix is the one this module reads', () => {
     const source = require('fs').readFileSync(require.resolve('../services/sms-reply-alert-delivery'), 'utf8');
     expect(source).toContain('const threadBellKey = (customerId) => `sms-thread:${customerId}`;');
-    expect(classify(smsThread(), { anyMode: true }).key).toBe('inbound_sms');
+    expect(classify(smsThread()).key).toBe('inbound_sms');
   });
 
   test('the loader gets each row\'s own references (a known sender\'s text sid and customer, a call, an email, a lead\'s phone), never an unknown sender\'s text', async () => {
@@ -1524,7 +1524,7 @@ describe('customer-contact classes', () => {
     test('a new lead: "Lead was contacted" by a person\'s text or call back after the bell; its own reasons stay too', async () => {
       const row = { ...leadNote(), id: uid(78) };
       mockTables.leads = [lead()];
-      expect(await verdictFor(row, { anchor: T0 })).toMatchObject({ cls: 'new_lead', reason: null, would: null });
+      expect(await verdictFor(row, { anchor: T0 })).toMatchObject({ cls: 'new_lead', reason: null });
       expect((await verdictFor(row, { textAt: at(20) })).reason).toBe('Lead was contacted');
       expect((await verdictFor(row, { backAt: at(20) })).reason).toBe('Lead was contacted');
       expect((await verdictFor(row, { textAt: at(-20), backAt: at(-20) })).reason).toBeNull();
@@ -1554,7 +1554,6 @@ describe('customer-contact classes', () => {
       expect(JSON.parse(open.metadata).retired).toEqual({ by: 'alert-relevance', reason: 'Answered by a call', at: NOW_AFTER.toISOString() });
       expect(mail).toMatchObject({ done_by: 'relevance', resolution: 'A visit was booked' });
       expect(waiting.done_at ?? null).toBeNull();
-      expect(mockAuditWouldClose).not.toHaveBeenCalled();
     });
 
     test('the retire is judged on a fresh read — a text that arrives between the batch read and the write keeps the bell', async () => {
@@ -1628,7 +1627,6 @@ describe('customer-contact classes', () => {
       expect(result).toMatchObject({ rearmed: 1, retired: 0 });
       expect(unknown.done_at ?? null).toBeNull();
       expect(open.done_at ?? null).toBeNull();
-      expect(mockAuditWouldClose).not.toHaveBeenCalled();
     });
 
     test('a call bell whose visit was cancelled again is put back; a failed witness load leaves every closed row as it is', async () => {
@@ -1659,7 +1657,7 @@ describe('customer-contact classes', () => {
     const judged = async (row, bundleOver = null, opts = {}) => {
       mockBundles = new Map(bundleOver ? [[String(row.id), bundle(bundleOver)]] : []);
       const cls = classify(row, opts);
-      if (!cls) return { cls: null, reason: null, would: null };
+      if (!cls) return { cls: null, reason: null };
       const data = await loadSubjects([row]);
       return { cls: cls.key, ...judge(cls, subjectFor(row, data, TODAY)) };
     };
@@ -1677,7 +1675,7 @@ describe('customer-contact classes', () => {
       const ran = { visitRanAt: at(30) };
 
       test('it closes with the missed-call lane\'s wording', async () => {
-        expect(await judged(voicemail(), ran)).toMatchObject({ cls: 'voicemail_callback', reason: VISIT_RESOLUTION, would: null });
+        expect(await judged(voicemail(), ran)).toMatchObject({ cls: 'voicemail_callback', reason: VISIT_RESOLUTION });
         expect(VISIT_RESOLUTION).toBe(require('../services/missed-call-bell').VISIT_UNDERWAY_RESOLUTION);
       });
 
@@ -1696,7 +1694,7 @@ describe('customer-contact classes', () => {
       });
 
       test('an email bell never gets it', async () => {
-        expect(await judged(email(), ran)).toMatchObject({ cls: 'inbound_email', reason: null, would: null });
+        expect(await judged(email(), ran)).toMatchObject({ cls: 'inbound_email', reason: null });
       });
 
       test('the sweep closes with the wording; the re-arm pass puts the bell back when the witness stops saying the visit ran', async () => {
@@ -1717,8 +1715,8 @@ describe('customer-contact classes', () => {
       const paid = { staffActionAt: at(10), staffActionKind: 'payment' };
 
       test('a visit a person booked or a payment a person recorded closes a pending text, with the action named', async () => {
-        expect(await judged(smsThread(), { pending: true, ...booked })).toMatchObject({ cls: 'inbound_sms', reason: 'A visit was booked', would: null });
-        expect(await judged(smsThread(), { pending: true, ...paid })).toMatchObject({ reason: 'A payment was recorded', would: null });
+        expect(await judged(smsThread(), { pending: true, ...booked })).toMatchObject({ cls: 'inbound_sms', reason: 'A visit was booked' });
+        expect(await judged(smsThread(), { pending: true, ...paid })).toMatchObject({ reason: 'A payment was recorded' });
       });
 
       test('nothing before the text counts, and no action keeps a pending text; a text with no customer-id action stays', async () => {
@@ -1778,7 +1776,7 @@ describe('customer-contact classes', () => {
       });
 
       test('a person\'s text reaches the lead: the reason', async () => {
-        expect(await judged(leadAlert(), { textAt: at(20) })).toMatchObject({ cls: 'lead_contacted', reason: 'Lead was contacted', would: null });
+        expect(await judged(leadAlert(), { textAt: at(20) })).toMatchObject({ cls: 'lead_contacted', reason: 'Lead was contacted' });
       });
 
       test('the three reasons, each only from a fact after the bell; a missing lead row is unknown', async () => {
@@ -1896,14 +1894,14 @@ describe('customer-contact classes', () => {
         expect((await judged(row(), { textAt: at(20), replyAt: at(20) })).reason).toBe('Answered by text');
         expect((await judged(row(), { replyAt: at(20) })).reason).toBe('Answered by email');
         // before the bell, equal to it, a visit, a quote or nothing at all: still open
-        expect(await judged(row(), { backAt: at(-20), inAt: at(-20), textAt: at(-20), replyAt: at(-20) })).toMatchObject({ reason: null, would: null });
-        expect(await judged(row(), { backAt: T0, textAt: T0, replyAt: T0 })).toMatchObject({ reason: null, would: null });
-        expect(await judged(row(), { visitAt: at(20), quote: true })).toMatchObject({ reason: null, would: null });
-        expect(await judged(row(), null)).toMatchObject({ cls: 'portal_chat_answered', reason: null, would: null });
+        expect(await judged(row(), { backAt: at(-20), inAt: at(-20), textAt: at(-20), replyAt: at(-20) })).toMatchObject({ reason: null });
+        expect(await judged(row(), { backAt: T0, textAt: T0, replyAt: T0 })).toMatchObject({ reason: null });
+        expect(await judged(row(), { visitAt: at(20), quote: true })).toMatchObject({ reason: null });
+        expect(await judged(row(), null)).toMatchObject({ cls: 'portal_chat_answered', reason: null });
       });
 
       test('a person\'s text after the bell closes it', async () => {
-        expect(await judged(chatBell(), { textAt: at(20) })).toMatchObject({ reason: 'Answered by text', would: null });
+        expect(await judged(chatBell(), { textAt: at(20) })).toMatchObject({ reason: 'Answered by text' });
       });
 
       test('the witnesses are asked about the customer from the bell\'s LATEST event (created_at or the re-ring\'s rungAt); contact before the re-ring never settles it', async () => {
@@ -1926,10 +1924,10 @@ describe('customer-contact classes', () => {
       test('the add-a-service chat keeps its estimate rule, and also closes on a person\'s contact', async () => {
         const addService = () => chatBell({ topic: 'add_service' });
         mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
-        expect(await judged(addService(), { backAt: at(20) })).toMatchObject({ reason: 'Estimate was sent', would: null });
+        expect(await judged(addService(), { backAt: at(20) })).toMatchObject({ reason: 'Estimate was sent' });
         mockTables.estimates = [];
-        expect(await judged(addService(), { backAt: at(20) })).toMatchObject({ cls: 'portal_chat_add_service', reason: 'A person called back', would: null });
-        expect(await judged(addService(), { backAt: at(-20) })).toMatchObject({ reason: null, would: null });
+        expect(await judged(addService(), { backAt: at(20) })).toMatchObject({ cls: 'portal_chat_add_service', reason: 'A person called back' });
+        expect(await judged(addService(), { backAt: at(-20) })).toMatchObject({ reason: null });
       });
 
       test('the sweep closes a portal chat bell a person answered; the email-change bell is never touched', async () => {
@@ -2008,9 +2006,9 @@ describe('customer-contact classes', () => {
         expect((await judged(requestBell(), { inAt: at(20), textAt: at(20) })).reason).toBe('A person answered their call');
         expect((await judged(requestBell(), { textAt: at(20), replyAt: at(20) })).reason).toBe('Answered by text');
         expect((await judged(requestBell(), { replyAt: at(20) })).reason).toBe('Answered by email');
-        expect(await judged(requestBell(), { backAt: at(-20), inAt: at(-20), textAt: at(-20), replyAt: at(-20) })).toMatchObject({ reason: null, would: null });
-        expect(await judged(requestBell(), { textAt: T0 })).toMatchObject({ reason: null, would: null });
-        expect(await judged(requestBell(), { visitAt: at(20), quote: true })).toMatchObject({ reason: null, would: null });
+        expect(await judged(requestBell(), { backAt: at(-20), inAt: at(-20), textAt: at(-20), replyAt: at(-20) })).toMatchObject({ reason: null });
+        expect(await judged(requestBell(), { textAt: T0 })).toMatchObject({ reason: null });
+        expect(await judged(requestBell(), { visitAt: at(20), quote: true })).toMatchObject({ reason: null });
         // The witnesses are read for the customer, from the bell's creation, with the chat gate off.
         expect(mockLoadContactBundles.mock.calls.pop()[0].map((i) => [i.kind, i.refs, i.bellAt])).toEqual([['customer', { customerId: CUST }, T0]]);
       });
@@ -2155,7 +2153,7 @@ describe('customer-contact classes', () => {
       test('it is finished by the estimate accepted, declined or archived, or a visit booked after the drop-off; nothing else', async () => {
         // Nothing to find: still relevant.
         mockTables.estimates = [openEstimate()];
-        expect(await judged(checkoutBell(), null)).toMatchObject({ cls: 'portal_unfinished_booking', reason: null, would: null });
+        expect(await judged(checkoutBell(), null)).toMatchObject({ cls: 'portal_unfinished_booking', reason: null });
         mockTables.estimates = [openEstimate({ accepted_at: at(30), status: 'accepted' })];
         expect(await judged(checkoutBell(), null)).toMatchObject({ reason: 'Estimate was accepted' });
         // Accepted with the status alone still counts.
@@ -2180,7 +2178,7 @@ describe('customer-contact classes', () => {
         expect((await judged(checkoutBell(), { backAt: at(20), textAt: at(20) })).reason).toBe('A person called back');
         expect((await judged(checkoutBell(), { textAt: at(20) })).reason).toBe('Answered by text');
         expect((await judged(checkoutBell(), { replyAt: at(20) })).reason).toBe('Answered by email');
-        expect(await judged(checkoutBell(), { textAt: at(-20), backAt: at(-20) })).toMatchObject({ reason: null, would: null });
+        expect(await judged(checkoutBell(), { textAt: at(-20), backAt: at(-20) })).toMatchObject({ reason: null });
         // The witnesses are read for the customer (the chat gate stays off).
         expect(mockLoadContactBundles.mock.calls.pop()[0].map((i) => [i.kind, i.refs, i.bellAt])).toEqual([['customer', { customerId: CUST }, T0]]);
       });
@@ -2251,7 +2249,7 @@ describe('customer-contact classes', () => {
         ['archived', held({ archived_at: at(30) }), 'Estimate was archived'],
       ])('%s', async (_label, estimate, reason) => {
         mockTables.estimates = [estimate];
-        expect(await judged(heldBell(), null)).toMatchObject({ cls: 'tech_estimate_office_first', reason, would: null });
+        expect(await judged(heldBell(), null)).toMatchObject({ cls: 'tech_estimate_office_first', reason });
       });
 
       test('an estimate that is gone closes it; a bell with no estimate id closes nothing', async () => {
@@ -2292,7 +2290,7 @@ describe('customer-contact classes', () => {
         const row = textNote();
         expect(classify(row).key).toBe('text_note_checked');
         // the older failure bell, an alert with no doneWhen, another doneWhen and another prefix never match
-        expect(classify(failureBell(), { anyMode: true })).toBeNull();
+        expect(classify(failureBell())).toBeNull();
         expect(classify(textNote({ doneWhen: undefined }))).toBeNull();
         expect(classify(textNote({ doneWhen: 'customer_answered' }))).toBeNull();
         expect(classify(textNote({ dedupeKey: `sms-other:${SMS_LOG}` }))).toBeNull();
@@ -2323,14 +2321,14 @@ describe('customer-contact classes', () => {
       test('closes only with a person\'s answer AND a visit done, both after the bell', async () => {
         const reason = 'Answered, and a visit after the text is done';
         for (const answer of [{ textAt: at(20) }, { backAt: at(20) }, { inAt: at(20) }, { replyAt: at(20) }]) {
-          expect(await noted(textNote(), answer, at(30))).toMatchObject({ cls: 'text_note_checked', reason, would: null });
+          expect(await noted(textNote(), answer, at(30))).toMatchObject({ cls: 'text_note_checked', reason });
         }
         // the visit may come any day after the bell, not only the same Eastern day
         expect(await noted(textNote(), { textAt: at(20) }, at(60 * 24 * 9))).toMatchObject({ reason });
         // answered but no visit done; visit done but not answered
-        expect(await noted(textNote(), { textAt: at(20) }, null)).toMatchObject({ reason: null, would: null });
-        expect(await noted(textNote(), {}, at(30))).toMatchObject({ reason: null, would: null });
-        expect(await noted(textNote(), null, at(30))).toMatchObject({ reason: null, would: null });
+        expect(await noted(textNote(), { textAt: at(20) }, null)).toMatchObject({ reason: null });
+        expect(await noted(textNote(), {}, at(30))).toMatchObject({ reason: null });
+        expect(await noted(textNote(), null, at(30))).toMatchObject({ reason: null });
         // contact before the bell, or at the bell, is no answer
         expect(await noted(textNote(), { textAt: at(-20), backAt: at(-20), inAt: at(-20), replyAt: at(-20) }, at(30))).toMatchObject({ reason: null });
         expect(await noted(textNote(), { textAt: T0, replyAt: T0 }, at(30))).toMatchObject({ reason: null });
@@ -2347,7 +2345,7 @@ describe('customer-contact classes', () => {
         mockBundles = new Map([[String(row.id), bundle({ textAt: at(20) })]]);
         const data = await loadSubjects([row]);
         expect(data.contactFailed).toBe(true);
-        expect(judge(classify(row), subjectFor(row, data, TODAY))).toMatchObject({ reason: null, would: null });
+        expect(judge(classify(row), subjectFor(row, data, TODAY))).toMatchObject({ reason: null });
         const closed = closedRow(textNote(), 'Answered, and a visit after the text is done');
         mockTables.notifications = [closed];
         mockBundles = new Map([[String(closed.id), bundle({ textAt: at(20) })]]);

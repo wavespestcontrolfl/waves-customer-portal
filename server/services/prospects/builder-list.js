@@ -60,18 +60,21 @@ function sourceFor(kind) {
 }
 
 /**
- * Upper case, accents dropped (PEÑA -> PENA, so it matches a customer typed without the accent), apostrophes and
- * periods gone (straight or curly), commas and other punctuation a space (POOLS,LLC is POOLS LLC), trailing company
- * words (LLC, INC, ...) dropped.
- * Letters of any script and digits stay, so two names in another alphabet never share a key.
+ * Upper case, accents on Latin letters dropped (PEÑA -> PENA, so it matches a customer typed without the accent),
+ * apostrophes and periods gone (straight or curly), commas and other punctuation a space (POOLS,LLC is POOLS LLC),
+ * trailing company words (LLC, INC, ...) dropped.
+ * Letters of any script, their marks and digits stay, so two names in another alphabet never share a key: in
+ * Japanese or Cyrillic a mark makes another letter (ガ is not カ, Й is not И), and in Devanagari a vowel sign is part
+ * of the word.
  */
 function builderKey(name) {
   const words = String(name == null ? '' : name)
     .normalize('NFKD')
-    .replace(/\p{M}+/gu, '')
+    .replace(/(\p{Script=Latin})\p{M}+/gu, '$1')
+    .normalize('NFC')
     .toUpperCase()
     .replace(/['‘’.]/g, '')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
     .trim()
     .split(' ')
     .filter(Boolean);
@@ -85,8 +88,10 @@ const shiftDay = (day, days) => dateOnlyString(addETDays(dateOnlyAtNoonUtc(day),
 
 // The county file arrives once a week (Mondays), so "the last 7 days from today" would fall to zero as the week goes on.
 // The week summary is the 7 days that end on the newest permit date on file (weekEnd), never a day after today.
+// The newest date can arrive as a pg DATE (a Date): it becomes a plain day before it is compared.
 function cutoffsFor(today, dataThrough = null) {
-  const weekEnd = dataThrough && dataThrough < today ? dataThrough : today;
+  const newest = dateOnlyString(dataThrough);
+  const weekEnd = newest && newest < today ? newest : today;
   return {
     today,
     weekStart: shiftDay(weekEnd, -6), // 7 days, weekEnd included
@@ -107,16 +112,18 @@ function heaviest(rows, field) {
   return ranked.length ? ranked[0][0] : null;
 }
 
-function toRow(raw) {
+// A row as the database returns it: a COUNT arrives as text and a DATE can arrive as a Date. Every count becomes a
+// number and every day a plain 'YYYY-MM-DD' before anything is added, compared or sorted.
+function normalizeRow(row) {
   return {
-    name: raw.name,
-    license: raw.license || null,
-    permits7: Number(raw.permits7) || 0,
-    permits30: Number(raw.permits30) || 0,
-    permits90: Number(raw.permits90) || 0,
-    permits365: Number(raw.permits365) || 0,
-    firstPermit: dateOnlyString(raw.first_permit),
-    lastPermit: dateOnlyString(raw.last_permit),
+    name: row.name,
+    license: row.license || null,
+    permits7: Number(row.permits7) || 0,
+    permits30: Number(row.permits30) || 0,
+    permits90: Number(row.permits90) || 0,
+    permits365: Number(row.permits365) || 0,
+    firstPermit: dateOnlyString(row.firstPermit),
+    lastPermit: dateOnlyString(row.lastPermit),
   };
 }
 
@@ -141,13 +148,15 @@ function mergeGroup(key, group, { newSince, customerKeys }) {
 }
 
 /**
- * Pure merge. rows: one per upper-cased name and license from the database. Returns the builders (permits in the last
- * 365 days only), sorted by 90-day permits, then 12-month permits, then name, and the newest-week summary. The week is
- * counted before the 12-month cut: it ends on the newest permit on file, which can be older than 12 months.
+ * Pure merge. rows: one per upper-cased name and license, as the database returns them (normalizeRow). Returns the
+ * builders (permits in the last 365 days only), sorted by 90-day permits, then 12-month permits, then name, and the
+ * newest-week summary. The week is counted before the 12-month cut: it ends on the newest permit on file, which can
+ * be older than 12 months.
  */
 function mergeBuilders(rows, { newSince, customerKeys = new Set() }) {
   const groups = new Map();
-  for (const row of rows) {
+  for (const raw of rows) {
+    const row = normalizeRow(raw);
     const key = builderKey(row.name);
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
@@ -178,14 +187,14 @@ async function readGroups(conn, source, cut) {
             COUNT(*) FILTER (WHERE issued_date >= ?::date) AS permits30,
             COUNT(*) FILTER (WHERE issued_date >= ?::date) AS permits90,
             COUNT(*) FILTER (WHERE issued_date >= ?::date) AS permits365,
-            MIN(issued_date) AS first_permit,
-            MAX(issued_date) AS last_permit
+            MIN(issued_date) AS "firstPermit",
+            MAX(issued_date) AS "lastPermit"
        FROM ${source.table}
       WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}
       GROUP BY 1, 2`,
     [cut.weekStart, cut.weekEnd, cut.d30, cut.d90, cut.d365, cut.today],
   );
-  return result.rows.map(toRow);
+  return result.rows;
 }
 
 async function readDataThrough(conn, source, today) {
