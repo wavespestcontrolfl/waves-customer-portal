@@ -14,6 +14,9 @@
  *     string;
  *   - hoaEmail's email format is not weakened, and ALLOWED_FIELDS is not
  *     widened, in the process.
+ *   - the sprinkler timer on file follows the same contract as ONE record
+ *     (services/controller-timer.js): a timer the row cannot take is
+ *     rejected whole, while the other fields of the batch save.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -188,4 +191,77 @@ describe('prototype-inherited keys are unknown, not schemas', () => {
       expect(out.presentCount).toBe(1);
     },
   );
+});
+
+// The sprinkler timer on file (sprinkler timer connect, step 1): three fields that are ONE record about one box on
+// the wall of one home. The customer's writer settles them under its preference lock (settleControllerTimer).
+describe('PUT /api/property/preferences — the sprinkler timer on file', () => {
+  const { CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS } = require('@waves/irrigation-runtime');
+  const { PREFS_FIELD_SCHEMAS, ALLOWED_FIELDS } = require('../services/property-preferences-schema');
+  const { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS } = require('../services/irrigation-schedule-confirmation');
+  const { CONTROLLER_TIMER_FIELDS, clearedControllerTimer } = require('../services/controller-timer');
+  const AccountMembershipEmail = require('../services/account-membership-email');
+  const { propertyChangeItems } = require('../routes/property')._private;
+  const X2_ON_APP = { irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' };
+  const timerOf = (row) => CONTROLLER_TIMER_FIELDS.map((column) => row?.[column] ?? null);
+
+  test('each field takes a key from the shared list; a blank clears; free text is rejected', () => {
+    for (const [field, labels] of [
+      ['irrigationControllerBrand', CONTROLLER_BRANDS], ['irrigationControllerModel', CONTROLLER_MODELS], ['irrigationControllerApp', CONTROLLER_APP_ANSWERS],
+    ]) {
+      for (const key of Object.keys(labels)) expect(PREFS_FIELD_SCHEMAS[field].validate(key).error).toBeUndefined();
+      expect(PREFS_FIELD_SCHEMAS[field].validate('').value).toBeNull();
+      expect(PREFS_FIELD_SCHEMAS[field].validate('Hunter').error).toBeTruthy();
+    }
+    for (const column of CONTROLLER_TIMER_FIELDS) expect(ALLOWED_FIELDS).toContain(column);
+  });
+
+  test('a whole timer saves, comes back in the response, stamps no irrigation system and sends no email', async () => {
+    const { status, body } = await putPrefs(X2_ON_APP);
+    expect(status).toBe(200);
+    expect(body.preferences).toMatchObject(X2_ON_APP);
+    expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
+    expect(db._state.row.irrigation_system).toBeUndefined();
+    expect(db._state.row.irrigation_confirmed_fields).toBeUndefined();
+    expect(AccountMembershipEmail.sendAccountUpdated).not.toHaveBeenCalled();
+  });
+
+  test('an answer sent alone is a 400 that names the field, and nothing is written', async () => {
+    db._state.row = { id: 'pref-1', customer_id: 'cust-1', irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
+    const { status, body } = await putPrefs({ irrigationControllerApp: 'yes' });
+    expect(status).toBe(400);
+    expect(body.rejected).toEqual([{ field: 'irrigationControllerApp', message: expect.stringMatching(/saves as one record/) }]);
+    expect(timerOf(db._state.row)).toEqual(['rain_bird', null, null]);
+    expect(db._state.row.updated_at).toBeUndefined();
+  });
+
+  test('a timer that cannot exist is rejected whole beside a field that saves', async () => {
+    const { status, body } = await putPrefs({ irrigationControllerBrand: 'rain_bird', irrigationControllerModel: 'x2', irrigationControllerApp: null, parkingNotes: 'Driveway' });
+    expect(status).toBe(200);
+    expect(body.rejected.map((r) => r.field)).toEqual(['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp']);
+    expect(db._state.row.parking_notes).toBe('Driveway');
+    expect(timerOf(db._state.row)).toEqual([null, null, null]);
+  });
+
+  test('after a move, only a page rendered against the new home may set the timer', async () => {
+    const movedAt = '2026-11-10T15:00:00.000Z';
+    db._state.row = { id: 'pref-1', customer_id: 'cust-1', irrigation_home_changed_at: movedAt, ...clearedControllerTimer() };
+    for (const stale of [X2_ON_APP, { ...X2_ON_APP, confirmed_as_of: null }, { ...X2_ON_APP, confirmed_as_of: '2026-09-01T00:00:00.000Z' }]) {
+      const { status, body } = await putPrefs(stale);
+      expect(status).toBe(400);
+      expect(body.error).toBe('The home on this account changed. Reload, then set the sprinkler timer again.');
+      expect(timerOf(db._state.row)).toEqual([null, null, null]);
+    }
+    expect((await putPrefs({ ...X2_ON_APP, confirmed_as_of: movedAt })).status).toBe(200);
+    expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
+  });
+
+  test('a timer is not a watering input, and a change to it adds nothing to the account-updated email', () => {
+    for (const column of CONTROLLER_TIMER_FIELDS) {
+      expect(IRRIGATION_INPUT_FIELDS).not.toContain(column);
+      expect(IRRIGATION_SIZING_FIELDS).not.toContain(column);
+    }
+    const x2Columns = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
+    expect(propertyChangeItems(x2Columns, clearedControllerTimer())).toEqual([]);
+  });
 });

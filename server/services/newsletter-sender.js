@@ -6,7 +6,9 @@
  * Segment filter shape (stored in newsletter_sends.segment_filter jsonb):
  *   SQL-expressible (applied directly in buildSubscriberQuery):
  *     { sources?: string[], tags?: string[], customersOnly?: boolean,
- *       leadsOnly?: boolean, region_zone?: string[] }
+ *       leadsOnly?: boolean, region_zone?: string[], subscriber_ids?: number[],
+ *       holdout?: 'pest-insider', address_keys?: { [id]: string } }
+ *   (holdout and address_keys: re-checked per batch at dispatch)
  *   Service-line / membership (NOT a column — resolved to a customer_id set
  *   via newsletter-audience-profiles, then injected as a whereIn):
  *     { has_service?: string[], missing_service?: string[],
@@ -288,6 +290,54 @@ function excludeMailboxNotMailable(query) {
     });
 }
 
+// A planned audience's rows in one snapshot: the id, the customer linked now,
+// the address on file now, and every customer behind that mailbox
+// (mailbox_customer_ids: customers linked to any subscriber row on it,
+// whatever its status, and customers whose own email is on it; the sender's
+// one mailbox key, MAILBOX_KEY_SQL). The sender mails one row per mailbox, so
+// a planned issue's holdout covers the whole mailbox: a held-out customer is
+// never reached through an alias row, a lead row or a shared address.
+// `query` reads newsletter_subscribers; the planner, the recipient count and
+// each batch's re-check all read through here.
+function withMailboxCustomers(query) {
+  return query
+    .withMaterialized('mailbox_customers', (qb) => {
+      qb.select('linked.mailbox_key as mc_mailbox_key', db.raw('array_agg(DISTINCT linked.customer_id) AS mc_customer_ids'))
+        .from(function linkedCustomers() {
+          this.select(db.raw(`${MAILBOX_KEY_SQL('email')} AS mailbox_key`), db.raw('customer_id::text AS customer_id'))
+            .from('newsletter_subscribers')
+            .whereNotNull('customer_id')
+            .whereRaw("TRIM(COALESCE(email, '')) <> ''")
+            .unionAll(function customerEmails() {
+              this.select(db.raw(`${MAILBOX_KEY_SQL('email')} AS mailbox_key`), db.raw('id::text AS customer_id'))
+                .from('customers')
+                .whereNull('deleted_at')
+                .whereRaw("TRIM(COALESCE(email, '')) <> ''");
+            })
+            .as('linked');
+        })
+        .groupBy('linked.mailbox_key');
+    })
+    // One row per mailbox key on the joined side, so the join never repeats a reader.
+    .joinRaw(`LEFT JOIN mailbox_customers ON mailbox_customers.mc_mailbox_key = ${MAILBOX_KEY_SQL('newsletter_subscribers.email')}`)
+    .select(
+      'newsletter_subscribers.id', 'newsletter_subscribers.customer_id', 'newsletter_subscribers.email',
+      db.raw("COALESCE(mailbox_customers.mc_customer_ids, '{}') AS mailbox_customer_ids"),
+    );
+}
+
+// The rows of a planned audience that may be mailed now, by the one rule
+// (keepsPlannedAudience) the recipient count and every batch apply, so a
+// count never promises a reader a batch would skip. `mailedAddressBySub`
+// adds, per id, the address a batch is about to mail.
+function plannedEligibleRows(plan, segmentFilter, rows, mailedAddressBySub = null) {
+  return rows.filter((row) => keepsPlannedAudience(
+    plan, segmentFilter, row.id,
+    [row.customer_id, ...(Array.isArray(row.mailbox_customer_ids) ? row.mailbox_customer_ids : [])],
+    mailedAddressBySub ? [row.email, mailedAddressBySub.get(row.id)] : [row.email],
+  ));
+}
+
 // Keys that can't be expressed in SQL against newsletter_subscribers — they
 // depend on classifying each customer's active recurring services, so they are
 // resolved to a customer_id set by resolveSegmentCustomerIds() first.
@@ -425,9 +475,11 @@ async function loadPersonalizationContext(subscribers) {
  */
 async function countSegmentRecipients(segmentFilter) {
   await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
-  const row = await buildSubscriberQuery(segmentFilter, await resolveSegmentCustomerIds(segmentFilter))
-    .count('* as c')
-    .first();
+  const query = buildSubscriberQuery(segmentFilter, await resolveSegmentCustomerIds(segmentFilter));
+  // A planned audience counts by the rule each batch applies (plannedEligibleRows).
+  const plan = sendHoldout(segmentFilter);
+  if (plan) return plannedEligibleRows(plan, segmentFilter, await withMailboxCustomers(query)).length;
+  const row = await query.count('* as c').first();
   return Number(row?.c || 0);
 }
 
@@ -471,7 +523,123 @@ function buildSubscriberQuery(segmentFilter, customerIds = null) {
   if (Array.isArray(f.tags) && f.tags.length) {
     q = q.whereRaw('tags \\?| array[' + f.tags.map(() => '?').join(',') + ']', f.tags);
   }
-  return q;
+  return narrowToPlannedAudience(q, f);
+}
+
+// Planned audiences a send's segment_filter can name (segment_filter.holdout):
+// a planned issue's own rules, which the per-chunk re-check in sendCampaign
+// asks again right before each batch, on a first send and on a resume.
+// - heldOut(customerId): customers the issue must never reach, asked on each
+//   recipient's CURRENT customer link and on every customer behind its
+//   mailbox (withMailboxCustomers), so a lead that became a held-out customer
+//   after the plan, a relink to another customer, or an alias of a held-out
+//   customer's mailbox is skipped.
+// - addressKey(email): the key of an address. segment_filter.address_keys
+//   holds, by subscriber id, the key of the address the plan qualified; a
+//   recipient about to be mailed at any other address is skipped, because the
+//   plan chose that mailbox, not whatever address the row carries now.
+// - isAddressKey(value): whether a stored key has addressKey's form.
+const SEND_HOLDOUTS = Object.freeze({
+  'pest-insider': Object.freeze({
+    heldOut: (customerId) => require('./pest-insider/audience').isHeldOut(customerId),
+    addressKey: (email) => require('./pest-insider/audience').addressKey(email),
+    isAddressKey: (value) => require('./pest-insider/audience').isAddressKey(value),
+  }),
+});
+
+// The planned-audience rules a send names, or null when it names none.
+function sendHoldout(segmentFilter) {
+  const name = segmentFilter?.holdout;
+  return name != null && Object.hasOwn(SEND_HOLDOUTS, name) ? SEND_HOLDOUTS[name] : null;
+}
+
+// True when a recipient still belongs to its planned issue: none of
+// `customerIds` (the customer linked now and every customer behind its
+// mailbox) is held out, and every one of `addresses` (the address about to be
+// mailed and the address on file now) is the one the plan qualified. A
+// missing or malformed address_keys keeps nobody.
+function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerIds, addresses) {
+  if (customerIds.some((customerId) => plan.heldOut(customerId))) return false;
+  const keys = segmentFilter?.address_keys;
+  if (!keys || typeof keys !== 'object' || Array.isArray(keys)) return false;
+  const id = String(subscriberId);
+  if (!Object.hasOwn(keys, id) || typeof keys[id] !== 'string') return false;
+  return addresses.every((address) => keys[id] === plan.addressKey(address));
+}
+
+// Why this send must not go out to its audience (an Error marked
+// audienceRefusal), or null. Read before any claim work, on a first send and
+// on a resume (a resume reads its retryable rows from the ledger and never
+// runs buildSubscriberQuery), so the row stays as it is and can be repaired:
+// - a holdout name this server does not know;
+// - a Waves Pest Insider issue with no planned audience (its planner sets
+//   one): without it the issue would go to every subscriber, the holdout and
+//   readers who never open Waves mail included;
+// - a planned audience without a usable reader list or without a
+//   well-formed address key for every reader on it: the batches would skip
+//   everyone, and the issue would end 'sent' to nobody.
+function audienceRefusal(send) {
+  const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
+  const filter = send.segment_filter;
+  const refused = (code, message) => Object.assign(new Error(message), { code, audienceRefusal: true });
+  if (filter?.holdout != null && !sendHoldout(filter)) {
+    return refused('UNKNOWN_HOLDOUT', 'the segment filter names a holdout this server does not know');
+  }
+  if (send.newsletter_type === PEST_INSIDER_TYPE && filter?.holdout !== 'pest-insider') {
+    return refused('UNPLANNED_AUDIENCE', 'a Waves Pest Insider issue goes only to its planned readers, and this one has no plan');
+  }
+  const plan = sendHoldout(filter);
+  if (plan) {
+    const { subscriber_ids: ids, address_keys: keys } = filter;
+    const keyed = Boolean(keys) && typeof keys === 'object' && !Array.isArray(keys);
+    if (!usableIdList(ids) || !keyed
+      || !ids.every((id) => Object.hasOwn(keys, String(id)) && plan.isAddressKey(keys[String(id)]))) {
+      return refused('INCOMPLETE_PLAN', 'the planned audience needs a reader list and a well-formed address key for every reader on it');
+    }
+  }
+  return null;
+}
+
+// The segment as the send log shows it. A planned audience's subscriber ids
+// (who opens Waves mail) and address keys (hashes of email addresses) appear
+// only as counts.
+function segmentForLog(filter) {
+  if (!filter) return 'all';
+  const shown = { ...filter };
+  if (shown.subscriber_ids != null) {
+    shown.subscriber_ids = Array.isArray(shown.subscriber_ids) ? `${shown.subscriber_ids.length} ids` : 'malformed';
+  }
+  if (shown.address_keys != null) {
+    shown.address_keys = typeof shown.address_keys === 'object' ? `${Object.keys(shown.address_keys).length} keys` : 'malformed';
+  }
+  return JSON.stringify(shown);
+}
+
+// The keys a planned issue's segment_filter carries (a Waves Pest Insider
+// issue's audience, fixed when the issue is planned: see
+// services/pest-insider/audience.js).
+// - holdout: a SEND_HOLDOUTS name. One the sender does not know matches
+//   nobody, and so does a send that names one with no subscriber_ids: a
+//   planned issue never falls back to the whole list.
+// - address_keys: { [subscriber id]: key of the address the plan qualified },
+//   read by the per-chunk re-check in sendCampaign (keepsPlannedAudience).
+// - subscriber_ids: an exact list of newsletter_subscribers ids. Absent or
+//   null = no constraint. Present = only those ids, still under every rule in
+//   buildSubscriberQuery. A present-but-unusable value (not an array, an empty
+//   array, or any element that is not a positive integer inside Postgres's
+//   integer range, the id column's type) matches nobody: an exact list must
+//   never broaden to every active subscriber, and an id the int[] cast would
+//   refuse must not abort the count. One array binding, so a long list cannot
+//   hit Postgres's bind-parameter limit.
+const PG_INTEGER_MAX = 2147483647;
+function usableIdList(ids) {
+  return Array.isArray(ids) && ids.length > 0
+    && ids.every((id) => Number.isInteger(id) && id > 0 && id <= PG_INTEGER_MAX);
+}
+function narrowToPlannedAudience(q, { subscriber_ids: ids, holdout }) {
+  if (holdout != null && !Object.hasOwn(SEND_HOLDOUTS, holdout)) return q.whereRaw('1 = 0');
+  if (ids == null) return holdout != null ? q.whereRaw('1 = 0') : q;
+  return usableIdList(ids) ? q.whereRaw('newsletter_subscribers.id = ANY(?::int[])', [ids]) : q.whereRaw('1 = 0');
 }
 
 function assignAbVariant() {
@@ -687,6 +855,10 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
   if (!send.html_body && !send.text_body) throw new Error('body required');
+  // A send whose audience this server cannot honor stops here on every path,
+  // before any claim work (audienceRefusal).
+  const refusal = audienceRefusal(send);
+  if (refusal) throw refusal;
 
   // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
   // A TRUE PARTIAL resume — preclaimed AND constrained to the existing
@@ -889,7 +1061,7 @@ async function sendCampaign(sendId, opts = {}) {
   // segment or new subscribers cannot expand an old campaign's audience.
   if (!opts.existingDeliveriesOnly) {
     subscribers = await buildSubscriberQuery(send.segment_filter, await resolveSegmentCustomerIds(send.segment_filter));
-    logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${send.segment_filter ? JSON.stringify(send.segment_filter) : 'all'})`);
+    logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${segmentForLog(send.segment_filter)})`);
     const deliveryRows = subscribers.map((s) => ({
       send_id: send.id,
       subscriber_id: s.id,
@@ -1079,10 +1251,27 @@ async function sendCampaign(sendId, opts = {}) {
       // eligible — but the row we selected still carries the OLD (archived)
       // customer_id, which would personalize the email and file the customer
       // touchpoint against the archived profile.
-      const freshCustomerBySub = new Map((await excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
-        db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
-      ))).select('id', 'customer_id')).map((r) => [r.id, r.customer_id ?? null]));
-      const stillEligible = freshCustomerBySub;
+      // A planned send's own list applies here too (narrowToPlannedAudience): a
+      // resume reads its retryable rows from the ledger and never runs
+      // buildSubscriberQuery, so a reader the list does not hold, or a missing,
+      // empty or malformed list, is skipped here, terminally.
+      // A send that names a planned audience (a Waves Pest Insider issue) reads
+      // each reader's address and the customers behind its mailbox in this
+      // same query (withMailboxCustomers), and keeps only the readers the plan
+      // still holds (plannedEligibleRows): not held out on the customer linked
+      // now or on any customer behind the mailbox, and mailed at the address
+      // the plan qualified, both the one about to be mailed and the one on
+      // file now (an address corrected while earlier batches went out).
+      const plan = sendHoldout(send.segment_filter);
+      const freshQuery = narrowToPlannedAudience(excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
+        db('newsletter_subscribers').where({ status: 'active' }).whereIn('newsletter_subscribers.id', chunkToSend.map((s) => s.id)),
+      ))), send.segment_filter || {});
+      const freshRows = await (plan ? withMailboxCustomers(freshQuery) : freshQuery.select('id', 'customer_id', 'email'));
+      const freshCustomerBySub = new Map(freshRows.map((r) => [r.id, r.customer_id ?? null]));
+      const stillEligible = plan
+        ? new Map(plannedEligibleRows(plan, send.segment_filter, freshRows, new Map(chunkToSend.map((s) => [s.id, s.email])))
+          .map((r) => [r.id, r.customer_id ?? null]))
+        : freshCustomerBySub;
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
       if (ineligible.length) {
         const skippedNow = await skipIneligibleDeliveries(send.id, opts.existingDeliveriesOnly
@@ -1095,7 +1284,7 @@ async function sendCampaign(sendId, opts = {}) {
         // terminalized is not counted as skipped here as well.
         skippedIneligible += skippedNow;
         skippedAtDispatch += skippedNow;
-        logger.info(`[newsletter] send ${send.id} skipped ${skippedNow}/${ineligible.length} recipient(s) no longer eligible at dispatch (archived customer / not active)`);
+        logger.info(`[newsletter] send ${send.id} skipped ${skippedNow}/${ineligible.length} recipient(s) no longer eligible at dispatch (archived customer / not active / held out / address changed since the plan)`);
         chunkToSend = chunkToSend.filter((s) => stillEligible.has(s.id));
         claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean);
         if (!chunkToSend.length) continue;
@@ -1392,50 +1581,61 @@ async function prepareResumeCampaign(sendId) {
   const typedSend = requiresClaimValidation(send.newsletter_type)
     ? send
     : ((send.newsletter_type === null && await isFlagshipSend(send)) ? { ...send, newsletter_type: FLAGSHIP_TYPE_KEY } : null);
-  if (typedSend) {
+  // A send whose audience this server cannot honor (audienceRefusal) takes the
+  // path stored copy that fails validation takes: nothing is claimed, and the
+  // same lease-guarded transitions below return a zero-ledger campaign to
+  // draft or release a stale claim, so a refused campaign is never stuck in
+  // 'sending'.
+  const refusal = audienceRefusal(send);
+  let errors = refusal ? [refusal.message] : [];
+  if (!refusal && typedSend) {
     const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
     const lockedPrices = await lockedPricesForSend(typedSend, db);
-    const { errors } = validateNewsletterDraft(typedSend, { recipientCount: 1, lockedPrices });
-    if (errors.length > 0) {
-      // Nothing is claimed, and the campaign KEEPS its delivered state: a
-      // 'failed' or 'sent' row stays publicly readable (newsletter-feed.js
-      // serves sending/sent/failed — the web version the first batch
-      // received stays up) and is corrected in place through PATCH's
-      // correct-and-resume path; the next Resume re-validates the corrected
-      // copy and, through sendCampaign's ledger guard (codex round 11),
-      // reaches only the recipients still outstanding (codex round 12 P2 —
-      // a return to 'draft' made that link a 404). A live 'sending' owner
-      // was refused above; a STALE one moves to 'failed' with its claim
-      // token revoked — readable and editable, and a stuck original worker
-      // learns through its heartbeat ownership check that it no longer owns
-      // the campaign — as a compare-and-set on the inspected state and lease
-      // (pre-push audit P1).
-      let outcome = 'correct the copy and resume again';
-      if (totalDeliveries === 0 && (send.status === 'failed' || reclaimingStaleSend)) {
-        // Nobody received a zero-ledger campaign (the first attempt failed
-        // before any delivery row was seeded), so there is no web version
-        // to keep and no ledger to resume: it goes back to an editable draft
-        // with its approval cleared (codex round 13 P2) — compare-and-set on
-        // the inspected state and lease, like every other transition here.
-        const reset = db('newsletter_sends').where({ id: send.id, status: send.status });
-        if (reclaimingStaleSend) reset.where('updated_at', '<=', leaseCutoff);
-        const returned = (await reset.update({
-          status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_refused_at: null,
-          sending_claim_token: null, updated_at: new Date(),
-        })) > 0;
-        outcome = returned ? 'returned to draft for editing (nobody received it)' : 'it changed state meanwhile and was left as is';
-      } else if (reclaimingStaleSend) {
-        const released = (await db('newsletter_sends')
-          .where({ id: send.id, status: 'sending' })
-          .where('updated_at', '<=', leaseCutoff)
-          .update({ status: 'failed', sending_claim_token: null, updated_at: new Date() })) > 0;
-        if (released) outcome = 'its stale send claim was released; correct the copy and resume again';
-      }
-      const err = new Error(`campaign no longer passes validation; ${outcome}: ${errors.join('; ')}`);
-      err.code = 'VALIDATION_FAILED';
-      err.errors = errors;
-      throw err;
+    ({ errors } = validateNewsletterDraft(typedSend, { recipientCount: 1, lockedPrices }));
+  }
+  if (errors.length > 0) {
+    // Nothing is claimed, and the campaign KEEPS its delivered state: a
+    // 'failed' or 'sent' row stays publicly readable (newsletter-feed.js
+    // serves sending/sent/failed — the web version the first batch
+    // received stays up) and is corrected in place through PATCH's
+    // correct-and-resume path; the next Resume re-validates the corrected
+    // copy and, through sendCampaign's ledger guard (codex round 11),
+    // reaches only the recipients still outstanding (codex round 12 P2 —
+    // a return to 'draft' made that link a 404). A live 'sending' owner
+    // was refused above; a STALE one moves to 'failed' with its claim
+    // token revoked — readable and editable, and a stuck original worker
+    // learns through its heartbeat ownership check that it no longer owns
+    // the campaign — as a compare-and-set on the inspected state and lease
+    // (pre-push audit P1).
+    const repair = refusal ? 'repair its audience' : 'correct the copy';
+    let outcome = `${repair} and resume again`;
+    if (totalDeliveries === 0 && (send.status === 'failed' || reclaimingStaleSend)) {
+      // Nobody received a zero-ledger campaign (the first attempt failed
+      // before any delivery row was seeded), so there is no web version
+      // to keep and no ledger to resume: it goes back to an editable draft
+      // with its approval cleared (codex round 13 P2) — compare-and-set on
+      // the inspected state and lease, like every other transition here.
+      const reset = db('newsletter_sends').where({ id: send.id, status: send.status });
+      if (reclaimingStaleSend) reset.where('updated_at', '<=', leaseCutoff);
+      const returned = (await reset.update({
+        status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_refused_at: null,
+        sending_claim_token: null, updated_at: new Date(),
+      })) > 0;
+      outcome = returned ? 'returned to draft for editing (nobody received it)' : 'it changed state meanwhile and was left as is';
+    } else if (reclaimingStaleSend) {
+      const released = (await db('newsletter_sends')
+        .where({ id: send.id, status: 'sending' })
+        .where('updated_at', '<=', leaseCutoff)
+        .update({ status: 'failed', sending_claim_token: null, updated_at: new Date() })) > 0;
+      if (released) outcome = `its stale send claim was released; ${repair} and resume again`;
     }
+    const err = new Error(refusal
+      ? `campaign cannot be resumed as stored; ${outcome}: ${errors.join('; ')}`
+      : `campaign no longer passes validation; ${outcome}: ${errors.join('; ')}`);
+    err.code = refusal ? refusal.code : 'VALIDATION_FAILED';
+    if (refusal) err.audienceRefusal = true;
+    err.errors = errors;
+    throw err;
   }
 
   // Are there outstanding non-success deliveries to resume? If delivery
@@ -1549,7 +1749,12 @@ async function resumeCampaign(sendId) {
  * this tick reverted it.
  */
 async function revertBlockedScheduledSend(row, reason) {
-  const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
+  // Bound to the version this tick read, as the dispatch claim is: a row
+  // edited, re-approved or rescheduled since then is left as it is now.
+  const revert = db('newsletter_sends').where({ id: row.id, status: 'scheduled' });
+  if (row.updated_at) revert.where('updated_at', '<', noLaterThan(row.updated_at));
+  if (row.proof_approved_at) revert.where('proof_approved_at', '<', noLaterThan(row.proof_approved_at));
+  const reverted = await revert.update({
     status: 'draft',
     scheduled_for: null,
     proof_token: null,
@@ -1687,12 +1892,14 @@ async function processScheduledSends() {
         logger.info(`[newsletter-scheduler] send ${row.id} changed after this tick validated it — not dispatching this version`);
         continue;
       }
-      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {
+      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID' || err.audienceRefusal) {
         // sendCampaign's own pre-claim gates re-run the lineup checks and
         // can newly fail even though the tick's gate just passed (the
         // recheck fetches live pages). A generic 'failed' flip would
         // strand the week uneditable — take the same
-        // revert-to-editable-draft exit as the tick's gate.
+        // revert-to-editable-draft exit as the tick's gate. An audience
+        // refusal (audienceRefusal) takes the same exit: nothing went out,
+        // and the alert says why.
         logger.error(`[newsletter-scheduler] send ${row.id} blocked at dispatch: ${err.message}`);
         try {
           await revertBlockedScheduledSend(row, err.message);
@@ -1769,4 +1976,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
