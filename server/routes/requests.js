@@ -1258,7 +1258,11 @@ router.post('/start-plan', authenticate, planStartLiveOr404, cancelResolutionLim
       if (err && err.restartUnavailable) {
         return res.status(409).json({ error: err.message, code: err.code });
       }
-      throw err;
+      // Knex puts an insert's bound values (the customer's name, phone, email and street) in
+      // err.message (codex pre-push P1, AGENTS.md "PII in logs"): log and forward the database
+      // code and the customer id only.
+      logger.error(`[plan-start] mint failed for customer ${req.customerId}: ${err?.code || err?.name || 'error'}`);
+      throw Object.assign(new Error('plan start could not mint the estimate'), { code: err?.code });
     }
     res.json({ ok: true, url: minted.url, estimateId: minted.estimateId, reused: minted.reused === true });
   } catch (err) {

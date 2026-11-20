@@ -2241,6 +2241,16 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     expect(premises).not.toHaveBeenCalled();
   });
 
+  test('absent for an address the mint refuses: with no city, a unit line such as "Building 2" reads back as the city (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain({ address_line2: 'Building 2', city: null }));
+    // Still priced: only the address check turns booking off.
+    expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in result).toBe(false);
+    // A unit line the parser knows reads back as the same home and keeps the button.
+    expect((await ask(plain({ address_line2: 'Apt 4', city: null }))).planStart?.optionIds?.length).toBeGreaterThan(0);
+  });
+
   test('never lists a mosquito option: a mosquito-only plan adds a setup fee its line does not declare', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
     const result = await ask(plain(), null, 'I am interested in adding mosquito service');

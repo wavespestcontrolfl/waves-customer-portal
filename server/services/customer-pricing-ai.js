@@ -1497,7 +1497,9 @@ async function planStartHint(db, customer, options, currentServiceKeys, ownedSer
     // term still covering today owns a plan: no offer.
     if (await restart.ownsAnyRecurringService(db, customer.id)) return {};
     const street = await restart.singlePremisesStreet(db, customer, { strict: true });
-    if (!street) return {};
+    // The mint's own address check (codex pre-push P1): an address that reads back as another
+    // home refuses the mint, so the card offers the request up front, not a button that files it.
+    if (!street || !restart.storedAddressNamesHome(customer, street, addressForCustomer)) return {};
     // The accepted-estimate seed the mint prices with (codex pre-push P1): its review
     // markers refuse the mint, so they offer no button. Unreadable fails closed, as the mint does.
     seed = await require('./service-report/cross-sell').loadEstimateSeed(db, customer.id, street);

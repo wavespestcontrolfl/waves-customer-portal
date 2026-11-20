@@ -150,6 +150,15 @@ function sameHome(a, b) {
   return require('../service-report/visit-property-scope').sameResolvedProperty(a, b);
 }
 
+// The plan-start accept reads the home back from the estimate's stored address,
+// the comma-joined profile string addressForCustomer builds. True when that
+// string names `street` (codex pre-push P1): with no city, a unit line such as
+// "Building 2" reads back as the city, and such a quote could never be
+// accepted. The mint refuses it, and the pricing card's hint offers no button.
+function storedAddressNamesHome(customer, street, addressForCustomer) {
+  return sameHome(require('../estimate-property-linkage').normalizedEstimateStreet(addressForCustomer(customer)), street);
+}
+
 class RestartUnavailableError extends Error {
   constructor(code, message) {
     super(message);
@@ -826,14 +835,9 @@ async function mintPricedEstimate(args) {
   if (!primaryStreet) {
     throw new RestartUnavailableError('pricing_unavailable', handMessage);
   }
-  // The plan-start accept reads the home back from the stored address string
-  // (codex pre-push P1). A profile whose string parses as another home (with
-  // no city, a unit line such as "Building 2" reads as the city) could never
-  // be accepted, so plan start prices it by hand.
-  if (strict && !sameHome(
-    require('../estimate-property-linkage').normalizedEstimateStreet(mintDeps.pricingAi.addressForCustomer(fresh)),
-    primaryStreet,
-  )) {
+  // A plan-start quote whose stored address reads back as another home could
+  // never be accepted, so plan start prices it by hand (codex pre-push P1).
+  if (strict && !storedAddressNamesHome(fresh, primaryStreet, mintDeps.pricingAi.addressForCustomer)) {
     throw new RestartUnavailableError('pricing_unavailable', handMessage);
   }
   // Plan start also stores the home its price was proven for (codex pre-push P0): a staff address
@@ -1675,6 +1679,7 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
 module.exports = {
   SOURCE,
   RESTARTABLE_FAMILIES,
+  storedAddressNamesHome,
   RestartUnavailableError,
   cancelledFamiliesFor,
   mintRestartEstimate,
