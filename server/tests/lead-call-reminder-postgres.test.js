@@ -75,7 +75,8 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
   const metaOf = (row) => (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {});
   const bannersFor = (id) => triggerNotification.mock.calls.filter(([key, payload]) => key === 'lead_call_reminder' && payload.alertRowId === id);
   const run = async (now = NOW) => {
-    const result = await reminder.runLeadCallReminder({ now });
+    // The 8 PM cutoff's fresh clock is the pass's `now`: the real clock is not part of this suite.
+    const result = await reminder.runLeadCallReminder({ now, clock: () => now });
     await Promise.all(result.sends || []);
     return result;
   };
@@ -162,7 +163,8 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
   test('the alert-relevance sweep runs the pass and reports it', async () => {
     const { customer, lead } = await leadAndCustomer();
     const row = await bell({ lead, customer, at: mins(-100) });
-    const result = await relevance.runAdminAlertRelevanceSweep({ now: NOW });
+    // The reminders' fresh clock is the sweep's `now`: the real clock is not part of this suite.
+    const result = await relevance.runAdminAlertRelevanceSweep({ now: NOW, clock: () => NOW });
     expect(result.leadCallReminders).toBeGreaterThanOrEqual(1);
     expect(metaOf(await get(row.id)).leadCallReminderAt).toBe(NOW.toISOString());
   });

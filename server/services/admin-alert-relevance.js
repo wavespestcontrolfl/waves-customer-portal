@@ -1688,7 +1688,9 @@ async function sweepRow(row, cls, subject, { now, todayET, byClass, shadowed }) 
   if (verdict.reason && await retireIfStillMovedOn(row, cls, todayET, now)) byClass[cls.key] = (byClass[cls.key] || 0) + 1;
 }
 
-async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
+// `clock` (tests): the fresh clock the two lead reminders ask their hours with at each stamp and dispatch; omitted, the
+// real time. `now` stays the sweep's own time for everything else.
+async function runAdminAlertRelevanceSweep({ now = new Date(), clock } = {}) {
   if (!adminAlertRelevanceLive()) return { skipped: true, reason: 'switch_off' };
   const todayET = etDateString(now);
   // First, so a row put back is judged again by the retire pass below.
@@ -1725,7 +1727,7 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   const lateReRung = await lateReRingPass(now);
   const estimateReRung = await estimateReRingPass(now);
   const bookingsRaised = await unfinishedBookingsPass(now);
-  const reminders = await reminderPasses(now);
+  const reminders = await reminderPasses(now, clock);
   return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}), ...(lateReRung ? { lateReRung } : {}), ...(estimateReRung ? { estimateReRung } : {}), ...(bookingsRaised ? { bookingsRaised } : {}), ...reminders };
 }
 
@@ -1767,10 +1769,10 @@ async function unfinishedBookingsPass(now) {
 // GATE_LEAD_CALL_REMINDER: a lead's call request (a missed press-1 ring, a night call-back bell) still open after one
 // business hour sends ONE phone banner (lead-call-reminder.js). After the closes above, so a bell this run just closed
 // sends nothing. Off: nothing is read or written. A failure is logged and never fails the sweep.
-async function leadCallReminderPass(now) {
+async function leadCallReminderPass(now, clock) {
   if (!require('../config/feature-gates').leadCallReminderLive?.()) return null;
   try {
-    return (await require('./lead-call-reminder').runLeadCallReminder({ now })).reminded || null;
+    return (await require('./lead-call-reminder').runLeadCallReminder({ now, ...(clock ? { clock } : {}) })).reminded || null;
   } catch (err) {
     logger.warn(`[alert-relevance] the lead call reminder pass failed: ${errSummary(err)}`);
     return null;
@@ -1778,18 +1780,18 @@ async function leadCallReminderPass(now) {
 }
 
 // The two reminder passes below, as the fields the sweep's result carries (a pass that sent nothing adds none).
-async function reminderPasses(now) {
-  const leadCallReminders = await leadCallReminderPass(now);
-  const newLeadRealerts = await newLeadRealertPass(now);
+async function reminderPasses(now, clock) {
+  const leadCallReminders = await leadCallReminderPass(now, clock);
+  const newLeadRealerts = await newLeadRealertPass(now, clock);
   return { ...(leadCallReminders ? { leadCallReminders } : {}), ...(newLeadRealerts ? { newLeadRealerts } : {}) };
 }
 
 // New-lead re-alert (new-lead-reminder.js; owner 2026-11-19): an open new-lead or repeat-form bell nobody has reached gets
 // ONE more phone push at 15 business minutes (Monday to Saturday, 8 AM to 6 PM ET). No gate: the push goes to admin users
 // only. After the closes above, so a bell this run just closed sends nothing. A failure is logged and never fails the sweep.
-async function newLeadRealertPass(now) {
+async function newLeadRealertPass(now, clock) {
   try {
-    const out = await require('./new-lead-reminder').runNewLeadReminder({ now });
+    const out = await require('./new-lead-reminder').runNewLeadReminder({ now, ...(clock ? { clock } : {}) });
     return out.pushed ? { pushed: out.pushed } : null;
   } catch (err) {
     logger.warn(`[alert-relevance] the new-lead re-alert pass failed: ${errSummary(err)}`);

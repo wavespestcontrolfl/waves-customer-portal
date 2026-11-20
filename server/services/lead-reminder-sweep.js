@@ -13,8 +13,9 @@
  * The stamp waits on notifyAdmin's advisory lock for the bell's dedupe key, the lock a refresh of that bell reads and
  * rewrites its metadata under; nothing here row-locks a bell or a lead. Just before a push goes, the row must still be
  * an open bell in the bell feed with exactly the metadata that was stamped: a bell that rang again, moved to Activity
- * or lost its stamp since then sends nothing. The reminder then judges the lead again with fresh reads (its own
- * `waiting`): a person who reached the lead, or a lead closed or quoted, since the page was read sends nothing.
+ * or lost its stamp since then sends nothing. Before that read, the reminder judges the lead again with fresh reads (its
+ * own `waiting`): a person who reached the lead, or a lead closed or quoted, since the page was read sends nothing. The
+ * row read comes last, so a Done or a new ring during the lead's reads still stops the push.
  */
 
 const db = require('../models/db');
@@ -104,8 +105,8 @@ async function rowStillOpen(id, label, stamped = null) {
 // The push, with the row's own words. alertRowId gives it its own push tag per bell row. `stamped` is the row's
 // metadata as the stamp left it (rowStillOpen). `ready` (optional) is asked with a fresh clock just before dispatch,
 // before the reads and again after them: false means the reminder's hours, or this item's late window, closed since the
-// sweep began. `stillWaiting` (optional, async) judges the lead again after the open-row read: false means a person
-// reached it, or it closed, since the page was read. Never throws.
+// sweep began. `stillWaiting` (optional, async) judges the lead again: false means a person reached it, or it closed,
+// since the page was read. The open-row read runs after it, the last read before the handoff. Never throws.
 async function sendPush({ row, customerId, stamped = null }, label, ready = () => true, stillWaiting = async () => true) {
   try {
     const { triggerNotification } = require('./notification-triggers');
@@ -116,7 +117,7 @@ async function sendPush({ row, customerId, stamped = null }, label, ready = () =
       // bellAuthorized: the bell row's writer rang it (bell: true), so the push keeps that answer. pushOnly: the row is
       // not rewritten. adminOnly: nothing goes to a lead, a customer or a technician.
       pushOnly: true, adminOnly: true, bellAuthorized: true,
-      beforePush: async () => ready() && (await rowStillOpen(row.id, label, stamped)) && (await stillWaiting()) && ready(),
+      beforePush: async () => ready() && (await stillWaiting()) && (await rowStillOpen(row.id, label, stamped)) && ready(),
     });
   } catch (err) {
     logger.warn(`[${label}] push failed for notification ${row.id}: ${safeError(err)}`);

@@ -354,20 +354,3 @@ describe('attachOpenCallLeadByPhone — attach semantics', () => {
     await expect(attachOpenCallLeadByPhone(phoneArgs())).resolves.toBeNull();
   });
 });
-
-// new-lead-reminder.js reads this mark: a form attached to an open call lead did not create that lead, so the call that
-// made the lead never settles the form's bell. The route is too large to drive whole here, so its trigger call is read.
-describe('the new_lead bell of an attached form', () => {
-  test('carries payload.attachedCallLead, true when the submission attached to an open call lead', () => {
-    const fs = require('fs');
-    const path = require('path');
-    const src = fs.readFileSync(path.join(__dirname, '../routes/lead-webhook.js'), 'utf8');
-    const start = src.indexOf("triggerNotification('new_lead', {");
-    expect(start).toBeGreaterThan(-1);
-    expect(src.indexOf("triggerNotification('new_lead', {", start + 1)).toBe(-1);
-    const call = src.slice(start, src.indexOf('});', start));
-    expect(call).toMatch(/\n\s+attachedCallLead,\n/);
-    // The flag is the route's own: set only where an attach returned a lead row.
-    expect(src).toMatch(/if \(attached\) \{\s+leadRecord = attached;\s+attachedCallLead = true;/);
-  });
-});

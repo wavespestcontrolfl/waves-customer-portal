@@ -65,7 +65,10 @@ const { triggerNotification } = require('../services/notification-triggers');
 const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
 const reminder = require('../services/lead-call-reminder');
 
-const { runLeadCallReminder, __private: { inSendHours, dueAtFor } } = reminder;
+const { __private: { inSendHours, dueAtFor } } = reminder;
+// The 8 PM cutoff is asked with a fresh clock at the stamp and at dispatch. That clock is the pass's `now` unless a test
+// sets one: the real clock is not part of these cases.
+const runLeadCallReminder = (opts = {}) => reminder.runLeadCallReminder({ clock: () => opts.now, ...opts });
 
 // Eastern wall-clock times in November 2026 (EST, UTC-5).
 const est = (day, hhmm) => new Date(`2026-11-${day}T${hhmm}:00-05:00`);
@@ -224,6 +227,16 @@ describe('the banner', () => {
     expect(await beforePush()).toBe(false);
   });
 
+  test('the 8 PM cutoff is asked again at dispatch: a banner stamped at 7:58 PM that dispatches after 8 sends nothing', async () => {
+    let at = est('05', '19:58');
+    const result = await runLeadCallReminder({ now: at, clock: () => at });
+    await Promise.all(result.sends || []);
+    const { beforePush } = reminders()[0][2];
+    expect(await beforePush()).toBe(true);
+    at = est('05', '20:01');
+    expect(await beforePush()).toBe(false);
+  });
+
   test('a banner that throws is logged and never reaches the sweep', async () => {
     triggerNotification.mockRejectedValueOnce(new Error('push down'));
     const result = await runLeadCallReminder({ now: NOW });
@@ -301,6 +314,11 @@ describe('the alert-relevance sweep runs the pass after its closes', () => {
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(spy).toHaveBeenCalledWith({ now: NOW });
     expect(result.leadCallReminders).toBe(2);
+    // A test's clock reaches the pass; the cron passes none, so the pass reads the real time.
+    const clock = () => NOW;
+    spy.mockResolvedValueOnce({ skipped: false, due: 0, reminded: 0, sends: [] });
+    await runAdminAlertRelevanceSweep({ now: NOW, clock });
+    expect(spy).toHaveBeenLastCalledWith({ now: NOW, clock });
     spy.mockRestore();
   });
 

@@ -6660,6 +6660,9 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
         phone,
         message: !!extracted.call_summary,
         leadId,
+        // Every caller mints the lead just before this (a fresh insert, or a claim-race or name-conflict re-mint), so
+        // this is the lead's intake bell (new-lead-reminder.js inquiryOf).
+        createdLead: true,
       });
     } catch (notifyErr) {
       logger.warn(`[call-proc] tracked-call new_lead notify failed: ${notifyErr.message}`);

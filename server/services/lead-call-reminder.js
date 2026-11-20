@@ -161,12 +161,15 @@ const sendReminder = (item) => sweep.__private.sendPush(item, LABEL);
 
 /**
  * One pass. Returns { skipped, reason } or { skipped: false, due, reminded, sends }; `sends` are the banner sends,
- * never awaited here (tests await them). Throws only when a page cannot be read; the sweep catches it.
+ * never awaited here (tests await them). Throws only when a page cannot be read; the sweep catches it. `clock` (tests)
+ * is the fresh clock the hours are asked with; default the real time.
  */
-async function runLeadCallReminder({ now = new Date(), pageSize } = {}) {
+async function runLeadCallReminder({ now = new Date(), pageSize, clock } = {}) {
   if (!reminderLive()) return { skipped: true, reason: 'gate_off' };
   if (!inSendHours(now)) return { skipped: true, reason: 'quiet_hours' };
-  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: stillWaiting }, { now, pageSize });
+  // inHours: the 8 PM cutoff is asked again with a fresh clock before each stamp and at each push's dispatch, since a
+  // sweep that began at 7:59 PM can reach them after 8.
+  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: stillWaiting, inHours: inSendHours }, { now, pageSize, clock });
   if (out.sent) logger.info(`[${LABEL}] queued ${out.sent} reminder banner(s): a lead's call request is still open after 1 business hour`);
   return { skipped: false, due: out.due, reminded: out.sent, sends: out.sends };
 }

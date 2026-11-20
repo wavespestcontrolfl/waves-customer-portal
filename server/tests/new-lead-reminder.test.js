@@ -101,7 +101,7 @@ const row = (id, { createdAt = est('09', '10:00'), metadata = {}, title = 'New l
   title,
   body: 'Pat Sample via the website - Wants pest control',
   link: `/admin/leads?lead=${LEAD}`,
-  metadata: { triggerKey: 'new_lead', doneWhen: 'lead_contacted', payload: { leadId: LEAD }, ...metadata },
+  metadata: { triggerKey: 'new_lead', doneWhen: 'lead_contacted', payload: { leadId: LEAD, createdLead: true }, ...metadata },
   created_at: createdAt,
   created_at_token: createdAt.toISOString(),
 });
@@ -339,6 +339,16 @@ describe('the 15-minute push (no gate)', () => {
     mockBundles.fail = false;
     mockState.leads = [lead({ status: 'lost' })];
     expect(await beforePush()).toBe(false);
+  });
+
+  test('the open-row read is the last read before the push: a Done or a new ring during the lead\'s reads still stops it', async () => {
+    await run(PUSH_NOW);
+    const { beforePush } = pushes()[0][2];
+    mockState.calls.length = 0;
+    expect(await beforePush()).toBe(true);
+    // The lead was read again (its own reads) before the row.
+    expect(mockState.calls.some((c) => c.table === 'leads')).toBe(true);
+    expect(mockState.calls[mockState.calls.length - 1]).toMatchObject({ table: 'notifications', verb: 'first' });
   });
 
   test('the banner goes only while the row is an open bell with exactly the metadata the stamp left', async () => {
@@ -579,23 +589,34 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
   test('a person\'s call just before a fresh form is not an answer to it: only contact after the form counts', async () => {
     // A person talked with the caller until 9:58; at 10:00 the web form attached to that call lead and rang the trigger.
     mockState.leads = [lead({ created_at: est('09', '09:40'), twilio_call_sid: CALL_SID })];
-    mockState.rows = [row('n-1', { metadata: { payload: { leadId: LEAD, attachedCallLead: true } } })];
+    mockState.rows = [row('n-1', { metadata: { payload: { leadId: LEAD, createdLead: false } } })];
     mockBundles.byId = { 'n-1': { inAt: est('09', '09:58') } };
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
 
     // A person's call back after the form answers it.
     jest.clearAllMocks();
-    mockState.rows = [row('n-2', { metadata: { payload: { leadId: LEAD, attachedCallLead: true } } })];
+    mockState.rows = [row('n-2', { metadata: { payload: { leadId: LEAD, createdLead: false } } })];
     mockBundles.byId = { 'n-2': { backAt: est('09', '10:02') } };
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
   });
 
-  test('a form the webhook attached to an open call lead is a later inquiry: the answered call that made the lead does not settle it', async () => {
-    // A person answered the call that made the lead at 9:52; the caller sent the web form at 10:00, and the webhook
-    // attached it to that open call lead (payload.attachedCallLead) and rang the new-lead trigger.
+  test('a new-lead bell without the writer\'s mark (written before it existed) is a later inquiry: the answered call does not settle it', async () => {
+    // The 48-hour scan still holds bells written before payload.createdLead existed. One of them may be a form attached to
+    // the call lead minutes after an answered call: with no mark, it is judged from its own bell.
     mockState.leads = [lead({ created_at: est('09', '09:52'), twilio_call_sid: CALL_SID })];
     mockState.answered = [{ twilio_call_sid: CALL_SID }];
-    mockState.rows = [row('n-1', { metadata: { payload: { leadId: LEAD, attachedCallLead: true } } })];
+    mockState.rows = [row('n-1', { metadata: { payload: { leadId: LEAD } } })];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '10:00'));
+    expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
+  });
+
+  test('a form the webhook attached to an open call lead is a later inquiry: the answered call that made the lead does not settle it', async () => {
+    // A person answered the call that made the lead at 9:52; the caller sent the web form at 10:00, and the webhook
+    // attached it to that open call lead (payload.createdLead false) and rang the new-lead trigger.
+    mockState.leads = [lead({ created_at: est('09', '09:52'), twilio_call_sid: CALL_SID })];
+    mockState.answered = [{ twilio_call_sid: CALL_SID }];
+    mockState.rows = [row('n-1', { metadata: { payload: { leadId: LEAD, createdLead: false } } })];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
     expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '10:00'));
     expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
@@ -673,5 +694,36 @@ describe('a capped scan resumes: old settled bells cannot hide a due one', () =>
     expect(firstQuery.raws).toContainEqual(['(created_at, id) > (?::timestamptz, ?::uuid)', [fresh(5).created_at_token, 'new-5']]);
     // The due row fills a page of one, so the scan went on; an empty page ended it and the cursor starts over.
     expect(sweepShared.__private.resumeAfter.has(PUSH_STAMP)).toBe(false);
+  });
+});
+
+
+// The intake bell is the one whose writer created the lead (inquiryOf). The writers mark it in the trigger's payload; the
+// route and the call processor are too large to drive whole here, so their trigger calls are read.
+describe('the writers mark the bell of a lead they created (payload.createdLead)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const triggerCall = (file, from = 0) => {
+    const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+    const start = src.indexOf("triggerNotification('new_lead', {", from);
+    expect(start).toBeGreaterThan(-1);
+    return { src, start, call: src.slice(start, src.indexOf('});', start)) };
+  };
+
+  test('the form webhook: true only when the submission inserted its own lead row, false for a form attached to a call lead', () => {
+    const { src, start, call } = triggerCall('../routes/lead-webhook.js');
+    expect(src.indexOf("triggerNotification('new_lead', {", start + 1)).toBe(-1);
+    expect(call).toMatch(/\n\s+createdLead,\n/);
+    // Set in one place only: right after this request's own insert. An attach takes the call lead's row and never sets it.
+    expect(src.match(/createdLead = true;/g)).toHaveLength(1);
+    expect(src).toMatch(/\.returning\('\*'\);\s+leadRecord = newLead;\s+createdLead = true;/);
+    expect(src).toMatch(/if \(attached\) \{\s+leadRecord = attached;\s+attachedCallLead = true;\s+\}/);
+  });
+
+  test('the call processor: every new-lead bell follows a mint, and says so', () => {
+    const fnStart = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8').indexOf('async function notifyNewCallLead(');
+    expect(fnStart).toBeGreaterThan(-1);
+    const { call } = triggerCall('../services/call-recording-processor.js', fnStart);
+    expect(call).toContain('createdLead: true,');
   });
 });
