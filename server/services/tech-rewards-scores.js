@@ -24,7 +24,7 @@
  *                carries no on-time rule; the 24 hours is this module's own, in one constant.
  *   audit        Share of the technician's tech_protocol_audits rows with result 'match',
  *                for audit months in the window. A row counts only while it matches its visit's current
- *                record (same technician and month, no newer replacement record): see tech-protocol-audit.js.
+ *                record (same technician and month, no newer replacement record), at most five per month: see tech-protocol-audit.js.
  *   callbacks    callbacksPer100 = callbacks credited to the technician (the source-visit
  *                credit bi-tech-scorecard.js uses: callbackCreditByTechnician) per 100
  *                completed non-callback visits in the window (a customer_declined visit performed no service, so it is
@@ -40,7 +40,7 @@ const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const calc = require('./tech-rewards-calc');
 const { callbackCreditByTechnician, PERFORMED_OUTCOME_SQL, VISIT_IS_CALLBACK_SQL } = require('./callback-credit');
 const { deliveryEvidenceForRecords, CLOSEOUT_SLACK_MS } = require('./completion-record-invariants');
-const { CURRENT_AUDIT_FROM_SQL, CURRENT_AUDIT_WHERE_SQL } = require('./tech-protocol-audit');
+const { countedMarks } = require('./tech-protocol-audit');
 
 const { DEFAULT_WEIGHTS, DEFAULT_CUT_LINES, seasonWindow, weightedScore, scoreBand } = calc;
 
@@ -253,16 +253,9 @@ async function readOnTime(rawTechnicianId, window, conn = db) {
 async function readAudit(rawTechnicianId, window, conn = db) {
   const technicianId = requireTechnician(rawTechnicianId);
   const { from, to } = requireWindow(window);
-  // Only a mark that still matches its visit's current record counts (tech-protocol-audit.js CURRENT_AUDIT_*).
-  const row = (await conn.raw(
-    `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE a.result = 'match') AS matched
-       FROM ${CURRENT_AUDIT_FROM_SQL}
-      WHERE a.technician_id = ? AND a.audit_month >= ?::date AND a.audit_month <= ?::date
-        AND ${CURRENT_AUDIT_WHERE_SQL}`,
-    [technicianId, monthStart(from), to],
-  )).rows[0];
-  const total = toCount(row?.total);
-  return total ? percent(toCount(row.matched), total) : null;
+  // Only a mark that still matches its visit's current record counts, at most five per month (tech-protocol-audit.js).
+  const counted = await countedMarks(technicianId, { fromMonth: monthStart(from), toMonth: to }, conn);
+  return counted.length ? percent(counted.filter((mark) => mark.result === 'match').length, counted.length) : null;
 }
 
 async function readCallbacks(rawTechnicianId, window, conn = db) {

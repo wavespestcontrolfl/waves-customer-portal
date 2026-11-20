@@ -4,8 +4,9 @@
  * GET /?month=YYYY-MM          the month's board (default: this ET month): per technician with eligible visits,
  *                              five sampled completed lawn / tree & shrub visits with products, rates, targets,
  *                              counts, photos and the current mark.
- * PUT /visits/:scheduledServiceId   { result: 'match' | 'mismatch', note?, recordId? } mark one sampled visit (a mismatch
- *                              needs a note; recordId = the record shown, refused with 409 if the visit's record changed).
+ * PUT /visits/:scheduledServiceId   { result: 'match' | 'mismatch', note?, technicianId, month, recordId? } mark one
+ *                              sampled visit (a mismatch needs a note; technicianId + month (YYYY-MM) + recordId = what the
+ *                              board showed, refused with 409 if the visit's current record no longer matches).
  *                              One row per visit: marking again changes it. 404 not an eligible visit, 409 not in the
  *                              technician's sample for the month or changed since loaded.
  * Writes only tech_protocol_audits (read by tech-rewards-scores.js readAudit). Never touches visits or records.
@@ -22,7 +23,8 @@ router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }
 
 function fail(res, err, what) {
   if (err instanceof audit.ProtocolAuditError) return res.status(err.status).json({ error: err.message, code: err.code });
-  logger.error(`[admin-tech-protocol-audit] ${what} failed: ${err.message}`);
+  // the error text can carry SQL (with customer names): log the operation and a code only
+  logger.error(`[admin-tech-protocol-audit] ${what} failed (${err.code || err.name || 'error'})`);
   return res.status(500).json({ error: `Could not ${what}.` });
 }
 
@@ -38,6 +40,8 @@ router.put('/visits/:scheduledServiceId', async (req, res) => {
   try {
     const mark = await audit.saveMark({
       scheduledServiceId: req.params.scheduledServiceId,
+      technicianId: req.body?.technicianId,
+      month: req.body?.month,
       recordId: req.body?.recordId,
       result: req.body?.result,
       note: req.body?.note,

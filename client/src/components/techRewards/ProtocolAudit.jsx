@@ -69,7 +69,7 @@ function MarkForm({ visit, onSaved }) {
     if (result === 'mismatch' && !note.trim()) { setError('A mismatch needs a note.'); return; }
     setBusy(true); setError('');
     try {
-      const data = await call(`/visits/${visit.scheduledServiceId}`, { method: 'PUT', body: { result, note, recordId: visit.recordId } });
+      const data = await call(`/visits/${visit.scheduledServiceId}`, { method: 'PUT', body: { result, note, technicianId: visit.technicianId, month: visit.month, recordId: visit.recordId } });
       onSaved(data.mark);
     } catch (failure) {
       setError(failure.message);
@@ -131,7 +131,7 @@ export default function ProtocolAudit() {
     ...prev,
     technicians: prev.technicians.map(t => {
       if (t.id !== technicianId) return t;
-      const visits = t.visits.map(v => (v.scheduledServiceId === mark.scheduledServiceId ? { ...v, audit: mark } : v));
+      const visits = t.visits.map(v => (v.scheduledServiceId === mark.scheduledServiceId ? { ...v, audit: mark, needsRecheck: false } : v));
       return { ...t, visits, markedCount: visits.filter(v => v.audit).length };
     }),
   }));

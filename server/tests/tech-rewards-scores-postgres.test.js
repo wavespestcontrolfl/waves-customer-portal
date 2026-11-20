@@ -127,6 +127,9 @@ describe('tech rewards scores input checks', () => {
       t.uuid('customer_id');
       t.text('status');
       t.text('service_type');
+      t.text('service_line');
+      t.text('protocol_name');
+      t.integer('area_serviced_sqft');
       t.date('service_date').notNullable();
       t.boolean('is_callback');
       t.string('report_template_version');
@@ -560,7 +563,7 @@ describe('tech rewards scores input checks', () => {
       // a mark counts while it matches its visit's current completed record (same technician, same month)
       const add = async (month, result, technicianId = tech) => {
         const svc = await scheduled(technicianId);
-        await visit(technicianId, { scheduled_service_id: svc.id, service_date: month });
+        await visit(technicianId, { scheduled_service_id: svc.id, service_date: month, service_type: 'Lawn Care Treatment' });
         return db('tech_protocol_audits').insert({ technician_id: technicianId, scheduled_service_id: svc.id, audit_month: month, result });
       };
       await add('2026-03-01', 'match');
@@ -575,7 +578,7 @@ describe('tech rewards scores input checks', () => {
     test('audit: a mark stops counting once its visit moved to another technician or month, or its record was replaced; a deleted visit keeps it', async () => {
       const mark = async (result, fields = {}) => {
         const svc = await scheduled(tech);
-        const record = await visit(tech, { scheduled_service_id: svc.id, service_date: '2026-04-10' });
+        const record = await visit(tech, { scheduled_service_id: svc.id, service_date: '2026-04-10', service_type: 'Lawn Care Treatment' });
         await db('tech_protocol_audits').insert({ technician_id: tech, scheduled_service_id: svc.id, audit_month: '2026-04-01', result, ...fields });
         return { svc, record };
       };
@@ -804,7 +807,7 @@ describe('tech rewards scores input checks', () => {
       const a = await visit(tech);
       await db('service_report_deliveries').insert({ service_record_id: a.id, status: 'sent', sent_at: ts('2026-04-10T16:00:00Z') });
       const audited = await scheduled(tech);
-      await visit(tech, { scheduled_service_id: audited.id, report_template_version: null }); // no report owed: only the audit's visit
+      await visit(tech, { scheduled_service_id: audited.id, report_template_version: null, service_type: 'Lawn Care Treatment' }); // no report owed: only the audit's visit
       await db('tech_protocol_audits').insert({ technician_id: tech, scheduled_service_id: audited.id, audit_month: '2026-04-01', result: 'match' });
       await db('equipment_checks').insert({ technician_id: tech, checked_at: ts('2026-04-08T14:00:00Z') });
       await db('tech_owner_ratings').insert({ technician_id: tech, period_month: '2026-04-01', rating: 80 });

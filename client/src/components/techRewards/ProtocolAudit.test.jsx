@@ -9,7 +9,7 @@ vi.mock('../../lib/adminFetch', () => ({ adminFetch: vi.fn() }));
 
 const reply = (body, ok = true, status = ok ? 200 : 400) => Promise.resolve({ ok, status, json: async () => body });
 const VISIT = (over = {}) => ({
-  scheduledServiceId: 'visit-1', recordId: 'rec-1', serviceDate: '2026-04-10', serviceType: 'Lawn Care Treatment', serviceLine: 'lawn',
+  scheduledServiceId: 'visit-1', recordId: 'rec-1', technicianId: 'tech-a', month: '2026-04', serviceDate: '2026-04-10', serviceType: 'Lawn Care Treatment', serviceLine: 'lawn',
   protocolName: 'Sample protocol', areaSqft: 5000, customerName: 'Sample Customer',
   products: [
     { name: 'Sample Product', rate: 2.5, rateUnit: 'oz/1000 sq ft', totalAmount: null, amountUnit: null, area: '5000 sq ft', targets: ['chinch bugs'] },
@@ -65,7 +65,7 @@ describe('Protocol audit tab', () => {
     fireEvent.click(within(card).getByLabelText('Match'));
     fireEvent.click(within(card).getByRole('button', { name: 'Save mark' }));
     await waitFor(() => expect(calls.find(c => c.method === 'PUT')).toBeTruthy());
-    expect(calls.find(c => c.method === 'PUT')).toMatchObject({ path: '/admin/tech-protocol-audits/visits/visit-1', body: { result: 'match', note: '', recordId: 'rec-1' } });
+    expect(calls.find(c => c.method === 'PUT')).toMatchObject({ path: '/admin/tech-protocol-audits/visits/visit-1', body: { result: 'match', note: '', technicianId: 'tech-a', month: '2026-04', recordId: 'rec-1' } });
     expect(await screen.findByText(/2 of 2 marked/)).toBeInTheDocument();
   });
 
@@ -93,6 +93,22 @@ describe('Protocol audit tab, a stale mark', () => {
     render(<ProtocolAudit />);
     expect(await screen.findByText(/Needs re-check/)).toBeInTheDocument();
     expect(screen.getByText(/0 of 1 marked/)).toBeInTheDocument();
+  });
+});
+
+describe('Protocol audit tab, re-marking a stale visit', () => {
+  it('clears Needs re-check once the mark is saved', async () => {
+    adminFetch.mockImplementation((path, options = {}) => (options.method === 'PUT'
+      ? reply({ mark: { scheduledServiceId: 'visit-1', result: 'match', note: null, auditedAt: '2026-04-20T15:00:00Z' } })
+      : reply(BOARD([VISIT({ needsRecheck: true })]))));
+    render(<ProtocolAudit />);
+    const card = await screen.findByRole('form', { name: 'Mark this visit' });
+    expect(screen.getByText(/Needs re-check/)).toBeInTheDocument();
+    fireEvent.click(within(card).getByLabelText('Match'));
+    fireEvent.click(within(card).getByRole('button', { name: 'Save mark' }));
+    expect(await screen.findByText('Marked match')).toBeInTheDocument();
+    expect(screen.queryByText(/Needs re-check/)).not.toBeInTheDocument();
+    expect(screen.getByText(/1 of 1 marked/)).toBeInTheDocument();
   });
 });
 

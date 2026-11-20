@@ -3,6 +3,7 @@
 // tech-protocol-audit-postgres.test.js.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const logger = require('../services/logger');
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     if (!req.headers['x-test-auth']) return res.status(401).json({ error: 'Admin authentication required' });
@@ -26,6 +27,7 @@ describe('/api/admin/tech-protocol-audits', () => {
   let server;
   let baseUrl;
   const VISIT = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const TECH = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
   const AUTH = { 'x-test-auth': '1', 'content-type': 'application/json' };
   const get = (query = '', headers = AUTH) => fetch(`${baseUrl}/${query}`, { headers });
   const put = (body, headers = AUTH) => fetch(`${baseUrl}/visits/${VISIT}`, { method: 'PUT', headers, body: JSON.stringify(body) });
@@ -61,10 +63,10 @@ describe('/api/admin/tech-protocol-audits', () => {
   });
 
   test('PUT saves the mark as the signed-in admin', async () => {
-    const res = await put({ result: 'mismatch', note: 'rate off', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' });
+    const res = await put({ result: 'mismatch', note: 'rate off', technicianId: TECH, month: '2026-04', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ mark: { scheduledServiceId: VISIT } });
-    expect(audit.saveMark).toHaveBeenCalledWith({ scheduledServiceId: VISIT, result: 'mismatch', note: 'rate off', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', auditedBy: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    expect(audit.saveMark).toHaveBeenCalledWith({ scheduledServiceId: VISIT, result: 'mismatch', note: 'rate off', technicianId: TECH, month: '2026-04', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', auditedBy: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
   });
 
   test("the service's refusals keep their status and code; any other failure is a plain 500", async () => {
@@ -78,5 +80,17 @@ describe('/api/admin/tech-protocol-audits', () => {
     const broken = await put({ result: 'match' });
     expect(broken.status).toBe(500);
     expect(JSON.stringify(await broken.json())).not.toContain('details');
+  });
+
+  test('a database failure logs the operation and a code only: no SQL, no customer name', async () => {
+    const dbError = Object.assign(new Error("select ... where lower(name) in ('sample customer') failed"), { code: '57014' });
+    audit.getBoard.mockRejectedValueOnce(dbError);
+    audit.saveMark.mockRejectedValueOnce(new Error('select ... Sample Customer'));
+    await get('?month=2026-04');
+    await put({ result: 'match' });
+    const logged = logger.error.mock.calls.map(([line]) => line).join('\n');
+    expect(logged).toContain('load the protocol audit failed (57014)');
+    expect(logged).toContain('save the protocol audit mark failed (Error)');
+    expect(logged).not.toMatch(/sample customer|select/i);
   });
 });

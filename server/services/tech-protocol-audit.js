@@ -92,48 +92,65 @@ async function eligibleVisits({ monthStart = null, technicianId = null, schedule
   return rows.filter((row) => AUDIT_LINES.includes(row.service_line || detectServiceLine(row.service_type)));
 }
 
-/**
- * SQL for the audit rows that still count (the board and the score's readAudit read the SAME rule). A mark counts
- * only while it matches its visit's CURRENT canonical record (newest completed performed non-callback sibling):
- * the same technician and the same ET month, and no replacement record created after the mark. A moved visit
- * therefore leaves the old technician's score, and a replaced record asks for a new mark. A row whose visit was
- * deleted (scheduled_service_id NULL) keeps counting: nothing is left to compare it with. Alias `a` = the audit row.
- */
-const CURRENT_AUDIT_FROM_SQL = `tech_protocol_audits a
-  LEFT JOIN LATERAL (
-    SELECT sr.technician_id, sr.created_at, to_char(date_trunc('month', sr.service_date), 'YYYY-MM-DD') AS month
-      FROM service_records sr
-     WHERE sr.scheduled_service_id = a.scheduled_service_id
-       AND sr.status = 'completed'
-       AND NOT ${VISIT_IS_CALLBACK_SQL('sr')}
-       AND ${PERFORMED_OUTCOME_SQL('sr')}
-     ORDER BY sr.created_at DESC, sr.id DESC
-     LIMIT 1) cur ON TRUE`;
-const CURRENT_AUDIT_WHERE_SQL = `(a.scheduled_service_id IS NULL
-    OR (cur.technician_id = a.technician_id AND cur.month = to_char(a.audit_month, 'YYYY-MM-DD') AND cur.created_at <= a.audited_at))`;
-
 const sampleRank = (technicianId, monthStart, visitId) => crypto.createHash('sha256')
   .update(`${technicianId}:${monthStart}:${visitId}`).digest('hex');
 
+const compareRank = (x, y) => (x.rank < y.rank ? -1 : x.rank > y.rank ? 1 : 0);
+
 /**
- * Pure: up to SAMPLE_SIZE of one technician's eligible visits for one month. Marked visits
- * (markedIds) always stay; the lowest sha256 ranks fill the rest. Returned in rank order.
+ * Pure: up to SAMPLE_SIZE of one technician's eligible visits for one month. Counted marks (markedIds) always
+ * stay; `reserved` more counted marks sit on visits that are not on the list (a deleted visit, a corrected
+ * service line) and use up slots; the lowest sha256 ranks fill the rest. Returned in rank order.
  */
-function pickSample(rows, { technicianId, monthStart, markedIds = new Set() }) {
+function pickSample(rows, { technicianId, monthStart, markedIds = new Set(), reserved = 0 }) {
   const ranked = rows
     .map((row) => ({ row, rank: sampleRank(technicianId, monthStart, row.scheduled_service_id) }))
-    .sort((a, b) => (a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : 0));
+    .sort(compareRank);
   const kept = ranked.filter(({ row }) => markedIds.has(row.scheduled_service_id));
-  const fill = ranked.filter(({ row }) => !markedIds.has(row.scheduled_service_id)).slice(0, Math.max(0, SAMPLE_SIZE - kept.length));
-  return [...kept, ...fill].sort((a, b) => (a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : 0)).map(({ row }) => row);
+  const fill = ranked.filter(({ row }) => !markedIds.has(row.scheduled_service_id)).slice(0, Math.max(0, SAMPLE_SIZE - kept.length - reserved));
+  return [...kept, ...fill].sort(compareRank).map(({ row }) => row);
 }
 
-async function markedVisitIds(technicianId, monthStart, conn = db) {
+/**
+ * A mark counts only while it matches its visit's CURRENT eligible record (the ONE eligibility, eligibleVisits):
+ * the same technician and ET month, and no replacement record made after the mark. A moved visit leaves the old
+ * technician's score; a replaced record asks for a new mark. A row whose visit was deleted (scheduled_service_id
+ * NULL) keeps counting: nothing is left to compare it with. Pure.
+ */
+function markIsCurrent(mark, visit) {
+  if (!mark.scheduled_service_id) return true;
+  return Boolean(visit) && mark.technician_id === visit.technician_id && mark.month === visit.month
+    && new Date(visit.record_created_at).getTime() <= new Date(mark.audited_at).getTime();
+}
+
+/**
+ * The marks that count toward a technician's score for audit months fromMonth..toMonth ('YYYY-MM-01'): the current
+ * marks (markIsCurrent), at most SAMPLE_SIZE per month, the lowest sample ranks first, so a visit that returns to a
+ * technician can never make a sixth counted mark. The board and the score's readAudit both read this.
+ */
+async function countedMarks(technicianId, { fromMonth, toMonth }, conn = db) {
   const { rows } = await conn.raw(
-    'SELECT scheduled_service_id FROM tech_protocol_audits WHERE technician_id = ? AND audit_month = ?::date AND scheduled_service_id IS NOT NULL',
-    [technicianId, monthStart],
+    `SELECT id, scheduled_service_id, technician_id, result, audited_at, to_char(audit_month, 'YYYY-MM-DD') AS month
+       FROM tech_protocol_audits
+      WHERE technician_id = ? AND audit_month >= ?::date AND audit_month <= ?::date`,
+    [technicianId, fromMonth, toMonth],
   );
-  return new Set(rows.map((row) => row.scheduled_service_id));
+  const counted = [];
+  for (const month of [...new Set(rows.map((r) => r.month))]) {
+    const visits = new Map((await eligibleVisits({ monthStart: month, technicianId }, conn)).map((v) => [v.scheduled_service_id, v]));
+    counted.push(...rows.filter((r) => r.month === month && markIsCurrent(r, visits.get(r.scheduled_service_id)))
+      .map((mark) => ({ mark, rank: sampleRank(technicianId, month, mark.scheduled_service_id || mark.id) }))
+      .sort(compareRank).slice(0, SAMPLE_SIZE).map(({ mark }) => mark));
+  }
+  return counted;
+}
+
+// One technician's sample for one month, from its eligible visits `own`: counted marks stay, the rest is filled by rank.
+async function sampleFor(own, technicianId, monthStart, conn = db) {
+  const counted = await countedMarks(technicianId, { fromMonth: monthStart, toMonth: monthStart }, conn);
+  const markedIds = new Set(counted.map((m) => m.scheduled_service_id).filter(Boolean));
+  const reserved = counted.length - own.filter((row) => markedIds.has(row.scheduled_service_id)).length;
+  return { sample: pickSample(own, { technicianId, monthStart, markedIds, reserved }), counted: markedIds };
 }
 
 const byTechnician = (rows) => {
@@ -146,22 +163,20 @@ async function signedPhotoUrl(s3Key) {
   try {
     return await require('./photos').getViewUrl(s3Key, PHOTO_URL_SECONDS);
   } catch (err) {
-    logger.warn(`[tech-protocol-audit] photo presign failed: ${err.message}`);
+    logger.warn(`[tech-protocol-audit] photo presign failed (${err.code || err.name || 'error'})`);
     return null;
   }
 }
 
-// The mark a visit shows: counted (audit) or stale (needsRecheck) by the same rule as CURRENT_AUDIT_WHERE_SQL.
-function auditState(a, row) {
+// The mark a visit shows: counted (audit), or an old mark that no longer counts (needsRecheck).
+function auditState(a, counted) {
   if (!a) return { audit: null, needsRecheck: false };
-  const current = a.technician_id === row.technician_id && a.month_key === row.month.slice(0, 7)
-    && new Date(row.record_created_at).getTime() <= new Date(a.audited_at).getTime();
-  return current ? { audit: { result: a.result, note: a.note, auditedAt: a.audited_at }, needsRecheck: false } : { audit: null, needsRecheck: true };
+  return counted ? { audit: { result: a.result, note: a.note, auditedAt: a.audited_at }, needsRecheck: false } : { audit: null, needsRecheck: true };
 }
 
 // What the owner compares with the protocol, for the sampled records: products with rate, area and
 // targets, photos, the customer's name, and the existing mark. Reads only.
-async function visitDetails(sampled, conn = db) {
+async function visitDetails(sampled, countedIds, conn = db) {
   const recordIds = sampled.map((row) => row.record_id);
   const visitIds = sampled.map((row) => row.scheduled_service_id);
   if (!recordIds.length) return new Map();
@@ -172,13 +187,12 @@ async function visitDetails(sampled, conn = db) {
     conn('service_photos').whereIn('service_record_id', recordIds).orderBy([{ column: 'sort_order' }, { column: 'created_at' }])
       .select('id', 'service_record_id', 'photo_type', 's3_key', 'caption'),
     conn('tech_protocol_audits').whereIn('scheduled_service_id', visitIds)
-      .select('scheduled_service_id', 'technician_id', conn.raw("to_char(audit_month, 'YYYY-MM') AS month_key"), 'result', 'note', 'audited_at'),
+      .select('scheduled_service_id', 'result', 'note', 'audited_at'),
     conn('customers').whereIn('id', sampled.map((row) => row.customer_id).filter(Boolean)).select('id', 'first_name', 'last_name'),
   ]);
   const customerName = new Map(customers.map((c) => [c.id, [c.first_name, c.last_name].filter(Boolean).join(' ') || null]));
-  // A mark counts here by the score's own rule (see CURRENT_AUDIT_FROM_SQL): it must match the technician and
-  // month the visit shows now, and be newer than its record. Otherwise it reads as unmarked, flagged "needs
-  // re-check" (a moved visit or a replaced record); marking again re-attributes it.
+  // A mark shows only while it counts (countedMarks, the score's own rule); otherwise the visit reads as unmarked,
+  // flagged "needs re-check" (a moved visit, a replaced record); marking again re-attributes it.
   const auditRow = new Map(audits.map((a) => [a.scheduled_service_id, a]));
   const out = new Map();
   for (const row of sampled) {
@@ -189,6 +203,8 @@ async function visitDetails(sampled, conn = db) {
     out.set(row.scheduled_service_id, {
       scheduledServiceId: row.scheduled_service_id,
       recordId: row.record_id,
+      technicianId: row.technician_id,
+      month: row.month.slice(0, 7),
       serviceDate: row.service_date,
       serviceType: row.service_type,
       serviceLine: row.service_line || detectServiceLine(row.service_type),
@@ -208,7 +224,7 @@ async function visitDetails(sampled, conn = db) {
       photos: await Promise.all(ownPhotos.slice(0, MAX_PHOTOS_PER_VISIT).map(async (p) => ({
         id: p.id, type: p.photo_type, caption: p.caption || null, url: p.s3_key ? await signedPhotoUrl(p.s3_key) : null,
       }))),
-      ...auditState(auditRow.get(row.scheduled_service_id), row),
+      ...auditState(auditRow.get(row.scheduled_service_id), countedIds.has(row.scheduled_service_id)),
     });
   }
   return out;
@@ -221,9 +237,8 @@ async function getBoard(rawMonth, conn = db) {
   const names = new Map((await conn('technicians').whereIn('id', [...new Set(rows.map((r) => r.technician_id))]).select('id', 'name')).map((t) => [t.id, t.name]));
   const technicians = [];
   for (const [technicianId, own] of byTechnician(rows)) {
-    const markedIds = await markedVisitIds(technicianId, monthStart, conn);
-    const sampled = pickSample(own, { technicianId, monthStart, markedIds });
-    const details = await visitDetails(sampled, conn);
+    const { sample: sampled, counted } = await sampleFor(own, technicianId, monthStart, conn);
+    const details = await visitDetails(sampled, counted, conn);
     const visits = sampled.map((row) => details.get(row.scheduled_service_id));
     technicians.push({
       id: technicianId,
@@ -244,8 +259,11 @@ async function getBoard(rawMonth, conn = db) {
  * visit's canonical record. The check and the write run under one lock per technician and month, so two
  * marks can never both pass the five-visit sample.
  */
-async function saveMark({ scheduledServiceId, recordId = null, result, note, auditedBy }, conn = db) {
+async function saveMark({ scheduledServiceId, technicianId, month, recordId = null, result, note, auditedBy }, conn = db) {
   if (typeof scheduledServiceId !== 'string' || !UUID_RE.test(scheduledServiceId)) throw new ProtocolAuditError(400, 'INVALID_VISIT', 'visit id must be a uuid');
+  if (typeof technicianId !== 'string' || !UUID_RE.test(technicianId) || !MONTH_RE.test(String(month))) {
+    throw new ProtocolAuditError(400, 'INVALID_CONTEXT', 'technicianId and month (YYYY-MM) of the board are required');
+  }
   if (!RESULTS.includes(result)) throw new ProtocolAuditError(400, 'INVALID_RESULT', "result must be 'match' or 'mismatch'");
   const text = note == null ? '' : String(note).trim();
   if (text.length > MAX_NOTE_CHARS) throw new ProtocolAuditError(400, 'NOTE_TOO_LONG', `note must be at most ${MAX_NOTE_CHARS} characters`);
@@ -255,13 +273,12 @@ async function saveMark({ scheduledServiceId, recordId = null, result, note, aud
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`tech-protocol-audit:${first.technician_id}:${first.month}`]);
     const [visit] = await eligibleVisits({ scheduledServiceId }, trx);
-    if (!visit || visit.technician_id !== first.technician_id || visit.month !== first.month || (recordId && recordId !== visit.record_id)) {
+    // the mark is filed under the technician and month the board showed; any other current record is refused
+    if (!visit || visit.technician_id !== first.technician_id || visit.month !== first.month
+      || visit.technician_id !== technicianId.toLowerCase() || visit.month.slice(0, 7) !== month || (recordId && recordId !== visit.record_id)) {
       throw new ProtocolAuditError(409, 'STALE_VISIT', 'this visit changed since it was loaded: reload and review it again');
     }
-    const sample = pickSample(
-      await eligibleVisits({ monthStart: visit.month, technicianId: visit.technician_id }, trx),
-      { technicianId: visit.technician_id, monthStart: visit.month, markedIds: await markedVisitIds(visit.technician_id, visit.month, trx) },
-    );
+    const { sample } = await sampleFor(await eligibleVisits({ monthStart: visit.month, technicianId: visit.technician_id }, trx), visit.technician_id, visit.month, trx);
     if (!sample.some((row) => row.scheduled_service_id === visit.scheduled_service_id)) {
       throw new ProtocolAuditError(409, 'NOT_IN_SAMPLE', "this visit is not in the technician's sample for the month");
     }
@@ -277,4 +294,4 @@ async function saveMark({ scheduledServiceId, recordId = null, result, note, aud
   });
 }
 
-module.exports = { CURRENT_AUDIT_FROM_SQL, CURRENT_AUDIT_WHERE_SQL, SAMPLE_SIZE, ProtocolAuditError, parseMonth, eligibleVisits, pickSample, getBoard, saveMark };
+module.exports = { SAMPLE_SIZE, ProtocolAuditError, parseMonth, eligibleVisits, pickSample, countedMarks, getBoard, saveMark };
