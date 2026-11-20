@@ -208,9 +208,12 @@ function sentCohorts(rows, { days, nowMs }) {
     // (portal pricing card, GATE_PORTAL_PLAN_START). countable_view_at
     // (countableViewAtSql) is the earliest open since delivery in the open log
     // or the row, so a later reopen never stands in for their first view
-    // (codex pre-push P1); for any other row it is viewed_at.
+    // (codex pre-push P1). It is their only view stamp: SQL bounds it by the
+    // delivery at full precision, while a raw viewed_at or last_viewed_at
+    // can sit in the delivery's own millisecond (codex pre-push P1). Every
+    // other row keeps main's view stamps.
     const isCtaMint = SELF_SERVE_ESTIMATE_SOURCES.includes(String(row.source || ''));
-    const viewCandidates = [ms(row.countable_view_at), ms(row.viewed_at), ms(row.last_viewed_at)]
+    const viewCandidates = (isCtaMint ? [ms(row.countable_view_at)] : [ms(row.viewed_at), ms(row.last_viewed_at)])
       .filter((ts) => ts != null && (!isCtaMint || ts >= sentAt));
     const firstView = viewCandidates.length ? Math.min(...viewCandidates) : null;
     if (inBaseWindow) {
