@@ -79,6 +79,9 @@ async function loadFailedPaymentFacts(customerId, dbh = db, { statuses = ['faile
   // invoices.id is UUID. Historical metadata is not: keep malformed legacy
   // references out of the PostgreSQL lookup so one bad value cannot abort
   // deduplication for every valid invoice on the account.
+  if (strict && failedInvoiceIds.some((id) => !UUID_SHAPE.test(id))) {
+    throw new Error('A failed payment has an unresolved invoice reference');
+  }
   const validFailedInvoiceIds = [...new Set(failedInvoiceIds
     .filter((id) => UUID_SHAPE.test(id))
     .map((id) => id.toLowerCase()))];

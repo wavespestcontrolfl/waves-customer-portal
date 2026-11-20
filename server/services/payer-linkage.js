@@ -69,9 +69,18 @@ function buildPayerLinkage(payerInvRows, { failed = false } = {}) {
   return { failed, payerInvRows, payerInvoiceIds, isPayerLinked };
 }
 
+// Older payment writers stored a JSON string inside their JSONB column.
+// PostgreSQL 16 validates that inner string before the cast (even malformed
+// historical text cannot abort the balance query). Keys are internal literals.
+function paymentMetadataValueSql(alias, key) {
+  const column = `${alias}.metadata`;
+  return `(CASE WHEN jsonb_typeof(${column}) = 'string' AND pg_input_is_valid(${column} #>> '{}', 'jsonb')
+    THEN ((${column} #>> '{}')::jsonb)->>'${key}' ELSE ${column}->>'${key}' END)`;
+}
+
 function excludeDirectPayerPayments(query) {
   return query.whereNull('payments.payer_id')
-    .whereRaw("COALESCE(payments.metadata->>'payer_id', '') = ''");
+    .whereRaw(`COALESCE(${paymentMetadataValueSql('payments', 'payer_id')}, '') = ''`);
 }
 
 // Same query billing-v2 has always run (moved here unchanged). `failed` = the lookup errored: the caller must
@@ -203,7 +212,7 @@ async function loadLivePayerLinkage(customerId, dbh = db) {
 // use the key instead of casting the indexed column to text; the CASE guarantees the cast is
 // only evaluated for a well-formed value (a malformed metadata string can never throw).
 function uuidFromMetadata(alias, key = 'invoice_id') {
-  const v = `${alias}.metadata->>'${key}'`;
+  const v = paymentMetadataValueSql(alias, key);
   return `(CASE WHEN ${v} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (${v})::uuid END)`;
 }
 
@@ -215,19 +224,18 @@ function excludeLiveOwnedPayerPayments(qb, linkage) {
   // excludeDirectPayerPayments before this helper is called.
   const rows = linkage.payerInvRows?.length ? linkage.payerInvRows : (linkage.liveOwnedRows || []);
   if (!rows.length) return qb;
-  const ph = (n) => Array.from({ length: n }, () => '?').join(', ');
   const ids = rows.map((r) => String(r.id));
   for (const key of ['invoice_id', 'dispute_invoice_id', 'waves_invoice_id']) {
     const mdId = uuidFromMetadata('payments', key);
-    qb.whereRaw(`(${mdId} IS NULL OR ${mdId}::text NOT IN (${ph(ids.length)}))`, ids);
+    qb.whereRaw(`COALESCE(${mdId}::text <> ALL(?::text[]), TRUE)`, [ids]);
   }
   const pis = rows.map((r) => r.stripe_payment_intent_id).filter(Boolean);
-  if (pis.length) qb.whereRaw(`(payments.stripe_payment_intent_id IS NULL OR payments.stripe_payment_intent_id NOT IN (${ph(pis.length)}))`, pis);
+  if (pis.length) qb.whereRaw(`(payments.stripe_payment_intent_id IS NULL OR payments.stripe_payment_intent_id <> ALL(?::text[]))`, [pis]);
   const chs = rows.map((r) => r.stripe_charge_id).filter(Boolean);
-  if (chs.length) qb.whereRaw(`(payments.stripe_charge_id IS NULL OR payments.stripe_charge_id NOT IN (${ph(chs.length)}))`, chs);
+  if (chs.length) qb.whereRaw(`(payments.stripe_charge_id IS NULL OR payments.stripe_charge_id <> ALL(?::text[]))`, [chs]);
   const nums = rows.map((r) => r.invoice_number).filter(Boolean);
   if (nums.length) {
-    qb.whereRaw(`COALESCE(substring(payments.description from '^Invoice\\s+([A-Za-z0-9-]+)\\s+—'), '') NOT IN (${ph(nums.length)})`, nums);
+    qb.whereRaw(`COALESCE(substring(payments.description from '^Invoice\\s+([A-Za-z0-9-]+)\\s+—'), '') <> ALL(?::text[])`, [nums]);
   }
   return qb;
 }

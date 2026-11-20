@@ -87,6 +87,10 @@ describe('loadFailedPaymentFacts — strict (SMS grounding)', () => {
     const facts = { rows: [viaCharge, viaDescription, own], balanceCarryingInvoiceIds: new Set() };
     expect(standaloneFailedTotal(facts, (p) => linkage.isPayerLinked(p))).toBe(25);
   });
+  test('SMS withholds a failed payment amount when a legacy reference cannot identify the invoice', async () => {
+    const dbh = fakeDb({ payments: [row({ metadata: { invoice_id: 'legacy-reference' }, stripe_payment_intent_id: 'pi_invoice' })] });
+    await expect(loadFailedPaymentFacts('c1', dbh, { strict: true })).rejects.toThrow('unresolved invoice reference');
+  });
   test('a failing invoice lookup THROWS (the aggregator marks billing unavailable) instead of becoming an empty set', async () => {
     const dbh = fakeDb({ payments: [row({ metadata: { invoice_id: INVOICE_A } })], invoiceError: new Error('boom') });
     await expect(loadFailedPaymentFacts('c1', dbh, { strict: true })).rejects.toThrow('boom');
