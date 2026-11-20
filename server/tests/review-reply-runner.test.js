@@ -7,6 +7,7 @@ const mockPublish = jest.fn();
 const mockNotify = jest.fn(async () => ({}));
 const mockAccountFacts = jest.fn(async () => null);
 const mockVerify = jest.fn(() => null);
+const mockOffAppName = jest.fn(() => null);
 const mockGbp = { isLocationConfigured: jest.fn(async () => true) };
 const state = { rows: [], raws: [] };
 
@@ -24,6 +25,7 @@ jest.mock('../services/review-reply/grounding', () => ({
 jest.mock('../services/review-reply/drafter', () => ({
   draftReviewReply: (...a) => mockDraft(...a),
   verifyReplyText: (...a) => mockVerify(...a),
+  offAppName: (...a) => mockOffAppName(...a),
   loadRecentPostedReplies: jest.fn(async () => []),
   classifyReplyMode: jest.fn(() => 'service_quality'),
   REPLY_VERSION: 'reply-v1',
@@ -1481,6 +1483,16 @@ describe('processDueAutoReplies — state machine', () => {
     expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })({ ...fresh, review_text: 'Edited review' , auto_reply_grounding: { ...stored, fingerprint: Runner.reviewFingerprint({ ...base, review_text: 'Edited review' }) } })).toMatch(/changed since this draft was loaded/);
     // Token matches and nothing changed → posts (even an edited draft).
     expect(await Runner.pipelineDraftGuard(draft + ' Edited.', { draftToken: token })(fresh)).toBeNull();
+    // Owner 2026-11-19: a stored draft written before the app-name rule is agent text. Posted
+    // unchanged it must say "the Waves app"; the person's edit of it is their own words.
+    mockOffAppName.mockClear().mockReturnValueOnce('app');
+    expect(await Runner.pipelineDraftGuard(draft)(fresh)).toMatch(/does not say "the Waves app"/);
+    expect(mockOffAppName).toHaveBeenCalledWith(draft);
+    mockOffAppName.mockClear().mockReturnValueOnce('app');
+    expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })(fresh)).toMatch(/does not say "the Waves app"/);
+    mockOffAppName.mockClear();
+    expect(await Runner.pipelineDraftGuard(draft + ' Edited.', { draftToken: token })(fresh)).toBeNull();
+    expect(mockOffAppName).not.toHaveBeenCalled();
     // Posted meanwhile via Post now → refuse, the person must reload.
     expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })({ ...fresh, auto_reply_status: 'posted', review_reply: draft })).toMatch(/cleared since it was loaded/);
     // codex r27: an editor AI draft (/ai-reply, never stored) carries a

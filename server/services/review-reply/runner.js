@@ -33,7 +33,7 @@ const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix, removedOwnerReplyFields, whereNeedsRealReply } = require('./draft-prefix');
 const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint, groundingCustomerId } = require('./grounding');
-const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, REPLY_VERSION } = require('./drafter');
+const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, offAppName, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
 
 const STATUS = {
@@ -1582,6 +1582,10 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
     // or re-attribution, and by then the row carries nothing to compare
     // against. A token is binding whether or not the text was edited.
     if (!token && !isStoredDraft) return null;
+    // A stored draft written before the app-name rule (reply-v2) can still
+    // say "our app". Posted unchanged it is agent text, so it gets the same
+    // check as a new draft (owner 2026-11-19); an edited draft is the person's.
+    if (isStoredDraft && offAppName(submitted)) return 'this automatic draft does not say "the Waves app" — change it to "the Waves app", then post';
     if (token) {
       if (!holdsDraft) return 'this automatic draft was cleared since it was loaded (the review changed, or it was posted or skipped) — reload and draft again';
       if (token !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was loaded — reload and draft again';
