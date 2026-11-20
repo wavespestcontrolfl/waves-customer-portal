@@ -243,15 +243,23 @@ const oneSentence = (stretch) => !SENTENCE_END.test(stretch.replace(/\b([ap])\.m
 // Words that name a day without a date.
 const DAY_WORD = /\b(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|today|tonight|tomorrow)\b/g;
 
+// "4/20-24" closes on the 24th, as "April 20-24" does: a closing day right after a numeric date with no year.
+const NUMERIC_CLOSE = /^ ?(?:-|to|through|thru) ?(\d{1,2})(?:st|nd|rd|th)?(?![/\d:])\b/;
+
 /** Each calendar date the (comparable) words name, in order: { at, end, month, day, year } (year null when not given). */
 function quoteDates(text) {
+  const numeric = (m) => {
+    const after = m.index + m[0].length;
+    const close = m[3] ? null : NUMERIC_CLOSE.exec(text.slice(after, after + 16));
+    return [m, m[1], close ? close[1] : m[2], m[3] && m[3].length === 2 ? `20${m[3]}` : m[3], close ? close[0].length : 0];
+  };
   const found = [
-    ...[...text.matchAll(NAMED_DATE)].map((m) => [m, MONTH_KEYS.indexOf(m[1].slice(0, 3)) + 1, m[3] || m[2], m[4]]),
-    ...[...text.matchAll(NUMERIC_DATE)].map((m) => [m, m[1], m[2], m[3] && m[3].length === 2 ? `20${m[3]}` : m[3]]),
-    ...[...text.matchAll(ISO_DATE)].map((m) => [m, m[2], m[3], m[1]]),
+    ...[...text.matchAll(NAMED_DATE)].map((m) => [m, MONTH_KEYS.indexOf(m[1].slice(0, 3)) + 1, m[3] || m[2], m[4], 0]),
+    ...[...text.matchAll(NUMERIC_DATE)].map(numeric),
+    ...[...text.matchAll(ISO_DATE)].map((m) => [m, m[2], m[3], m[1], 0]),
   ];
   return found
-    .map(([m, month, day, year]) => ({ at: m.index, end: m.index + m[0].length, month: Number(month), day: Number(day), year: year ? Number(year) : null }))
+    .map(([m, month, day, year, more]) => ({ at: m.index, end: m.index + m[0].length + more, month: Number(month), day: Number(day), year: year ? Number(year) : null }))
     .sort((a, b) => a.at - b.at);
 }
 
@@ -270,21 +278,30 @@ function dayMarks(text) {
  */
 function quoteNamesDay({ text, wordsEnd }, endDate, away) {
   const [year, month, day] = endDate.split('-').map(Number);
-  const weekday = WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+  const end = Date.UTC(year, month - 1, day);
+  const weekday = WEEKDAYS[new Date(end).getUTCDay()];
   const relative = { today: away === 0, tonight: away === 0, tomorrow: away === 1 };
-  // A date with no year is its next time on or after the day the email came: on April 15,
-  // "April 15" is that day, never the one a year on.
-  const came = new Date(Date.UTC(year, month - 1, day - away));
+  // A date with no year names endDate only as its next time on or after the day the email
+  // came: on April 15, "April 15" is that day, never the one a year on.
+  const came = new Date(end - away * 86400000);
   const comingYear = came.getUTCFullYear() + (month * 100 + day >= (came.getUTCMonth() + 1) * 100 + came.getUTCDate() ? 0 : 1);
   // Names endDate's day: its date, its weekday (also as a label), or a relative word that lands on it.
   const sameDay = (d) => (d.word
     ? d.word === weekday || relative[d.word] === true
     : d.month === month && d.day === day && (d.year ?? comingYear) === year);
+  // Another date as a day: with no year, in the year that puts it nearest endDate, so a start
+  // before the email came stays before ("April 13 through Friday", "Dec 28 through Friday").
+  const asDay = (d) => {
+    if (d.year !== null) return Date.UTC(d.year, d.month - 1, d.day);
+    const nearer = (a, b) => (Math.abs(b - end) < Math.abs(a - end) ? b : a);
+    return [year - 1, year + 1].map((y) => Date.UTC(y, d.month - 1, d.day)).reduce(nearer, Date.UTC(year, d.month - 1, d.day));
+  };
   const marks = dayMarks(text);
   const said = marks.filter((d) => d.end <= wordsEnd);
-  const dated = said.some((d) => !d.word);
-  // With no date in the words, a weekday names a day at most a week on.
-  const named = said.filter((d) => (dated ? !d.word : d.word !== weekday || away <= 7) && sameDay(d));
+  // A weekday names a day at most a week on. Beside dates in the words, a day word names only a
+  // day after all of them ("April 20 through Friday"); a weekday that labels a date is that date.
+  const afterDates = said.every((d) => d.word || asDay(d) < end);
+  const named = said.filter((d) => sameDay(d) && (!d.word || ((d.word !== weekday || away <= 7) && afterDates)));
   // Another day after d in its sentence. The stretch takes that day's first letter, so ". Monday" ends the sentence.
   const anotherDayAfter = (d) => marks.some((n) => n.at >= d.end && n.at - d.end <= RANGE_GAP && !sameDay(n)
     && oneSentence(text.slice(d.end, n.at + 1)));
@@ -319,7 +336,8 @@ function wholeWordsInEmail(hay, needle) {
 /**
  * Checks one parsed answer against the email. { ok: true, endDate, quote, priceIncrease }
  * (endDate null = the email states no end; priceIncrease = endDate is the day a new price
- * starts, the model's reading), or { ok: false, reason }. `cut`: a cap cut the end of emailText.
+ * starts, the model's reading, which a dated answer must give as a JSON true or false), or
+ * { ok: false, reason }. `cut`: a cap cut the end of emailText.
  */
 function checkAnswer(answer, emailText, receivedAt, cut = false) {
   if (!answer || !Object.prototype.hasOwnProperty.call(answer, 'end_date')) return { ok: false, reason: 'invalid_json' };
@@ -340,7 +358,9 @@ function checkAnswer(answer, emailText, receivedAt, cut = false) {
   // Words that run to a cut cannot be checked whole: "May 3" may have been "May 30", and a range may go on past it.
   if (cut && place.nearEnd) return { ok: false, reason: 'quote_at_cut' };
   if (!quoteNamesDay(place, endDate, away)) return { ok: false, reason: 'quote_date_mismatch' };
-  return { ok: true, endDate, quote, priceIncrease: answer.price_increase === true };
+  // The flag picks the line's label ("price rises" or "ends"), so only a JSON true or false counts.
+  if (typeof answer.price_increase !== 'boolean') return { ok: false, reason: 'bad_price_flag' };
+  return { ok: true, endDate, quote, priceIncrease: answer.price_increase };
 }
 
 /** One model read of one email (its whole body on it). Never throws. */
