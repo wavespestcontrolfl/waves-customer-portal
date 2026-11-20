@@ -436,6 +436,12 @@ describe('parseInspectionReport', () => {
       '<table><tr><td>Inspection Date</td></tr><tr><td>11/16/2026</td></tr></table><table><tr><td><u><b>Violation');
     expect(twice.indexOf('10/20/2026')).toBeLessThan(twice.indexOf('11/16/2026'));
     expect(read(twice, '2026-10-20')).toBeNull();
+    // Two dated rows under one head row (a callback listed with the visit): either visit's, so no answer.
+    const callback = '<td>Warning Issued</td></tr><tr><td>Callback - Food</td><td>10/21/2026</td><td>Met Inspection Standards</td></tr></table>';
+    expect(read(reportPage(rows, '10/20/2026').replace('<td>Warning Issued</td></tr></table>', callback), '2026-10-20')).toBeNull();
+    const fixtureTwice = fixture('report-35a.html').replace('<td>Warning Issued</td></tr></table>', callback);
+    expect(fixtureTwice).toContain('10/21/2026');
+    expect(parse(fixtureTwice, { visitDate: '2026-10-20' })).toBeNull();
     // The fixtures carry the real layout.
     expect(parse(fixture('report-35a.html'), { visitDate: '2026-10-20' })).toMatchObject({ pestEvidence: true });
     expect(parse(fixture('report-35b.html'), { cited35: 1, visitDate: '2026-10-21' })).toEqual({ pestEvidence: false, findings: [] });

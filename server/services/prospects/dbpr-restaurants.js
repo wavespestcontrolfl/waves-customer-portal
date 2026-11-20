@@ -316,13 +316,14 @@ const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
 // could not be read, and each date the inspection table gives. A row ends at a row or table tag, or at the page end.
 // In the violations table (from its "Violation" / "Observation" head row to the next table tag) a row with anything
 // in it must hold a code alone in the Violation column and nothing before it; anywhere else no cell may be a code.
-// The inspection table is a head row naming "Inspection Date", then a row giving it in that column.
+// The inspection table is a head row naming "Inspection Date", then the rows under it: each row up to the table's
+// end gives a date in that column, so a second visit's row there is a second date.
 function readReportTables(page) {
   const entries = [];
   const dates = [];
   let unreadable = false;
   let codeColumn = -1; // the Violation column's position while in the violations table, else -1
-  let dateColumn = -1; // the Inspection Date column's position after its head row, until a row gives the date
+  let dateColumn = -1; // the Inspection Date column's position from its head row to the table's end, else -1
   let row = []; // the cell texts of the row being read, blank cells kept so each keeps its position
   const endRow = () => {
     if (codeColumn >= 0 && row.some(Boolean)) {
@@ -335,11 +336,10 @@ function readReportTables(page) {
     } else if (row.some((cell) => VIOLATION_CODE_RE.test(cell))) {
       unreadable = true;
     }
-    if (dateColumn >= 0 && row.some(Boolean)) {
-      dates.push(row[dateColumn] || '');
-      dateColumn = -1;
-    } else if (row.includes('Inspection Date')) {
+    if (row.includes('Inspection Date')) {
       dateColumn = row.indexOf('Inspection Date');
+    } else if (dateColumn >= 0 && row.some(Boolean)) {
+      dates.push(row[dateColumn] || '');
     }
   };
   for (const match of page.matchAll(CELL_OR_ROW_END_RE)) {
