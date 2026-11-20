@@ -194,8 +194,14 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(block.length).toBeGreaterThan(200);
     // Ownership stays INSIDE every write and read on the token (the typed
     // email must match the row's), and the pre-read is the run's OWN row —
-    // never the original.
-    expect(src).toMatch(/const ownRow = \(\) => db\('leads'\)\n\s+\.where\(\{ id: leadId \}\)\n\s+\.whereNull\('deleted_at'\)\n\s+\.whereRaw\('LOWER\(email\) = \?', \[String\(contactEmail\)\.toLowerCase\(\)\.trim\(\)\]\);/);
+    // never the original. A web-form lead (the quiz hand-off) must also
+    // still be open and not commercial, in the same predicate.
+    expect(src).toMatch(/const ownRow = \(\) => db\('leads'\)\n\s+\.where\(\{ id: leadId \}\)\n\s+\.whereNull\('deleted_at'\)\n\s+\.whereRaw\('LOWER\(email\) = \?', \[String\(contactEmail\)\.toLowerCase\(\)\.trim\(\)\]\)\n\s+\.modify\(exceptClosedWebFormLead\);/);
+    // The run's later writes of a column an office action also writes keep
+    // their condition in their own statement: the customer link (the rule)
+    // and the source fill (still empty).
+    expect(src).toContain("await db('leads').where({ id: lead.id }).modify(exceptClosedWebFormLead).update({ customer_id: customerId });");
+    expect(src).toContain("await db('leads').where({ id: lead.id }).whereNull('lead_source_id').update({ lead_source_id: sourceMeta.leadSourceId });");
     expect(block).not.toMatch(/forUpdate/);
     // The stored additional-property list counts as well as the request's
     // (codex r12 P1).

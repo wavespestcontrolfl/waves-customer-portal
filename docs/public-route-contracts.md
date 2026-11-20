@@ -4448,7 +4448,14 @@ every other commercial signal). The quiz answers are NOT a pricing input:
 `property` never becomes the draft's property type. They are not
 staff-only: the Lead Response Agent may read them. The response is
 unchanged. Safe in either deploy order: a portal without this change
-ignores the unknown key and files an ordinary form lead;
+ignores the unknown key and files an ordinary form lead. The AI triage,
+which the webhook starts without waiting, writes a lead this request
+inserted only while the row still holds the intake stage
+(`lead_webhook_received`, checked in the UPDATE's WHERE): once a price page
+has continued the lead (the attach token, see
+`/api/public/estimator/property-lookup` below), a late triage answer is
+dropped whole: it never replaces the price page's stage, address verdict or
+profile, re-prices no draft and records no `ai_triage` activity;
 and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
@@ -5216,7 +5223,24 @@ Also accepts an OPTIONAL `prefill_lead_id` + `prefill_token` pair — the
 lead-prefill HMAC below — which, when valid, makes the lead capture UPDATE
 that existing open call-pipeline lead instead of inserting a new row; the
 same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
-with identical semantics. Also accepts the OPTIONAL `timeline` described
+with identical semantics. On THIS route only, the pair may instead carry
+the quiz hand-off's ATTACH token (`mintLeadAttachToken`,
+`utils/lead-prefill-token.js`: the prefill token's format and secret, HMAC
+purpose `lead-attach`, 2-hour TTL; no route mints one yet). When valid, the
+lead capture UPDATES the lead the token names with the prefill attach's
+field rules, but only while that lead passes the hand-off's rule
+(`applyQuizHandoffLeadPredicate`, `server/services/lead-statuses.js`: open
+by `applyOpenLeadPredicate`, not deleted, not commercial). The lead keeps
+its `form_submission` type, its source and its `quiz` answers
+(`extracted_data` is merged: a key the price page does not send, `timeline`
+included, is kept), and the later `/api/public/quote/calculate` run prices
+that same lead. A wrong, expired or refused attach token is ignored: the
+lookup inserts its own `quote_wizard` lead as before. The rule is decided
+once, in the attach UPDATE; the same request's later writes (the completion
+stage, the address verdict) follow that lead and merge `extracted_data`
+keys only. The webhook does not
+accept an attach token in the pair. Also accepts the OPTIONAL `timeline`
+described
 under `/api/webhooks/lead` above, with the same storage and urgency
 semantics; it survives the later `/api/public/quote/calculate` snapshot).
 Attribution (referrer/UTM/click-ids) resolves through
@@ -5323,7 +5347,9 @@ format gate on lead_id, 30 req/hour rate limit, privacy headers
 mismatched, or unknown ids — indistinguishable on purpose (no oracle).
 PREFILL/attach authority ONLY: it returns the contact data we already
 texted the link-holder about, and is never accepted as identity or pricing
-authority on any money path).
+authority on any money path. The quiz hand-off's attach token (purpose
+`lead-attach`, see the property lookup above) is not a prefill token: this
+route answers it with the same 404, so it can never read a lead back).
 `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
 instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
 limit. Persists a quote/lead and may text the quote via a Twilio short-link;
@@ -5341,6 +5367,17 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+A `leadId` that names a web-form lead (`lead_type` `form_submission`; its
+id reaches a visitor only through the quiz hand-off) is written only while
+that lead passes the hand-off's rule: open, not deleted, not commercial
+(`exceptClosedWebFormLead`, `server/services/lead-statuses.js`, inside the
+ownership UPDATE). A refused lead matches zero rows, like a wrong id, and
+the run files its own `quote_wizard` lead. The run's later customer link
+(`customer_id`) repeats the rule, so a web-form lead the office converted
+or closed mid-request keeps its customer. `/upsell` never writes a
+web-form lead (its read excludes the type and answers 404): no page of the
+hand-off calls it. A `leadId` of any other lead type is held to its own
+route's conditions only.
 Optional `heard_about` / `heard_about_prompt` (owner-approved 2026-10-30,
 "count customers from AI"): the wizard's self-reported "How did you hear
 about us?" answer and its AI-only "What did you ask it?" follow-up, validated
