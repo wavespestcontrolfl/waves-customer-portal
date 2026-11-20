@@ -100,8 +100,11 @@ describe('a refused plan quote (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED
     const branch = eff.slice(release, eff.indexOf('if (!held) {'));
     // Never from a staff preview or the headless PDF capture (twelfth pre-push audit).
     expect(branch).toContain('if (!readOnlyPreview && !pdfDocumentMode\n        && !inlineConfirmBusyRef.current && refusedQuoteHoldReleaseRef.current !== held.id) {');
-    expect(branch).toContain('pendingRecoveryHoldRef.current = held.id;');
-    expect(branch).toContain("recoverFromDeadHold('configure');");
+    // It releases the hold /data names, not the one this tab still holds: another tab may have swapped them, and the
+    // marked hold would then never be released (thirteenth pre-push audit).
+    expect(branch).toContain("recoverFromDeadHold('configure', null, held.id);");
+    const recovery = pageSource.slice(pageSource.indexOf('const recoverFromDeadHold = useCallback((phase, note = null, holdId = null) => {'));
+    expect(recovery).toContain('const deadHoldId = holdId\n      || reservationRef.current?.scheduledServiceId\n      || pendingRecoveryHoldRef.current');
     expect(branch.trimEnd().endsWith('return;\n    }')).toBe(true);
     expect(eff).toContain('ctaPhase, quoteRefusalCode, readOnlyPreview, pdfDocumentMode,\n    recoverFromDeadHold]');
   });

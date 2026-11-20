@@ -7169,7 +7169,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // a payment method re-adopted the dead hold. Refreshing the contract is
   // what actually reopens the picker, so every caller goes through here
   // rather than repeating the reset.
-  const recoverFromDeadHold = useCallback((phase, note = null) => {
+  const recoverFromDeadHold = useCallback((phase, note = null, holdId = null) => {
     // Never DURING Stripe's confirmation (codex r16 P1): recovery clears the
     // reservation, unmounts payment capture and DELETEs the hold, which
     // mid-confirmSetup would cancel a hold the confirmation is about to use
@@ -7192,8 +7192,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // it first is what returns the contract to standard_slot_pick. A hold
     // that is already gone (expired, swept) just 404s the release.
     // On a retry the reservation is already cleared, so fall back to the
-    // hold the previous attempt could not release.
-    const deadHoldId = reservationRef.current?.scheduledServiceId
+    // hold the previous attempt could not release. A caller that names the
+    // hold releases that one (codex pre-push P1): the refused-quote
+    // hydration names the hold /data lists, which another tab may have
+    // swapped for the one this tab still holds.
+    const deadHoldId = holdId
+      || reservationRef.current?.scheduledServiceId
       || pendingRecoveryHoldRef.current
       || null;
     setCtaPhase(phase);
@@ -7290,8 +7294,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       if (!readOnlyPreview && !pdfDocumentMode
         && !inlineConfirmBusyRef.current && refusedQuoteHoldReleaseRef.current !== held.id) {
         refusedQuoteHoldReleaseRef.current = held.id;
-        pendingRecoveryHoldRef.current = held.id;
-        recoverFromDeadHold('configure');
+        recoverFromDeadHold('configure', null, held.id);
       }
       return;
     }

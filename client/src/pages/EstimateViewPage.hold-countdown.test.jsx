@@ -236,7 +236,7 @@ describe('hold countdown bar', () => {
     // first re-offers the rejected hold as existing_appointment.
     expect(fn).toContain('releaseHeldReservation(deadHoldId)');
     expect(fn.indexOf('releaseHeldReservation(deadHoldId)')).toBeLessThan(fn.indexOf('loadEstimate({ preserveSelection: false })'));
-    expect(fn).toContain('const deadHoldId = reservationRef.current?.scheduledServiceId');
+    expect(fn).toContain('const deadHoldId = holdId\n      || reservationRef.current?.scheduledServiceId');
     expect(fn).toContain('setReservation(null);');
     expect(fn).toContain('setSlotsRefreshSignal((v) => v + 1);');
     // Both recovery callers go through it; neither repeats the reset.
