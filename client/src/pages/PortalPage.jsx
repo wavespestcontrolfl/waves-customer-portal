@@ -14098,7 +14098,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const rewardPerReferral = Number(data?.rewardPerReferral) || 0;
   // Step 2: a member at the yearly limit is told so instead of being promised another credit (the server sends
   // capReached and annualCap only while the program is on Step 2).
-  const atYearlyLimit = data?.capReached === true && Number(data?.annualCap) > 0;
+  const atYearlyLimit = data?.capReached === true;
   const earnsCredit = rewardPerReferral > 0 && !atYearlyLimit;
   const lifetimeEarned = data?.totalEarned != null
     ? Number(data.totalEarned || 0) / 100
@@ -14206,7 +14206,7 @@ function ReferTab({ customer, onSwitchTab }) {
               {earnsCredit ? 'Refer and Earn' : 'Refer a Neighbor'}
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {atYearlyLimit
+              {atYearlyLimit && Number(data.annualCap) > 0
                 ? `You earned ${Number(data.annualCap)} credits this year, the most we give. Thank you! Credits start again January 1.`
                 : earnsCredit
                   ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`

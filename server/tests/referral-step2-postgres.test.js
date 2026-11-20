@@ -418,6 +418,16 @@ const DAY = 86400000;
       await db('referral_program_settings').where({ id: 1 }).update({ referrer_reward_cents: 2500 });
     });
 
+    test('a gate flip between conversion and the visit leaves total earned at what was posted', async () => {
+      await db('referral_program_settings').where({ id: 1 }).update({ step2_referrer_reward_cents: 3000 });
+      const ctx = await performed(); // staged $30 under Step 2
+      expect(await db('referral_promoters').where({ id: ctx.ref.promoter_id }).first()).toMatchObject({ pending_earnings_cents: 3000, total_earned_cents: 3000 });
+      gates.referralStep2 = false; // switched off before the visit: the legacy $25 posts
+      await firstService(ctx.friend, ctx.visit);
+      expect(await amounts(ctx.member.id)).toEqual([25]);
+      expect(await db('referral_promoters').where({ id: ctx.ref.promoter_id }).first()).toMatchObject({ pending_earnings_cents: 0, total_earned_cents: 2500 });
+    });
+
     test('a home with no map point pays $25', async () => {
       const { member, friend, visit } = await performed({ memberFields: HOME });
       await firstService(friend, visit);
@@ -562,6 +572,63 @@ const DAY = 86400000;
         });
       }
       expect(await engine.step2OfferFor(db, member.id, await engine.getSettings())).toMatchObject({ creditsThisYear: 10, capReached: true });
+    });
+  });
+
+  describe('settings', () => {
+    test('the yearly limit is at least 1', async () => {
+      await expect(engine.updateSettings({ step2_annual_credit_cap: 0 })).rejects.toMatchObject({ code: 'INVALID_SETTING' });
+      await expect(engine.updateSettings({ step2_annual_credit_cap: '0' })).rejects.toMatchObject({ code: 'INVALID_SETTING' });
+      expect((await engine.updateSettings({ step2_annual_credit_cap: 1 })).step2_annual_credit_cap).toBe(1);
+      await engine.updateSettings({ step2_annual_credit_cap: 10 });
+      // Other counts still accept 0.
+      expect((await engine.updateSettings({ max_referrals_per_month: 0 })).max_referrals_per_month).toBe(0);
+      await engine.updateSettings({ max_referrals_per_month: 20 });
+    });
+  });
+
+  describe('the member invitation email', () => {
+    const { sendReferralInviteEmail } = require('../services/referral-invite-email');
+    const lineOf = () => sendTemplate.mock.calls.at(-1)[0].payload.referral_reward_line;
+    const nudge = () => require('../config/feature-gates').gates;
+    let savedNudge;
+    beforeEach(() => { savedNudge = nudge().referralNudgeEnroll; nudge().referralNudgeEnroll = false; });
+    afterEach(() => { nudge().referralNudgeEnroll = savedNudge; sendTemplate.mockClear(); });
+
+    test('gate off: the legacy amount, byte for byte', async () => {
+      gates.referralStep2 = false;
+      await db('referral_program_settings').where({ id: 1 }).update({ step2_referrer_reward_cents: 3000 });
+      const member = await customer({ email: 'member@example.invalid' });
+      await sendReferralInviteEmail({ customerId: member.id });
+      expect(lineOf()).toBe('you get a $25 referral reward and they get $25 off their first service.');
+    });
+
+    test('gate on: the Step 2 standard credit', async () => {
+      await db('referral_program_settings').where({ id: 1 }).update({ step2_referrer_reward_cents: 3000 });
+      const member = await customer({ email: 'member@example.invalid' });
+      await sendReferralInviteEmail({ customerId: member.id });
+      expect(lineOf()).toBe('you get a $30 referral reward and they get $25 off their first service.');
+    });
+
+    test('gate on, member at the yearly limit: the member-reward part is dropped', async () => {
+      const member = await customer({ email: 'member@example.invalid' });
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: member.id, referee_name: `Prior ${i}`, referee_phone: `+1941567${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      await sendReferralInviteEmail({ customerId: member.id });
+      expect(lineOf()).toBe('they get $25 off their first service.');
+      expect(lineOf()).not.toMatch(/you get/);
+      // No friend discount either: nothing to say, so no email.
+      sendTemplate.mockClear();
+      await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 0 });
+      expect(await sendReferralInviteEmail({ customerId: member.id })).toBeNull();
+      expect(sendTemplate).not.toHaveBeenCalled();
     });
   });
 
@@ -739,6 +806,24 @@ const DAY = 86400000;
         atCap: false, forCustomerId: String(member.id), conditional: 'Member: $25, or $50 within half a mile, unless at the yearly limit; friend: $25 credit',
       });
       expect(await inbound.previewTerms(db, null)).toMatchObject({ forCustomerId: null });
+    });
+
+    test('a SQL error inside the preview never aborts the caller\'s transaction', async () => {
+      const inbound = require('../services/referral-inbound');
+      const member = await customer();
+      const spy = jest.spyOn(engine, 'step2TermsFor').mockImplementation(async (conn) => {
+        await conn.raw('SELECT * FROM table_that_does_not_exist');
+      });
+      try {
+        await db.transaction(async (trx) => {
+          expect(await inbound.previewTerms(trx, member.id)).toBeNull();
+          // The bell's own write on the same transaction still works.
+          await trx('customers').where({ id: member.id }).update({ first_name: 'Bell' });
+          expect((await trx('customers').where({ id: member.id }).first('first_name')).first_name).toBe('Bell');
+        });
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('the cap is counted for the customer a confirm pays: a secondary household profile resolves the household promoter', async () => {

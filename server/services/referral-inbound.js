@@ -205,7 +205,9 @@ function performedRecurringVisits(conn) {
 // transaction stays strict (referral-engine liveSettingsOrThrow).
 async function previewTerms(conn, memberId) {
   try {
-    return await engine.step2TermsFor(conn, memberId);
+    // In a savepoint (a nested transaction): a SQL error in the preview rolls back to it and leaves the caller's
+    // transaction usable, so the bell row still writes.
+    return await conn.transaction((sp) => engine.step2TermsFor(sp, memberId));
   } catch (err) {
     logger.warn(`[referral-inbound] rule preview unavailable: ${err.code || err.message}`);
     return null;

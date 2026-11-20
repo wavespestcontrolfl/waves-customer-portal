@@ -1260,11 +1260,14 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // immediately-earned referral (already paid at conversion) is never clobbered.
     await supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId: referral.id });
 
-    // Promoter bookkeeping: drain the exact pending amount staged at conversion. Under GATE_REFERRAL_STEP2 the
-    // member's real credit can differ from the amount staged ($50 near, $0 at the cap), so total earned moves by
-    // the difference and the promoter dashboard shows what was truly earned.
+    // Promoter bookkeeping: drain the exact pending amount staged at conversion. The member's real credit can differ
+    // from the amount staged ($50 near, $0 at the cap, or a different rule after a gate flip), so total earned moves
+    // by the difference and the promoter dashboard shows what was truly earned.
     if (referral.promoter_id) {
-      const earnedAdjust = memberCredit ? Math.round(memberCredit.dollars * 100) - referrerCents : 0;
+      // Posted minus staged, whichever way the gate stands now: a referral staged under Step 2 and settled after the
+      // gate was switched off (or the reverse) differs, a legacy referral (staged = posted) adjusts by 0.
+      const postedCents = referral.referrer_customer_id ? Math.round(referrerDollars * 100) : 0;
+      const earnedAdjust = postedCents - referrerCents;
       await trx('referral_promoters').where({ id: referral.promoter_id }).update({
         pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [referrerCents]),
         ...(earnedAdjust ? { total_earned_cents: db.raw('GREATEST(total_earned_cents + ?, 0)', [earnedAdjust]) } : {}),
@@ -1386,7 +1389,8 @@ async function memberCreditsThisYear(conn, memberId) {
 // changes in this PR): the member's amounts, the near radius, the yearly limit and where the member stands.
 async function step2OfferFor(conn, memberId, settings) {
   const s = step2.step2Settings(settings);
-  const creditsThisYear = await memberCreditsThisYear(conn, memberId);
+  // The count is for the customer the credit is paid to (a household shares its promoter's customer).
+  const creditsThisYear = await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId));
   return {
     rewardPerReferral: s.step2_referrer_reward_cents / 100,
     nearReward: s.step2_near_referrer_reward_cents / 100,
@@ -1572,8 +1576,10 @@ function validateSettingValue(key, value) {
   if (value === null) return null;
   if (key.endsWith('_cents') || SETTING_COUNT_KEYS.includes(key)) {
     const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
-    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) {
-      throw referralError(400, 'INVALID_SETTING', `${key} must be a whole number that is 0 or more`);
+    // The yearly credit limit is at least 1: a limit of 0 would pay no member anything.
+    const min = key === 'step2_annual_credit_cap' ? 1 : 0;
+    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < min) {
+      throw referralError(400, 'INVALID_SETTING', `${key} must be a whole number that is ${min} or more`);
     }
     return n;
   }

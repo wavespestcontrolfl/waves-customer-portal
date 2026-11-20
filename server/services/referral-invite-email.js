@@ -99,11 +99,27 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
 
     const { getSettings } = require('./referral-engine');
     const settings = await getSettings();
-    const referrer = dollars(settings.referrer_reward_cents);
     const refereeCents = Number(settings.referee_discount_cents || 0);
-    const rewardLine = refereeCents > 0
+    // GATE_REFERRAL_STEP2: the member's number is the Step 2 standard credit, and a member at the yearly limit is
+    // promised nothing: the member-reward part is dropped (no new copy), leaving only the friend's discount.
+    let memberCents = settings.referrer_reward_cents;
+    let atYearlyLimit = false;
+    if (((require('../config/feature-gates').gates) || {}).referralStep2 === true) {
+      const offer = await require('./referral-engine').step2OfferFor(db, customerId, settings);
+      memberCents = Math.round(offer.rewardPerReferral * 100);
+      atYearlyLimit = offer.capReached;
+    }
+    const referrer = dollars(memberCents);
+    let rewardLine = refereeCents > 0
       ? `you get a ${referrer} referral reward and they get ${dollars(refereeCents)} off their first service.`
       : `you get a ${referrer} referral reward.`;
+    if (atYearlyLimit) {
+      if (!(refereeCents > 0)) {
+        logger.info(`[referral-invite-email] customer ${customerId} is at the yearly limit and no friend discount is set; invite skipped`);
+        return null;
+      }
+      rewardLine = `they get ${dollars(refereeCents)} off their first service.`;
+    }
 
     const EmailTemplateLibrary = require('./email-template-library');
     const result = await EmailTemplateLibrary.sendTemplate({
