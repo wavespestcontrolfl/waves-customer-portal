@@ -115,8 +115,11 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
   const estimatesOnPhone = async (phone) => (await db('estimates').whereRaw(`${LAST_TEN('customer_phone')} = ?`, [phone]).orderBy('created_at'))
     .map((row) => [row.source, row.status]);
 
-  // A lead as the lead webhook files it for a quiz, with the attach token the
-  // webhook gives for it.
+  // A lead as the lead webhook files it for a quiz hand-off, with the attach
+  // token the webhook gives for it. No draft estimate: the webhook's half of
+  // the hand-off (part 2) makes none for a submission it hands off, because
+  // the price calculation refuses its own draft while a lead_webhook draft
+  // sits on the phone. That half's cases post to the webhook itself.
   const quizLead = async (columns = {}) => {
     const contact = { phone: syntheticPhone(), email: `pat.${randomUUID().slice(0, 8)}@example.com` };
     const [row] = await db('leads').insert({
