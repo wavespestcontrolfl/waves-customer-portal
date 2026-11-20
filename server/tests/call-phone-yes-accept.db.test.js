@@ -912,15 +912,19 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: true });
   });
 
-  // The close is read again under the lock: evidence that changed after the first read keeps the card.
-  test('a close whose evidence changed before the write keeps the card open', async () => {
-    const { bookingCallId } = await phoneYes();
+  // The close is read again under the lock: evidence that changed after the first read keeps the card, and what the
+  // re-read found is written, so the card (and the bell that rings from it) never keeps a yes the re-read no longer backs.
+  test('a close whose evidence changed before the write keeps the card open, with what the re-read found', async () => {
+    const { bookingCallId, customerId } = await phoneYes();
     await sweep();
     const [card] = await cards(bookingCallId);
+    // A later call takes the yes back: the re-read finds no close, but a yes that no longer holds.
+    await call(customerId, null, { created_at: new Date() }, 'cancellation_request');
     const { applyCardStateForTest } = require('../services/call-phone-yes-accept')._private;
     await expect(applyCardStateForTest(card, { close: 'No longer applies: test.' })).resolves.toBe(false);
     const [after] = await cards(bookingCallId);
     expect(after.status).toBe('open');
+    expect(payloadOf(after)).toMatchObject({ yes_heard: false, no_yes_reason: 'caller_took_back' });
   });
 
   // A resend claims 'sending', then restores the status: a sweep in between keeps the card and its link.

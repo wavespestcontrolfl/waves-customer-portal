@@ -653,23 +653,27 @@ async function applyCardState(card, state) {
     const row = await trx('triage_items').where({ id: card.id, status: 'open' }).first('payload');
     if (!row) return false;
     const stamp = new Date();
+    let next = state;
     if (state.close) {
       // A dismissed card is never filed again, so the close is read again under the lock: evidence that changed since
-      // the first read (a re-read that dropped a cancel, a visit put back) keeps the card, and the next run reads it.
-      const again = await cardState({ ...card, payload: row.payload }, trx);
-      if (!again?.close) return false;
-      await trx('triage_items').where({ id: card.id, status: 'open' }).update({
-        status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE, resolution_note: again.close,
-        resolved_at: stamp, updated_at: stamp,
-      });
-      await syncCallReviewStatus(trx, card.call_log_id, 'dismissed');
-      return true;
+      // the first read (a re-read that dropped a cancel, a visit put back) keeps the card. What the re-read found is
+      // written instead, so the card, and the bell that rings from it, never keeps a yes the re-read no longer backs.
+      next = await cardState({ ...card, payload: row.payload }, trx);
+      if (!next) return false;
+      if (next.close) {
+        await trx('triage_items').where({ id: card.id, status: 'open' }).update({
+          status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE, resolution_note: next.close,
+          resolved_at: stamp, updated_at: stamp,
+        });
+        await syncCallReviewStatus(trx, card.call_log_id, 'dismissed');
+        return true;
+      }
     }
     const payload = {
       ...parseJson(row.payload),
-      ...(state.keepYes ? {} : heardFields(state.refresh, { recheckingCallId: state.rechecking, noYes: state.noYes })),
-      ...(state.estimateIds ? { estimate_ids: state.estimateIds } : {}),
-      ...(state.estimateAccepted === undefined ? {} : { estimate_accepted: state.estimateAccepted }),
+      ...(next.keepYes ? {} : heardFields(next.refresh, { recheckingCallId: next.rechecking, noYes: next.noYes })),
+      ...(next.estimateIds ? { estimate_ids: next.estimateIds } : {}),
+      ...(next.estimateAccepted === undefined ? {} : { estimate_accepted: next.estimateAccepted }),
     };
     await trx('triage_items').where({ id: card.id, status: 'open' })
       .update({ payload: JSON.stringify(payload), summary: summaryOf(payload), updated_at: stamp });

@@ -28,6 +28,7 @@ const { randomUUID } = require('crypto');
 const { bannerAfterWrite, __private: { skipReason } } = require('../services/bell-banners');
 const Compose = require('../services/admin-alert-compose');
 const Bell = require('../services/call-phone-yes-bell');
+const NotificationService = require('../services/notification-service');
 const { etDateString, formatETDayDate, parseETDateTime } = require('../utils/datetime-et');
 const { _private: { ringOpenCardsForTest } } = require('../services/call-phone-yes-accept');
 
@@ -261,6 +262,24 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(claimedBells.filed.done_at).toBeNull();
     // The two rings at filing, nothing after.
     expect(bannersFor(accepted.id) + bannersFor(claimed.id)).toBe(2);
+  });
+
+  // A system close takes the row over (done_by is the latest closer, doneColumns), and Reopen undoes only a person's
+  // close: no row can stand open and auto-cleared for a closed card.
+  test('a row a person marked Done before the card closed cannot be reopened once the card closes', async () => {
+    const card = await phoneYesCard();
+    await pass();
+    const { filed } = await bellsOf(card.id);
+    await trx('notifications').where({ id: filed.id }).update({ done_at: new Date(Date.now() - 60000), done_by: '123' });
+    await trx('triage_items').where({ id: card.id }).update({ status: 'resolved', resolved_at: new Date() });
+    await pass();
+
+    const closed = (await bellsOf(card.id)).filed;
+    expect(closed.done_by).toBe('episodes');
+    expect(closed.metadata).toEqual(expect.objectContaining({ autoCleared: true, autoClearedReason: 'phone_yes_card_closed' }));
+    const { token } = await trx('notifications').where({ id: filed.id }).first(trx.raw('done_at::text AS token'));
+    await expect(NotificationService.reopenAdminDone(String(filed.id), { expectedDoneAt: token })).resolves.toBe('not_reopenable');
+    expect((await bellsOf(card.id)).filed.done_at).not.toBeNull();
   });
 
   test('a yes taken back: the open row is rewritten quietly, with no banner, and keeps its read state', async () => {
