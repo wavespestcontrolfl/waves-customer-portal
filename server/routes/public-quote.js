@@ -3734,7 +3734,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`}${duplicateOfLeadId ? ' · repeat of an open lead (filed as duplicate)' : ''}`,
-        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : {}) } }
+        // createdLead: this wizard run's own row (inserted above, or minted by its property-lookup stage), not a repeat
+        // filed as a duplicate. The new-lead re-alert (new-lead-reminder.js intakeMarked) then counts a person's contact
+        // from the lead's creation, not only from this bell, and only within 15 minutes of that creation.
+        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : { createdLead: true }) } }
       );
     } catch (e) {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);

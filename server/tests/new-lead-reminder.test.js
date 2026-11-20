@@ -294,7 +294,7 @@ describe('the 15-minute push (no gate)', () => {
     mockState.leads = [lead({ created_at: est('09', '10:00') })];
     await run(est('09', '10:30'));
     const [[items]] = loadContactBundles.mock.calls;
-    expect(items).toEqual([{ id: 'n-1', kind: 'customer', bellAt: est('09', '10:00'), refs: { customerId: CUST, phone: '+19415550100' } }]);
+    expect(items).toEqual([{ id: 'n-1', kind: 'customer', bellAt: est('09', '10:00'), refs: { customerId: CUST, phone: '+19415550100', exclusive: true } }]);
   });
 
   test('a row already stamped sends nothing again: at most one push per bell row', async () => {
@@ -634,7 +634,7 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.leads = [lead({ customer_id: null, phone: null })];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
     const [[items]] = loadContactBundles.mock.calls;
-    expect(items[0].refs).toEqual({ customerId: null, phone: null });
+    expect(items[0].refs).toEqual({ customerId: null, phone: null, exclusive: true });
     updates().length = 0;
     triggerNotification.mockClear();
     mockState.emails = [{ to_address: 'Pat Sample <pat@example.invalid>', cc_address: '', bcc_address: '', received_at: est('09', '10:05') }];
@@ -715,6 +715,25 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
   });
 
+  test('a phone another open lead holds is left out of the witnesses\' refs, so a text on it reaches neither lead; a phone of its own is passed', async () => {
+    const OTHER_LEAD = '66666666-6666-4666-8666-666666666666';
+    // The lead rows as lead-contact-sync.js openLeadIdentities reads them (`peer`, the SQL phone key).
+    const own = lead({ customer_id: null, peer: '9415550100' });
+    mockState.leads = [own, lead({ id: OTHER_LEAD, customer_id: null, peer: '9415550100', email: 'other@example.invalid' })];
+    // A person's text to that phone after the bell: the witnesses would name both leads by the phone alone.
+    mockBundles.byId = { 'n-1': { textAt: est('09', '10:10') }, 'n-2': { textAt: est('09', '10:10') } };
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    const [[shared]] = loadContactBundles.mock.calls;
+    expect(shared[0].refs).toEqual({ customerId: null, phone: null, exclusive: true });
+    // The phone is this lead's alone: it is passed, and the same text reached the lead.
+    loadContactBundles.mockClear();
+    mockState.leads = [own];
+    mockState.rows = [row('n-2')];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+    const [[alone]] = loadContactBundles.mock.calls;
+    expect(alone[0].refs).toEqual({ customerId: null, phone: '+19415550100', exclusive: true });
+  });
+
   test('a send that names no customer is no proof when another open lead holds the same address', async () => {
     const OTHER_LEAD = '55555555-5555-4555-8555-555555555555';
     mockState.emails = [{ id: 'm-1', gmail_thread_id: 't-1', to_address: 'pat@example.invalid', cc_address: '', bcc_address: '', received_at: est('09', '10:05') }];
@@ -725,6 +744,31 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.leads = [lead({ customer_id: null })];
     mockState.rows = [row('n-2')];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+  });
+
+  test('the quote wizard\'s bell for its own row is the intake bell within 15 minutes of the lead: it looks back to the lead; without the mark, or later, it counts from itself', async () => {
+    // public-quote.js writes straight to notifyAdmin: no triggerKey, the lead in metadata, its own mark.
+    const wizardRow = (id, mark) => row(id, {
+      createdAt: est('09', '10:04'),
+      metadata: { triggerKey: undefined, doneWhen: undefined, payload: undefined, leadId: LEAD, ...(mark ? { createdLead: true } : {}) },
+    });
+    const bellAtOf = async (r, leadRow) => {
+      loadContactBundles.mockClear();
+      mockState.rows = [r];
+      mockState.leads = [leadRow];
+      await run(est('09', '10:25'));
+      return loadContactBundles.mock.calls[0][0][0].bellAt;
+    };
+    // The lead was made at 10:00 (the wizard's property-lookup stage) and the bell came at 10:04: a call or text in
+    // between counts.
+    expect(await bellAtOf(wizardRow('w-1', true), lead({ customer_id: null, created_at: est('09', '10:00') }))).toEqual(est('09', '10:00'));
+    // No mark (a bell written before it existed): a later inquiry, from its own bell.
+    expect(await bellAtOf(wizardRow('w-2', false), lead({ customer_id: null, created_at: est('09', '10:00') }))).toEqual(est('09', '10:04'));
+    // A run on a row made more than 15 minutes before: from its own bell.
+    expect(await bellAtOf(wizardRow('w-3', true), lead({ customer_id: null, created_at: est('09', '09:45') }))).toEqual(est('09', '10:04'));
+    // The trigger's own mark lives in its payload: a top-level mark on a trigger bell is not it.
+    const triggerRow = row('w-4', { createdAt: est('09', '10:04'), metadata: { payload: { leadId: LEAD }, createdLead: true } });
+    expect(await bellAtOf(triggerRow, lead({ customer_id: null, created_at: est('09', '10:00') }))).toEqual(est('09', '10:04'));
   });
 
   test('an email lead looks back to when the message came in, not only to when classification made the lead', async () => {
@@ -892,6 +936,12 @@ describe('the writers mark the bell of a lead they created (payload.createdLead)
     expect(src.match(/createdLead = true;/g)).toHaveLength(1);
     expect(src).toMatch(/\.returning\('\*'\);\s+leadRecord = newLead;\s+createdLead = true;/);
     expect(src).toMatch(/if \(attached\) \{\s+leadRecord = attached;\s+attachedCallLead = true;\s+\}/);
+  });
+
+  test('the quote wizard: its bell marks its own row, never a repeat filed as a duplicate', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    expect(src.match(/notifyAdmin\(\s*'new_lead',/g)).toHaveLength(1);
+    expect(src).toMatch(/notifyAdmin\(\s*'new_lead',[\s\S]{0,4000}?metadata: \{ leadId: lead\.id, \.\.\.\(duplicateOfLeadId \? \{ duplicateOfLeadId \} : \{ createdLead: true \}\) \}/);
   });
 
   test('the call processor: every new-lead bell follows a mint, and says so', () => {

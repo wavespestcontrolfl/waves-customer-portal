@@ -124,6 +124,14 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     await db('notifications').where({ id: written.id }).update({ created_at: at, metadata: JSON.stringify(meta) });
     return db('notifications').where({ id: written.id }).first();
   };
+  // A person's delivered text to a phone, tied to a customer or to none (the shared witnesses' text rule, staff-contact.js).
+  const staffTextTo = (phone, at, customerId = null) => insert('sms_log', {
+    direction: 'outbound', from_phone: '+15555559499', to_phone: phone, customer_id: customerId,
+    message_body: 'Hi, this is Waves about your request.', message_type: 'manual', status: 'delivered',
+    twilio_sid: `SMO${crypto.randomUUID().replace(/-/g, '')}`, metadata: JSON.stringify({ human_authored: true }), created_at: at,
+  });
+  // A lead with no customer on file, on the phone given.
+  const leadOn = (phone) => insert('leads', { phone, first_name: 'Lead', last_name: 'Sample', status: 'new', created_at: mins(-3 * 24 * 60) });
   const pushesFor = (id) => triggerNotification.mock.calls.filter(([key, payload]) => key === 'lead_call_reminder' && payload.alertRowId === id);
   // What each push's dispatch check answered for this bell.
   const dispatchedFor = (id) => mockDispatched.filter((d) => d.id === id).map((d) => d.go);
@@ -248,6 +256,33 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     await sweepAt(mins(40));
     expect(pushesFor(aBell.id)).toHaveLength(0);
   }, 180000);
+
+  test('a person\'s text to a phone two open leads share reaches neither; to a lead\'s own phone it reaches it; tied to the lead\'s own customer it counts on a shared phone', async () => {
+    const sharedPhone = `+1555555${phoneN += 1}`;
+    const ownPhone = `+1555555${phoneN += 1}`;
+    const leadA = await leadOn(sharedPhone);
+    const leadB = await leadOn(sharedPhone);
+    const leadC = await leadOn(ownPhone);
+    const { customer, lead: leadD } = await leadOnFile();
+    await leadOn(customer.phone);
+    const bells = await Promise.all([leadA, leadB, leadC, leadD].map((l) => newLeadBell(l, mins(-18))));
+    await staffTextTo(sharedPhone, mins(-10));
+    await staffTextTo(ownPhone, mins(-10));
+    await staffTextTo(customer.phone, mins(-10), customer.id);
+    await run();
+    expect(bells.map((b) => pushesFor(b.id).length)).toEqual([1, 1, 0, 0]);
+  }, 60000);
+
+  test('a person\'s text tied to another customer is no proof for a lead with no customer on that phone', async () => {
+    const phone = `+1555555${phoneN += 1}`;
+    const other = await insert('customers', {
+      first_name: 'Other', last_name: 'Sample', phone, email: `other${phoneN}-${Date.now()}@example.invalid`, created_at: mins(-3 * 24 * 60),
+    });
+    const bell = await newLeadBell(await leadOn(phone), mins(-18));
+    await staffTextTo(phone, mins(-10), other.id);
+    await run();
+    expect(pushesFor(bell.id)).toHaveLength(1);
+  }, 60000);
 
   // Two sweeps (two app instances, or a slow sweep and the next one) can reach two bells of one lead at once. Each stamp
   // takes the lead's lock in its own transaction and reads the claim under it, so the second waits for the first to

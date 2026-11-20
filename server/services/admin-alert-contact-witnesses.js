@@ -44,6 +44,11 @@
  * Each item is judged only by events AFTER its own anchor: the text, call or
  * email the bell is about (its own time), else the bell's. Callers pass plain
  * references (ids, a phone); this module knows no notification metadata shape.
+ *
+ * A lead that other open leads may share a phone with (refs.exclusive, the new-lead reminder) is matched by the rule
+ * lead-contact-sync.js judgeLeads uses: a text or call tied to a customer counts only when that is the lead's own
+ * customer, never when the lead has none; one tied to no customer counts by the lead's own phone, which the caller
+ * leaves out when another open lead holds it. The customer's file phone is not added for it (exclusiveMatch).
  */
 
 const { phoneIdentityKey } = require('../utils/phone');
@@ -85,6 +90,14 @@ function namesItem(row, item) {
 // sender's text bell is judged on this path, so the subject always has an id.)
 function ownMatch(row, item) {
   return !!item.customerId && !!row.customer_id && String(row.customer_id) === item.customerId;
+}
+
+// A lead among leads that may share its phone (refs.exclusive): a row tied to a customer names it only when that is the
+// lead's own customer, never when the lead has none (a text to customer B on a number a lead with no customer also
+// gave says nothing about that lead); a row tied to no customer names it by the phone the caller passed.
+function exclusiveMatch(row, item) {
+  if (row.customer_id) return !!item.customerId && String(row.customer_id) === item.customerId;
+  return !!row.peer && item.peers.has(row.peer);
 }
 
 // The newest time among the witness rows that name this item.
@@ -166,7 +179,7 @@ function identify(item, lookups) {
   const anchor = found.anchor || item.bellAt;
   const peers = new Set(found.phones.map((p) => phoneIdentityKey(p)).filter(Boolean));
   if (!anchor || (!customerId && !peers.size)) return null;
-  return { item, customerId, peers, anchor, email: found.email || null };
+  return { item, customerId, peers, anchor, email: found.email || null, exclusive: item.refs.exclusive === true };
 }
 
 // How far back a text or call row ties a customer to a phone when judging whether
@@ -446,13 +459,14 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
   const idents = items.map((item) => identify(item, lookups)).filter(Boolean);
   if (!idents.length) return bundles;
 
-  // A known customer's own phone also names them (a text or call that carries no customer id).
+  // A known customer's own phone also names them (a text or call that carries no customer id). Not for an exclusive
+  // item: only the lead's own phone, as the caller passed it, speaks for it.
   const customerIds = unique(idents.map((i) => i.customerId));
   if (customerIds.length) {
     const owners = await conn('customers').whereIn('id', customerIds).whereNull('deleted_at').select('id', 'phone');
     for (const owner of owners) {
       const peer = phoneIdentityKey(owner.phone);
-      if (peer) idents.filter((i) => i.customerId === String(owner.id)).forEach((i) => i.peers.add(peer));
+      if (peer) idents.filter((i) => i.customerId === String(owner.id) && !i.exclusive).forEach((i) => i.peers.add(peer));
     }
   }
   const peers = unique(idents.flatMap((i) => [...i.peers]));
@@ -476,15 +490,16 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
   const staffActed = await staffActionsAfterTexts(conn, smsIdents);
   for (const ident of idents) {
     const { item, customerId } = ident;
-    // A shared phone: this customer's own evidence by customer id only (ownMatch).
+    // A shared phone: this customer's own evidence by customer id only (ownMatch). An exclusive item: exclusiveMatch.
     const own = shared.has(ident);
+    const matches = own ? ownMatch : (ident.exclusive ? exclusiveMatch : namesItem);
     const bundle = {
       anchor: ident.anchor,
       shared: item.kind === 'sms' ? own : null,
       pending: item.kind === 'sms' ? [...ident.peers].some((peer) => pendingPeers.has(peer)) : null,
-      textAt: own ? latestFor(replyRows, ident, ownMatch) : latestFor(textRows, ident),
-      backAt: latestFor(backRows, ident, own ? ownMatch : namesItem),
-      inAt: latestFor(inRows, ident, own ? ownMatch : namesItem),
+      textAt: own ? latestFor(replyRows, ident, ownMatch) : latestFor(textRows, ident, matches),
+      backAt: latestFor(backRows, ident, matches),
+      inAt: latestFor(inRows, ident, matches),
       visitAt: customerId ? asDate(visits.get(customerId)) : null,
       quote: false,
       replyAt: null,

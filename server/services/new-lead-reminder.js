@@ -118,10 +118,9 @@ const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQue
 
 // The rows with a push due now: { row, meta, askedAt, leadId, expiresAt, intakeTrigger }. A row that names no lead (a
 // tracking-line text, or a repeat form from a customer row with no lead row) cannot be judged, so it sends nothing.
-// intakeTrigger: the new-lead trigger wrote this bell (notification-triggers.js new_lead, metadata.triggerKey) for a lead
-// its writer had just created, which the writer marks payload.createdLead (lead-webhook.js, call-recording-processor.js
-// notifyNewCallLead, booking-preferred-time.js). Any other bell is a later inquiry: a form the webhook attached to an
-// open call lead (createdLead false), or a bell written before the mark existed. inquiryOf reads it.
+// intakeTrigger: the bell's writer created its lead and says so (intakeMarked). Any other bell is a later inquiry: a form
+// the webhook attached to an open call lead (createdLead false), or a bell written before the mark existed. inquiryOf
+// reads it.
 // The row was stamped at or after its latest event: that event already had its push. A stamp that does not parse counts
 // as current, so the row is not read as news.
 function stampedSince(meta, askedAt) {
@@ -129,6 +128,13 @@ function stampedSince(meta, askedAt) {
   const at = Date.parse(meta[PUSH_STAMP]);
   return !(at < askedAt.getTime());
 }
+
+// The writer's mark that it created this bell's lead: the new-lead trigger's payload.createdLead (notification-triggers.js
+// new_lead, metadata.triggerKey: lead-webhook.js, call-recording-processor.js notifyNewCallLead,
+// booking-preferred-time.js), or the quote wizard's own metadata.createdLead (public-quote.js writes its bell straight to
+// notifyAdmin, so it has no triggerKey; it marks its own row, never a repeat filed as a duplicate).
+const intakeMarked = (meta) => (meta.triggerKey === 'new_lead' && meta.payload?.createdLead === true)
+  || (!meta.triggerKey && meta.createdLead === true);
 
 function dueItems(rows, now) {
   const { bellEventAt, parseMeta, refsFromRow } = relevance();
@@ -141,7 +147,7 @@ function dueItems(rows, now) {
     if (!leadId || !askedAt || askedAt.getTime() <= floor || stampedSince(meta, askedAt)) continue;
     const { dueAt, expiresAt } = pushWindow(askedAt, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES);
     if (dueAt.getTime() > now.getTime() || expiresAt.getTime() < now.getTime()) continue;
-    items.push({ row, meta, askedAt, leadId, expiresAt, intakeTrigger: meta.triggerKey === 'new_lead' && meta.payload?.createdLead === true });
+    items.push({ row, meta, askedAt, leadId, expiresAt, intakeTrigger: intakeMarked(meta) });
   }
   return items;
 }
@@ -149,6 +155,21 @@ function dueItems(rows, now) {
 const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
 // The lead's own email address as a mailbox address, or '' (the shared parser the Gmail linkage uses).
 const leadEmail = (lead) => require('./email/email-customer-link').extractEmailAddresses(lead.email)[0] || '';
+// The lead's phone as the witnesses and lead-contact-sync.js key it, or null.
+const leadPeer = (lead) => require('../utils/phone').phoneIdentityKey(lead.phone) || null;
+
+// Which of a lead's identities another open lead also holds (lead-contact-sync.js openLeadIdentities, the identity check
+// its own sweep uses): a reply on a phone or to a mailbox two open leads share cannot say which of them it answered, so
+// it is no proof for either. Evidence tied to the lead's own customer still counts. One read for the batch; returns
+// (key, lead) => true when an open lead other than `lead` holds `key` ('phone:<peer>' or 'email:<address>').
+async function identitiesHeldByAnother(items) {
+  const peers = [...new Set(items.map(({ lead }) => leadPeer(lead)).filter(Boolean))];
+  const emails = [...new Set(items.map(({ lead }) => leadEmail(lead)).filter(Boolean))];
+  const owners = peers.length || emails.length
+    ? await require('./lead-contact-sync').openLeadIdentities(db, { peers, emails, customerIds: [] })
+    : new Map();
+  return (key, lead) => [...(owners.get(key) || [])].some((id) => id !== String(lead.id));
+}
 
 // When each email bell's message came in: { emailId -> Date }, one batched read. An email bell written for a follow-up on a
 // lead already on file (email-actions.js) comes after classification and drafting, so staff may have replied before the
@@ -159,17 +180,17 @@ async function emailReceivedAt(items) {
   return new Map(rows.filter((r) => r.received_at).map((r) => [String(r.id).toLowerCase(), new Date(r.received_at)]));
 }
 
-// When the inquiry this bell reports began, and whether it is the lead's intake bell. The intake bell is the one the
-// new-lead trigger writes when it creates a lead (notification-triggers.js, metadata.triggerKey new_lead: the relevance
-// sweep's own definition, its new_lead class; payload.createdLead set by the writer that made the lead), within 15
-// minutes of the lead's creation. It looks back to the lead's
-// first contact (an email lead's first_contact_at is the message's receipt time, before the classification that created
-// the lead), and the call that made the lead counts only for it. Every other bell is a fresh inquiry about a lead already
-// on file, however soon after the lead it came: a repeat form (category lead), a form attached to an open call lead, or a
-// bell written straight to the bell (notifyAdmin('new_lead'): an email follow-up's draft, a duplicate submission). Its
-// evidence counts only from the bell
-// itself, or, for a bell that names an email (`emailAt`, the message's received_at), from the message. The push deadline
-// stays on the bell.
+// When the inquiry this bell reports began, and whether it is the lead's intake bell. The intake bell is the one a writer
+// marks as the bell of a lead it created (intakeMarked: the new-lead trigger's bell, triggerKey new_lead as the relevance
+// sweep's new_lead class reads it, or the quote wizard's own row), within 15 minutes of the lead's creation. It looks
+// back to the lead's first contact (an email lead's first_contact_at is the message's receipt time, before the
+// classification that created the lead), and the call that made the lead counts only for it. A wizard row is the visitor's
+// own run: a second run on it inside those 15 minutes is the same inquiry, and a run on it after them is judged from its
+// own bell. Every other bell is a fresh inquiry about a lead already on file, however soon after the lead it came: a
+// repeat form (category lead), a form attached to an open call lead, or a bell written straight to the bell
+// (notifyAdmin('new_lead'): an email follow-up's draft, a wizard repeat filed as a duplicate). Its evidence counts only
+// from the bell itself, or, for a bell that names an email (`emailAt`, the message's received_at), from the message. The
+// push deadline stays on the bell.
 function inquiryOf({ askedAt, lead, intakeTrigger = false }, emailAt = null) {
   const intake = intakeTrigger && askedAt.getTime() - new Date(lead.created_at).getTime() <= INTAKE_BELL_MS;
   const starts = [askedAt.getTime()];
@@ -204,13 +225,20 @@ async function reachedLeads(items) {
   if (!waiting.length) return [];
   const { loadContactBundles } = require('./admin-alert-contact-witnesses');
   const { reached, estimateHandedOff } = require('./lead-call-reminder').__private;
+  const heldByAnother = await identitiesHeldByAnother(waiting);
   // Kind 'customer', as lead-call-reminder does: it also reads a person's Gmail send to the customer's own address.
+  // Exclusive (admin-alert-contact-witnesses.js exclusiveMatch): a text or call tied to another customer never counts,
+  // and the lead's phone is left out when another open lead holds it, so only its own customer's evidence counts then.
   const bundles = await loadContactBundles(
-    waiting.map((item) => ({ id: item.row.id, kind: 'customer', bellAt: item.anchor, refs: { customerId: item.lead.customer_id || null, phone: item.lead.phone || null } })),
+    waiting.map((item) => {
+      const peer = leadPeer(item.lead);
+      const phone = peer && !heldByAnother(`phone:${peer}`, item.lead) ? item.lead.phone : null;
+      return { id: item.row.id, kind: 'customer', bellAt: item.anchor, refs: { customerId: item.lead.customer_id || null, phone, exclusive: true } };
+    }),
     { conn: db, bookedVisits: (ids) => relevance().bookedVisitsByCustomer(db, ids) },
   );
   const sent = await estimatesSent(waiting);
-  const emailed = await personEmailed(waiting);
+  const emailed = await personEmailed(waiting, heldByAnother);
   const still = [];
   for (const item of waiting) {
     // The witnesses return no bundle for a lead with no customer and no phone of its own (an email-only lead): its text,
@@ -262,16 +290,14 @@ function leadClaim(item) {
 // (Cc and Bcc captured, no customer in its thread, no recipient on a customer's file, so not a mailbox another customer
 // shares). A send linked to another customer says nothing about this lead, and neither does one the linkage cannot
 // settle (Cc or Bcc never captured, a mixed thread, recipients naming two customers): the push still goes. A send that
-// names no customer counts only while no other open lead holds the address (lead-contact-sync.js openLeadIdentities,
-// the same identity check its own sweep uses): two leads sharing one mailbox cannot tell which of them was answered.
-// The read starts at the earliest anchor of these items, so a reply inside an old lead's own window is never cut off.
-// Returns the test for one item.
-async function personEmailed(items) {
+// names no customer counts only while no other open lead holds the address (`heldByAnother`, identitiesHeldByAnother):
+// two leads sharing one mailbox cannot tell which of them was answered. The read starts at the earliest anchor of these
+// items, so a reply inside an old lead's own window is never cut off. Returns the test for one item.
+async function personEmailed(items, heldByAnother) {
   const { personSentFilter, extractEmailAddresses, emailCustomerLink } = require('./email/email-customer-link');
   const addresses = [...new Set(items.map(({ lead }) => leadEmail(lead)).filter(Boolean))];
   if (!addresses.length) return () => false;
   const earliest = new Date(Math.min(...items.map((item) => item.anchor.getTime())));
-  const owners = await require('./lead-contact-sync').openLeadIdentities(db, { peers: [], emails: addresses, customerIds: [] });
   const rows = await db('emails as er').whereRaw(personSentFilter('er'))
     .where('er.received_at', '>', earliest)
     .whereRaw("EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), a.addr) > 0)", [addresses])
@@ -290,7 +316,7 @@ async function personEmailed(items) {
     const address = leadEmail(lead);
     if (!address) return false;
     const own = lead.customer_id ? String(lead.customer_id) : null;
-    const shared = [...(owners.get(`email:${address}`) || [])].some((id) => id !== String(lead.id));
+    const shared = heldByAnother(`email:${address}`, lead);
     return sent.some((m) => m.at > anchor.getTime() && m.to.has(address) && (m.linked ? String(m.linked) === own : m.namesNoCustomer && !shared));
   };
 }

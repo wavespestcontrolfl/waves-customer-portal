@@ -656,10 +656,14 @@ is written minutes after a call a person already answered): a deleted lead, a le
 like are out), or one with an estimate sent or viewed; the call that made the lead answered by a
 person (`answered_by = 'human'`; only for the intake bell: the one the new-lead trigger writes for a lead its writer
 created, `metadata.triggerKey` `new_lead` as the relevance sweep's `new_lead` class defines it, with `payload.createdLead`
-set by that writer (the form webhook, the call processor's `notifyNewCallLead`, the /book preferred-time request), within
-15 minutes of the lead's creation; every other bell, such as a repeat form, a form attached to an open call lead
-(`createdLead` false), an email follow-up's draft or a bell written before the mark existed, is a fresh inquiry); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone after
-the bell's inquiry began, with no look-back before it (the shared contact witnesses, kind `customer`; for the intake bell, the
+set by that writer (the form webhook, the call processor's `notifyNewCallLead`, the /book preferred-time request), or the
+quote wizard's bell for its own row (`public-quote.js` writes it straight to `notifyAdmin`, with `metadata.createdLead`, never
+on a repeat filed as a duplicate), within 15 minutes of the lead's creation; every other bell, such as a repeat form, a form
+attached to an open call lead (`createdLead` false), an email follow-up's draft or a bell written before the mark existed, is
+a fresh inquiry); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone after
+the bell's inquiry began (a text or call tied to another customer never counts, even for a lead with no customer; one tied to
+no customer counts on the lead's own phone only while no other open lead holds that phone, by `lead-contact-sync.js`
+`openLeadIdentities`; the customer's file phone is not added), with no look-back before it (the shared contact witnesses, kind `customer`; for the intake bell, the
 earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
 lead made days ago, the bell itself); a person's email to the lead's own address since that moment (only one the shared email linkage,
 `emailCustomerLink`, ties to the lead's customer, or shows names no customer at all: Cc and Bcc captured, no customer in its
