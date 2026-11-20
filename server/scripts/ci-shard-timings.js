@@ -28,9 +28,12 @@
 const fs = require('fs');
 
 const RESULT = /^(?:PASS|FAIL)\s+(tests\/\S+\.test\.js)(?:\s+\(([\d.]+) s\))?/;
-// A server-unit file Jest does not print ran in under 5 s. Measured 2026-11-20 on
+// A result Jest prints without a time ran in under 5 s. Measured 2026-11-20 on
 // three main runs: (shard wall time x 3 workers - printed file times) / unprinted
-// files = 0.4 s. A DB file without a time gets the median of the measured DB files.
+// files = 0.4 s. That is the time recorded for such a result when no serial gap
+// measures it, and the unit default: a unit file whose median falls to it leaves
+// the map, so a suite that got fast loses its old weight. A DB file the map does
+// not list gets the median of the listed DB files.
 const UNIT_DEFAULT_SECONDS = 0.4;
 const SECTION_BY_JOB = [['server-db', 'db'], ['server-unit', 'unit']];
 
@@ -62,6 +65,7 @@ function timingsFromLog(text) {
     lastResultAt.set(stepKey, at);
     if (printed) found[section].set(file, Number(printed));
     else if (serialSteps.has(stepKey) && previous !== undefined) found[section].set(file, (at - previous) / 1000);
+    else found[section].set(file, UNIT_DEFAULT_SECONDS);
   }
   return found;
 }
@@ -89,7 +93,11 @@ function main(args) {
   const out = {};
   for (const [section, bySection] of Object.entries(samples)) {
     const merged = { ...previous[section]?.files };
-    for (const [file, seconds] of bySection) merged[file] = round(median(seconds));
+    for (const [file, seconds] of bySection) {
+      const value = round(median(seconds));
+      if (section === 'unit' && value <= UNIT_DEFAULT_SECONDS) delete merged[file];
+      else merged[file] = value;
+    }
     const files = Object.fromEntries(Object.keys(merged).sort().map((file) => [file, merged[file]]));
     const measured = Object.values(files);
     const defaultSeconds = section === 'unit' || !measured.length ? UNIT_DEFAULT_SECONDS : round(median(measured));
