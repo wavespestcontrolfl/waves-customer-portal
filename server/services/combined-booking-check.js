@@ -765,7 +765,8 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
   const { etDateString } = require('../utils/datetime-et');
   const todayET = etDateString(now);
   const tomorrowET = addDaysET(todayET, 1);
-  const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0, held: 0 };
+  // rings: the real rings this run made, for the watchdog's shared budget.
+  const result = { candidates: 0, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, closed: 0, held: 0, rings: 0 };
   result.closed += await retireAbandoned(conn);
   // An internal test / demo customer never gets an admin artifact (the
   // notification service suppresses its bells): left out up front.
@@ -860,6 +861,7 @@ async function postInUrgencyOrder(toPost, result, { raise, ringBudget, urgentOnl
     if (rang(row)) rings += 1;
     result.problems += 1;
   }
+  result.rings = rings;
 }
 
 module.exports = {

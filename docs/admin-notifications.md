@@ -346,6 +346,11 @@ customer's message by this rule.
    (`server/services/auto-dispatch/check-down-notice.js`) rings once per outage and is never
    held back by the allowance; it counts toward it. A tool that has stopped moving visits is
    the notice that must reach a person.
+   Exception (owner ruling 2026-11-19, decision page "Same-time visit check", option A): a new
+   same-start pair for tomorrow (`server/services/same-start-visits-check.js`, the schedule
+   watchdog's last class) always rings, even when the run's allowance is spent, and it counts
+   toward it; so does a new pair later today whose start is still ahead. By the next run the
+   pair may be under way. At most one bell per customer.
    Far double bookings (owner audit 2026-10-22, decision D1):
    a visit auto-dispatch leaves in conflict more than 14 days out is a line on one standing
    Activity row (ops digest `auto-dispatch-far-conflicts`, audience fyi), outside the allowance
