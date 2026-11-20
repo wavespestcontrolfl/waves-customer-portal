@@ -1679,13 +1679,31 @@ describe('revertMerge', () => {
     // A merge that cleared the kept customer's own timer because its backfill changed their home (only they had a
     // preferences row) journaled it as kept_customer_timer: the undo that takes that home back puts it back.
     const timerWrites = (state) => state.flagRestores.filter((r) => r.table === 'property_preferences' && 'irrigation_controller_brand' in r.payload);
-    const MERGE_STAMP = new Date('2026-07-30T04:00:00.000Z');
-    const CLEARED_BY_MERGE = { row_id: 'pp-9', before: X2, home_changed_at: MERGE_STAMP.getTime() };
-    const EMPTY_SINCE_MERGE = { ...NO_TIMER, irrigation_home_changed_at: MERGE_STAMP };
+    // The home the cleared timer describes: the kept customer's own address before the merge (OWN_STREET).
+    const CLEARED_BY_MERGE = { row_id: 'pp-9', before: X2, home: { address_line1: '100 Sample St', address_line2: null, city: 'Bradenton', zip: null } };
+    const EMPTY_SINCE_MERGE = { ...NO_TIMER, irrigation_home_changed_at: new Date('2026-07-30T04:00:00.000Z') };
     it('the merge cleared the kept customer\'s own timer: the undo that takes the inherited unit back puts it back on their empty row', async () => {
       const { error, state } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, OWN_STREET, CLEARED_BY_MERGE);
       expect(error).toBeUndefined();
       expect(timerWrites(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-9', customer_id: WINNER }, payload: X2 }]);
+    });
+
+    it('a later merge stamped their row without moving them (undone first, newest first): the timer still goes back', async () => {
+      const { error, state } = await revertWithPrefs(
+        { ...NO_TIMER, irrigation_home_changed_at: new Date('2026-08-20T15:00:00.000Z') },
+        { address_line2: 'Apt 4' },
+        OWN_STREET,
+        CLEARED_BY_MERGE,
+      );
+      expect(error).toBeUndefined();
+      expect(timerWrites(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-9', customer_id: WINNER }, payload: X2 }]);
+    });
+
+    it('a journal entry without the home it describes: nothing is put back, and the undo says so', async () => {
+      const { error, state, result } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, OWN_STREET, { row_id: 'pp-9', before: X2 });
+      expect(error).toBeUndefined();
+      expect(timerWrites(state)).toEqual([]);
+      expect(result.skipped).toContainEqual({ key: 'property_preferences.kept_customer_sprinkler_timer', reason: 'home_changed_since_merge' });
     });
 
     it('a move since (only the street changed, the inherited unit stays): the timer is not put back at the new street, and the undo says so', async () => {
