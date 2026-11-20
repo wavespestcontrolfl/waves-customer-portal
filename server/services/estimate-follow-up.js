@@ -336,7 +336,9 @@ function followupFinalVerdict(est, { stage = null, quotedExpiresAt = null, nowMs
     const quoted = new Date(quotedExpiresAt).getTime();
     if (live === null || Number.isNaN(quoted) || live !== quoted) return "deadline-changed";
   }
-  if (UNOPENED_STAGES.has(stage) && est.viewed_at) return "estimate-viewed";
+  // Either view stamp: the public route records last_viewed_at before a
+  // separate write sets viewed_at, so a check between them still sees the open.
+  if (UNOPENED_STAGES.has(stage) && (est.viewed_at || est.last_viewed_at)) return "estimate-viewed";
   return null;
 }
 

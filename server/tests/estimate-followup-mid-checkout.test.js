@@ -247,6 +247,12 @@ describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
     }
   });
 
+  test('an unopened reminder ends on either view stamp: last_viewed_at alone (viewed_at not yet written) is a view', async () => {
+    const viewedAt = new Date(NOW.getTime() - 10 * 60000);
+    arrangeReplay({ est: { viewed_at: null, last_viewed_at: viewedAt } });
+    await expect(deferredFollowupStillEligible('est-1', { stage: 'unviewed' })).resolves.toEqual({ eligible: false, reason: 'estimate-viewed' });
+  });
+
   test('a row queued before the stage was recorded may be an unopened reminder: a recent view stays a final no', async () => {
     const viewedAt = new Date(NOW.getTime() - 10 * 60000);
     arrangeReplay({ est: { viewed_at: viewedAt, last_viewed_at: viewedAt } });
