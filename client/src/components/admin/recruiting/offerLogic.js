@@ -229,7 +229,8 @@ const ANSWERED = ["accepted", "declined", "date_requested"];
  * was tried went out; otherwise "The offer is open." and one short line per
  * channel. An offer withdrawn or replaced during the send says so, with no Revise.
  */
-export function describeSend(comms, firstName, offerStatus = "sent") {
+// offerStatus: the sent offer's status in the send's answer (offerApi sendOffer requires it).
+export function describeSend(comms, firstName, offerStatus) {
   const channels = [["text", comms?.sms], ["email", comms?.email]].filter(([, c]) => c && wasTried(c));
   const states = channels.map(([label, c]) => [label, channelState(c)]);
   const lines = states.map(([label, st]) => `The ${label} ${STATE_TEXT[st]}.`);

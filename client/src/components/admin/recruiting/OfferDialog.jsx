@@ -172,6 +172,11 @@ function openDraft(data) {
   return [data.draft, data.current].find((o) => o && o.status === "draft") || null;
 }
 
+// Every offer the read holds (the current one, a revision, the history), by id.
+function offerIdsOf(data) {
+  return new Set([data.current, data.draft, ...(data.history || [])].filter(Boolean).map((o) => o.id));
+}
+
 function initialDraftId(draft, data) {
   if (draft) return draft.id;
   return data.current?.status === "draft" ? data.current.id : null;
@@ -369,7 +374,8 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
   // Set when the server refused a write as stale. The form stays read-only, with the owner's
   // edits on screen, until they load the new version or close the form.
   const [conflict, setConflict] = useState(false);
-  // "save" or "send" while the form re-reads after a write whose answer was lost.
+  // While the form re-reads after a write whose answer was lost: { kind: "save" or "send", ids: the offers the read
+  // held when the write began }.
   const [lost, setLost] = useState(null);
   // Set when a write answered that offers are turned off: nothing was written. The form
   // stays read-only until a read works, and that read turns the flow off, which closes it.
@@ -457,11 +463,14 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
   };
 
   // A read after a lost answer decides what happened. The draft as it was: nothing
-  // was written, so the form stays as it is, edits included. Anything else (the
-  // offer went out, or the draft changed): read-only, as after a refused write.
-  const settleLost = (next, kind) => {
+  // was written, so the form stays as it is, edits included. With no draft when the
+  // write began, "as it was" also needs no offer the read did not hold then (`ids`):
+  // a first save that landed and was discarded or sent since shows as a new offer.
+  // Anything else (the offer went out, the draft changed, a new offer): read-only,
+  // as after a refused write.
+  const settleLost = (next, { kind, ids }) => {
     const still = pinned ? reviewedDraft(next, pinned.id) : openDraft(next);
-    const unchanged = pinned ? still?.draftHash === pinned.draftHash : !still;
+    const unchanged = pinned ? still?.draftHash === pinned.draftHash : !still && [...offerIdsOf(next)].every((id) => ids.has(id));
     setLost(null);
     if (unchanged) {
       setError(LOST_ANSWER_TEXT[kind]);
@@ -472,16 +481,18 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
   };
 
   // The answer to a save or send was lost: re-read before the form offers the write
-  // again. If the read fails, Try again only re-reads.
+  // again. If the read fails, Try again only re-reads. `data` is the read the write
+  // began on (this closure's), so its offers are the ones the write could not have made.
   const lostWrite = async (kind) => {
+    const pending = { kind, ids: offerIdsOf(data) };
     setConfirming(false);
     setError(null);
-    setLost(kind);
+    setLost(pending);
     setNeedRead(true);
     const next = await onChanged();
     if (!next) return;
     setNeedRead(false);
-    settleLost(next, kind);
+    settleLost(next, pending);
   };
 
   // Offers were turned off (404 enabled:false): nothing was written. Save and Send stay off,
@@ -559,8 +570,9 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
     setError(null);
     try {
       const out = await sendOffer(applicationId, pinned.id, pinned.draftHash, reviewedOut);
-      // The answer's offer row is read after delivery: it can already be withdrawn or replaced.
-      setResult({ comms: out.comms || {}, offerStatus: out.offer?.status });
+      // The answer's offer row is read after delivery: it can already be withdrawn or replaced. An answer without this
+      // offer and the channels never gets here (sendOffer throws it as a lost answer, and the read decides).
+      setResult({ comms: out.comms, offerStatus: out.offer.status });
       await onSent();
       setConfirming(false);
     } catch (err) {

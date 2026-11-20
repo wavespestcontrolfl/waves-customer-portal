@@ -1795,6 +1795,59 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(saves).toHaveLength(1);
   });
 
+  // An answer the form cannot use is a lost answer, whatever its status: the read decides, and no result is claimed.
+  it('a send answered 200 without its offer is a lost answer: the form re-reads and claims no result', async () => {
+    await openDraftForm({ 'POST /admin/careers/app-1/offer/offer-1/send': () => res(200, {}) });
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText('The send got no answer. The offer still reads as a draft, but it may still go out. If it did, sending again is refused, so it cannot go out twice.')).toBeInTheDocument();
+    expect(screen.queryByText('The offer is open.')).toBeNull();
+    expect(screen.queryByText(/Offer sent to/)).toBeNull();
+  });
+
+  it('a save answered 200 with another draft than the one it named is a lost answer: the form re-reads before Save is offered again', async () => {
+    const saves = [];
+    await openDraftForm({ 'POST /admin/careers/app-1/offer': () => { saves.push(1); return res(200, { offer: offerRecord({ id: 'offer-9', draftHash: 'other' }) }); } });
+    fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText('The save got no answer. The draft still reads as before, but the save may still finish. If it did, saving again is refused and this form shows the newer version.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
+    expect(saves).toHaveLength(1);
+  });
+
+  // A first save (no draft yet) whose answer is lost: the read decides by the offers it holds, not only by an open draft.
+  async function lostFirstSave(offerAfter) {
+    let saved = false;
+    const saves = [];
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer': () => { saves.push(1); saved = true; return res(502, { error: 'Bad gateway' }); } },
+      { offer: () => res(200, saved ? offerAfter : offerPayload()), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Make an offer' }));
+    await screen.findByLabelText('Hourly rate ($)');
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-11' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    return saves;
+  }
+
+  it('a first save whose answer is lost, and whose new draft was discarded before the read, asks for review and offers no second save', async () => {
+    // The save landed, and another admin discarded the draft it made before this form read again.
+    const saves = await lostFirstSave(offerPayload({ current: offerRecord({ status: 'withdrawn', timeline: [] }) }));
+    expect(await screen.findByText('This draft is no longer open. Close this form to see the offer.')).toBeInTheDocument();
+    expect(screen.queryByText(/The save got no answer/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
+    expect(saves).toHaveLength(1);
+  });
+
+  it('a first save whose answer is lost, with no new offer in the read, says so and offers Save again', async () => {
+    const saves = await lostFirstSave(offerPayload());
+    expect(await screen.findByText('The save got no answer. The draft still reads as before, but the save may still finish. If it did, saving again is refused and this form shows the newer version.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeEnabled();
+    expect(saves).toHaveLength(1);
+  });
+
   it('a save answered gate-off closes the form and brings back the status-only Offer move', async () => {
     let off = false;
     await openDraftForm(
