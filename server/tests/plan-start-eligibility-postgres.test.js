@@ -1,10 +1,11 @@
 // planStartBlocker against real PostgreSQL (one rolled-back transaction per test). The unit suite
 // (plan-start-eligibility.test.js) pins the decisions on a fake that applies no filter. This one proves what only
 // a database can: the SQL of each read on the real tables (the saved properties, the estimates, the leads, the
-// visit services with their catalog join, the calendar read, the legacy plan visit, the ongoing series root, the
-// billed plan rate, the plan hold, the two annual prepay reads), that a JSONB estimate payload comes back in a
-// form the estimate rules read, and that the account and property values the rules name are values the schema
-// accepts. No network, no spend. All names and addresses are synthetic.
+// services of the visits and of the service reports with their catalog join, the contracts, the calendar read, the legacy plan
+// visit, the visit with no status, the ongoing series root, the billed plan rate, the plan hold, the two annual
+// prepay reads), that a JSONB estimate payload comes back in a form the estimate rules read, and that the
+// account and property values the rules name are values the schema accepts. No network, no spend. All names
+// and addresses are synthetic.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -121,6 +122,23 @@ postgres('planStartBlocker (live Postgres)', () => {
     return row;
   }
 
+  // A service report of a done one-time job (service_records). It keeps its own service text.
+  async function seedServiceReport(customer, change = {}) {
+    const [row] = await trx('service_records').insert({
+      customer_id: customer.id, service_date: day(-20), service_type: 'One-Time Pest Control', ...change,
+    }).returning('*');
+    return row;
+  }
+
+  // A contract of the account (customer_contracts): by default a home agreement made from a document template.
+  async function seedContract(customer, change = {}) {
+    const [row] = await trx('customer_contracts').insert({
+      customer_id: customer.id, contract_type: 'document_template', title: 'Synthetic agreement',
+      document_template_key: 'service_agreement.termite_program', ...change,
+    }).returning('*');
+    return row;
+  }
+
   // A row of the service catalog (synthetic key and name).
   async function seedCatalogService(change = {}) {
     const [row] = await trx('services').insert({ service_key: `synthetic_${hex(6)}`, name: 'Synthetic Home Service', ...change }).returning('*');
@@ -208,8 +226,25 @@ postgres('planStartBlocker (live Postgres)', () => {
       // The two values the building-use check constraint takes. Only a won commercial proposal writes one.
       ['the building use of a business building', { building_use: 'nonresidential' }],
       ['the building use of a residential community', { building_use: 'residential', property_type: 'single_family' }],
+      // The key only the accept of a commercial pest estimate writes, with either of its two values (JSONB).
+      ['a sold commercial scope with the interior excluded', { service_preferences: JSON.stringify({ exterior_sweep: true, interior_spray: false, commercial_interior_scope: 'excluded' }) }],
+      ['a sold commercial scope with the interior included', { service_preferences: JSON.stringify({ exterior_sweep: true, interior_spray: true, commercial_interior_scope: 'included' }) }],
     ])('%s: commercial', async (_label, change) => {
       expect(await planStartBlocker(trx, (await seedCustomer(change)).id)).toBe('commercial');
+    });
+
+    test('the fixture: an account is saved with the default service preferences, as an object with no sold scope', async () => {
+      const customer = await seedCustomer();
+      expect(customer.service_preferences).toEqual({ exterior_sweep: true, interior_spray: true });
+    });
+
+    test.each([
+      ['a home that declined the inside service', { exterior_sweep: true, interior_spray: false }],
+      ['empty preferences', {}],
+      ['a JSON null', null],
+      ['a list', ['commercial_interior_scope']],
+    ])('service preferences with no sold commercial scope (%s) are not commercial', async (_label, preferences) => {
+      expect(await planStartBlocker(trx, (await seedCustomer({ service_preferences: JSON.stringify(preferences) })).id)).toBeNull();
     });
 
     test.each([
@@ -236,7 +271,7 @@ postgres('planStartBlocker (live Postgres)', () => {
   });
 
   // The customers row mirrors only the TYPE of the primary property, and the mirror can be behind. A property's
-  // occupancy is saved on the property alone. Every active property of the account counts.
+  // occupancy is saved on the property alone. Every saved property of the account counts, also a removed one.
   describe('a saved property of the account', () => {
     const SECOND = { is_primary: false };
 
@@ -267,10 +302,21 @@ postgres('planStartBlocker (live Postgres)', () => {
       })).toBeNull();
     });
 
-    test('a commercial property that was removed from the account (not active) says nothing', async () => {
+    // One mark is enough, whatever its age: the removal of a business address does not make the account a home.
+    test.each([
+      ['the commercial occupancy', { occupancy_type: 'commercial' }],
+      ['a commercial type', { property_type: 'commercial' }],
+    ])('a property with %s that was removed from the account (not active), beside a home: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedProperty(customer);
-        await seedProperty(customer, { ...SECOND, active: false, occupancy_type: 'commercial', property_type: 'commercial' });
+        await seedProperty(customer, { ...SECOND, active: false, ...change });
+      })).toBe('commercial');
+    });
+
+    test('a home that was removed from the account is not commercial', async () => {
+      expect(await blockerFor(async (customer) => {
+        await seedProperty(customer);
+        await seedProperty(customer, { ...SECOND, active: false, occupancy_type: 'rental_investment', property_type: 'condo' });
       })).toBeNull();
     });
 
@@ -315,6 +361,16 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a commercial service row the accept routes know by its key', { estimate_data: { result: { recurring: { services: [{ serviceKey: 'commercial_lawn_monthly' }] } } } }],
       ["the form's toggle as text", { estimate_data: { inputs: { isCommercial: 'YES' } } }],
       ["the engine's flag", { estimate_data: { engine: { intent: { is_commercial: true } } } }],
+      // Under the default category, with one mark only.
+      ['an office in the form inputs', { estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Office' } } }],
+      ['a commercial risk type in the engine request', { estimate_data: { engineRequest: { profile: { commercialRiskType: 'food' } } } }],
+      ["a commercial risk type in the engine's intent", { estimate_data: { engine: { intent: { commercial_risk_type: 'office_low' } } } }],
+      ["a commercial subtype in the engine's intent", { estimate_data: { engine: { intent: { commercial_subtype: 'restaurant' } } } }],
+      ['a commercial service pick in the engine inputs', { estimate_data: { engineInputs: { services: { commercialPest: { selected: true } } } } }],
+      ['a service line whose label says commercial', { estimate_data: { result: { recurring: { services: [{ service: 'pest_control', label: 'Commercial Pest Control' }] } } } }],
+      ["the commercial tier in the estimate's own tier column", { waveguard_tier: 'Commercial' }],
+      ['a service line that carries its commercial key under `key`', { estimate_data: { result: { recurring: { services: [{ key: 'commercial_pest', name: 'Monthly Service' }] } } } }],
+      ['a commercial service key in a list of picked keys', { estimate_data: { selectedServiceKeys: ['pest_quarterly', 'commercial_pest'] } }],
     ])('%s, beside a home estimate, on an account whose own row says nothing: commercial', async (_label, change) => {
       const customer = await seedCustomer();
       await seedEstimate(customer);
@@ -338,6 +394,22 @@ postgres('planStartBlocker (live Postgres)', () => {
         await seedEstimate(customer, { status: 'accepted', accepted_at: new Date() });
         await seedEstimate(customer, { estimate_data: null });
       })).toBeNull();
+    });
+
+    // A condo is a home. This is the estimate of a condo as the estimator saves one: a home tier, the empty
+    // commercial fields and the pricing mode that every home estimate carries.
+    test('the estimate of a condo is not commercial', async () => {
+      expect(await blockerFor((customer) => seedEstimate(customer, {
+        waveguard_tier: 'Bronze',
+        estimate_data: {
+          inputs: { isCommercial: 'NO', propertyType: 'Condo', commercialSubtype: '', commercialRiskType: '', commercialPricingMode: 'manual_quote' },
+          engineRequest: { profile: { isCommercial: false, propertyType: 'condo_ground', commercialSubtype: null, commercialRiskType: null }, options: { commercialPricingMode: 'manual_quote' } },
+          engine: { intent: { is_commercial: false, commercial_subtype: null, commercial_risk_type: null, category: 'RESIDENTIAL' } },
+          result: { recurring: { services: [{ service: 'pest_control', serviceKey: 'pest_quarterly', name: 'Quarterly Pest Control' }] } },
+          // A service pick that was not taken, and the prefix inside a text.
+          commercial_lawn: { selected: false }, notes: 'Asked about commercial_pest for a friend.', selectedServiceKeys: ['pest_quarterly'],
+        },
+      }))).toBeNull();
     });
 
     test("another customer's commercial estimate, and one with no customer on it, say nothing about this customer", async () => {
@@ -398,42 +470,123 @@ postgres('planStartBlocker (live Postgres)', () => {
     });
   });
 
-  // The rule the calendar and tier readers apply to a visit joined to its catalog row: the visit's own service
-  // text, the catalog key, the catalog name.
+  // The rule the calendar and tier readers apply to a row joined to its catalog row: the row's own service text,
+  // the catalog key, the catalog name. The proof asks it of every visit and of every service report.
   describe('a visit of the account', () => {
     test.each([
       ['a done visit', { status: 'completed' }],
       ['a cancelled visit', { status: 'cancelled' }],
       ['a visit still to come', { status: 'confirmed', scheduled_date: day(10) }],
+      ['a visit with no status', { status: null }],
     ])('a commercial service in the text of %s, beside a home visit: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedVisit(customer);
         await seedVisit(customer, { service_type: 'Commercial Pest Control', ...change });
       })).toBe('commercial');
     });
+  });
 
+  // A visit keeps the catalog key it was booked under, also with no link to the catalog.
+  describe("a visit's saved catalog key (service_key_snapshot)", () => {
+    test('a commercial saved key behind a generic text and no catalog link, beside a home visit: commercial', async () => {
+      expect(await blockerFor(async (customer) => {
+        await seedVisit(customer, { service_key_snapshot: 'pest_quarterly' });
+        const visit = await seedVisit(customer, { service_type: 'Pest Control', service_key_snapshot: 'commercial_pest', status: 'cancelled' });
+        expect(visit.service_id).toBeNull();
+      })).toBe('commercial');
+    });
+
+    test('home saved keys only are not commercial', async () => {
+      expect(await blockerFor(async (customer) => {
+        await seedVisit(customer, { service_type: 'Pest Control', service_key_snapshot: 'pest_quarterly' });
+        await seedVisit(customer, { service_type: 'Lawn Care', service_key_snapshot: 'lawn_care_monthly' });
+      })).toBeNull();
+    });
+
+    test("another customer's commercial saved key says nothing about this customer", async () => {
+      const customer = await seedCustomer();
+      const other = await seedCustomer();
+      await seedVisit(customer, { service_key_snapshot: 'pest_quarterly' });
+      await seedVisit(other, { service_type: 'Pest Control', service_key_snapshot: 'commercial_pest' });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+      expect(await planStartBlocker(trx, other.id)).toBe('commercial');
+    });
+  });
+
+  // The app knows the commercial agreement by its template key.
+  describe('a contract of the account', () => {
+    const { TEMPLATE_KEY } = require('../services/commercial-proposal-agreement');
+
+    // Every status the app gives a contract: the draft, sent, viewed, signed, cancelled.
+    test.each([['draft'], ['sent'], ['viewed'], ['signed'], ['cancelled']])(
+      'a contract from the commercial agreement template with the status %s, beside a home contract: commercial', async (status) => {
+        expect(await blockerFor(async (customer) => {
+          await seedContract(customer);
+          await seedContract(customer, { document_template_key: TEMPLATE_KEY, status });
+        })).toBe('commercial');
+      });
+
+    test('home contracts only (a termite agreement, an autopay form with no template) are not commercial', async () => {
+      expect(await blockerFor(async (customer) => {
+        await seedContract(customer, { status: 'signed' });
+        await seedContract(customer, { contract_type: 'autopay_authorization', document_template_key: null });
+      })).toBeNull();
+    });
+
+    test("another customer's commercial contract says nothing about this customer", async () => {
+      const customer = await seedCustomer();
+      const other = await seedCustomer();
+      await seedContract(customer);
+      await seedContract(other, { document_template_key: TEMPLATE_KEY, status: 'signed' });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+      expect(await planStartBlocker(trx, other.id)).toBe('commercial');
+    });
+  });
+
+  describe('a service report of the account', () => {
+    // Every status the column's check constraint takes.
+    test.each([['scheduled'], ['in_progress'], ['completed'], ['cancelled'], ['incomplete']])(
+      'a commercial service in the text of a report with the status %s, beside a home report: commercial', async (status) => {
+        expect(await blockerFor(async (customer) => {
+          await seedServiceReport(customer);
+          await seedServiceReport(customer, { service_type: 'Commercial Pest Control', status });
+        })).toBe('commercial');
+      });
+
+    test('a report with no visit behind it, on an account with no visit at all: commercial', async () => {
+      const customer = await seedCustomer();
+      const report = await seedServiceReport(customer, { service_type: 'Commercial Pest Control' });
+      expect(report.scheduled_service_id).toBeNull();
+      expect(await planStartBlocker(trx, customer.id)).toBe('commercial');
+    });
+  });
+
+  describe.each([
+    ['a visit', (customer, change) => seedVisit(customer, change)],
+    ['a service report', (customer, change) => seedServiceReport(customer, change)],
+  ])('the service of %s', (_kind, seedRecord) => {
     test.each([
       ['key', { service_key: `commercial_synthetic_${hex(6)}` }],
       ['name', { name: 'Synthetic Commercial Service' }],
     ])('a commercial catalog %s behind a generic service text: commercial', async (_label, catalog) => {
       const service = await seedCatalogService(catalog);
-      expect(await blockerFor((customer) => seedVisit(customer, { service_type: 'Pest Control', service_id: service.id }))).toBe('commercial');
+      expect(await blockerFor((customer) => seedRecord(customer, { service_type: 'Pest Control', service_id: service.id }))).toBe('commercial');
     });
 
-    test('home visits only, one of them linked to a home catalog service, are not commercial', async () => {
+    test('home services only, one of them linked to a home catalog service, are not commercial', async () => {
       const service = await seedCatalogService();
       expect(await blockerFor(async (customer) => {
-        await seedVisit(customer);
-        await seedVisit(customer, { service_type: 'Pest Control', service_id: service.id });
-        await seedVisit(customer, { status: 'cancelled', service_type: 'One-Time Roach Treatment' });
+        await seedRecord(customer);
+        await seedRecord(customer, { service_type: 'Pest Control', service_id: service.id });
+        await seedRecord(customer, { status: 'cancelled', service_type: 'One-Time Roach Treatment' });
       })).toBeNull();
     });
 
-    test("another customer's commercial visit says nothing about this customer", async () => {
+    test("another customer's commercial service says nothing about this customer", async () => {
       const customer = await seedCustomer();
       const other = await seedCustomer();
-      await seedVisit(customer);
-      await seedVisit(other, { service_type: 'Commercial Pest Control' });
+      await seedRecord(customer);
+      await seedRecord(other, { service_type: 'Commercial Pest Control' });
       expect(await planStartBlocker(trx, customer.id)).toBeNull();
       expect(await planStartBlocker(trx, other.id)).toBe('commercial');
     });
@@ -461,6 +614,41 @@ postgres('planStartBlocker (live Postgres)', () => {
     });
   });
 
+  // The status column takes a NULL (its default is 'pending'). The calendar read drops the visits that are over
+  // with NOT IN, and in SQL a NULL fails NOT IN: that read never returns a visit with no status. So the proof
+  // reads this shape itself, and the row rule reads no status as open.
+  describe('a visit that carries the recurring flag and no status', () => {
+    test('the fixture: a visit can be saved with no status', async () => {
+      const visit = await seedFlaggedVisit(await seedCustomer(), { status: null });
+      expect(visit.status).toBeNull();
+    });
+
+    test.each([
+      ['dated after today', {}],
+      ['dated today', { scheduled_date: day(0) }],
+    ])('%s: has_plan', async (_label, change) => {
+      expect(await blockerFor((customer) => seedFlaggedVisit(customer, { status: null, ...change }))).toBe('has_plan');
+    });
+
+    test.each([
+      ['dated before today', { scheduled_date: day(-1) }],
+      ['a free re-service callback', { is_callback: true }],
+      ['an included follow-up', { followup_included: true }],
+      ['booked from a one-time source', { source: 'estimate-accept' }],
+    ])('%s is not a live plan visit', async (_label, change) => {
+      expect(await blockerFor((customer) => seedFlaggedVisit(customer, { status: null, ...change }))).toBeNull();
+    });
+
+    test('a one-time visit with no status, still to come, is not a plan visit', async () => {
+      expect(await blockerFor((customer) => seedVisit(customer, { status: null, scheduled_date: day(10) }))).toBeNull();
+    });
+
+    test("another customer's visit with no status does not count", async () => {
+      await seedFlaggedVisit(await seedCustomer(), { status: null });
+      expect(await planStartBlocker(trx, (await seedCustomer()).id)).toBeNull();
+    });
+  });
+
   describe('a legacy plan visit (no recurring flag, a recurring parent)', () => {
     test('the fixture alone is not a plan: a completed root with a cancelled child', async () => {
       expect(await blockerFor((customer) => seedLegacyVisit(customer, { status: 'cancelled' }))).toBeNull();
@@ -470,6 +658,8 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['dated after today', {}],
       ['dated today', { scheduled_date: day(0) }],
       ['still pending', { status: 'pending' }],
+      // A NULL status: a status filter with NOT IN would lose this visit.
+      ['saved with no status', { status: null }],
       ['in progress now, with a date before today', { status: 'on_site', scheduled_date: day(-1) }],
       ['on the way now, with a date before today', { status: 'en_route', scheduled_date: day(-1) }],
     ])('%s: has_plan', async (_label, change) => {
