@@ -31354,6 +31354,10 @@ async function composeEstimateDataPayload(estimate, {
     // monthly tier row's visit count, and the resolved customer's lane via
     // estimateSetupFeePromiseLaneOk). The accept recomputes it inside its
     // transaction and refuses (409 SETUP_FEE_TERMS_REFRESH) on any difference.
+    // A customer's own plan quote that staff changed (the one-time option or invoice billing on): the accept and both
+    // card steps refuse it, so the page shows its refused-quote banner and offers no booking from the start (codex
+    // pre-push P1). The accept still refuses a change made after the page loaded.
+    const staffChangedQuoteForData = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate);
     const setupFeePromiseForData = require('../config/feature-gates').pafSetupFeeLive()
       && RecurringCards.payAfterFirstVisitSetupFeeRail(recurringCardPolicyForData)
       && monthlyTierVisitCountsResolvable(pricingBundle?.frequencies)
@@ -32130,6 +32134,9 @@ async function composeEstimateDataPayload(estimate, {
         // offering controls that can only fail. Present only on restart rows
         // so every other response stays byte-identical.
         ...(String(estimate.source || '') === 'plan_restart' ? { planRestart: true } : {}),
+        // Present only on a plan quote staff changed (staffChangedQuoteForData above): the accept's code and words.
+        ...(staffChangedQuoteForData
+          ? { quoteRefusal: { code: staffChangedQuoteForData.code, error: staffChangedQuoteForData.message } } : {}),
         // What the customer booked (set at accept). Null for legacy accepts +
         // any non-accepted estimate; the accepted recap falls back to the
         // derived mode/frequency when null.

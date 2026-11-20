@@ -6070,6 +6070,9 @@ export function ServiceSection({
 // this set — those render the picker for the customer to (re)pick a slot,
 // and every path back to them clears the reservation first.
 const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']);
+// The two codes a refused plan quote answers with, from the accept and from both card steps: the page keeps the
+// server's message in its stale-quote banner and links back to the portal (docs/public-route-contracts.md).
+const STALE_QUOTE_CODES = new Set(['RESTART_STATE_CHANGED', 'PLAN_START_STATE_CHANGED']);
 
 // Remount the estimate view whenever the bearer :token changes, so NO state
 // survives an A→B navigation: reservation, the live Stripe deposit / card-hold
@@ -6456,8 +6459,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The server's reason when it refused the customer's own plan quote as
   // changed (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED). No time on
   // this page can accept that quote, so its banner stays up and links back
-  // to the portal for a fresh quote; null = no such refusal.
-  const [staleQuoteNote, setStaleQuoteNote] = useState(null);
+  // to the portal for a fresh quote; null = no such refusal. /data marks a
+  // quote staff changed before this load (estimate.quoteRefusal), so that
+  // banner is up from the start (codex pre-push P1).
+  const [staleQuoteReply, setStaleQuoteNote] = useState(null);
+  const staleQuoteNote = staleQuoteReply || data?.estimate?.quoteRefusal?.error || null;
   // Recovery releases the hold and re-reads the contract. Until BOTH land,
   // `data.estimate.acceptance` still describes the dead hold, so leaving the
   // payment buttons live let a customer re-adopt the very hold being deleted
@@ -7230,6 +7236,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         recoveryInFlightRef.current = false;
       });
   }, [loadEstimate, releaseHeldReservation]);
+  // A refused plan quote (STALE_QUOTE_CODES), from the accept or a card step: keep the server's message in the
+  // stale-quote banner, release the hold and re-read the estimate. True when it took the answer. A ref, like
+  // enterContactReviewRef, so every handler and effect reads the live callback.
+  const refuseStaleQuoteRef = useRef(null);
+  refuseStaleQuoteRef.current = (status, body) => {
+    if (status !== 409 || !STALE_QUOTE_CODES.has(body?.code)) return false;
+    setStaleQuoteNote(body.error || 'This quote changed since it was created — please go back to your portal for a current quote.');
+    recoverFromDeadHold('configure');
+    return true;
+  };
 
   // A RELOADED page must start the clock immediately (codex r9 P1). The
   // adopted hold used to be hydrated only inside handlePaymentChoice, so a
@@ -8445,17 +8461,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // call-the-office message instead of a slot-picker retry loop.
             throw new Error(body.error || 'We couldn\'t confirm this plan\'s pricing online — please call the office and we\'ll finish it for you.');
           }
-          if (body.code === 'RESTART_STATE_CHANGED' || body.code === 'PLAN_START_STATE_CHANGED') {
-            // The customer's own plan quote no longer fits the account, or
-            // staff changed it (docs/public-route-contracts.md). No new time
-            // or reload can accept it, so the slot-conflict recovery below
-            // offered "Refresh times" on a dead quote (codex pre-push P1).
-            // Release the hold like the no-booking refusals do, and keep a
-            // banner that links back to the portal for a fresh quote.
-            setStaleQuoteNote(body.error || 'This quote changed since it was created — please go back to your portal for a current quote.');
-            recoverFromDeadHold('configure');
-            return;
-          }
+          // The customer's own plan quote no longer fits the account, or
+          // staff changed it (docs/public-route-contracts.md). No new time
+          // or reload can accept it, so the slot-conflict recovery below
+          // offered "Refresh times" on a dead quote (codex pre-push P1).
+          // The shared answer releases the hold like the no-booking
+          // refusals do, and keeps a banner that links back to the portal.
+          if (refuseStaleQuoteRef.current(r.status, body)) return;
           if (/estimate is no longer active/i.test(body.error || '')) {
             setCtaPhase('configure');
             setReservation(null);
@@ -8598,6 +8610,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
           throw new Error(await enterContactReviewRef.current(body));
         }
+        // A refused plan quote takes no card: its banner sends the customer back to the portal.
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         if (r.status === 409 && body.exemptReason) {
           // Policy says no hold owed — fall through to accept. 'saved_method'
           // means the hold still stands (a saved card backs it); any other
@@ -8702,6 +8716,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
           throw new Error(await enterContactReviewRef.current(body));
         }
+        // A refused plan quote takes no card: its banner sends the customer back to the portal.
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         if (r.status === 409 && body.exemptReason) {
           // Policy says no card owed — fall through to the deposit/accept.
           // Only saved_method_consented / autopay_already_active keep the
@@ -8938,6 +8954,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         await enterContactReviewRef.current(body);
         return false;
       }
+      if (refuseStaleQuoteRef.current(r.status, body)) return false;
       if (!r.ok || !body?.clientSecret) return false;
       if (recurringCardIntentOpenRef.current) {
         setRecurringCardIntent(body);
@@ -9052,6 +9069,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           await enterContactReviewRef.current(body);
           return;
         }
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         // Staleness re-check at RESOLVE time (r3 P2): a confirm tapped before
         // this pre-mint resolved fell back to the modal path with its own
         // intent — accepting this late response would render the inline

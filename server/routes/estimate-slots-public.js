@@ -333,6 +333,22 @@ async function refuseParkedRecurringIntent(res, estimate, parkState, replaceSetu
   }
   return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
 }
+// A customer's own plan quote that staff changed (the one-time option or invoice billing on) takes no card: its accept
+// refuses it (estimate-public.js, staffChangedQuoteRefusal), so both card-intent routes answer that same 409 after the
+// park decision and before any policy answer or Stripe work, and the page shows its refused-quote banner (codex pre-push
+// P1). A replace request's named capture is retired first, as the park does (503 when Stripe cannot confirm).
+async function refuseStaffChangedQuoteIntent(res, estimate, replaceSetupIntentId = '') {
+  const refusal = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate);
+  if (!refusal) return null;
+  if (replaceSetupIntentId) {
+    try {
+      await retireOrDenyDroppedCapture(estimate, replaceSetupIntentId);
+    } catch (retireErr) {
+      return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+    }
+  }
+  return res.status(409).json({ error: refusal.message, code: refusal.code });
+}
 async function sendRecheckedIntentResponse(res, estimate, status, body, { retireSetupIntentId = null, requestedServiceMode } = {}) {
   const blocked = await postMintRefusal(estimate, { requestedServiceMode });
   if (blocked) {
@@ -920,6 +936,8 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       const parkState = await contactReviewState(estimate, { estData, quoteRequirement });
       if (parkState) return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
     }
+    const changedHoldQuote = await refuseStaffChangedQuoteIntent(res, estimate);
+    if (changedHoldQuote) return changedHoldQuote;
 
     // The hold only applies to a one-time booking — mirror accept's one-time
     // availability gate before minting the intent so a one_time request on an
@@ -1049,6 +1067,8 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     // B18 park: no card is captured for an estimate whose phone belongs to another customer (see card-hold-intent).
     const recurringParkState = await contactReviewState(estimate, { estData, quoteRequirement });
     if (recurringParkState) return refuseParkedRecurringIntent(res, estimate, recurringParkState, replaceSetupIntentId);
+    const changedRecurringQuote = await refuseStaffChangedQuoteIntent(res, estimate, replaceSetupIntentId);
+    if (changedRecurringQuote) return changedRecurringQuote;
 
     // The Auto Pay card only applies to the recurring lane — a one-time
     // request keeps its own card-hold intent endpoint.

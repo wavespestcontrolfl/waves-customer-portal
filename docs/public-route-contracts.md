@@ -2149,7 +2149,15 @@ message and links back to the portal, never "Refresh times". It turns off its on
 payment choices for that quote. Only the React page has that banner, so an accept-active
 `plan_start` or `plan_restart` estimate always gets the React view: the `/estimate/` mount skips the
 legacy renderer and the GrowthBook holdback, and the `/api/estimates` mount redirects to
-`/estimate/:token`. A re-check that cannot read its state, or that finds the
+`/estimate/:token`. `GET /:token/data` marks a row that already has an option on before any tap:
+`estimate.quoteRefusal: { code, error }`, the accept's code and words, present only on such a plan
+quote, so the page shows the banner and offers no booking from the first load. `POST
+/:token/card-hold-intent` and `/recurring-card-intent` answer the same 409 after the park decision and
+before any policy answer or Stripe call, and mint nothing; a recurring replace request's named
+capture is retired first (the existing 503 when Stripe cannot confirm). The page answers that 409 from
+every card step (the modal mint, the replace-method call and the inline pre-mint) with the same
+banner. The office's stuck-booking alert treats both codes as routine, since the banner walks the
+customer back to the portal. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never
 waits on it while it holds the comms key), answers 409
 `{ error, code: 'PLAN_START_RECHECK_RETRY' }` with a retry line and writes nothing; the estimate page

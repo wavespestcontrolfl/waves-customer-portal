@@ -518,6 +518,85 @@ describe('area add-ons reserve only in one-time mode (GATE_AREA_ADDONS on)', () 
 // Codex round 11 P1 on #6135: /recurring-card-intent checked the park and the quote gates but not the add-on rule, so an
 // add-on estimate with a linked appointment (checkout bypasses /reserve) minted a SetupIntent and saved the customer's card,
 // and only then did the accept refuse. The same refusal now comes first, before any Stripe work.
+// A customer's own plan quote that staff changed (the one-time option or invoice billing on): its accept refuses it
+// (estimate-public.js), so neither card step asks for a card. Both answer the accept's own 409, and the page shows its
+// refused-quote banner (codex pre-push P1).
+describe('a plan quote that staff changed takes no card (codex pre-push P1)', () => {
+  const { staffChangedQuoteRefusal } = require('../services/cancellation-resolution/restart');
+  const planQuote = (overrides = {}) => ({
+    id: 'est-plan-q', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, monthly_total: 88, customer_id: 'cust-1',
+    source: 'plan_start', show_one_time_option: false, bill_by_invoice: false,
+    estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 } } }),
+    ...overrides,
+  });
+  const post = (leg, body = {}) => fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const expected = (row) => {
+    const refusal = staffChangedQuoteRefusal(row);
+    return { error: refusal.message, code: refusal.code };
+  };
+  let spies = [];
+  beforeEach(() => {
+    const recurring = require('../services/recurring-card-on-file');
+    spies = [
+      jest.spyOn(recurring, 'createRecurringCardSetupIntentForEstimate').mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'seti_new' }),
+      jest.spyOn(recurring, 'replaceRecurringCardIntent').mockResolvedValue({ ok: true, intent: { clientSecret: 'cs', setupIntentId: 'seti_new' } }),
+    ];
+    require('../routes/estimate-public').retireOrDenyDroppedCapture.mockClear();
+    require('../services/estimate-card-holds').createCardHoldSetupIntentForEstimate.mockClear();
+  });
+  afterEach(() => spies.forEach((spy) => spy.mockRestore()));
+  const minted = () => [
+    require('../services/recurring-card-on-file').createRecurringCardSetupIntentForEstimate,
+    require('../services/recurring-card-on-file').replaceRecurringCardIntent,
+    require('../services/estimate-card-holds').createCardHoldSetupIntentForEstimate,
+  ];
+
+  test.each([
+    ['plan_start', 'bill_by_invoice'], ['plan_start', 'show_one_time_option'],
+    ['plan_restart', 'bill_by_invoice'], ['plan_restart', 'show_one_time_option'],
+  ])('a %s quote with %s on: both card steps answer the accept\'s 409 and mint nothing', async (source, column) => {
+    currentEstimate = planQuote({ source, [column]: true });
+    for (const [leg, body] of [['card-hold-intent', { serviceMode: 'one_time' }], ['recurring-card-intent', {}]]) {
+      const res = await post(leg, body);
+      expect([leg, res.status]).toEqual([leg, 409]);
+      expect(await res.json()).toEqual(expected(currentEstimate));
+    }
+    for (const fn of minted()) expect(fn).not.toHaveBeenCalled();
+    expect(require('../routes/estimate-public').retireOrDenyDroppedCapture).not.toHaveBeenCalled();
+  });
+
+  test('a replace request retires the capture it names first: the page drops it on this answer', async () => {
+    currentEstimate = planQuote({ bill_by_invoice: true });
+    const res = await post('recurring-card-intent', { replaceSetupIntentId: ' seti_old ' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expected(currentEstimate));
+    expect(require('../routes/estimate-public').retireOrDenyDroppedCapture).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-plan-q' }), 'seti_old');
+    for (const fn of minted()) expect(fn).not.toHaveBeenCalled();
+  });
+
+  test('a plan quote with both options off, and a staff estimate with one on, are not refused by the rule', async () => {
+    for (const row of [planQuote(), planQuote({ source: 'admin', bill_by_invoice: true })]) {
+      currentEstimate = row;
+      const res = await post('recurring-card-intent', {});
+      const body = await res.json();
+      expect(['PLAN_START_STATE_CHANGED', 'RESTART_STATE_CHANGED']).not.toContain(body.code);
+    }
+  });
+
+  test('order: after the park decision, before every policy answer and any Stripe work (both routes)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+    const routes = [
+      src.slice(src.indexOf("router.post('/:token/card-hold-intent'"), src.indexOf("router.post('/:token/recurring-card-intent'")),
+      src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'")),
+    ];
+    for (const route of routes) {
+      const at = route.indexOf('await refuseStaffChangedQuoteIntent(res, estimate');
+      expect(at).toBeGreaterThan(route.indexOf('contactReviewState(estimate, { estData, quoteRequirement })'));
+      expect(at).toBeLessThan(route.indexOf('sendRecheckedIntentResponse('));
+    }
+  });
+});
+
 describe('area add-ons: a recurring-mode card intent mints nothing (GATE_AREA_ADDONS on)', () => {
   const ADDON_ROW = { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', name: 'Web Sweep', price: 89 };
   const WITH_RECURRING = {

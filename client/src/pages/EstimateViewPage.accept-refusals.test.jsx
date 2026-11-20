@@ -47,18 +47,42 @@ describe('a refused plan quote (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED
   // The customer's own plan quote no longer fits the account, or staff changed
   // it. The generic recovery offered "Refresh times" on that same dead quote
   // (codex pre-push P1 on the staff-toggle fix).
-  const branchAt = () => pageSource.indexOf("if (body.code === 'RESTART_STATE_CHANGED' || body.code === 'PLAN_START_STATE_CHANGED') {");
+  const ANSWER = 'refuseStaleQuoteRef.current(r.status, body)';
+  // The shared answer: both codes, a 409 only, the server's words kept, the hold released.
+  const answerSource = () => {
+    const at = pageSource.indexOf('refuseStaleQuoteRef.current = (status, body) => {');
+    return pageSource.slice(at, pageSource.indexOf('\n  };', at));
+  };
 
-  it('takes its own branch in the accept handler, ahead of the slot split', () => {
-    const at = branchAt();
-    expect(at).toBeGreaterThan(-1);
+  it('has one shared answer: both codes, the server\'s words in the banner, the hold released', () => {
+    expect(pageSource).toContain("const STALE_QUOTE_CODES = new Set(['RESTART_STATE_CHANGED', 'PLAN_START_STATE_CHANGED']);");
+    const answer = answerSource();
+    expect(answer).toContain('if (status !== 409 || !STALE_QUOTE_CODES.has(body?.code)) return false;');
+    expect(answer).toContain('setStaleQuoteNote(body.error');
+    expect(answer).toContain("recoverFromDeadHold('configure');");
+  });
+
+  it('takes the shared answer in the accept handler, ahead of the slot split', () => {
     const slotSplit = pageSource.indexOf("const slotGone = body.code === 'SLOT_UNAVAILABLE'");
-    expect(at).toBeLessThan(slotSplit);
+    const at = pageSource.lastIndexOf(`if (${ANSWER}) return;`, slotSplit);
+    expect(at).toBeGreaterThan(-1);
     // The same handler: no other callback starts between the branch and the split.
     expect(pageSource.slice(at, slotSplit)).not.toContain('useCallback(');
-    const branch = pageSource.slice(at, pageSource.indexOf('return;', at));
-    expect(branch).toContain('setStaleQuoteNote(body.error');
-    expect(branch).toContain("recoverFromDeadHold('configure');");
+  });
+
+  it('takes the same answer from every card step (codex pre-push P1): no card is asked for on a refused quote', () => {
+    // Each card-intent request is answered before anything else reads its body as a card to capture.
+    const requests = [...pageSource.matchAll(/fetch\(`\$\{API_BASE\}\/public\/estimates\/\$\{token\}\/(card-hold-intent|recurring-card-intent)`/g)];
+    expect(requests).toHaveLength(4);
+    for (const request of requests) {
+      const next = pageSource.slice(request.index, request.index + 900);
+      expect([request[1], next.includes(ANSWER)]).toEqual([request[1], true]);
+    }
+    expect(pageSource.split(ANSWER).length - 1).toBe(5);
+  });
+
+  it('shows the banner from the first load when /data marks the quote (codex pre-push P1)', () => {
+    expect(pageSource).toContain('const staleQuoteNote = staleQuoteReply || data?.estimate?.quoteRefusal?.error || null;');
   });
 
   it('locks booking and payment while its banner is up (codex pre-push P1)', () => {
