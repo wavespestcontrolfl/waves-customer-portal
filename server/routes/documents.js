@@ -25,7 +25,7 @@ const {
 } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
-const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
+const { customerCopyViolations, heldAccessCode } = require('../services/service-report/technician-report-copy');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { applyReportIdentitySnapshotToLegacyPdf, readReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
@@ -403,13 +403,14 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // docs/public-route-contracts.md). On every record each value passes the
   // complete customer-copy screen before it prints (customerCopyViolations,
   // AGENTS.md; the web payload screens its recommendations with it too,
-  // report-data.js buildReportV1Data), and a line that holds an access code
-  // drops, as the web payload's lists drop it. On a record that carries the
-  // technician's own note each value has passed the note's screen as well
+  // report-data.js buildReportV1Data), and a value either other access-code
+  // check catches drops (heldAccessCode: the completion check and the
+  // visit-history redactor). On a record that carries the technician's own
+  // note each value has passed the note's screen as well
   // (noteRecordCopyViolations). A refused value is left out; the rest print.
-  const { buildProtocolPayload, withoutAccessCodeLines } = require('../services/service-report/report-data');
+  const { buildProtocolPayload } = require('../services/service-report/report-data');
   const formLists = buildProtocolPayload(service);
-  const printable = (lines) => withoutAccessCodeLines(lines).filter((line) => !customerCopyViolations(line).length);
+  const printable = (lines) => lines.filter((line) => !heldAccessCode(line) && !customerCopyViolations(line).length);
   const observations = printable(formLists.structuredObservations);
 
   if (observations.length) {

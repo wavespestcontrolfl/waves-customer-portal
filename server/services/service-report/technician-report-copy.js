@@ -783,19 +783,25 @@ const NOTE_MARKED_SENTENCE_RE = new RegExp([
   `${NOTE_DAY_WORD_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_REENTRY_VERB_SRC}`,
 ].join('|'), 'iu');
 
-// The visit-history reader's redactor (context-aggregator.js
+// Two access-code checks beside the report's own (customerCopyViolations):
+// the completion check (COMPLETION_ACCESS_CODE_RE: "Side access 4417 for the
+// yard") and the visit-history reader's redactor (context-aggregator.js
 // redactAccessCodes: digits before an access word, a code word after a code
-// noun, a card number) masks forms neither access check here sees ("I used
-// 1234 to get through the gate."). A note-record value it would change is
-// withheld. Required at call time: context-aggregator loads this module.
-function visitHistoryRedacts(value) {
-  return require('../context-aggregator').redactAccessCodes(value) !== value;
+// noun, a card number: "I used 1234 to get through the gate."). Each customer
+// reader that screens with this module withholds a value either one catches:
+// the note record (noteRecordCopyViolations) and the Documents PDF lists on
+// every record (routes/documents.js). The redactor is required at call time:
+// context-aggregator loads this module.
+function heldAccessCode(text) {
+  const value = String(text || '');
+  return COMPLETION_ACCESS_CODE_RE.test(value)
+    || require('../context-aggregator').redactAccessCodes(value) !== value;
 }
 
 function noteRecordCopyViolations(text) {
   const value = String(text || '');
   const violations = customerCopyViolations(value);
-  if (COMPLETION_ACCESS_CODE_RE.test(value) || visitHistoryRedacts(value)) violations.push('note_record_access_code');
+  if (heldAccessCode(value)) violations.push('note_record_access_code');
   if (NOTE_RECORD_TIME_RE.test(value)
     || value.split(NOTE_SENTENCE_END_RE).some((sentence) => NOTE_MARKED_SENTENCE_RE.test(sentence))) {
     violations.push('note_record_time');
@@ -816,6 +822,7 @@ module.exports = {
   fourSectionReport,
   containsReportAccessCode,
   customerCopyViolations,
+  heldAccessCode,
   noteRecordCopyViolations,
   summaryCopySignature,
   renderWriterRulesState,

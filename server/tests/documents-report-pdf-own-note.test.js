@@ -199,13 +199,21 @@ describe.each([
   });
 
   test('a form value that holds an access code drops, on every record', async () => {
-    // The second value only the completion access-code check catches
-    // (withoutAccessCodeLines); the complete screen catches the first too.
-    serviceRow = visit(JSON.stringify({ ...LISTS, formRecommendations: ['Trim the hedge back from the wall', 'Gate code 4545 for next time', 'Side access 4417 for the yard'] }));
+    // A record with no note. The second value only the completion
+    // access-code check catches, the third only the visit-history redactor
+    // (heldAccessCode); the complete screen catches the first too.
+    serviceRow = visit(JSON.stringify({
+      ...LISTS,
+      formObservations: ['Light ant activity', 'I used 1234 to get through the gate'],
+      formRecommendations: ['Trim the hedge back from the wall', 'Gate code 4545 for next time', 'Side gate 12-34 for the yard', 'I used 2468 to get through the gate'],
+    }));
     const text = await printed(path);
+    expect(text).toContain('Light ant activity');
     expect(text).toContain('Trim the hedge back from the wall');
     expect(text).not.toContain('4545');
-    expect(text).not.toContain('4417');
+    expect(text).not.toContain('12-34');
+    expect(text).not.toContain('1234');
+    expect(text).not.toContain('2468');
   });
 
   test('a recommendation the complete screen refuses never prints, on a record with no note too', async () => {

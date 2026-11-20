@@ -3184,8 +3184,11 @@ recommendation lists from the completion form's values (`buildProtocolPayload`
 such a record), never the merged `structured_notes` lists (which fold in raw
 `[Found]` / `[Next]` lines) or `ai_report`, on a record with no note too. On
 every record each value passes `customerCopyViolations` before it prints (the
-web payload screens its recommendations with it too), and a line that holds an
-access code drops (`withoutAccessCodeLines`); a refused value is left out. That
+web payload screens its recommendations with it too), and a value either other
+access-code check catches drops (`heldAccessCode`: the completion check, and
+the visit-history redactor `redactAccessCodes`, as on a note record; production,
+2026-11-20, read-only: no form value of the 11 records with form lists); a
+refused value is left out. That
 PDF prints the service title frozen at completion, but it judges whether the
 note may stand from the stored row, as the web report does: a row with no
 stored `service_line` takes the line its stored `service_type` names before

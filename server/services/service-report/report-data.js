@@ -8027,7 +8027,6 @@ module.exports = {
   locationAreaLabels,
   taggedNoteLines,
   buildProtocolPayload,
-  withoutAccessCodeLines,
   minutesFromElapsed,
   methodFromProduct,
   metricValue,
