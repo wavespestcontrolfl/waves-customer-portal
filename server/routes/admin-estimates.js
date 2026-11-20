@@ -51,6 +51,7 @@ const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
   estimateReviseBlock,
+  selfServeMintEditRefusal,
   estimateEditVersion,
   estimateViewUrl,
   reviseAdminEstimate,
@@ -6351,6 +6352,11 @@ router.patch('/:id', async (req, res, next) => {
       if (verdict.error) return res.status(400).json({ error: verdict.error });
       Object.assign(updates, verdict.updates);
     }
+    // A customer's own mint (plan_restart / plan_start) is never edited in place, and these two
+    // options change what its accept does (codex pre-push r29 on #8132): turning one ON gets the
+    // revise refusal. Turning one OFF stays allowed.
+    const mintRefusal = (req.body.showOneTimeOption || req.body.billByInvoice) ? selfServeMintEditRefusal(estimate) : null;
+    if (mintRefusal) return res.status(409).json({ error: mintRefusal });
     if (req.body.showOneTimeOption !== undefined) {
       const nextShowOneTimeOption = !!req.body.showOneTimeOption;
       const deliveryError = nextShowOneTimeOption ? validateEstimateDeliveryOptions({

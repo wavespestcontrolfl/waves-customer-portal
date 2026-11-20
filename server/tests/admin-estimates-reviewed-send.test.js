@@ -2095,6 +2095,38 @@ describe('commercial Auto Pay payment term', () => {
   });
 });
 
+describe('a customer\'s own plan quote takes no staff delivery option (codex pre-push r29 on #8132)', () => {
+  test.each([
+    ['plan_restart', 'showOneTimeOption'], ['plan_restart', 'billByInvoice'],
+    ['plan_start', 'showOneTimeOption'], ['plan_start', 'billByInvoice'],
+  ])('a %s quote refuses %s ON with the revise refusal, before any write', async (source, option) => {
+    row.status = 'sent';
+    row.source = source;
+    const response = await invoke('/:id', 'patch', { [option]: true });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.error).toBe(require('../services/admin-estimate-persistence').selfServeMintEditRefusal({ source }));
+    expect(response.body.error).toMatch(/cannot be edited in place/);
+    expect(mutations).toEqual([]);
+  });
+
+  test('an option already on stays reachable: staff can turn it OFF', async () => {
+    row.status = 'sent';
+    row.source = 'plan_restart';
+    row.bill_by_invoice = true;
+    const response = await invoke('/:id', 'patch', { billByInvoice: false });
+    expect(response.body).toEqual({ success: true });
+    expect(row.bill_by_invoice).toBe(false);
+  });
+
+  test('a staff estimate still turns an option on', async () => {
+    row.status = 'sent';
+    row.source = 'admin';
+    const response = await invoke('/:id', 'patch', { showOneTimeOption: true });
+    expect(response.body).toEqual({ success: true });
+    expect(row.show_one_time_option).toBe(true);
+  });
+});
+
 describe('reviewed multi-property offer revisions', () => {
   test.each(['showOneTimeOption', 'billByInvoice'])('%s cannot change on a sent sibling while another property is being sent', async (option) => {
     row.status = 'sent';

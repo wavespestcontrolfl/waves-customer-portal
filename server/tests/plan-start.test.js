@@ -929,6 +929,17 @@ describe('mintPlanStartEstimate', () => {
       expect(JSON.parse(tables.estimates.find((r) => r.id === next.estimateId).estimate_data).sendSnapshot.pricingBundle).toBeTruthy();
     });
 
+    test.each(['show_one_time_option', 'bill_by_invoice'])('a live quote with %s turned on by staff is archived and re-minted, never handed back as staff changed it (codex pre-push r29 on #8132)', async (column) => {
+      const first = await mint();
+      tables.estimates[0] = { ...tables.estimates[0], [column]: true };
+      const next = await mint({ randomBytes: () => Buffer.from('0123456789abcdef') });
+      expect(next.reused).toBe(false);
+      expect(next.estimateId).not.toBe(first.estimateId);
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
+      const minted = tables.estimates.find((r) => r.id === next.estimateId);
+      expect(!!minted.show_one_time_option || !!minted.bill_by_invoice).toBe(false);
+    });
+
     test('a quote for ANOTHER option is archived and a fresh one minted', async () => {
       const first = await mint();
       recompute.mockResolvedValue(pricedAs(LAWN_LINE));

@@ -99,6 +99,52 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it("offers no 1× option or invoice mode on a customer's own plan quote unless one is already on (codex pre-push r29 on #8132)", async () => {
+  const rows = [
+    { ...ESTIMATES[0], id: "estimate-own", customerName: "Own Mint", source: "plan_restart" },
+    {
+      ...ESTIMATES[1],
+      id: "estimate-own-on",
+      customerName: "Own Mint On",
+      source: "plan_start",
+      showOneTimeOption: true,
+      billByInvoice: true,
+    },
+    { ...ESTIMATES[2], id: "estimate-staff", customerName: "Staff Quote", source: "admin" },
+  ];
+  fetch.mockImplementation(async (url) => {
+    const parsed = new URL(String(url), "http://fixture.invalid");
+    if (parsed.pathname === "/api/admin/estimates") {
+      return response({
+        estimates: parsed.searchParams.get("sentOnly") === "1" ? rows : [],
+        truncated: false,
+      });
+    }
+    return response({ resolved: 0, drafted: 0, sources: [] });
+  });
+  renderPage("/admin/pipeline?tab=estimates");
+  const menuFor = async (name) => {
+    fireEvent.click(
+      await screen.findByRole("button", { name: `Actions for ${name}` }),
+    );
+  };
+  const closeMenu = () =>
+    fireEvent.click(screen.getByRole("button", { name: "Close actions menu" }));
+
+  await menuFor("Own Mint");
+  expect(screen.queryByRole("button", { name: "1× Option: Off" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Invoice mode: Off" })).not.toBeInTheDocument();
+  closeMenu();
+  // An option already on stays listed, so staff can turn it off.
+  await menuFor("Own Mint On");
+  expect(screen.getByRole("button", { name: "1× Option: On" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Invoice mode: On" })).toBeInTheDocument();
+  closeMenu();
+  await menuFor("Staff Quote");
+  expect(screen.getByRole("button", { name: "1× Option: Off" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Invoice mode: Off" })).toBeInTheDocument();
+});
+
 it.each([
   "/admin/pipeline?tab=estimates",
   "/admin/pipeline?tab=estimates&tableControls=0",

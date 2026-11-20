@@ -1126,6 +1126,11 @@ async function reuseLiveQuote(mint, {
     && sameAddress
     && sameStamp
     && sameTotals
+    // The mint's own delivery options (codex pre-push r29 on #8132): the mint never turns on the
+    // one-time option or invoice billing, so a live row with either on was changed by staff. It
+    // is re-minted, never handed back as staff changed it.
+    && !live.show_one_time_option
+    && !live.bill_by_invoice
     && offerFingerprint(liveData) === offerFingerprint(estimateData)
     // The page still sells its frozen snapshot (codex pre-push P0): the
     // fingerprint omits sendSnapshot, and the page's tier selection can

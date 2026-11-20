@@ -371,6 +371,18 @@ describe('mintRestartEstimate', () => {
     expect(releaseHolds).not.toHaveBeenCalled();
   });
 
+  test.each(['show_one_time_option', 'bill_by_invoice'])('a live quote with %s turned on by staff is re-minted, never handed back as staff changed it (codex pre-push r29 on #8132)', async (column) => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    tables.estimates[0] = { ...tables.estimates[0], [column]: true };
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('0123456789abcdef') });
+    expect(again.reused).toBe(false);
+    expect(again.estimateId).not.toBe(first.estimateId);
+    expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
+    // The new quote carries neither option: the mint never sets them.
+    const minted = tables.estimates.find((r) => r.id === again.estimateId);
+    expect(!!minted.show_one_time_option || !!minted.bill_by_invoice).toBe(false);
+  });
+
   test('an identical tap at an address that does not parse back to its home reuses the live quote: its stored address is today\'s own string (codex pre-push r38 P1)', async () => {
     // With no city, the unit line "Building 2" reads back as the stored address's city.
     const unitOnly = { ...CUSTOMER, address_line2: 'Building 2', city: null };

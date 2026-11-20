@@ -196,6 +196,42 @@ function makeDatabase({
   return { database, writes };
 }
 
+describe('toggle_show_one_time_option on a customer\'s own plan quote (codex pre-push r29 on #8132)', () => {
+  const ESTIMATE_ID = '00000000-0000-4000-8000-000000000081';
+  const quote = (source, extra = {}) => ({
+    id: ESTIMATE_ID, token: 'synthetic-token', source, status: 'sent', show_one_time_option: false,
+    onetime_total: '0', monthly_total: '100', annual_total: '1200', estimate_data: '{}', ...extra,
+  });
+  // The toggle's guarded UPDATE runs .modify() callbacks (expected value, archive state).
+  const withModify = (database) => {
+    const wrapped = (table) => {
+      const builder = database(table);
+      builder.modify = (callback) => { callback(builder); return builder; };
+      builder.whereNotNull = () => builder;
+      return builder;
+    };
+    wrapped.fn = database.fn;
+    return wrapped;
+  };
+
+  test.each(['plan_restart', 'plan_start'])('a %s quote refuses the option ON with the revise refusal, before any write', async (source) => {
+    const { database, writes } = makeDatabase({ estimate: quote(source) });
+    mockDb.mockImplementation(withModify(database));
+    const result = await executeEstimateTool('toggle_show_one_time_option', { estimate_identifier: ESTIMATE_ID, enabled: true });
+    expect(result.error).toBe(require('../services/admin-estimate-persistence').selfServeMintEditRefusal({ source }));
+    expect(result.error).toMatch(/cannot be edited in place/);
+    expect(writes).toEqual([]);
+  });
+
+  test('an option already on stays reachable: the tool turns it OFF', async () => {
+    const { database, writes } = makeDatabase({ estimate: quote('plan_restart', { show_one_time_option: true }) });
+    mockDb.mockImplementation(withModify(database));
+    const result = await executeEstimateTool('toggle_show_one_time_option', { estimate_identifier: ESTIMATE_ID, enabled: false });
+    expect(result.error).toBeUndefined();
+    expect(writes).toEqual([expect.objectContaining({ table: 'estimates', op: 'update', payload: expect.objectContaining({ show_one_time_option: false }) })]);
+  });
+});
+
 describe('Agent Estimate draft tool', () => {
   beforeEach(() => {
     jest.clearAllMocks();

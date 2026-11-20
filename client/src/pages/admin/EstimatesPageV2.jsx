@@ -3118,7 +3118,12 @@ function EstimatePipelineViewV2({
                                   `/admin/estimates?editEstimateId=${e.id}`,
                                 ),
                             },
-                            ["draft", "sent", "viewed"].includes(e.status) && {
+                            // A customer's own mint takes no staff delivery
+                            // option (server 409); one already on stays
+                            // listed so staff can turn it off.
+                            ["draft", "sent", "viewed"].includes(e.status) &&
+                              (!EDIT_REFUSED_SOURCES.includes(e.source) ||
+                                e.showOneTimeOption) && {
                               key: "one-time",
                               label: e.showOneTimeOption
                                 ? "1× Option: On"
@@ -3137,7 +3142,9 @@ function EstimatePipelineViewV2({
                               ),
                               onClick: () => toggleOneTimeOption(e),
                             },
-                            ["draft", "sent", "viewed"].includes(e.status) && {
+                            ["draft", "sent", "viewed"].includes(e.status) &&
+                              (!EDIT_REFUSED_SOURCES.includes(e.source) ||
+                                e.billByInvoice) && {
                               key: "invoice",
                               label: e.billByInvoice
                                 ? "Invoice mode: On"
@@ -3615,7 +3622,7 @@ const EDITABLE_ESTIMATE_STATUSES = [
 ];
 // The server refuses an in-place edit of a customer's own mint
 // (admin-estimate-persistence.js REVISE_REFUSED_MINT_SOURCES), so the menus
-// never offer one.
+// never offer one. It refuses turning on the 1× option or invoice mode too.
 const EDIT_REFUSED_SOURCES = ["plan_restart", "plan_start"];
 function canEditEstimateInPlace(estimate) {
   return (

@@ -3777,6 +3777,9 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected
 
   const next = typeof enabled === 'boolean' ? enabled : !estimate.show_one_time_option;
   if (next) {
+    // A customer's own mint takes no staff one-time option (the admin PATCH /:id refuses it too).
+    const mintRefusal = require('../admin-estimate-persistence').selfServeMintEditRefusal(estimate);
+    if (mintRefusal) return { error: mintRefusal };
     const deliveryError = validateEstimateDeliveryOptions({
       showOneTimeOption: true,
       billByInvoice: false,
