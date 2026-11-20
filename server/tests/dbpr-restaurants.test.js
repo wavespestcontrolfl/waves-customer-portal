@@ -528,6 +528,19 @@ describe('syncRestaurantProspects', () => {
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
   });
 
+  test('a row in the area of another fiscal year is malformed even when it cites nothing, so a mixed file cannot set the measure', async () => {
+    store = makeStore();
+    const visits = (count, date, v35, from) => Array.from({ length: count }, (_, i) => inspRow({ visit: String(from + i), date, v35 }));
+    // 80 inspections of this year and 20 of last year that cite nothing: a fifth malformed, so the file fails unmeasured.
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...visits(80, '11/16/2026', 1, 9001), ...visits(20, '06/15/2026', 0, 9201)]) });
+    expect((await sync({ fetchText, store })).files.inspection).toEqual({ failed: true });
+    expect(reads.inspection).toBeUndefined();
+    // 9 of them beside 90 of this year pass, counted.
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...visits(90, '11/16/2026', 1, 9001), ...visits(9, '06/15/2026', 0, 9201)]) });
+    expect((await sync({ fetchText, store })).files.inspection).toEqual({ kept: 90, malformed: 9, upserted: 90 });
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 99 });
+  });
+
   test('a license row loads only with the usual 36 cells: a cell added, two added or one lost is malformed', async () => {
     store = makeStore();
     // 37 cells: an extra cell before Secondary Phone Number would move the phone and the license number.

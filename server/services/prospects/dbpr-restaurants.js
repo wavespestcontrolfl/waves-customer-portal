@@ -331,6 +331,8 @@ async function loadFile(kind, fetchText, now) {
   let rowsRead = 0;
   // Each fiscal year's row count and newest date, by the row's own date.
   const years = new Map();
+  // Good rows in the area, cited or not, by fiscal year.
+  const goodByYear = new Map();
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
   const header = await eachDbprCsvRow(text, (row, { cells, columns }) => {
     rowsRead += 1;
@@ -346,7 +348,9 @@ async function loadFile(kind, fetchText, now) {
       const seen = years.get(year) || { rows: 0, newest: day };
       years.set(year, { rows: seen.rows + 1, newest: day > seen.newest ? day : seen.newest });
     }
+    const good = counts.valid;
     records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts, today) : parseLicenseRows([row], kind, counts, today)));
+    if (counts.valid > good && day) goodByYear.set(fiscalYearOf(day), (goodByYear.get(fiscalYearOf(day)) || 0) + 1);
   });
   // A required column missing from the header is renamed or gone. One named twice would take the later cell (a
   // renamed column could give two applications one key). Either way the whole file is refused.
@@ -364,12 +368,13 @@ async function loadFile(kind, fetchText, now) {
   // The fiscal year most rows fall in (null for a header alone) and that year's newest date, so a stray date of
   // another year never moves a file or makes it look fresh.
   const [fiscalYear, year] = [...years].sort((a, b) => b[1].rows - a[1].rows)[0] || [null, null];
-  // A row in the area dated in another fiscal year is a stray date (a mistyped one, or a file the state started over
-  // late). Stored, it would stay wrong (a known key only refreshes last_seen_at), so like a date after today it is
-  // malformed and not kept; the file of its own year stores it.
+  // A good row in the area dated in another fiscal year is a stray date (a mistyped one, or a file the state started
+  // over late), whether it cites violation 35 or not. Stored, it would stay wrong (a known key only refreshes
+  // last_seen_at), so like a date after today it is malformed and not kept; the file of its own year stores it.
+  const otherYears = [...goodByYear].reduce((sum, [y, rows]) => (y === fiscalYear ? sum : sum + rows), 0);
+  counts.malformed += otherYears;
+  counts.valid -= otherYears;
   const kept = records.filter((record) => fiscalYearOf(record.event_date) === fiscalYear);
-  counts.malformed += records.length - kept.length;
-  counts.valid -= records.length - kept.length;
   // Malformed rows over a tenth of the rows that count mean a changed format (a new date format, rows of a new
   // width), not a stray row: the file fails, even beside good rows. With no good row, one malformed row fails it. The
   // rows that count are the good and malformed ones: malformed counts rows in the area and rows that cannot be placed
