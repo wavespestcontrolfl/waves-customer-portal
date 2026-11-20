@@ -88,7 +88,7 @@ function BonusCard({ scoreboard }) {
         note={stayBonus
           ? (stayBonus.estimateCents === null
             ? `${stayBonus.years}-year bonus. Estimate starts ${dayLabel(stayBonus.earningsStart)}, when the 12 months of pay that count toward it begin.`
-            : `${stayBonus.years}-year bonus, about ${centsToDollars(stayBonus.estimateCents)}. Estimate: includes pay earned through ${dayLabel(stayBonus.earningsEnd)}. Payroll confirms the final amount.`)
+            : `${stayBonus.years}-year bonus, about ${centsToDollars(stayBonus.estimateCents)}. Estimate from pay recorded so far; pay earned through ${dayLabel(stayBonus.earningsEnd)} counts. Payroll confirms the final amount.`)
           : 'The 1, 3 and 5 year stay bonuses are behind you, or your hire date is not on file.'}
       />
     </div>

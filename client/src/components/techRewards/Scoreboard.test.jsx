@@ -56,7 +56,7 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText('$633.32')).toBeInTheDocument();
     expect(screen.getByText(/Estimate, final at season end\. 4\.0% of \$10,000\.00 pay x 1\.58x multiplier\./)).toBeInTheDocument();
     expect(screen.getByText('Jan 5, 2027')).toBeInTheDocument();
-    expect(screen.getByText(/1-year bonus, about \$400\.00\. Estimate: includes pay earned through Jan 4, 2027\. Payroll confirms the final amount\./)).toBeInTheDocument();
+    expect(screen.getByText(/1-year bonus, about \$400\.00\. Estimate from pay recorded so far; pay earned through Jan 4, 2027 counts\. Payroll confirms the final amount\./)).toBeInTheDocument();
     expect(screen.getByText(/your level is not recorded yet/)).toBeInTheDocument();
   });
 
