@@ -1,7 +1,7 @@
 name: Install packages (node_modules cache)
 description: >-
   Restores the node_modules folders saved for this exact lockfile, set of
-  package.json files, Node version and runner image. On a miss it runs
+  package.json and .npmrc files, Node version and runner image. On a miss it runs
   `npm ci` and saves the fresh folders at once, before any test or build can
   write into them. Any package.json change gives a new key, so `npm ci` still
   checks every manifest against the lockfile when one changes.
@@ -17,6 +17,9 @@ runs:
       run: |
         echo "image=${ImageOS:-unknown}-$(uname -m)" >> "$GITHUB_OUTPUT"
         echo "node=$(node -v)" >> "$GITHUB_OUTPUT"
+        # What npm leaves out (NODE_ENV=production or npm_config_omit means
+        # "dev"); a job that installs without dev packages gets its own cache.
+        echo "omit=$(npm config get omit | tr -c 'a-z0-9\n' '_')" >> "$GITHUB_OUTPUT"
     - name: Restore node_modules
       id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -27,7 +30,9 @@ runs:
           node_modules
           */node_modules
           packages/*/node_modules
-        key: node-modules-v1-${{ steps.parts.outputs.image }}-node${{ steps.parts.outputs.node }}-${{ hashFiles('package-lock.json', 'package.json', '*/package.json', 'packages/*/package.json') }}
+        # .npmrc files set install policy (omit=dev, registries): a new or
+        # changed one must force a clean install too. None exist today.
+        key: node-modules-v1-${{ steps.parts.outputs.image }}-node${{ steps.parts.outputs.node }}-omit${{ steps.parts.outputs.omit }}-${{ hashFiles('package-lock.json', 'package.json', '*/package.json', 'packages/*/package.json', '.npmrc', '*/.npmrc', 'packages/*/.npmrc') }}
     - name: npm ci (no saved node_modules for this key)
       if: steps.restore.outputs.cache-hit != 'true'
       shell: bash
