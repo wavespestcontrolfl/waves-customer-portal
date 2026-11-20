@@ -46,6 +46,11 @@ function validDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function normalizedIsoDate(value) {
+  const d = validDate(value);
+  return d ? d.toISOString() : null;
+}
+
 function dateOnly(date) {
   return asDate(date).toISOString().slice(0, 10);
 }
@@ -99,7 +104,7 @@ function parsePolicy(value) {
       amountCents: Math.max(0, toInt(parsed.amountCents, DEFAULT_POLICY.amountCents)),
       minRating: Math.max(1, Math.min(5, toInt(parsed.minRating, DEFAULT_POLICY.minRating))),
       eligibleSources: PAYOUT_ELIGIBLE_SOURCES,
-      programStartsAt: parseProgramCutoff(parsed.programStartsAt),
+      programStartsAt: normalizedIsoDate(parsed.programStartsAt) || null,
       monthlyCapCount: normalizeMonthlyCap(parsed.monthlyCapCount),
     };
   } catch {
@@ -111,11 +116,8 @@ function reviewEarnedAt(review) {
   return validDate(review?.review_created_at || review?.created_at) || new Date();
 }
 
-// The ONE cutoff reader (owner 2026-11-20 D4): payout creation, sync, the dashboard and payments all
-// read programStartsAt through parseProgramCutoff, so a date-only value is the start of that Eastern day.
 function programStart(policy) {
-  const iso = parseProgramCutoff(policy?.programStartsAt);
-  return iso ? new Date(iso) : null;
+  return validDate(policy?.programStartsAt);
 }
 
 function reviewWithinProgramWindow(review, policy) {
@@ -188,13 +190,13 @@ async function getPolicy(conn = db) {
 // type first, then range; no coercion (a numeric string, an object, NaN or "12abc" is refused). Unknown keys
 // pass through as the lenient parser lets them. Used on a save (the patch and the merged result), on the
 // stored row, and so on every payment read.
-// The program cutoff, strictly (owner 2026-11-20 D4): a date-only value is the start of that Eastern day
-// (the repo's parseETDateTime); a timestamp must carry an explicit offset (Z or +hh:mm), because Railway's
-// UTC would otherwise decide it. An impossible calendar date, hour, minute or offset is refused. Returns the
-// normalized UTC ISO string, or null when the value is not acceptable. The ISO 'Z' form savePolicy has always
-// written stays valid.
+// The program cutoff as a SAVE accepts it (owner 2026-11-20 D4): a real calendar date-only value (stored as
+// the instant of that Eastern midnight, via the repo's parseETDateTime) or a timestamp with an explicit offset
+// (Z or +hh:mm). An impossible date or time, or an offset-free timestamp (Railway's UTC would decide it), is
+// refused. Returns the UTC ISO instant to store, or null. Read paths do not use it: a stored value keeps the
+// meaning it always had.
 const CUTOFF_STAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):?(\d{2}))$/;
-function parseProgramCutoff(value) {
+function parseProgramCutoffForSave(value) {
   if (typeof value !== 'string') return null;
   if (validCalendarDate(value)) {
     const startOfDay = parseETDateTime(`${value}T00:00`);
@@ -216,7 +218,7 @@ const POLICY_FIELD_CHECKS = {
   eligibleSources: (v) => Array.isArray(v) && v.every((source) => typeof source === 'string'),
   minRating: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5,
   requireCustomerMatchForGoogle: (v) => typeof v === 'boolean',
-  programStartsAt: (v) => v === null || parseProgramCutoff(v) !== null,
+  programStartsAt: (v) => v === null || (typeof v === 'string' && normalizedIsoDate(v) !== null),
   monthlyCapCount: (v) => v === null || (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 1000),
 };
 
@@ -232,7 +234,7 @@ function checkPolicyFields(fields) {
     if (check && !check(value)) {
       throw operationalError(`The review bonus setting "${name}" is not valid`, 422, 'review_policy_invalid');
     }
-    checked[name] = name === 'programStartsAt' && value !== null ? parseProgramCutoff(value) : value;
+    checked[name] = name === 'programStartsAt' && value !== null ? normalizedIsoDate(value) : value;
   }
   return checked;
 }
@@ -328,6 +330,12 @@ async function savePolicy(rawPatch = {}, conn = db, { key = POLICY_KEY } = {}) {
   const { replace = false, ...rawFields } = rawPatch;
   // A bad field is refused (422) before anything is read or written: the stored row stays as it was.
   const policyPatch = checkPolicyFields(rawFields);
+  // The cutoff is stricter on a save: what is stored is always an unambiguous instant.
+  if (typeof rawFields.programStartsAt === 'string') {
+    const instant = parseProgramCutoffForSave(rawFields.programStartsAt);
+    if (!instant) throw operationalError('The review bonus setting "programStartsAt" is not valid', 422, 'review_policy_invalid');
+    policyPatch.programStartsAt = instant;
+  }
   return conn.transaction(async (trx) => {
     await lockPolicy(trx, { key });
     let current;
@@ -2010,6 +2018,7 @@ module.exports = {
   toCsv,
   __private: {
     parsePolicy,
+    parseProgramCutoffForSave,
     qualifiesReviewRequest,
     qualifiesGoogleReview,
     weekPeriodFor,

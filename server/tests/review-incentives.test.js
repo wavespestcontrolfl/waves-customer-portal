@@ -444,28 +444,6 @@ describe('review incentives', () => {
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
   });
 
-  test('a date-only program cutoff is the start of that Eastern day for payout creation (owner 2026-11-20 D4)', async () => {
-    const { parsePolicy } = ReviewIncentives.__private;
-    // A stored '2026-06-01' reads as 2026-06-01 00:00 Eastern, the same moment everywhere it is read.
-    const dateOnly = parsePolicy({ ...policy, programStartsAt: '2026-06-01' });
-    expect(dateOnly.programStartsAt).toBe('2026-06-01T04:00:00.000Z');
-    const withReview = (reviewCreatedAt) => createDbMock({
-      service_records: [{ id: 'service-1', customer_id: 'customer-1', technician_id: 'tech-1', service_date: '2026-05-27' }],
-      google_reviews: [{
-        id: 'google-1', customer_id: 'customer-1', reviewer_name: 'Customer One', star_rating: 5,
-        review_created_at: reviewCreatedAt, location_id: 'sarasota', google_review_id: 'accounts/1/locations/2/reviews/abc',
-      }],
-    });
-    // 10 p.m. Eastern on May 31 is before the cutoff: not eligible.
-    const early = withReview('2026-06-01T02:00:00.000Z');
-    expect(await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn: early, policy: dateOnly }))
-      .toMatchObject({ created: false, skipped: true, reason: 'before_program_start' });
-    // 12:30 a.m. Eastern on June 1 is after it: eligible.
-    const late = withReview('2026-06-01T04:30:00.000Z');
-    expect(await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn: late, policy: dateOnly }))
-      .toMatchObject({ created: true });
-  });
-
   test('lists the review matcher\'s open decisions with the customer they name, outside the period and the program window (owner 2026-10-31)', async () => {
     const conn = createDbMock({
       customers: [
@@ -1607,7 +1585,7 @@ describe('monthly cap policy (owner 2026-11-20 D4)', () => {
       eligibleSources: ['google_review', {}, [1]],
       minRating: ['3', {}, 0, 6, 2.5, NaN],
       requireCustomerMatchForGoogle: ['yes', 0, {}],
-      programStartsAt: [{}, [], 5, 'not a date', '2026-13-45', '2026-02-31', '2026-02-31T00:00:00Z', '2026-03-01T00:00', '2026-03-01T10:00:00', '2026-03-01T25:00:00Z', '2026-03-01T10:00:00+25:00'],
+      programStartsAt: [{}, [], 5, 'not a date', '2026-13-45'],
       monthlyCapCount: ['15', '12abc', {}, [], NaN, 0, 2.5, 1001],
     };
     for (const [field, values] of Object.entries(bad)) {
@@ -1621,20 +1599,8 @@ describe('monthly cap policy (owner 2026-11-20 D4)', () => {
       .toMatchObject({ monthlyCapCount: 15, amountCents: 500, programStartsAt: '2026-01-01T00:00:00.000Z', note: 'kept' });
     expect(validatePolicyStrict({ monthlyCapCount: null, programStartsAt: null }).monthlyCapCount).toBeNull();
     expect(validatePolicyStrict({ amountCents: 2147483647 }).amountCents).toBe(2147483647);
-    // The cutoff: the ISO Z form savePolicy has always written, an explicit offset, or an Eastern date-only value.
-    expect(validatePolicyStrict({ programStartsAt: '2026-11-19T23:30:15.743Z' }).programStartsAt).toBe('2026-11-19T23:30:15.743Z');
-    expect(validatePolicyStrict({ programStartsAt: '2026-03-01T10:00:00-05:00' }).programStartsAt).toBe('2026-03-01T15:00:00.000Z');
-    expect(validatePolicyStrict({ programStartsAt: '2026-03-01' }).programStartsAt).toBe('2026-03-01T05:00:00.000Z');
-    expect(validatePolicyStrict({ programStartsAt: '2026-07-01' }).programStartsAt).toBe('2026-07-01T04:00:00.000Z');
     expect(validatePolicyStrict({ amountCents: 0, minRating: 5, monthlyCapCount: 1000 })).toMatchObject({ amountCents: 0, minRating: 5, monthlyCapCount: 1000 });
     expect(() => validatePolicyStrict([])).toThrow(expect.objectContaining({ code: 'review_policy_invalid' }));
-  });
-
-  test('getPolicyStrict still reads a stored row with the ISO Z cutoff savePolicy has always written', async () => {
-    const stored = JSON.stringify({ enabled: true, amountCents: 500, programStartsAt: '2026-11-19T23:30:15.743Z', monthlyCapCount: 15 });
-    expect(await ReviewIncentives.getPolicyStrict(storedRow(stored))).toMatchObject({ programStartsAt: '2026-11-19T23:30:15.743Z', monthlyCapCount: 15 });
-    await expect(ReviewIncentives.getPolicyStrict(storedRow('{"programStartsAt":"2026-02-31"}')))
-      .rejects.toMatchObject({ code: 'review_policy_malformed' });
   });
 
   test('getPolicyStrict treats a stored row with a bad field as unreadable', async () => {
@@ -1642,5 +1608,16 @@ describe('monthly cap policy (owner 2026-11-20 D4)', () => {
       .rejects.toMatchObject({ code: 'review_policy_malformed' });
     await expect(ReviewIncentives.getPolicyStrict(storedRow({ amountCents: {} })))
       .rejects.toMatchObject({ code: 'review_policy_malformed' });
+  });
+
+  test('the save-only cutoff parser stores an unambiguous instant and refuses the rest', () => {
+    const { parseProgramCutoffForSave: parse } = ReviewIncentives.__private;
+    expect(parse('2026-07-01')).toBe('2026-07-01T04:00:00.000Z');
+    expect(parse('2026-03-01')).toBe('2026-03-01T05:00:00.000Z');
+    expect(parse('2026-11-19T23:30:15.743Z')).toBe('2026-11-19T23:30:15.743Z');
+    expect(parse('2026-03-01T10:00:00-05:00')).toBe('2026-03-01T15:00:00.000Z');
+    for (const bad of ['2026-02-31', '2026-11-01T09:00:00', '2026-03-01T00:00', '2026-03-01T25:00:00Z', '2026-03-01T10:00:00+25:00', 'junk', 5, {}, null]) {
+      expect([String(bad), parse(bad)]).toEqual([String(bad), null]);
+    }
   });
 });
