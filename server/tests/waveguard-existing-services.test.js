@@ -7,6 +7,7 @@
 // pending row wrongly waived her $99 setup and hid the annual-prepay option.
 
 const {
+  TERMINAL_STATUSES,
   isMembershipCustomerRow,
   isActivePlanCustomer,
   isLiveObligationRow,
@@ -68,6 +69,21 @@ describe('isLiveObligationRow', () => {
     ['a one-time booking source in another case', { source: 'Quote-Wizard-Onetime' }],
   ])('%s is not live', (_label, change) => {
     expect(isLiveObligationRow(row(change), TODAY)).toBe(false);
+  });
+
+  // The calendar read drops these statuses in SQL. A reader that brings its own rows must get the same answer
+  // from the rule: a cancelled visit of next week is not a plan.
+  test.each(TERMINAL_STATUSES.map((status) => [status]))('a %s visit is not live, also on a date still to come', (status) => {
+    expect(isLiveObligationRow(row({ status }), TODAY)).toBe(false);
+    expect(isLiveObligationRow(row({ status, scheduled_date: TODAY }), TODAY)).toBe(false);
+    expect(isLiveObligationRow(row({ status: status.toUpperCase() }), TODAY)).toBe(false);
+  });
+
+  test('the statuses that are not live are the list the calendar read drops, and every other status of the table stays live', () => {
+    expect([...TERMINAL_STATUSES].sort()).toEqual(['cancelled', 'completed', 'no_show', 'rescheduled', 'skipped']);
+    for (const status of ['pending', 'confirmed', 'en_route', 'on_site']) {
+      expect(isLiveObligationRow(row({ status }), TODAY)).toBe(true);
+    }
   });
 
   test.each([['en_route'], ['on_site'], ['in_progress'], ['ON_SITE']])('a visit %s is live whatever its date', (status) => {

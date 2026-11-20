@@ -726,10 +726,16 @@ async function loadLiveRecurringObligationRows(database, customerId) {
 // Exported so a reader of another row SHAPE (a legacy plan visit: no
 // recurring flag, a recurring parent) judges "live" by this one rule. `today`
 // is the ET calendar day (etDateString()).
+// A visit in a TERMINAL_STATUSES state is never live, whatever its date. The
+// calendar read drops those in SQL (loadActiveRecurringServiceRows), so its
+// rows never get here; a reader that brings its own rows gets the same answer
+// from the rule and cannot count a cancelled visit of next week as a plan.
 const LIVE_IN_PROGRESS_STATUSES = new Set(['en_route', 'on_site', 'in_progress']);
 function isLiveObligationRow(row, today) {
+  const status = String(row.status || '').toLowerCase();
+  if (TERMINAL_STATUSES.includes(status)) return false;
   if (row.followup_included === true) return false;
-  if (!LIVE_IN_PROGRESS_STATUSES.has(String(row.status || '').toLowerCase())) return rowPassesGatedPricingEvidence(row, today);
+  if (!LIVE_IN_PROGRESS_STATUSES.has(status)) return rowPassesGatedPricingEvidence(row, today);
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   return !isCallbackRow(row) && !isOneTimeBookingSource(row.source);
 }
