@@ -4244,16 +4244,40 @@ async function lawnNextVisitAtProperty(service, afterIso, knex, readFailures) {
   return row ? { state: 'scheduled', row } : noneOrUnknown();
 }
 
-// The lawn protocol version a completed visit's plan RECORDED: its completion ledger
-// row when one exists (a row with no version, attribution 'none', is authoritative:
-// nothing was followed), else the scheduled visit's pin only when there is no
-// completion row at all. null = no recorded version. Throws on a failed read.
+// What a completed visit's plan RECORDED about its lawn protocol: version and window. THE rule, in one place: the
+// completion ledger row when one exists (a row with no version, attribution 'none', is authoritative: nothing was
+// followed), else the scheduled visit's pin only when there is no completion row at all. Each field null = not recorded.
+function recordedProtocolAssignment(ledger, pin) {
+  const source = ledger
+    ? { version: ledger.protocol_version, windowKey: ledger.window_key, windowTitle: ledger.window_title }
+    : { version: pin?.lawn_protocol_version, windowKey: pin?.lawn_protocol_window_key, windowTitle: pin?.lawn_protocol_window_title };
+  return { version: source.version || null, windowKey: source.windowKey || null, windowTitle: source.windowTitle || null };
+}
+
+// The lawn protocol version a completed visit's plan RECORDED (recordedProtocolAssignment). null = no recorded
+// version. Throws on a failed read.
 async function resolveRecordedProtocolVersion(knex, service) {
   const completion = await knex('lawn_protocol_service_completions').where({ service_record_id: service.id }).first('protocol_version');
-  if (completion) return completion.protocol_version || null;
-  if (!service.scheduled_service_id) return null;
-  const scheduled = await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('lawn_protocol_version');
-  return scheduled?.lawn_protocol_version || null;
+  if (!completion && !service.scheduled_service_id) return null;
+  const scheduled = completion ? null : await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('lawn_protocol_version');
+  return recordedProtocolAssignment(completion, scheduled).version;
+}
+
+// The same recorded assignment (version, windowKey, windowTitle) for MANY visits in two reads: every ledger row, then the
+// pins of the visits that have none. services: [{ id (the service record), scheduled_service_id }]. Returns a Map of
+// service record id to the assignment. Throws on a failed read.
+async function resolveRecordedProtocolAssignments(knex, services) {
+  const out = new Map();
+  if (!services.length) return out;
+  const ledger = new Map((await knex('lawn_protocol_service_completions').whereIn('service_record_id', services.map((sv) => sv.id))
+    .select('service_record_id', 'protocol_version', 'window_key', 'window_title')).map((row) => [row.service_record_id, row]));
+  const pinIds = services.filter((sv) => !ledger.has(sv.id) && sv.scheduled_service_id).map((sv) => sv.scheduled_service_id);
+  const pins = new Map(pinIds.length
+    ? (await knex('scheduled_services').whereIn('id', pinIds)
+      .select('id', 'lawn_protocol_version', 'lawn_protocol_window_key', 'lawn_protocol_window_title')).map((row) => [row.id, row])
+    : []);
+  for (const sv of services) out.set(sv.id, recordedProtocolAssignment(ledger.get(sv.id), pins.get(sv.scheduled_service_id)));
+  return out;
 }
 
 // The lawn round (1-9) of a visit on a 9-visit rounds series, else null: the program line follows the round for those
@@ -7935,6 +7959,7 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 module.exports = {
   buildReportV1Data,
   resolveRecordedProtocolVersion,
+  resolveRecordedProtocolAssignments,
   resolveVisitRound,
   termiteStationPinsFlag,
   resolveApplicatorFdacsId,
