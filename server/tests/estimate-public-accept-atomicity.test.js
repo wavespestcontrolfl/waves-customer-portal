@@ -2521,6 +2521,34 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
       expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     });
 
+    test('a merge moved the estimate to another customer whose accept is still in flight: the 409 stays and nothing is retired (codex pre-push P1)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-17', token: 'tok-restart-17-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      const restart = require('../services/cancellation-resolution/restart');
+      const realCheck = restart.assertRestartAcceptEligible;
+      let refusedUnderLock = false;
+      spies.push(jest.spyOn(restart, 'assertRestartAcceptEligible').mockImplementation(async (...args) => {
+        try {
+          return await realCheck(...args);
+        } catch (checkErr) {
+          refusedUnderLock = true;
+          throw checkErr;
+        }
+      }));
+      // The new owner's accept has not committed when this request reads the row: still sent, but owned by them.
+      db.__state.onTable = (table) => {
+        if (table !== 'estimates' || !refusedUnderLock) return;
+        refusedUnderLock = false;
+        Object.assign(storedEstimate(), { customer_id: 'cust-moved-to' });
+      };
+      const res = await putAccept('tok-restart-17-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(retire).not.toHaveBeenCalled();
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
     test('control: the same refusal on an estimate still not accepted keeps the 409 and retires the card', async () => {
       const body = verifiedCapture();
       resetStore(restartEstimate({ id: 'est-restart-15', token: 'tok-restart-15-x012345678' }));

@@ -321,6 +321,15 @@ describe('GET /:token/data cta.consumerNotice', () => {
     expect(res.body.cta.consumerNotice).toEqual({ state: 'awaiting', canSign: true });
   });
 
+  test('gate on: a customer\'s own plan quote that staff changed offers no form to sign (codex pre-push P1)', async () => {
+    gateOn();
+    const res = await data(makeEstimate({ source: 'plan_start', bill_by_invoice: true }));
+    expect(res.status).toBe(200);
+    expect(res.body.estimate.quoteRefusal).toMatchObject({ code: 'PLAN_START_STATE_CHANGED' });
+    expect(res.body.cta).not.toHaveProperty('consumerNotice');
+    expect(mockCtaFor).not.toHaveBeenCalled();
+  });
+
   test('gate on: an estimate the service has nothing to say about leaves the key off', async () => {
     gateOn();
     mockCtaFor.mockResolvedValue(null);
@@ -354,6 +363,15 @@ describe('PUT /:token/accept consumer notice refusal', () => {
     expect(dbWrites).toEqual([]);
     expect(db.transaction).not.toHaveBeenCalled();
     expect(dbTables.filter((t) => t !== 'estimates')).toEqual([]);
+  });
+
+  test('gate on: a customer\'s own plan quote that staff changed answers its own 409 first, never the notice (codex pre-push P1)', async () => {
+    gateOn();
+    const res = await accept(makeEstimate({ source: 'plan_start', bill_by_invoice: true }));
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PLAN_START_STATE_CHANGED');
+    expect(mockBlocksAccept).not.toHaveBeenCalled();
+    expect(dbWrites).toEqual([]);
   });
 
   test('gate on, notice on file: the check passes and the accept goes on past it', async () => {

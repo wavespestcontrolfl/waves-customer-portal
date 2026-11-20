@@ -2136,7 +2136,8 @@ neither and staff can no longer change either, on or off, so such a row was chan
 that rule, and it stays refused until the customer's next portal tap replaces it with a fresh quote.
 The accept answers this refusal before it checks any field of the request body (contact fields,
 slot, service mode, payment), so an invoice-mode quote, whose page sends no slot, gets it rather
-than `plan_start_slot_required`. The re-check answers it again on both options as the row reads
+than `plan_start_slot_required`. It also answers ahead of the Florida consumer notice
+(`consumer_notice_required`), so a customer is never asked to sign for a quote they cannot accept. The re-check answers it again on both options as the row reads
 under the estimate row lock, before the comms lock (a writer from before the write refusal can
 commit between the accept's read and that lock). The page drops a recurring card it captured on
 either answer, so the accept retires that capture: the early refusal retires the
@@ -2150,7 +2151,8 @@ re-reads the estimate, and when it is now accepted it answers the same success r
 accepted estimate and retires nothing (a failed read takes the error path, also with nothing retired). The
 replay answers only for the estimate and customer the request first read: the same refusal answers a merge or
 undo that moved the estimate to another customer, so when that customer's accept committed instead, the
-request keeps its 409 and retires nothing.
+request keeps its 409 and retires nothing. It also retires nothing when the estimate moved but is not yet
+accepted, since that customer's accept may still be binding the same card.
 The estimate page answers both state-changed codes with a banner that keeps the server's
 message and links back to the portal, never "Refresh times". It turns off its one booking condition
 (the time picker, the pick-a-time prompts, the sticky booking bar and every book button) and its
@@ -2159,7 +2161,8 @@ payment choices for that quote. Only the React page has that banner, so an accep
 legacy renderer and the GrowthBook holdback, and the `/api/estimates` mount redirects to
 `/estimate/:token`. `GET /:token/data` marks a row that already has an option on before any tap:
 `estimate.quoteRefusal: { code, error }`, the accept's code and words, present only on such a plan
-quote, so the page shows the banner and offers no booking from the first load. `POST
+quote, so the page shows the banner and offers no booking from the first load. Such a row also carries
+no `cta.consumerNotice`, so the page offers no form to sign. `POST
 /:token/card-hold-intent` and `/recurring-card-intent` answer the same 409 after the park decision and
 before any policy answer or Stripe call, and mint nothing; a recurring replace request's named
 capture is retired first (the existing 503 when Stripe cannot confirm). Every slot route answers the
