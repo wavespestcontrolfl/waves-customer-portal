@@ -600,6 +600,8 @@ jest.setTimeout(30000);
   });
   describe('repeat silent caller (GATE_MISSED_CALL_SPAM_REPEAT)', () => {
     const CALLER = '+17275550611';
+    // The staff cell a form-callback bridge rings first (pre-push audit r20).
+    const STAFF_CELL = '+19415550100';
     const repeat = (row) => isRepeatSilentCaller(row);
     const lead = (phone, extra = {}) => database('leads').insert({ id: randomUUID(), phone, created_at: new Date(), ...extra });
     // The call judged: the caller's latest silent hang-up on the Parrish GBP line
@@ -660,6 +662,7 @@ jest.setTimeout(30000);
       ['a staff note on the judged call', (row) => database('call_log').where({ id: row.id }).update({ notes: 'called back, it was a person' })],
       ['a customer link on the judged call', (row) => database('call_log').where({ id: row.id }).update({ customer_id: LINKED_CUSTOMER })],
       ['a staff callback that rang out', () => database('call_log').insert(call(GBP_LINE, 0, { direction: 'outbound', to_phone: CALLER, status: 'no-answer', answered_by: null }))],
+      ['a lead callback bridge that rang the number from a staff cell', () => database('call_log').insert(call(GBP_LINE, 0, { direction: 'outbound', to_phone: STAFF_CELL, answered_by: null, source: 'lead-webhook-auto-bridge', metadata: { type: 'lead_auto_bridge', leadPhone: '(727) 555-0611' } }))],
       ['a reply in the text log', () => database('sms_log').insert({ id: randomUUID(), direction: 'inbound', from_phone: CALLER, to_phone: GBP_LINE, message_body: 'who is this', status: 'received', created_at: new Date() })],
       ['a reply only in the unified inbox', () => inbox(CALLER, { channel: 'sms', direction: 'inbound', body: 'who is this' })],
       ['a staff row with the number', () => database('technicians').insert({ id: randomUUID(), name: 'Staff Test', phone: CALLER, role: 'technician', employment_status: 'active' })],
@@ -668,7 +671,7 @@ jest.setTimeout(30000);
       ['a customer saved with the number on a secondary slot', () => database('customers').insert({ id: randomUUID(), first_name: 'Test', service_contact_phone: '727-555-0611', created_at: new Date(), updated_at: new Date() })],
       ['a staff reply still sending, its reservation the only row', () => database('sms_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_type: 'manual', message_body: 'Hi, Waves returning your call', status: 'sending', metadata: { manual_send_reservation: true }, created_at: new Date() })],
       ['a reply in a customer thread a promotion moved it to', () => inbox(null, { channel: 'sms', direction: 'inbound', body: 'who is this', metadata: { sms_contact_phone: CALLER } }, { contact_phone: null, unknown_contact: false, customer_id: LINKED_CUSTOMER })],
-    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15, r16, r18)', async (label, lateWrite) => {
+    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15, r16, r18, r20)', async (label, lateWrite) => {
       isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
       await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
       const inserted = judged();
@@ -913,6 +916,19 @@ jest.setTimeout(30000);
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
       await database('call_log').insert(call(GBP_LINE, 60 * 24 * 4, { direction: 'outbound', to_phone: CALLER, answered_by: null, ...shape }));
+      expect(await repeat(row)).toBe(false);
+    });
+
+    // A form-callback bridge rang staff first: its to_phone is the staff cell,
+    // and metadata.leadPhone is the number it then dialed. With the lead
+    // deleted, only the call says staff called the number (pre-push audit r20).
+    test('a lead callback bridge that rang the number from a staff cell means it is never a repeat, its lead deleted (pre-push audit r20)', async () => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      await lead('727.555.0611', { deleted_at: new Date() });
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      await database('call_log').insert(call(GBP_LINE, 60 * 24 * 4, { direction: 'outbound', to_phone: STAFF_CELL, answered_by: null, source: 'lead-webhook-auto-bridge', metadata: { type: 'lead_auto_bridge', leadPhone: '(727) 555-0611' } }));
       expect(await repeat(row)).toBe(false);
     });
 

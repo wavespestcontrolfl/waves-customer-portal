@@ -436,10 +436,13 @@ function otherGbpLineSql(row) {
 //  - no staff row (technician or admin, any status) has the number's phone,
 //    read from the table itself: the cached staff-sender list answers "not
 //    staff" when its gate is off or its read failed (pre-push audit r12);
-//  - every other call from or to the number, from the window start on, is a
-//    settled silent hang-up (IS NOT TRUE: a NULL blocks too). From the window
-//    start on, not to the judged call: a staff callback can come between the
-//    call and its bell (pre-push audit r9);
+//  - every other call of the number, from the window start on, is a settled
+//    silent hang-up (IS NOT TRUE: a NULL blocks too). A call of the number is
+//    one with the number on a leg: the caller, the dialed number, or the lead
+//    a form-callback bridge rang from a staff cell (its to_phone is the cell,
+//    metadata.leadPhone the lead; whereCallOfNumber, pre-push audit r20).
+//    From the window start on, not to the judged call: a staff callback can
+//    come between the call and its bell (pre-push audit r9);
 //  - no text from or to it but our own text-back in the text log
 //    (message_type as in missed-call-text-back.js; as the text-back's
 //    contactState reads contact; pre-push audit r11), in any status: a staff
@@ -501,6 +504,19 @@ function inboxSilentSql() {
 // address first, then its thread's, as admin-alert-contact-witnesses.js and
 // sms-response-policy.js read it.
 const MESSAGE_PEER_SQL = phoneKeySql("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, ''))");
+// A call (table alias `table`) with the number on a leg, the legs
+// phoneIsOneOfCallLegs (call-recording-processor.js) reads: the caller, the
+// dialed number, and the lead's number in the call's metadata. A form-callback
+// bridge (lead-webhook-auto-bridge) rang staff first, so its to_phone is the
+// staff cell and metadata.leadPhone is the lead; with the lead deleted or its
+// phone changed, only that key says staff called the number (pre-push audit
+// r20). Any call's leadPhone counts, as the lead callback reads take it.
+function whereCallOfNumber(qb, table, key) {
+  return qb.where((number) => number
+    .whereRaw(`${phoneKeySql(`${table}.from_phone`)} = ?`, [key])
+    .orWhereRaw(`${phoneKeySql(`${table}.to_phone`)} = ?`, [key])
+    .orWhereRaw(`${phoneKeySql(`${table}.metadata->>'leadPhone'`)} = ?`, [key]));
+}
 function silentRecordClauses(row, key, at, checkedAt) {
   const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
   const [settledSql, settledBindings] = settledSilentSql(checkedAt);
@@ -521,9 +537,7 @@ function silentRecordClauses(row, key, at, checkedAt) {
         .modify((inner) => whereNotSandboxCall(inner))
         .whereNot('call_log.id', row.id)
         .where('call_log.created_at', '>=', since)
-        .where((number) => number
-          .whereRaw(`${CALLER_KEY} = ?`, [key])
-          .orWhereRaw(`${phoneKeySql('call_log.to_phone')} = ?`, [key]))
+        .modify((calls) => whereCallOfNumber(calls, 'call_log', key))
         .whereRaw(`${settledSql} IS NOT TRUE`, settledBindings);
     })
     .whereNotExists(function loggedText() {
@@ -545,9 +559,7 @@ function silentRecordClauses(row, key, at, checkedAt) {
         .join('messages as m', 'm.twilio_sid', 'vc.twilio_call_sid')
         .join('conversations as c', 'c.id', 'm.conversation_id')
         .where('vc.created_at', '>=', since)
-        .where((number) => number
-          .whereRaw(`${phoneKeySql('vc.from_phone')} = ?`, [key])
-          .orWhereRaw(`${phoneKeySql('vc.to_phone')} = ?`, [key]))
+        .modify((calls) => whereCallOfNumber(calls, 'vc', key))
         .whereRaw(`(${inboxSilent} AND c.customer_id IS NULL) IS NOT TRUE`, inboxBindings);
     })
     .whereNotExists(function linkedConversation() {
