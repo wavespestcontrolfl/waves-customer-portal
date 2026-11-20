@@ -7,7 +7,8 @@
  *
  * An OPEN new-lead bell (category `new_lead`, naming a lead), or the repeat-form bell (lead-webhook.js
  * ringRepeatFormAlert: a lead sent the quote form again; the relevance sweep's lead_repeat_form class), that no person
- * has reached gets ONE more phone push 15 minutes after the bell's latest event. No gate: the push goes to admin users
+ * has reached gets ONE more phone push 15 minutes after the bell's latest event. A lead's latest inquiry sets its clock:
+ * an older open bell of the lead waits for the newer one (dueItems). No gate: the push goes to admin users
  * only. (A second step, a ring to the owner's cell at 60 minutes behind its own gate, is a separate change.)
  * At most one push for each event of a bell row: it is stamped first, in one statement fenced on the row being open and
  * unchanged since it was read (metadata.newLeadRealertAt), under notifyAdmin's lock for the bell's dedupe key. And at most one push per
@@ -29,9 +30,10 @@
  *   the lead is deleted, not open or already converted (lead-statuses.js isOpenLeadRow: spam, cancelled, won, lost and the like
  *   are out), or has an estimate sent or viewed; the call that made the lead was
  *   answered by a person (only for the lead's intake bell: the one the new-lead trigger writes for a lead its writer
- *   created, metadata.triggerKey new_lead and payload.createdLead, within 15 minutes of the lead's creation; every other
- *   bell, such as a repeat form, a form attached to an open call lead, an email follow-up's draft or a bell written
- *   before that mark existed, is a fresh inquiry); a person's
+ *   created, metadata.triggerKey new_lead and payload.createdLead, or the call processor's bell by its title, also one
+ *   written before that mark existed, within 15 minutes of the lead's creation; every other bell, such as a repeat
+ *   form, a form attached to an open call lead, an email follow-up's draft or another bell written before the mark
+ *   existed, is a fresh inquiry); a person's
  *   text or call, or a Gmail send, or a visit
  *   booked, reached the lead's customer or phone after that bell's inquiry began (for the intake bell:
  *   the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself; a bell that
@@ -129,23 +131,41 @@ function stampedSince(meta, askedAt) {
   return !(at < askedAt.getTime());
 }
 
+// The titles of the call processor's new-lead bell (call-recording-processor.js notifyNewCallLead); no other writer uses
+// them. Each of its callers mints the lead just before it, so it is always that lead's intake bell.
+const CALL_LEAD_TITLES = ['New call lead', 'New voicemail lead'];
+
 // The writer's mark that it created this bell's lead: the new-lead trigger's payload.createdLead (notification-triggers.js
 // new_lead, metadata.triggerKey: lead-webhook.js, call-recording-processor.js notifyNewCallLead,
 // booking-preferred-time.js), or the quote wizard's own metadata.createdLead (public-quote.js writes its bell straight to
 // notifyAdmin, so it has no triggerKey; it marks its own quote_wizard row, never a repeat filed as a duplicate, nor a
-// call lead the prefill token attached the form to).
-const intakeMarked = (meta) => (meta.triggerKey === 'new_lead' && meta.payload?.createdLead === true)
+// call lead the prefill token attached the form to). A call processor's bell written before the mark existed carries
+// no mark, but its title says what it is: its call, which ends before the bell is written, is still judged (a mark of
+// false is never read past).
+const intakeMarked = (meta) => (meta.triggerKey === 'new_lead' && (meta.payload?.createdLead === true
+    || (meta.payload?.createdLead === undefined && CALL_LEAD_TITLES.includes(meta.payload?.title))))
   || (!meta.triggerKey && meta.createdLead === true);
 
+// The lead's latest inquiry sets its clock: of a lead's open, unpushed bells (every page of the scan), only the one with
+// the latest event can be due, so a form sent again just before an older bell falls due holds that bell, and the lead's
+// one push comes 15 minutes after the newer form, not minutes after its own ring.
 function dueItems(rows, now) {
   const { bellEventAt, parseMeta, refsFromRow } = relevance();
   const floor = now.getTime() - WINDOW_MS;
-  const items = [];
+  const open = [];
+  const latest = new Map();
   for (const row of rows) {
     const meta = parseMeta(row.metadata);
     const askedAt = bellEventAt(row);
     const leadId = refsFromRow(row).leadId;
     if (!leadId || !askedAt || askedAt.getTime() <= floor || stampedSince(meta, askedAt)) continue;
+    const key = String(leadId).toLowerCase();
+    latest.set(key, Math.max(latest.get(key) || 0, askedAt.getTime()));
+    open.push({ row, meta, askedAt, leadId, key });
+  }
+  const items = [];
+  for (const { row, meta, askedAt, leadId, key } of open) {
+    if (askedAt.getTime() < latest.get(key)) continue;
     const { dueAt, expiresAt } = pushWindow(askedAt, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES);
     if (dueAt.getTime() > now.getTime() || expiresAt.getTime() < now.getTime()) continue;
     items.push({ row, meta, askedAt, leadId, expiresAt, intakeTrigger: intakeMarked(meta) });
@@ -364,5 +384,5 @@ module.exports = {
   runNewLeadReminder,
   PUSH_STAMP,
   LEAD_STAMPS,
-  __private: { inBusinessHours, businessDueAt, businessDayClose, pushWindow, kind, dueItems, reachedLeads, inquiryOf, leadClaim, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES },
+  __private: { inBusinessHours, businessDueAt, businessDayClose, pushWindow, kind, dueItems, reachedLeads, inquiryOf, leadClaim, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES, CALL_LEAD_TITLES },
 };

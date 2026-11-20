@@ -23,7 +23,7 @@
  *   - a visit booked: the new-lead class's live top-level visit predicate,
  *     passed in as `bookedVisits`;
  *   - an email a person answered: a Gmail SENT row in the customer's thread
- *     (personSentFilter + resolveEmailCustomerLink, email-customer-link.js);
+ *     (personSentFilter + emailCustomerLink, email-customer-link.js);
  *   - a visit that ran after a voicemail (voice items only): the voicemail's customer,
  *     by customer id and never by phone, has a visit in a status that ran with
  *     completed_at after the call's start on the same Eastern day.
@@ -36,7 +36,7 @@
  *     (by customer id, never by phone) within 24 hours after the text
  *     (sms-staff-action-answers.js, the one definition the Messages reader shares).
  *   - an email a person sent to a portal chat's customer (customer items only): a Gmail SENT
- *     row after the bell, in ANY thread, that resolveEmailCustomerLink links to that customer
+ *     row after the bell, in ANY thread, that emailCustomerLink links to that customer
  *     (the same linkage as the email reply above, but not tied to one thread). Read only for
  *     rows whose To/Cc/Bcc carries the customer's own address.
  * read_at is never evidence. Read-only: nothing here writes, locks or sends.
@@ -59,7 +59,7 @@ const { phoneIdentitySql } = require('./sms-response-policy');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
+const { personSentFilter, emailCustomerLink, extractEmailAddresses } = require('./email/email-customer-link');
 const staffActionDef = require('./sms-staff-action-answers');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -398,7 +398,7 @@ async function attachEmailReplies(conn, idents, bundles) {
     const at = asDate(row.received_at);
     const owners = emailIdents.filter((i) => i.email.gmail_thread_id === row.gmail_thread_id && at && at.getTime() > i.anchor.getTime());
     if (!owners.length) continue;
-    const linked = await resolveEmailCustomerLink(conn, row);
+    const { customerId: linked } = await emailCustomerLink(conn, row);
     for (const owner of owners.filter((o) => String(linked) === o.customerId)) {
       const bundle = bundles.get(String(owner.item.id));
       bundle.replyAt = later(bundle.replyAt, at);
@@ -407,7 +407,7 @@ async function attachEmailReplies(conn, idents, bundles) {
 }
 
 // An email a person sent to a portal chat's customer after the bell, in any thread: a Gmail SENT row
-// that resolveEmailCustomerLink links to the customer. Bounded: only rows after the earliest anchor whose
+// that emailCustomerLink links to the customer. Bounded: only rows after the earliest anchor whose
 // To/Cc/Bcc text holds one of these customers' own addresses are read (a prefilter; the link decides).
 async function attachCustomerEmailSends(conn, idents, bundles) {
   const owners = idents.filter((i) => i.item.kind === 'customer' && i.customerId);
@@ -427,7 +427,7 @@ async function attachCustomerEmailSends(conn, idents, bundles) {
     const recipients = new Set(extractEmailAddresses([row.to_address, row.cc_address, row.bcc_address].filter(Boolean).join(',')));
     const named = owners.filter((o) => at && at.getTime() > o.anchor.getTime() && [...(addressOf.get(o.customerId) || [])].some((a) => recipients.has(a)));
     if (!named.length) continue;
-    const linked = await resolveEmailCustomerLink(conn, row);
+    const { customerId: linked } = await emailCustomerLink(conn, row);
     for (const owner of named.filter((o) => String(linked) === o.customerId)) {
       const bundle = bundles.get(String(owner.item.id));
       bundle.replyAt = later(bundle.replyAt, at);

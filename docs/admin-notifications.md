@@ -643,8 +643,10 @@ back a bell when any bell, itself included, holds a push for its lead in the 48 
 was for (`metadata.newLeadRealertLeads`, left out of the bell version like the stamps), because the repeat-form row is
 keyed by customer and a form for the customer's other lead refreshes it: the first lead stays capped, and the other lead
 is judged on its own. So a lead with an open intake
-bell and a repeat form gets one push, for the latest inquiry (the sweep judges every page first, then stamps the latest
-inquiry first), and a bell of that lead written or rung in the next 48 hours gets none (the writer's own ring still
+bell and a repeat form gets one push, for the latest inquiry: the lead's latest inquiry sets its clock, so an older open
+bell of the lead waits for the newer one (the sweep reads every page before it judges any row), and a form sent again
+just before the older bell falls due gets the push 15 minutes after that form. A bell of that lead written or rung in
+the next 48 hours gets none (the writer's own ring still
 reaches the phones). A row that rang again after its stamp (a repeat form refreshes its row and keeps the stamp) is read
 again, so after those 48 hours it can push for its new event. The stamp is the clock when it is written, and the hours
 and the late window are asked last, just before that write. As with the call-back reminder, it goes only while the row is
@@ -656,11 +658,12 @@ is written minutes after a call a person already answered): a deleted lead, a le
 like are out), or one with an estimate sent or viewed; the call that made the lead answered by a
 person (`answered_by = 'human'`; only for the intake bell: the one the new-lead trigger writes for a lead its writer
 created, `metadata.triggerKey` `new_lead` as the relevance sweep's `new_lead` class defines it, with `payload.createdLead`
-set by that writer (the form webhook, the call processor's `notifyNewCallLead`, the /book preferred-time request), or the
-quote wizard's bell for its own row (`public-quote.js` writes it straight to `notifyAdmin`, with `metadata.createdLead`, only
+set by that writer (the form webhook, the call processor's `notifyNewCallLead`, the /book preferred-time request); the
+call processor's bell by its title (`New call lead`, `New voicemail lead`; no other writer uses them), also one written
+before the mark existed, so its call, which ends before the bell, is still judged; or the quote wizard's bell for its own row (`public-quote.js` writes it straight to `notifyAdmin`, with `metadata.createdLead`, only
 for a `quote_wizard` lead: never on a repeat filed as a duplicate, nor on a voicemail or inbound-call lead the prefill token
 attached the form to), within 15 minutes of the lead's creation; every other bell, such as a repeat form, a form
-attached to an open call lead (`createdLead` false), an email follow-up's draft or a bell written before the mark existed, is
+attached to an open call lead (`createdLead` false), an email follow-up's draft or another bell written before the mark existed, is
 a fresh inquiry); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone after
 the bell's inquiry began (a text or call tied to another customer never counts, even for a lead with no customer; one tied to
 no customer counts on the lead's own phone only while no other open lead holds that phone, by `lead-contact-sync.js`

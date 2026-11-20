@@ -408,13 +408,14 @@ describe('the 15-minute push (no gate)', () => {
     expect(await beforeHandoff()).toBe(false);
   });
 
-  test('one lead\'s two bells due together push once, for its latest inquiry, under a lock on the lead', async () => {
+  test('one lead\'s two bells push once, for its latest inquiry, under a lock on the lead', async () => {
     mockState.recordStamps = true;
     const locks = [];
     mockState.onRaw = (sql, bindings) => { if (String(sql).includes('pg_advisory_xact_lock')) locks.push(bindings[0]); };
-    // The lead's intake bell at 10:00 and its repeat form at 10:03: both due at 10:20, and nobody reached the lead.
+    // The lead's intake bell at 10:00 and its repeat form at 10:03, and nobody reached the lead by 10:20. The repeat form,
+    // the lead's latest inquiry, is due; the intake bell waits for it.
     mockState.rows = [row('n-1'), repeatFormRow('rf-1', est('09', '10:03'))];
-    expect(await run(PUSH_NOW)).toMatchObject({ due: 2, pushed: 1 });
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
     expect(pushes().map(([, payload]) => payload.alertRowId)).toEqual(['rf-1']);
     expect(locks).toContain(`new-lead-reminder:lead:${LEAD}`);
     // The intake bell's inquiry began before that push: the next sweep leaves it quiet too.
@@ -430,7 +431,22 @@ describe('the 15-minute push (no gate)', () => {
     mockState.pages = [[row('n-1')], [repeatFormRow('rf-1', est('09', '10:03'))], []];
     const result = await runNewLeadReminder({ now: PUSH_NOW, pageSize: 1 });
     await Promise.all(result.sends);
-    expect(result).toMatchObject({ due: 2, pushed: 1 });
+    expect(result).toMatchObject({ due: 1, pushed: 1 });
+    expect(pushes().map(([, payload]) => payload.alertRowId)).toEqual(['rf-1']);
+    // The repeat form on the later page is not due yet (10:18): it still holds the intake bell read on the first page.
+    triggerNotification.mockClear();
+    mockState.pages = [[row('n-1')], [repeatFormRow('rf-2', est('09', '10:18'))], []];
+    expect(await runNewLeadReminder({ now: PUSH_NOW, pageSize: 1 })).toMatchObject({ due: 0, pushed: 0 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('the lead\'s latest inquiry sets its clock: a form sent again just before the intake bell falls due holds it, and the push comes 15 minutes after that form', async () => {
+    mockState.recordStamps = true;
+    // The intake bell at 10:00 is due at 10:15; the lead sent the form again at 10:18.
+    mockState.rows = [row('n-1'), repeatFormRow('rf-1', est('09', '10:18'))];
+    expect(await run(est('09', '10:20'))).toMatchObject({ due: 0, pushed: 0 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(await run(est('09', '10:34'))).toMatchObject({ due: 1, pushed: 1 });
     expect(pushes().map(([, payload]) => payload.alertRowId)).toEqual(['rf-1']);
   });
 
@@ -829,6 +845,18 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
   });
 
+  test.each(['New call lead', 'New voicemail lead'])('a call processor bell written before the mark existed (%s) is still its intake bell: the answered call settles it', async (title) => {
+    // The call ended at 9:58, a person answered it, and the processor wrote its bell at 10:00 with no payload.createdLead.
+    mockState.leads = [lead({ created_at: est('09', '09:58'), twilio_call_sid: CALL_SID })];
+    mockState.answered = [{ twilio_call_sid: CALL_SID }];
+    mockState.rows = [row('n-1', { title, metadata: { payload: { leadId: LEAD, title } } })];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+    // A writer's mark of false is never read past: the same bell marked false is a later inquiry, judged from itself.
+    mockState.rows = [row('n-2', { title, metadata: { payload: { leadId: LEAD, title, createdLead: false } } })];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+  });
+
   test('a form the webhook attached to an open call lead is a later inquiry: the answered call that made the lead does not settle it', async () => {
     // A person answered the call that made the lead at 9:52; the caller sent the web form at 10:00, and the webhook
     // attached it to that open call lead (payload.createdLead false) and rang the new-lead trigger.
@@ -950,5 +978,8 @@ describe('the writers mark the bell of a lead they created (payload.createdLead)
     expect(fnStart).toBeGreaterThan(-1);
     const { call } = triggerCall('../services/call-recording-processor.js', fnStart);
     expect(call).toContain('createdLead: true,');
+    // Its titles are the ones the reminder reads as its bell, also on a bell written before the mark existed.
+    const [, voicemail, answered] = call.match(/title: extracted\.is_voicemail \? '([^']+)' : '([^']+)',/);
+    expect([answered, voicemail]).toEqual(require('../services/new-lead-reminder').__private.CALL_LEAD_TITLES);
   });
 });

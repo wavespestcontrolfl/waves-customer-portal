@@ -7,7 +7,7 @@ jest.mock('../models/db', () => jest.fn());
 // it answers from the row: `links_to` names the customer a send belongs to.
 jest.mock('../services/email/email-customer-link', () => ({
   extractEmailAddresses: jest.requireActual('../services/email/email-customer-link').extractEmailAddresses,
-  resolveEmailCustomerLink: jest.fn(async (_conn, row) => row.links_to || null),
+  emailCustomerLink: jest.fn(async (_conn, row) => ({ customerId: row.links_to || null, namesNoCustomer: false })),
   personSentFilter: (alias) => `SENT_ONLY(${alias})`,
 }));
 
@@ -162,8 +162,8 @@ describe('the customer record', () => {
   });
 
   test('our own replies are read too, and only the ones the shared mail linkage rule gives to this customer', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
-    resolveEmailCustomerLink.mockClear();
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
+    emailCustomerLink.mockClear();
     const conn = fakeConn(TABLES);
     const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     const emailCalls = conn.calls.filter(([t]) => t === 'emails');
@@ -181,11 +181,11 @@ describe('the customer record', () => {
   });
 
   test('a sent mail with no Cc/Bcc on file is never guessed: in the customer\'s thread it makes the record incomplete', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
-    resolveEmailCustomerLink.mockClear();
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
+    emailCustomerLink.mockClear();
     const old = (id, thread) => ({ id, gmail_thread_id: thread, customer_id: null, to_address: 'pat@example.test', cc_address: null, bcc_address: null, subject: 'Re', body_text: 'Old reply.', received_at: '2026-04-01T11:00:00.000Z', links_to: 'c1' });
     const record = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [TABLES.emails[0], old('o1', 'th1'), old('o2', 'th-other')] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
-    expect(resolveEmailCustomerLink).not.toHaveBeenCalled();
+    expect(emailCustomerLink).not.toHaveBeenCalled();
     expect(record.entries.some((e) => e.text.includes('Old reply.'))).toBe(false);
     expect(record.unread.filter((u) => u.channel === 'email')).toEqual([{ channel: 'email', at: '2026-04-01T07:00:00-04:00', reason: 'recipients_not_captured' }]);
   });
@@ -235,8 +235,8 @@ describe('the customer record', () => {
     }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.entries.find((e) => e.channel === 'portal_request').at).toBeNull();
     expect(record.unread.some((u) => u.reason === 'sender_not_verified')).toBe(false);
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
-    expect(resolveEmailCustomerLink).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ id: 'e2' }), { asOf: AS_OF });
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
+    expect(emailCustomerLink).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ id: 'e2' }), { asOf: AS_OF });
   });
 
   test('a linked mail not from the customer\'s own address is unread; an operator\'s request row and a tagged call copy are not read', async () => {

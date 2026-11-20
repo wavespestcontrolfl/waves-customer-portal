@@ -132,8 +132,4 @@ async function emailCustomerLink(conn, row, { asOf } = {}) {
   return { customerId: null, namesNoCustomer: distinct.length === 0 };
 }
 
-async function resolveEmailCustomerLink(conn, row, options = {}) {
-  return (await emailCustomerLink(conn, row, options)).customerId;
-}
-
-module.exports = { personSentFilter, resolveEmailCustomerLink, emailCustomerLink, extractEmailAddresses };
+module.exports = { personSentFilter, emailCustomerLink, extractEmailAddresses };

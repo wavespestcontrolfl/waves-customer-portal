@@ -181,7 +181,8 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     expect(pushesFor(formBell.id)).toHaveLength(1);
     expect(pushesFor(webBell.id)).toHaveLength(0);
     expect(metaOf(await db('notifications').where({ id: formBell.id }).first())[reminder.PUSH_STAMP]).toBe(NOW.toISOString());
-    // Held back by the lead's claim, not stamped: the next sweep judges it again, and the claim holds it again.
+    // Not stamped: the repeat form, the lead's latest inquiry, set its clock. The next sweep (the stamped form is no
+    // longer read) judges it again, and the lead's claim holds it.
     expect(metaOf(await db('notifications').where({ id: webBell.id }).first())).not.toHaveProperty(reminder.PUSH_STAMP);
     jest.clearAllMocks();
     await run();
@@ -224,6 +225,22 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     expect(pushesFor(formBell.id)).toHaveLength(1);
     expect(metaOf(await db('notifications').where({ id: formBell.id }).first())[reminder.PUSH_STAMP]).toBe(saturday.toISOString());
   }, 180000);
+
+  test('the lead\'s latest inquiry sets its clock: the repeat form the writer rings just before the new-lead bell falls due holds it; the push comes 15 minutes after the form', async () => {
+    const { customer, lead } = await leadOnFile();
+    // The web form's bell at 2:40 PM is due at 2:55; the lead sends the form again at 2:58.
+    const webBell = await newLeadBell(lead, mins(-20));
+    const formBell = await repeatFormBell(customer, lead, mins(-2));
+    await run();
+    expect(pushesFor(webBell.id)).toHaveLength(0);
+    expect(pushesFor(formBell.id)).toHaveLength(0);
+    jest.clearAllMocks();
+    const at = mins(14);
+    const result = await reminder.runNewLeadReminder({ now: at, clock: () => at });
+    await Promise.all(result.sends || []);
+    expect(pushesFor(formBell.id)).toHaveLength(1);
+    expect(pushesFor(webBell.id)).toHaveLength(0);
+  }, 60000);
 
   test('the cap stays with the lead a push was for: the writer refreshes the repeat-form row for the customer\'s other lead, which pushes, and the first lead stays capped', async () => {
     const { customer, lead: leadA } = await leadOnFile();

@@ -724,7 +724,7 @@ postgres('Email commitments on PostgreSQL', () => {
   // header value ("Name <addr>", or a comma-separated list), never a bare
   // address — a plain `=` comparison never matched it, so 23 real SENT
   // rows to gmail.com resolved to no customer in production. These prove
-  // the fix in BOTH resolveEmailCustomerLink directly and the evidence
+  // the fix in BOTH emailCustomerLink directly and the evidence
   // loader's own SQL prefilter (which shares the same underlying bug).
   test('D1 via to_address resolution (no thread partner): a "Name <addr>" SENT reply still resolves and closes an SMS ask', async () => {
     const sourceAt = new Date();
@@ -750,51 +750,51 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(replyFulfillment(evidence, commitment)).toMatchObject({ verdict: 'fulfilled', record_type: 'email_reply', record_id: reply.id });
   });
 
-  test('resolveEmailCustomerLink: a two-recipient to_address resolves when exactly one is an active customer', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+  test('emailCustomerLink: a two-recipient to_address resolves when exactly one is an active customer', async () => {
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'someone.else@nowhere.invalid, customer@example.invalid', cc_address: '', bcc_address: '' };
-    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
+    await expect(emailCustomerLink(mockPg, row)).resolves.toMatchObject({ customerId });
   });
 
-  test('resolveEmailCustomerLink: an unthreaded send naming the customer only in Cc or Bcc still resolves (Codex #5422 r6)', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+  test('emailCustomerLink: an unthreaded send naming the customer only in Cc or Bcc still resolves (Codex #5422 r6)', async () => {
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     const base = { id: randomUUID(), gmail_thread_id: null, to_address: null, cc_address: '', bcc_address: '' };
-    await expect(resolveEmailCustomerLink(mockPg, { ...base, bcc_address: 'customer@example.invalid' })).resolves.toBe(customerId);
-    await expect(resolveEmailCustomerLink(mockPg, { ...base, to_address: '', cc_address: 'Synthetic <customer@example.invalid>' })).resolves.toBe(customerId);
-    await expect(resolveEmailCustomerLink(mockPg, base)).resolves.toBeNull();
+    await expect(emailCustomerLink(mockPg, { ...base, bcc_address: 'customer@example.invalid' })).resolves.toMatchObject({ customerId });
+    await expect(emailCustomerLink(mockPg, { ...base, to_address: '', cc_address: 'Synthetic <customer@example.invalid>' })).resolves.toMatchObject({ customerId });
+    await expect(emailCustomerLink(mockPg, base)).resolves.toMatchObject({ customerId: null });
   });
 
-  test('resolveEmailCustomerLink: two recipients matching two different customers resolves to nobody (never guesses)', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+  test('emailCustomerLink: two recipients matching two different customers resolves to nobody (never guesses)', async () => {
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     const otherId = randomUUID();
     await mockPg('customers').insert({ id: otherId, first_name: 'Other', last_name: 'Fixture',
       phone: '+12025559999', email: 'other.customer@example.invalid', address_line1: '2 Fixture Way', city: 'Sarasota', zip: '34236' });
     const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'other.customer@example.invalid, customer@example.invalid', cc_address: '', bcc_address: '' };
-    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
+    await expect(emailCustomerLink(mockPg, row)).resolves.toMatchObject({ customerId: null });
   });
 
-  test('resolveEmailCustomerLink: a send in the customer\'s thread that never went to the customer (internal forward) resolves to nobody', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+  test('emailCustomerLink: a send in the customer\'s thread that never went to the customer (internal forward) resolves to nobody', async () => {
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     const inbound = await insertEmail({ customer_id: customerId });
     const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'Office <office@wavespestcontrol.com>', cc_address: '', bcc_address: '' };
-    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
-    await expect(resolveEmailCustomerLink(mockPg, { ...row, to_address: null })).resolves.toBeNull();
+    await expect(emailCustomerLink(mockPg, row)).resolves.toMatchObject({ customerId: null });
+    await expect(emailCustomerLink(mockPg, { ...row, to_address: null })).resolves.toMatchObject({ customerId: null });
   });
 
-  test('resolveEmailCustomerLink: a thread send that also names another customer resolves to nobody', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+  test('emailCustomerLink: a thread send that also names another customer resolves to nobody', async () => {
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     await mockPg('customers').insert({ id: randomUUID(), first_name: 'Third', last_name: 'Fixture',
       phone: '+12025559998', email: 'third.customer@example.invalid', address_line1: '3 Fixture Way', city: 'Sarasota', zip: '34236' });
     const inbound = await insertEmail({ customer_id: customerId });
     const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid, third.customer@example.invalid', cc_address: '', bcc_address: '' };
-    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
+    await expect(emailCustomerLink(mockPg, row)).resolves.toMatchObject({ customerId: null });
   });
 
-  test('resolveEmailCustomerLink: a thread reply to the address the customer wrote in from resolves to that customer', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+  test('emailCustomerLink: a thread reply to the address the customer wrote in from resolves to that customer', async () => {
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     const inbound = await insertEmail({ customer_id: customerId, from_address: 'Dryrun Fixture <work.inbox@example.invalid>' });
     const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'work.inbox@example.invalid', cc_address: '', bcc_address: '' };
-    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
+    await expect(emailCustomerLink(mockPg, row)).resolves.toMatchObject({ customerId });
   });
 
   test('subject-only ask: an empty body with an actionable subject is eligible, and the quote grounds in the subject', async () => {
@@ -863,47 +863,47 @@ postgres('Email commitments on PostgreSQL', () => {
   });
 
   test('cc/bcc: a staff send with customer A in To and customer B in Cc resolves to nobody', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     await mockPg('customers').insert({ id: randomUUID(), first_name: 'Cc', last_name: 'Fixture',
       phone: '+12025559997', email: 'cc.customer@example.invalid', address_line1: '4 Fixture Way', city: 'Sarasota', zip: '34236' });
     const inbound = await insertEmail({ customer_id: customerId });
     const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
       cc_address: 'cc.customer@example.invalid', bcc_address: '' };
-    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
+    await expect(emailCustomerLink(mockPg, row)).resolves.toMatchObject({ customerId: null });
     // Same without a thread partner (direct recipient branch).
-    await expect(resolveEmailCustomerLink(mockPg, { ...row, gmail_thread_id: randomUUID() })).resolves.toBeNull();
+    await expect(emailCustomerLink(mockPg, { ...row, gmail_thread_id: randomUUID() })).resolves.toMatchObject({ customerId: null });
   });
 
   test('cc/bcc: another customer in Bcc resolves to nobody; a non-customer Cc/Bcc still resolves', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     await mockPg('customers').insert({ id: randomUUID(), first_name: 'Bcc', last_name: 'Fixture',
       phone: '+12025559996', email: 'bcc.customer@example.invalid', address_line1: '5 Fixture Way', city: 'Sarasota', zip: '34236' });
     const inbound = await insertEmail({ customer_id: customerId });
     const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
       cc_address: '', bcc_address: 'Bcc Fixture <bcc.customer@example.invalid>' };
-    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
-    await expect(resolveEmailCustomerLink(mockPg, { ...row, bcc_address: 'office@wavespestcontrol.com',
-      cc_address: 'Office <office2@wavespestcontrol.com>' })).resolves.toBe(customerId);
+    await expect(emailCustomerLink(mockPg, row)).resolves.toMatchObject({ customerId: null });
+    await expect(emailCustomerLink(mockPg, { ...row, bcc_address: 'office@wavespestcontrol.com',
+      cc_address: 'Office <office2@wavespestcontrol.com>' })).resolves.toMatchObject({ customerId });
   });
 
   test('cc/bcc: the customer only in Cc still counts as reached (the recipient set is To+Cc+Bcc)', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'someone.else@nowhere.invalid',
       cc_address: 'customer@example.invalid', bcc_address: '' };
-    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
+    await expect(emailCustomerLink(mockPg, row)).resolves.toMatchObject({ customerId });
   });
 
   test('cc/bcc: a SENT row whose cc or bcc was never captured (NULL) never links to a customer', async () => {
-    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     const inbound = await insertEmail({ customer_id: customerId });
     const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid' };
-    await expect(resolveEmailCustomerLink(mockPg, { ...row, cc_address: null, bcc_address: '' })).resolves.toBeNull();
-    await expect(resolveEmailCustomerLink(mockPg, { ...row, cc_address: '', bcc_address: null })).resolves.toBeNull();
-    await expect(resolveEmailCustomerLink(mockPg, { ...row, cc_address: '', bcc_address: '' })).resolves.toBe(customerId);
+    await expect(emailCustomerLink(mockPg, { ...row, cc_address: null, bcc_address: '' })).resolves.toMatchObject({ customerId: null });
+    await expect(emailCustomerLink(mockPg, { ...row, cc_address: '', bcc_address: null })).resolves.toMatchObject({ customerId: null });
+    await expect(emailCustomerLink(mockPg, { ...row, cc_address: '', bcc_address: '' })).resolves.toMatchObject({ customerId });
   });
 
   test('emailCustomerLink: a null link says whether the send names no customer or cannot be settled', async () => {
-    const { emailCustomerLink, resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const { emailCustomerLink } = require('../services/email/email-customer-link');
     // Names no customer: Cc/Bcc captured, no customer in its thread, no recipient on a customer's file.
     const nobody = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'Lead Fixture <lead.only@nowhere.invalid>', cc_address: '', bcc_address: '' };
     await expect(emailCustomerLink(mockPg, nobody)).resolves.toEqual({ customerId: null, namesNoCustomer: true });
@@ -925,10 +925,6 @@ postgres('Email commitments on PostgreSQL', () => {
     await expect(emailCustomerLink(mockPg, { ...nobody, to_address: 'customer@example.invalid, mixed.other@example.invalid' })).resolves.toEqual(unsettled);
     // Linked: the customer's own address.
     await expect(emailCustomerLink(mockPg, { ...nobody, to_address: 'customer@example.invalid' })).resolves.toEqual({ customerId, namesNoCustomer: false });
-    // resolveEmailCustomerLink still answers the customer alone.
-    await expect(resolveEmailCustomerLink(mockPg, nobody)).resolves.toBeNull();
-    await expect(resolveEmailCustomerLink(mockPg, { ...nobody, bcc_address: null })).resolves.toBeNull();
-    await expect(resolveEmailCustomerLink(mockPg, { ...nobody, to_address: 'customer@example.invalid' })).resolves.toBe(customerId);
   });
 
   test('cc/bcc: intake marks a NULL-recipient SENT row seen with no commitment, and links a captured one', async () => {

@@ -164,16 +164,17 @@ async function waitingNow(kind, item) {
 
 /**
  * One scan for a reminder `kind`: { label, stamp, match, windowMs, dueItems(rows, now), waiting(items), inHours?(date) }.
- * dueItems picks the rows due now; waiting(items) returns those that still wait on a person and throws when a read
- * fails (no verdict: nothing is sent on that page). Each push asks waiting([item]) again just before it goes. `inHours(date)` is the reminder's own hours rule, asked with a fresh
+ * dueItems gets every page's rows at once and picks the rows due now, so it can weigh one lead's rows against each
+ * other whatever page each was read on; waiting(items) returns those that still wait on a person and throws when a read
+ * fails (no verdict: nothing is sent in this sweep). Each push asks waiting([item]) again just before it goes. `inHours(date)` is the reminder's own hours rule, asked with a fresh
  * clock (`clock`, default the real time) before each item is stamped and again at each push's dispatch: the parent
  * sweep's `now` can be old by the time its closes and the reads above have finished. When the hours have closed the
  * sweep stops with the rest unstamped, for the next open sweep while they are still inside their late window. An item
  * may carry `expiresAt`, the end of its late window: once the fresh clock passes it, the item is not stamped, and a
  * push already stamped is refused at dispatch. `closesAt(date)` (optional) is when the reminder's hours end on that
  * day: each push expires then, or at the item's `expiresAt` if that is first. `claim(item)` (optional) caps the pushes
- * per claim (stampOnce). Every page is judged first, then the stamps go in the kind's `order` (optional comparator), so
- * the item a claim prefers is stamped first even when its row was read on a later page. Returns { due, sent, sends };
+ * per claim (stampOnce). Every page is read and judged first, then the stamps go in the kind's `order` (optional
+ * comparator), so the item a claim prefers is stamped first even when its row was read on a later page. Returns { due, sent, sends };
  * `sends` are the pushes, never awaited here. Throws only when a page cannot be read.
  */
 async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Date() }) {
@@ -188,25 +189,29 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
     return ends.length ? new Date(Math.min(...ends)).toISOString() : null;
   };
   const sends = [];
-  const waiting = [];
+  const rows = [];
   let cursor = resumeAfter.get(stamp) || null;
   resumeAfter.delete(stamp);
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const rows = await candidateQuery(kind, since, cursor, pageSize);
-    if (!rows.length) break;
-    const last = rows[rows.length - 1];
+    const pageRows = await candidateQuery(kind, since, cursor, pageSize);
+    if (!pageRows.length) break;
+    rows.push(...pageRows);
+    const last = pageRows[pageRows.length - 1];
     cursor = { createdAt: last.created_at_token, id: last.id };
-    const due = kind.dueItems(rows, now);
-    total.due += due.length;
-    try {
-      waiting.push(...(await kind.waiting(due)));
-    } catch (err) {
-      logger.warn(`[${label}] contact witnesses failed to load, nothing sent on this page: ${safeError(err)}`);
-    }
-    if (rows.length < pageSize) break;
+    if (pageRows.length < pageSize) break;
     if (page === MAX_PAGES - 1) {
       resumeAfter.set(stamp, cursor);
       logger.warn(`[${label}] stopped after ${MAX_PAGES} pages; the next sweep resumes after them`);
+    }
+  }
+  const due = kind.dueItems(rows, now);
+  total.due = due.length;
+  const waiting = [];
+  if (due.length) {
+    try {
+      waiting.push(...(await kind.waiting(due)));
+    } catch (err) {
+      logger.warn(`[${label}] contact witnesses failed to load, nothing sent: ${safeError(err)}`);
     }
   }
   if (kind.order) waiting.sort(kind.order);

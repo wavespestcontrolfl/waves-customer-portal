@@ -13,7 +13,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // ledger's callback proof (staff-contact.js).
 const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callContactSelects } = require('./staff-contact');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
-const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
+const { personSentFilter, emailCustomerLink } = require('./email/email-customer-link');
 const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require('./email/email-strip');
 const { gateEnvValue, gateEnvTimestamp, promiseRecordEvidenceMode } = require('../config/feature-gates');
 
@@ -377,7 +377,7 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
     // never "a person replied" and left untouched here). The candidate
     // query is a cheap pre-filter (thread join, or to_address containing
     // THIS customer's own email as a substring — to_address is a raw
-    // header value, never a bare address); resolveEmailCustomerLink is
+    // header value, never a bare address); emailCustomerLink is
     // still the authoritative check below, so an ambiguous thread, or a
     // substring hit that does not truly resolve, never counts.
     email_reply: (async () => {
@@ -398,7 +398,7 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
         // comma-separated list for multiple recipients — coordinator
         // correction #3, 2026-09-29), never a bare address; a plain `=`
         // comparison never matches it. This is a pre-filter only (a
-        // substring LIKE, wide on purpose) — resolveEmailCustomerLink
+        // substring LIKE, wide on purpose) — emailCustomerLink
         // below is the authoritative parse-and-match, so a coincidental
         // substring hit here that does not truly resolve is dropped there.
         }).orWhereRaw(
@@ -411,7 +411,7 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
         .orderBy('er.received_at', 'desc').limit(EMAIL_REPLY_RAW_LIMIT + 1)
         .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.body_text', 'er.body_html', 'er.subject', 'er.received_at');
       const resolved = await Promise.all(candidates.map(async (row) => ({
-        row, linkedCustomerId: await resolveEmailCustomerLink(conn, row),
+        row, linkedCustomerId: (await emailCustomerLink(conn, row)).customerId,
       })));
       // The same quote/signature strip intake uses: a reply's own words are
       // the evidence, never the quoted thread under them (an old line would
@@ -914,7 +914,7 @@ function customerWitness(record, commitment, records = []) {
       && (commitment.kind !== 'other' || personCallBack(record)),
     // The candidate query already restricts this to a person-sent Gmail row
     // (personSentFilter), after the request (received_at > after) and
-    // resolved to THIS customer (resolveEmailCustomerLink) — nothing further
+    // resolved to THIS customer (emailCustomerLink) — nothing further
     // to check here, for either a customer's ask (person replied) or a
     // staff promise (the model may cite it as the delivered item).
     email_reply: () => true,
