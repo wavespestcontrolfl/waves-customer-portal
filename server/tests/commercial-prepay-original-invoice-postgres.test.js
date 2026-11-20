@@ -555,6 +555,36 @@ postgres('commercial prepay original-invoice ownership', () => {
     expect(await originalClaim()).toEqual(claimBefore);
   });
 
+  test('a schedule switch rebinds the invoice and catalog-verified setup series before refreshing coverage', async () => {
+    const { ids } = await seedSale({ marker: false, saleTimeBooking: true });
+    const bait = await trx('services').where({ service_key: 'rodent_bait_quarterly' }).first('id');
+    await trx('scheduled_services').where({ id: ids.olderRootId })
+      .update({ service_type: 'Pest Control', service_id: bait.id });
+    await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void', paid_at: null });
+    await trx('annual_prepay_terms').where({ id: ids.termId }).update({
+      commercial_setup_series_root_id: ids.saleRootId, status: 'payment_pending',
+    });
+    await trx('scheduled_services').where({ id: ids.saleRootId }).update({
+      annual_prepay_term_id: ids.termId, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 13.75,
+    });
+    const terms = require('../services/annual-prepay-renewals');
+    const args = {
+      customerId: ids.customerId, sourceEstimateId: ids.estimateId, prepayInvoiceId: ids.olderInvoiceId,
+      planLabel: 'Commercial rodent setup', termStart: day(7), termEnd: day(365), prepayAmount: 73,
+      coverageServiceType: 'Pest Control', coverageVisitCount: 4, coverageCadence: 'quarterly',
+      conn: trx, replaceDeadSwitchInvoice: true,
+    };
+    await terms.createTermForAnnualPrepay(args);
+    const stored = await trx('annual_prepay_terms').where({ id: ids.termId }).first();
+    expect(stored).toMatchObject({ prepay_invoice_id: ids.olderInvoiceId, commercial_setup_series_root_id: ids.olderRootId });
+    expect(await trx('scheduled_services').where({ id: ids.saleRootId }).first('annual_prepay_term_id', 'prepaid_amount'))
+      .toEqual({ annual_prepay_term_id: null, prepaid_amount: null });
+    await expect(terms.createTermForAnnualPrepay({ ...args, prepayInvoiceId: ids.invoiceId }))
+      .rejects.toMatchObject({ switchConflict: true });
+    expect(await trx('annual_prepay_terms').where({ id: ids.termId }).first('prepay_invoice_id', 'commercial_setup_series_root_id'))
+      .toEqual({ prepay_invoice_id: ids.olderInvoiceId, commercial_setup_series_root_id: ids.olderRootId });
+  });
+
   test('a Customer 360 first-visit promise seeds and covers only its own new series on payment', async () => {
     const { ids } = await seedSale({ coverageServiceType: 'Rodent Bait Stations' });
     const renewals = require('../services/annual-prepay-renewals');

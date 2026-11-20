@@ -45,10 +45,17 @@ async function resolveCommercialPrepaySale(database, customerId, estimateData, o
   if (!(frozenRodentBaitSetupAmount(estimateData) > 0)) return null;
   if (!estimateRodentBaitIsCommercial(estimateData)
     && !(await require('./secure-appointment-plans').customerHasCommercialChannel(database, customerId))) return null;
-  const candidates = await confirmedCommercialSaleVisits(database, customerId, opts);
-  const roots = await confirmedCommercialRodentRoots(database, customerId, candidates);
+  const visits = await confirmedCommercialSaleVisits(database, customerId, opts);
+  const roots = await confirmedCommercialRodentRoots(database, customerId, visits);
   const rootIds = new Set(roots.map((row) => String(row.id)));
-  const visits = candidates.filter((row) => rootIds.has(String(row.recurring_parent_id || row.id)));
+  const missingSelection = opts.adoptedExistingAppointmentId
+    && !visits.some((row) => String(row.id) === String(opts.adoptedExistingAppointmentId));
+  if (missingSelection || (opts.bookedAppointmentIds?.length && !visits.length)
+    || visits.some((row) => !rootIds.has(String(row.recurring_parent_id || row.id)))) {
+    throw require('./secure-appointment-plans').setupCollectionConflict(
+      'The selected setup visit changed before acceptance. Refresh and select the visit again.',
+    );
+  }
   const bookedIds = new Set((Array.isArray(opts.bookedAppointmentIds) ? opts.bookedAppointmentIds : []).map(String));
   const reservedRoots = visits.filter((row) => !row.recurring_parent_id && bookedIds.has(String(row.id)));
   const adopted = visits.filter((row) => opts.adoptedExistingAppointmentId != null

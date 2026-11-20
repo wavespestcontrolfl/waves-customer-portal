@@ -26311,6 +26311,7 @@ async function runPrepaySwitch({
         // like an accept-time prepay (resetBillingModeAfterTermCancel).
         sourceEstimateId: target.estimateId || null,
         prepayInvoiceId: invoice.id,
+        replaceDeadSwitchInvoice: true,
         planLabel: mintPayload.planLabel,
         monthlyRate: Math.round((mintPayload.amount / 12) * 100) / 100,
         prepayAmount: switchTermAmount,
@@ -26323,31 +26324,6 @@ async function runPrepaySwitch({
         conn: trx,
       });
       if (!term) throw new Error('annual prepay term could not be created');
-      // A REUSED term keeps its old prepay_invoice_id (createTerm's merge
-      // is deliberately non-destructive), and after an aborted switch that
-      // id points at the invoice the abort voided — the payment sync keys
-      // on prepay_invoice_id, so paying THIS invoice would never activate
-      // coverage (Codex P0 r5). Rebind, but only a term this lane may own:
-      // undecided, and bound to nothing or to a dead invoice. Anything
-      // else is history this endpoint must not rewrite.
-      const boundId = term.prepay_invoice_id ? String(term.prepay_invoice_id) : null;
-      if (boundId !== String(invoice.id)) {
-        let rebindable = !term.renewal_decision;
-        if (rebindable && boundId) {
-          const bound = await trx('invoices').where({ id: boundId }).first('id', 'status');
-          rebindable = !bound
-            || ['void', 'cancelled', 'canceled', 'refunded'].includes(String(bound.status || '').toLowerCase());
-        }
-        if (!rebindable) {
-          const err = new Error('An existing annual prepay term is still bound to another invoice — resolve it from Customer 360');
-          err.switchConflict = true;
-          throw err;
-        }
-        await trx('annual_prepay_terms')
-          .where({ id: term.id })
-          .update({ prepay_invoice_id: invoice.id, updated_at: new Date() });
-        term.prepay_invoice_id = invoice.id;
-      }
       mintedTerm = term;
 
     });

@@ -907,16 +907,13 @@ function setupCollectionConflict(message) {
 // racing the technician's completion claim on the parent into a double
 // charge).
 async function retireDirectSetupClaimForPrepay(trx, {
-  anchorId, invoiceId, amount, estimateId = null, expectedCommercialCustomerId = null,
+  anchorId, invoiceId, amount, estimateId = null, expectedCommercialCustomerId = null, selectedVisit = null,
 }) {
   const fee = cents(Math.max(0, Number(amount) || 0));
   if (!anchorId || !invoiceId) return { recorded: false, retired: false };
-  const parent = await trx('scheduled_services').where({ id: anchorId }).forUpdate()
-    .first('id', 'customer_id', 'pending_setup_fee', 'recurring_parent_id', 'service_id', 'service_type');
-  if (expectedCommercialCustomerId && (!parent || parent.recurring_parent_id
-    || String(parent.customer_id) !== String(expectedCommercialCustomerId)
-    || await authoritativeServiceKey(trx, parent) !== 'commercial_rodent_bait')) {
-    throw setupCollectionConflict('The selected setup visit changed before acceptance. Refresh and select the visit again.');
+  const parent = await trx('scheduled_services').where({ id: anchorId }).forUpdate().first();
+  if (expectedCommercialCustomerId) {
+    await assertSelectedSetupVisit(trx, parent, expectedCommercialCustomerId, selectedVisit);
   }
   const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
   if (stamp != null && stamp < 0) {
@@ -948,6 +945,26 @@ async function retireDirectSetupClaimForPrepay(trx, {
       .update({ pending_setup_fee: null, updated_at: new Date() });
   }
   return { recorded: fee > 0, retired: retired === 1 };
+}
+
+// The caller resolved the promised occurrence before the invoice transaction.
+// Re-read both rows while the financial claim is being written. A job moved
+// to another parent or another day no longer represents the same sale.
+async function assertSelectedSetupVisit(trx, parent, customerId, selected) {
+  const conflict = () => setupCollectionConflict('The selected setup visit changed before acceptance. Refresh and select the visit again.');
+  if (!parent || parent.recurring_parent_id || parent.reservation_expires_at
+    || String(parent.customer_id) !== String(customerId)
+    || await authoritativeServiceKey(trx, parent) !== 'commercial_rodent_bait') throw conflict();
+  if (!selected) return;
+  const visit = String(selected.id) === String(parent.id) ? parent
+    : await trx('scheduled_services').where({ id: selected.id }).forUpdate().first();
+  const { dateOnlyString } = require('../utils/date-only');
+  if (!visit || String(visit.customer_id) !== String(customerId)
+    || String(visit.recurring_parent_id || visit.id) !== String(parent.id)
+    || visit.status !== selected.status || visit.reservation_expires_at
+    || dateOnlyString(visit.scheduled_date) !== dateOnlyString(selected.scheduled_date)
+    || visit.window_start !== selected.window_start || visit.window_end !== selected.window_end
+    || (visit !== parent && await authoritativeServiceKey(trx, visit) !== 'commercial_rodent_bait')) throw conflict();
 }
 
 // consumeDisclosure: the SELECTION path (selectSecurePlan). There a NULL

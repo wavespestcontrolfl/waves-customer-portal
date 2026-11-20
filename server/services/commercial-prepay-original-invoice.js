@@ -111,19 +111,19 @@ async function bookedCommercialSetupRootId(conn, term, { readStored = false } = 
   const { recurringServiceKey } = require('./estimate-converter');
   const { authoritativeServiceKey, isRodentBaitProgramKey } = require('./secure-appointment-plans');
   const coverageKey = recurringServiceKey({ name: term.coverage_service_type });
-  if (term.coverage_service_type && !isRodentBaitProgramKey(coverageKey)) return null;
   if (readStored && term.id && !Object.hasOwn(term, 'commercial_setup_series_root_id')) {
     // Read-only callers sometimes project a subset of the term columns.
-    const stored = await conn('annual_prepay_terms').where({ id: term.id, customer_id: term.customer_id }).first();
+    const stored = await conn('annual_prepay_terms').where({ id: term.id, customer_id: term.customer_id, prepay_invoice_id: term.prepay_invoice_id }).first();
     if (stored?.commercial_setup_series_root_id) return stored.commercial_setup_series_root_id;
   }
-  const claim = await conn('setup_fee_claims as claim')
-    .join('invoices as invoice', 'invoice.id', 'claim.invoice_id')
-    .where({ 'claim.invoice_id': term.prepay_invoice_id, 'invoice.customer_id': term.customer_id })
-    .whereNotNull('claim.scheduled_service_id')
-    .where('claim.amount', '>', 0)
-    .first('claim.*', 'invoice.created_at as sale_invoice_created_at');
-  if (!claim || claim.unbooked_commercial_setup === true) return null;
+  // The stored appointment's catalog identity can disagree with a staff
+  // display label. Check the financial claim and its actual invoice owner.
+  const claim = await conn('setup_fee_claims').where({ invoice_id: term.prepay_invoice_id })
+    .whereNotNull('scheduled_service_id').where('amount', '>', 0).first();
+  if (!claim?.scheduled_service_id || claim.unbooked_commercial_setup === true) return null;
+  const invoice = await conn('invoices').where({ id: term.prepay_invoice_id, customer_id: term.customer_id })
+    .first('created_at');
+  if (!invoice) return null;
   const anchor = await conn('scheduled_services')
     .where({ id: claim.scheduled_service_id, customer_id: term.customer_id })
     .first();
@@ -133,9 +133,7 @@ async function bookedCommercialSetupRootId(conn, term, { readStored = false } = 
     : anchor;
   if (!root) return null;
   if (claim.unbooked_commercial_setup == null) {
-    const evidence = await legacyConversionEvidence(conn, claim, term, {
-      created_at: claim.sale_invoice_created_at,
-    });
+    const evidence = await legacyConversionEvidence(conn, claim, term, invoice);
     if (evidence?.kind !== 'booked') return null;
     const occurrence = await conn('scheduled_services')
       .where({ customer_id: term.customer_id })
@@ -147,7 +145,7 @@ async function bookedCommercialSetupRootId(conn, term, { readStored = false } = 
     const occurrenceKey = await authoritativeServiceKey(conn, occurrence);
     if (!isRodentBaitProgramKey(occurrenceKey)) return null;
     const occurrenceRootId = occurrence.recurring_parent_id || occurrence.id;
-    const saleCreatedAt = new Date(claim.sale_invoice_created_at).getTime();
+    const saleCreatedAt = new Date(invoice.created_at).getTime();
     const occurrenceCreatedAt = new Date(occurrence.created_at).getTime();
     const rootCreatedAt = new Date(root.created_at).getTime();
     if (!sameId(occurrenceRootId, root.id)

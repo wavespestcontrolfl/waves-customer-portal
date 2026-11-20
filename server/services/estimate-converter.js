@@ -8277,9 +8277,10 @@ const EstimateConverter = {
     // written in the invoice transaction so createTermForAnnualPrepay's first
     // refresh cannot adopt an unrelated existing visit.
     let commercialRodentSetupOwner = null;
+    let selectedSetupVisit = null;
     if (commercialSetupSale && frozenRodentBaitSetupAmount(estimateData) > 0) {
       const { authoritativeServiceKey, setupCollectionConflict } = require('./secure-appointment-plans');
-      const confirmedStart = confirmedCommercialVisits.find(
+      selectedSetupVisit = confirmedCommercialVisits.find(
         (visit) => String(visit.id) === String(firstScheduledServiceId),
       );
       // Ownership follows the exact selected occurrence. A child resolves to
@@ -8287,8 +8288,8 @@ const EstimateConverter = {
       // Never choose from every confirmed root: multiple accepted ids may
       // include an older, different series and unordered SQL cannot decide
       // which sale owns the setup.
-      const ownerRootId = confirmedStart
-        ? (confirmedStart.recurring_parent_id || confirmedStart.id)
+      const ownerRootId = selectedSetupVisit
+        ? (selectedSetupVisit.recurring_parent_id || selectedSetupVisit.id)
         : (!skipAutoSchedule && firstScheduledServiceId ? firstScheduledServiceId : null);
       if (ownerRootId) {
         const root = await database('scheduled_services')
@@ -8298,7 +8299,7 @@ const EstimateConverter = {
           .first('id', 'customer_id', 'service_id', 'service_type');
         if (root && await authoritativeServiceKey(database, root) === 'commercial_rodent_bait') {
           commercialRodentSetupOwner = root;
-        } else if (confirmedStart) {
+        } else if (selectedSetupVisit) {
           throw setupCollectionConflict('The selected setup visit changed before acceptance. Refresh and select the visit again.');
         }
       }
@@ -8643,6 +8644,7 @@ const EstimateConverter = {
                   amount: prepayRodentSetupAmount,
                   estimateId,
                   expectedCommercialCustomerId: customerId,
+                  selectedVisit: selectedSetupVisit,
                 });
               } else {
                 await plans.recordSetupFeeClaimForInvoice(invoiceTrx, {

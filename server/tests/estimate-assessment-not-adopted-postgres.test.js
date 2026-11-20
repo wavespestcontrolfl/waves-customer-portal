@@ -757,6 +757,43 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       expect(await mockTransaction('annual_prepay_terms').where({ source_estimate_id: estimateId })).toHaveLength(0);
     });
 
+    test.each(['parent service', 'moved child', 'rescheduled child', 'cancelled child', 'window'])(
+      'a selected bait occurrence with a changed %s cannot create a prepay invoice', async (change) => {
+        const { customerId, estimateId } = await fixture(mockTransaction, {
+          data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+        });
+        await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+        await mockTransaction('estimates').where({ id: estimateId }).update({
+          category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+        });
+        const makeVisit = (extra) => visit(mockTransaction, {
+          customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations',
+          date: CHOSEN_DATE, extra: { is_recurring: true, estimated_price: 165, ...extra },
+        });
+        const rootId = await makeVisit({ pending_setup_fee: 55 });
+        const childId = await makeVisit({ recurring_parent_id: rootId, window_start: '09:00' });
+        const opts = { adoptedExistingAppointmentId: childId, skipAutoSchedule: true };
+        const { resolveCommercialPrepaySale } = require('../services/commercial-prepay-sale-visits');
+        let snapshot;
+        if (change === 'parent service') {
+          await mockTransaction('scheduled_services').where({ id: rootId }).update({ service_id: null, service_type: 'Pest Control' });
+        } else {
+          snapshot = await resolveCommercialPrepaySale(mockTransaction, customerId, COMMERCIAL_RODENT_DATA, opts);
+          const changeTo = change === 'moved child' ? { recurring_parent_id: await makeVisit({}) }
+            : change === 'rescheduled child' ? { scheduled_date: etDateString(addETDays(new Date(CHOSEN_DATE + 'T12:00:00Z'), 4)) }
+              : change === 'cancelled child' ? { status: 'cancelled' } : { window_start: '14:00' };
+          await mockTransaction('scheduled_services').where({ id: childId }).update(changeTo);
+        }
+        await expect(EstimateConverter().convertEstimate(estimateId, {
+          ...opts, commercialPrepaySale: snapshot, billingTerm: 'prepay_annual', prepayInvoiceAmount: 660,
+          autoSendInvoice: false, skipMembershipEmail: true,
+        })).rejects.toMatchObject({ statusCode: 409, switchConflict: true });
+        expect(await mockTransaction('invoices').where({ customer_id: customerId })).toHaveLength(0);
+        expect(await mockTransaction('annual_prepay_terms').where({ customer_id: customerId })).toHaveLength(0);
+        expect(Number((await mockTransaction('scheduled_services').where({ id: rootId }).first()).pending_setup_fee)).toBe(55);
+      },
+    );
+
     test('the standalone converter rejects an in-flight selected-root claim before its invoice commits', async () => {
       const { customerId, estimateId } = await fixture(mockTransaction, {
         data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,

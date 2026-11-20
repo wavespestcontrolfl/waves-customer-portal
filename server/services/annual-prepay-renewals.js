@@ -8341,7 +8341,7 @@ async function detachOutOfWindowEditedVisits(existing, updates, conn) {
 // opposed to a date-window change (handled by detachOutOfWindowEditedVisits
 // above). Every comment is unchanged from the original inline block.
 async function detachDroppedCoverageSelectionVisits(existing, {
-  normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence,
+  normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence, replacesInvoice = false,
 }, conn) {
   // When the coverage SELECTION changes on an edit (service type / visit count
   // / cadence) — not just the date window handled above — the visits that
@@ -8365,7 +8365,7 @@ async function detachDroppedCoverageSelectionVisits(existing, {
       && (normalizeCoverageCadence(existing.coverage_cadence) || null)
         !== (normalizedCoverageCadence || null))
   );
-  if (!coverageSelectionChanged) return;
+  if (!coverageSelectionChanged && !replacesInvoice) return;
   // Clearing stamps isn't enough: the dropped visits keep their
   // annual_prepay_term_id link, which the repo treats as Annual Prepay for
   // reporting/forecasting (pricing-reality-check) and copies onto recurring
@@ -8393,6 +8393,7 @@ async function detachDroppedCoverageSelectionVisits(existing, {
       }
     });
   } catch (err) {
+    if (replacesInvoice) throw err;
     logger.warn(`[annual-prepay] coverage-change stamp/link cleanup skipped: ${err.message}`);
   }
 }
@@ -8401,6 +8402,7 @@ async function createTermForAnnualPrepay({
   customerId,
   sourceEstimateId = null,
   prepayInvoiceId = null,
+  replaceDeadSwitchInvoice = false,
   planLabel = 'WaveGuard Annual Prepay',
   monthlyRate = null,
   prepayAmount = null,
@@ -8483,34 +8485,47 @@ async function createTermForAnnualPrepay({
 
   let existing = null;
   if (sourceEstimateId || prepayInvoiceId) {
-    existing = await conn('annual_prepay_terms')
+    const bySource = conn('annual_prepay_terms').where({ customer_id: customerId })
       .where(function () {
         if (sourceEstimateId) this.orWhere({ source_estimate_id: sourceEstimateId });
         if (prepayInvoiceId) this.orWhere({ prepay_invoice_id: prepayInvoiceId });
-      })
-      .first();
+      });
+    if (replaceDeadSwitchInvoice) bySource.forUpdate();
+    existing = await bySource.first();
   }
   if (!existing) {
-    existing = await conn('annual_prepay_terms')
-      .where({
-        customer_id: customerId,
-        term_start: normalizedStart,
-        term_end: normalizedEnd,
-      })
-      .whereIn('status', ACTIVE_STATUSES)
-      .first();
+    const byWindow = conn('annual_prepay_terms')
+      .where({ customer_id: customerId, term_start: normalizedStart, term_end: normalizedEnd })
+      .whereIn('status', ACTIVE_STATUSES);
+    if (replaceDeadSwitchInvoice) byWindow.forUpdate();
+    existing = await byWindow.first();
   }
 
-  const seriesRootId = termCols.commercial_setup_series_root_id && !existing?.commercial_setup_series_root_id
+  // Only a schedule switch may replace a dead invoice. Change the binding
+  // and the setup owner together before refresh can use the former series.
+  const replacesInvoice = Boolean(replaceDeadSwitchInvoice && existing && prepayInvoiceId
+    && String(existing.prepay_invoice_id || '') !== String(prepayInvoiceId));
+  if (replacesInvoice) {
+    const oldInvoice = existing.prepay_invoice_id && await conn('invoices')
+      .where({ id: existing.prepay_invoice_id }).forUpdate().first('id', 'status', 'customer_id');
+    if (existing.renewal_decision || (oldInvoice && (oldInvoice.customer_id !== customerId
+      || !INVOICE_CANCELLED_STATUSES.has(String(oldInvoice.status || '').toLowerCase())))) {
+      throw require('./secure-appointment-plans').setupCollectionConflict(
+        'An existing annual prepay term is still bound to another invoice — resolve it from Customer 360',
+      );
+    }
+  }
+  const boundInvoiceId = replacesInvoice ? prepayInvoiceId : existing?.prepay_invoice_id || prepayInvoiceId || null;
+  const seriesRootId = termCols.commercial_setup_series_root_id && (replacesInvoice || !existing?.commercial_setup_series_root_id)
     ? await require('./commercial-prepay-original-invoice').bookedCommercialSetupRootId(conn, {
-      customer_id: customerId, prepay_invoice_id: existing?.prepay_invoice_id || prepayInvoiceId,
+      customer_id: customerId, prepay_invoice_id: boundInvoiceId,
       coverage_service_type: normalizedCoverageServiceType ?? existing?.coverage_service_type,
     }) : null;
   if (existing) {
     const updates = {
-      ...(seriesRootId && { commercial_setup_series_root_id: seriesRootId }),
-      source_estimate_id: existing.source_estimate_id || sourceEstimateId || null,
-      prepay_invoice_id: existing.prepay_invoice_id || prepayInvoiceId || null,
+      ...(termCols.commercial_setup_series_root_id && (replacesInvoice || seriesRootId) && { commercial_setup_series_root_id: seriesRootId }),
+      source_estimate_id: replacesInvoice ? sourceEstimateId || null : existing.source_estimate_id || sourceEstimateId || null,
+      prepay_invoice_id: boundInvoiceId,
       plan_label: planLabel || existing.plan_label,
       monthly_rate: monthlyRate != null ? monthlyRate : existing.monthly_rate,
       prepay_amount: prepayAmount != null ? prepayAmount : existing.prepay_amount,
@@ -8573,11 +8588,11 @@ async function createTermForAnnualPrepay({
     if (termCols.coverage_cadence && normalizedCoverageCadence !== undefined) {
       updates.coverage_cadence = normalizedCoverageCadence;
     }
-    if (termCols.first_visit_date && normalizedFirstVisitDate !== undefined) {
-      updates.first_visit_date = normalizedFirstVisitDate;
+    if (termCols.first_visit_date && (replacesInvoice || normalizedFirstVisitDate !== undefined)) {
+      updates.first_visit_date = normalizedFirstVisitDate ?? null;
     }
-    if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
-      updates.first_visit_window_start = normalizedFirstVisitWindowStart;
+    if (termCols.first_visit_window_start && (replacesInvoice || normalizedFirstVisitWindowStart !== undefined)) {
+      updates.first_visit_window_start = normalizedFirstVisitWindowStart ?? null;
     }
     if (termCols.annual_plan_version && annualPlanVersion && !existing.annual_plan_version) {
       updates.annual_plan_version = annualPlanVersion;
@@ -8605,7 +8620,7 @@ async function createTermForAnnualPrepay({
     // reporting stale visits as Annual Prepay.
     await detachOutOfWindowEditedVisits(existing, updates, conn);
     await detachDroppedCoverageSelectionVisits(existing, {
-      normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence,
+      normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence, replacesInvoice,
     }, conn);
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
