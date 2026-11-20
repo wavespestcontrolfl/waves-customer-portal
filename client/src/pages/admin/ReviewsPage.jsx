@@ -846,6 +846,11 @@ function PaidNotice({ text }) {
     </Card>
   );
 }
+// A fresh dashboard response carries the policy: the cap card takes it and drops any earlier failure.
+function applyCapPolicy(dashboard, setCapPolicy, setCapReadFailed) {
+  setCapPolicy(dashboard?.policy || null);
+  setCapReadFailed(false);
+}
 function payoutStatusLabel(p) {
   if (p.status === "paid") return "Paid";
   return p.overMonthlyCap ? "Over monthly cap — not paid" : "Pending";
@@ -1067,10 +1072,7 @@ function ReviewIncentivesPanel() {
     if (!background) setReadError(null);
     const incentivesRead = adminFetch(`/admin/reviews/incentives?days=${days}`).then(
       (d) => {
-        if (gen === loadGen.current) {
-          setCapPolicy(d?.policy || null);
-          setCapReadFailed(false);
-        }
+        if (gen === loadGen.current) applyCapPolicy(d, setCapPolicy, setCapReadFailed);
         return d;
       },
       (e) => {
@@ -1118,6 +1120,8 @@ function ReviewIncentivesPanel() {
         method: "POST",
         body: JSON.stringify({ days: Number(days) || 30 }),
       });
+      // The sync's response is a fresh dashboard: its policy replaces the card's, before the queue read.
+      applyCapPolicy(d, setCapPolicy, setCapReadFailed);
       const q = await adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`);
       setData(d);
       setQueue(q.items || []);

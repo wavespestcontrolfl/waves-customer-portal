@@ -476,6 +476,38 @@ describe("Reviews workspace foundation", () => {
     expect(screen.queryByText("15 reviews a month")).toBeNull();
   }, 30000);
 
+  it("a successful Run Attribution replaces a failed or old cap on the card", async () => {
+    let incentivesOk = false;
+    let syncCap = 15;
+    const dashboard = (cap) => ({ summary: { confirmedGoogleReviews: 1 }, payouts: [], leaderboard: [], policy: { enabled: true, amountCents: 1500, monthlyCapCount: cap } });
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      const path = String(url);
+      if (options.method === "POST" && path.includes("/admin/reviews/incentives/sync")) return response(dashboard(syncCap));
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) {
+        return incentivesOk ? response(dashboard(15)) : response({ error: "Synthetic policy failure" }, 503);
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    // A successful sync response carries the policy: the card shows the cap.
+    fireEvent.click(await screen.findByRole("button", { name: /Run Attribution/ }));
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    // A changed cap in the next sync response replaces the old one.
+    syncCap = 10;
+    fireEvent.click(screen.getByRole("button", { name: /Run Attribution/ }));
+    expect(await screen.findByText("10 reviews a month")).toBeInTheDocument();
+    expect(screen.queryByText("15 reviews a month")).toBeNull();
+    incentivesOk = true;
+  }, 30000);
+
   it("Mark Pending Paid sends only the pending ids the button was enabled from, never over-cap rows", async () => {
     const posts = [];
     const payout = (id, patch) => ({
