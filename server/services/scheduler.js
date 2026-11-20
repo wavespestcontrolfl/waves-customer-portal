@@ -5817,6 +5817,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 9AM — "Call today" estimate banner. Owner 2026-11-19 (plan page "Lead to Customer
+  // Plan", phase 1): ONE phone banner says how many estimates are on the Estimates page's own Call
+  // today list, and opens it. Push only, admin phones only, nothing when the list
+  // is empty. runExclusive stops two instances running together; the send takes a per-ET-day
+  // sms_send_claims row, so a deploy overlap or a restart cannot send a second banner. Sends
+  // nothing to a customer.
+  // =========================================================================
+  cron.schedule('0 9 * * *', async () => {
+    try {
+      // runEstimateCallTodayPush logs its own one line with the count and never throws; it reports a failed count, claim
+      // or delivery in an `error` field (a fixed code). Throw that inside the callback so job health records the run
+      // as failed. A skip (nothing on the list, already sent, no device) stays a success.
+      await runExclusive('estimate-call-today-push', async () => {
+        const result = await require('./estimate-call-today-push').runEstimateCallTodayPush();
+        if (result?.error) throw new Error(`estimate call-today push: ${result.error}`);
+        return result;
+      });
+    } catch (err) {
+      logger.error(`Estimate call-today push failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 7:23AM — Unbilled visits. Owner 2026-10-25 (Air Jobs Plan step 3): one standing
   // Billing bell lists the visits done in the last 30 days with no invoice,
   // read from the Billing recovery page's own list, so the bell and the page
@@ -8330,16 +8353,22 @@ function initScheduledJobs() {
     logger.info('Running: weekly CSR recommendation');
     try {
       const CSRCoach = require('./csr/csr-coach');
-      const rec = await CSRCoach.generateWeeklyTeamRecommendation();
+      // One period for the whole tip: the seven completed ET days before today (completedWeekDates), so one Friday's
+      // tip starts where the last one ended. The scored-call recommendation and the call-outcomes line both read it.
+      const { loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates } = require('./csr/weekly-call-outcomes');
+      const now = new Date();
+      const rec = await CSRCoach.generateWeeklyTeamRecommendation({ between: completedWeekDates(now) });
       // Was an internal text to the owner's phone, silenced since 2026-09
       // (services/owner-alerts.js). One row per week.
       if (rec.recommendation) {
         const { recordOwnerAlert, whyFromFreeText } = require('./owner-alerts');
+        // The week's new-customer call outcomes lead the tip; a failed read drops the line, never the tip.
+        const outcomesLine = await loadWeeklyCallOutcomes({ now, completedDays: true }).then(formatWeeklyCallOutcomes).catch(() => '');
         await recordOwnerAlert('csr-weekly-tip', {
           action: 'read the weekly call coaching tip',
           why: whyFromFreeText(rec.recommendation),
           subject: { type: 'check', id: 'csr-weekly-tip' },
-          text: `Weekly CSR Tip:\n\n${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
+          text: `Weekly CSR Tip:\n\n${outcomesLine ? `${outcomesLine}\n\n` : ''}${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
           link: '/admin/communications',
           dedupeKey: `owner-alert:csr-weekly-tip:${etDateString()}`,
         });

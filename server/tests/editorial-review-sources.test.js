@@ -243,3 +243,26 @@ test('rejects plain-text challenge responses as source evidence', async () => {
   expect(result.records).toEqual([]);
   expect(result.errors).toEqual(['Source returned a challenge page: https://example.gov/article.txt']);
 });
+
+describe('transient: every source error may pass a retry', () => {
+  const ok = { status: 200, html: '<p>Short evidence.</p>', contentType: 'text/html', finalUrl: null, blocked: false };
+  test.each([
+    ['a server error', { status: 503, html: null, blocked: false }, true],
+    ['a rate limit', { status: 429, html: null, blocked: false }, true],
+    ['a timeout or network failure', { status: 0, html: null, blocked: false, error: 'The operation was aborted' }, true],
+    ['a DNS failure', { status: 0, html: null, blocked: false, error: 'dns_error' }, true],
+    ['no page at all', null, true],
+    ['a 404', { status: 404, html: null, blocked: false }, false],
+    ['a blocked host', { status: 0, html: null, blocked: true, error: 'blocked_host' }, false],
+    ['an invalid URL', { status: 0, html: null, blocked: false, error: 'invalid_url' }, false],
+  ])('%s: transient %s', async (_label, page, transient) => {
+    mockFetchPage.mockResolvedValueOnce(page);
+    await expect(fetchSources(['https://example.gov/a'])).resolves.toMatchObject({ transient });
+  });
+  test('a mix of a server error and a 404 is not transient; no error is not transient', async () => {
+    mockFetchPage.mockResolvedValueOnce({ status: 503, html: null, blocked: false }).mockResolvedValueOnce({ status: 404, html: null, blocked: false });
+    await expect(fetchSources(['https://example.gov/a', 'https://example.gov/b'])).resolves.toMatchObject({ transient: false });
+    mockFetchPage.mockResolvedValueOnce(ok);
+    await expect(fetchSources(['https://example.gov/a'])).resolves.toMatchObject({ errors: [], transient: false });
+  });
+});

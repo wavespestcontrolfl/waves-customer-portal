@@ -6,12 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PipelineAnalytics, {
   aggregateServiceLineRows,
   classifyEstimateServiceLine,
-  isCallTodayEstimate,
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
   isPickReasonEstimate,
   withinDateRange,
 } from "./PipelineAnalytics";
+import { isCallTodayEstimate } from "@estimate-call-today";
 
 const NOW = new Date("2026-05-15T12:00:00.000Z");
 

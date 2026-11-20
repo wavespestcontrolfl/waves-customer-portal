@@ -61,6 +61,18 @@ describe('fact-check gate', () => {
     expect(payload.timeoutMs).toBeLessThanOrEqual(60000);
   });
 
+  test('the Mac job (claude -p on the Max plan) waits 10 minutes, not 60 s; read at call time', async () => {
+    const saved = process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+    process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+    try {
+      reply([]);
+      await load().evaluate(DRAFT);
+      expect(mockDispatch.mock.calls.at(-1)[1].timeoutMs).toBe(10 * 60 * 1000);
+    } finally {
+      if (saved === undefined) delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER; else process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = saved;
+    }
+  });
+
   test('BLOCKS on a P0 (objective error: reversed pathogen)', async () => {
     reply([{ severity: 'P0', claim: 'C. jacksonii on warm-season turf', issue: 'reversed; warm-season FL turf is C. monteithiana', fix: 'use C. monteithiana' }]);
     const r = await load().evaluate(DRAFT);

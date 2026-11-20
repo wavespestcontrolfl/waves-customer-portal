@@ -96,6 +96,42 @@ async function resolveRefreshEditorialTitle(sessionId, context) {
   return true;
 }
 
+// The brief-level twin of registerSessionEditorial + resolveRefreshEditorialTitle,
+// for a terminal draft (no agent session): what reviewPlan needs for this brief.
+//   { applicable: false }        the refresh target is outside the blog contract
+//   { title, partial }           review the plan against this title; `partial` =
+//                                refresh (headings only have to appear)
+//   { title: '', unresolved, permanent }
+//                                the title is not known; `permanent` when a retry
+//                                cannot help (a brief with no title, a refresh
+//                                target that is gone or has no title), false for
+//                                a read that failed and may pass later
+// A read failure throws nothing: get_existing_page returns an error object.
+async function editorialPlanContextForBrief(brief) {
+  const refresh = brief?.page_type === 'refresh' || brief?.action_type === 'refresh_existing_page';
+  if (!refresh) {
+    const title = String(brief?.working_title || brief?.target_keyword || '').trim();
+    return { title, partial: false, ...(title ? {} : { unresolved: true, permanent: true }) };
+  }
+  const existing = await readRefreshTarget(brief);
+  if (existing.applicable === false) return existing;
+  return { title: existing.title, partial: true, ...(existing.title ? {} : { unresolved: true, permanent: existing.permanent }) };
+}
+
+// get_existing_page errors that may pass later (GitHub or the parser was not reachable).
+const TEMPORARY_PAGE_READ_RE = /^(?:get_existing_page failed:|github-client \/ frontmatter parser unavailable)/;
+
+// The refresh target's existing title ('' when it cannot be read, with `permanent`),
+// or { applicable: false } when the target is outside the blog contract.
+async function readRefreshTarget(brief) {
+  const targetUrl = brief.target_url || brief.page_url || null;
+  if (!targetUrl) return { title: '', permanent: true };
+  const existing = await executeBriefTool('get_existing_page', { page_url: targetUrl });
+  if (!existing?.file_path) return { title: '', permanent: Boolean(existing?.error) && !TEMPORARY_PAGE_READ_RE.test(String(existing.error)) };
+  if (!require('../editorial-evidence').applicable(existing.file_path)) return { applicable: false };
+  return { title: String(existing.frontmatter?.title || existing.frontmatter?.metaTitle || '').trim(), permanent: true };
+}
+
 // Routes each session was SHOWN by check_existing_content. The writer
 // prompt mandates linking the existing post when writing a differentiated
 // angle, so these are legitimate link targets — the dispatcher hands them
@@ -206,6 +242,19 @@ function planSectionMismatch(plan, body, { partial }) {
   const extra = h2.filter((heading) => !planNormalized.includes(heading.normalized) && !NON_PLAN_HEADING_RE.test(heading.normalized))
     .map((heading) => heading.raw);
   return (missing.length || extra.length) ? { missing, extra } : null;
+}
+
+// The directive text for a planSectionMismatch result (emit_draft and the
+// terminal writer's plan check say the same thing).
+function planMismatchDirectives(mismatch) {
+  const directives = [];
+  if (mismatch.missing.length) {
+    directives.push(`The approved answer-plan section(s) are missing from the body as headings: ${mismatch.missing.join('; ')}. Add each as its own heading matching the plan.`);
+  }
+  if (mismatch.extra.length) {
+    directives.push(`These H2 section(s) are not part of the approved answer plan: ${mismatch.extra.join('; ')}. Remove them, fold them into a covered section, or call validate_answer_plan again with the complete section set.`);
+  }
+  return directives;
 }
 
 // GATE_CONTENT_PII_ALL_LANES: a brief saved before the gate flipped still
@@ -321,7 +370,8 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         if (!resolvedPath) return { error: `could not resolve page_url ${page_url} to Astro file` };
         let { filePath, file } = await readAstroFileCandidates(gh, resolvedPath);
         if (!file) {
-          const registryPath = await registryAstroPathForPage(page_url);
+          // strict: a registry read that failed is a failed page read, not "file not found".
+          const registryPath = await registryAstroPathForPage(page_url, { strict: true });
           if (registryPath && registryPath !== resolvedPath) {
             ({ filePath, file } = await readAstroFileCandidates(gh, registryPath));
           }
@@ -331,7 +381,13 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         // parser expects a markdown STRING, not the wrapper object —
         // passing the wrapper yields empty frontmatter and a serialized
         // object as body, which breaks refresh + meta rewrites.
-        const parsed = fm.parse(file.content);
+        let parsed;
+        try {
+          parsed = fm.parse(file.content);
+        } catch (parseErr) {
+          // Not "failed": the page itself is broken, and a retry reads the same file.
+          return { error: `get_existing_page: the page frontmatter does not parse (${filePath}): ${parseErr.message}`, code: 'frontmatter_invalid' };
+        }
         return { page_url, file_path: filePath, frontmatter: parsed.data, body: parsed.content };
       } catch (err) {
         return { error: `get_existing_page failed: ${err.message}` };
@@ -570,16 +626,7 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       // refresh session (registerSessionEditorial) — see planSectionMismatch.
       if (editorialContext && editorialContext.plan) {
         const mismatch = planSectionMismatch(editorialContext.plan, cleanBody, { partial: !!editorialContext.requiresExistingTitle });
-        if (mismatch) {
-          const directives = [];
-          if (mismatch.missing.length) {
-            directives.push(`The approved answer-plan section(s) are missing from the body as headings: ${mismatch.missing.join('; ')}. Add each as its own heading matching the plan.`);
-          }
-          if (mismatch.extra.length) {
-            directives.push(`These H2 section(s) are not part of the approved answer plan: ${mismatch.extra.join('; ')}. Remove them, fold them into a covered section, or call validate_answer_plan again with the complete section set.`);
-          }
-          return { draft_rejected: true, directives };
-        }
+        if (mismatch) return { draft_rejected: true, directives: planMismatchDirectives(mismatch) };
       }
       // W1 in-loop self-lint: run the PURE guardrails evaluator at capture,
       // with the SAME options gate 3c derives (registered by the dispatcher
@@ -812,19 +859,20 @@ function missingAstroFileLabel(resolvedPath) {
   return isBlog ? `${base}.{mdx,md}` : String(resolvedPath);
 }
 
-async function registryAstroPathForPage(pageUrl) {
+// `strict`: a database error is thrown instead of read as "no registry path".
+async function registryAstroPathForPage(pageUrl, { strict = false } = {}) {
   const lookup = registryLookupValuesForUrl(pageUrl);
   if (!lookup.exact.length) return null;
-  const exact = await registryAstroPathForLiveUrl(lookup.exact);
+  const exact = await registryAstroPathForLiveUrl(lookup.exact, { strict });
   if (exact) return exact;
   if (lookup.host && lookup.pathOnly) {
-    const hostedPath = await registryAstroPathForLiveUrl([lookup.pathOnly], { requiredHost: lookup.host });
+    const hostedPath = await registryAstroPathForLiveUrl([lookup.pathOnly], { requiredHost: lookup.host, strict });
     if (hostedPath) return hostedPath;
   }
-  return registryAstroPathForCanonicalUrl(lookup.exact, { requiredHost: lookup.host });
+  return registryAstroPathForCanonicalUrl(lookup.exact, { requiredHost: lookup.host, strict });
 }
 
-async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null } = {}) {
+async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null, strict = false } = {}) {
   try {
     const query = db('content_registry');
     if (!query || typeof query.select !== 'function') return null;
@@ -846,7 +894,8 @@ async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null 
       .first();
     const sourcePath = row?.astro_source_path;
     return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return null;
   }
 }
@@ -881,7 +930,7 @@ function isSafeSlugPath(s) {
   return s.split('/').every((seg) => SLUG_SEGMENT.test(seg));
 }
 
-async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null } = {}) {
+async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null, strict = false } = {}) {
   try {
     const query = db('content_registry');
     if (!query || typeof query.select !== 'function') return null;
@@ -906,7 +955,8 @@ async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null
     if (!Array.isArray(rows) || rows.length !== 1) return null;
     const sourcePath = rows[0]?.astro_source_path;
     return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return null;
   }
 }
@@ -981,6 +1031,9 @@ module.exports = {
   clearDraft,
   registerSessionLint,
   registerSessionEditorial,
+  editorialPlanContextForBrief,
+  planSectionMismatch,
+  planMismatchDirectives,
   // exposed for tests:
   _internals: { sessionDrafts, sessionCheckedRoutes, sessionLintOptions, sessionLintAttempts, urlToAstroPath, parseJsonbColumns },
 };
