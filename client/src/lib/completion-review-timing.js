@@ -279,7 +279,8 @@ export function completionReviewSuppressionReason({
 } = {}) {
   if (isIncompleteVisit) return "incomplete";
   // The one-time recap closeout has its own review rule, so the late-close ask never lifts it.
-  if (backfillQuietCloseout && !(lateCloseAskKept && !oneTimeRecapOnly)) return "backfill";
+  // Only a completed visit keeps the ask (the server's rule): inspection-only and follow-up outcomes stay suppressed.
+  if (backfillQuietCloseout && !(lateCloseAskKept && !oneTimeRecapOnly && visitOutcome === "completed")) return "backfill";
   if (visitOutcome === "customer_declined") return "customer_declined";
   if (visitOutcome === "customer_concern" || customerConcernInteraction) {
     return "customer_concern";

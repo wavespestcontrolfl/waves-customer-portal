@@ -109,19 +109,53 @@ function closedWithinDaysOfWorkedDay({ arrivedAt = null, scheduledDate = null, c
   return gap <= 0 && gap >= -maxDays;
 }
 
+// The columns the delivery-profile resolver (service-completion-profiles.js lookupServiceForScheduledService) keys on, plus
+// the row id it reloads evidence by. A row whose projection lacks one reads undefined = unknown.
+const IDENTITY_COLUMNS = ['id', 'service_id', 'service_type', 'service_key_snapshot', 'is_recurring'];
+const identityOf = (row) => (row ? IDENTITY_COLUMNS.map((c) => row[c]) : null);
+
 /**
- * Whether a backdated closeout of this visit made NOW would keep the review ask (the completion panel's preview and
- * the first-ask rule's pre-read). It also applies the delivery posture the commit reads for this visit (an internal-only
- * consultation, or a typed profile with delivery off, silences every customer text), so it never says true where the
- * commit says false. The visit outcome is only known at the commit. Any read failure, or no such visit, is false: fewer
- * texts. The server's own commit decision is what counts.
+ * THE verdict for the late-close review ask (owner 2026-11-20, D6 R3, GATE_REVIEW_LATE_CLOSE_ASK). The commit
+ * (complete-scheduled-service.js, on the locked row) and the panel's send-time preview both call it, so the preview
+ * never says true where the commit says false. True only when EVERY input below holds; an input that is unknown, failed
+ * to load, or drifted between the pre-lock read and the locked row makes it false (fewer texts). Inputs:
+ *   gate                      GATE_REVIEW_LATE_CLOSE_ASK strict 'true'; off = false.
+ *   isBackfill                an admin backdated closeout; anything else = false.
+ *   systemQuietCloseout,
+ *   issuedInvoiceCloseout     these closeouts never ask.
+ *   visitOutcome              must be exactly 'completed' (the preview passes 'completed': the outcome is the panel's, and
+ *                             the client lifts its suppression only for 'completed'). Unknown = false.
+ *   recapReviewOnly           the one-time recap closeout has its own rule; false.
+ *   isInternalOnlyCompletion  an internal-only consultation; false.
+ *   deliverySuppressed        the delivery posture the commit resolved BEFORE the backfill override (typed internal-only or
+ *                             disabled delivery); true or omitted = false. The preview has no commit posture; it passes false
+ *                             and relies on the strict re-resolve below.
+ *   visit, preLockVisit       the locked row and the row the pre-lock posture was read from. Either missing, or any identity
+ *                             column the resolver keys on (IDENTITY_COLUMNS: id, service_id, service_type, service_key_snapshot,
+ *                             is_recurring) unread (undefined) or different between them = drift = false.
+ *   visit.arrived_at,
+ *   visit.scheduled_date,
+ *   closedAt                  the worked ET day within 3 ET calendar days of the close (closedWithinDaysOfWorkedDay); an
+ *                             unreadable worked day or close = false.
+ *   profile                   resolved STRICT from the locked row (a probe or lookup error throws = false); its findingsType,
+ *                             completionMode, deliveryMode and category, with env SPECIALTY_REPORT_DELIVERY_DISABLED, go through
+ *                             resolveCompletionDeliveryPosture; suppressCustomerComms = false.
+ * The caller then adds the ask choice itself (requestReview, reviewAskAllowed, a blocking reviewSuppression), which the
+ * panel's own toggle covers.
  */
-async function lateCloseAskKeptForVisit(serviceId, database = db, now = new Date()) {
+async function lateCloseAskVerdict({
+  isBackfill, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, recapReviewOnly, isInternalOnlyCompletion,
+  deliverySuppressed = true, visit, preLockVisit, knex = db, closedAt,
+} = {}) {
+  const blocked = [systemQuietCloseout, issuedInvoiceCloseout, recapReviewOnly, isInternalOnlyCompletion, deliverySuppressed];
+  if (!isBackfill || visitOutcome !== 'completed' || blocked.some(Boolean)) return false;
+  if (!require('../config/feature-gates').reviewLateCloseAskLive()) return false;
+  const identity = identityOf(visit);
+  if (!identity || identity.includes(undefined) || JSON.stringify(identity) !== JSON.stringify(identityOf(preLockVisit))) return false;
+  if (!closedWithinDaysOfWorkedDay({ arrivedAt: visit.arrived_at, scheduledDate: visit.scheduled_date, closedAt })) return false;
   try {
-    const visit = serviceId ? await database('scheduled_services').where({ id: serviceId }).first('arrived_at', 'scheduled_date') : null;
-    if (!visit || !closedWithinDaysOfWorkedDay({ arrivedAt: visit.arrived_at, scheduledDate: visit.scheduled_date, closedAt: now })) return false;
     const Profiles = require('./service-completion-profiles');
-    const profile = await Profiles.resolveCompletionProfileForServiceId(serviceId, database);
+    const profile = await Profiles.resolveCompletionProfileForScheduledService(visit, knex, { strict: true });
     if (!profile) return false;
     return !Profiles.resolveCompletionDeliveryPosture({
       typedFindingsType: profile.findingsType || null,
@@ -135,4 +169,21 @@ async function lateCloseAskKeptForVisit(serviceId, database = db, now = new Date
   }
 }
 
-module.exports = { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskKeptForVisit };
+/**
+ * The panel's send-time preview and the first-ask pre-read: the verdict for a backdated closeout of this visit made NOW,
+ * as a completed visit (the commit's own verdict on the locked row is what counts). Any read failure, or no such visit, is false.
+ */
+async function lateCloseAskKeptForVisit(serviceId, database = db, now = new Date()) {
+  try {
+    const visit = serviceId
+      ? await database('scheduled_services').where({ id: serviceId }).first(...IDENTITY_COLUMNS, 'arrived_at', 'scheduled_date')
+      : null;
+    return await lateCloseAskVerdict({
+      isBackfill: true, visitOutcome: 'completed', deliverySuppressed: false, visit, preLockVisit: visit, knex: database, closedAt: now,
+    });
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskVerdict, lateCloseAskKeptForVisit };

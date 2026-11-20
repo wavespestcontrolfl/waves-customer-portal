@@ -76,7 +76,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseReviewAskKept, lateCloseFirstAskEligible, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
+const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseFirstAskEligible, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
@@ -980,61 +980,11 @@ describe('frozenResumeCompletionState — resume derives mode AND duration from 
   });
 });
 
-describe('lateCloseReviewAskKept — late backdated closeouts keep the review ask (owner 2026-11-20, D6 R3, GATE_REVIEW_LATE_CLOSE_ASK)', () => {
-  const closedAt = new Date('2026-11-20T15:00:00Z');
-  const workedTwoDaysAgo = { scheduled_date: '2026-11-18', arrived_at: null };
-  const base = { isBackfillCompletion: true, visitOutcome: 'completed', deliverySuppressed: false, svc: workedTwoDaysAgo, closedAt };
+describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REVIEW_LATE_CLOSE_ASK)', () => {
+  // The verdict itself (every input, drift, strict profile read) is unit-tested in review-visit-day.test.js.
   let saved;
   beforeEach(() => { saved = process.env.GATE_REVIEW_LATE_CLOSE_ASK; process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'true'; });
   afterEach(() => { if (saved === undefined) delete process.env.GATE_REVIEW_LATE_CLOSE_ASK; else process.env.GATE_REVIEW_LATE_CLOSE_ASK = saved; });
-
-  test('gate on + worked 2 days ago keeps the ask', () => {
-    expect(lateCloseReviewAskKept(base)).toBe(true);
-  });
-
-  test('gate off keeps today\'s quiet closeout', () => {
-    delete process.env.GATE_REVIEW_LATE_CLOSE_ASK;
-    expect(lateCloseReviewAskKept(base)).toBe(false);
-    process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'yes';
-    expect(lateCloseReviewAskKept(base)).toBe(false);
-  });
-
-  test('gate on + worked 5 days ago does not keep it', () => {
-    expect(lateCloseReviewAskKept({ ...base, svc: { scheduled_date: '2026-11-15' } })).toBe(false);
-  });
-
-  test('only an admin backfill: a live completion, the system quiet closeout and the invoice-issued closeout never do', () => {
-    expect(lateCloseReviewAskKept({ ...base, isBackfillCompletion: false })).toBe(false);
-    expect(lateCloseReviewAskKept({ ...base, systemQuietCloseout: true })).toBe(false);
-    expect(lateCloseReviewAskKept({ ...base, issuedInvoiceCloseout: { invoiceId: 'inv-1', trigger: 'sent' } })).toBe(false);
-  });
-
-  test('an incomplete, declined or internal-only visit never keeps it', () => {
-    expect(lateCloseReviewAskKept({ ...base, visitOutcome: 'incomplete' })).toBe(false);
-    expect(lateCloseReviewAskKept({ ...base, visitOutcome: 'customer_declined' })).toBe(false);
-    expect(lateCloseReviewAskKept({ ...base, isInternalOnlyCompletion: true })).toBe(false);
-  });
-
-  test('a typed disabled / internal-only delivery posture keeps requestReview false: only the backfill\'s own silence is lifted', () => {
-    expect(lateCloseReviewAskKept({ ...base, deliverySuppressed: true })).toBe(false);
-    // A caller that does not say defaults to silenced.
-    const { deliverySuppressed: _omit, ...unsaid } = base;
-    expect(lateCloseReviewAskKept(unsaid)).toBe(false);
-  });
-
-  test('the one-time recap closeout never keeps it', () => {
-    expect(lateCloseReviewAskKept({ ...base, recapReviewOnly: true })).toBe(false);
-    expect(lateCloseReviewAskKept({ ...base, recapReviewOnly: false })).toBe(true);
-  });
-
-  test('a locked row whose service identity moved from the one the delivery posture was resolved for fails closed', () => {
-    expect(lateCloseReviewAskKept({ ...base, identityMoved: true })).toBe(false);
-    expect(lateCloseReviewAskKept({ ...base, identityMoved: false })).toBe(true);
-  });
-
-  test('an unreadable worked day does not keep it', () => {
-    expect(lateCloseReviewAskKept({ ...base, svc: {} })).toBe(false);
-  });
 
   test('the frozen record is the resume answer: requestReview true beside backfill true restores kept; the usual false stays quiet', () => {
     expect(frozenResumeCompletionState({ backfill: true, requestReview: true }).lateCloseReviewKept).toBe(true);
@@ -1064,15 +1014,14 @@ describe('lateCloseReviewAskKept — late backdated closeouts keep the review as
     const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
     test('the decision is made once at the commit, from the locked row, and frozen with the normal expression', () => {
-      expect((src.match(/const lateCloseEligible = lateCloseReviewAskKept\(/g) || []).length).toBe(1);
+      expect((src.match(/const lateCloseEligible = await require\('\.\/review-visit-day'\)\.lateCloseAskVerdict\(/g) || []).length).toBe(1);
       // The choice is resolved once, as the initial enrollment reads it (an omitted requestReview is no ask), and frozen as that boolean.
       // The same verdict immediate enrollment reads: a blocking client suppression or a refused re-service ask freezes false.
       expect(src).toMatch(/lateCloseReviewKept = lateCloseEligible && !!requestReview && reviewAskAllowed\s*\n\s*&& !\(reviewSuppression && reviewSuppression !== 'invoice_created'\);/);
-      // The identity check is the one the report freeze uses, and the recap mode is passed in.
-      expect(src).toMatch(/identityMoved: !!lockedSvcRow && \(lockedSvcRow\.service_id !== svc\.service_id \|\| lockedSvcRow\.service_type !== svc\.service_type\),/);
-      expect(src).toMatch(/recapReviewOnly,\s*\n\s*identityMoved:/);
+      // The verdict gets the locked row, the pre-lock row (drift), the transaction (strict profile read) and the recap mode.
+      expect(src).toMatch(/visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: completionEndedAt,/);
+      expect(src).toMatch(/issuedInvoiceCloseout, visitOutcome, recapReviewOnly,/);
       expect(src).toMatch(/if \(isBackfillCompletion && !lateCloseEligible\) reviewFirstAskLock = null;/);
-      expect(src).toMatch(/svc: \{ \.\.\.svc, \.\.\.\(lockedSvcRow \|\| \{\}\) \}, closedAt: completionEndedAt/);
       expect(src).toMatch(/customerRequestedReview: \(isIncompleteVisit \|\| isInternalOnlyCompletion \|\| \(isBackfillCompletion && !lateCloseReviewKept\)\)/);
     });
 
@@ -1090,6 +1039,8 @@ describe('lateCloseReviewAskKept — late backdated closeouts keep the review as
 
     test('the commit passes the delivery posture from BEFORE the backfill override', () => {
       expect(src).toMatch(/deliverySuppressed: deliveryPosture\.suppressCustomerComms,/);
+      // The first-ask pre-read rides the packet transaction like the adjacent first-ask reads.
+      expect(src).toMatch(/lateCloseFirstAskEligible\(\{ backfill, completionInput, database: db \}\)/);
     });
 
     test('a resume restores the frozen decision before any ask is read', () => {

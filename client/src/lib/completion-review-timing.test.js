@@ -266,9 +266,16 @@ describe('late close ask (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
     expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, oneTimeRecapOnly: false })).toBeNull();
   });
 
-  test('kept lifts only the backfill reason: incomplete, declined and concern visits stay suppressed', () => {
+  test('only a completed visit lifts it: inspection-only and follow-up outcomes stay suppressed', () => {
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, visitOutcome: 'completed' })).toBeNull();
+    for (const visitOutcome of ['inspection_only', 'follow_up_needed']) {
+      expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, visitOutcome })).toBe('backfill');
+    }
+  });
+
+  test('kept lifts only the backfill reason: incomplete and already-reviewed stay suppressed, and a declined visit keeps the backfill reason', () => {
     expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, isIncompleteVisit: true })).toBe('incomplete');
-    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, visitOutcome: 'customer_declined' })).toBe('customer_declined');
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, visitOutcome: 'customer_declined' })).toBe('backfill');
     expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: true, alreadyReviewed: true })).toBe('already_reviewed');
   });
 
