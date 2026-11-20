@@ -1388,9 +1388,13 @@ async function memberCreditsThisYear(conn, memberId) {
     .where('l.source', 'referral')
     .where('l.delta', '>', 0)
     .whereRaw('r.referrer_customer_id = l.customer_id')
+    // A referral counts once, and only when it paid the member: a Step 2 row's own referrer_credit_cents says so, so
+    // after a customer merge (member and friend on one profile, both credits on one customer) a friend-only credit or
+    // the friend's second ledger row cannot take a cap slot. A row with no such record is a flat-credit row: it counts.
+    .where((q) => q.whereNull('r.referrer_credit_cents').orWhere('r.referrer_credit_cents', '>', 0))
     .where('l.created_at', '>=', start)
     .where('l.created_at', '<', end)
-    .count({ n: 'l.id' })
+    .countDistinct({ n: 'r.id' })
     .first();
   return Number(earned?.n || 0);
 }
@@ -1419,11 +1423,16 @@ async function step2OfferStrict(conn, memberId) {
   try {
     const live = await getLiveSettings(conn);
     if (!live) return null;
-    const offer = await step2OfferFor(conn, memberId, live);
-    // A paused program (program_active off) promises nothing, as the rest of the engine treats it.
-    return live.program_active === false || live.program_active === 0
-      ? { ...offer, rewardPerReferral: 0, standardReward: 0, programPaused: true }
-      : offer;
+    const offer = {
+      ...(await step2OfferFor(conn, memberId, live)),
+      // The friend's credit from the same live row, so an invitation states both amounts from one read.
+      friendReward: (Number(live.referee_discount_cents) || 0) / 100,
+    };
+    // A paused program promises nothing, as the rest of the engine treats it: only an affirmative active value counts
+    // (a cleared column is not active).
+    return live.program_active
+      ? offer
+      : { ...offer, rewardPerReferral: 0, standardReward: 0, friendReward: 0, programPaused: true };
   } catch (err) {
     logger.warn(`[ReferralEngine] Step 2 offer unavailable: ${err.code || err.message}`);
     return null;
@@ -1785,6 +1794,7 @@ module.exports = {
   updateReferralStatus,
   creditReferralOnFirstService,
   step2OfferFor,
+  memberCreditsThisYear,
   step2OfferStrict,
   step2TermsFor,
   referralAcquisitionCost,

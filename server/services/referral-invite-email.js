@@ -109,7 +109,8 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
 
     const { getSettings } = require('./referral-engine');
     const settings = await getSettings();
-    const refereeCents = Number(settings.referee_discount_cents || 0);
+    // The friend's number: under the gate it comes from the same strict offer as the member's (set below).
+    let refereeCents = Number(settings.referee_discount_cents || 0);
     // GATE_REFERRAL_STEP2: the member's number is the Step 2 standard credit, and a member at the yearly limit is
     // promised nothing: the member-reward part is dropped (no new copy), leaving only the friend's discount.
     let memberCents = settings.referrer_reward_cents;
@@ -122,6 +123,7 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
         return null;
       }
       memberCents = Math.round(offer.standardReward * 100);
+      refereeCents = Math.round(offer.friendReward * 100);
       atYearlyLimit = offer.capReached;
     }
     const referrer = dollars(memberCents);

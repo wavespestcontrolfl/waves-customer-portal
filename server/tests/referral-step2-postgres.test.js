@@ -465,6 +465,28 @@ const DAY = 86400000;
     });
   });
 
+  describe('the cap after a customer merge', () => {
+    const countThisYear = (memberId) => db.transaction((trx) => engine.memberCreditsThisYear(trx, memberId));
+
+    test('member and friend merged into one profile: a settled referral takes one cap slot, not two', async () => {
+      const { member, friend, visit } = await performed({ memberFields: HOME });
+      await firstService(friend, visit);
+      expect(await countThisYear(member.id)).toBe(1);
+      // The merge repoints the friend's credit row onto the surviving customer (the member).
+      await db('customer_credit_ledger').where({ customer_id: friend.id }).update({ customer_id: member.id });
+      expect(await countThisYear(member.id)).toBe(1);
+    });
+
+    test('a friend-only credit (the member was paid $0 at the cap) takes no slot after the merge', async () => {
+      const { member, friend, visit, ref } = await performed({ memberFields: HOME });
+      await firstService(friend, visit);
+      await db('customer_credit_ledger').where({ customer_id: member.id }).del();
+      await db('referrals').where({ id: ref.id }).update({ referrer_credit_cents: 0, referrer_reward_reason: 'cap_reached' });
+      await db('customer_credit_ledger').where({ customer_id: friend.id }).update({ customer_id: member.id });
+      expect(await countThisYear(member.id)).toBe(0);
+    });
+  });
+
   describe('the yearly cap', () => {
     // `count` earlier member credits for `memberId`, each tied to its own earlier referral, posted at `at`.
     async function priorCredits(memberId, count, at = new Date()) {
@@ -718,6 +740,27 @@ const DAY = 86400000;
       const member = await customer({ email: 'member@example.invalid' });
       await sendReferralInviteEmail({ customerId: member.id });
       expect(lineOf()).toBe('you get a $30 referral reward and they get $25 off their first service.');
+    });
+
+    test('gate on, program_active cleared (null): the program counts as paused', async () => {
+      const member = await customer({ email: 'member@example.invalid' });
+      await db('referral_program_settings').where({ id: 1 }).update({ program_active: null });
+      expect(await engine.step2OfferStrict(db, member.id)).toMatchObject({ programPaused: true, standardReward: 0, friendReward: 0 });
+      expect(await sendReferralInviteEmail({ customerId: member.id })).toBeNull();
+      await db('referral_program_settings').where({ id: 1 }).update({ program_active: true });
+    });
+
+    test('gate on: the invitation states the friend amount from the live row, even when getSettings falls back to $25', async () => {
+      const member = await customer({ email: 'member@example.invalid' });
+      await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 3000 });
+      const live = await db('referral_program_settings').where({ id: 1 }).first();
+      const spy = jest.spyOn(engine, 'getSettings').mockResolvedValue({ ...live, referee_discount_cents: 2500 });
+      await sendReferralInviteEmail({ customerId: member.id });
+      spy.mockRestore();
+      const sent = JSON.stringify(sendTemplate.mock.calls[0]);
+      expect(sent).toContain('$30');
+      expect(sent).not.toMatch(/they get \$25 off/);
+      await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 2500 });
     });
 
     test('gate on, settings unreadable: no amount is promised and no email goes', async () => {
