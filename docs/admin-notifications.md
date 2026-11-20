@@ -690,12 +690,15 @@ Phone-yes card bell (owner 2026-11-18 "ok go", phone-yes step 1, page v4; under 
 `server/services/call-phone-yes-bell.js`, run by the phone-yes sweep (every 10 minutes while the gate is on, after its filing and its
 moot close), rings the bell once for each `call_phone_yes` card when it is filed, and once more while the card is open and time runs
 short: an open estimate on the card expires within 24 hours, or the soonest visit to come that keeps the card open (a pest visit the
-call booked, on the calendar and not linked to an estimate) starts within 48 hours; a visit already under way or done (`on_site`,
-`completed`) keeps the card open but is no time to ring for. Only a card with status `open` whose evidence
+call booked, on the calendar and not linked to an estimate) starts within 48 hours. Only a visit still to come (`pending`,
+`confirmed`, `en_route`) makes time short: a visit parked for a new slot (`rescheduled`, which keeps its old date and time), under
+way or done keeps the card open but is no time to ring for. Only a card with status `open` whose evidence
 still matches it rings or is rewritten: the pass reads the card's state again under the lock (`cardState`), and a card with a
 change not yet written (an estimate accepted, a yes taken back) or whose read fails rings nothing until a later run writes it.
-While a call in the card's word window still owes a read, the card rings nothing new (the read may take the yes back, and the
-tap refuses meanwhile), but its open row still follows the card quietly (the moot pass marks a yes being read again).
+While a call in the card's word window still owes a read, or the call with the card's yes is read again (the card's
+`yes_rechecking` mark, which the moot pass sets; a resend can move the window past that call), the card rings nothing new (the
+read may take the yes back, and the tap refuses meanwhile), but its open row still follows the card quietly. A ring held this
+way is not spent: it goes out once the read ends.
 The time short is read by the clock after the card's lock. A claimed card (`in_progress`) keeps its row until it closes. Nothing rings while every active admin has the type's Bell switch off in
 Push Settings (no row, so no banner either; open rows are still rewritten and closed): the switch is read for each ring, under the
 card's lock, by the rule `triggerNotification` writes a shared bell row by (`bellWanted`); a card that rang nothing meanwhile

@@ -516,7 +516,12 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(bannersFor(card.id)).toBe(2);
   });
 
-  test('while the call with the yes is read again, nothing new rings; the open row says so quietly and keeps its read state', async () => {
+  test.each([
+    ['inside the word window', false],
+    // A resend of an estimate with no delivery record moves the window's start (its send) past the call with the yes;
+    // the card's own mark still holds it.
+    ['after a resend moved the word window past it', true],
+  ])('while the call with the yes is read again (%s), nothing new rings; the open row says so quietly and keeps its read state', async (_label, resend) => {
     const card = await phoneYesCard();
     await pass();
     const readAt = new Date(Date.now() - 60000);
@@ -526,6 +531,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     await keepCurrent(card.id);
     const { payload } = await trx('triage_items').where({ id: card.id }).first('payload');
     expect(typeof payload === 'string' ? JSON.parse(payload) : payload).toEqual(expect.objectContaining({ yes_rechecking: true }));
+    if (resend) await trx('estimates').whereIn('id', card.estimateIds).update({ sent_at: new Date(Date.now() - HOUR) });
     await pass();
     const { filed, count } = await bellsOf(card.id);
     expect(count).toBe(1);
@@ -541,6 +547,13 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     await pass();
     expect((await bellsOf(card.id)).due).toBeUndefined();
     expect(bannersFor(card.id)).toBe(1);
+
+    // The read ends: the card says what it says now, and the time-short ring was kept for it.
+    await trx('call_log').where({ id: card.yesCallId }).update({ processing_status: 'processed' });
+    await keepCurrent(card.id);
+    await pass();
+    expect((await bellsOf(card.id)).due).toEqual(expect.objectContaining({ title: "Estimates — check Pat Sampleton's estimate", done_at: null }));
+    expect(bannersFor(card.id)).toBe(2);
   });
 
   test('the filed row closes in the commit that writes the time-short row, before the pass reads the next card', async () => {
@@ -575,11 +588,12 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     }
   });
 
-  test('a visit already under way or done does not make time short; an expiry still does', async () => {
+  test('a visit parked for a new slot, under way or done does not make time short; an expiry still does', async () => {
     const card = await phoneYesCard();
     await pass();
-    // A technician started early: the visit's start is still to come, but it is under way. Then it is done.
-    for (const status of ['on_site', 'completed']) {
+    // A reschedule request parks the visit with its old slot (tomorrow here). Then a technician starts early: the
+    // visit's start is still to come, but it is under way. Then it is done.
+    for (const status of ['rescheduled', 'on_site', 'completed']) {
       await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1), status });
       await keepCurrent(card.id);
       expect(await trx('triage_items').where({ id: card.id }).first('status')).toEqual({ status: 'open' });

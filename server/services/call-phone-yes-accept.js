@@ -52,8 +52,9 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // A visit still on the calendar keeps the card: every status but cancelled and skipped. A visit waiting for its new
 // slot (rescheduled) and a done visit keep it too (the plan was still never accepted), so the gap never closes by itself.
 const CALENDAR_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'];
-// A visit already under way or done: still on the calendar (it keeps a card open), but no time to ring for.
-const STARTED_VISIT_STATUSES = ['on_site', 'completed'];
+// A visit still to come, the only kind that makes a card's time short. A visit parked for a new slot (rescheduled)
+// keeps its old date and time, and one under way or done is no time to ring for; both still keep a card open.
+const UPCOMING_VISIT_STATUSES = ['pending', 'confirmed', 'en_route'];
 const OPEN_ESTIMATE_STATUSES = ['sent', 'viewed'];
 // The statuses that settle an estimate for good (with an archive or a deleted row). Any other status keeps the card
 // naming it: open, lapsed (the office can extend it and accept), being sent again (a resend claims 'sending' and then
@@ -764,9 +765,10 @@ async function ringOpenCards(now) {
 
 // An open card read again under its call's triage lock (the lock every card writer takes first), with the times that
 // make it urgent, read by the clock after the lock (`now`: a visit may start, or an estimate expire, while the pass
-// waits for it). `hold`: a call in the word's window still owes a read, so the card rings nothing new until it is read
-// (the read may take the yes back, and the tap refuses meanwhile); its open row still follows the card, which the moot
-// pass marks while the call with the yes is read again. A read ends within OWED_READ_HOURS. Null once the card is no
+// waits for it). `hold`: a call in the word's window still owes a read, or the card's own yes is being read again (its
+// `yes_rechecking` mark, which the moot pass sets; a resend can move the window past that call), so the card rings
+// nothing new until the read ends (the read may take the yes back, and the tap refuses meanwhile); its open row still
+// follows the card. A read ends within OWED_READ_HOURS. Null once the card is no
 // longer open (the tap accepted it, or a person claimed, resolved or dismissed it), while a row it reads is busy
 // (holdCardRows), and while its evidence says something the card does not show yet (cardState: a close or a refresh
 // the next run writes).
@@ -776,7 +778,8 @@ async function openCardNow(trx, listed) {
     .first('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload', 'summary');
   const held = card && await holdCardRows(trx, card);
   if (!held || await cardState(card, trx)) return null;
-  const hold = Boolean(held.since && await Word.unreadCallSince(trx, { customerId: card.related_customer_id, since: held.since }));
+  const hold = parseJson(card.payload).yes_rechecking === true
+    || Boolean(held.since && await Word.unreadCallSince(trx, { customerId: card.related_customer_id, since: held.since }));
   const now = new Date();
   return { card, now, hold, ...(await cardTimes(trx, card, now)) };
 }
@@ -813,10 +816,10 @@ async function holdCardRows(trx, card) {
 }
 
 // The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and the
-// soonest visit to come among the ones that keep the card open (booked by the call, on the calendar, not linked to an
-// estimate, pest), not yet under way or done (STARTED_VISIT_STATUSES). Both are read under the card's customer, as its
-// moot check reads them. A call that booked several visits files its card with no visit of its own, so the call's
-// visits are read, not the card's.
+// soonest start among the visits that keep the card open (booked by the call, on the calendar, not linked to an
+// estimate, pest) and are still to come (UPCOMING_VISIT_STATUSES, start after now). Both are read under the card's
+// customer, as its moot check reads them. A call that booked several visits files its card with no visit of its own,
+// so the call's visits are read, not the card's.
 async function cardTimes(conn, card, now) {
   const { visitStart } = require('./call-phone-yes-bell');
   const ids = cardEstimateIds(card);
@@ -826,7 +829,7 @@ async function cardTimes(conn, card, now) {
       .orderBy('expires_at').first('expires_at')
     : null;
   const upcoming = (await callVisitsOnCalendar(conn, card.call_log_id, card.related_customer_id))
-    .filter((v) => !v.source_estimate_id && !STARTED_VISIT_STATUSES.includes(v.status) && visitStart(v) > now)
+    .filter((v) => !v.source_estimate_id && UPCOMING_VISIT_STATUSES.includes(v.status) && visitStart(v) > now)
     .sort((a, b) => visitStart(a) - visitStart(b));
   let visit = null;
   for (const candidate of upcoming) {
