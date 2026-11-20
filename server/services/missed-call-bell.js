@@ -551,13 +551,15 @@ function whereCallOfNumber(qb, table, key) {
 //    claim whose text went out (2); the 45 other unknown GBP callers of the 90
 //    days have rows in the same three tables and in no other.
 // A phone column is a text column whose name says phone, mobile or msisdn, or
-// is a plain number, caller, recipient or sender column. It matches by its
-// last 10 digits (FOOTPRINT_PHONE_SQL), the form the largest tables index
-// (migrations 20260927000006 and 20261120020000): the absence case reads every
-// table, and those grow with customers (pre-push audit r23). Every value whose
-// phone key is the number's ends in its 10 digits, so this finds all of them;
-// it can also find the same 10 digits under another country code, which only
-// lets a push go. A hashed one holds the SHA-256 of the E.164 number
+// is a plain number, caller, recipient or sender column. It matches by the
+// last 10 digits of its number once a conventional extension (ext, extension,
+// x or #, then digits, at the end) is removed (FOOTPRINT_PHONE_SQL; pre-push
+// audit r24): the form migration 20261120020000 indexes on the largest tables,
+// since the absence case reads every table and those grow with customers
+// (pre-push audit r23). Every value whose phone key is the number's ends in
+// its 10 digits, so this finds all of them, and one saved with an extension
+// too; it can also find the same 10 digits under another country code, which
+// only lets a push go. A hashed one holds the SHA-256 of the E.164 number
 // (compliance-contact-checks.js phoneHash); a last-4 or *_sid column cannot
 // name the number. Owner 2026-11-19 (*A*): what
 // no catalog read can find (a phone inside a JSON field, a column named
@@ -583,9 +585,11 @@ const FOOTPRINT_ALLOWED_SQL = {
   blocked_call_attempts: "NOT (fp.channel = 'voice' AND fp.block_type = 'marchex_shadow')",
 };
 const quoteIdent = (name) => `"${String(name).replace(/"/g, '""')}"`;
-// The last 10 digits of a phone column, character for character as the
-// migrations' last-10 indexes build them, or the planner cannot use them.
-const FOOTPRINT_PHONE_SQL = (column) => `right(regexp_replace(${column}, '\\D', '', 'g'), 10)`;
+// The number of a phone column: its extension removed, then its last 10
+// digits, character for character as migration 20261120020000's indexes
+// build it, or the planner cannot use them. Knex reads ? as a binding, so the
+// pattern writes {0,1}.
+const FOOTPRINT_PHONE_SQL = (column) => `right(regexp_replace(regexp_replace(${column}, '\\s*(ext(ension){0,1}\\.{0,1}|x|#)\\s*:{0,1}\\s*\\d+\\s*$', '', 'i'), '\\D', '', 'g'), 10)`;
 // The footprint tables and their phone columns, from pg_catalog (a domain
 // counts as its base type, as information_schema reports it). A partitioned
 // table is read once, through its parent.

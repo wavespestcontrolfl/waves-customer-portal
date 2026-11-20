@@ -807,20 +807,19 @@ jest.setTimeout(30000);
       expect(await opts.beforePush({ dispatching: true })).toBe(true);
     });
 
-    // The absence case reads every footprint table, so the largest keep a
-    // last-10 index the record read reaches by a lookup (pre-push audit r23;
-    // migrations 20260927000006 and 20261120020000, as in
+    // The absence case reads every footprint table, so the largest keep an
+    // index of the number the record read reaches by a lookup (pre-push audit
+    // r23, r24; migration 20261120020000, as in
     // hot-sweep-lookup-indexes-postgres). Synthetic rows never outweigh a full
     // scan on real costs, so the plan runs with sequential scans off and asks
     // for an index lookup (an Index Cond): a drift between FOOTPRINT_PHONE_SQL
     // and an index expression orphans the index.
-    test('the record read reaches the last-10 index of each large footprint table by a lookup (pre-push audit r23)', async () => {
-      const indexes = require('../models/migrations/20261120020000_footprint_phone_last10_indexes');
-      const leadsIndex = require('../models/migrations/20260927000006_outbound_return_prior_contact_phone_indexes');
-      const NAMES = ['customers_phone_last10_index', 'customers_secondary_phone_last10_index', 'customers_service_contact_phone_last10_index',
-        'customers_service_contact2_phone_last10_index', 'customers_service_contact3_phone_last10_index', 'customer_accounts_phone_last10_index',
-        'property_preferences_hoa_phone_last10_index', 'estimates_customer_phone_last10_index', 'estimates_customer_phone_typed_last10_index',
-        'leads_phone_last10_index'];
+    test('the record read reaches the number index of each large footprint table by a lookup (pre-push audit r23, r24)', async () => {
+      const indexes = require('../models/migrations/20261120020000_footprint_phone_indexes');
+      const NAMES = ['customers_phone_footprint_index', 'customers_secondary_phone_footprint_index', 'customers_service_contact_phone_footprint_index',
+        'customers_service_contact2_phone_footprint_index', 'customers_service_contact3_phone_footprint_index', 'customer_accounts_phone_footprint_index',
+        'property_preferences_hoa_phone_footprint_index', 'estimates_customer_phone_footprint_index', 'estimates_customer_phone_typed_footprint_index',
+        'leads_phone_footprint_index'];
       const present = async () => (await database.raw('SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY(?) ', [NAMES])).rows.map((r) => r.indexname).sort();
       const lookupsIn = (node, name) => [
         ...(node['Index Name'] === name && node['Index Cond'] ? [node['Index Cond']] : []),
@@ -830,11 +829,10 @@ jest.setTimeout(30000);
         // up() twice and down() twice are safe.
         await indexes.up(database);
         await indexes.up(database);
-        await leadsIndex.up(database);
         expect(await present()).toEqual([...NAMES].sort());
         await indexes.down(database);
         await indexes.down(database);
-        expect(await present()).toEqual(['leads_phone_last10_index']);
+        expect(await present()).toEqual([]);
         await indexes.up(database);
         await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
         const row = judged();
@@ -862,8 +860,25 @@ jest.setTimeout(30000);
         }
       } finally {
         await indexes.down(database);
-        await leadsIndex.down(database);
       }
+    });
+
+    // A free-text phone field can hold the number with an extension; the
+    // footprint reads the number before it (pre-push audit r24).
+    test.each([
+      ['an HOA phone', 'property_preferences', 'hoa_phone', '(727) 555-0611 ext 42'],
+      ['an HOA phone', 'property_preferences', 'hoa_phone', '727.555.0611 x42'],
+      ['an HOA phone', 'property_preferences', 'hoa_phone', '+1 727-555-0611 #2'],
+      ['an HOA phone', 'property_preferences', 'hoa_phone', '727 555 0611 extension: 7'],
+      ['a second customer phone', 'customers', 'secondary_phone', '727-555-0611 Ext. 12'],
+      ['an estimate phone', 'estimates', 'customer_phone', '727 555 0611 ext:7'],
+    ])('%s saved with an extension (%s.%s = %s) means it is never a repeat (pre-push audit r24)', async (label, table, column, value) => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      await database(table).insert({ id: randomUUID(), [column]: value });
+      expect(await repeat(row)).toBe(false);
     });
 
     test('one earlier silent call on another GBP line is a repeat; one on the same line is not; the first call never is', async () => {
