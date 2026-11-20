@@ -115,6 +115,15 @@ describe('readableEmail', () => {
     expect(readableEmail({ subject: 'S'.repeat(SUBJECT_CHARS + 1), body_text: 'Ends May 1.' })).toBeNull();
   });
 
+  // Pre-push audit on b461113351 (P1): reply history written inline in one paragraph was kept.
+  test('reply history written inline is dropped too, and the read is partial', () => {
+    const inline = 'Thanks. On Mon, Apr 13, 2026 at 9:00 AM Sam Rep wrote: Flash sale ends tomorrow.';
+    expect(readableEmail({ subject: 'Deal', body_text: inline })).toEqual({ subject: 'Deal', text: 'Thanks.', cut: false, partial: true });
+    // Prose is no header: with no date, time or address before "wrote:", the text stays whole.
+    const prose = 'Big savings. On sale now: our rep wrote: ends Friday.';
+    expect(readableEmail({ subject: 'Deal', body_text: prose })).toEqual({ subject: 'Deal', text: prose, cut: false, partial: false });
+  });
+
   // Pre-push audit on 75797b78e6 (P1): "Re: Flash sale ends tomorrow" put the old "tomorrow" on the reply's day.
   test("a reply's or forward's subject is the old email's: left out, so the read is partial", () => {
     for (const subject of ['Re: Flash sale ends tomorrow', 'FW: Flash sale ends tomorrow', 'fwd:Flash sale ends tomorrow']) {
@@ -338,6 +347,17 @@ describe('checkAnswer', () => {
     expect(read('2026-04-24', 'Ends May 1 (Friday)')).toEqual(refused);
     // A start before the email came is still before its end.
     expect(read('2026-04-23', 'Deals April 13 through Thursday').ok).toBe(true);
+  });
+
+  // Pre-push audit on b461113351 (P1): "Wednesday" quoted alone from "Sale ends April 15 (Wednesday)" passed April 22.
+  test('a day word right after a date labels it, also when the date sits just before the quote', () => {
+    const wednesday = new Date('2026-04-15T14:00:00Z'); // Wednesday Apr 15
+    const promo = 'Subject\nSale ends April 15 (Wednesday). Flash sale through Wednesday.';
+    const read = (endDate, quote) => checkAnswer({ end_date: endDate, quote, price_increase: false }, promo, wednesday);
+    const refused = { ok: false, reason: 'quote_date_mismatch' };
+    expect(read('2026-04-22', 'Wednesday')).toEqual(refused);
+    expect(read('2026-04-22', '15 (Wednesday)')).toEqual(refused);
+    expect(read('2026-04-22', 'Flash sale through Wednesday').ok).toBe(true);
   });
 
   // Pre-push audit on 75797b78e6 (P1): "Offer ends April 15 (Wednesday)" passed the Wednesday after.

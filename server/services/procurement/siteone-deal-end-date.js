@@ -33,6 +33,7 @@ const { anthropicText } = require('../llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const { etDateString } = require('../../utils/datetime-et');
 const { stripQuotedHistory, NUMERIC_DATE, QUOTE_CHARS } = require('./deal-email-text');
+const { HISTORY_HEADERS } = require('../email/email-strip');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -166,13 +167,14 @@ const INHERITED_SUBJECT = /^(?:re|fwd?) ?:/i;
  * is the old email's, and its "tomorrow" was said on another day, so it is left out (''). The
  * text is body_text, else body_html with
  * tags removed (line breaks kept); entities decoded, links removed, spaces and blank lines
- * collapsed, and quoted mail dropped: reply history as the date patterns drop it, every line
- * that starts with ">", and in HTML every <blockquote>. It is capped at what the subject
+ * collapsed, and quoted mail dropped: reply history as the date patterns drop it, reply history
+ * written inline (email-strip's HISTORY_HEADERS: "Thanks. On Apr 13, 2026 ... wrote: ..."), every
+ * line that starts with ">", and in HTML every <blockquote>. It is capped at what the subject
  * leaves of MODEL_TEXT_CHARS. `cut` is true when a cap cut the end of the text: the body
  * re-read cap (unless it cut only reply history, which is dropped anyway) or the model cap.
  * `partial` is true when the model does not read all of the email: a cap cut it, the subject
- * was left out, or a quoted line or a <blockquote> was dropped (the date patterns read those,
- * and a <blockquote> may be a styled block of this email).
+ * was left out, or inline reply history, a quoted line or a <blockquote> was dropped (the date
+ * patterns read those, and a <blockquote> may be a styled block of this email).
  */
 function readableEmail(email) {
   const flat = flatten(String(email?.subject || '')).replace(/\n/g, ' ');
@@ -182,9 +184,10 @@ function readableEmail(email) {
   const html = typeof email?.body_html === 'string' ? email.body_html : '';
   const read = flatten(decodeEntities(text ?? htmlText(html)));
   const kept = stripQuotedHistory(read);
-  const whole = kept.replace(QUOTED_LINE, '').trim();
+  const own = kept.slice(0, Math.min(...HISTORY_HEADERS.map((re) => re.exec(kept)?.index ?? kept.length)));
+  const whole = own.replace(QUOTED_LINE, '').trim();
   const room = MODEL_TEXT_CHARS - subject.length;
-  const readCut = kept.length === read.length && (text !== null ? text.length >= BODY_TEXT_CHARS : html.length >= BODY_HTML_CHARS);
+  const readCut = own.length === read.length && (text !== null ? text.length >= BODY_TEXT_CHARS : html.length >= BODY_HTML_CHARS);
   const cut = readCut || whole.length > room;
   const dropped = subject !== flat || whole.length < kept.trim().length || (text === null && /<blockquote/i.test(html));
   return { subject, text: whole.slice(0, room), cut, partial: cut || dropped };
@@ -248,6 +251,8 @@ const oneSentence = (stretch) => !SENTENCE_END.test(stretch.replace(/\b([ap])\.m
 // Beside dates, a day word names a day only as the close of a range that one of these words
 // opens from the date right before it: "April 20 through Friday", "4/14 until tomorrow".
 const RANGE_JOIN = /^ ?(?:-|to|through|thru|until|till) ?$/;
+// A day word right after a date, with only these between, labels that date: "April 15 (Wednesday)", "4/15, Wed".
+const LABEL_GAP = /^[ ,(]*$/;
 // Words for a day without a date. A weekday may be cut short ("Fri.", "Tues", "Thurs").
 const DAY_WORD = /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|today|tonight|tomorrow)\b/g;
 
@@ -292,12 +297,13 @@ function dayMarks(text) {
 
 /**
  * True when the words name endDate as the last day of their sentence; `away` is its day count
- * from the ET day the email came. `text` is the words (text.slice(0, wordsEnd)) and then the
- * email right after them, so a range the quote stops short of still shows its first day as a
- * start. A date in the words decides; with none, a weekday at most a week on, "today"/"tonight"
+ * from the ET day the email came. `text` is a little of the email before the words, the words
+ * (text.slice(wordsStart, wordsEnd)), and the email right after them, so a range the quote stops
+ * short of still shows its first day as a start, and a date just before the words still has its
+ * label. A date in the words decides; with none, a weekday at most a week on, "today"/"tonight"
  * or "tomorrow" must land on endDate. Beside dates, a day word counts only as a range's close.
  */
-function quoteNamesDay({ text, wordsEnd }, endDate, away) {
+function quoteNamesDay({ text, wordsStart, wordsEnd }, endDate, away) {
   const [year, month, day] = endDate.split('-').map(Number);
   const end = Date.UTC(year, month - 1, day);
   const weekday = WEEKDAYS[new Date(end).getUTCDay()];
@@ -318,7 +324,7 @@ function quoteNamesDay({ text, wordsEnd }, endDate, away) {
     return [year - 1, year + 1].map((y) => Date.UTC(y, d.month - 1, d.day)).reduce(nearer, Date.UTC(year, d.month - 1, d.day));
   };
   const marks = dayMarks(text);
-  const said = marks.filter((d) => d.end <= wordsEnd);
+  const said = marks.filter((d) => d.at >= wordsStart && d.end <= wordsEnd);
   // A weekday names a day at most a week on, and never when cut short. Beside dates in the words, a day
   // word names a day only as a range's close: a RANGE_JOIN word joins it to the date right before it,
   // and it falls after every date there ("April 20 through Friday"). So a weekday set beside a date
@@ -329,7 +335,9 @@ function quoteNamesDay({ text, wordsEnd }, endDate, away) {
     const start = dates.filter((n) => n.end <= d.at).pop();
     return start !== undefined && afterDates && RANGE_JOIN.test(text.slice(start.end, d.at));
   };
-  const named = said.filter((d) => sameDay(d) && (!d.word || (!d.short && (d.word !== weekday || away <= 7) && (!dates.length || closesRange(d)))));
+  // A day word right after a date, in the words or just before them, labels that date and names no other day.
+  const labels = (d) => marks.some((n) => !n.word && n.end <= d.at && LABEL_GAP.test(text.slice(n.end, d.at)));
+  const named = said.filter((d) => sameDay(d) && (!d.word || (!d.short && !labels(d) && (d.word !== weekday || away <= 7) && (!dates.length || closesRange(d)))));
   // Another day after d in its sentence. The stretch takes that day's first letter, so ". Monday" ends the sentence.
   const anotherDayAfter = (d) => marks.some((n) => n.at >= d.end && n.at - d.end <= RANGE_GAP && !sameDay(n)
     && oneSentence(text.slice(d.end, n.at + 1)));
@@ -341,11 +349,14 @@ const WORD_CHAR = /[a-z0-9]/;
 const YEAR_AFTER = /^(?:,? ?20\d{2}\b|\/(?:\d{4}|\d{2})\b)/;
 // Room after the words for another day RANGE_GAP characters on, and that day's own words.
 const AFTER_CHARS = RANGE_GAP + 24;
+// Room before the words for a date that a day word at their start labels: "September 30, 2026 (".
+const BEFORE_CHARS = 40;
 
 /**
- * Where the quoted words sit in the email, or null: { text, wordsEnd, nearEnd }, the words as
- * the email has them and then up to AFTER_CHARS of what follows; nearEnd when the email ends
- * before that. The words must sit at word edges ("April 3" is not in "April 30"), and a year
+ * Where the quoted words sit in the email, or null: { text, wordsStart, wordsEnd, nearEnd }: up
+ * to BEFORE_CHARS of what comes before the words, the words as the email has them
+ * (text.slice(wordsStart, wordsEnd)), and up to AFTER_CHARS of what follows; nearEnd when the
+ * email ends before that. The words must sit at word edges ("April 3" is not in "April 30"), and a year
  * the email writes right after a quoted day joins them, so the date is checked whole.
  */
 function wholeWordsInEmail(hay, needle) {
@@ -355,7 +366,8 @@ function wholeWordsInEmail(hay, needle) {
     if (edge(hay[at - 1], needle[0]) && edge(hay[end], needle[needle.length - 1])) {
       const year = /\d$/.test(needle) ? YEAR_AFTER.exec(hay.slice(end, end + 7)) : null;
       const wordsEnd = needle.length + (year ? year[0].length : 0);
-      return { text: hay.slice(at, at + wordsEnd + AFTER_CHARS), wordsEnd, nearEnd: at + wordsEnd + AFTER_CHARS > hay.length };
+      const from = Math.max(0, at - BEFORE_CHARS);
+      return { text: hay.slice(from, at + wordsEnd + AFTER_CHARS), wordsStart: at - from, wordsEnd: at - from + wordsEnd, nearEnd: at + wordsEnd + AFTER_CHARS > hay.length };
     }
   }
   return null;
