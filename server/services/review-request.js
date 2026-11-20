@@ -5021,19 +5021,7 @@ const ReviewService = {
     // suppression-only, the cadence should fall back to email rather than stall.
     // sendCustomerMessage would also block it, but checking here lets the channel
     // resolver pick email (matching the candidate list's sms_suppressed → email).
-    let phoneSuppressed = false;
-    if (contact.phone) {
-      try {
-        // messaging_suppression.phone is E.164 (written by the Twilio path), so
-        // normalize before matching or a formatted "(941)…" number misses the
-        // DNC row and the cadence stalls instead of falling back to email.
-        const e164 = toE164(contact.phone) || contact.phone;
-        const sup = await db("messaging_suppression").where({ phone: e164, active: true }).first();
-        phoneSuppressed = !!sup;
-      } catch {
-        /* table may not exist → treat as not suppressed */
-      }
-    }
+    const phoneSuppressed = await phoneIsSuppressed(contact.phone);
     // SMS consent is re-checked downstream in sendCustomerMessage (fails closed
     // there), so a prefs-read blip can still attempt SMS. Email has NO downstream
     // consent gate, so it fails CLOSED: it requires an existing prefs row with
@@ -7237,8 +7225,7 @@ const ReviewService = {
     if (!customer || customer.deleted_at) return stop("deleted");
     if (customer.has_left_google_review) return stop("reviewed");
     try {
-      const gr = await db("google_reviews").where({ customer_id: seq.customer_id }).first();
-      if (gr) return stop("reviewed");
+      if (await customerHasLinkedGoogleReview(seq.customer_id)) return stop("reviewed");
     } catch {
       /* google_reviews may not exist */
     }
@@ -8539,6 +8526,45 @@ const ReviewService = {
 // `database`: a caller inside a transaction (the visit-closeout packet's records phase) passes its
 // trx, so the read never takes a second pool connection; savepointRead keeps a failed read from
 // aborting that transaction.
+// Hard suppression (DNC / wrong-number) on a phone. messaging_suppression.phone is E.164 (written by
+// the Twilio path), so normalize before matching or a formatted "(941)…" number misses the DNC row.
+// failClosed: a failed read throws instead of reading as "not suppressed" (the yearly picker).
+async function phoneIsSuppressed(phone, { failClosed = false } = {}) {
+  if (!phone) return false;
+  try {
+    const e164 = toE164(phone) || phone;
+    return !!(await db("messaging_suppression").where({ phone: e164, active: true }).first());
+  } catch (err) {
+    // Knex puts bound values (the phone) in its error message: rethrow without them.
+    if (failClosed) throw Object.assign(new Error(`suppression lookup failed (${err.code || "error"})`), { code: err.code });
+    return false; // table may not exist → treat as not suppressed
+  }
+}
+
+// The dispatcher's own SMS recipient and suppression checks, for a caller that must know before it
+// enrolls whether a text could reach the customer. { reachable, reason }.
+async function smsRecipientReachable(customer) {
+  const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
+  const contact = await resolveServiceContactSmsRecipient(customer);
+  if (!contact || !contact.phone) return { reachable: false, reason: "no_phone" };
+  // A valid NANP number, or a well-formed international (+, not +1) E.164; anything else fails at send.
+  const { isValidNanpNumber, nanpNationalDigits } = require("../utils/phone");
+  const e164 = toE164(contact.phone);
+  const intl = typeof e164 === "string" && /^\+[2-9]\d{7,14}$/.test(e164) && !nanpNationalDigits(contact.phone);
+  if (!isValidNanpNumber(contact.phone) && !intl) return { reachable: false, reason: "invalid_phone" };
+  if (await phoneIsSuppressed(contact.phone, { failClosed: true })) return { reachable: false, reason: "phone_suppressed" };
+  // A number the line-type cache already marks non-SMS (landline / fixed VoIP) is rejected at send.
+  const { cachedLineTypeBlocks } = require("./messaging/validators/line-type");
+  if (await cachedLineTypeBlocks(contact.phone)) return { reachable: false, reason: "non_sms_line_type" };
+  return { reachable: true, reason: null };
+}
+
+// The one linked-review predicate: ANY google_reviews row linked to the customer (the cadence runner
+// stops on it, and the yearly picker selects on it). A read failure throws.
+async function customerHasLinkedGoogleReview(customerId, database = db) {
+  return Boolean(await database("google_reviews").where({ customer_id: customerId }).first("id"));
+}
+
 async function customerNeverAskedForReview(customerId, database = db) {
   if (!customerId) return false;
   try {
@@ -8659,6 +8685,8 @@ ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES = REVIEW_AFTER_REPORT_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 ReviewService.customerNeverAskedForReview = customerNeverAskedForReview;
+ReviewService.smsRecipientReachable = smsRecipientReachable;
+ReviewService.customerHasLinkedGoogleReview = customerHasLinkedGoogleReview;
 ReviewService.firstAskLockVisit = firstAskLockVisit;
 ReviewService.firstAskLockChoice = firstAskLockChoice;
 ReviewService.FIRST_ASK_OPT_OUT_REASON = FIRST_ASK_OPT_OUT_REASON;

@@ -163,8 +163,21 @@ async function checkLineType(input, _policy, _contactState) {
   return { ok: true };
 }
 
+// Cache-only verdict for a caller that must know BEFORE enrolling whether
+// checkLineType would block this number: true only when the proactive check is
+// on and the cached line type is in NON_SMS_LINE_TYPES. Never a paid Lookup; a
+// confirmed cache miss is false (checkLineType still runs at send time). A read
+// error throws (no phone in the message) so the caller skips rather than guesses.
+async function cachedLineTypeBlocks(phone) {
+  if (!isEnabled('proactiveLineTypeLookup') || !phone) return false;
+  const cached = await readCachedLineType(phone);
+  if (cached.state === 'error') throw new Error('line-type cache read failed');
+  return cached.state === 'hit' && NON_SMS_LINE_TYPES.has(cached.lineType);
+}
+
 module.exports = {
   checkLineType,
+  cachedLineTypeBlocks,
   // Shared phone-keyed line-type cache — also consumed by appointment-reminders'
   // isLandline so the two landline checks share one Lookup per number.
   readCachedLineType,

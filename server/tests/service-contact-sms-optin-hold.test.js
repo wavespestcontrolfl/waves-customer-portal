@@ -176,7 +176,8 @@ describe('send paths resolve the single recipient through the opt-in hold', () =
     const source = read('services/review-request.js');
     expect(source.match(/getServiceContactSmsRecipient\(/g).length).toBe(1);
     expect(source).toMatch(/const destinations = \[\.\.\.new Set\(\[getServiceContactSmsRecipient\(owner\)\.phone, owner\?\.phone\]/);
-    expect(source.match(/await resolveServiceContactSmsRecipient\(/g).length).toBe(4);
+    // 5th: smsRecipientReachable (the yearly picker's pre-enrollment check uses the same hold-aware resolver).
+    expect(source.match(/await resolveServiceContactSmsRecipient\(/g).length).toBe(5);
   });
 
   test('the staff review-request card pins and rechecks the same recipient the sender resolves', () => {

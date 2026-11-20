@@ -8344,8 +8344,8 @@ describe('the drafter\'s date is the day the visit was worked (review-visit-day.
 // Yearly review ask (started_by 'yearly', services/review-yearly-ask.js): dispatch-time rules.
 describe('Yearly review ask at dispatch', () => {
   const DAY = 86400000;
-  const yearly = (customerId, startedBy = 'yearly') => ({ id: `seq-y-${customerId}`, customer_id: customerId, status: 'active', current_step: 0, touches_sent: 0,
-    started_by: startedBy, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+  const yearly = (customerId, startedBy = 'yearly', notAfter = new Date(Date.now() + 5 * DAY).toISOString()) => ({ id: `seq-y-${customerId}`, customer_id: customerId, status: 'active', current_step: 0, touches_sent: 0,
+    started_by: startedBy, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask', notAfter }]),
     started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) });
   const cust = (id, extra = {}) => ({ id, first_name: 'Yo', last_name: 'T', phone: '+19410000199', email: 'yo@x.com', nearest_location_id: 'bradenton', ...extra });
   const tap = (customerId) => ({ id: `rr-y-${customerId}`, customer_id: customerId, channel: 'sms', status: 'opened',
@@ -8372,6 +8372,71 @@ describe('Yearly review ask at dispatch', () => {
     db.mockImplementation(mock);
     await ReviewService.processReviewSequences();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a row past its anniversary deadline is retired with no send', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const mock = makeMock({ customers: [cust('y-7')], review_sequences: [yearly('y-7', 'yearly', new Date(Date.now() - DAY).toISOString())] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('anniversary_window_over');
+  });
+
+  test('a linked review with missing_since set stops the row (the one predicate)', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const mock = makeMock({ customers: [cust('y-8')], review_sequences: [yearly('y-8')], google_reviews: [{ id: 'g1', customer_id: 'y-8', missing_since: new Date() }] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('reviewed');
+    expect(await ReviewService.customerHasLinkedGoogleReview('y-8')).toBe(true);
+  });
+
+  test('smsRecipientReachable: no phone and a suppressed phone are unreachable', async () => {
+    db.mockImplementation(makeMock({ customers: [], messaging_suppression: [{ phone: '+19410000199', active: true }] }));
+    expect(await ReviewService.smsRecipientReachable(cust('y-9', { phone: null }))).toEqual({ reachable: false, reason: 'no_phone' });
+    // A seven-digit local number or an impossible area code cannot be texted; a valid international number can.
+    expect(await ReviewService.smsRecipientReachable(cust('y-9', { phone: '555-0199' }))).toEqual({ reachable: false, reason: 'invalid_phone' });
+    expect(await ReviewService.smsRecipientReachable(cust('y-9', { phone: '(120) 555-0199' }))).toEqual({ reachable: false, reason: 'invalid_phone' });
+    expect(await ReviewService.smsRecipientReachable(cust('y-9', { phone: '+447700900123' }))).toEqual({ reachable: true, reason: null });
+    expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: false, reason: 'phone_suppressed' });
+    db.mockImplementation(makeMock({ customers: [], messaging_suppression: [] }));
+    expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
+  });
+
+  test('smsRecipientReachable: a cached non-SMS line type is unreachable while the proactive check is on; a failed suppression read never carries the phone', async () => {
+    const voip = { customers: [], messaging_suppression: [], phone_line_types: [{ phone: '+19410000199', line_type: 'fixedVoip' }] };
+    try {
+      db.mockImplementation(makeMock(voip));
+      expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
+      mockGates.proactiveLineTypeLookup = true;
+      db.mockImplementation(makeMock(voip));
+      expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: false, reason: 'non_sms_line_type' });
+      // A mobile number, or no cache row (no paid lookup here), stays reachable.
+      db.mockImplementation(makeMock({ ...voip, phone_line_types: [{ phone: '+19410000199', line_type: 'mobile' }] }));
+      expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
+      db.mockImplementation(makeMock({ ...voip, phone_line_types: [] }));
+      expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
+      // A failed cache read is not a miss: it throws (no phone in the message) so the picker skips.
+      const okDb = makeMock(voip);
+      db.mockImplementation((t, ...rest) => (t === 'phone_line_types'
+        ? { where: () => ({ first: async () => { throw new Error('pg blip on phone_line_types'); } }) }
+        : okDb(t, ...rest)));
+      const cacheErr = await ReviewService.smsRecipientReachable(cust('y-9')).then(() => null, (e) => e);
+      expect(cacheErr && cacheErr.message).toBe('line-type cache read failed');
+    } finally {
+      mockGates.proactiveLineTypeLookup = false;
+    }
+    // Knex puts bound values in its error text: the rethrown error drops them.
+    const base = makeMock({ customers: [] });
+    db.mockImplementation((t, ...rest) => (t === 'messaging_suppression'
+      ? { where: () => ({ first: async () => { throw Object.assign(new Error('select * from "messaging_suppression" where "phone" = $1 - +19410000199'), { code: '57P01' }); } }) }
+      : base(t, ...rest)));
+    const err = await ReviewService.smsRecipientReachable(cust('y-9')).then(() => null, (e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).not.toMatch(/0000199/);
+    expect(err.code).toBe('57P01');
   });
 
   test('a tap 40 days ago retires the yearly row with no send', async () => {
