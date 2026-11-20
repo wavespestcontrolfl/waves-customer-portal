@@ -34,7 +34,16 @@ describeDb('Builders list (PostgreSQL)', () => {
       && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
     if (!ownedQa && !ciTest) throw new Error('Use this worktree\'s private QA database or the isolated CI database');
-    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    // Knex gets the host, port and database checked above, never the raw URL: a ?host= or other override in the
+    // query string cannot move the connection somewhere the check did not see.
+    const connection = {
+      host: url.hostname,
+      port: Number(url.port) || 5432,
+      user: decodeURIComponent(url.username),
+      password: decodeURIComponent(url.password),
+      database: url.pathname.slice(1),
+    };
+    database = knex({ client: 'pg', connection, pool: { min: 0, max: 2 } });
     mockPg = database;
   });
   beforeEach(async () => {
