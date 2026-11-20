@@ -134,7 +134,10 @@ async function verifiedCustomerLinks(conn, invoiceIds) {
   const verified = new Map();
   for (const row of records) {
     if (seen.has(row.id)) {
-      verified.delete(row.id);
+      // A duplicate immutable sale record makes ownership ambiguous. Keep an
+      // explicit null sentinel so this invoice can never become linkable again
+      // if a third row follows the duplicate in the joined result.
+      verified.set(row.id, null);
       continue;
     }
     seen.add(row.id);

@@ -369,6 +369,20 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
     expect(hydrated.find((row) => row.id === current.id).payload.customerId).toBe(ids.customerId);
   });
 
+  test('duplicate sale records leave the current customer link unavailable', async () => {
+    const ids = await seedOriginal();
+    await observeState(trx, ids.sale.reviewContext, 'cancelled');
+    await require('../services/commercial-prepay-sale-record').recordUnbookedSale(trx, {
+      invoiceId: ids.invoiceId,
+      estimateId: ids.estimateId,
+      customerId: ids.customerId,
+      setupAmount: 55,
+    });
+
+    const [hydrated] = await review.hydrateCurrentCustomerLinks(trx, await reviews(ids.invoiceId));
+    expect(hydrated.payload.customerId).toBeNull();
+  });
+
   test('bulk clear leaves the invoice review open while resolving ordinary cards', async () => {
     const { invoiceId, sale } = await seedOriginal({ withEstimate: false });
     const dispatchAlerts = require('../services/dispatch-alerts');
