@@ -73,21 +73,21 @@ const RETRY_WINDOW_MS = Number(EXTRACTION_RETRY_WINDOW_DAYS) * 864e5;
 // with GATE_SHORT_CALL_RECORDING_SWEEP on, any recording of a call under
 // 24 h old), or PAN-quarantined (a card readback was heard). A retry state
 // without them is never reclaimed.
-function claimable(c, status) {
+function claimable(c, status, now = Date.now()) {
   const recording = !!(c.recording_url && c.recording_url !== '');
   const pan = c.pan_detected === true;
   const media = recording || (status !== TRANSCRIBE_FAILED && pan && !!c.has_transcript);
-  return media && (sweepLengthOk(c) || pan);
+  return media && (sweepLengthOk(c, now) || pan);
 }
 
 // What the sweep will claim again: no_transcription unconditionally (no
 // cap, no age gate); extraction_failed inside the processor's retry limits.
 function retryEligible(c, status, now = Date.now()) {
-  if (status === TRANSCRIBE_FAILED) return claimable(c, status);
+  if (status === TRANSCRIBE_FAILED) return claimable(c, status, now);
   return status === 'extraction_failed'
     && Number(c.extraction_attempts || 0) < Number(CALL_EXTRACTION_MAX_ATTEMPTS)
     && new Date(c.created_at).getTime() > now - RETRY_WINDOW_MS
-    && claimable(c, status);
+    && claimable(c, status, now);
 }
 
 // The processor's own stage vocabularies (call-recording-processor.js,
