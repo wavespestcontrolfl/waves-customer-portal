@@ -171,7 +171,10 @@ describe('runPromisedEstimateWatcher', () => {
     // boundary as sent_at (audit on 573ee332e): mere existence would let a
     // pre-promise delivery + a later suppressed attempt (which advances
     // sent_at but not the stamp) falsely keep the promise.
-    expect(block).toMatch(/\(e\.estimate_data #>> '\{deliveryState,lastDeliveredAt\}'\)::timestamptz > CASE/);
+    // Read through the guarded reader: a malformed stamp leaves the promise
+    // open and never aborts the whole query (codex pre-push P1).
+    expect(block).toMatch(/\$\{deliveryInstantSql\('e', 'lastDeliveredAt'\)\} > CASE/);
+    expect(block).not.toMatch(/lastDeliveredAt\}'\)::timestamptz/);
     expect(block).not.toMatch(/sentChannels\}'\) = 'array'/);
     expect(block).not.toMatch(/channels,email,ok/);
   });

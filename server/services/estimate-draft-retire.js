@@ -25,6 +25,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { isoInstantSql } = require('./self-serve-estimates');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_EXCEPTION_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const RETIRE_BATCH_LIMIT = 200;
@@ -143,10 +144,11 @@ const SENT_CHANNELS_SQL = (alias) => `(jsonb_array_length(
     CASE WHEN jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
       THEN ${alias}.estimate_data #> '{deliveryState,sentChannels}' ELSE '[]'::jsonb END) > 0
   AND ${alias}.viewed_at IS NOT NULL)`;
-// Shape AND validity: the shape regex alone lets an ISO-looking but invalid
-// value abort the whole candidate query at the cast, and pg_input_is_valid
-// alone accepts special literals such as 'infinity'.
-const ISO_INSTANT_SQL = (expr) => `(${expr} ~ '^[0-9]{4}-' AND pg_input_is_valid(${expr}, 'timestamptz'))`;
+// Shape AND validity, the one rule for a deliveryState stamp
+// (self-serve-estimates.js): the shape regex alone lets an ISO-looking but
+// invalid value abort the whole candidate query at the cast, and
+// pg_input_is_valid alone accepts special literals such as 'infinity'.
+const ISO_INSTANT_SQL = isoInstantSql;
 const DELIVERED_AT_SQL = (alias) => ISO_INSTANT_SQL(`(${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}')`);
 const SENT_TIME_SQL = (alias) => `(CASE
   WHEN ${DELIVERED_AT_SQL(alias)}

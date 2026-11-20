@@ -30,6 +30,7 @@ const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etDateString } = require('../utils/datetime-et');
 const { askedServiceLines, estimateMatchesAsk } = require('./call-estimate-service-match');
+const { deliveryInstantSql } = require('./self-serve-estimates');
 
 const watcherDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.PROMISED_ESTIMATE_WATCHER_DISABLED || '').toLowerCase());
@@ -104,7 +105,7 @@ const KEPT_HEAD = `
           -- plan_start mints (portal pricing card, GATE_PORTAL_PLAN_START).
           AND (COALESCE(e.source, '') NOT IN ('service_report_cta', 'plan_restart', 'plan_start')
                OR (COALESCE(e.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
-                   AND (e.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > CASE
+                   AND ${deliveryInstantSql('e', 'lastDeliveredAt')} > CASE
                      WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
                      WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
                      ELSE c.created_at

@@ -27,6 +27,7 @@ const { deliverOpsDigest, fullSetItemKeys } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { loadPendingSmsConversations } = require('./sms-pending-conversations');
+const { deliveryInstantSql } = require('./self-serve-estimates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
 const watcherDisabled = () => ['1', 'true', 'on']
@@ -289,7 +290,7 @@ async function loadDroppedFollowUps(cutoff = new Date(), { includeExpired = fals
           AND ((COALESCE(fe.source, '') NOT IN ('service_report_cta', 'plan_restart', 'plan_start') AND fe.sent_at > t.created_at)
                OR (COALESCE(fe.source, '') IN ('service_report_cta', 'plan_restart', 'plan_start')
                    AND COALESCE(fe.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
-                   AND (fe.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > t.created_at))
+                   AND ${deliveryInstantSql('fe', 'lastDeliveredAt')} > t.created_at))
       ))
       -- Unlinked send_sms tasks fulfill through the source call's SID and
       -- recipient phone (codex r34): a human-typed/approved text to the

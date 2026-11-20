@@ -22,7 +22,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { DISPOSITIONS, dispositionGroup, dispositionFromDeclineReason, expiredDispositionFor } = require('./estimate-disposition');
 const { inferEstimateServiceLines, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
-const { SELF_SERVE_ESTIMATE_SOURCES, isUndeliveredSelfServe, countableViewAtSql } = require('./self-serve-estimates');
+const {
+  SELF_SERVE_ESTIMATE_SOURCES, isUndeliveredSelfServe, countableViewAtSql, firstDeliveredAtMs,
+} = require('./self-serve-estimates');
 
 const RESOLVED_STATUSES = ['accepted', 'declined', 'expired'];
 
@@ -264,7 +266,7 @@ function sentAnchorMs(row) {
   // sendEstimateNow persists the FIRST handoff durably at
   // deliveryState.firstDeliveredAt — the one witness a resend can't move
   // (GH codex P1: an unopened resend must keep its original cohort age).
-  const firstDelivered = ms(data?.deliveryState?.firstDeliveredAt);
+  const firstDelivered = firstDeliveredAtMs(data);
   // A self-serve mint anchors where the Intelligence Bar dates its send
   // (self-serve-estimates.js deliveredAtSql, codex pre-push P1): its first
   // delivery, sent_at when the stamp is there but unreadable, none while
