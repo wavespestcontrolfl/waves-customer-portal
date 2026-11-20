@@ -5027,7 +5027,10 @@ const ReviewService = {
     // consent gate, so it fails CLOSED: it requires an existing prefs row with
     // review + email enabled (parity with SMS's NO_CONSENT_RECORD on a missing
     // row) and a clean prefs read.
-    const canSms = !!contact.phone && !smsBlocked && !phoneSuppressed;
+    // An SMS-only (yearly) ask texts a valid US / Canada number only, the same rule the picker
+    // applied (the dispatch normalizer reads any ten digits as +1).
+    const nanpOk = !smsOnly || require("../utils/phone").isValidNanpNumber(contact.phone);
+    const canSms = !!contact.phone && !smsBlocked && !phoneSuppressed && nanpOk;
     const canEmail = !!emailContact.email && !!prefs && !emailBlocked && !prefsLookupFailed;
 
     // A no-link private check-in (resolution_check / satisfaction_confirm) must

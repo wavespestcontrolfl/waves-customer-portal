@@ -148,6 +148,10 @@ describe('resolveServiceContactSmsRecipient', () => {
   test('failClosed: a lookup error is rethrown instead of falling back to the account holder', async () => {
     const dbh = optinReader([], { error: new Error('connection reset') });
     await expect(resolveServiceContactSmsRecipient(CONTACT, { dbh, failClosed: true })).rejects.toThrow('connection reset');
+    // A missing opt-in table reads as "no holds" for other callers; failClosed rethrows it.
+    const missing = Object.assign(new Error('relation "recipient_optin" does not exist'), { code: '42P01' });
+    await expect(resolveServiceContactSmsRecipient(CONTACT, { dbh: optinReader([], { error: missing }), failClosed: true })).rejects.toThrow('does not exist');
+    await expect(optinHeldPhoneKeys(['cust-1'], { dbh: optinReader([], { error: missing }) })).resolves.toEqual(new Map());
   });
 
   test('a slot-1 phone that is the account holder\'s own number is never held', async () => {
