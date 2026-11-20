@@ -14,7 +14,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { dateOnlyString, dateOnlyAtNoonUtc } = require('../../utils/date-only');
-const { CUSTOMER_STAGES } = require('../customer-stages');
+const { whereLiveCustomer } = require('../customer-stages');
 
 const KINDS = ['pool', 'home'];
 const COMPANY_WORDS = new Set(['LLC', 'INC', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LTD', 'INCORPORATED']);
@@ -190,20 +190,17 @@ async function readDataThrough(conn, source, today) {
 
 // The keys of every active payer and every live customer company. The caller gets booleans only. A failed read
 // fails the whole list (the office presses Try again): an empty set would show every customer as a fresh prospect.
-// A live customer is the shared rule (customer-stages.js whereLiveCustomer): active, not deleted, in a customer
-// stage. The customers table also holds CRM leads, and a lead's company is still a prospect.
+// A live customer is the shared rule itself (customer-stages.js whereLiveCustomer), so the two can never drift. The
+// customers table also holds CRM leads, and a lead's company is still a prospect.
 async function readCustomerKeys() {
-  const result = await db.raw(
-    `SELECT company_name AS name FROM customers
-      WHERE active AND deleted_at IS NULL AND pipeline_stage IN (${CUSTOMER_STAGES.map(() => '?').join(', ')})
-        AND BTRIM(COALESCE(company_name, '')) <> ''
-     UNION
-     SELECT company_name AS name FROM payers WHERE active AND BTRIM(COALESCE(company_name, '')) <> ''
-     UNION
-     SELECT display_name AS name FROM payers WHERE active AND BTRIM(COALESCE(display_name, '')) <> ''`,
-    CUSTOMER_STAGES,
-  );
-  return new Set(result.rows.map((row) => builderKey(row.name)).filter(Boolean));
+  const named = (column) => `BTRIM(COALESCE(${column}, '')) <> ''`;
+  const rows = await db('customers')
+    .modify(whereLiveCustomer)
+    .whereRaw(named('company_name'))
+    .select('company_name as name')
+    .union((qb) => qb.from('payers').where('active', true).whereRaw(named('company_name')).select('company_name as name'))
+    .union((qb) => qb.from('payers').where('active', true).whereRaw(named('display_name')).select('display_name as name'));
+  return new Set(rows.map((row) => builderKey(row.name)).filter(Boolean));
 }
 
 async function listBuilders({ kind, now = new Date() }) {
@@ -218,7 +215,9 @@ async function listBuilders({ kind, now = new Date() }) {
   const [{ newest: dataThrough, cutoffs: cut, groups: rows }, customerKeys] = await Promise.all([permitRead, readCustomerKeys()]);
   const merged = mergeBuilders(rows, { newSince: cut.d30, customerKeys });
   logger.info(`[builder-list] ${kind}: ${merged.builders.length} builders in ${Date.now() - started} ms`);
-  return { kind, dataThrough, week: { from: cut.weekStart, through: cut.weekEnd, ...merged.week }, builders: merged.builders };
+  // No permit on file yet (before the first county sync): week is null, so the page says so instead of "0 permits".
+  const week = dataThrough ? { from: cut.weekStart, through: cut.weekEnd, ...merged.week } : null;
+  return { kind, dataThrough, week, builders: merged.builders };
 }
 
 // The names (upper-cased, trimmed) that fold into one builder key.
