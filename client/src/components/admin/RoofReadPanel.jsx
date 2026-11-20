@@ -249,6 +249,8 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   // never reverses a hide choice another tab made.
   const [hideEdited, setHideEditedState] = useState(false);
   const hideEditedRef = useRef(false);
+  // Counts the checkbox saves that landed: a count answer that started before one of them carries an older hide value.
+  const hideSavesRef = useRef(0);
   const setHideEdited = (v) => { hideEditedRef.current = v; setHideEditedState(v); };
   const [pointsEdited, setPointsEdited] = useState(false);
   const [pointsState, setPointsState] = useState({ busy: false, msg: "", err: "" });
@@ -323,6 +325,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   async function saveTech() {
     const read = result?.read;
     if (!read || saveState.busy || !estimateId) return;
+    const hideSavesAtStart = hideSavesRef.current;
     const trimmed = countEdited ? count.trim() : "";
     if (trimmed !== "" && !(/^\d+$/.test(trimmed) && Number(trimmed) <= MAX_TECH_COUNT)) {
       setSaveState({ busy: false, msg: "", err: `Count must be a whole number from 0 to ${MAX_TECH_COUNT}.` });
@@ -354,7 +357,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
       }
       setResult((prev) => ({ ...prev, read: body.read }));
       // An untouched checkbox follows the server (another tab may have hidden the points).
-      if (!hideEditedRef.current) setShowOnEstimate(!body.read.hide_on_estimate);
+      if (!hideEditedRef.current && hideSavesRef.current === hideSavesAtStart) setShowOnEstimate(!body.read.hide_on_estimate);
       // What the server holds now, then clear the edited markers.
       setCount(body.read.tech_final_count == null ? "" : String(body.read.tech_final_count));
       setTechFlags(techFlagsFrom(body.read));
@@ -431,6 +434,8 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
               x: round4(p.x), y: round4(p.y), type: p.type, note: p.note.trim() || null, ...(p.source ? { source: p.source } : {}),
             })),
             crop: { lat: spot.lat, lng: spot.lng },
+            // The list these edits started from: the server refuses the save (409) if another window changed it since.
+            expected_pins: rd.tech_pins ?? null,
           } : {}),
           ...(hideChanged ? { hide_on_estimate: !showOnEstimate } : {}),
         }),
@@ -438,9 +443,11 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
       const body = await r.json().catch(() => ({}));
       if (!mounted.current) return;
       if (!r.ok || !body?.read) {
-        setPointsState({ busy: false, msg: "", err: body?.error || "Could not save the points. Try again." });
+        // The edits stay on screen; a 409 offers "Read the roof again" to load the other window's points.
+        setPointsState({ busy: false, msg: "", err: body?.error || "Could not save the points. Try again.", conflict: r.status === 409 });
         return;
       }
+      if (hideChanged) hideSavesRef.current += 1;
       // What the server holds now, then clear the edited marker.
       setResult((prev) => ({ ...prev, read: body.read }));
       setPoints(pointsFrom(body.read, nextId));
@@ -513,6 +520,11 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
               <p className="text-14 text-zinc-600" role="alert" data-testid="roof-read-points-unusable">
                 This roof read did not work. Read the roof again before adding points.
               </p>
+            )}
+            {(!readUsable || pointsState.conflict) && (
+              <Button variant="secondary" size="sm" onClick={readRoof} disabled={phase === "loading"} data-testid="roof-read-again">
+                Read the roof again
+              </Button>
             )}
             <p className="text-14 text-zinc-600">
               Tap a faded letter to confirm it, or tap the photo to add a point. Drag a point to move it, or select it and press the arrow keys.

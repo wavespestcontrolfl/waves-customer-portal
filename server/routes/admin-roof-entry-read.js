@@ -10,7 +10,8 @@
  *         400 { error: 'reference_mismatch' } when both ids are given and the estimate belongs to a different customer.
  *   PATCH /api/admin/roof-entry-read/:id/tech-count the technician's final count, flags and confirmed points
  *         body { count?: int 0-500, flags?: { <entry type>: 'yes' | 'no' | 'unsure' },
- *                pins?: [{ x, y, type, note?, source? }, ...] | null, crop?: { lat, lng }, hide_on_estimate?: boolean } -> { read }
+ *                pins?: [{ x, y, type, note?, source? }, ...] | null, crop?: { lat, lng }, expected_pins?: [...] | null,
+ *                hide_on_estimate?: boolean } -> { read }
  *         At least one of count, flags, pins, hide_on_estimate is required. pins (owner ruling 2026-11-20, choice 4A) are the
  *         points the technician confirmed on the photo, saved whole (null clears them); the customer estimate shows only
  *         these, never the AI read. When pins is a list, crop is required: the crop centre the panel drew on, which must
@@ -18,8 +19,11 @@
  *         pins list (over 20 points, x or y outside 0-1, an unknown type, a note over 40 characters) is 400.
  *         source (optional) is "<entry type>:<index into that type's AI pins>", the AI suggestion a point was confirmed from;
  *         the staff panel uses it to keep that suggestion hidden, and the customer estimate never gets it.
+ *         With a pins list, expected_pins is required too: the list the panel last loaded (null = none saved). The save
+ *         lands only while the row still holds exactly that list, else 409 (another window changed the points).
+ *         Points need a finished, readable read (else 400 "Read the roof again").
  *         hide_on_estimate true keeps the points off the customer estimate. Send only what changed: pins and crop only when
- *         the points were edited, hide_on_estimate only when the checkbox changed (a stale tab then cannot overwrite points).
+ *         the points were edited, hide_on_estimate only when the checkbox changed.
  *
  * Admin only, like the other admin estimate routes. The gate is this router's first middleware, ahead of the staff
  * login that reads the technicians table: gate off = 404 { enabled: false } from the router, with no route-level
@@ -32,7 +36,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { roofEntryReadLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const {
-  ENTRY_TYPES, LIKELY, countyKey, runRoofEntryRead, saveTechCount, validateTechPins,
+  ENTRY_TYPES, LIKELY, MAX_TECH_PINS, countyKey, runRoofEntryRead, saveTechCount, validateTechPins,
 } = require('../services/roof-entry-read');
 
 const router = express.Router();
@@ -78,8 +82,14 @@ function techCountInput(body) {
       const pins = validateTechPins(b.pins);
       const c = b.crop;
       if (!pins || !c || typeof c !== 'object' || !isCoord(c.lat, 90) || !isCoord(c.lng, 180)) return null;
+      // The list the panel last loaded (null = none saved yet): required, so a stale tab's save is refused (409).
+      const e = b.expected_pins;
+      const expectedOk = e === null || (Array.isArray(e) && e.length <= MAX_TECH_PINS
+        && e.every((p) => p && typeof p === 'object' && !Array.isArray(p)));
+      if (!expectedOk) return null;
       out.pins = pins;
       out.crop = { lat: c.lat, lng: c.lng };
+      out.expectedPins = e;
     }
   }
   if (b.hide_on_estimate !== undefined) {
@@ -121,6 +131,7 @@ router.patch('/:id/tech-count', async (req, res, next) => {
   } catch (err) {
     if (err.code === 'crop_mismatch') return res.status(400).json({ error: 'These points were not drawn on this roof photo' });
     if (err.code === 'read_not_usable') return res.status(400).json({ error: 'This roof read did not work. Read the roof again before adding points.' });
+    if (err.code === 'points_changed') return res.status(409).json({ error: 'These points were changed in another window. Read the roof again to load them.' });
     logger.error(`[admin-roof-entry-read] tech count failed: ${err.message}`);
     return next(err);
   }

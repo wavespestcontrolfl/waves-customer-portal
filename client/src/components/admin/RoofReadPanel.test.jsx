@@ -524,6 +524,7 @@ describe("confirmed points", () => {
         { x: 0.25, y: 0.25, type: "other", note: null },
       ],
       crop: { lat: 27.46, lng: -82.57 },
+      expected_pins: null,
       hide_on_estimate: true,
     });
     // The count and flags are not part of a points save.
@@ -644,7 +645,7 @@ describe("saving only what changed", () => {
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     await screen.findByText("Points saved.");
     const body = lastBody();
-    expect(Object.keys(body).sort()).toEqual(["crop", "pins"]);
+    expect(Object.keys(body).sort()).toEqual(["crop", "expected_pins", "pins"]);
     expect(body.pins).toHaveLength(2);
   });
 
@@ -657,12 +658,43 @@ describe("saving only what changed", () => {
     expect(patches()).toHaveLength(0);
   });
 
+  it("sends the list the edits started from, and on a 409 keeps the edits and offers to read again", async () => {
+    await opened();
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    fetchMock.mockImplementationOnce(() => reply({ error: "These points were changed in another window. Read the roof again to load them." }, 409));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    expect(await screen.findByTestId("roof-read-points-error")).toHaveTextContent("changed in another window");
+    expect(lastBody().expected_pins).toEqual(SAVED);
+    expect(screen.getAllByTestId("roof-read-point")).toHaveLength(2);
+    // "Read the roof again" re-posts the read (a free reuse of this estimate's read) and loads the saved points.
+    fetchMock.mockImplementationOnce(() => reply({ status: "ok", cached: true, read: READ({ tech_pins: [...SAVED, ...SAVED] }), image_url: IMAGE }));
+    fireEvent.click(screen.getByTestId("roof-read-again"));
+    await waitFor(() => expect(screen.queryByTestId("roof-read-points-error")).toBeNull());
+  });
+
+  it("does not let a count answer that started before a checkbox save undo it", async () => {
+    await opened();
+    let finish;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "2" } });
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    // While the count save is in flight, staff hide the points and that save lands first.
+    fireEvent.click(screen.getByRole("checkbox", SHOW));
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ hide_on_estimate: true, tech_pins: SAVED }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    finish(await reply({ read: READ({ tech_final_count: 2, hide_on_estimate: false, tech_pins: SAVED }) }));
+    await screen.findByText("Saved.");
+    expect(screen.getByRole("checkbox", SHOW)).not.toBeChecked();
+  });
+
   it("locks the points editor on a read whose AI answer did not work, and says to read again", async () => {
     await opened(READ({ tier: "unknown", flags: {}, tech_pins: null }));
     expect(screen.getByTestId("roof-read-points-unusable")).toHaveTextContent("This roof read did not work. Read the roof again before adding points.");
     expect(screen.getByTestId("roof-read-add-point")).toBeDisabled();
     fireEvent.click(frame(), { clientX: 100, clientY: 50 });
     expect(screen.queryAllByTestId("roof-read-point")).toHaveLength(0);
+    expect(screen.getByTestId("roof-read-again")).toBeInTheDocument();
   });
 
   it("applies a checkbox click made while a count save is in flight (the late answer does not undo it)", async () => {
@@ -691,7 +723,7 @@ describe("saving only what changed", () => {
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ hide_on_estimate: true, tech_pins: [...SAVED, { x: 0.5, y: 0.5, type: "other", note: null }] }) }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     await screen.findByText("Points saved.");
-    expect(Object.keys(lastBody()).sort()).toEqual(["crop", "pins"]);
+    expect(Object.keys(lastBody()).sort()).toEqual(["crop", "expected_pins", "pins"]);
   });
 
   it("needs the map point to save edited points", async () => {
