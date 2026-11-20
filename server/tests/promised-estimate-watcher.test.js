@@ -160,7 +160,7 @@ describe('runPromisedEstimateWatcher', () => {
     );
     const block = src.split('e.sent_at IS NOT NULL')[1].slice(0, 2600);
     // plan_restart joined the publish-without-delivery set (C4, #3671 r8).
-    expect(block).toMatch(/COALESCE\(e\.source, ''\) NOT IN \('service_report_cta', 'plan_restart', 'plan_start'\)/);
+    expect(block).toMatch(/CASE WHEN COALESCE\(e\.source, ''\) IN \('service_report_cta', 'plan_restart', 'plan_start'\)/);
     // …but a mint an operator LATER actually delivered keeps the promise
     // (GitHub #3391 round P2). The witness is deliveryState.firstDeliveredAt
     // — stamped only for REAL deliveries (never suppression sentinels),
@@ -173,7 +173,9 @@ describe('runPromisedEstimateWatcher', () => {
     // sent_at but not the stamp) falsely keep the promise.
     // Read through the guarded reader: a malformed stamp leaves the promise
     // open and never aborts the whole query (codex pre-push P1).
-    expect(block).toMatch(/\$\{deliveryInstantSql\('e', 'lastDeliveredAt'\)\} > CASE/);
+    // It stands in for sent_at, compared with the end of the call once.
+    expect(block).toMatch(/THEN \$\{deliveryInstantSql\('e', 'lastDeliveredAt'\)\}\s+ELSE e\.sent_at\s+END\) > CASE/);
+    expect(block.match(/WHEN c\.bridged_at IS NOT NULL/g)).toHaveLength(1);
     expect(block).not.toMatch(/lastDeliveredAt\}'\)::timestamptz/);
     expect(block).not.toMatch(/sentChannels\}'\) = 'array'/);
     expect(block).not.toMatch(/channels,email,ok/);

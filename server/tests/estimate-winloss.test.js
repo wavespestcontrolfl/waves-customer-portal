@@ -431,6 +431,21 @@ describe('winLossSlices — audit slices', () => {
     expect(sentCohorts).toMatchObject({ sentTotal: 1, viewedTotal: 0 });
   });
 
+  test('a staff quote keeps the lenient read of its first-delivery stamp; only a self-serve quote reads it strictly (codex pre-push P1)', () => {
+    const { sentAnchorMs } = _private;
+    // A space-separated stamp with a short offset: JavaScript reads it, the strict ISO rule does not.
+    const stamp = '2026-10-01 12:00:00+00';
+    const anchored = (source) => sentAnchorMs({
+      source, sent_at: '2026-11-05T15:00:00Z', viewed_at: null, accepted_at: null,
+      estimate_data: { deliveryState: { firstDeliveredAt: stamp } },
+    });
+    // A staff quote stays in its October cohort, as on main.
+    expect(anchored(null)).toBe(Date.parse(stamp));
+    expect(anchored('admin')).toBe(Date.parse(stamp));
+    // A self-serve quote dates by sent_at, as the Intelligence Bar's SQL reads it.
+    expect(anchored('plan_start')).toBe(Date.parse('2026-11-05T15:00:00Z'));
+  });
+
   test('no sent rows → empty cohorts with null rates', async () => {
     mockDbHandler = estimatesTable([], []);
     const { sentCohorts } = await winLossSlices({ days: 7 });

@@ -266,15 +266,17 @@ function sentAnchorMs(row) {
   // sendEstimateNow persists the FIRST handoff durably at
   // deliveryState.firstDeliveredAt — the one witness a resend can't move
   // (GH codex P1: an unopened resend must keep its original cohort age).
-  const firstDelivered = firstDeliveredAtMs(data);
   // A self-serve mint anchors where the Intelligence Bar dates its send
   // (self-serve-estimates.js deliveredAtSql, codex pre-push P1): its first
-  // delivery, sent_at when the stamp is there but unreadable, none while
-  // undelivered.
+  // delivery read by the shared strict rule, sent_at when the stamp is
+  // there but unreadable, none while undelivered.
   if (SELF_SERVE_ESTIMATE_SOURCES.includes(String(row.source || ''))) {
-    return isUndeliveredSelfServe(row.source, data) ? null : (firstDelivered ?? ms(row.sent_at));
+    return isUndeliveredSelfServe(row.source, data) ? null : (firstDeliveredAtMs(data) ?? ms(row.sent_at));
   }
-  const candidates = [firstDelivered, ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
+  // Every other source keeps main's lenient read of the stamp (codex
+  // pre-push P1): the strict rule exists for the self-serve report anchor
+  // only, and must not move a staff quote to another cohort.
+  const candidates = [ms(data?.deliveryState?.firstDeliveredAt), ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
     .filter((ts) => ts != null);
   return candidates.length ? Math.min(...candidates) : null;
 }
