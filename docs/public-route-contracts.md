@@ -2108,7 +2108,10 @@ primary street, and no visit whose stamped address, property row or creating est
 address or cannot be resolved) whose street is the estimate's own address, so a move or a second
 property since the mint refuses. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
 error reads "This account changed since this estimate was created — please go back to your portal
-for a current price.", or a retry line when the state cannot be read) and writes nothing. Estimates of every other source are unchanged.
+for a current price.", or a retry line when the state cannot be read) and writes nothing. Before that
+check, a `plan_start` accept must name the visit it books: a held `slotId` or an `existingAppointmentId`,
+both verified as on every accept. An accept that names neither answers 400 `{ error, code:
+'plan_start_slot_required' }` and writes nothing, so the quote stays open. Estimates of every other source are unchanged.
 
 `GET /api/estimates/:token` and the accept build an estimate's offer through
 `buildPricingBundle`, which serves the frozen send snapshot as is only when

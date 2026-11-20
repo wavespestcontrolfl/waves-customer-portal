@@ -10746,6 +10746,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     if (annualPrepaySelected && !slotId && !existingAppointmentId && !isCommercialAccept) {
       return res.status(400).json({ error: 'annual prepay requires selecting a service appointment first' });
     }
+    // A plan-start quote (GATE_PORTAL_PLAN_START) is the portal card's booking path: its accept
+    // must carry the visit it books, a held slot or the appointment the page shows, so it never
+    // starts a plan with no visit (codex pre-push r23 P1). The page asks for a slot first
+    // (standard_slot_pick); this refuses a slotless request and leaves the quote open. Both ids
+    // are verified below as on every accept.
+    if (estimate.source === 'plan_start' && !slotId && !existingAppointmentId) {
+      return res.status(400).json({ error: 'Pick a visit time to start your plan.', code: 'plan_start_slot_required' });
+    }
     if (billByInvoice && !estimate.customer_id && !estimate.customer_phone) {
       return res.status(400).json({ error: 'invoice-mode estimates require a linked customer or customer phone before online acceptance' });
     }

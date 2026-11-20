@@ -636,40 +636,76 @@ describe('buildReportCrossSell', () => {
     }
   });
 
-  test('the seed reads the whole accepted history, so newer quotes never hide a review marker (GATE_PORTAL_PLAN_START pre-push r15 P0)', async () => {
-    // A cap on the newest dozen rows ran before the acceptance and premises
-    // checks: 13 newer open quotes here, or 13 newer accepted quotes at
-    // another premises, hid the accepted estimate whose field-verification
-    // marker must demote a seeded price. This fake honors where, orderBy
-    // and limit, so a capped read loses the seed.
-    const { loadEstimateSeed } = _private;
-    const HERE = '123 Gulf Dr, Sarasota, FL 34236';
-    const at = (n) => new Date(Date.UTC(2026, 9, 1, n)).toISOString();
-    const inputs = { engineInputs: { homeSqFt: 2100, lotSqFt: 8000, stories: 1 } };
-    const row = (id, address, status, hour, data = inputs) => ({ id, customer_id: 'cust-1', address, status, created_at: at(hour), estimate_data: data });
-    const rows = [
-      row('est-marked', HERE, 'accepted', 0, { ...inputs, fieldVerify: ['lawn_sqft'] }),
-      ...Array.from({ length: 13 }, (_, i) => row(`est-elsewhere-${i}`, '9 Bayshore Rd, Venice, FL 34285', 'accepted', 1 + i)),
-      ...Array.from({ length: 13 }, (_, i) => row(`est-open-${i}`, HERE, i % 2 ? 'sent' : 'declined', 20 + i)),
-    ];
+  // A fake that honors where, every orderBy in turn, limit and offset, and counts the pages read.
+  const pagedEstimates = (rows) => {
+    let reads = 0;
     const database = () => {
       const filters = [];
-      let newestFirst = false;
+      const order = [];
       let cap = Infinity;
+      let skip = 0;
       const q = {
         where(criteria) { filters.push(criteria); return q; },
-        orderBy(col, dir) { newestFirst = col === 'created_at' && dir === 'desc'; return q; },
+        orderBy(col, dir) { order.push([col, dir]); return q; },
         limit(n) { cap = n; return q; },
+        offset(n) { skip = n; return q; },
         async select() {
+          reads += 1;
           const hit = rows.filter((r) => filters.every((c) => Object.entries(c).every(([k, v]) => r[k] === v)));
-          if (newestFirst) hit.sort((a, b) => b.created_at.localeCompare(a.created_at));
-          return hit.slice(0, cap);
+          hit.sort((x, y) => {
+            for (const [col, dir] of order) {
+              const cmp = String(x[col]).localeCompare(String(y[col]));
+              if (cmp) return dir === 'desc' ? -cmp : cmp;
+            }
+            return 0;
+          });
+          return hit.slice(skip, skip + cap);
         },
       };
       return q;
     };
-    const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(HERE);
-    expect(await loadEstimateSeed(database, 'cust-1', street)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+    return { database, reads: () => reads };
+  };
+  const SEED_HERE = '123 Gulf Dr, Sarasota, FL 34236';
+  const seedInputs = { engineInputs: { homeSqFt: 2100, lotSqFt: 8000, stories: 1 } };
+  const seedRow = (id, address, status, hour, data = seedInputs) => ({
+    id, customer_id: 'cust-1', address, status, created_at: new Date(Date.UTC(2026, 9, 1, hour)).toISOString(), estimate_data: data,
+  });
+
+  test('the seed reads the whole accepted history, so newer quotes never hide a review marker (GATE_PORTAL_PLAN_START pre-push r15 P0)', async () => {
+    // A cap on the newest dozen rows ran before the acceptance and premises
+    // checks: 13 newer open quotes here, or 13 newer accepted quotes at
+    // another premises, hid the accepted estimate whose field-verification
+    // marker must demote a seeded price. The read pages on, so the marked
+    // estimate on the second page still seeds.
+    const { loadEstimateSeed } = _private;
+    const rows = [
+      seedRow('est-marked', SEED_HERE, 'accepted', 0, { ...seedInputs, fieldVerify: ['lawn_sqft'] }),
+      ...Array.from({ length: 13 }, (_, i) => seedRow(`est-elsewhere-${i}`, '9 Bayshore Rd, Venice, FL 34285', 'accepted', 1 + i)),
+      ...Array.from({ length: 13 }, (_, i) => seedRow(`est-open-${i}`, SEED_HERE, i % 2 ? 'sent' : 'declined', 20 + i)),
+    ];
+    const fake = pagedEstimates(rows);
+    const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(SEED_HERE);
+    expect(await loadEstimateSeed(fake.database, 'cust-1', street)).toMatchObject({ homeSqFt: 2100, requiresFieldVerification: true });
+    expect(fake.reads()).toBe(2);
+  });
+
+  test('the seed read stops at the first page with an eligible row, newest first, ties broken by id (codex pre-push r23 P1)', async () => {
+    // One unbounded read parsed every accepted quote's pricing JSON on each
+    // report and portal-offer answer.
+    const { loadEstimateSeed } = _private;
+    const rows = [
+      ...Array.from({ length: 30 }, (_, i) => seedRow(`est-old-${String(i).padStart(2, '0')}`, SEED_HERE, 'accepted', i, { ...seedInputs, fieldVerify: ['lawn_sqft'] })),
+      // Two newest rows share a created_at: the higher id is the newer by the tie-breaker.
+      seedRow('est-new-a', SEED_HERE, 'accepted', 40, { engineInputs: { homeSqFt: 1500, lotSqFt: 6000, stories: 1 } }),
+      seedRow('est-new-b', SEED_HERE, 'accepted', 40, { engineInputs: { homeSqFt: 2600, lotSqFt: 9000, stories: 2 } }),
+    ];
+    const fake = pagedEstimates(rows);
+    const street = require('../services/estimate-property-linkage').normalizedEstimateStreet(SEED_HERE);
+    const seed = await loadEstimateSeed(fake.database, 'cust-1', street);
+    expect(seed).toMatchObject({ homeSqFt: 2600 });
+    expect(seed.requiresFieldVerification).toBeFalsy();
+    expect(fake.reads()).toBe(1);
   });
 
   test('an uncorroborated NON-ladder report identity never claims a current plan (PR r13 P2)', async () => {

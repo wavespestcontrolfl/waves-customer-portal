@@ -4766,11 +4766,24 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL',
     ...overrides,
   });
+  // The visit a plan-start accept books: a slot held for this estimate, sent as the page sends it,
+  // with the pay-per-application choice a recurring slot accept carries.
+  const heldSlot = (estimateId) => {
+    const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+    db.__state.tables.scheduled_services = [{
+      id: `ss-hold-${estimateId}`, source_estimate_id: estimateId,
+      customer_id: null, technician_id: null, status: 'pending',
+      scheduled_date: scheduledDate, window_start: '09:00:00', window_end: '10:00:00',
+      estimated_duration_minutes: 60,
+      reservation_expires_at: new Date(Date.now() + 15 * 60000),
+    }];
+    return { slotId: `${scheduledDate}_09-00_unassigned`, paymentMethodPreference: 'pay_at_visit' };
+  };
 
   test('an account cancelled after the mint refuses the accept (409) and rolls back', async () => {
     resetStore(planStartEstimate());
     db.__state.tables.customers = [leadCustomer({ active: false, pipeline_stage: 'churned' })];
-    const res = await putAccept('tok-plan-start-1-x012345');
+    const res = await putAccept('tok-plan-start-1-x012345', heldSlot('est-plan-start-1'));
     expect(res.status).toBe(409);
     expect(res.data.error).toMatch(/changed since this estimate was created/);
     expect(storedEstimate().status).toBe('sent');
@@ -4791,15 +4804,33 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
       membershipEmail: null,
       deferredFollowUpReminderRows: [],
     });
-    const res = await putAccept('tok-plan-start-3-x012345');
+    const res = await putAccept('tok-plan-start-3-x012345', heldSlot('est-plan-start-3'));
     expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+
+  test('a slotless accept is refused and leaves the quote open: plan start books a visit (codex pre-push r23 P1)', async () => {
+    resetStore(planStartEstimate({ id: 'est-plan-start-5', token: 'tok-plan-start-5-x012345' }));
+    db.__state.tables.customers = [leadCustomer()];
+    const res = await putAccept('tok-plan-start-5-x012345');
+    expect(res.status).toBe(400);
+    expect(res.data.code).toBe('plan_start_slot_required');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    // The same accept with the slot the page holds commits.
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-9', tier: 'Bronze', monthlyRate: 60, firstScheduledServiceId: null,
+      recurringConversionSkipped: false, welcomeSms: null, membershipEmail: null, deferredFollowUpReminderRows: [],
+    });
+    expect((await putAccept('tok-plan-start-5-x012345', heldSlot('est-plan-start-5'))).status).toBe(200);
     expect(storedEstimate().status).toBe('accepted');
   });
 
   test('an account that moved since the mint refuses the accept (409) and rolls back', async () => {
     resetStore(planStartEstimate({ id: 'est-plan-start-4', token: 'tok-plan-start-4-x012345' }));
     db.__state.tables.customers = [leadCustomer({ address_line1: '9 Oak Ave' })];
-    const res = await putAccept('tok-plan-start-4-x012345');
+    const res = await putAccept('tok-plan-start-4-x012345', heldSlot('est-plan-start-4'));
     expect(res.status).toBe(409);
     expect(storedEstimate().status).toBe('sent');
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
