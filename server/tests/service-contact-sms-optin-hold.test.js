@@ -145,6 +145,11 @@ describe('resolveServiceContactSmsRecipient', () => {
     await expect(resolveServiceContactSmsRecipient(CONTACT, { dbh })).rejects.toThrow('connection reset');
   });
 
+  test('failClosed: a lookup error is rethrown instead of falling back to the account holder', async () => {
+    const dbh = optinReader([], { error: new Error('connection reset') });
+    await expect(resolveServiceContactSmsRecipient(CONTACT, { dbh, failClosed: true })).rejects.toThrow('connection reset');
+  });
+
   test('a slot-1 phone that is the account holder\'s own number is never held', async () => {
     const own = { ...CONTACT, service_contact_phone: '941-555-0100' };
     const dbh = optinReader([{ customer_id: 'cust-1', phone_key: '9415550100' }]);

@@ -917,7 +917,9 @@ async function optinHeldPhoneKeys(customerIds = [], { dbh = db } = {}) {
 // unconsented contact. Fail-CLOSED like filterRecipientsByOptin: a lookup
 // error holds the contact. On a transaction handle the error is rethrown
 // (Postgres has already aborted that transaction).
-async function resolveServiceContactSmsRecipient(customer, { dbh = db } = {}) {
+// failClosed: a failed opt-in read throws instead of falling back to the primary contact (a caller
+// that must not act on a guess, e.g. the yearly review picker before it enrolls).
+async function resolveServiceContactSmsRecipient(customer, { dbh = db, failClosed = false } = {}) {
   const { getServiceContactSmsRecipient, getPrimaryContact } = require('./customer-contact');
   const primary = () => ({ ...getPrimaryContact(customer), role: 'primary' });
   let resolved;
@@ -928,7 +930,7 @@ async function resolveServiceContactSmsRecipient(customer, { dbh = db } = {}) {
     try {
       heldPhoneKeys = (await optinHeldPhoneKeys([customer.id], { dbh })).get(String(customer.id)) || null;
     } catch (err) {
-      if (dbh && dbh.isTransaction) throw err;
+      if ((dbh && dbh.isTransaction) || failClosed) throw err;
       logger.warn(`[recipient-optin] single-recipient lookup failed (${err.message}) — holding the service contact`);
       return primary();
     }

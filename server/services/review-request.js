@@ -8545,13 +8545,12 @@ async function phoneIsSuppressed(phone, { failClosed = false } = {}) {
 // enrolls whether a text could reach the customer. { reachable, reason }.
 async function smsRecipientReachable(customer) {
   const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
-  const contact = await resolveServiceContactSmsRecipient(customer);
+  // failClosed: a failed opt-in read throws (the picker skips this customer) instead of a primary fallback.
+  const contact = await resolveServiceContactSmsRecipient(customer, { failClosed: true });
   if (!contact || !contact.phone) return { reachable: false, reason: "no_phone" };
-  // A valid NANP number, or a well-formed international (+, not +1) E.164; anything else fails at send.
-  const { isValidNanpNumber, nanpNationalDigits } = require("../utils/phone");
-  const e164 = toE164(contact.phone);
-  const intl = typeof e164 === "string" && /^\+[2-9]\d{7,14}$/.test(e164) && !nanpNationalDigits(contact.phone);
-  if (!isValidNanpNumber(contact.phone) && !intl) return { reachable: false, reason: "invalid_phone" };
+  // US / Canada numbers only: the dispatch normalizer reads any ten digits as +1, so a non-NANP
+  // number could be checked here and texted at a different destination. Not NANP = no yearly ask.
+  if (!require("../utils/phone").isValidNanpNumber(contact.phone)) return { reachable: false, reason: "invalid_phone" };
   if (await phoneIsSuppressed(contact.phone, { failClosed: true })) return { reachable: false, reason: "phone_suppressed" };
   // A number the line-type cache already marks non-SMS (landline / fixed VoIP) is rejected at send.
   const { cachedLineTypeBlocks } = require("./messaging/validators/line-type");
