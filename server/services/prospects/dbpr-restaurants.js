@@ -185,16 +185,19 @@ function parseInspectionReport(html) {
 
 // ── Download + store ────────────────────────────────────────────
 
+// One record per (kind, source_key); a repeated key keeps its last copy. PostgreSQL refuses an upsert that names the
+// same row twice in one statement.
 function dedupeByKey(records) {
   return [...new Map(records.map((r) => [`${r.kind}|${r.source_key}`, r])).values()];
 }
 
 // A re-read of a known row refreshes last_seen_at only: a pest_evidence answer, the findings and the attempt count
-// are never overwritten by a later file.
+// are never overwritten by a later file. Returns the number of rows written.
 async function upsertRecords(records) {
+  const unique = dedupeByKey(records);
   let n = 0;
-  for (let i = 0; i < records.length; i += UPSERT_CHUNK) {
-    const chunk = records.slice(i, i + UPSERT_CHUNK).map((r) => ({ ...r, detail: JSON.stringify(r.detail) }));
+  for (let i = 0; i < unique.length; i += UPSERT_CHUNK) {
+    const chunk = unique.slice(i, i + UPSERT_CHUNK).map((r) => ({ ...r, detail: JSON.stringify(r.detail) }));
     await db('restaurant_prospects').insert(chunk).onConflict(['kind', 'source_key']).merge({ last_seen_at: db.fn.now() });
     n += chunk.length;
   }
