@@ -2808,17 +2808,21 @@ container cost and size, and the trench product surcharge (server-owned
 `preSlabTermiticidePricingKnobs` / `trenchingTermiticidePricingKnobs`, like the
 termite station and misting pins). The engine uses a pin only for the product
 it was quoted with (for trenching, also the rate and product oz), and it marks
-the line it priced with the pin (`replayPinApplied`). When a replayed pre-slab
-or trench line lacks that mark (no stored row, or a pin the engine skipped) and
-the replayed one-time total no longer matches the issued `onetime_total`, the
-pricing bundle carries `{ quoteRequired: true, quoteRequiredReason:
-'termiticide_price_changed_requote' }` with the friendly "Our termite treatment
-pricing has been updated since this quote was sent — call Waves and we’ll
-refresh your quote with current pricing." copy. Every gate that reads
-`resolveEstimateQuoteRequirement` then treats it as any other quote
-requirement, so the page shows the requote state instead of an acceptable
-price. A never-issued draft skips the pins and prices live, its first send
-included; a quote whose replayed total still matches its issued total is not
+the line a pin priced (`replayPinApplied`): a pre-slab line only when its
+container cost and size are the pin's own, a trench line only at the full
+finished volume (at a reduced volume the product oz cannot tell the job, so
+the pin keeps its surcharge but the line stays unmarked). When a replayed
+pre-slab or trench line lacks that mark (no stored row, a pin the engine
+skipped, or a match it cannot prove) and the replayed one-time total no longer
+matches the issued `onetime_total`, the pricing bundle carries `{
+quoteRequired: true, quoteRequiredReason: 'termiticide_price_changed_requote'
+}` with the friendly "Our termite treatment pricing has been updated since this
+quote was sent — call Waves and we’ll refresh your quote with current
+pricing." copy. Every gate that reads `resolveEstimateQuoteRequirement` then
+treats it as any other quote requirement, so the page shows the requote state
+instead of an acceptable price. A never-issued draft replays its pins like
+every other pin, so its first send and every later replay agree, and it is
+never held; a quote whose replayed total still matches its issued total is not
 held; a send snapshot that serves as sent is unchanged.
 
 Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,

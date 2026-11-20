@@ -20578,10 +20578,11 @@ function extractEngineInputs(estData) {
 
 // Termiticide pins (owner 2026-11-18 bottle swap): savedFloorReplayOverrides below sets a slab or trench pin only from a stored
 // row (the pre-slab container cost and size, the trench product surcharge), and the engine marks the line it priced with that pin
-// (replayPinApplied). A replayed line without the mark cannot replay the cost it was quoted with: an engineInputs-only estimate
-// keeps no stored row, and the engine skips a pin for another product, rate or product oz (a changed dilution or footage, for one).
-// When the replayed one-time total also no longer matches the issued one, the quote goes to review instead of selling a moved
-// price. A never-issued draft prices live (pre-push audits 13, 14 and 15).
+// (replayPinApplied). A replayed line without the mark cannot show it replayed the cost it was quoted with: an engineInputs-only
+// estimate keeps no stored row, the engine skips a pin for another product, rate or product oz (a changed dilution or footage, for
+// one), and a cost set on the service or a reduced trench volume leaves the match unproven. When the replayed one-time total also
+// no longer matches the issued one, the quote goes to review instead of selling a moved price. A never-issued draft is not sold
+// yet, so it is never held (pre-push audits 13 to 16).
 const TERMITICIDE_PIN_SERVICES = new Set(['pre_slab_termiticide', 'trenching']);
 function termiticideRequoteNeeded(estData, estimate, engineResult, replayedOneTimeTotal) {
   const issued = Number(estimate?.onetime_total);
@@ -20613,12 +20614,11 @@ function savedFloorReplayOverrides(estData) {
   if (mistingKnobs) overrides.mistingPricingKnobs = mistingKnobs;
   // Termiticide pins (owner 2026-11-18 bottle swap): a sent slab quote keeps the container cost it priced with, and a sent trench
   // quote its product surcharge. Both keys are set on every replay (undefined when the stored rows carry none), so a copy inside
-  // the stored inputs never prices. A never-issued draft is not sold: it prices on today's bottle, its first send included
-  // (pre-push audit 15).
+  // the stored inputs never prices. A never-issued draft replays them too, like every pin above: its first send and every later
+  // replay read the same stored row, so the price it was sent at never moves after delivery (pre-push audit 16). A re-save in the
+  // estimate tool prices today's bottle.
   Object.assign(overrides, { preSlabTermiticidePricingKnobs: undefined, trenchingTermiticidePricingKnobs: undefined },
-    estData?.[UNISSUED_ESTIMATE] === true
-      ? {}
-      : require('../services/estimate-tree-shrub-knob-replay').termiticideReplayOverrides(estData));
+    require('../services/estimate-tree-shrub-knob-replay').termiticideReplayOverrides(estData));
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.

@@ -7084,8 +7084,10 @@ function labelCheckCounts(options, productKey, product) {
 // product, rate and product oz. Custom inputs count too: a replay re-prices the stored inputs, and a custom rate, cost or
 // container size still takes the rest of its cost basis from config (a custom cost divides by the configured container oz).
 // A quote priced before the label's volume adjustment stored the product for the full labeled volume, so that oz matches too.
-// The line reports whether the pin priced it (replayPinApplied, on a replay only): the public bundle sends a quote whose pin did not
-// apply, and whose total moved, to review.
+// The line reports whether the pin priced it (replayPinApplied, on a replay only): the public bundle sends a quote whose line is
+// unmarked, and whose total moved, to review. At a reduced volume the oz cannot tell the job: a quote priced before the volume
+// adjustment stored the full-volume oz, which is also the reduced oz of a job twice as long. So a reduced-volume line keeps the
+// pinned surcharge (the same job keeps its sent price) but stays unmarked, and a moved total goes to review (pre-push audit 16).
 function trenchReplayPinApplies(replay, priced) {
   if (!replay || typeof replay !== 'object') return false;
   const pinned = Number(replay.productSurcharge);
@@ -7359,7 +7361,7 @@ function priceTrenching(property = {}, options = {}, replay) {
     includedChemicalCost: roundMoney(includedChemicalCost),
     chemicalPremiumCost: roundMoney(chemicalPremiumCost),
     productSurcharge,
-    ...(replay ? { replayPinApplied } : {}),
+    ...(replay ? { replayPinApplied: replayPinApplied && volumeFactor === 1 } : {}),
     chemicalCostPerLF: roundMoney(chemicalCostPerLF),
     containersRequired,
     baseInstallBeforePremium,

@@ -93,6 +93,16 @@ async function syncPricesToEstimator(options = {}) {
       if (blockers.length) {
         skipped.push({ mix: mix.name, blockers });
         logger.info(`[PriceSync] Skipped mix "${mix.name}" — ${blockers.length} product(s) without a usable price/size`);
+        // The mix keeps its last cost, which may have used a price the inventory has since marked needs_pricing: flag that product
+        // cost_unknown so the equipment list reports the mix incomplete. The recost below strips the flag once every price is
+        // usable again (pre-push audit 16).
+        const marked = new Set(blockers.filter((b) => b.reason === 'needs_pricing').map((b) => b.product_id));
+        if (!dryRun && mixProducts.some((p) => marked.has(p.product_id) && p.cost_unknown !== true)) {
+          await db('tank_mixes').where({ id: mix.id }).update({
+            products: JSON.stringify(mixProducts.map((p) => (marked.has(p.product_id) ? { ...p, cost_unknown: true } : p))),
+            updated_at: db.fn.now(),
+          });
+        }
         continue;
       }
 

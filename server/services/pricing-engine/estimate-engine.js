@@ -298,8 +298,9 @@ function serviceOptions(value) {
 // A replayed quote keeps the container cost its stored pre-slab row priced with (input.preSlabTermiticidePricingKnobs, set by
 // the server replay paths from estimate-tree-shrub-knob-replay), for the product that row quoted only, on either pricer: the
 // legacy wrapper (services.preSlabTermidor) resolves its product as a legacy payload, as pricePreSlabTermidor does. A cost set
-// on the service itself still wins. The line reports whether the pin priced it (replayPinApplied, on a replay only): the public
-// bundle sends a quote whose pin did not apply, and whose total moved, to review.
+// on the service itself still wins. The line reports whether the pin priced it (replayPinApplied, on a replay only): the same
+// product, and the line's container cost and size are the pin's own (a cost set on the service that differs leaves it unmarked;
+// pre-push audit 16). The public bundle sends a quote whose line is unmarked, and whose total moved, to review.
 function preSlabReplayPinApplies(options, knobs, legacyWrapper = false) {
   if (!knobs || typeof knobs !== 'object') return false;
   const { productKey } = legacyWrapper
@@ -2036,7 +2037,10 @@ function generateEstimate(input) {
     const result = legacyWrapper
       ? pricePreSlabTermidor(property, preSlabOptions)
       : pricePreSlabTermiticide(property, preSlabOptions);
-    if (preSlabKnobs) result.replayPinApplied = preSlabReplayPinApplies(preSlabBaseOptions, preSlabKnobs, legacyWrapper);
+    if (preSlabKnobs) {
+      result.replayPinApplied = preSlabReplayPinApplies(preSlabBaseOptions, preSlabKnobs, legacyWrapper)
+        && Number(result.containerCost) === Number(preSlabKnobs.containerCost) && Number(result.containerOz) === Number(preSlabKnobs.containerOz);
+    }
     lineItems.push(result);
   }
   // Commercial bed bug bypasses the manual lane only with EXPLICIT commercial
