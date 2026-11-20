@@ -234,7 +234,9 @@ const isSet = (value) => (typeof value === 'string' ? value.trim() !== '' : Bool
 // The engine's intent is written by a model, and it can spell "no subtype" as
 // a word. The two readers of that spelling take 'none' and 'null' as empty
 // (structuredCommercialSignal in lead-estimate-automation.js,
-// commercialCategoryConflict in estimator-engine/unit-scope-model.js).
+// commercialCategoryConflict in estimator-engine/unit-scope-model.js). The
+// form's spelling (commercialSubtype) is not read this way: there the payload
+// scan of the save takes ANY text as a subtype, these two words too.
 const NO_SUBTYPE_WORDS = Object.freeze(['none', 'null']);
 const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && NO_SUBTYPE_WORDS.includes(value.trim().toLowerCase()));
 
@@ -270,24 +272,58 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   one mark is enough, as it is for the intake's rule for a form
 //   (structuredCommercialSignal in lead-estimate-automation.js) and for the
 //   payload scan of the save;
+// - each mark the payload scan of the save reads, at ANY depth. That scan
+//   stops 12 levels down, and a mark must not change its meaning with its
+//   depth. No rule above holds two of its marks: the mark of an auto-priced
+//   commercial quote (commercialEstimatedPricing, which the accept routes
+//   read too; read here as the toggle is read), and a subtype in the form's
+//   spelling that is any text, also the word 'none';
 // - the estimator's own verdict on the premises, where the object is the
 //   property facts a draft keeps (estimatorEngine.propertyFactsV2): the
 //   occupancy class 'commercial', or a commercial service scope (a suite, a
 //   whole commercial building, a commercial parcel of several buildings, the
 //   common area of an association: isCommercialServiceScope in
-//   property-lookup/property-facts-v2.js).
+//   property-lookup/property-facts-v2.js);
+// - what the lookup keeps on a profile about a business at the address, and
+//   an estimate saves the profile (lookupSaysBusiness below).
+// Not read: the parameters of a commercial price the estimator form keeps
+// (commercialPricingMode, the pest and lawn cadences, the interior service).
+// They are not verdicts. Every home estimate carries the form's default
+// pricing mode, the form writes the cadences only beside the toggle, and a
+// tool can set the interior service on any estimate.
 const COMMERCIAL_SERVICE_SCOPES = Object.freeze([
   'commercial_suite', 'entire_commercial_building', 'multi_building_commercial_parcel', 'association_common_area',
 ]);
 const factsSayCommercial = (node) => node.occupancyClass === 'commercial' || COMMERCIAL_SERVICE_SCOPES.includes(node.serviceScope);
+// The lookup asks staff about a business that is listed at the address ("Are
+// we treating just your space or the whole building?"). It keeps three
+// fields on the profile (profileCarriesBusinessScope in
+// property-lookup/business-scope.js), and each one alone is a mark:
+// - the scope staff decided (one suite, the whole building). The open
+//   question ('scope_unresolved') decides nothing;
+// - the answer itself ('suite', 'building'). The answer 'none' says "not
+//   this business";
+// - the source the lookup names for a commercial verdict. It writes a source
+//   only on a commercial profile, so any source that is set counts
+//   ('staff_confirmed_business' is the one an answer stamps).
+// The listing itself (businessIdentity, serviceScopeSuggestion) is not read.
+// A listing only suggests (the owner ruling that module carries): a home
+// business at the number of a house is still a house.
+function lookupSaysBusiness(node) {
+  const { SCOPE, normalizeOccupancyAnswer } = require('./property-lookup/business-scope');
+  const answer = normalizeOccupancyAnswer(node.occupancyAnswer);
+  return (isSet(node.serviceScopeDecision) && node.serviceScopeDecision !== SCOPE.UNRESOLVED)
+    || (Boolean(answer) && answer !== 'none')
+    || isSet(node.commercialDetectionSource);
+}
 function nodeSaysCommercial(node) {
   const converter = require('./estimate-converter');
-  return saysYes(node.isCommercial) || saysYes(node.is_commercial)
+  return saysYes(node.isCommercial) || saysYes(node.is_commercial) || saysYes(node.commercialEstimatedPricing)
     || require('./pricing-engine/commercial-helpers').isCommercialProperty(node)
     || isCommercialPropertyType(node.property_type)
-    || isSetSubtype(node.commercial_subtype) || isSetSubtype(node.commercialSubtype)
+    || isSetSubtype(node.commercial_subtype) || isSet(node.commercialSubtype)
     || String(node.category ?? '').trim().toUpperCase() === 'COMMERCIAL'
-    || factsSayCommercial(node)
+    || factsSayCommercial(node) || lookupSaysBusiness(node)
     || isSet(node.commercialRiskType) || isSet(node.commercial_risk_type)
     || converter.isCommercialRecurringLine(node)
     || String(converter.recurringServiceKey(node) || '').startsWith('commercial_')

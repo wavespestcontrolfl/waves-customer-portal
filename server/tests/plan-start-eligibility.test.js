@@ -296,6 +296,10 @@ describe('planStartBlocker', () => {
       const FACTS = (facts) => ({ estimatorEngine: { propertyFactsV2: { version: 2, shadow: true, facts: { propertySubtype: 'single_family', ...facts } } } });
       const COMMERCIAL_SCOPES = ['commercial_suite', 'entire_commercial_building', 'multi_building_commercial_parcel', 'association_common_area'];
       const HOME_SCOPES = ['residential_unit', 'entire_residential_structure', 'entire_parcel', 'unknown'];
+      // The profile of a home, as the lookup writes one and the estimator saves it with the estimate.
+      const PROFILE = (change = {}) => ({ engineRequest: { profile: {
+        category: 'RESIDENTIAL', propertyType: 'Single Family', isCommercial: false, commercialSubtype: null, commercialDetectionSource: null, ...change,
+      } } });
 
       // The estimator's rule for a commercial scope is not exported, so the proof keeps its own list. A scope
       // the estimator adds later fails here until someone sorts it.
@@ -352,6 +356,15 @@ describe('planStartBlocker', () => {
         // The estimator's own verdict on the premises, kept with a draft (estimatorEngine.propertyFactsV2).
         ['a commercial occupancy class in the saved property facts', ESTIMATE({ estimate_data: FACTS({ occupancyClass: 'commercial', serviceScope: 'unknown' }) })],
         ...COMMERCIAL_SCOPES.map((serviceScope) => [`the service scope ${serviceScope} in the saved property facts`, ESTIMATE({ estimate_data: FACTS({ occupancyClass: 'unknown', serviceScope }) })]),
+        // What the lookup keeps on a profile about a business at the address, on a profile that reads residential
+        // in every other field: the scope staff decided, their answer, the source of a commercial verdict.
+        ['the whole building, as staff decided for a business at the address', ESTIMATE({ estimate_data: PROFILE({ serviceScopeDecision: 'entire_commercial_building' }) })],
+        ["staff's answer that the customer has the whole building", ESTIMATE({ estimate_data: PROFILE({ occupancyAnswer: 'building' }) })],
+        ["staff's answer that the customer has one suite, on a question still marked open", ESTIMATE({ estimate_data: PROFILE({ serviceScopeDecision: 'scope_unresolved', occupancyAnswer: 'suite' }) })],
+        ['the source of a commercial verdict of the lookup', ESTIMATE({ estimate_data: PROFILE({ commercialDetectionSource: 'property_record_property_type' }) })],
+        // Two marks of the scan of the save that no other rule holds, below the 12 levels that scan reads.
+        ['the mark of an auto-priced commercial quote, far down', ESTIMATE({ estimate_data: farDown({ commercialEstimatedPricing: true }) })],
+        ["the word none as a subtype in the form's spelling, beside a toggle set to no, far down", ESTIMATE({ estimate_data: farDown({ category: 'RESIDENTIAL', isCommercial: 'NO', commercialSubtype: 'none' }) })],
         // The quiz of the lead an estimate was drafted from, where the payload keeps it.
         ["the 'business' answer of a quiz page, kept in the payload", ESTIMATE({ estimate_data: { lead: { quiz: { kind: 'lawn', property: 'business' } } } })],
         // The payload scan reads the toggle only as a boolean, and never the engine's spelling.
@@ -391,7 +404,23 @@ describe('planStartBlocker', () => {
           notes: 'Asked about commercial_pest for a friend.', mode: 'small_commercial_pilot', tags: ['non_commercial_account', 'pest'],
         } })],
         ['a field whose NAME starts with the prefix', ESTIMATE({ estimate_data: { commercial_lawn: { selected: false }, commercial_notes: 'none' } })],
-        ['a residential category and an empty subtype, far down', ESTIMATE({ estimate_data: farDown({ category: 'RESIDENTIAL', commercialSubtype: 'none', isCommercial: 'NO' }) })],
+        ['a residential category and an empty subtype, far down', ESTIMATE({ estimate_data: farDown({ category: 'RESIDENTIAL', commercial_subtype: 'none', commercialSubtype: '', isCommercial: 'NO' }) })],
+        // The lookup's profile of a home, and the three states of it that confirm no business: an open question,
+        // the answer "not this business", and a listing staff did not confirm.
+        ['the lookup profile of a home', ESTIMATE({ estimate_data: PROFILE() })],
+        ['an open question about a business at the address', ESTIMATE({ estimate_data: PROFILE({ serviceScopeDecision: 'scope_unresolved', serviceScopeQuestion: 'Are we treating just your space or the whole building?', occupancyAnswer: null }) })],
+        ["staff's answer that the customer is not the listed business", ESTIMATE({ estimate_data: PROFILE({ serviceScopeDecision: null, occupancyAnswer: 'none' }) })],
+        ['a listing at the address that staff did not confirm', ESTIMATE({ estimate_data: PROFILE({
+          serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'building',
+          businessIdentity: { name: 'Corner Cafe', type: 'restaurant', matchedBy: 'street_number', tenantsAtNumber: 2, unitKey: 'business:place-1' },
+        }) })],
+        ['a quote that is not auto-priced as commercial', ESTIMATE({ estimate_data: { quote: { commercialEstimatedPricing: false, commercialDisclaimer: null }, deep: farDown({ commercialEstimatedPricing: false }) } })],
+        // Parameters of a commercial price are not verdicts: the form keeps a pricing mode on every estimate, and
+        // a tool can set the interior service on any estimate.
+        ['parameters of a commercial price beside a toggle set to no', ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', commercialPricingMode: 'estimated', commercialPestCadence: 'monthly', commercialLawnCadence: 'six', commercialInteriorService: 'included' },
+          engineRequest: { options: { commercialPricingMode: 'estimated', commercialInteriorService: 'excluded' } },
+        } })],
         ['a category of another vocabulary', ESTIMATE({ estimate_data: { products: [{ category: 'pest_control' }, { category: 'lawn_care' }] } })],
         ...HOME_SCOPES.map((serviceScope) => [`a residential occupancy class and the service scope ${serviceScope}`, ESTIMATE({ estimate_data: FACTS({ occupancyClass: 'residential', serviceScope }) })]),
         ['a home tier on the estimate', ESTIMATE({ waveguard_tier: 'Bronze' })],
@@ -438,6 +467,97 @@ describe('planStartBlocker', () => {
 
       test.each([['nonesuch'], ['nullable'], ['restaurant']])('the subtype %j is a subtype', async (word) => {
         expect(await blocker(withEstimates([ESTIMATE({ estimate_data: { intent: { commercial_subtype: word } } })]))).toBe('commercial');
+      });
+
+      // In the form's spelling the payload scan of the save takes ANY text as a subtype, these words too. So does
+      // the proof, at the top and far down: a mark must not change its meaning with its depth.
+      test.each([['none'], ['null'], [' None '], ['office']])("the word %j is a subtype in the form's spelling, at the top and far down", async (word) => {
+        const mark = { category: 'RESIDENTIAL', isCommercial: 'NO', commercialSubtype: word };
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: { inputs: mark } })]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: farDown(mark) })]))).toBe('commercial');
+      });
+
+      test.each([[''], ['   '], [null], [undefined], [false], [0]])("a subtype of %j in the form's spelling is not set", async (value) => {
+        const mark = { category: 'RESIDENTIAL', isCommercial: 'NO', commercialSubtype: value };
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: { inputs: mark, deep: farDown(mark) } })]))).toBeNull();
+      });
+
+      // The scan of the save reads six marks on an object, 12 levels down and no further. Each one is a mark at
+      // any depth here, also beside a toggle set to no. The first two lines pin the list to the scan itself.
+      const SCAN_MARKS = [
+        ['the mark of an auto-priced commercial quote', { commercialEstimatedPricing: true }],
+        ['the toggle', { isCommercial: true }],
+        ['the commercial property type', { isCommercial: false, propertyType: 'Commercial' }],
+        ['the commercial category', { isCommercial: false, category: 'commercial' }],
+        ['a subtype that is any text', { isCommercial: false, commercialSubtype: 'none' }],
+        ['a commercial service', { isCommercial: false, service: 'commercial_pest' }],
+      ];
+      test.each(SCAN_MARKS)('%s, a mark of the scan of the save, is read below the reach of that scan', async (_label, mark) => {
+        const { isCommercialEstimateData } = require('../services/estimate-delivery-options');
+        expect(isCommercialEstimateData(mark)).toBe(true);
+        expect(isCommercialEstimateData(farDown(mark))).toBe(false);
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: farDown(mark) })]))).toBe('commercial');
+        expect(await blocker(world({ tables: { leads: [{ is_commercial: false, is_residential: true, extracted_data: farDown(mark) }] } }))).toBe('commercial');
+      });
+
+      // The mark of an auto-priced commercial quote is read as the toggle is read. The scan of the save reads
+      // only the boolean.
+      test.each([[true], ['true'], [' YES '], [1]])('a quote mark of %j is a yes', async (flag) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: { quote: { commercialEstimatedPricing: flag } } })]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: farDown({ commercialEstimatedPricing: flag }) })]))).toBe('commercial');
+      });
+
+      test.each([[false], ['false'], ['no'], [0], [null], [''], [undefined]])('a quote mark of %j is not a yes', async (flag) => {
+        const data = { commercialEstimatedPricing: flag, quote: { commercialEstimatedPricing: flag }, deep: farDown({ commercialEstimatedPricing: flag }) };
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: data })]))).toBeNull();
+      });
+
+      // The scope staff decided for a business at the address. Every scope the lookup can decide is a mark, and
+      // the open question is none. A scope the lookup adds later fails the first line until someone sorts it.
+      test('every scope the lookup can decide is a mark, and the open question is none', async () => {
+        const { SCOPE } = require('../services/property-lookup/business-scope');
+        const decided = (serviceScopeDecision) => blocker(withEstimates([ESTIMATE({ estimate_data: PROFILE({ serviceScopeDecision }) })]));
+        expect(Object.values(SCOPE).sort()).toEqual(['commercial_suite', 'entire_commercial_building', 'scope_unresolved']);
+        expect(await decided(SCOPE.SUITE)).toBe('commercial');
+        expect(await decided(SCOPE.BUILDING)).toBe('commercial');
+        expect(await decided('whole_parcel')).toBe('commercial');
+        expect(await decided(SCOPE.UNRESOLVED)).toBeNull();
+      });
+
+      test.each([[''], ['   '], [null], [undefined], [false]])('a scope decision of %j is not set', async (serviceScopeDecision) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: PROFILE({ serviceScopeDecision }) })]))).toBeNull();
+      });
+
+      // The answer itself, as the lookup's own reader of an answer takes it.
+      test.each([['suite'], ['building'], [' Building '], ['SUITE']])("staff's answer %j confirms the business", async (occupancyAnswer) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: PROFILE({ occupancyAnswer }) })]))).toBe('commercial');
+      });
+
+      test.each([['none'], [' None '], [''], [null], [undefined], ['maybe'], [true]])("staff's answer %j confirms nothing", async (occupancyAnswer) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: PROFILE({ occupancyAnswer }) })]))).toBeNull();
+      });
+
+      // The lookup's reader of an answer belongs to the lookup. The proof asks it, so a new answer is followed.
+      test("an answer only the lookup's own reader takes counts", async () => {
+        const owner = require('../services/property-lookup/business-scope');
+        const real = owner.normalizeOccupancyAnswer;
+        const spy = jest.spyOn(owner, 'normalizeOccupancyAnswer').mockImplementation((value) => (value === 'depot' ? 'parcel' : real(value)));
+        const estimates = [ESTIMATE(), ESTIMATE({ estimate_data: PROFILE({ occupancyAnswer: 'depot' }) })];
+        try {
+          expect(await blocker(withEstimates(estimates))).toBe('commercial');
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await blocker(withEstimates(estimates))).toBeNull();
+      });
+
+      // The source of a commercial verdict. The lookup writes one only on a commercial profile.
+      test.each([['staff_confirmed_business'], ['property_record_property_type'], ['property_record_unit_count'], ['satellite_ai_property_use']])('a detection source of %j is set', async (commercialDetectionSource) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: PROFILE({ commercialDetectionSource }) })]))).toBe('commercial');
+      });
+
+      test.each([[''], ['   '], [null], [undefined], [false]])('a detection source of %j is not set', async (commercialDetectionSource) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: PROFILE({ commercialDetectionSource }) })]))).toBeNull();
       });
 
       // The app's own scan stops 12 levels down. A mark below that would read as a home.
@@ -545,6 +665,10 @@ describe('planStartBlocker', () => {
         ['a commercial subtype beside a toggle set to no', LEAD({ extracted_data: { isCommercial: 'NO', commercialSubtype: 'office' } })],
         // A mark only the payload scan of the save reads.
         ['the mark of commercial estimated pricing', LEAD({ extracted_data: { quote: { commercialEstimatedPricing: true } } })],
+        // What the lookup keeps on a profile about a business at the address, where a lead keeps the profile.
+        ["staff's answer about a business at the address", LEAD({ extracted_data: { enriched: { category: 'RESIDENTIAL', isCommercial: false, occupancyAnswer: 'building' } } })],
+        ['the scope staff decided for a business at the address', LEAD({ extracted_data: { enriched: { category: 'RESIDENTIAL', isCommercial: false, serviceScopeDecision: 'entire_commercial_building' } } })],
+        ['the source of a commercial verdict of the lookup', LEAD({ extracted_data: { isCommercial: false, commercialSubtype: null, commercialDetectionSource: 'satellite_ai_property_use' } })],
         // A quiz page's property question. The lead keeps the quiz object as the visitor answered it.
         ["the 'business' answer of a quiz page", LEAD({ extracted_data: { attribution: {}, quiz: { kind: 'pest', seeing: 'ants', property: 'business' } } })],
       ])('%s: commercial, and no plan record is read', async (_label, lead) => {
@@ -564,6 +688,7 @@ describe('planStartBlocker', () => {
         ['a quiz answered for a house, a townhome or a condo', LEAD({ extracted_data: { quiz: { kind: 'pest', property: 'house' }, earlier: [{ quiz: { kind: 'lawn', property: 'townhome' } }, { quiz: { kind: 'pest', property: 'condo' } }] } })],
         ['a quiz with no property answer', LEAD({ extracted_data: { quiz: { kind: 'lawn', seeing: 'brown_patches' } } })],
         ['a residential category beside a residential type', LEAD({ extracted_data: { enriched: { category: 'RESIDENTIAL', propertyType: 'single_family' }, quote: { commercialEstimatedPricing: false } } })],
+        ['an open question about a business at the address, and the answer "not this business"', LEAD({ extracted_data: { enriched: { serviceScopeDecision: 'scope_unresolved', occupancyAnswer: 'none', commercialDetectionSource: null } } })],
       ])('%s is not commercial', async (_label, lead) => {
         expect(await blocker(withLeads([lead, LEAD()]))).toBeNull();
       });

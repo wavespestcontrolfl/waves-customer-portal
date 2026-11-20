@@ -108,6 +108,9 @@ postgres('planStartBlocker (live Postgres)', () => {
     return row;
   }
 
+  // A mark 20 levels down in a payload: below the 12 levels the payload scan of the save reads.
+  const farDown = (mark) => Array.from({ length: 20 }).reduce((inner) => ({ next: [inner] }), mark);
+
   // A lead: by default with the flags the columns default to (a home lead). `customer` null: no customer on it.
   async function seedLead(customer, change = {}) {
     const [row] = await trx('leads').insert({ customer_id: customer ? customer.id : null, ...change }).returning('*');
@@ -503,6 +506,47 @@ postgres('planStartBlocker (live Postgres)', () => {
       expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: FACTS(facts) }))).toBeNull();
     });
 
+    // What the lookup keeps on a profile about a business at the address. The estimator saves the profile with
+    // the estimate. Every other field of the profile reads residential, and the category column keeps its default.
+    const PROFILE = (change = {}) => ({ engineRequest: { profile: {
+      category: 'RESIDENTIAL', propertyType: 'Single Family', isCommercial: false, commercialSubtype: null, commercialDetectionSource: null, ...change,
+    } } });
+    test.each([
+      ['the whole building, as staff decided for a business at the address', { serviceScopeDecision: 'entire_commercial_building' }],
+      ["staff's answer that the customer has the whole building", { occupancyAnswer: 'building' }],
+      ['the source of a commercial verdict of the lookup', { commercialDetectionSource: 'property_record_property_type' }],
+    ])("%s, in an estimate's saved lookup profile: commercial", async (_label, change) => {
+      expect(await blockerFor(async (customer) => {
+        await seedEstimate(customer);
+        const estimate = await seedEstimate(customer, { estimate_data: PROFILE(change) });
+        expect(estimate.category).toBe('RESIDENTIAL');
+      })).toBe('commercial');
+    });
+
+    test.each([
+      ['a home', {}],
+      ['an open question about a business at the address', { serviceScopeDecision: 'scope_unresolved', occupancyAnswer: null }],
+      ["staff's answer that the customer is not the listed business", { serviceScopeDecision: null, occupancyAnswer: 'none' }],
+    ])('the saved lookup profile of %s is not commercial', async (_label, change) => {
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: PROFILE(change) }))).toBeNull();
+    });
+
+    // Two marks of the payload scan of the save that no other rule holds, below the reach of that scan.
+    test.each([
+      ['the mark of an auto-priced commercial quote', { commercialEstimatedPricing: true }],
+      ["the word none as a subtype in the form's spelling, beside a toggle set to no", { isCommercial: 'NO', commercialSubtype: 'none' }],
+    ])('%s, 20 levels down in an estimate payload: commercial', async (_label, mark) => {
+      expect(await blockerFor(async (customer) => {
+        const estimate = await seedEstimate(customer, { estimate_data: farDown(mark) });
+        expect(estimate.category).toBe('RESIDENTIAL');
+      })).toBe('commercial');
+    });
+
+    test('a quote that is not auto-priced as commercial, 20 levels down in an estimate payload, is not commercial', async () => {
+      const mark = { commercialEstimatedPricing: false, isCommercial: 'NO', commercialSubtype: '', commercialDetectionSource: null };
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: farDown(mark) }))).toBeNull();
+    });
+
     // A JSON text is a valid jsonb value, and the driver returns it as the text itself: not as JSON to parse.
     // It carries no structured mark, and it is never a failed read.
     test('the fixture: a payload that is a JSON text comes back as that text', async () => {
@@ -586,6 +630,8 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a deleted lead with a commercial key in its payload', { extracted_data: JSON.stringify({ classification: { intent: 'commercial_inquiry' } }), deleted_at: new Date() }],
       ["a quiz lead that answered 'business'", { extracted_data: JSON.stringify({ quiz: { kind: 'pest', seeing: 'ants', property: 'business' } }) }],
       ['a lead whose payload has a commercial category beside a residential type', { extracted_data: JSON.stringify({ enriched: { category: 'COMMERCIAL', propertyType: 'single_family' } }) }],
+      ["a lead whose payload keeps staff's answer about a business at the address", { extracted_data: JSON.stringify({ enriched: { category: 'RESIDENTIAL', isCommercial: false, occupancyAnswer: 'building' } }) }],
+      ['a lead with the mark of an auto-priced commercial quote 20 levels down in its payload', { extracted_data: JSON.stringify(farDown({ commercialEstimatedPricing: true })) }],
     ])('%s, beside a home lead: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedLead(customer);
