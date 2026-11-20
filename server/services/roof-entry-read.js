@@ -105,6 +105,7 @@ const PIN_ACTIONS = Object.freeze({ trees_touching_roof: 'trim back' });
 const pinAction = (type) => PIN_ACTIONS[type] || 'seal';
 const MAX_TECH_PINS = 20;
 const MAX_PIN_NOTE = 40;
+const PIN_SOURCE_RE = /^[a-z_]+:\d{1,2}$/;
 const TIER_UNKNOWN = 'unknown';
 const STATUS_DONE = 'done';
 const STATUS_PENDING = 'pending';
@@ -666,6 +667,9 @@ async function runRead(input) {
  * The technician's confirmed points, normalized, or null when the input is not a valid list: at most 20 points, each
  * { x, y } a number from 0 to 1 (a fraction of the crop, as the AI pins), a type from TECH_PIN_TYPES, and an optional
  * plain-text note of at most 40 characters (control characters become spaces; blank = no note). [] is valid (none).
+ * A point may also carry `source`, "<entry type>:<index>" (index into that type's AI pins), naming the AI suggestion it was
+ * confirmed from, so the staff panel keeps that suggestion hidden after the point is moved or retyped. It is kept in the
+ * normalized output when sent, and customerPointsFromRow never passes it on.
  */
 function validateTechPins(pins) {
   if (!Array.isArray(pins) || pins.length > MAX_TECH_PINS) return null;
@@ -683,7 +687,12 @@ function validateTechPins(pins) {
       if (note.length > MAX_PIN_NOTE) return null;
       if (!note) note = null;
     }
-    out.push({ x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000, type, note });
+    const pin = { x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000, type, note };
+    if (p.source != null) {
+      if (typeof p.source !== 'string' || !PIN_SOURCE_RE.test(p.source) || !ENTRY_TYPES.includes(p.source.split(':')[0])) return null;
+      pin.source = p.source;
+    }
+    out.push(pin);
   }
   return out;
 }
@@ -699,7 +708,7 @@ const isCentre = (c) => c && typeof c === 'object' && Number.isFinite(c.lat) && 
  * pins, and the rounded centre is stored so the estimate can rebuild the same county crop. A centre that does not match
  * throws code 'crop_mismatch' and writes nothing. Returns the public read, or null for an unknown id.
  */
-async function saveTechCount(id, { count, flags, pins, crop, hideOnEstimate } = {}) {
+async function saveTechCount(id, { count, flags, pins, crop, expectedPins, hideOnEstimate } = {}) {
   const patch = {};
   if (count !== undefined) patch.tech_final_count = count;
   // Merged in SQL in one statement, so two saves of different types (or two tabs) keep both; a type sent again is replaced.
@@ -708,8 +717,13 @@ async function saveTechCount(id, { count, flags, pins, crop, hideOnEstimate } = 
   const where = { id };
   if (pins === null) patch.tech_pins = null;
   else if (pins !== undefined) {
-    const row = await db(TABLE).where({ id }).first('id', 'image_source', 'lookup_key');
+    const row = await db(TABLE).where({ id }).first('id', 'image_source', 'lookup_key', 'status', 'ai_tier');
     if (!row) return null;
+    // Only a finished, readable read can carry points: the customer estimate shows points from those rows only, and a
+    // failed or unreadable read is never reopened (the next tap reads again), so points saved on it would be lost.
+    if (row.status !== STATUS_DONE || row.ai_tier === TIER_UNKNOWN) {
+      throw Object.assign(new Error('This roof read did not finish'), { code: 'read_not_usable' });
+    }
     if (!isCentre(crop) || lookupKey({ source: row.image_source, lat: crop.lat, lng: crop.lng }) !== row.lookup_key) {
       throw Object.assign(new Error('These points were not drawn on this roof photo'), { code: 'crop_mismatch' });
     }
@@ -719,8 +733,18 @@ async function saveTechCount(id, { count, flags, pins, crop, hideOnEstimate } = 
     // lookup_key never changes, so this also proves the row still names the crop that was checked.
     where.lookup_key = row.lookup_key;
   }
-  const [row] = await db(TABLE).where(where).update(patch).returning('*');
-  return row ? publicRead(row) : null;
+  let query = db(TABLE).where(where);
+  // A points save or clear names the list it was edited from (expectedPins, the list the panel last loaded; null = none
+  // saved). The UPDATE only lands while the row still holds exactly that list, so a stale tab cannot erase points another
+  // tab saved in between: it throws code 'points_changed' and writes nothing.
+  const checked = pins !== undefined && expectedPins !== undefined;
+  if (checked) query = query.whereRaw('tech_pins IS NOT DISTINCT FROM ?::jsonb', [expectedPins === null ? null : JSON.stringify(expectedPins)]);
+  const [row] = await query.update(patch).returning('*');
+  if (row) return publicRead(row);
+  if (checked && await db(TABLE).where({ id }).first('id')) {
+    throw Object.assign(new Error('The points changed since they were loaded'), { code: 'points_changed' });
+  }
+  return null;
 }
 
 /** The county crop URL the stored pins sit on (built here from the stored centre, never from caller input), or null. */
@@ -740,7 +764,7 @@ function cropImageUrl(row) {
  * action ('seal', or 'trim back' for a branch).
  */
 function customerPointsFromRow(row) {
-  if (!row || row.status !== STATUS_DONE || row.hide_on_estimate) return null;
+  if (!row || row.status !== STATUS_DONE || row.ai_tier === TIER_UNKNOWN || row.hide_on_estimate) return null;
   const pins = row.tech_pins == null ? null : parseJson(row.tech_pins);
   if (!Array.isArray(pins) || !pins.length) return null;
   const imageUrl = cropImageUrl(row);
