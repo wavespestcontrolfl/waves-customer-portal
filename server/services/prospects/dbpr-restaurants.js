@@ -136,10 +136,10 @@ function hasEveryColumn(row, kind) {
 
 /**
  * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row cut short, or a row
- * in the area with a bad report id, date or violation-35 count, is skipped and counted in counts.malformed; a row in
- * the area that passes counts in counts.valid, cited or not.
+ * in the area with a bad report id, date (or one after `today`, when given) or violation-35 count, is skipped and
+ * counted in counts.malformed; a row in the area that passes counts in counts.valid, cited or not.
  */
-function parseInspectionRows(rows, counts = {}) {
+function parseInspectionRows(rows, counts = {}, today = null) {
   counts.malformed ??= 0;
   counts.valid ??= 0;
   const out = [];
@@ -155,7 +155,7 @@ function parseInspectionRows(rows, counts = {}) {
     const cited = wholeNumber(row['Violation 35']);
     // A row without both report ids is left out: its report could never be read, and once stored it would block a
     // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
-    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || cited === null) {
+    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || (today && eventDate > today) || cited === null) {
       counts.malformed += 1;
       continue;
     }
@@ -187,11 +187,12 @@ function parseInspectionRows(rows, counts = {}) {
 
 /**
  * New-license or ownership-change rows (same layout) -> one record per application in the three counties. A row cut
- * short, or a row in the area with no application number, one longer than the key column, or no real approval date,
- * is skipped and counted in counts.malformed: once stored, a known key only refreshes last_seen_at, so a corrected
- * copy in a later file could never fill it in. A row kept counts in counts.valid.
+ * short, or a row in the area with no application number, one longer than the key column, or no real approval date
+ * (or one after `today`, when given: a mistyped date), is skipped and counted in counts.malformed: once stored, a
+ * known key only refreshes last_seen_at, so a corrected copy in a later file could never fill it in. A row kept
+ * counts in counts.valid.
  */
-function parseLicenseRows(rows, kind, counts = {}) {
+function parseLicenseRows(rows, kind, counts = {}, today = null) {
   counts.malformed ??= 0;
   counts.valid ??= 0;
   const out = [];
@@ -203,7 +204,7 @@ function parseLicenseRows(rows, kind, counts = {}) {
     if (!inServiceArea(row['Location County'], row['Location City'], row['Location Zip Code'])) continue;
     const sourceKey = clean(row['Application Number']);
     const eventDate = parseUsDate(row['Application Approval Date']);
-    if (!sourceKey || sourceKey.length > KEY_MAX || !eventDate) {
+    if (!sourceKey || sourceKey.length > KEY_MAX || !eventDate || (today && eventDate > today)) {
       counts.malformed += 1;
       continue;
     }
@@ -330,18 +331,14 @@ async function loadFile(kind, fetchText, now, last) {
       return;
     }
     const day = parseUsDate(row[DATE_COLUMN[kind]]);
-    // A row dated after today (Eastern) is a mistyped date. Stored, it would stay wrong: a corrected copy of a known
-    // row only refreshes last_seen_at. It is malformed, and it never makes a file look fresh or of a later year.
-    if (day && day > today) {
-      counts.malformed += 1;
-      return;
-    }
-    if (day) {
+    // A row dated after today (Eastern) is a mistyped date: it never makes a file look fresh or of a later year. The
+    // parsers skip it, counted as malformed only when it is in the area (stored, it would stay wrong).
+    if (day && day <= today) {
       const year = fiscalYearOf(day);
       const seen = years.get(year) || { rows: 0, newest: day };
       years.set(year, { rows: seen.rows + 1, newest: day > seen.newest ? day : seen.newest });
     }
-    records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts) : parseLicenseRows([row], kind, counts)));
+    records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts, today) : parseLicenseRows([row], kind, counts, today)));
   });
   // A required column missing from the header is renamed or gone: the whole file is refused.
   if (REQUIRED_COLUMNS[kind].some((column) => !header.includes(column))) throw new Error('unexpected file layout');
@@ -355,8 +352,11 @@ async function loadFile(kind, fetchText, now, last) {
   }
   // Malformed rows and not one good row in the area mean a changed format (a new date format, say), not a quiet
   // week: the file fails. A file whose rows all fall outside the area, or whose good rows cite nothing, succeeds.
+  // Malformed counts rows in the area and rows that cannot be placed (a wrong width); a row outside the area never
+  // counts, whatever its date.
   if (!counts.valid && counts.malformed) throw new Error('no good row in the area');
-  // Rows without one readable date leave nothing to measure the file by (a cut file of rows outside the area, say):
+  // Rows without one readable date up to today leave nothing to measure the file by (a cut file of rows outside the
+  // area, say):
   // it fails. Only a header alone, above, reads with no fiscal year.
   if (rowsRead && !years.size) throw new Error('no dated row');
   // The fiscal year most rows fall in (null for a header alone) and that year's newest date, so a stray date of

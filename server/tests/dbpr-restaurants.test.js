@@ -146,14 +146,16 @@ describe('parseLicenseRows and the phone rule', () => {
     expect(out[1].seats).toBeNull();
   });
 
-  test('an application number longer than the key column, or a date that is not a real day, is skipped and counted', () => {
+  test('an application number longer than the key column, or a date that is not a real day or is after today, is skipped and counted', () => {
     const rows = parseDbprCsv(licCsv([
       licRow({ app: 'A'.repeat(40) }), licRow({ app: 'A'.repeat(41) }), licRow({ app: '' }), licRow({ app: '7009', county: 'Polk' }),
       licRow({ app: '7010', date: '02/30/2026' }), licRow({ app: '7011', date: '' }),
+      // After today: malformed in the area; outside it, skipped like any row outside it.
+      licRow({ app: '7012', date: '11/20/2026' }), licRow({ app: '7013', county: 'Polk', date: '11/20/2026' }),
     ]));
     const counts = { malformed: 0 };
-    expect(svc.parseLicenseRows(rows, 'new_license', counts).map((r) => r.source_key)).toEqual(['A'.repeat(40)]);
-    expect(counts).toEqual({ malformed: 4, valid: 1 });
+    expect(svc.parseLicenseRows(rows, 'new_license', counts, '2026-11-19').map((r) => r.source_key)).toEqual(['A'.repeat(40)]);
+    expect(counts).toEqual({ malformed: 5, valid: 1 });
   });
 
   test('a row cut short is skipped and counted; an empty cell is still a cell', () => {
@@ -298,9 +300,11 @@ describe('syncRestaurantProspects', () => {
     expect(upserts.some((r) => r.kind === kind)).toBe(false);
   });
 
-  test('a file with a header and no rows fails; a file whose rows all fall outside the area does not', async () => {
+  test('a file with a header and no rows fails; a file whose rows all fall outside the area does not, even with a mistyped date', async () => {
     store = makeStore();
-    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]), 'newfood.csv': () => licCsv([licRow({ county: 'Polk' })]) });
+    // A quiet week: no new license in the area, and one row outside it dated after today.
+    const quiet = [licRow({ county: 'Polk' }), licRow({ app: '7002', county: 'Polk', date: '11/20/2026' })];
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]), 'newfood.csv': () => licCsv(quiet) });
     const result = await sync({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
     expect(result.failures).toBe(1);
     expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 0, malformed: 0 }, owner_change: { kept: 1 } });
