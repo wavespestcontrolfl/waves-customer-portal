@@ -7743,7 +7743,9 @@ nothing vouches for the old ones, and the address behind them can have changed
 (`address_changed`, this answer's or the account-change one's, or phase one linked a
 profile at another address), so a search would bring times for the address the
 server resolves now under the address the page still shows. A full load or a newly
-typed address (which brings its own list) opens the search again. A terminal state, the address form, or the GET's own no-times answers
+typed address (which brings its own list) opens the search again. The search is
+closed while that reload runs, and opens again when the reload brings a list, so a
+search never finishes over a failed reload. A terminal state, the address form, or the GET's own no-times answers
 (`service_area_unavailable`, `booking_unavailable`) in that answer still replace the
 page. Any answer but a booking also drops a search still running, so its late times
 never land over the page. The reload runs under the page's request controller: a

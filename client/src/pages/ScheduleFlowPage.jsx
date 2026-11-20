@@ -2340,12 +2340,18 @@ export default function ScheduleFlowPage({ flow }) {
           // change of address meanwhile supersedes it: it applies no list,
           // clears nothing and says nothing, as the new address's own list
           // replaces the page (pre-push P1 on 4e9d76bcb1).
+          // The search is closed while the reload runs, and opens again only
+          // when the reload brings the page's list: a search finishing after
+          // a failed reload would put times back (pre-push P1 on 03ceaf92ec).
           const { signal } = loadAbortRef.current;
+          setSearchClosed(true);
           const done = await refreshInspectionAvailability({ signal, ignoreHeldAddress: Boolean(body.address_changed) })
-            .then(() => signal.aborted, () => {
+            .then(() => {
+              if (!signal.aborted) setSearchClosed(false);
+              return signal.aborted;
+            }, () => {
               if (!signal.aborted) {
                 mergeData({ availability: null });
-                setSearchClosed(true);
                 setSubmitError('That time was just taken, and we couldn\'t load the latest open times. Please reload this page, or text us and we\'ll help.');
               }
               return true;

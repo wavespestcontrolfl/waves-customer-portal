@@ -834,6 +834,36 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(getCalls).toBe(2);
   });
 
+  // Pre-push P1 on 03ceaf92ec: a search started while the refusal's reload
+  // runs could land after a failed reload and put times back under an address
+  // the page may no longer book. The search closes before the reload starts,
+  // and opens again only when the reload brings the page's list.
+  it('the search is closed while the refusal\'s reload runs, and opens when that reload brings a list', async () => {
+    let getCalls = 0;
+    let finishReload;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null }, 409));
+      getCalls += 1;
+      if (getCalls === 2) return new Promise((resolve) => { finishReload = resolve; });
+      return Promise.resolve(jsonResponse(okPayload()));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    expect(screen.getByLabelText('Search for a service date or time')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(finishReload).toBeTypeOf('function'));
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+
+    finishReload(jsonResponse(okPayload({ availability: mondayAvailability('09:00', '9:00 AM') })));
+    expect(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
+    expect(screen.getByLabelText('Search for a service date or time')).toBeInTheDocument();
+    expect(screen.getByText(/here are the latest open times/i)).toBeInTheDocument();
+  });
+
   // A full load (here, the page opened for another link) brings an address
   // with its times, so the search opens again.
   it('after a failed reload closes the search, a full load opens it again', async () => {
