@@ -22,6 +22,9 @@ const FOOD_TRUCK = '2014';
 const NEW_DAYS = 7;
 // About two rows a day reach the list, so 90 days is a few hundred rows; the cap only guards the page.
 const ROW_LIMIT = 1000;
+// The weekly job's job_health row (services/scheduler.js runs it under this name). Its last success is the last run that
+// read all three files without a failure, whether or not it kept a row; a failed run leaves the last good read.
+const SYNC_JOB = 'restaurant-prospect-sync';
 
 // A calendar day moved by whole days, with the shared helpers: noon UTC is the same day in Eastern time.
 const shiftDay = (day, days) => dateOnlyString(addETDays(dateOnlyAtNoonUtc(day), days));
@@ -54,7 +57,8 @@ function toRow(row, newSince) {
 
 /**
  * The list for the last `days` days by the row's own date (a license's approval day, an inspection's day), Eastern,
- * today included; newest first. readAt is when the job last read the files (null before its first run).
+ * today included; newest first. readAt is when the weekly job last read all three files without a failure (null before
+ * its first good run).
  * @returns {Promise<{ days: number, from: string, through: string, readAt: string|null,
  *   counts: { new_restaurant: number, new_owner: number, pest_finding: number }, rows: object[] }>}
  */
@@ -63,7 +67,7 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
   const through = etDateString(now);
   const from = shiftDay(through, -(days - 1));
   const newSince = new Date(now.getTime() - NEW_DAYS * 24 * 60 * 60 * 1000);
-  const [rows, [latest]] = await Promise.all([
+  const [rows, health] = await Promise.all([
     db('restaurant_prospects')
       .whereBetween('event_date', [from, through])
       .whereRaw("COALESCE(license_type_code, '') <> ?", [FOOD_TRUCK])
@@ -72,7 +76,7 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
       .limit(ROW_LIMIT)
       .select('id', 'kind', 'business_name', 'address', 'city', 'zip', 'county', 'phone', 'seats', 'event_date',
         'license_number', 'detail', 'first_seen_at'),
-    db('restaurant_prospects').max({ readAt: 'last_seen_at' }),
+    db('job_health').where({ job_name: SYNC_JOB }).first('last_success_at'),
   ]);
   const list = rows.map((row) => toRow(row, newSince));
   const counts = { new_restaurant: 0, new_owner: 0, pest_finding: 0 };
@@ -81,7 +85,7 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
     days,
     from,
     through,
-    readAt: latest && latest.readAt ? new Date(latest.readAt).toISOString() : null,
+    readAt: health && health.last_success_at ? new Date(health.last_success_at).toISOString() : null,
     counts,
     rows: list,
   };
