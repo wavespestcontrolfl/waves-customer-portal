@@ -2849,6 +2849,29 @@ describe('POST /:token commit', () => {
       }
     });
 
+    // Pre-push P1 on 8fa8005c52: with no address typed, the page shows the address it resolved (the profile's on file,
+    // else the lead's). When phase 1 moves the booking to a matched profile's other stored location, times there would
+    // sit under that old address, and a retry would book the profile's location under it. The refusal answers
+    // `address_changed` with no times, so the page reloads the address and the times together.
+    test('a stored-address booking that phase 1 moved to a matched profile answers address_changed with no times', async () => {
+      mockFarSouthGates.funnel = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      const adopted = { address_line1: '9 Home St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.3, longitude: -82.4 };
+      seedPhoneHousehold({ id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101', ...adopted });
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const leadAddress = { line1: '123 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'lead', address: leadAddress, location: { lat: 27.1, lng: -82.2 } },
+        custRow: { id: 'cust-9', ...adopted }, bookingAddress: { line1: '9 Home St', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' },
+        bookingLocation: { lat: 27.3, lng: -82.4 }, locationMoved: true,
+      });
+
+      expect(refresh).toEqual({ location: null, addressChanged: true });
+    });
+
     // Pre-push P1 on 419b536e4b: at the same pin, the next commit's phase 1 keeps the profile's staff-verified pin for a
     // typed address the customers row matches (retainReviewedLocation). Staff may verify a pin for that address after
     // this commit: the next commit then books that pin, so the refusal answers as a moved booking does (the page drops

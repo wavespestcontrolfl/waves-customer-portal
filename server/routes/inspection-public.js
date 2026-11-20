@@ -651,7 +651,11 @@ function storedAddressCandidates(lead, custRow) {
 // for that address (retainReviewedLocation); when it would, the refusal
 // answers as a moved booking does (`address_changed`), so the page drops the
 // typed address and its reload and retry read that pin (pre-push P1 on
-// 419b536e4b). A booking from the stored address (none typed) builds them at
+// 419b536e4b). A booking from the stored address (none typed) that phase 1
+// moved to a matched profile's other stored location answers
+// `address_changed` with no times: the page shows the address it resolved, so
+// it reloads that address and its times together (pre-push P1 on 8fa8005c52).
+// Otherwise it builds them at
 // its pin when the profile read again still has that stored pin and address:
 // the next commit, with none typed, resolves to them, and the page makes no
 // new lookup (pre-push P1 on 419b536e4b: its reload's GET paid for a county
@@ -695,7 +699,12 @@ async function nextCommitRefresh({ lead, verified, resolved, custRow, bookingAdd
   const stored = nextCust ? storedCoordsResolution(nextCust) : null;
   const atStored = Boolean(stored) && sameLocation(stored.location, bookingLocation)
     && require('node:util').isDeepStrictEqual(locationMoved ? customerAddressFields(nextCust) : stored.address, bookingAddress);
-  if (resolved.source !== 'supplied') return atStored ? fresh : { location: null };
+  if (resolved.source !== 'supplied') {
+    // The page shows the address it resolved (the profile's on file, else the lead's). A booking phase 1 moved to a
+    // matched profile's other stored location reloads that address and its times together (pre-push P1 on 8fa8005c52).
+    if (locationMoved) return { location: null, addressChanged: true };
+    return atStored ? fresh : { location: null };
+  }
   if (reviewRefusesBooking(nextCust, nextCust, resolved)) return { location: null, failure: 'address_unresolved' };
   const sameProfile = Boolean(nextCust) && String(nextCust.id) === String(custRow.id);
   if (locationMoved) return { location: null, addressChanged: sameProfile && atStored };
