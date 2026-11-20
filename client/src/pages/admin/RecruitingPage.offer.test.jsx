@@ -614,6 +614,41 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(within(await screen.findByTestId('offer-card')).getByRole('button', { name: 'Revise' })).toBeInTheDocument();
   });
 
+  it('Try again after a failed offer re-read re-reads the application too, so a stage moved meanwhile shows', async () => {
+    let failRead = false;
+    let moved = false;
+    setupFetch(
+      {
+        'POST /admin/careers/app-1/offer/offer-1/withdraw': () => { failRead = true; return res(200, { offer: { ...sent, status: 'withdrawn' } }); },
+        'GET /admin/careers/app-1': () => res(200, { application: detailFixture({ status: moved ? 'reviewed' : 'offer' }) }),
+      },
+      { offer: () => (failRead ? res(500, { error: 'Read failed' }) : res(200, offerPayload({ current: { ...sent, status: moved ? 'withdrawn' : 'sent' } }))), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+    expect(await screen.findByText('Read failed')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reviewed' })).toBeInTheDocument(); // the detail still reads Offer
+    // Another admin moves the application to Reviewed; then the owner presses the card's Try again.
+    failRead = false;
+    moved = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByText('Read failed')).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Reviewed' })).toBeNull()); // the detail reads Reviewed
+    expect(screen.getByRole('button', { name: 'Offer' })).toBeInTheDocument();
+  });
+
+  it('says before Confirm that moving out of Offer withdraws the offer that is out', async () => {
+    setupFetch({}, { offer: offerPayload({ current: { ...sent, status: 'sent' } }), detail: detailFixture({ status: 'offer' }) });
+    await openDetail();
+    await screen.findByTestId('offer-card');
+    fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }));
+    const stage = (await screen.findByRole('heading', { name: 'Move to Reviewed' })).closest('[role="dialog"]');
+    expect(within(stage).getByText('This move also withdraws the offer you sent to Jordan, so their link stops working.')).toBeInTheDocument();
+  });
+
   it('drops a Revise result that comes back after the owner opened another applicant', async () => {
     let releaseRevise;
     const pending = new Promise((resolve) => { releaseRevise = resolve; });

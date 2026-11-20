@@ -17,6 +17,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import OfferDialog from "../../components/admin/recruiting/OfferDialog";
 import OfferSection from "../../components/admin/recruiting/OfferSection";
 import useOfferFlow from "../../components/admin/recruiting/useOfferFlow";
+import { stageMoveOfferNote } from "../../components/admin/recruiting/offerLogic";
 import {
   Button,
   Badge,
@@ -464,6 +465,7 @@ function StageChangeDialog({
   stale,
   refreshFailed,
   onRetryRefresh,
+  offerNote,
   error,
   onConfirm,
   onClose,
@@ -479,6 +481,7 @@ function StageChangeDialog({
             This application could not be reloaded after the offer change, so its stage may be out of date. Confirm stays off until it loads.
           </ActionFeedback>
         )}
+        {offerNote && !sendResult && <ActionFeedback className="mb-3">{offerNote}</ActionFeedback>}
         {previewLoading && (
           <div className="text-14 text-zinc-500 py-4 text-center">Loading preview…</div>
         )}
@@ -545,8 +548,9 @@ function StageChangeDialog({
 // the same way openDetail/load already stayed out as their own callbacks.
 // refreshFailed: the page's in-place re-read of this application failed (after an
 // offer action), so the stage on screen may be out of date. It holds Confirm, as it
-// holds the stage buttons behind the dialog.
-function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refreshFailed) {
+// holds the stage buttons behind the dialog. offerFlow: the offer card's read, for
+// the line about what a move withdraws.
+function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refreshFailed, offerFlow) {
   const [stageDialog, setStageDialog] = useState(null);
   const [preview, setPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -561,6 +565,17 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
   const [sendResult, setSendResult] = useState(null);
   const [stageError, setStageError] = useState(null);
   const [busy, setBusy] = useState(false);
+
+  // After a 409 the detail shows the newer stage; this dialog was opened on
+  // the old one, so Confirm could only be refused again. The owner closes
+  // it and decides from the refreshed detail.
+  const stale = Boolean(stageDialog && detail && stageDialog.fromStatus !== detail.status);
+  // Confirm writes only while the stage on screen is the one the dialog opened
+  // on and the last re-read of the application worked.
+  const held = stale || Boolean(refreshFailed);
+  const offerNote = stageDialog
+    ? stageMoveOfferNote(stageDialog.fromStatus, stageDialog.status, offerFlow, detail?.contact_snapshot?.name)
+    : null;
 
   // Invalidates an in-flight preview fetch the same way detailSeq guards
   // openDetail — closing the dialog (or reopening it for a different
@@ -687,18 +702,12 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
       : `Move to ${STATUS_LABEL[stageDialog.status] || stageDialog.status}`
     : "";
 
-  // After a 409 the detail shows the newer stage; this dialog was opened on
-  // the old one, so Confirm could only be refused again. The owner closes
-  // it and decides from the refreshed detail.
-  const stale = Boolean(stageDialog && detail && stageDialog.fromStatus !== detail.status);
-  // Confirm writes only while the stage on screen is the one the dialog opened
-  // on and the last re-read of the application worked.
-  const held = stale || Boolean(refreshFailed);
 
   return {
     stageDialog,
     title,
     stale: held,
+    offerNote,
     preview,
     previewLoading,
     previewError,
@@ -1040,8 +1049,8 @@ export default function RecruitingPage() {
     setDetail(application);
   }, []);
 
-  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError));
   const offerFlow = useOfferFlow(detail?.id, detail?.status);
+  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError), offerFlow);
   const detailIdRef = useRef(null);
   detailIdRef.current = detail?.id ?? null;
 
@@ -1300,7 +1309,8 @@ export default function RecruitingPage() {
         busy={stageWorkflow.busy}
         stale={stageWorkflow.stale}
         refreshFailed={Boolean(detailRefreshError)}
-        onRetryRefresh={() => detail && openDetail(detail.id, { refresh: true })}
+        onRetryRefresh={() => openDetail(detail.id, { refresh: true })}
+        offerNote={stageWorkflow.offerNote}
         error={stageWorkflow.error}
         onConfirm={stageWorkflow.confirmStage}
         onClose={stageWorkflow.closeStageDialog}

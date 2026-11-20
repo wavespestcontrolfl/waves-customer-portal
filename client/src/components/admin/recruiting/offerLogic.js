@@ -219,6 +219,28 @@ export function describeSend(comms, firstName, offerStatus = "sent") {
 
 // A 'sent' offer past its expiresAt reads as closed unsigned even before the
 // server's own status says so.
+// A stage move that leaves Offer, or closes the application (rejected, withdrawn,
+// hired), withdraws its offer records in the same write (server: admin-careers.js
+// applyStatusTransition, `closesOffers`). The stage dialog says so before Confirm.
+export function stageMoveClosesOffers(from, to) {
+  return (from === "offer" && to !== "offer") || (["rejected", "withdrawn", "hired"].includes(to) && from !== to);
+}
+
+// The stage dialog's line about what a move withdraws, or null. `flow` is the offer
+// flow (useOfferFlow). While its read is loading, failed or out of date, the line says
+// what may happen.
+export function stageMoveOfferNote(from, to, flow, name) {
+  if (!stageMoveClosesOffers(from, to) || flow.off) return null;
+  if (!flow.enabled || flow.refreshError) return "If an offer is out, this move also withdraws it, and their link stops working.";
+  const current = shownOffer(flow.data.current);
+  const held = Boolean(current) && ["sent", "date_requested"].includes(current.status);
+  const draft = Boolean(flow.data.draft) || current?.status === "draft";
+  const firstName = String(name || "the applicant").trim().split(/\s+/)[0];
+  if (held && draft) return `This move also withdraws the offer you sent to ${firstName}, so their link stops working, and discards the unsent draft.`;
+  if (held) return `This move also withdraws the offer you sent to ${firstName}, so their link stops working.`;
+  return draft ? "This move also discards the unsent offer draft." : null;
+}
+
 export function shownOffer(offer, now = new Date()) {
   const lapsed = offer?.status === "sent" && offer.expiresAt && new Date(offer.expiresAt) < now;
   return lapsed ? { ...offer, status: "expired" } : offer;

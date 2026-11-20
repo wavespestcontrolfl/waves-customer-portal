@@ -66,6 +66,23 @@ describe("OfferTimeline", () => {
     expect(withdrawOffer).not.toHaveBeenCalled();
   });
 
+  // A refusal for a reason the card does not show (the owner account lost its access, say) re-reads like every failed
+  // write: the question closes and the card follows that read, so Withdraw is not pressed again in vain.
+  it("closes the Withdraw question and re-reads after an OWNER_ONLY refusal", async () => {
+    withdrawOffer.mockRejectedValueOnce(
+      Object.assign(new Error("This action is limited to the owner account."), { status: 403, body: { code: "OWNER_ONLY" } }),
+    );
+    const onChanged = vi.fn(async () => null);
+    render(card({ onChanged }));
+    fireEvent.click(screen.getByRole("button", { name: "Withdraw offer" }));
+    const ask = await screen.findByRole("dialog", { name: "Withdraw offer" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Withdraw" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Withdraw offer" })).toBeNull());
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("This action is limited to the owner account.")).toBeInTheDocument();
+    expect(withdrawOffer).toHaveBeenCalledTimes(1);
+  });
+
   it("closes the Discard question when the draft it was opened for changes, and discards nothing", async () => {
     const draft = record({ id: "offer-2", status: "draft", draftHash: "hash-2" });
     const { rerender } = render(card({ draft }));

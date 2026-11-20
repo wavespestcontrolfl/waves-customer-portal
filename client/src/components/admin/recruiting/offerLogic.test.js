@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   describeSend,
   shownOffer,
+  stageMoveClosesOffers,
+  stageMoveOfferNote,
   expiryLabel,
   formatDay,
   formatIssued,
@@ -136,5 +138,43 @@ describe('offer helpers', () => {
     expect(shownOffer({ status: 'sent', expiresAt: '2026-12-19T04:59:59Z' }, now).status).toBe('expired');
     expect(shownOffer({ status: 'sent', expiresAt: '2026-12-21T04:59:59Z' }, now).status).toBe('sent');
     expect(shownOffer({ status: 'accepted', expiresAt: '2026-12-19T04:59:59Z' }, now).status).toBe('accepted');
+  });
+});
+
+// The stage dialog's line mirrors the server's rule (admin-careers.js applyStatusTransition `closesOffers`): leaving
+// Offer, or closing the application, withdraws the draft and the offer that is out.
+describe('stage moves that withdraw an offer', () => {
+  it('names the moves the server withdraws offers on', () => {
+    expect(stageMoveClosesOffers('offer', 'reviewed')).toBe(true);
+    expect(stageMoveClosesOffers('offer', 'interview')).toBe(true);
+    expect(stageMoveClosesOffers('interview', 'hired')).toBe(true);
+    expect(stageMoveClosesOffers('reviewed', 'rejected')).toBe(true);
+    expect(stageMoveClosesOffers('interview', 'reviewed')).toBe(false);
+    expect(stageMoveClosesOffers('interview', 'offer')).toBe(false);
+    expect(stageMoveClosesOffers('hired', 'hired')).toBe(false);
+  });
+
+  it('says what the move withdraws, from the offer read', () => {
+    const flow = (data, more = {}) => ({ enabled: true, off: false, refreshError: null, data, ...more });
+    const sent = { id: 'o1', status: 'sent', expiresAt: '2099-01-01T00:00:00Z' };
+    const name = 'Jordan Rivera';
+    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: sent, draft: null }), name))
+      .toBe('This move also withdraws the offer you sent to Jordan, so their link stops working.');
+    expect(stageMoveOfferNote('offer', 'hired', flow({ current: { ...sent, status: 'date_requested' }, draft: null }), name))
+      .toBe('This move also withdraws the offer you sent to Jordan, so their link stops working.');
+    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: sent, draft: { id: 'o2', status: 'draft' } }), name))
+      .toBe('This move also withdraws the offer you sent to Jordan, so their link stops working, and discards the unsent draft.');
+    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: { id: 'o1', status: 'draft' }, draft: null }), name))
+      .toBe('This move also discards the unsent offer draft.');
+    // Nothing the applicant holds: an expired offer, a signed one, or a move that keeps the offer.
+    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: { ...sent, expiresAt: '2020-01-01T00:00:00Z' }, draft: null }), name)).toBeNull();
+    expect(stageMoveOfferNote('offer', 'hired', flow({ current: { ...sent, status: 'accepted' }, draft: null }), name)).toBeNull();
+    expect(stageMoveOfferNote('interview', 'reviewed', flow({ current: sent, draft: null }), name)).toBeNull();
+    // Offers off: no offer to withdraw. A read that is loading, failed or out of date: what may happen.
+    expect(stageMoveOfferNote('offer', 'reviewed', { off: true, enabled: false }, name)).toBeNull();
+    expect(stageMoveOfferNote('offer', 'reviewed', { off: false, enabled: false }, name))
+      .toBe('If an offer is out, this move also withdraws it, and their link stops working.');
+    expect(stageMoveOfferNote('offer', 'reviewed', flow({ current: sent, draft: null }, { refreshError: 'Read failed' }), name))
+      .toBe('If an offer is out, this move also withdraws it, and their link stops working.');
   });
 });

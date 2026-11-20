@@ -19,9 +19,7 @@ import { fetchSignedCopy, reviseOffer, withdrawOffer } from "./offerApi";
 import {
   formatDay,
   formatTimelineTime,
-  isGateOffAnswer,
   isLostAnswer,
-  isStaleWrite,
   LOST_ANSWER_TEXT,
   money,
   offerErrorMessage,
@@ -274,11 +272,13 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
   const stale = Boolean(refreshError);
   const canAct = ownerActions === true && !stale;
 
-  // A failed write re-reads so the card shows what is true now: a stale refusal
-  // changed nothing, a lost answer (no reply, a 5xx) may have gone through, and a
-  // gate-off answer means offers are off. If that read fails, the section's Try
-  // again stays and the write actions stay off (refreshError). Reads (the signed
-  // copy) pass write: false and only show their error.
+  // Every write that did not succeed re-reads the offer and the application, whatever
+  // the answer was, so the card shows what is true now: a refusal changed nothing, but
+  // the server sees something the card does not (a newer record, the owner's access
+  // taken away, offers turned off), and a lost answer (no reply, a 5xx) may have gone
+  // through. If that read fails, the section's Try again stays and the write actions
+  // stay off (refreshError). Reads (the signed copy) pass write: false and only show
+  // their error.
   const act = async (work, { write = true } = {}) => {
     setBusy(true);
     setError(null);
@@ -286,9 +286,8 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
       await work();
       return "ok";
     } catch (err) {
-      const lost = write && isLostAnswer(err);
-      setError(lost ? LOST_ANSWER_TEXT.card : offerErrorMessage(err));
-      if (!write || !(lost || isStaleWrite(err) || isGateOffAnswer(err))) return "failed";
+      setError(write && isLostAnswer(err) ? LOST_ANSWER_TEXT.card : offerErrorMessage(err));
+      if (!write) return "failed";
       await onChanged();
       return "settled";
     } finally {
@@ -308,13 +307,13 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
       else if (next && !held) setError("The new draft could not be loaded. Try again.");
     });
 
+  // A refused or unanswered write also closes the question: the card re-read, so it shows the truth.
   const closeTarget = async () => {
-    const outcome = await act(async () => {
+    await act(async () => {
       await withdrawOffer(applicationId, closing.id, expectedState(closing));
       await onChanged();
     });
-    // A refused or unanswered write also closes the confirm: the card now shows the truth.
-    if (outcome !== "failed") setClosing(null);
+    setClosing(null);
   };
 
   // A read that changes the record, fails, or takes away the owner's access while the question

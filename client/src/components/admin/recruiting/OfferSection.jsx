@@ -34,8 +34,11 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
   const stillInOffer = detail.status === "offer";
   // detailStale: the application could not be re-read, so its stage may be out of date.
   const canMakeOffer = stillInOffer && !refreshError && !detailStale && !data.draft && !(current && LIVE_STATES.includes(current.status));
+  // A failed re-read after an action is retried with the same combined re-read (the
+  // offer, then the application), so the stage and its actions follow the offer: an
+  // offer signed meanwhile moves the application too.
   const stale = refreshError ? (
-    <ActionFeedback error className="mb-3" onRetry={retry}>
+    <ActionFeedback error className="mb-3" onRetry={onChanged}>
       {refreshError}
     </ActionFeedback>
   ) : null;
