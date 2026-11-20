@@ -2401,9 +2401,10 @@ async function settlePlannedIssues(now = new Date()) {
     .where((recent) => recent.whereRaw(SETTLE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
       .orWhereRaw(ISSUE_CHANGE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS]))
     .select('id', 'send_id');
-  // A failed issue, told or not, whose send has since become 'sent' (a Resume that finished, or late
-  // delivery confirmations): by the send's own last change, so a Resume long after the issue counts.
-  const recovered = await db('pest_insider_issues').where({ status: 'failed' })
+  // An issue whose send has since become or stayed 'sent' and changed (a Resume that finished, or late
+  // delivery confirmations): by the send's own last change, so a Resume long after the issue counts. A
+  // failed one, told or not, may have recovered; a sent one's counts and reason follow its send.
+  const recovered = await db('pest_insider_issues').whereIn('status', ['failed', 'sent'])
     .whereExists(function recoveredSend() {
       this.select(db.raw('1')).from('newsletter_sends')
         .whereRaw('newsletter_sends.id = pest_insider_issues.send_id')

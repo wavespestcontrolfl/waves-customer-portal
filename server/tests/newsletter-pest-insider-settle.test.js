@@ -705,6 +705,9 @@ test('a failed row past the lookback is no longer listed', async () => {
   ]);
   // The recovered list reads the send's own last change instead, so a Resume long after the issue counts.
   expect(lists[2].whereRaw).not.toHaveBeenCalledWith("issue_date >= (now() at time zone 'America/New_York')::date - ?::int", [14]);
+  // A sent issue too, whatever its own dates: a Resume that finished long after the issue updates its
+  // counts and reason (finalize leaves the issue row alone).
+  expect(lists[2].whereIn).toHaveBeenCalledWith('status', ['failed', 'sent']);
   const sendQuery = { select: jest.fn(() => sendQuery), from: jest.fn(() => sendQuery), where: jest.fn(() => sendQuery), whereRaw: jest.fn(() => sendQuery) };
   lists[2].whereExists.mock.calls[0][0].call(sendQuery);
   expect(sendQuery.where).toHaveBeenCalledWith('newsletter_sends.status', 'sent');
