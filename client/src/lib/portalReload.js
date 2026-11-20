@@ -7,7 +7,9 @@
 // or a write to the device's own storage (deviceWrites.js).
 // Waves Admin never reloads by itself (a reload with no signal opens the
 // app's offline screen), nor do the field pages (/admin/today must work with
-// no signal); both, like every staff page, get the Reload bar. No tab reloads
+// no signal), at a move to or away from one: field work can still be on its
+// way as a field page closes, such as a time-clock punch waiting for the
+// location. Both, like every staff page, get the Reload bar. No tab reloads
 // by itself while the browser reports it is offline.
 import { isAdminPath, isFieldPath } from './adminBookmarkMeta';
 import { deviceWritesInFlight } from './deviceWrites';
@@ -34,10 +36,11 @@ function hasSignal(now) {
   return !browserOffline() && heardFromServerWithin(RECENT_ANSWER_MS, now);
 }
 
-export function reloadDueAtMove(pathname, now = Date.now()) {
+// `from`: the page the move leaves.
+export function reloadDueAtMove(pathname, now = Date.now(), from = null) {
   const build = newerBuild();
   return Boolean(build)
-    && isAdminPath(pathname) && !isFieldPath(pathname) && !isWavesAdminApp()
+    && isAdminPath(pathname) && !isFieldPath(pathname) && !isFieldPath(from) && !isWavesAdminApp()
     && hasSignal(now)
     && !reloadedFor(build)
     && !reloadHoldName();
@@ -62,14 +65,6 @@ export function reloadBlockers() {
 // The first of them, or null.
 export function reloadBlocker() {
   return reloadBlockers()[0] ?? null;
-}
-
-// The stale-chunk reload (staleChunkReload.js, App.jsx's lazyWithRetry) asks
-// too: on a staff page, anything above keeps the tab, and the page whose code
-// failed to load shows its retry screen instead. Customer pages are
-// unchanged.
-export function staffReloadBlocker(pathname = window.location.pathname) {
-  return isAdminPath(pathname) ? reloadBlocker() : null;
 }
 
 const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });

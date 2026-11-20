@@ -34,6 +34,7 @@ function Page({ name }) {
     <div>
       <h1>{name}</h1>
       <button type="button" onClick={() => navigate('/admin/pipeline')}>Open Pipeline</button>
+      <button type="button" onClick={() => navigate('/admin/dashboard')}>Open Dashboard</button>
       <button type="button" onClick={() => navigate('?tab=leads')}>Leads tab</button>
     </div>
   );
@@ -131,6 +132,18 @@ describe('PortalUpdateGate', () => {
     expect(screen.getByText('Dashboard')).toBeTruthy();
     await act(async () => {});
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a move away from a field page keeps the tab, as a time-clock punch there can still wait for the location; the next move reloads', async () => {
+    renderAt('/admin/today');
+    goLive('bbb222bbb222');
+    fireEvent.click(screen.getByText('Open Pipeline'));
+    expect(screen.getByText('Pipeline')).toBeTruthy();
+    await act(async () => {});
+    expect(reload).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Open Dashboard'));
+    expect(screen.getByText('Loading the new version...')).toBeTruthy();
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
   });
 
   test('held work keeps the tab: the move opens the page and the bar stays', async () => {

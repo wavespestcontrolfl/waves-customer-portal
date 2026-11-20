@@ -17,7 +17,7 @@ import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/porta
 export function PortalUpdateGate({ fallback, children }) {
   const { pathname } = useLocation();
   const [gate, setGate] = useState({ pathname, reloading: false });
-  if (gate.pathname !== pathname) setGate({ pathname, reloading: reloadDueAtMove(pathname) });
+  if (gate.pathname !== pathname) setGate({ pathname, reloading: reloadDueAtMove(pathname, Date.now(), gate.pathname) });
 
   useEffect(() => {
     if (!gate.reloading) return undefined;
@@ -49,13 +49,13 @@ const HOLD_TEXT = {
   offline: 'This device is offline. A reload may show an error page.',
 };
 
-// The reload button of the Reload bar and of the staff retry screen
-// (App.jsx). It obeys the same holds as the automatic reload: when work holds
-// it, a click names every held work instead of reloading, and the button
-// becomes "Reload anyway". Each click asks again, so "Reload anyway" reloads
-// only when nothing holds that the button has not named. A new resetKey
-// clears the named work. The Reload bar also passes pageUsed (below).
-export function useHoldAwareReload(resetKey, beforeReload, pageUsed) {
+// The Reload bar's button. It obeys the same holds as the automatic reload:
+// when work holds it, a click names every held work instead of reloading, and
+// the button becomes "Reload anyway". Each click asks again, so "Reload
+// anyway" reloads only when nothing holds that the button has not named. A
+// new resetKey clears the named work. pageUsed (below) adds a use of the page
+// in view.
+function useHoldAwareReload(resetKey, pageUsed) {
   const [held, setHeld] = useState([]);
   useEffect(() => { setHeld((named) => (named.length ? [] : named)); }, [resetKey]);
   const tryReload = () => {
@@ -64,7 +64,6 @@ export function useHoldAwareReload(resetKey, beforeReload, pageUsed) {
       setHeld(blockers);
       return;
     }
-    beforeReload?.();
     window.location.reload();
   };
   const heldText = [...new Set(held.map((name) => HOLD_TEXT[name] || 'Something in this tab is still open.'))].join(' ');
@@ -98,7 +97,7 @@ export function PortalUpdateBar() {
   const { pathname } = useLocation();
   const build = useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
   const pageUsed = usePageUsed(pathname);
-  const { named, heldText, tryReload } = useHoldAwareReload(`${build} ${pathname}`, undefined, pageUsed);
+  const { named, heldText, tryReload } = useHoldAwareReload(`${build} ${pathname}`, pageUsed);
   if (!build || !isAdminPath(pathname)) return null;
 
   return (

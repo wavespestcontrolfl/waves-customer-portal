@@ -21,8 +21,6 @@
 // lazyWithRetry hold later failures too; if this page is still here when the
 // window ends, the navigation never committed and the page reloads.
 
-import { staffReloadBlocker } from './portalReload';
-
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 
 // Long enough for a slow navigation to commit. It bounds how long a page whose
@@ -76,19 +74,11 @@ export function markPageNavigating(reload = () => window.location.reload()) {
 // One-shot guard (App.jsx clears the flag on a successful lazy load) so a
 // genuine outage still surfaces instead of reload-looping.
 export function handleVitePreloadError(event, reload = () => window.location.reload()) {
-  // Only the customer app opens a navigation window: native/nativeLinks.js
-  // and native/nativePush.js run in the Capacitor app alone, and never open
-  // /admin or /tech. Waves Admin is not a Capacitor app. So the staff holds
-  // below never apply in that window.
   if (pageNavigating()) {
     chunkHeld = true;
     event.preventDefault();
     return;
   }
-  // Held work on a staff page, or a staff tab offline, keeps the tab: the
-  // import fails as it would with no handler, and lazyWithRetry shows the
-  // retry screen.
-  if (staffReloadBlocker()) return;
   try {
     if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');

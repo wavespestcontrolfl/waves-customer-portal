@@ -10,7 +10,7 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => platform.wavesAdmi
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from './portalVersion';
 import { registerReloadHold } from './reloadHolds';
 import { countDeviceWrite } from './deviceWrites';
-import { RECENT_ANSWER_MS, WRITE_WAIT_MS, reloadBlockers, reloadDueAtMove, reloadForNewBuild, staffReloadBlocker } from './portalReload';
+import { RECENT_ANSWER_MS, WRITE_WAIT_MS, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from './portalReload';
 
 const NOW = 1_000_000;
 let holding = false;
@@ -50,6 +50,11 @@ describe('reloadDueAtMove', () => {
     expect(reloadDueAtMove('/billing', NOW)).toBe(false);
     expect(reloadDueAtMove('/admin/today', NOW)).toBe(false);
     expect(reloadDueAtMove('/admin/today/visit/1', NOW)).toBe(false);
+    // Nor at a move away from a field page: a time-clock punch there can
+    // still be waiting for the location.
+    expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/today')).toBe(false);
+    expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/today/truck-check')).toBe(false);
+    expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/dashboard')).toBe(true);
     platform.wavesAdmin = true;
     expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
   });
@@ -89,24 +94,12 @@ describe('offline', () => {
   });
 });
 
-describe('staffReloadBlocker', () => {
-  test('names held work on staff pages only, for the stale-chunk reload', () => {
-    holding = true;
-    expect(staffReloadBlocker('/admin/communications')).toBe('test-hold');
-    expect(staffReloadBlocker('/admin/today')).toBe('test-hold');
-    expect(staffReloadBlocker('/billing')).toBeNull();
-    holding = false;
-    expect(staffReloadBlocker('/admin/communications')).toBeNull();
-  });
-
-  test('a browser that reports itself offline blocks every reload button, named after held work, and keeps a staff tab', () => {
+describe('reloadBlockers', () => {
+  test('a browser that reports itself offline blocks every reload button, named after held work', () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     expect(reloadBlockers()).toEqual(['offline']);
-    expect(staffReloadBlocker('/admin/today')).toBe('offline');
-    expect(staffReloadBlocker('/billing')).toBeNull();
     holding = true;
     expect(reloadBlockers()).toEqual(['test-hold', 'offline']);
-    expect(staffReloadBlocker('/admin/today')).toBe('test-hold');
   });
 });
 
@@ -130,7 +123,7 @@ describe('reloadForNewBuild', () => {
     const done = reloadForNewBuild({ reload });
     await vi.advanceTimersByTimeAsync(1000);
     expect(reload).not.toHaveBeenCalled();
-    expect(staffReloadBlocker('/admin/dispatch')).toBe('saving');
+    expect(reloadBlockers()).toEqual(['saving']);
     finishWrite();
     await vi.advanceTimersByTimeAsync(400);
     await expect(done).resolves.toBeNull();

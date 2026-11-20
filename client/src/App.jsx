@@ -2,8 +2,7 @@ import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import { CHUNK_RELOAD_FLAG, isStaleChunkReloadPending, markStaleChunkReloadPending } from './lib/staleChunkReload';
-import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload } from './components/PortalUpdate';
-import { staffReloadBlocker } from './lib/portalReload';
+import { PortalUpdateBar, PortalUpdateGate } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -78,26 +77,17 @@ function CustomerFailureScreen({ title, message, onRetry }) {
 }
 
 export class PageErrorBoundary extends Component {
-  constructor(props) { super(props); this.state = { error: null, heldChunk: false }; }
-  // Held work, or a browser offline, keeps a staff tab on its old code
-  // (lib/portalReload.js). A nested page chunk that plain React.lazy loads
-  // fails here, not in lazyWithRetry, when the live build removed it or the
-  // tab has no signal: it gets the same hold-aware retry screen.
-  static getDerivedStateFromError(error) {
-    return { error, heldChunk: isChunkError(error) && Boolean(staffReloadBlocker()) };
-  }
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
   componentDidCatch(error, info) {
     // A stale-chunk reload is already under way: the swallowed import made
     // React.lazy throw, and the page is about to reload into the new build.
     if (isStaleChunkReloadPending()) return;
-    // A held tab's missing chunk is expected: the retry screen handles it.
-    if (this.state.heldChunk) return;
     console.error('[Page crash]', error, info.componentStack);
     reportError(error, { context: 'PageErrorBoundary', componentStack: info.componentStack });
   }
   render() {
     if (this.state.error && isStaleChunkReloadPending()) return <RouteFallback />;
-    if (this.state.error && this.state.heldChunk) return <ChunkLoadFallback />;
     if (this.state.error) {
       if (this.props.customerGlass) {
         return (
@@ -300,10 +290,7 @@ function showReloadToast() {
 // Rendered when a lazy chunk still fails after the one automatic reload —
 // a friendly retry beats the blank screen the rethrow used to produce.
 function ChunkLoadFallback() {
-  // Case-insensitive, as React Router matches /ADMIN/... too.
-  const operatorPath = /^\/(admin|tech)(\/|$)/i.test(window.location.pathname);
-  // Held work can be why this staff tab kept its old code: Retry names it first.
-  const { named, heldText, tryReload } = useHoldAwareReload(null, clearChunkReloadFlag);
+  const operatorPath = /^\/(admin|tech)(\/|$)/.test(window.location.pathname);
   if (!operatorPath) {
     return (
       <CustomerFailureScreen
@@ -326,27 +313,21 @@ function ChunkLoadFallback() {
           Couldn&rsquo;t load this page
         </div>
         <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
-          {named ? heldText : 'Check your connection and try again.'}
+          Check your connection and try again.
         </div>
         <button
-          onClick={tryReload}
+          onClick={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
           style={{
             minHeight: 42, padding: '0 18px', background: COLORS.glassNavy, color: '#fff',
             border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700,
             fontFamily: FONTS.heading, cursor: 'pointer',
           }}
         >
-          {named ? 'Reload anyway' : 'Retry'}
+          Retry
         </button>
       </div>
     </div>
   );
-}
-
-// Best effort: with session storage blocked there is no flag to clear, and
-// the reload must still run.
-function clearChunkReloadFlag() {
-  try { sessionStorage.removeItem(CHUNK_RELOAD_FLAG); } catch { /* storage blocked */ }
 }
 
 // Route-level Suspense placeholder. One element for every lazy page instead
@@ -359,13 +340,6 @@ function RouteFallback({ label = 'Loading...' }) {
       {label}
     </div>
   );
-}
-
-// The error for a page chunk the live build no longer serves, in Chrome,
-// Safari and Firefox. "Unable to preload CSS" is Vite's error for a page
-// stylesheet gone the same way.
-function isChunkError(err) {
-  return /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|ChunkLoadError|Unable to preload CSS/i.test(String(err?.message || ''));
 }
 
 export function lazyWithRetry(factory) {
@@ -383,23 +357,14 @@ export function lazyWithRetry(factory) {
       // A CSS preload already started the reload, then the chunk itself
       // failed too: same reload, same placeholder.
       if (isStaleChunkReloadPending()) return { default: RouteFallback };
-      if (isChunkError(err)) {
-        // Held work on a staff page, or a staff tab offline, keeps the tab
-        // (lib/portalReload.js); the retry screen's button reloads when the
-        // person is ready.
-        if (staffReloadBlocker()) return { default: ChunkLoadFallback };
+      const msg = String(err?.message || '');
+      const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError/i.test(msg);
+      if (isChunkError) {
         if (!sessionStorage.getItem(CHUNK_RELOAD_FLAG)) {
           sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
           markStaleChunkReloadPending();
-          // A staff page reloads at once: in a delay, held work could start,
-          // or the signal drop, after the check above. Other pages show the
-          // toast first.
-          if (isAdminPath(window.location.pathname)) {
-            window.location.reload();
-          } else {
-            showReloadToast();
-            setTimeout(() => window.location.reload(), 1200);
-          }
+          showReloadToast();
+          setTimeout(() => window.location.reload(), 1200);
           return { default: () => null };
         }
         // Already auto-reloaded once — show a retry screen instead of
