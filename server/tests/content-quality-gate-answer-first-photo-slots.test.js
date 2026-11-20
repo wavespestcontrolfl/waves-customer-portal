@@ -563,24 +563,14 @@ describe('next_steps PII scan (common hard check, next_steps only)', () => {
     expect(result.hard_failures.map((f) => f.name)).toContain('next_steps_redacted');
   });
 
-  test('next_steps_redacted never scans a supporting-blog body; the body check is GATE_CONTENT_PII_ALL_LANES', () => {
-    const run = () => gate.evaluate(
+  test('next_steps_redacted never scans a supporting-blog body; the body check is redaction_passed', () => {
+    const result = gate.evaluate(
       { body: `${BODY}\n\nAsk Jane Doe at 4867 Maple Street.`, frontmatter: {} },
       { page_type: 'supporting-blog', action_type: 'new_supporting_blog' },
       {},
     );
-    delete process.env.GATE_CONTENT_PII_ALL_LANES;
-    const dark = run();
-    expect(dark.checks.next_steps_redacted).toMatchObject({ ok: true });
-    expect(dark.checks.redaction_passed).toMatchObject({ ok: true, reason: 'content_pii_all_lanes_gate_dark' });
-    process.env.GATE_CONTENT_PII_ALL_LANES = 'true';
-    try {
-      const live = run();
-      expect(live.checks.next_steps_redacted).toMatchObject({ ok: true });
-      expect(live.checks.redaction_passed.ok).toBe(false);
-    } finally {
-      delete process.env.GATE_CONTENT_PII_ALL_LANES;
-    }
+    expect(result.checks.next_steps_redacted).toMatchObject({ ok: true });
+    expect(result.checks.redaction_passed.ok).toBe(false);
   });
 
   test('a refresh draft with dirty next_steps does not hard-fail the full gate on them', () => {

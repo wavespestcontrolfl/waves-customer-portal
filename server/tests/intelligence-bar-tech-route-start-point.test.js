@@ -41,7 +41,6 @@ const { executeScheduleTool } = require('../services/intelligence-bar/schedule-t
 const DATE = '2035-03-06';
 const ENV = {
   start: process.env.GATE_TECH_START_POINTS,
-  cal: process.env.GATE_DRIVE_TIME_CALIBRATION,
 };
 let techRow;
 
@@ -53,7 +52,6 @@ function stop(id, lng, over = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   techRow = { id: 'tech-1', name: 'Test Tech', start_lat: '5', start_lng: '5' };
   db.mockImplementation((table) => {
     const q = {};
@@ -70,8 +68,6 @@ beforeEach(() => {
 afterEach(() => {
   if (ENV.start === undefined) delete process.env.GATE_TECH_START_POINTS;
   else process.env.GATE_TECH_START_POINTS = ENV.start;
-  if (ENV.cal === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = ENV.cal;
 });
 
 const startOf = () => {

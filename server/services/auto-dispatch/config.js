@@ -30,7 +30,7 @@ function boolEnv(name, def) {
 }
 
 // GATE_ROUTE_TIERS is read at CALL time through the shared gate parser (same
-// pattern as GATE_DRIVE_TIME_CALIBRATION, and for the same reason: it swaps the
+// pattern as the other redeploy-free gates, and for the same reason: it swaps the
 // eligibility/window math auto-dispatch ranks slots with, and gate OFF must be
 // byte-for-byte the legacy flat-lock behavior — so the flip is a deliberate,
 // redeploy-free act in EVERY environment, never an ambient dev default).

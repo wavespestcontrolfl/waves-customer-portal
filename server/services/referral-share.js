@@ -78,7 +78,8 @@ async function buildReferralShareForCustomer(customerId, {
   return {
     code,
     link,
-    smsBody: `We use Waves Pest Control and ${offerClause}. ${bareLink}`,
+    // Texts say "Waves" (owner 2026-11-04); the email keeps the full name.
+    smsBody: `We use Waves and ${offerClause}. ${bareLink}`,
     emailSubject: refereeCents > 0 ? `${refereeAmount} off Waves Pest Control` : 'Waves Pest Control',
     emailBody: `We use Waves Pest Control and ${offerClause}.\n\n${link}`,
   };
