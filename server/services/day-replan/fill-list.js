@@ -22,6 +22,7 @@
  * no-time-soon check ask). That leaves out guarantee-only renewals, commercial, parked, quote-required and invoice-only
  * estimates, and the ones whose page already shows an appointment. Nothing here is paid: no geocoding and no road times.
  */
+const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { isInternalTestContact } = require('../internal-test-customers');
@@ -127,9 +128,12 @@ async function readDays(conn, blocks) {
 /**
  * The fill list for the listed blocks ({ day, techId, start, min }): byBlock[i] is block i's lines, best first, and
  * the counts the notice states. Throws when the estimates, a day's stops, the start points or the departure time cannot
- * be read. An estimate whose own reads fail is left off and counted as unread.
+ * be read. An estimate whose own reads fail is left off and counted as unread. Built on the module database only: the
+ * page's checks read it (estimate-slots-public.js), and the 07:05 job passes it (scheduler.js runOpenBlocksAlert()),
+ * so every read sees the same rows; another connection (a transaction) throws.
  */
 async function fillList(conn, blocks, now) {
+  if (conn !== db) throw new Error('the fill list reads the main database only');
   const { estimates, unread } = await openEstimates(conn, now);
   const result = { checked: estimates.length + unread, fitted: 0, noLocation: 0, unread, byBlock: blocks.map(() => []) };
   const candidates = [];

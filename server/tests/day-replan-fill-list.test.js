@@ -3,7 +3,11 @@
  * first visit fits a listed block, by the schedule gap tool's own check (the real analyzeGapCandidate and arrival
  * search), least added drive first. The reads are faked; synthetic ids and names only.
  */
-jest.mock('../models/db', () => ({}));
+// The module database: the fill list is built on it only. Each test's fake knex answers through it (fakeConn).
+jest.mock('../models/db', () => {
+  const db = (...args) => db.current(...args);
+  return db;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/estimate-slot-availability', () => {
   const actual = jest.requireActual('../services/estimate-slot-availability');
@@ -78,7 +82,9 @@ function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = 
     q.pluck = async () => (table === 'scheduled_services' ? taken : q.categories.flatMap((category) => inactive[category] || []));
     return q;
   };
-  return { conn, calls };
+  const db = require('../models/db');
+  db.current = conn;
+  return { conn: db, calls };
 }
 
 // Every listed day's stops (the gap tool's read): by date, numbered in route order as dispatch saves them.
@@ -229,6 +235,33 @@ describe('fillList', () => {
     // The gap tool's read of the day, with its statuses and columns.
     expect(dayStopsQuery).toHaveBeenCalledWith(conn, { dateStr: DAY, excludeStatuses: ['cancelled', 'completed'], select: ['stop columns'] });
     expect(loadTechStartPoints).toHaveBeenCalledWith(conn, [TECH]);
+  });
+
+  test('built on the main database only: the page\'s checks read it, so another connection is refused', async () => {
+    const other = (table) => { throw new Error(`read ${table}`); };
+    await expect(fillList(other, [morning], NOW)).rejects.toThrow('the fill list reads the main database only');
+  });
+
+  test('a combined visit keeps its full length on the modeled route: the planned minutes of one service never shrink it', async () => {
+    const before = process.env.GATE_SCHEDULING_CAPACITY;
+    // Plan-only mode: the route plans the owner's minutes on site, and nothing else changes.
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    try {
+      dayStops({ [DAY]: [stop('first', '08:00')] });
+      locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+      const { conn } = fakeConn({ estimates: [estimate('near')] });
+      // One service: a one-time pest visit plans 45 minutes on site.
+      slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, serviceLabel: 'One-Time Pest Control',
+        services: [{ service: 'pest_control', label: 'One-Time Pest Control' }] });
+      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ length: 60, onSiteMin: 45 });
+      // The same pest service with lawn care on one visit: the whole 60 minutes.
+      slots.resolveCatalogSlotProfile.mockResolvedValue({ ...PROFILE, reservationServiceMix: true, serviceLabel: 'Pest Control + Lawn Care',
+        services: [{ service: 'pest_control', label: 'One-Time Pest Control' }, { service: 'lawn_care', label: 'Lawn Care' }] });
+      expect((await fillList(conn, [morning], NOW)).byBlock[0][0]).toMatchObject({ length: 60, onSiteMin: 60 });
+    } finally {
+      if (before === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = before;
+    }
   });
 
   test('the visit is sized as the page sizes it: the picker\'s service mode and default selection', async () => {

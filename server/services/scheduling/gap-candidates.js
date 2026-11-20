@@ -80,6 +80,9 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   const service = {
     id: '__candidate__', customer_id: estimate.customer_id, status: 'pending', lat: coords.lat, lng: coords.lng,
     estimated_duration_minutes: profile.durationMinutes, ...primary,
+    // Several services on one visit name no single planning-minutes row, so the route plans its full length, as the
+    // page's own offer and reservation plan it (find-time.js, slot-reservation.js; planning-minutes.js).
+    ...((profile.services || []).length > 1 ? { combined_services: true } : {}),
   };
   const preferences = await getCustomerSchedulingPreferences(estimate.customer_id, service.service_type, conn,
     { serviceKey: service.service_key_snapshot });
