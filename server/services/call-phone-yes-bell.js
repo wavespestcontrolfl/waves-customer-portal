@@ -96,6 +96,11 @@ const STATE_TEXT = {
     action: (who) => `accept ${who}'s estimate`,
     why: ({ visitDay }) => `The caller said yes to pay per application on a call${visitDay ? `, and the visit is ${visitDay}` : ''}.`,
   },
+  // A yes, but no estimate on the card is open to accept now (each one expired, or none is open): the tap refuses it.
+  lapsed: {
+    action: (who) => `check ${who}'s estimate`,
+    why: () => 'The caller said yes to pay per application, but no estimate on the card is open to accept now.',
+  },
   rechecking: {
     action: (who) => `check ${who}'s estimate`,
     why: ({ booked }) => `A call booked a pest visit${booked} while an estimate is open; its yes is being read again.`,
@@ -113,10 +118,12 @@ const DUE_WHY = {
 };
 
 // The bell's words: the headline's action, the one-sentence why and the detail. The card's payload and summary give
-// them (the summary is the sweep's own copy), so the bell says what the card shows. The caller's words stay on the card.
-function textFor({ name, card, expiresAt = null, several = false, visit = null, due = null }) {
+// them (the summary is the sweep's own copy), so the bell says what the card shows; a yes with no estimate open to
+// accept (`openToAccept` false, cardTimes) asks for a check, not an accept. The caller's words stay on the card.
+function textFor({ name, card, expiresAt = null, several = false, visit = null, due = null, openToAccept = true }) {
   const payload = typeof card.payload === 'string' ? JSON.parse(card.payload) : (card.payload || {});
-  const state = cardStateOf(payload);
+  const shown = cardStateOf(payload);
+  const state = shown === 'yes' && !openToAccept ? 'lapsed' : shown;
   const start = visitStart(visit);
   const visitDay = start ? formatETDayDate(start) : null;
   const facts = { booked: visitDay ? ` for ${visitDay}` : '', expiresAt, several, visitDay };
@@ -138,18 +145,19 @@ function standingKey(cardId, written) {
 // back, an estimate accepted, the visit moved), quietly: no ring, no banner, the read state kept. Nothing when the card
 // has no open row. Returns { key, raised } (the key it raised and the raise's result), or null.
 // card: { id, call_log_id, related_customer_id, related_estimate_id, payload, summary }; expiresAt: the soonest an open
-// estimate on the card expires, after now; several: the card names more than one estimate; visit: the soonest visit to
-// come that keeps the card open ({ scheduled_date, window_start }) or null; written: as standingKey; trx: the card's
-// transaction (runBellPass), which the write joins, so the banner goes only once it commits. A key it owes rings only
-// while the Bell switch is on (bellSwitchOn, read here, under the card's lock); off, an open row is still kept current.
-async function ringCard({ card, expiresAt = null, several = false, visit = null, written, now = new Date(), trx }) {
+// estimate on the card expires, after now; several: the card names more than one estimate; openToAccept: as textFor;
+// visit: the soonest visit to come that keeps the card open ({ scheduled_date, window_start }) or null; written: as
+// standingKey; trx: the card's transaction (runBellPass), which the write joins, so the banner goes only once it
+// commits. A key it owes rings only while the Bell switch is on (bellSwitchOn, read here, under the card's lock); off,
+// an open row is still kept current.
+async function ringCard({ card, expiresAt = null, several = false, openToAccept = true, visit = null, written, now = new Date(), trx }) {
   const due = dueReason({ expiresAt, visit, now });
   const owed = keyToRing({ cardId: card.id, due, rung: written });
   const ringKey = owed && (await bellSwitchOn(trx)) ? owed : null;
   const key = ringKey || standingKey(card.id, written);
   if (!key) return null;
   const name = (await Names.lookupCustomerName(trx, card.related_customer_id)) || 'a customer';
-  const text = textFor({ name, card, expiresAt, several, visit, due });
+  const text = textFor({ name, card, expiresAt, several, visit, due, openToAccept });
   const raised = await compose.raiseAdminAlert('estimate', {
     area: 'Estimates',
     action: text.action,
@@ -189,6 +197,15 @@ async function bellSwitchOn(conn) {
   return bellWanted(TRIGGER_REGISTRY[BANNER_KIND], admins, prefs);
 }
 
+// Closes the filed rows of these cards once their time-short rows stand. Also a filed row a person already marked Done:
+// the system close takes it over (done_by is the latest closer), so Recently Done cannot bring its words back beside
+// the time-short row. Rows already closed this way are skipped.
+function handOver(conn, cardIds, now) {
+  return Episodes.closeAdminAlertKeys(conn, cardIds.map(filedKey), 'phone_yes_time_short', {
+    now, resolution: 'Replaced by the alert that time runs short on this card',
+  });
+}
+
 // Each key already written for these cards (a closed row still holds its key), true while its row is open.
 async function writtenKeys(cardIds) {
   const keys = cardIds.flatMap((id) => [filedKey(id), dueKey(id)]);
@@ -205,13 +222,15 @@ async function writtenKeys(cardIds) {
  * The bell pass, run by the sweep after its filing and its moot close. `listCards()`: every card still open or claimed,
  * each { id, status, call_log_id }. `readCard(trx, listed)`: an open card read again under its call's triage lock (the
  * lock every card writer takes first), with the times that make it urgent and the clock it read them by after the lock
- * ({ card, expiresAt, several, visit, now }), or null once it is no longer open, while a row it reads is busy, while its
+ * ({ card, expiresAt, several, openToAccept, visit, now }), or null once it is no longer open, while a row it reads is busy, while its
  * evidence says something it does not show yet, or while a call in its window still owes a read. Each open card rings
  * in a transaction of its own that holds that lock, so a card the tap accepts or a person claims while the pass runs
- * rings nothing. With the Bell switch off (bellSwitchOn) nothing rings, and open rows are still rewritten. Then two
- * closes, each retried by every pass: a card's filed row once its time-short row exists (one open row per card), and
- * the rows of cards no longer open, listed again so a card closed during the pass loses its rows in this pass. A
- * claimed card, or one that could not be read, keeps its rows. Returns the number of rows the second close closed.
+ * rings nothing. With the Bell switch off (bellSwitchOn) nothing rings, and open rows are still rewritten. A card's
+ * filed row closes in the commit that writes its time-short row (handOver), so one row per card is open. Then two
+ * closes, each retried by every pass: the handover again (for a close that failed, or a time-short row an earlier run
+ * wrote), and the rows of cards no longer open, listed again so a card closed during the pass loses its rows in this
+ * pass. A claimed card, or one that could not be read, keeps its rows. Returns the number of rows the second close
+ * closed.
  */
 async function runBellPass({ listCards, readCard, now = new Date() }) {
   const listed = await listCards();
@@ -220,8 +239,13 @@ async function runBellPass({ listCards, readCard, now = new Date() }) {
     try {
       const out = await db.transaction(async (trx) => {
         const fresh = await readCard(trx, entry);
-        // The card's own clock (`fresh.now`, read after its lock) wins over the pass's.
-        return fresh ? ringCard({ now, ...fresh, written, trx }) : null;
+        if (!fresh) return null;
+        // The card's own clock (read after its lock) wins over the pass's.
+        const at = fresh.now || now;
+        const rung = await ringCard({ ...fresh, now: at, written, trx });
+        // The time-short row replaces the filed row in the same commit, so the office never sees both.
+        if (rung?.raised?.id && rung.key === dueKey(entry.id)) await handOver(trx, [entry.id], at);
+        return rung;
       });
       // A row now stands for this key; a raise that failed or was withheld returns no id, and the next run tries again.
       if (out?.raised?.id) written.set(out.key, true);
@@ -230,12 +254,8 @@ async function runBellPass({ listCards, readCard, now = new Date() }) {
       logger.warn(`[call-phone-yes] bell skipped for card ${entry.id}: ${e.code || e.name || 'error'}`);
     }
   }
-  // Also a filed row a person already marked Done: the system close takes it over (done_by is the latest closer), so
-  // Recently Done cannot bring its words back beside the time-short row. Rows already closed this way are skipped.
   const replaced = listed.map((card) => card.id).filter((id) => written.has(dueKey(id)) && written.has(filedKey(id)));
-  await Episodes.closeAdminAlertKeys(db, replaced.map(filedKey), 'phone_yes_time_short', {
-    now, resolution: 'Replaced by the alert that time runs short on this card',
-  });
+  await handOver(db, replaced, now);
   const open = new Set((await listCards()).map((card) => String(card.id)));
   const standing = [...await Episodes.openAdminAlertKeys(db, FILED_PREFIX), ...await Episodes.openAdminAlertKeys(db, DUE_PREFIX)];
   return Episodes.closeAdminAlertKeys(db, standing.filter((key) => !open.has(cardIdOfKey(key))), DONE_WHEN, {

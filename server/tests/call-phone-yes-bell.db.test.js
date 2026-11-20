@@ -516,6 +516,61 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(bannersFor(card.id)).toBe(2);
   });
 
+  test('a yes with every estimate on the card expired asks for a check, not an accept, since the tap refuses it', async () => {
+    // Filed after its estimate expired: the filed bell asks for a check.
+    const lapsed = await phoneYesCard({ estimates: [{ hours: -1 }] });
+    // Filed while its estimate is open: an accept.
+    const card = await phoneYesCard();
+    await pass();
+    expect((await bellsOf(lapsed.id)).filed).toEqual(expect.objectContaining({
+      title: "Estimates — check Pat Sampleton's estimate",
+      body: 'The caller said yes to pay per application, but no estimate on the card is open to accept now.',
+    }));
+    expect((await bellsOf(card.id)).filed.title).toBe("Estimates — accept Pat Sampleton's estimate");
+
+    // Its estimate expires, then the visit moves to tomorrow: the time-short bell asks for a check.
+    await trx('estimates').whereIn('id', card.estimateIds).update({ expires_at: new Date(Date.now() - HOUR) });
+    await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1) });
+    await keepCurrent(card.id);
+    await pass();
+    expect((await bellsOf(card.id)).due).toEqual(expect.objectContaining({
+      title: "Estimates — check Pat Sampleton's estimate",
+      body: `The visit the call booked is ${dayWords(1)}, and its card in Triage is still open.`,
+    }));
+  });
+
+  test('the filed row closes in the commit that writes the time-short row, before the pass reads the next card', async () => {
+    const first = await phoneYesCard();
+    const second = await phoneYesCard();
+    await pass();
+    await trx('scheduled_services').whereIn('id', [first.visitId, second.visitId]).update({ scheduled_date: etDay(1) });
+    // At each card's read: every other card whose time-short row stands, and whether its filed row is still open.
+    const seen = [];
+    const realPass = Bell.runBellPass;
+    const spy = jest.spyOn(Bell, 'runBellPass').mockImplementation(({ readCard, ...rest }) => realPass({
+      ...rest,
+      readCard: async (conn, listed) => {
+        for (const other of [first, second].filter((made) => made.id !== listed.id)) {
+          const { filed, due } = await bellsOf(other.id);
+          if (due) seen.push({ card: other.id, filedOpen: filed.done_at == null });
+        }
+        return readCard(conn, listed);
+      },
+    }));
+    try {
+      await pass();
+    } finally {
+      spy.mockRestore();
+    }
+    // The second card's read found the first card's time-short row with its filed row already closed.
+    expect(seen).toEqual([expect.objectContaining({ filedOpen: false })]);
+    for (const made of [first, second]) {
+      const { filed, due } = await bellsOf(made.id);
+      expect(due.done_at).toBeNull();
+      expect(filed.done_at).not.toBeNull();
+    }
+  });
+
   test("urgency is read by the clock after the card's lock, not the sweep's start", async () => {
     // By a clock two days old (a long scan, a long wait for the lock), a visit that began yesterday at 3:00 PM would
     // start within 48 hours, and one tomorrow at 3:00 PM would not.
@@ -559,6 +614,8 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       ['a re-read of the call with the yes', {}, reRead],
       // The window starts at the send, as the card's check reads it: here before the estimate's row was made.
       ['a re-read of the call with the yes, on an estimate whose send is dated before its row was made', { madeHoursAgo: 0 }, reRead],
+      // The customer's numbers decide which unlinked calls are theirs (and so which still owe a read).
+      ['a new phone number on the customer', {}, (card) => ['customers', card.customerId, { phone: '+19415559876' }]],
     ])("%s: in flight, the card rings nothing this run; after the ring's read, the change waits for its commit", async (_label, setup, changeOf) => {
       const perTest = trx;
       try {

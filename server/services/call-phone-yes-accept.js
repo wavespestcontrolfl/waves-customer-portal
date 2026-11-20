@@ -778,18 +778,19 @@ async function openCardNow(trx, listed) {
   return { card, now, ...(await cardTimes(trx, card, now)) };
 }
 
-// The rows a ring reads, held FOR SHARE to its commit, as the tap holds them: the customer's estimates (the tap's own
-// lock, which also refuses while one is being sent), the customer's calls in the word's window (cardEstimatesOf's
-// `since`, the window cardState reads: the yes, any later word, the booking call) and every visit the call booked. A
-// change to one (an accept, a decline, an extension, a re-read, a visit moved) either landed before, and the reads after
-// the lock see it, or waits for the ring's commit, so the ring says what was true when it committed. Returns { since },
-// or null for a change in flight right now: the card rings nothing this run (NOWAIT, in a savepoint, so the bell never
-// waits on a row and its transaction stays usable). A call or a visit inserted meanwhile has no row to hold; the next
-// run reads it.
+// The rows a ring reads, held FOR SHARE to its commit, as the tap holds them: the customer's row (its phone numbers
+// decide which unlinked calls are theirs), the customer's estimates (the tap's own lock, which also refuses while one is
+// being sent), the customer's calls in the word's window (cardEstimatesOf's `since`, the window cardState reads: the
+// yes, any later word, the booking call) and every visit the call booked. A change to one (a new number, an accept, a
+// decline, an extension, a re-read, a visit moved) either landed before, and the reads after the lock see it, or waits
+// for the ring's commit, so the ring says what was true when it committed. Returns { since }, or null for a change in
+// flight right now: the card rings nothing this run (NOWAIT, in a savepoint, so the bell never waits on a row and its
+// transaction stays usable). A call or a visit inserted meanwhile has no row to hold; the next run reads it.
 async function holdCardRows(trx, card) {
   const customerId = card.related_customer_id;
   try {
     return await trx.transaction(async (sp) => {
+      await sp('customers').where({ id: customerId }).forShare().noWait().select('id');
       await lockCustomerEstimates(sp, customerId);
       const { since } = await cardEstimatesOf(card, sp);
       if (since) await Word.lockCallsSince(sp, { customerId, since });
@@ -805,15 +806,19 @@ async function holdCardRows(trx, card) {
 // The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and the
 // soonest visit to come among the ones that keep the card open (booked by the call, on the calendar, not linked to an
 // estimate, pest). Both are read under the card's customer, as its moot check reads them. A call that booked several
-// visits files its card with no visit of its own, so the call's visits are read, not the card's.
+// visits files its card with no visit of its own, so the call's visits are read, not the card's. `openToAccept`: an
+// estimate on the card is still open and not past its expiry (the card stays open after each one expires, and the tap
+// refuses an expired estimate).
 async function cardTimes(conn, card, now) {
   const { visitStart } = require('./call-phone-yes-bell');
   const ids = cardEstimateIds(card);
-  const soonest = ids.length
+  const expiries = ids.length
     ? await conn('estimates').whereIn('id', ids).where({ customer_id: card.related_customer_id })
-      .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').where('expires_at', '>', now)
-      .orderBy('expires_at').first('expires_at')
-    : null;
+      .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at')
+      .where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', now))
+      .pluck('expires_at')
+    : [];
+  const soonest = expiries.filter(Boolean).map((at) => new Date(at)).sort((a, b) => a - b)[0] || null;
   const upcoming = (await callVisitsOnCalendar(conn, card.call_log_id, card.related_customer_id))
     .filter((v) => !v.source_estimate_id && visitStart(v) > now)
     .sort((a, b) => visitStart(a) - visitStart(b));
@@ -821,7 +826,7 @@ async function cardTimes(conn, card, now) {
   for (const candidate of upcoming) {
     if (await isPestVisit(conn, candidate)) { visit = candidate; break; }
   }
-  return { expiresAt: soonest?.expires_at || null, several: ids.length > 1, visit };
+  return { expiresAt: soonest, several: ids.length > 1, openToAccept: expiries.length > 0, visit };
 }
 
 // One call's card, filed when the call earns one. True when a card was filed.

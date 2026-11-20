@@ -115,6 +115,24 @@ describe('the words, by card state', () => {
     expect(() => passesRules(text)).not.toThrow();
   });
 
+  test('a yes with no estimate on the card open to accept asks for a check: the tap refuses an expired estimate', () => {
+    const yes = card({ yes_heard: true, caller_words: WORDS });
+    expect(textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, openToAccept: false })).toMatchObject({
+      action: "check Pat Sampleton's estimate",
+      why: 'The caller said yes to pay per application, but no estimate on the card is open to accept now.',
+    });
+    const short = textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, due: 'visit_soon', openToAccept: false });
+    expect(short).toMatchObject({
+      action: "check Pat Sampleton's estimate", why: 'The visit the call booked is Tue, Nov 24, and its card in Triage is still open.',
+    });
+    for (const text of [textFor({ name: 'Pat Sampleton', card: yes, visit: VISIT, openToAccept: false }), short]) {
+      expect(() => passesRules(text)).not.toThrow();
+    }
+    // An accepted estimate's card asks about its visit either way.
+    expect(textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, estimate_accepted: true }), visit: VISIT, openToAccept: false }).action)
+      .toBe("check Pat Sampleton's booked visit");
+  });
+
   test('a long name is cut to fit the headline', () => {
     const text = textFor({ name: 'Bartholomew Maximilian Featherstonehaugh Worthington', card: card({ yes_heard: false }), visit: VISIT });
     expect(text.action).toMatch(/^check Bartholomew .*…'s estimate$/);
