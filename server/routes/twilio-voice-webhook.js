@@ -2631,8 +2631,8 @@ function gptLiveMaxUsd() {
 // settled cost. Returns false when the reservation does not fit under the cap;
 // a database error, or a call already claimed, throws and the caller refuses
 // the call (fail closed).
-async function reserveGptLiveCall(callSid, { cell, voice }) {
-  const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+async function reserveGptLiveCall(callSid, { cell, voice, token }) {
+  const { VOICE_RELAY_SANDBOX_SOURCE, callTokenDigest } = require('../services/voice-agent/relay-protocol');
   const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [GPT_LIVE_BUDGET_LOCK]);
@@ -2640,7 +2640,8 @@ async function reserveGptLiveCall(callSid, { cell, voice }) {
       .where({ source: VOICE_RELAY_SANDBOX_SOURCE })
       .first(trx.raw(GPT_LIVE_SPENT_SQL));
     if (Number(row && row.usd) + PER_CALL_RESERVE_USD > gptLiveMaxUsd()) return false;
-    const stamp = { gpt_live: { cell, voice, started_at: new Date().toISOString(), reserved_usd: PER_CALL_RESERVE_USD } };
+    // stream_token_sha256 binds the reservation to the one token issued here.
+    const stamp = { gpt_live: { cell, voice, started_at: new Date().toISOString(), reserved_usd: PER_CALL_RESERVE_USD, stream_token_sha256: callTokenDigest(token) } };
     const updated = await trx('call_log')
       .where({ twilio_call_sid: callSid })
       .whereRaw(GPT_LIVE_UNCLAIMED_SQL)
@@ -2684,7 +2685,7 @@ async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
   try {
     const token = require('../services/voice-agent/relay-protocol').mintCallToken(callSid);
     if (!token) throw new Error('no call token (VOICE_RELAY_WS_SECRET unset)');
-    if (!(await reserveGptLiveCall(callSid, { cell, voice }))) {
+    if (!(await reserveGptLiveCall(callSid, { cell, voice, token }))) {
       logger.warn(`[gpt-live] budget used up — refused ${maskSid(callSid)} cell ${cell}`);
       return gptLiveSayAndHangup(res, 'The GPT-Live test budget is used up. Goodbye.');
     }

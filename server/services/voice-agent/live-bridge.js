@@ -320,7 +320,15 @@ class LiveBridge {
       void this.finalize('setup_failed');
       return;
     }
-    this.openai = this.deps.openaiFactory({ url: OPENAI_LIVE_URL, headers: { Authorization: `Bearer ${apiKey}` } });
+    try {
+      this.openai = this.deps.openaiFactory({ url: OPENAI_LIVE_URL, headers: { Authorization: `Bearer ${apiKey}` } });
+    } catch {
+      // A socket that throws at construction never reached OpenAI.
+      this.openai = null;
+      this.noteError('socket_open_failed');
+      void this.finalize('socket_open_failed');
+      return;
+    }
     // No session.started in time = a refused or stuck start: end the call
     // rather than leave the caller on a silent line.
     this.startTimer = setTimeout(() => {
@@ -438,9 +446,13 @@ class LiveBridge {
     // Code and type only: the message can echo input.
     this.noteError(`${e.code || 'error'}${e.type ? `:${e.type}` : ''}`);
     logger.warn(`[voice-live] openai error code=${String(e.code || '')} type=${String(e.type || '')} callSid=${this.callSid}`);
-    // Before session.started, an error is a refused start: end the call. After
-    // it, errors such as responses_validation_failed are nonfatal (OpenAI docs).
+    // Before session.started, an error is a refused start: end the call.
+    // responses_validation_failed comes after it (OpenAI validates delegation
+    // settings asynchronously and keeps the bad ones), so the lookups can never
+    // work: end that call too rather than bill a broken comparison. Other
+    // errors after the start (a rejected command) are nonfatal.
     if (!this.ready) void this.finalize('setup_rejected');
+    else if (e.code === 'responses_validation_failed') void this.finalize('backend_rejected');
   }
 
   // ── tools ────────────────────────────────────────────────────────────────
@@ -575,18 +587,27 @@ class LiveBridge {
     } catch { /* already closed */ }
   }
 
-  summary(reason) {
-    const sorted = [...this.latencies].sort((a, b) => a - b);
-    const errors = [...this.errors];
+  // The seconds to record and whether the cost can be settled. A call that
+  // never reached OpenAI (no key, a local setup failure, a bad start frame)
+  // provably used nothing: it settles at zero and frees its reservation.
+  // Otherwise only session.closed confirms the final usage (OpenAI: a close
+  // without it "does not confirm successful finalization"); unconfirmed, no
+  // cost is settled and the call keeps its full reservation.
+  settledUsage(errors) {
+    if (this.openai === null) return { usage: 0, settled: true };
     let usage = this.usageSeconds;
     if (usage === null) {
       usage = Math.max(0, Math.round((this.deps.now() - this.startedAt) / 1000));
       errors.push('usage_missing');
     }
-    // Without session.closed the final usage is unconfirmed (OpenAI: a close
-    // without it "does not confirm successful finalization"), so no cost is
-    // settled and the call keeps its full reservation.
     if (!this.usageConfirmed) errors.push('usage_unconfirmed');
+    return { usage, settled: this.usageConfirmed };
+  }
+
+  summary(reason) {
+    const sorted = [...this.latencies].sort((a, b) => a - b);
+    const errors = [...this.errors];
+    const { usage, settled } = this.settledUsage(errors);
     const tokenUsd = backendTokenUsd(this.backendInputTokens, this.backendOutputTokens);
     // Card numbers and access codes are scrubbed before storage, across turns
     // (a number read in pieces), with the relay transcript's own scrubber.
@@ -599,12 +620,16 @@ class LiveBridge {
     }
     return {
       usage_seconds: usage,
+      openai_contacted: this.openai !== null,
       usage_confirmed: this.usageConfirmed,
       backend_units: this.backendUnits,
       backend_input_tokens: this.backendInputTokens,
       backend_output_tokens: this.backendOutputTokens,
-      ...(this.usageConfirmed ? { cost_usd: callCostUsd(usage, this.backendUnits, tokenUsd) } : {}),
-      close_reason: this.closeReason || reason,
+      ...(settled ? { cost_usd: callCostUsd(usage, this.backendUnits, tokenUsd) } : {}),
+      // Why the bridge ended the call (cap, caller hangup, ...), and OpenAI's
+      // own close reason separately: an acknowledged close must not hide a cap.
+      close_reason: reason,
+      provider_close_reason: this.closeReason,
       turns: this.latencies,
       latency_p50_ms: median(sorted),
       latency_max_ms: sorted.length ? sorted[sorted.length - 1] : null,
@@ -625,7 +650,7 @@ class LiveBridge {
       ),
       updated_at: new Date(),
     });
-    logger.info(`[voice-live] done callSid=${this.callSid} reason=${this.closeReason || reason} turns=${this.latencies.length} usage_s=${this.usageSeconds}`);
+    logger.info(`[voice-live] done callSid=${this.callSid} reason=${reason} turns=${this.latencies.length} usage_s=${this.usageSeconds}`);
   }
 }
 

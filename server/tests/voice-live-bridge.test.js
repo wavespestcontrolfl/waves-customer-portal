@@ -139,7 +139,7 @@ describe('session setup and caller audio', () => {
     expect(t.openaiFactory).not.toHaveBeenCalled();
     expect(t.twilio.close).toHaveBeenCalled();
     expect(t.update).toHaveBeenCalledTimes(1);
-    expect(summaryOf(t).close_reason).toBe('callsid_mismatch');
+    expect(summaryOf(t)).toMatchObject({ close_reason: 'callsid_mismatch', openai_contacted: false, cost_usd: 0 });
   });
 
   test('a start frame with no streamSid closes the call and never opens OpenAI; a later good start changes nothing', async () => {
@@ -171,13 +171,22 @@ describe('session setup and caller audio', () => {
     expect(s.errors).toContain('unknown_parameter:invalid_request_error');
   });
 
-  test('an error after session.started (e.g. responses_validation_failed) is nonfatal', async () => {
+  test('an error after session.started (a rejected command) is nonfatal', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive({ type: 'error', error: { code: 'unknown_parameter', type: 'invalid_request_error' } });
+    await flush();
+    expect(t.twilio.close).not.toHaveBeenCalled();
+    expect(t.update).not.toHaveBeenCalled();
+  });
+
+  test('responses_validation_failed after session.started ends the call: the lookups can never work', async () => {
     const t = setup();
     await t.ready();
     t.openai.receive({ type: 'error', error: { code: 'responses_validation_failed', type: 'invalid_request_error' } });
     await flush();
-    expect(t.twilio.close).not.toHaveBeenCalled();
-    expect(t.update).not.toHaveBeenCalled();
+    expect(t.twilio.close).toHaveBeenCalled();
+    expect(summaryOf(t)).toMatchObject({ close_reason: 'backend_rejected', provider_close_reason: 'close_requested' });
   });
 
   test('no session.started within the deadline ends the call instead of leaving a silent line', async () => {
@@ -195,6 +204,19 @@ describe('session setup and caller audio', () => {
     await flush();
     expect(t.openaiFactory).not.toHaveBeenCalled();
     expect(t.twilio.close).toHaveBeenCalled();
+    // OpenAI was never contacted: the call settles at zero and frees its reservation
+    const s = summaryOf(t);
+    expect(s).toMatchObject({ openai_contacted: false, usage_seconds: 0, cost_usd: 0 });
+    expect(s.errors).not.toContain('usage_unconfirmed');
+  });
+
+  test('a socket that throws at construction ends the call, settled at zero, without an uncaught error', async () => {
+    const t = setup({ deps: { openaiFactory: () => { throw new Error('bad url'); } } });
+    t.twilioStart();
+    await flush();
+    expect(t.twilio.close).toHaveBeenCalled();
+    const s = summaryOf(t);
+    expect(s).toMatchObject({ openai_contacted: false, cost_usd: 0, close_reason: 'socket_open_failed' });
   });
 });
 
@@ -416,7 +438,9 @@ describe('finish', () => {
       backend_input_tokens: 0,
       backend_output_tokens: 0,
       cost_usd: 0.0375, // 45 s at $0.05 a minute
-      close_reason: 'close_requested',
+      openai_contacted: true,
+      close_reason: 'twilio_stop', // why the bridge ended it
+      provider_close_reason: 'close_requested', // OpenAI's acknowledgment, kept apart
       turns: [],
       latency_p50_ms: null,
       latency_max_ms: null,
@@ -479,7 +503,8 @@ describe('finish', () => {
     await t.ready();
     await waitFor(() => t.update.mock.calls.length > 0);
     expect(t.twilio.close).toHaveBeenCalled();
-    expect(summaryOf(t).close_reason).toBe('close_requested');
+    // the cap stays visible even though OpenAI acknowledged the close
+    expect(summaryOf(t)).toMatchObject({ close_reason: 'cap', provider_close_reason: 'close_requested' });
     expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(true);
   });
 

@@ -189,7 +189,16 @@ async function readLiveStamp(callSid) {
   }
   const live = meta && meta.gpt_live;
   if (!live || typeof live !== 'object') return null;
-  return { voice: String(live.voice || ''), cell: String(live.cell || '') };
+  return { voice: String(live.voice || ''), cell: String(live.cell || ''), tokenDigest: String(live.stream_token_sha256 || '') };
+}
+
+// Only the token the cell route issued (and stamped by digest) opens the paid
+// bridge: another valid token for this CallSid, such as the greeting's relay
+// token, must not open a second session on the same reservation.
+function isStampedToken(stamp, token) {
+  const want = Buffer.from(stamp.tokenDigest, 'utf8');
+  const got = Buffer.from(require('./relay-protocol').callTokenDigest(token), 'utf8');
+  return want.length === got.length && require('crypto').timingSafeEqual(want, got);
 }
 
 async function handleLiveUpgrade(req, socket, head, pathname) {
@@ -203,6 +212,10 @@ async function handleLiveUpgrade(req, socket, head, pathname) {
     const stamp = await readLiveStamp(callSid);
     if (!stamp || !require('../../config/feature-gates').voiceGptLiveTestLive()) {
       logger.warn(`[voice-live] rejected ws upgrade: not a stamped sandbox call, or gate off callSid=${callSid}`);
+      return destroySocket(socket);
+    }
+    if (!isStampedToken(stamp, token)) {
+      logger.warn(`[voice-live] rejected ws upgrade: not the token the cell route issued callSid=${callSid}`);
       return destroySocket(socket);
     }
     if (!(await burnCallToken(token, callSid))) {

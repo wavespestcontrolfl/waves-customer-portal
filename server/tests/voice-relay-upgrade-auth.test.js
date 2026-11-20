@@ -591,21 +591,25 @@ test('a failed source read rejects the upgrade WITHOUT burning the token', async
 describe('ws upgrade — GPT-Live path', () => {
   const { runLiveBridge } = require('../services/voice-agent/live-bridge');
   const LIVE_SID = 'CA-live-up-1';
-  const STAMP = { gpt_live: { cell: '71', voice: 'marin', started_at: '2026-11-19T12:00:00.000Z' } };
+  const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
+  let LIVE_TOKEN; // the one token the cell route issued, minted per test once the secret is set
+  let STAMP;
   let httpServer;
 
-  const liveUrl = (sid = LIVE_SID, token = mintCallToken(sid)) => `/ws/voice-live/${sid}/${token}`;
+  const liveUrl = (sid = LIVE_SID, token = LIVE_TOKEN) => `/ws/voice-live/${sid}/${token}`;
 
   beforeEach(() => {
     jest.clearAllMocks();
     mockBurned.clear();
     mockBurnFails = false;
     mockCallLogFails = false;
-    mockCallLogRow = { source: 'voice_relay_sandbox', metadata: STAMP };
     process.env.VOICE_RELAY_ENABLED = 'true';
     process.env.ANTHROPIC_API_KEY = 'sk-test';
     process.env.VOICE_RELAY_WS_SECRET = SECRET;
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    LIVE_TOKEN = mintCallToken(LIVE_SID);
+    STAMP = { gpt_live: { cell: '71', voice: 'marin', started_at: '2026-11-19T12:00:00.000Z', stream_token_sha256: callTokenDigest(LIVE_TOKEN) } };
+    mockCallLogRow = { source: 'voice_relay_sandbox', metadata: STAMP };
     httpServer = attach();
   });
 
@@ -658,6 +662,22 @@ describe('ws upgrade — GPT-Live path', () => {
     }
     expect(mockBurned.size).toBe(0); // read-then-burn: a refusal leaves the token alone
     expect(mockHandleUpgrade).not.toHaveBeenCalled();
+  });
+
+  test('another valid token for the same call (e.g. the greeting\'s relay token) cannot open a second paid session', async () => {
+    const other = mintCallToken(LIVE_SID);
+    expect(other).not.toBe(LIVE_TOKEN);
+    const socket = await upgrade(httpServer, liveUrl(LIVE_SID, other));
+    expect(socket.destroy).toHaveBeenCalled();
+    expect(mockBurned.size).toBe(0);
+    expect(runLiveBridge).not.toHaveBeenCalled();
+  });
+
+  test('a stamp with no token digest opens nothing', async () => {
+    mockCallLogRow = { source: 'voice_relay_sandbox', metadata: { gpt_live: { cell: '71', voice: 'marin' } } };
+    const socket = await upgrade(httpServer, liveUrl());
+    expect(socket.destroy).toHaveBeenCalled();
+    expect(runLiveBridge).not.toHaveBeenCalled();
   });
 
   test('gate off destroys the socket', async () => {

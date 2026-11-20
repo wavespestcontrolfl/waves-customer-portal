@@ -506,7 +506,12 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(tb.whereRaw).toHaveBeenCalledWith("(metadata->'gpt_live') IS NULL");
     // The stamp the WS upgrade later requires, carrying this call's reservation.
     const stamp = JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live;
-    expect(stamp).toEqual({ cell: '71', voice: 'marin', started_at: expect.any(String), reserved_usd: PER_CALL_RESERVE_USD });
+    // ...bound to the one token this response issues (its digest, never the token)
+    const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
+    expect(stamp).toEqual({
+      cell: '71', voice: 'marin', started_at: expect.any(String), reserved_usd: PER_CALL_RESERVE_USD,
+      stream_token_sha256: callTokenDigest(url.split('/').pop()),
+    });
     expect(update.mock.calls[0][0].metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
   });
 

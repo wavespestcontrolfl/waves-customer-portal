@@ -513,6 +513,14 @@ function buildRelayTwiML({
   );
 }
 
+// SHA-256 hex of a minted call token. The GPT-Live trial stores it on the
+// call's stamp so only the ONE token its cell route issued can open the paid
+// bridge; any other valid token for the same CallSid (the greeting's relay
+// token) is refused.
+function callTokenDigest(token) {
+  return require('crypto').createHash('sha256').update(String(token || '')).digest('hex');
+}
+
 module.exports = {
   RELAY_WS_PATH,
   VOICE_RELAY_SANDBOX_SOURCE,
@@ -540,6 +548,7 @@ module.exports = {
   appendCallAuth,
   mintCallToken,
   verifyCallToken,
+  callTokenDigest,
   CALL_TOKEN_TTL_MS,
   parsePrompt,
   textFrame,
