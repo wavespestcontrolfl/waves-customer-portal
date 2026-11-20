@@ -316,7 +316,8 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
 
     test('a lookup that runs again never rewrites a keyed lead\'s label: the catalog name stays beside its key', async () => {
       // The price calculation writes the key and the catalog name together.
-      // The visitor then goes back and sends the lookup again on the same token.
+      // A client then sends the lookup again on the same token (the site's
+      // price page drops the token after its first lookup; another client may not).
       const keyed = await quizLead({ service_key: 'pest_quarterly', service_interest: 'Quarterly Pest Control' });
       const again = await lookup(keyed, { prefill_lead_id: keyed.leadId, prefill_token: keyed.token, serviceInterest: 'ant-control' });
       expect(again).toMatchObject({ status: 200, json: { lead_id: keyed.leadId } });
