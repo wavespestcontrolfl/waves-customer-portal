@@ -46,9 +46,8 @@
  *     customer; it clears once no upcoming day has such a pair. It rings last,
  *     within what the other classes and the combined-booking check left of
  *     the budget; a new pair for today (start still ahead) or tomorrow always
- *     rings, and still counts (owner 2026-11-19, decision page option A). An
- *     hourly urgent pass (runSameStartUrgentPass) rings such a pair made after
- *     this run. The finder and the copy are in same-start-visits-check.js.
+ *     rings, and still counts (owner 2026-11-19, decision page option A).
+ *     The finder and the copy are in same-start-visits-check.js.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
@@ -289,68 +288,6 @@ function etClock(date) {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
-// The same-start class's hourly urgent pass (scheduler.js, :25 from 7 AM to
-// 8 PM ET; owner 2026-11-19, "A"): a pair on a day up to tomorrow that its
-// customer's bell does not show yet rings now, not at the next 6:40 run, by
-// when tomorrow is today and the pair may be under way. Today counts while its
-// start is still ahead (the finder's rule). It writes only those customers'
-// bells, each whole, as the daily run would; it never updates or closes another
-// bell and runs no close pass. Like the daily run's exception, these rings
-// spend no budget and count in the 24-hour read. Same gate as the run.
-// It takes the daily run's lock first, with no job health, so a pass skipped
-// because that lock is held records nothing (it loses nothing: that run judges
-// the same pairs; the 6:40 tick never arrives while a pass from 7:25 AM to
-// 8:25 PM is in flight, so the shared lock never makes that run skip). Only
-// then does it run as its own job, so its job health ('same-start-urgent-pass')
-// is written only by a pass that ran, and a good hourly pass never clears a
-// failed 6:40 run. Anything short of a clean pass (a failed read, a bell not
-// delivered) throws, so this job's health shows it.
-async function runSameStartUrgentPass({ now = new Date() } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('scheduleIntegrityWatchdog')) return { skipped: true, reason: 'gated_off' };
-  const { runExclusive } = require('../utils/cron-lock');
-  return runExclusive('schedule-integrity-watchdog', () => runExclusive('same-start-urgent-pass', async () => {
-    const result = await sameStartUrgentInner({ now });
-    if (result.failed) {
-      const n = result.undelivered;
-      throw new Error(n ? `${n} ${n === 1 ? 'bell' : 'bells'} not delivered` : 'the same-start check failed');
-    }
-    return result;
-  }), { recordHealth: false });
-}
-
-async function sameStartUrgentInner({ now }) {
-  const tomorrowET = etDateString(addETDays(now, 1));
-  const sameStart = await sameStartVisitAlerts(etDateString(now), etClock(now));
-  if (sameStart.failed) return { rang: 0, undelivered: 0, failed: true };
-  const episodes = require('../config/feature-gates').alertEpisodesLive();
-  const standing = sameStart.alerts.length ? await standingBellDays(SAME_START_PREFIX) : new Map();
-  let rang = 0;
-  const lost = { count: 0 };
-  for (const alert of sameStart.alerts) {
-    const shown = standing.get(alert[0]) || [];
-    if (!(alert[3].itemKeys || []).some((day) => day <= tomorrowET && !shown.includes(day))) continue;
-    if (await deliverSameStart(episodes, alert, lost)) rang += 1;
-  }
-  return { rang, undelivered: lost.count, failed: lost.count > 0 };
-}
-
-// One same-start delivery (the daily late loop and the hourly pass): whether it
-// was a real ring. A lost write is logged and counted in `lost.count`, never
-// thrown, so one customer's failure never holds back the rest; each job then
-// fails after its loop (this class's only output is the bell).
-async function deliverSameStart(episodes, alert, lost) {
-  try {
-    return realRing(await ringAlert(episodes, ...alert), episodes, { countRefreshRings: true });
-  } catch (err) {
-    lost.count += 1;
-    // The code, never err.message: a failed knex write's message carries its
-    // SQL with the bound title, which names the customer (AGENTS.md: no PII in logs).
-    logger.error(`[schedule-integrity] ${alert[0]} not delivered (${err.code || err.name || 'error'})`);
-    return false;
-  }
-}
-
 async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('scheduleIntegrityWatchdog')) {
@@ -365,7 +302,7 @@ async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
     const result = await runInner({ now });
     // The same-start class's only output is the bell: a failed scan or a lost
     // bell fails the run, after every class did its work, so the run's job
-    // health shows it (the hourly pass does the same).
+    // health shows it.
     const n = result.sameStartUndelivered;
     if (result.sameStartCheckFailed || n) {
       throw new Error(`[schedule-integrity] ${n ? `${n} same-start ${n === 1 ? 'bell' : 'bells'} not delivered` : 'the same-start check failed'}`);
@@ -1046,7 +983,7 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysR
   let rang = 0;
   let held = 0;
   const over = [];
-  const lost = { count: 0 };
+  let undelivered = 0;
   const standing = episodes && alerts.length ? await standingBellDays(prefix) : new Map();
   const firstNewDay = (alert) => {
     const carried = standing.get(alert[0]) || [];
@@ -1068,11 +1005,20 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysR
       if (!kept) { over.push(alert[0]); continue; }
       delivery = [...kept.slice(0, 4), { ...kept[4], ringOnRefresh: () => false }];
     }
-    if (await deliverSameStart(episodes, delivery, lost)) rang += 1;
+    // A lost write is logged and counted, never thrown, so it never holds back
+    // the next customer. The code, never err.message: a failed knex write's
+    // message carries its SQL with the bound title, which names the customer
+    // (AGENTS.md: no PII in logs).
+    try {
+      if (realRing(await ringAlert(episodes, ...delivery), episodes, { countRefreshRings: true })) rang += 1;
+    } catch (err) {
+      undelivered += 1;
+      logger.error(`[schedule-integrity] ${delivery[0]} not delivered (${err.code || err.name || 'error'})`);
+    }
   }
   if (held) capHit();
   const closed = over.length ? await alertEpisodes.closeAdminAlertKeys(db, over, 'its days no longer start together', { now }) : 0;
-  return { rang, closed, undelivered: lost.count };
+  return { rang, closed, undelivered };
 }
 
 // Delivers one run's findings: rings them in order, capped at
@@ -1352,8 +1298,6 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, s
 module.exports = {
   manualSeriesStampIssue,
   runScheduleIntegrityWatchdog,
-  runSameStartUrgentPass,
-  _sameStartUrgentInner: sameStartUrgentInner,
   runInner,
   rowHasPrice,
   isUnpricedSeriesVisit,

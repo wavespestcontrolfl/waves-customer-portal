@@ -77,7 +77,6 @@ const { siblingInvoiceCoverageVerdict } = require('../services/billing-lane');
 const { findLawnEmailAudienceGaps, findUnstampedRecurringLawnMembers } = require('../services/irrigation-weekly-email');
 const {
   runScheduleIntegrityWatchdog,
-  runSameStartUrgentPass,
   runInner,
   rowHasPrice,
   isUnpricedSeriesVisit,
@@ -1609,88 +1608,6 @@ describe('unpriced series held by a visit that completed unpriced since its bell
     const completedScan = db.mock.results.map((r) => r.value).find((c) => c.where.mock.calls.some(([a, b]) => a === 'ss.status' && b === 'completed'));
     expect(completedScan).toBeUndefined();
     expect(anyInvoiceLinkedToVisit).not.toHaveBeenCalled();
-  });
-});
-
-describe('same-start urgent pass (hourly; owner 2026-11-19, "A")', () => {
-  // Today is Aug 4 (noon ET), so tomorrow is Aug 5.
-  const pairOn = (customerId, itemKeys) => [
-    `same-start-visits:${customerId}`, `Schedule — split ${customerId}'s visits at the same time`, '2 visits start at 1 PM.',
-    { customer_id: customerId, itemKeys },
-    { link: `/admin/dispatch?tab=schedule&date=${itemKeys[0]}`, detail: 'Lawn and Pest.', refreshOnDedupe: true, ringOnRefresh: () => true },
-  ];
-  const watchdogOn = () => isEnabled.mockImplementation((name) => name === 'scheduleIntegrityWatchdog');
-  afterEach(() => isEnabled.mockImplementation(() => false));
-
-  test('gated off, it reads nothing', async () => {
-    isEnabled.mockReturnValue(false);
-    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ skipped: true, reason: 'gated_off' });
-    expect(sameStartVisitAlerts).not.toHaveBeenCalled();
-  });
-
-  test('it rings, whole, each customer with a day up to tomorrow that the bell does not show; it writes and closes nothing else', async () => {
-    watchdogOn();
-    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [
-      pairOn('cust-today', ['2026-08-04', '2026-08-20']), // later today, no bell yet
-      pairOn('cust-tomorrow', ['2026-08-05']), // its bell shows another day only
-      pairOn('cust-known', ['2026-08-05', '2026-08-09']), // its bell shows tomorrow; Aug 9 is the daily run's
-      pairOn('cust-later', ['2026-08-06']), // new, but after tomorrow: the daily run's
-    ], failed: false });
-    makeDbMock({ bellRows: [
-      { dedupe_key: 'same-start-visits:cust-tomorrow', auto_cleared: null, item_keys: ['2026-08-12'] },
-      { dedupe_key: 'same-start-visits:cust-known', auto_cleared: null, item_keys: ['2026-08-05'] },
-    ] });
-    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 2, undelivered: 0, failed: false });
-    expect(sameStartVisitAlerts).toHaveBeenCalledWith('2026-08-04', '12:00');
-    const calls = episodeHelpers.raiseAdminAlertWithReopen.mock.calls;
-    expect(calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-today', 'same-start-visits:cust-tomorrow']);
-    expect(calls[0][3].metadata.itemKeys).toEqual(['2026-08-04', '2026-08-20']);
-    expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalled();
-    expect(runCombinedBookingCheck).not.toHaveBeenCalled();
-    // The daily run's lock first, with no job health; then its own job, so only a pass that ran records health.
-    const { runExclusive } = require('../utils/cron-lock');
-    expect(runExclusive.mock.calls.map(([name, , opts]) => [name, opts])).toEqual([
-      ['schedule-integrity-watchdog', { recordHealth: false }], ['same-start-urgent-pass', undefined],
-    ]);
-  });
-
-  test('while the daily run holds its lock the pass skips: it reads nothing and never starts its own job, so that job\'s health stands', async () => {
-    watchdogOn();
-    const { runExclusive } = require('../utils/cron-lock');
-    runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
-    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ skipped: true, reason: 'lease_held' });
-    expect(runExclusive.mock.calls.map(([name]) => name)).toEqual(['schedule-integrity-watchdog']);
-    expect(sameStartVisitAlerts).not.toHaveBeenCalled();
-  });
-
-  test('a failed check writes nothing and fails the pass', async () => {
-    watchdogOn();
-    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [], failed: true });
-    makeDbMock();
-    await expect(runSameStartUrgentPass({ now: NOW })).rejects.toThrow('the same-start check failed');
-    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('one customer\'s failed write never holds back the next; the pass then fails', async () => {
-    watchdogOn();
-    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairOn('cust-a', ['2026-08-05']), pairOn('cust-b', ['2026-08-05'])], failed: false });
-    makeDbMock();
-    episodeHelpers.raiseAdminAlertWithReopen.mockImplementationOnce(async () => null); // the first write is lost
-    await expect(runSameStartUrgentPass({ now: NOW })).rejects.toThrow('1 bell not delivered');
-    expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-a', 'same-start-visits:cust-b']);
-    expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-b']);
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('same-start-visits:cust-a not delivered'));
-  });
-
-  test('kill switch off: the same customers ring through notifyAdmin', async () => {
-    watchdogOn();
-    alertEpisodesLive.mockReturnValue(false);
-    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairOn('cust-tomorrow', ['2026-08-05']), pairOn('cust-later', ['2026-08-06'])], failed: false });
-    makeDbMock();
-    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 1, undelivered: 0, failed: false });
-    expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-tomorrow']);
-    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 });
 

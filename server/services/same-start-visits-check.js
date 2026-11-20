@@ -48,8 +48,7 @@
  * its shared ring budget (this class rings after every other one, the
  * combined-booking check included, earliest new day first; a new pair for
  * today or tomorrow rings past the budget too, owner 2026-11-19 "A") and its
- * alert episodes. The watchdog's hourly urgent pass rings such a pair made
- * after the daily run. The bell names the
+ * alert episodes. The bell names the
  * first day and the number of days, links to the first day's schedule, and
  * lists the days and their groups in its detail. Its itemKeys are every day,
  * listed in the detail or not, so a day that joins a standing bell rings it

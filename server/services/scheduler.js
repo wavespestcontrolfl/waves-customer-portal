@@ -10428,20 +10428,6 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // HOURLY :25, 7 AM-8 PM ET — the same-start check's urgent pass (owner
-  // 2026-11-19, "A"): a customer's visits at one start on a day up to tomorrow,
-  // made after the 6:40 watchdog run, ring now; by the next run tomorrow is
-  // today and the pair may be under way. Its gate check, its own job health
-  // ('same-start-urgent-pass') and the watchdog's borrowed lock live in
-  // runSameStartUrgentPass; see schedule-integrity-watchdog.js.
-  cron.schedule('25 7-20 * * *', async () => {
-    try {
-      await require('./schedule-integrity-watchdog').runSameStartUrgentPass();
-    } catch (err) {
-      logger.error(`[schedule-integrity] same-start urgent pass failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
   // =========================================================================
   // HOURLY :46 — Retroactive call_log→customer linking. Heals calls that
   // arrived before their customer record existed (unambiguous primary-phone
