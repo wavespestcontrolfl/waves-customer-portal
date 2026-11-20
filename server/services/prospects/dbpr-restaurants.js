@@ -257,10 +257,12 @@ const ENTITIES = { '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot
 // The state office's street address closes every whole page.
 const PAGE_FOOTER_RE = /2601 Blair Stone Road/;
 const VIOLATION_CODE_RE = /^\d\d[A-Z]?-\d\d-\d$/;
-// A cell (td or th), or a row end. HTML lets a page leave out </td> and </tr>, and the state's pages do, so a cell runs
-// to the next table tag (a cell, a row or a table, start or end), as a browser closes it, and any row or table tag
-// ends the row. A cell that holds a table gives only its text before that table.
-const CELL_OR_ROW_END_RE = /<t[dh]\b[^>]*>((?:(?!<\/?(?:t[dhr]|table|tbody|thead|tfoot)\b)[\s\S])*)|<\/?(?:tr|table|tbody|thead|tfoot)\b[^>]*>/gi;
+// A cell (td or th; group 1), or a row or table tag (group 2 names it). HTML lets a page leave out </td> and </tr>,
+// and the state's pages do, so a cell runs to the next table tag (a cell, a row or a table, start or end), as a
+// browser closes it, and any row or table tag ends the row. A cell that holds a table gives only its text before it.
+const CELL_OR_ROW_END_RE = /<t[dh]\b[^>]*>((?:(?!<\/?(?:t[dhr]|table|tbody|thead|tfoot)\b)[\s\S])*)|<\/?(tr|table|tbody|thead|tfoot)\b[^>]*>/gi;
+// The row that heads the violations table: "Violation" and "Observation" (a blank spacer cell between them).
+const isViolationsHead = (cells) => cells.length === 2 && /^violation$/i.test(cells[0]) && /^observation$/i.test(cells[1]);
 
 // Tags out, the six entities the pages use decoded, NUL characters and runs of white space made one space.
 function htmlText(html) {
@@ -295,8 +297,10 @@ function newestNoteFirst(text) {
  * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. A page
  * answers only when it is whole (the state office footer closes it) and lists the violation 35 the file counted (a
  * 35A or 35B code). An error page, a changed layout or a page cut short is a failed read, retried later, never
- * "no pests". An entry starts at a table cell that holds a violation code alone and takes the cells after it in
- * its row, so a code quoted in a note, a comment, a script or the footer never starts one. findings holds the
+ * "no pests". An entry starts at a table cell that holds a violation code alone, in the violations table (the rows
+ * after its "Violation" / "Observation" head, up to the next table tag), and takes the cells after it in its row,
+ * so a code quoted in a note, a comment or a script never starts one. A code cell outside that table (another table,
+ * the footer) means the page is not laid out as expected: no answer, never a guess either way. findings holds the
  * 35A entries only, each note of a follow-up report newest first (newestNoteFirst).
  */
 function parseInspectionReport(html) {
@@ -305,20 +309,31 @@ function parseInspectionReport(html) {
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
   const entries = [];
   let open = null;
+  let row = []; // the cell texts of this row, to find the violations table's head
+  let inViolations = false;
+  let stray = false; // a code cell outside the violations table
   for (const match of page.matchAll(CELL_OR_ROW_END_RE)) {
     if (match[1] === undefined) {
-      open = null; // a row or table tag closes the entry
+      // A row or table tag ends the row and its entry. The violations table runs from its head to the next table tag.
+      if (isViolationsHead(row)) inViolations = true;
+      if (/^table$/i.test(match[2])) inViolations = false;
+      row = [];
+      open = null;
       continue;
     }
     const cell = htmlText(match[1]);
-    if (VIOLATION_CODE_RE.test(cell)) {
+    if (!cell) continue;
+    row.push(cell);
+    if (!VIOLATION_CODE_RE.test(cell)) {
+      if (open) open.parts.push(cell);
+    } else if (inViolations) {
       open = { code: cell, parts: [] };
       entries.push(open);
-    } else if (open && cell) {
-      open.parts.push(cell);
+    } else {
+      stray = true;
     }
   }
-  if (!entries.some((entry) => /^35[AB]-/.test(entry.code))) return null;
+  if (stray || !entries.some((entry) => /^35[AB]-/.test(entry.code))) return null;
   const findings = entries
     .filter((entry) => /^35A-/.test(entry.code))
     .map((entry) => ({ code: entry.code, text: newestNoteFirst(entry.parts.join(' ')).slice(0, FINDING_TEXT_MAX) }));

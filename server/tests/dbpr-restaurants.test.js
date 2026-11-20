@@ -17,6 +17,9 @@ const logger = require('../services/logger');
 const svc = require('../services/prospects/dbpr-restaurants');
 
 const fixture = (name) => fs.readFileSync(path.join(__dirname, 'fixtures', 'dbpr-restaurants', name), 'utf8');
+// A whole report page: the inspection heading, the violations table under its head row, and the state office footer.
+const VIOLATIONS_HEAD = '<tr><td><u><b>Violation</b></u></td><td>&nbsp;&nbsp;</td><td><u><b>Observation</b></u></td></tr>';
+const reportPage = (rows) => `<p>Inspection Information</p><table>${VIOLATIONS_HEAD}${rows}</table><p>2601 Blair Stone Road</p>`;
 
 const csvLine = (cells) => cells.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',');
 
@@ -255,9 +258,22 @@ describe('parseInspectionReport', () => {
   });
 
   test('finding text is capped, and a NUL character never reaches it', () => {
-    const page = (note) => `<p>Inspection Information</p><table><tr><td>35A-02-8</td><td>${note}</td></tr></table><p>2601 Blair Stone Road</p>`;
+    const page = (note) => reportPage(`<tr><td>35A-02-8</td><td>${note}</td></tr>`);
     expect(svc.parseInspectionReport(page('x'.repeat(2000))).findings[0].text).toHaveLength(400);
     expect(svc.parseInspectionReport(page('ROACH\0ES')).findings[0].text).toBe('ROACH ES');
+  });
+
+  test('a code counts only inside the violations table: a lone 35A code in another table or the footer is no answer, never pests', () => {
+    const b = fixture('report-35b.html');
+    const reference = b.replace('<p>2601 Blair Stone Road', '<table><tr><td>Code</td><td>Meaning</td></tr><tr><td>35A-02-8</td><td>Pests</td></tr></table><p>2601 Blair Stone Road');
+    expect(svc.parseInspectionReport(reference)).toBeNull();
+    const footer = b.replace('<p>2601 Blair Stone Road, Tallahassee FL 32399</p>', '<table><tr><td>35A-02-8</td><td>2601 Blair Stone Road</td></tr></table>');
+    expect(footer).toContain('<td>35A-02-8</td><td>2601 Blair Stone Road');
+    expect(svc.parseInspectionReport(footer)).toBeNull();
+    // A violations table without its head row is not the table either: no answer.
+    expect(svc.parseInspectionReport(b.replace(/<tr><td><font><u><b>Violation[\s\S]*?<\/tr>\n/, ''))).toBeNull();
+    // The page as it is still answers.
+    expect(svc.parseInspectionReport(b)).toEqual({ pestEvidence: false, findings: [] });
   });
 
   test('a cell or a row without its end tag still counts, so a 35A code cell without </td> is never read as "no pests"', () => {
@@ -267,7 +283,8 @@ describe('parseInspectionReport', () => {
     expect(open).not.toContain('35A-02-8</u></a></td>');
     expect(svc.parseInspectionReport(open)).toEqual(whole);
     // No </td> and no </tr> anywhere: each row still ends at the next one, so the 35B note never joins the 35A entry.
-    const bare = '<p>Inspection Information</p><table><tr><td>35A-02-8<td>High Priority - Live flies at the bar.'
+    const bare = '<p>Inspection Information</p><table><tr><td>Violation<td>&nbsp;<td>Observation'
+      + '<tr><td>35A-02-8<td>High Priority - Live flies at the bar.'
       + '<tr><td>35B-03-4<td>Basic - Back door propped open.</table><p>2601 Blair Stone Road</p>';
     expect(svc.parseInspectionReport(bare)).toEqual({ pestEvidence: true, findings: [{ code: '35A-02-8', text: 'High Priority - Live flies at the bar.' }] });
     // A header cell (th) is a cell too.
@@ -275,7 +292,7 @@ describe('parseInspectionReport', () => {
   });
 
   test('a follow-up report puts the newest visit note first, so the cap never drops the visit the page reports', () => {
-    const page = (note) => `<p>Inspection Information</p><table><tr><td>35A-02-8</td><td>${note}</td></tr></table><p>2601 Blair Stone Road</p>`;
+    const page = (note) => reportPage(`<tr><td>35A-02-8</td><td>${note}</td></tr>`);
     const initial = `Live, small flying insects found. ${'Observed flies at the bar. '.repeat(20)}`;
     const note = `High Priority - - From initial inspection : High Priority - ${initial}`
       + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
