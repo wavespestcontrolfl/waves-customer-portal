@@ -201,37 +201,92 @@ const DAY_MS = 86400000;
 const dayNumber = (dateStr) => Math.floor(Date.parse(`${dateStr}T00:00:00Z`) / DAY_MS);
 // half-up a x b / c for non-negative integers
 const mulDivRound = (a, b, c) => Math.floor((2 * a * b + c) / (2 * c));
+// the same for a signed amount (a component can in principle be a negative adjustment)
+const signedMulDivRound = (cents, b, c) => (cents < 0 ? -mulDivRound(-cents, b, c) : mulDivRound(cents, b, c));
+const hundredths = (value) => Math.round(Number(value) * 100) || 0;
 
 /**
- * The share of one pay week's gross that falls on [from, to]. `dayMinutes` are the week's paid minutes by
- * work date ({ workDate, minutes }). With worked time on record the gross splits by the paid minutes on
- * in-window dates over the week's paid minutes, so the dates the work was done decide it; a week with no
- * worked time on record falls back to in-window days / 7. Half up, once per week.
+ * The gross of one finalized check, split into the components payroll-calc.js computePaycheck adds up
+ * (gross = regularPay + overtimePay + ptoPay + holidayPay + reviewBonus + commission + healthAllowance +
+ * lineOvertimePremium; the employer HSA is not in gross). Each component has ONE earning rule, from data the pay
+ * run already stores. A component is { cents, spread: [{ date, weight }] } (earned on dated days, in proportion
+ * to the weights) or { cents, week } (earned in a week only; counts its in-window days / 7).
+ *
+ *   component (payroll_checks column)      earning date rule                            data used
+ *   regular + overtime pay                 shift work dates of the check's week,        time_entry_daily_summary paid minutes
+ *   (regular_pay_cents + overtime_pay_      weighted by paid minutes; the week's        by work_date, overtime_minutes of the
+ *   cents; the weekly OT premium is in      overtime minutes are the LAST minutes       check (hours past 40 are worked last)
+ *   overtime_pay)                           worked, at 1.5x
+ *   paid time off (pto_pay_cents)          the dated PTO records of the week,           payroll_time_off (kind pto)
+ *                                           weighted by minutes
+ *   holiday pay (holiday_pay_cents)        the dated holiday records of the week,       payroll_time_off (kind holiday)
+ *                                           weighted by minutes
+ *   commission lines (commission_cents)    the payment day for a ledger line            payroll_pay_lines of the check:
+ *   review bonus lines (review_bonus_      (covers_to), the day the review was          LINE_EARNED_ON_SQL
+ *   cents), health allowance lines         credited for a review bonus, the line's
+ *   (health_allowance_cents)               own pay week otherwise
+ *   catch-up overtime premium              the earned weeks of the line pay it          calc_snapshot.lineOvertimeWeeks
+ *   (line_overtime_premium_cents)          comes from (each week's premiumCents)
+ *   anything else (gross minus the above)  NO DATE: the check's own week, in-window     (a check with no day records, a
+ *                                           days / 7                                     sum that does not add up)
+ *
+ * A component with no dated data (a straddling week with no daily summaries or time off records) falls back
+ * to its week's in-window days / 7. The components of a check always add up to its gross_cents.
  */
-function weekShareCents(week, fromDay, toDay) {
-  const start = dayNumber(week.weekStart);
+function checkComponents(check) {
+  const wageCents = check.regularPayCents + check.overtimePayCents;
+  // paid minutes by day, the check's overtime minutes counted at the end of the week (1.5x: weights in half minutes)
+  const days = [...(check.dayMinutes || [])].sort((a, b) => (a.workDate < b.workDate ? -1 : 1))
+    .map((d) => ({ date: d.workDate, minutes: hundredths(d.minutes) }));
+  let overtimeLeft = hundredths(check.overtimeMinutes);
+  const weights = [];
+  for (let i = days.length - 1; i >= 0; i -= 1) {
+    const overtime = Math.min(days[i].minutes, overtimeLeft);
+    overtimeLeft -= overtime;
+    weights.unshift({ date: days[i].date, weight: (days[i].minutes - overtime) * 2 + overtime * 3 });
+  }
+  const timeOff = (records) => (records || []).map((r) => ({ date: r.workDate, weight: hundredths(r.minutes) }));
+  const components = [
+    { cents: wageCents, spread: weights },
+    { cents: check.ptoPayCents, spread: timeOff(check.ptoRecords) },
+    { cents: check.holidayPayCents, spread: timeOff(check.holidayRecords) },
+    ...(check.lines || []).map((line) => ({ cents: line.cents, spread: [{ date: line.earnedOn, weight: 1 }] })),
+    ...(check.lineOvertimeWeeks || []).map((w) => ({ cents: w.premiumCents, week: w.weekStart })),
+  ];
+  const known = components.reduce((sum, c) => sum + c.cents, 0);
+  components.push({ cents: check.grossCents - known, week: check.weekStart });
+  return components;
+}
+
+// The share of one component that falls on [fromDay, toDay] (day numbers), half up once.
+function componentShareCents(component, checkWeekStart, fromDay, toDay) {
+  const { cents } = component;
+  if (!cents) return 0;
+  const spread = component.spread || [];
+  const total = spread.reduce((sum, d) => sum + d.weight, 0);
+  if (total > 0) {
+    const inside = spread.filter((d) => dayNumber(d.date) >= fromDay && dayNumber(d.date) <= toDay).reduce((sum, d) => sum + d.weight, 0);
+    return signedMulDivRound(cents, inside, total);
+  }
+  const start = dayNumber(component.week || checkWeekStart);
   const days = Math.min(start + 6, toDay) - Math.max(start, fromDay) + 1;
   if (days <= 0) return 0;
-  if (days >= 7) return week.grossCents;
-  const minutes = (week.dayMinutes || []).map((d) => ({ day: dayNumber(d.workDate), hundredths: Math.round(Number(d.minutes) * 100) || 0 }));
-  const total = minutes.reduce((sum, d) => sum + d.hundredths, 0);
-  if (total <= 0) return mulDivRound(week.grossCents, days, 7);
-  const inside = minutes.filter((d) => d.day >= fromDay && d.day <= toDay).reduce((sum, d) => sum + d.hundredths, 0);
-  return mulDivRound(week.grossCents, inside, total);
+  return days >= 7 ? cents : signedMulDivRound(cents, days, 7);
 }
 
 /**
- * Gross pay EARNED in [from, to]: the work-week basis, not the pay date (the ruling measures work done
- * Mar 1 - Aug 31, and weekly pay means August work is paid in September). `weeks` are finalized checks as
- * { weekStart, grossCents, dayMinutes? }, a pay week being weekStart .. weekStart + 6. A week that straddles a
- * window edge counts only the share earned on in-window dates (weekShareCents). D5-5 pay lines MUST use this
- * helper (with readGross for the weeks) for the season bonus base and the stay bonus's prior 12 months, so the
- * board and the pay line can never differ.
+ * Gross pay EARNED in [from, to] by work, not by pay date (the ruling measures work done Mar 1 - Aug 31, and
+ * weekly pay means August work is paid in September; a catch-up line or premium paid later counts when it was
+ * earned). It is the sum, over every finalized check, of the components (see checkComponents, which holds the
+ * component table and each one's earning date rule) whose earning dates fall in the window; a component that
+ * straddles an edge counts its in-window share. D5-5 pay lines MUST use this helper (with readGross) for the
+ * season bonus base and the stay bonus's prior 12 months, so the board and the pay line can never differ.
  */
-function earnedGrossCents(weeks, from, to) {
+function earnedGrossCents(checks, from, to) {
   const fromDay = dayNumber(from);
   const toDay = dayNumber(to);
-  return weeks.reduce((total, week) => total + weekShareCents(week, fromDay, toDay), 0);
+  return checks.reduce((total, check) => total
+    + checkComponents(check).reduce((sum, c) => sum + componentShareCents(c, check.weekStart, fromDay, toDay), 0), 0);
 }
 
 // The paid minutes by work date of one technician's week, from the daily summaries the weekly pay is summed from
@@ -246,44 +301,69 @@ async function readDayMinutes(conn, technicianId, weekStart) {
   return rows.map((row) => ({ workDate: row.work_date, minutes: Number(row.minutes) || 0 }));
 }
 
+// The dated paid time off and holiday records of one week (payroll_time_off).
+async function readTimeOffRecords(conn, technicianId, weekStart) {
+  const rows = await conn('payroll_time_off')
+    .where({ technician_id: technicianId })
+    .where('work_date', '>=', weekStart)
+    .where('work_date', '<=', addStaffWorkDays(weekStart, 6))
+    .select(conn.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"), 'kind', 'minutes');
+  const records = (kind) => rows.filter((row) => row.kind === kind).map((row) => ({ workDate: row.work_date, minutes: Number(row.minutes) || 0 }));
+  return { ptoRecords: records('pto'), holidayRecords: records('holiday') };
+}
+
 // The day a pay line was EARNED (the same dating the commission year to date uses): a commission ledger line on the day
 // of the payment it pays (covers_to), a review bonus on the day the review was credited, any other line (a hand-made
-// commission, a bonus) in its own pay week (earned_week_start). `l` is payroll_pay_lines.
+// commission, a bonus, an allowance) in its own pay week (earned_week_start). `l` is payroll_pay_lines.
 const LINE_EARNED_ON_SQL = `COALESCE(CASE l.source_type
     WHEN ? THEN l.covers_to
     WHEN ? THEN (SELECT (p.earned_at AT TIME ZONE ?)::date FROM review_incentive_payouts p WHERE p.id::text = l.source_id)
   END, l.earned_week_start)`;
 const lineEarnedOnBindings = () => [COMMISSION_SOURCE_TYPE, REVIEW_BONUS_SOURCE_TYPE, STAFF_TIME_ZONE];
+// the pay line kinds that are in a check's gross (the employer HSA is not)
+const GROSS_LINE_KINDS = ['review_bonus', 'commission', 'health_allowance'];
 
 /**
- * Gross pay earned in [from, to], in two parts. WAGES: each finalized check's gross less the pay lines paid on it
- * (commission, review bonus, other lines), by work week through earnedGrossCents (a catch-up line paid in a later
- * week must not move wages). LINES: each paid line counts in full on the day it was earned (LINE_EARNED_ON_SQL),
- * wherever it was paid. D5-5 pay lines use this function for the season bonus base and the stay bonus's prior 12
- * months.
+ * The technician's finalized checks that can hold pay earned in [from, to] (every check whose pay week ends on or
+ * after `from`: a catch-up line or premium can be paid long after it was earned), with their dated parts, then
+ * earnedGrossCents. Day records are read only for a week that straddles a window edge.
  */
 async function readGross(conn, technicianId, from, to) {
   const rows = await conn('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
-    .whereRaw('c.week_start + 6 >= ?::date AND c.week_start <= ?::date', [from, to])
-    .select(conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents',
-      conn.raw("COALESCE((SELECT SUM(l.amount_cents) FROM payroll_pay_lines l WHERE l.check_id = c.id AND l.status = 'paid'), 0) AS lines_cents"));
-  const weeks = [];
+    .whereRaw('c.week_start + 6 >= ?::date', [from])
+    .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents', 'c.regular_pay_cents',
+      'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents',
+      conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"));
+  if (!rows.length) return 0;
+  const lineRows = await conn('payroll_pay_lines as l')
+    .whereIn('l.check_id', rows.map((row) => row.id))
+    .where('l.status', 'paid')
+    .whereIn('l.kind', GROSS_LINE_KINDS)
+    .select('l.check_id', 'l.amount_cents', conn.raw(`to_char(${LINE_EARNED_ON_SQL}, 'YYYY-MM-DD') AS earned_on`, lineEarnedOnBindings()));
+  const checks = [];
   for (const row of rows) {
-    const week = { weekStart: row.week_start, grossCents: Math.max(0, toCents(row.gross_cents) - toCents(row.lines_cents)) };
-    if (week.weekStart < from || addStaffWorkDays(week.weekStart, 6) > to) week.dayMinutes = await readDayMinutes(conn, technicianId, week.weekStart);
-    weeks.push(week);
+    const check = {
+      weekStart: row.week_start,
+      grossCents: toCents(row.gross_cents),
+      regularPayCents: toCents(row.regular_pay_cents),
+      overtimePayCents: toCents(row.overtime_pay_cents),
+      overtimeMinutes: Number(row.overtime_minutes) || 0,
+      ptoPayCents: toCents(row.pto_pay_cents),
+      holidayPayCents: toCents(row.holiday_pay_cents),
+      lines: lineRows.filter((line) => line.check_id === row.id).map((line) => ({ cents: toCents(line.amount_cents), earnedOn: line.earned_on })),
+      lineOvertimeWeeks: (Array.isArray(row.line_overtime_weeks) ? row.line_overtime_weeks : [])
+        .map((w) => ({ weekStart: w.weekStart, premiumCents: toCents(w.premiumCents) })),
+    };
+    const weekEnd = addStaffWorkDays(check.weekStart, 6);
+    if (weekEnd >= from && check.weekStart <= to && (check.weekStart < from || weekEnd > to)) {
+      check.dayMinutes = await readDayMinutes(conn, technicianId, check.weekStart);
+      Object.assign(check, await readTimeOffRecords(conn, technicianId, check.weekStart));
+    }
+    checks.push(check);
   }
-  const lines = await conn('payroll_pay_lines as l')
-    .join('payroll_checks as c', 'c.id', 'l.check_id')
-    .join('payroll_runs as r', 'r.id', 'c.run_id')
-    .where({ 'l.technician_id': technicianId, 'l.status': 'paid', 'c.status': 'finalized', 'r.status': 'finalized' })
-    .whereRaw(`${LINE_EARNED_ON_SQL} >= ?::date AND ${LINE_EARNED_ON_SQL} <= ?::date`,
-      [...lineEarnedOnBindings(), from, ...lineEarnedOnBindings(), to])
-    .sum({ cents: 'l.amount_cents' })
-    .first();
-  return earnedGrossCents(weeks, from, to) + toCents(lines?.cents);
+  return earnedGrossCents(checks, from, to);
 }
 
 // Commission pay lines earned from Jan 1 to today: 'paid' on a finalized check, 'open' on a run not finalized yet,
@@ -367,4 +447,4 @@ async function listTechnicians(conn = db) {
   return rows.map((row) => ({ id: row.id, name: row.name }));
 }
 
-module.exports = { ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents };
+module.exports = { ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents };

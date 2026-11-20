@@ -55,6 +55,19 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.text('status').notNullable();
       t.date('week_start').notNullable();
       t.integer('gross_cents').notNullable();
+      t.integer('regular_pay_cents').notNullable().defaultTo(0);
+      t.integer('overtime_pay_cents').notNullable().defaultTo(0);
+      t.decimal('overtime_minutes', 10, 2).notNullable().defaultTo(0);
+      t.integer('pto_pay_cents');
+      t.integer('holiday_pay_cents');
+      t.jsonb('calc_snapshot').notNullable().defaultTo('{}');
+    });
+    await s.createTable('payroll_time_off', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('technician_id');
+      t.date('work_date').notNullable();
+      t.text('kind').notNullable();
+      t.decimal('minutes', 10, 2).notNullable();
     });
     await s.createTable('payroll_pay_lines', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -109,16 +122,19 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
   });
 
   beforeEach(async () => {
-    for (const table of ['payroll_checks', 'payroll_runs', 'payroll_pay_lines', 'review_incentive_payouts', 'review_requests', 'time_entry_daily_summary', 'messaging_audit_log']) await db(table).del();
+    for (const table of ['payroll_checks', 'payroll_runs', 'payroll_pay_lines', 'review_incentive_payouts', 'review_requests', 'time_entry_daily_summary', 'messaging_audit_log', 'payroll_time_off']) await db(table).del();
     scores.buildSeasonScore.mockReset().mockResolvedValue({
       complete: true, year: 2026, parts: PARTS, score: 91.5, rateBps: 400, settings: { version: 0, weights: WEIGHTS, cutLines: CUTS },
     });
     scores.getSettings.mockReset().mockResolvedValue({ version: 0, weights: WEIGHTS, cutLines: CUTS });
   });
 
+  // a plain check: all of its gross is regular pay unless the row says otherwise
+  const insertChecks = (rows) => db('payroll_checks').insert(rows.map((row) => ({ regular_pay_cents: row.gross_cents, ...row })));
+
   async function seed() {
     const [run, voided] = (await db('payroll_runs').insert([{ status: 'finalized', week_start: '2026-10-26', pay_date: '2026-11-06' }, { status: 'voided', week_start: '2026-11-02', pay_date: '2026-11-13' }]).returning('id')).map((r) => r.id);
-    await db('payroll_checks').insert([
+    await insertChecks([
       { run_id: run, technician_id: alpha, status: 'finalized', week_start: '2026-03-02', gross_cents: 100000 },
       { run_id: run, technician_id: alpha, status: 'finalized', week_start: '2026-08-31', gross_cents: 50000 },
       { run_id: run, technician_id: alpha, status: 'finalized', week_start: '2026-09-07', gross_cents: 70000 }, // after the season
@@ -204,6 +220,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
   test('catch-up pay: lines paid in a later week count on the day they were earned, wages by work week', async () => {
     await seed();
     const [sept] = await db('payroll_checks').where({ technician_id: alpha, week_start: '2026-09-07' }).select('id');
+    await db('payroll_checks').where({ id: sept.id }).update({ regular_pay_cents: 58500 }); // 70000 less the 11500 of lines
     const [payout] = await db('review_incentive_payouts').where({ technician_id: alpha, source: 'google_review' }).orderBy('earned_at').limit(1).select('id');
     await db('payroll_pay_lines').insert([
       // the Sept 7 check's 70000 gross holds 11500 of lines; its wages (58500) are outside the season
@@ -216,6 +233,29 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.commission).toMatchObject({ paidCents: 23600 + 8000 + 2000 });
     // the stay window holds the same wages (218500) and all three lines (11500) once each
     expect(board.stayBonus.estimateCents).toBe(Math.round(230000 * 0.02));
+  });
+
+  test('paid time off on Aug 31 and a catch-up overtime premium earned in May are dated by their own records', async () => {
+    const [eps] = await db('technicians').insert({ name: 'Sample Epsilon', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-09-07', pay_date: '2026-09-18' }).returning('id');
+    await insertChecks([
+      // the Aug 31 week: 30000 of wages (a third worked on Aug 31) and 10000 of PTO taken Aug 31 and Sep 1
+      { run_id: run.id, technician_id: eps.id, status: 'finalized', week_start: '2026-08-31', gross_cents: 40000, regular_pay_cents: 30000, pto_pay_cents: 10000 },
+      // paid in September: 7000 of wages (outside) and a 3000 overtime premium earned in two May weeks
+      { run_id: run.id, technician_id: eps.id, status: 'finalized', week_start: '2026-09-07', gross_cents: 10000, regular_pay_cents: 7000,
+        calc_snapshot: { lineOvertimeWeeks: [{ weekStart: '2026-05-04', premiumCents: 2000 }, { weekStart: '2026-05-11', premiumCents: 1000 }] } },
+    ]);
+    await db('time_entry_daily_summary').insert([
+      { technician_id: eps.id, work_date: '2026-08-31', total_shift_minutes: 480, unpaid_meal_minutes: 0 },
+      { technician_id: eps.id, work_date: '2026-09-01', total_shift_minutes: 480, unpaid_meal_minutes: 0 },
+      { technician_id: eps.id, work_date: '2026-09-02', total_shift_minutes: 480, unpaid_meal_minutes: 0 },
+    ]);
+    await db('payroll_time_off').insert([
+      { technician_id: eps.id, work_date: '2026-08-31', kind: 'pto', minutes: 480 },
+      { technician_id: eps.id, work_date: '2026-09-01', kind: 'pto', minutes: 480 },
+    ]);
+    const board = await service.getScoreboard(eps.id, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(10000 + 5000 + 3000);
   });
 
   test('review asks count every delivered ask by its send day: a follow-up counts once even when stamped twice', async () => {
@@ -263,7 +303,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     await seed();
     const [delta] = await db('technicians').insert({ name: 'Sample Delta', hire_date: '2025-12-01' }).returning('id');
     const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-11-30', pay_date: '2026-12-11' }).returning('id');
-    await db('payroll_checks').insert({ run_id: run.id, technician_id: delta.id, status: 'finalized', week_start: '2026-11-30', gross_cents: 70000 });
+    await insertChecks([{ run_id: run.id, technician_id: delta.id, status: 'finalized', week_start: '2026-11-30', gross_cents: 70000 }]);
     await db('time_entry_daily_summary').insert([
       { technician_id: delta.id, work_date: '2026-11-30', total_shift_minutes: 480, unpaid_meal_minutes: 0 }, // in the window
       { technician_id: delta.id, work_date: '2026-12-01', total_shift_minutes: 480, unpaid_meal_minutes: 0 }, // on the anniversary: not in it

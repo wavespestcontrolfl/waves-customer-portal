@@ -2,7 +2,7 @@
 // with synthetic fixtures. The reads run against Postgres in tech-rewards-scoreboard-postgres.test.js.
 jest.mock('../models/db', () => jest.fn());
 
-const { composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents } = require('../services/tech-rewards-scoreboard');
+const { composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents } = require('../services/tech-rewards-scoreboard');
 
 const WEIGHTS = { onTime: 25, audit: 25, callbacks: 20, truck: 10, ownerRating: 20 };
 const CUTS = { top: 90, mid: 80, low: 70 };
@@ -61,45 +61,96 @@ describe('reviewRateBps', () => {
   });
 });
 
-describe('earnedGrossCents (work-week basis, edge weeks prorated)', () => {
-  const week = (weekStart, grossCents) => ({ weekStart, grossCents });
-  test('whole weeks inside the window count in full', () => {
-    expect(earnedGrossCents([week('2026-03-02', 70000), week('2026-08-24', 70000)], '2026-03-01', '2026-08-31')).toBe(140000);
-  });
-  test('the week of Aug 31 (Mon Aug 31 - Sun Sep 6) counts one day in seven', () => {
-    expect(earnedGrossCents([week('2026-08-31', 70000)], '2026-03-01', '2026-08-31')).toBe(10000);
-  });
-  test('the week ending Mar 1 (Mon Feb 23 - Sun Mar 1) counts one day in seven; the week before it counts nothing', () => {
-    expect(earnedGrossCents([week('2026-02-23', 70000), week('2026-02-16', 70000)], '2026-03-01', '2026-08-31')).toBe(10000);
-  });
-  test('a mid-week edge counts the in-window days (Thu Aug 31 2028: Mon-Thu = 4 of 7), rounded half up', () => {
-    expect(earnedGrossCents([week('2028-08-28', 100000)], '2028-03-01', '2028-08-31')).toBe(57143);
+describe('earnedGrossCents (by component earning date)', () => {
+  const FROM = '2026-03-01';
+  const TO = '2026-08-31';
+  const plain = (weekStart, cents, extra = {}) => ({
+    weekStart, grossCents: cents, regularPayCents: cents, overtimePayCents: 0, overtimeMinutes: 0, ptoPayCents: 0, holidayPayCents: 0, ...extra,
   });
   const mins = (...pairs) => pairs.map(([workDate, minutes]) => ({ workDate, minutes }));
-  test('an edge week whose hours all fall inside the window counts in full', () => {
-    // Mon Aug 31 week: all the work was done Mon-Tue Aug 31 (Mon) ... window ends Aug 31, so use the Mar 1 edge: week of Feb 23, work done only Sun Mar 1
-    expect(earnedGrossCents([{ weekStart: '2026-02-23', grossCents: 70000, dayMinutes: mins(['2026-03-01', 480]) }], '2026-03-01', '2026-08-31')).toBe(70000);
+  const sum = (check) => checkComponents(check).reduce((total, c) => total + c.cents, 0);
+
+  test('the components of a plain week add up to its gross; so do the components of a full check', () => {
+    const week = plain('2026-04-06', 70000);
+    expect(sum(week)).toBe(week.grossCents);
+    const full = {
+      weekStart: '2026-09-07', grossCents: 40000 + 12000 + 8000 + 4000 + 3000 + 500 + 1500,
+      regularPayCents: 40000, overtimePayCents: 12000, overtimeMinutes: 480, ptoPayCents: 8000, holidayPayCents: 4000,
+      lines: [{ cents: 3000, earnedOn: '2026-05-10' }, { cents: 500, earnedOn: '2026-04-10' }],
+      lineOvertimeWeeks: [{ weekStart: '2026-05-04', premiumCents: 1500 }],
+    };
+    expect(sum(full)).toBe(full.grossCents);
+    expect(checkComponents(full).at(-1).cents).toBe(0); // nothing left undated
   });
-  test('an edge week whose hours all fall outside the window counts nothing', () => {
-    expect(earnedGrossCents([{ weekStart: '2026-08-31', grossCents: 70000, dayMinutes: mins(['2026-09-01', 480], ['2026-09-02', 480]) }], '2026-03-01', '2026-08-31')).toBe(0);
+
+  test('whole weeks inside the window count in full; a week before or after counts nothing', () => {
+    expect(earnedGrossCents([plain('2026-03-02', 70000), plain('2026-08-24', 70000), plain('2026-02-16', 70000)], FROM, TO)).toBe(140000);
+    expect(earnedGrossCents([plain('2026-09-07', 70000)], FROM, TO)).toBe(0);
   });
-  test('an edge week with hours on both sides splits by paid minutes, not by days', () => {
-    // Mon Aug 31 8 h inside; Tue-Wed Sep 1-2 16 h outside: one third
-    expect(earnedGrossCents([{ weekStart: '2026-08-31', grossCents: 50000, dayMinutes: mins(['2026-08-31', 480], ['2026-09-01', 480], ['2026-09-02', 480]) }], '2026-03-01', '2026-08-31')).toBe(16667);
-    // days/7 would have said one seventh
-    expect(earnedGrossCents([{ weekStart: '2026-08-31', grossCents: 50000 }], '2026-03-01', '2026-08-31')).toBe(7143);
+
+  test('an edge week with no day records (no summaries, no time off) counts its in-window days / 7', () => {
+    expect(earnedGrossCents([plain('2026-08-31', 70000)], FROM, TO)).toBe(10000); // Mon Aug 31 only
+    expect(earnedGrossCents([plain('2026-02-23', 70000)], FROM, TO)).toBe(10000); // Sun Mar 1 only
+    expect(earnedGrossCents([plain('2028-08-28', 100000)], '2028-03-01', '2028-08-31')).toBe(57143); // Mon-Thu = 4 of 7
+    expect(earnedGrossCents([plain('2026-08-31', 70000, { dayMinutes: [] })], FROM, TO)).toBe(10000);
+    expect(earnedGrossCents([plain('2026-08-31', 70000, { dayMinutes: mins(['2026-08-31', 0]) })], FROM, TO)).toBe(10000);
   });
-  test('an edge week with no worked time on record (or only zero minutes) falls back to days / 7', () => {
-    expect(earnedGrossCents([{ weekStart: '2026-08-31', grossCents: 70000, dayMinutes: [] }], '2026-03-01', '2026-08-31')).toBe(10000);
-    expect(earnedGrossCents([{ weekStart: '2026-08-31', grossCents: 70000, dayMinutes: mins(['2026-08-31', 0]) }], '2026-03-01', '2026-08-31')).toBe(10000);
+
+  test('wages in an edge week follow the shift dates: all inside is full, all outside is 0, a split is proportional', () => {
+    expect(earnedGrossCents([plain('2026-02-23', 70000, { dayMinutes: mins(['2026-03-01', 480]) })], FROM, TO)).toBe(70000);
+    expect(earnedGrossCents([plain('2026-08-31', 70000, { dayMinutes: mins(['2026-09-01', 480], ['2026-09-02', 480]) })], FROM, TO)).toBe(0);
+    expect(earnedGrossCents([plain('2026-08-31', 50000, { dayMinutes: mins(['2026-08-31', 480], ['2026-09-01', 480], ['2026-09-02', 480]) })], FROM, TO)).toBe(16667);
   });
-  test('a week fully inside ignores its minutes', () => {
-    expect(earnedGrossCents([{ weekStart: '2026-04-06', grossCents: 70000, dayMinutes: mins(['2026-04-06', 480]) }], '2026-03-01', '2026-08-31')).toBe(70000);
+
+  test('overtime minutes are the last minutes worked, at 1.5x: Monday of a 48 hour week carries 960 of 6240 weight', () => {
+    const days = mins(['2026-08-31', 480], ['2026-09-01', 480], ['2026-09-02', 480], ['2026-09-03', 480], ['2026-09-04', 480], ['2026-09-05', 480]);
+    const week = plain('2026-08-31', 100000, { regularPayCents: 70000, overtimePayCents: 30000, overtimeMinutes: 480, dayMinutes: days });
+    expect(earnedGrossCents([week], FROM, TO)).toBe(Math.round((100000 * 960) / 6240)); // 15385
+  });
+
+  test('paid time off on Aug 31 in a boundary week counts by its dated record, not by the shift minutes', () => {
+    // 10000 of PTO taken Mon Aug 31 and Tue Sep 1 (half in the window), wages 30000 worked a third in the window
+    const week = plain('2026-08-31', 40000, {
+      regularPayCents: 30000, ptoPayCents: 10000,
+      dayMinutes: mins(['2026-08-31', 480], ['2026-09-01', 480], ['2026-09-02', 480]),
+      ptoRecords: mins(['2026-08-31', 480], ['2026-09-01', 480]), holidayRecords: [],
+    });
+    expect(earnedGrossCents([week], FROM, TO)).toBe(10000 + 5000);
+    // a week of nothing but PTO (no shifts) is still dated by its record
+    const onlyPto = plain('2026-08-31', 8000, { regularPayCents: 0, ptoPayCents: 8000, dayMinutes: [], ptoRecords: mins(['2026-08-31', 480]), holidayRecords: [] });
+    expect(earnedGrossCents([onlyPto], FROM, TO)).toBe(8000);
+  });
+
+  test('holiday pay is dated by its own record', () => {
+    const week = plain('2026-02-23', 12000, { regularPayCents: 0, holidayPayCents: 12000, dayMinutes: [], ptoRecords: [], holidayRecords: mins(['2026-02-27', 480]) });
+    expect(earnedGrossCents([week], FROM, TO)).toBe(0);
+  });
+
+  test('catch-up overtime premium earned in May and paid in September counts in the season', () => {
+    const paidSeptember = plain('2026-09-07', 10000, {
+      regularPayCents: 7000, lineOvertimePremiumCents: 3000,
+      lineOvertimeWeeks: [{ weekStart: '2026-05-04', premiumCents: 2000 }, { weekStart: '2026-05-11', premiumCents: 1000 }],
+    });
+    expect(earnedGrossCents([paidSeptember], FROM, TO)).toBe(3000);
+    // a premium earned in a September week stays out of it
+    expect(earnedGrossCents([{ ...paidSeptember, lineOvertimeWeeks: [{ weekStart: '2026-09-07', premiumCents: 3000 }] }], FROM, TO)).toBe(0);
+  });
+
+  test('pay lines count on the day they were earned, wherever they were paid', () => {
+    const check = plain('2026-09-07', 12500, {
+      regularPayCents: 2000,
+      lines: [{ cents: 8000, earnedOn: '2026-05-10' }, { cents: 1500, earnedOn: '2026-04-10' }, { cents: 1000, earnedOn: '2026-09-07' }],
+    });
+    expect(earnedGrossCents([check], FROM, TO)).toBe(9500);
+  });
+
+  test('a gross the components do not explain is undated: it takes its week in-window days / 7', () => {
+    expect(earnedGrossCents([{ weekStart: '2026-08-31', grossCents: 70000, regularPayCents: 0, overtimePayCents: 0, ptoPayCents: 0, holidayPayCents: 0 }], FROM, TO)).toBe(10000);
   });
 
   test('both edges prorate in the stay bonus window, and a week after the window is out', () => {
     // window 2026-04-01 (Wed) .. 2026-11-20 (Fri): Mon Mar 30 week has 5 of 7 days in; Mon Nov 16 week has 5 of 7 in; Nov 23 is out
-    expect(earnedGrossCents([week('2026-03-30', 70000), week('2026-11-16', 70000), week('2026-11-23', 70000)], '2026-04-01', '2026-11-20')).toBe(100000);
+    expect(earnedGrossCents([plain('2026-03-30', 70000), plain('2026-11-16', 70000), plain('2026-11-23', 70000)], '2026-04-01', '2026-11-20')).toBe(100000);
   });
 });
 
