@@ -345,6 +345,19 @@ describe('termite measurement overrides and safeguards', () => {
   // The chart halves the label's own volume, 4.0 gal per 10 LF per foot of depth (production's setting, read 2026-11-20). A configured
   // volume off the chart keeps it at the high rate: half of it is not the label's reduced volume, and would price too little product
   // (pre-push audit at the fourth push).
+  // The concrete volume pad is solution that drilling and rodding consume beyond the applied volume: the chart check reads the
+  // applied volume, and the line reports the pad's gallons on their own (pre-push audit at the fourteenth push).
+  test('an all-concrete trench at the label chart\'s 0.06% pair passes the chart check and reports the volume pad apart', () => {
+    const measurements = { perimeterLF: 100, dirtLF: 0, concreteLF: 100 };
+    const trench = (extra) => priceTrenching({}, { measurements, productKey: 'talstar_p', labelConfirmed: true, ...extra });
+    const padded = trench({});
+    // 100 LF at 4 gal per 10 LF per foot of depth, 0.5 ft deep: 20 gal applied, and the 20% pad's 4 gal on top.
+    expect(padded).toMatchObject({ concreteFinishedGallons: 24, concreteVolumePadGallons: 4, productOz: 24, concentrationLabel: '0.06%' });
+    expect(padded.manualReviewReasons).not.toContain('off_label_chart_confirmation_required');
+    expect(padded.warnings).toContain('Concrete/slab drilling and rodding can consume additional finished solution; volume pad applied.');
+    expect(trench({ concreteVolumePadPct: 0 })).toMatchObject({ concreteFinishedGallons: 20, concreteVolumePadGallons: 0 });
+  });
+
   // The label's chart lists two pairs per 10 LF per foot of depth: 1 fl oz a finished gallon (0.06%) at 4 gal, and 2 fl oz (0.12%)
   // at 2 gal. Any other final pair goes to review whatever the label check, at either rate, and shows no 0.06% label (pre-push audits
   // at the eighth to twelfth pushes).

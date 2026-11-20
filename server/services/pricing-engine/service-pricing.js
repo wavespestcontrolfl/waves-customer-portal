@@ -7271,6 +7271,7 @@ function priceTrenching(property = {}, options = {}, replay) {
     concreteVolumePadPct,
     dirtFinishedGallons: null,
     concreteFinishedGallons: null,
+    concreteVolumePadGallons: null,
     finishedGallons: null,
     productOzPerFinishedGallon,
     productOz: null,
@@ -7347,6 +7348,10 @@ function priceTrenching(property = {}, options = {}, replay) {
   const labeledGallons = labeledDirtGallons + labeledConcreteGallons;
   const dirtFinishedGallons = labeledDirtGallons * volumeFactor;
   const concreteFinishedGallons = labeledConcreteGallons * volumeFactor;
+  // The concrete volume pad (main's default 20%) is solution that drilling and rodding consume beyond the applied volume, an
+  // allowance and not a pair on the label's chart, so the chart check reads the volume before it. The line reports the pad's
+  // gallons on their own, beside the gallons that include them (pre-push audit at the fourteenth push).
+  const concreteVolumePadGallons = concreteFinishedGallons * (concreteVolumePadPct / (1 + concreteVolumePadPct));
   const finishedGallons = dirtFinishedGallons + concreteFinishedGallons;
   const productOz = finishedGallons * productOzPerFinishedGallon;
   const chemicalCostPerOz = containerCost / containerOz;
@@ -7398,6 +7403,7 @@ function priceTrenching(property = {}, options = {}, replay) {
     ...baseResult,
     dirtFinishedGallons: roundMoney(dirtFinishedGallons),
     concreteFinishedGallons: roundMoney(concreteFinishedGallons),
+    concreteVolumePadGallons: roundMoney(concreteVolumePadGallons),
     finishedGallons: roundMoney(finishedGallons),
     productOz: roundMoney(productOz),
     chemicalCostPerOz: roundMoney(chemicalCostPerOz),

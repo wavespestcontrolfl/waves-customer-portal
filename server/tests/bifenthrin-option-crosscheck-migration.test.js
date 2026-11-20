@@ -1295,6 +1295,32 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
     });
 
+    // A name is read before any figure: an override with no label of its own that names a Crosscheck bottle (its catalog name, the
+    // camelCase alias first, as db-bridge reads it) is an admin's own Crosscheck product, so its price stays and only a Talak warning
+    // on it moves (pre-push audit at the fourteenth push: an override naming LESCO Crosscheck Plus at $45 was repriced to $30.90).
+    test('an override that names Crosscheck keeps its own price; only a Talak warning on it moves', async () => {
+      const officeNote = 'Office: call the builder before the slab pour.';
+      const preslab = { catalog_product_name: 'LESCO Crosscheck Plus', container_cost: 45 };
+      const bifen = { catalogProductName: 'Crosscheck Plus', containerCost: 45, warnings: [TALAK_WARNING, officeNote] };
+      const trench = { catalog_product_name: 'LESCO Crosscheck Plus', container_cost: 45 };
+      // db-bridge reads the camelCase name first: a Talak name there is the Talak bottle, whatever the snake_case key names.
+      const talakFirst = { catalogProductName: 'Atticus Talak 7.9 F', catalog_product_name: 'LESCO Crosscheck Plus', container_cost: 45 };
+      const db = world({ preslab: preslabRow(preslab, bifen), trench: trenchRow(trench, talakFirst), catalog: [], vendors: [] });
+      const original = JSON.stringify(db.pricing_config);
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual(preslab);
+      expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual({ ...bifen, warnings: [CROSSCHECK_PRESLAB.warnings[0], officeNote] });
+      expect(productOf(db, 'onetime_trenching', 'talstar_p')).toEqual(trench);
+      expect(productOf(db, 'onetime_trenching', 'bifen_it')).toEqual({ catalog_product_name: 'LESCO Crosscheck Plus', ...CROSSCHECK_TRENCH });
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).not.toMatch(/was edited since the Talak swap/);
+      const after = snapshot(db);
+      await migration.up(knex);
+      expect(snapshot(db)).toBe(after);
+      await migration.down(knex);
+      expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
+    });
+
     // Only another bottle's figures or name move a product with no label of its own: one with none, or with Crosscheck Plus's own,
     // already quotes Crosscheck Plus, and is left as it is, with no warning about another bottle.
     test('a product with no label of its own and no other bottle\'s figures is left alone', async () => {
