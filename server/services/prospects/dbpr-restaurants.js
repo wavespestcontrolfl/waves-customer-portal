@@ -1,8 +1,6 @@
 /**
  * Weekly restaurant prospect list from Florida's public restaurant files (DBPR; free, no key; owner approval
- * 2026-11-19): the store calls on `restaurant_prospects` and the pure parsers for the three files. The weekly job
- * that downloads the files and calls them is the next change; until it lands, nothing calls this file. It sends
- * nothing and calls no AI.
+ * 2026-11-19). Backend only: it fills `restaurant_prospects` and sends nothing to anyone, calls no AI.
  *
  *   7fdinspi.csv      district 7 inspections, current fiscal year. Kept: visits that cited violation 35 in
  *                     Manatee, Sarasota or Charlotte, outside Punta Gorda (not served; excluded-localities.js).
@@ -10,20 +8,42 @@
  *   chgownr_food.csv  ownership changes statewide. Kept: the same places. In this file the values under
  *                     "Primary Phone Number" and "Mailing County Code" arrive swapped, so a phone is picked by shape.
  *
+ * The state rebuilds the three files each morning, and each holds one fiscal year (July to June): on July 1 they
+ * start over. The year before is not posted as these CSVs. Its archives are statewide XLSX files, checked
+ * 2026-11-20: inspections about 55 MB, new licenses posted about July 9, no ownership-change archive since 2022-23.
+ * Reading them is not worth one day of rows a year. So the job also runs daily on June 24-30 (scheduler.js), and
+ * at most the last day of June goes unread.
+ *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
- * read yet, true = a 35A finding, false = 35B only. detail_attempts counts failed report reads.
+ * read yet, true = a 35A finding, false = 35B only. The report-page reads that fill it are the next change; until
+ * then every inspection stays NULL.
+ *
+ * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
+ * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
+ * elapsed time only, never a business name, address or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true
+ * or on).
  */
 
 const db = require('../../models/db');
+const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
+const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
+const { etDateString } = require('../../utils/datetime-et');
 
+const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
+const FILES = {
+  inspection: '7fdinspi.csv',
+  new_license: 'newfood.csv',
+  owner_change: 'chgownr_food.csv',
+};
 // Every column a parser reads. A row without one is skipped and counted (hasEveryColumn): no License ID would store
 // inspections whose report can never be read, no city or ZIP would let Punta Gorda rows through, and a renamed name,
 // address or phone column would store blanks that no later file repairs (a known key only refreshes last_seen_at).
-// An empty cell is still allowed. The two license files share one layout.
+// An empty cell is still allowed. The two license files share one layout. loadFile refuses a whole file whose
+// header lacks one.
 const PLACE_COLUMNS = ['Location City', 'Location Zip Code'];
 const LICENSE_COLUMNS = [
   'Application Number', 'Application Type', 'Application Approval Date', 'License Number', 'License Type Code',
@@ -44,8 +64,13 @@ const REQUIRED_COLUMNS = {
 // applications, and one value too long would make PostgreSQL refuse its whole insert batch.
 const KEY_MAX = 40;
 
+const FILE_TIMEOUT_MS = 60 * 1000;
 const REPORT_MAX_ATTEMPTS = 3;
 const UPSERT_CHUNK = 500;
+
+function syncDisabled(env = process.env) {
+  return /^(1|true|on)$/i.test(String(env.DBPR_PROSPECT_SYNC_DISABLED || '').trim());
+}
 
 // ── Parsers (pure) ──────────────────────────────────────────────
 
@@ -248,7 +273,72 @@ async function bumpAttempts(id) {
   await db('restaurant_prospects').where({ id }).increment('detail_attempts', 1);
 }
 
+// ── Weekly job ──────────────────────────────────────────────────
+
+const defaultStore = { upsertRecords };
+
+async function loadFile(kind, fetchText, now) {
+  const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
+  const counts = { malformed: 0, valid: 0 };
+  const records = [];
+  let rowsRead = 0;
+  // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
+  const header = await eachDbprCsvRow(text, (row, dropped) => {
+    rowsRead += 1;
+    // A row wider than its header lost the cells past it, and the cells it kept may have moved: an extra cell before
+    // the two report ids would shift them, and both would still pass as digits. It is malformed.
+    if (dropped) {
+      counts.malformed += 1;
+      return;
+    }
+    records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts) : parseLicenseRows([row], kind, counts)));
+  });
+  // A required column missing from the header is renamed or gone: the whole file is refused.
+  if (REQUIRED_COLUMNS[kind].some((column) => !header.includes(column))) throw new Error('unexpected file layout');
+  // A header with no rows is a download cut short, not a quiet week, so the file fails. The files start over on
+  // July 1, so in the first week of July (Eastern date; it spans the July 4 holiday) a header alone is a new year
+  // with nothing in it yet. A file whose rows all fall outside the area is fine.
+  if (!rowsRead && !/-07-0[1-7]$/.test(etDateString(now))) throw new Error('empty file');
+  // Malformed rows and not one good row in the area mean a changed format (a new date format, say), not a quiet
+  // week: the file fails. A file whose rows all fall outside the area, or whose good rows cite nothing, succeeds.
+  if (!counts.valid && counts.malformed) throw new Error('no good row in the area');
+  return { records, malformed: counts.malformed };
+}
+
+async function syncFiles(deps, result) {
+  for (const kind of Object.keys(FILES)) {
+    try {
+      const { records, malformed } = await loadFile(kind, deps.fetchText, deps.now);
+      const unique = dedupeByKey(records);
+      result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
+    } catch (err) {
+      result.failures += 1;
+      result.files[kind] = { failed: true };
+      logger.warn(`[dbpr-prospects] ${kind} file failed (${err.code || err.name})`);
+    }
+  }
+}
+
+/**
+ * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
+ * { fetchText, store, now }.
+ * @returns {Promise<{ skipped?: string, failures: number, files: object, elapsedMs: number }>}
+ */
+async function syncRestaurantProspects(deps = {}) {
+  const started = Date.now();
+  const result = { failures: 0, files: {}, elapsedMs: 0 };
+  if (syncDisabled()) return { ...result, skipped: 'disabled' };
+  await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
+  result.elapsedMs = Date.now() - started;
+  const counts = Object.entries(result.files)
+    .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${f.malformed ? `(${f.malformed} malformed)` : ''}`).join(' ');
+  logger.info(`[dbpr-prospects] ${counts} failures=${result.failures} ${result.elapsedMs}ms`);
+  return result;
+}
+
 module.exports = {
+  syncRestaurantProspects,
+  syncDisabled,
   parseUsDate,
   parseInspectionRows,
   parseLicenseRows,

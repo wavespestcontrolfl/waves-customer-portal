@@ -64,16 +64,22 @@ function parseDbprCsv(text) {
 // blocks requests for seconds and keeps every row. Here the text goes in
 // fixed-size slices, whatever its line ends (csv-parse carries a record
 // across slices; a cut never splits a character), requests get a turn
-// between slices, and onRow sees each row as it is read (an async onRow is
-// awaited, row by row). Resolves with the trimmed header ([] for an empty
+// between slices, and onRow(row, dropped) sees each row as it is read (an
+// async onRow is awaited, row by row). dropped counts the cells past the
+// header that csv-parse left out of the row: 0 for a row as wide as the
+// header, or shorter. Resolves with the trimmed header ([] for an empty
 // file). A parse error, or an error onRow throws or rejects with, rejects.
 const DBPR_SLICE_CHARS = 32 * 1024;
 
 async function eachDbprCsvRow(text, onRow) {
   let header = [];
-  const parser = parseCsvStream({ ...DBPR_CSV_OPTIONS, columns: (names) => { header = trimHeader(names); return header; } });
+  const parser = parseCsvStream({
+    ...DBPR_CSV_OPTIONS,
+    info: true, // each record comes with its cell count (info.index)
+    columns: (names) => { header = trimHeader(names); return header; },
+  });
   const reading = (async () => {
-    for await (const row of parser) await onRow(row);
+    for await (const { info, record } of parser) await onRow(record, Math.max(0, info.index - header.length));
   })();
   // A failure is read from `reading` at the end; until then it must not count as an unhandled rejection.
   reading.catch(() => {});
