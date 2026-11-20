@@ -23,14 +23,14 @@ const HELP_LINE = "Don't see one of these buttons? Reply here and we will help."
 const SIGN_IN = "Sign in to the Waves app with your phone number.";
 
 // The app-alert guides' last step and closing line. The quoted status and the
-// button names are the labels in PortalPage.jsx AppNotificationSettings and its
-// Service notifications rows: "This device is connected.", Connect this device,
-// Turn on app notifications, each alert's switch and its App / Text delivery
-// choice (visit alert switches can sit under Appointment notifications, as in the
-// notifications guide). Only alerts with a delivery choice can go by text
-// (the weather row is on/off only).
-const ALERTS_APP_STEP = "Open the Waves app, tap Visits and scroll down to Service notifications. It should say \"This device is connected.\" If you see Connect this device or Turn on app notifications, tap it. Each alert you want should be switched on and show App. If an alert has no switch next to it, its switch is lower down, under Appointment notifications. Pick the property first if asked.";
-const ALERTS_TEXT_CHOICE = "Rather get texts? In Service notifications, pick Text for any alert that offers it.";
+// button names are the labels in PortalPage.jsx AppNotificationSettings, under
+// Service notifications: "This device is connected.", Connect this device and
+// Turn on app notifications. The step checks only this phone's connection; each
+// alert's switch and delivery choice sit in rows that differ by account shape
+// (per-property switches, menu-only rows), so the closing line sends the
+// customer to that screen instead of describing its rows.
+const ALERTS_APP_STEP = "Open the Waves app, tap Visits and scroll down to Service notifications. It should say \"This device is connected.\" If you see Connect this device or Turn on app notifications, tap it.";
+const ALERTS_TEXT_CHOICE = "Want to change which alerts you get, or get some by text instead? Use the choices under Service notifications in the same place.";
 
 const GUIDES = [
   {
