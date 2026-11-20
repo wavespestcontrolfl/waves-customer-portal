@@ -107,8 +107,9 @@
  * up() wrote; after either it runs the recalculation again, so the catalog follows the restored rows (a mark up()'s recalculation
  * cleared comes back when the winner up() saw returns); with neither, it puts back a catalog price up() replaced or recalculated,
  * and the winner flags up()'s recalculation moved, only while the catalog still holds exactly what up() wrote; it puts back a unit
- * cost up() changed (its own clear, or its recalculation's) only while the catalog still holds what up() left, and leaves an
- * approval up() superseded closed (see above); it restores the pest breakdown only when its audit row exists AND the row still
+ * cost up() changed (its own clear, or its recalculation's) only while the catalog still holds what up() left and its price is back
+ * to what up() saw (a stale unit cost would outrank a price entered since), and leaves an approval up() superseded closed (see
+ * above); it restores the pest breakdown only when its audit row exists AND the row still
  * deep-equals what up() wrote; then it deletes this migration's price_history and price_snapshots rows (a restored vendor row
  * links its earlier snapshot again), audit rows and changelog row.
  *
@@ -684,15 +685,17 @@ async function restoreProductPrice(knex, before, written) {
 
 // The unit cost as up() saw it, when up() changed it (its own clear, or its recalculation's: a cost whose unit contradicts the
 // catalog's size), only while the catalog still holds what up() left (one entered since is kept; pre-push audit at the seventh
-// push). A catalog restored as up() saw it already holds it.
+// push) and only once the catalog's price is back to what up() saw: job costing reads a unit cost before the catalog price, so a
+// stale one put back beside a price entered since would outrank that price (pre-push audit at the eighth push). A catalog restored
+// as up() saw it already holds it.
 async function restoreUnitCost(knex, before, written) {
   const seen = pickColumns(before.catalog_seen || {}, UNIT_COST_COLUMNS);
   const left = pickColumns(written.catalog_recalculated || {}, UNIT_COST_COLUMNS);
   if (sameColumns(seen, left)) return;
   const catalog = await knex('products_catalog').where({ id: before.product_id }).forUpdate().first();
   if (!catalog || sameColumns(catalog, seen)) return;
-  if (!sameColumns(catalog, left)) {
-    console.warn(`${LOG} down: the ${CATALOG_NAME} unit cost changed since this migration - leaving it alone`);
+  if (!sameColumns(catalog, left) || !sameColumns(catalog, pickColumns(before.catalog_seen || {}, WINNER_COLUMNS))) {
+    console.warn(`${LOG} down: the ${CATALOG_NAME} unit cost or price changed since this migration - leaving the unit cost alone`);
     return;
   }
   await knex('products_catalog').where({ id: before.product_id }).update(seen);

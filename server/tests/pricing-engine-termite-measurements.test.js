@@ -337,25 +337,38 @@ describe('termite measurement overrides and safeguards', () => {
   // The chart halves the label's own volume, 4.0 gal per 10 LF per foot of depth (production's setting, read 2026-11-20). A configured
   // volume off the chart keeps it at the high rate: half of it is not the label's reduced volume, and would price too little product
   // (pre-push audit at the fourth push).
-  test('a configured trench volume off the label chart keeps that volume at the bifenthrin high rate', () => {
+  // That dilution at a volume off its chart is neither labeled amount, so the line stays in review whatever its label check, at
+  // either rate; the label's standard dilution off the chart does not (pre-push audit at the eighth push).
+  test('a configured trench volume off the label chart keeps that volume at the bifenthrin high rate, in review', () => {
     const trenching = require('../services/pricing-engine/constants').SPECIALTY.trenching;
     const saved = trenching.finishedGallonsPer10LFPerFtDepth;
+    const savedStandard = trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate;
     const measurements = { perimeterLF: 400, dirtLF: 400, concreteLF: 0 };
-    const trench = () => priceTrenching({}, {
-      measurements, productKey: 'talstar_p', applicationRate: 'high', labelConfirmed: true, labelBottle: 'lesco_crosscheck_plus',
+    const trench = (extra = { applicationRate: 'high' }) => priceTrenching({}, {
+      measurements, productKey: 'talstar_p', labelConfirmed: true, labelBottle: 'lesco_crosscheck_plus', ...extra,
     });
     try {
       trenching.finishedGallonsPer10LFPerFtDepth = 3; // 400 LF x 0.3 x 0.5 ft = 60 labeled gallons
       const offChart = trench();
-      expect(offChart).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true });
+      expect(offChart).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true, requiresManualReview: true });
       expect(offChart.warnings.join(' ')).not.toMatch(/reduced finished volume/);
+      expect(offChart.warnings.join(' ')).toMatch(/off the label volume chart/);
       expect(offChart.manualReviewReasons).not.toContain('reduced_volume_confirmation_required');
+      expect(offChart.manualReviewReasons).toContain('off_chart_volume_confirmation_required');
+      expect(trench({}).manualReviewReasons || []).not.toContain('off_chart_volume_confirmation_required'); // 0.06% at 1 oz
+      trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 2; // the audit's case: the standard rate at 0.12%
+      const standardAtTwo = trench({});
+      expect(standardAtTwo).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true, requiresManualReview: true });
+      expect(standardAtTwo.manualReviewReasons).toContain('off_chart_volume_confirmation_required');
+      trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
       trenching.finishedGallonsPer10LFPerFtDepth = 4; // the chart's: 80 labeled gallons, halved
       const onChart = trench();
       expect(onChart).toMatchObject({ finishedGallons: 40, productOz: 80 });
       expect(onChart.manualReviewReasons).toContain('reduced_volume_confirmation_required');
+      expect(onChart.manualReviewReasons).not.toContain('off_chart_volume_confirmation_required');
     } finally {
       trenching.finishedGallonsPer10LFPerFtDepth = saved;
+      trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
     }
   });
 
@@ -1199,12 +1212,35 @@ describe('a sent pre-slab quote keeps the container cost it priced with', () => 
     const engineResult = oldQuote();
     expect(replay.preSlabTermiticideKnobSignalForReplay({ engineInputs: input(), engineResult })).toEqual(TALAK);
     expect(replay.preSlabTermiticideKnobSignalForReplay({ result: mapV1ToLegacyShape(engineResult) })).toEqual(TALAK);
+    // A mapped item saved before it stored containerCost derives the cost, to the cent, from its container count and total.
+    const saved = mapV1ToLegacyShape(engineResult);
+    [...saved.oneTime.items, ...saved.oneTime.specItems].forEach((item) => delete item.containerCost);
+    expect(replay.preSlabTermiticideKnobSignalForReplay({ result: saved })).toEqual(TALAK);
     expect(replay.preSlabTermiticideKnobSignalForReplay({ result: mapV1ToLegacyShape(generateEstimate({ ...PROFILE, services: {} })) })).toBeNull();
     expect(replay.preSlabTermiticideKnobSignalForReplay({ engineResult: { lineItems: [{ service: 'pre_slab_termiticide', productKey: 'talstar_p' }] } })).toBeNull();
     expect(replay.preSlabTermiticideKnobSignalForReplay({})).toBeNull();
     const legacyRow = { service: 'pre_slab_termidor', productKey: 'termidor_sc', containerCost: 174.72, containerOz: 78 };
     expect(replay.preSlabTermiticideKnobSignalForReplay({ engineResult: { lineItems: [legacyRow] } }))
       .toEqual({ productKey: 'termidor_sc', containerCost: 174.72, containerOz: 78 });
+  });
+
+  // Seven $30.905 containers store a $216.33 total, whose quotient is not the cost: the mapped item stores the cost itself, so the
+  // replay of a quote priced with fractional cents keeps its price (pre-push audit at the eighth push).
+  test('a container cost with fractional cents replays exactly from the mapped item', () => {
+    const products = require('../services/pricing-engine/constants').SPECIALTY.preSlabTermiticide.products;
+    const savedCost = products.talstar_p.containerCost;
+    const quote = input({ slabSqFt: 7900 });
+    let quoted;
+    try {
+      products.talstar_p.containerCost = 30.905;
+      quoted = generateEstimate(quote);
+    } finally {
+      products.talstar_p.containerCost = savedCost;
+    }
+    expect(slabLine(quoted)).toMatchObject({ price: 788, containersRequired: 7, containerCost: 30.905 });
+    const pin = replay.preSlabTermiticideKnobSignalForReplay({ result: mapV1ToLegacyShape(quoted) });
+    expect(pin).toEqual({ productKey: 'talstar_p', containerCost: 30.905, containerOz: 128 });
+    expect(slabLine(generateEstimate({ ...quote, preSlabTermiticidePricingKnobs: pin })).price).toBe(788);
   });
 
   test('the public replay of an old quote keeps its price; a copy of the pin inside the stored inputs never prices', () => {

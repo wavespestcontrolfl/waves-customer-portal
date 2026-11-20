@@ -325,9 +325,12 @@ function mistingKnobSignalForReplay(estData = {}) {
 // $30.90 / 128 oz). The pre-slab price is cost-plus on the product's container cost, which pricing_config and its catalog link
 // move, and every replay path re-runs generateEstimate under the LIVE value: without this a sent slab quote would re-price on
 // revisit or accept. Same contract as the misting stamp: the stored pre-slab row keeps the product it quoted and the container
-// cost it priced with (the raw line's containerCost; the mapped item's fullContainerProductCost / containersRequired, cent-exact),
-// and they replay for that product. No stored row, or none with a finite cost basis: null (the live config prices it, like a
-// fresh quote).
+// cost it priced with (containerCost: the raw line's, and the mapped item's since the pre-push audit at the eighth push), and they
+// replay for that product. A mapped item saved before then has only fullContainerProductCost / containersRequired, both in cents:
+// their quotient, to the cent, is the cost exactly when the cost had whole cents, and a cost with fractional cents cannot be
+// recovered from them. Every pre-slab container cost production has held had whole cents (read-only read, 2026-11-20: all 64
+// values in its audit history since 2026-06-22, and every stored row that derives one). No stored row, or none with a finite cost
+// basis: null (the live config prices it, like a fresh quote).
 // A stored figure counts only when the row holds one: Number(null), Number('') and Number(false) are all 0, and a blank trench
 // surcharge read as a confirmed $0 would keep today's surcharge off a replayed line (pre-push audit 17).
 function storedFigure(value) {

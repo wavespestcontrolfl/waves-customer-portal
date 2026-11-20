@@ -562,7 +562,21 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       await migration.down(knex);
       expect(db.vendor_pricing[0]).toMatchObject({ price: '58.42' });
       expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: '0.3000', cost_unit: 'fl_oz' });
-      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/unit cost changed since this migration - leaving it alone/));
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/unit cost or price changed since this migration - leaving the unit cost alone/));
+    });
+
+    // Job costing reads a unit cost before the catalog price: down() leaves the stale one up() cleared off while a price entered since
+    // keeps the catalog price, so costing reads that price (pre-push audit at the eighth push).
+    test('a stale unit cost up() cleared stays off while a price entered since keeps the catalog price', async () => {
+      const db = world({ catalog: [catalogRow({ cost_per_unit: '0.4564', cost_unit: 'fl_oz' })] });
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      Object.assign(db.vendor_pricing[0], { price: '29.00', price_amount: '29.0000' }); // an admin's price, and its recalculation
+      Object.assign(db.products_catalog[0], { best_price: '29.00', best_price_amount_cached: '29.0000' });
+      await migration.down(knex);
+      expect(db.vendor_pricing[0]).toMatchObject({ price: '29.00' });
+      expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: null, cost_unit: null, best_price: '29.00' });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/unit cost or price changed since this migration - leaving the unit cost alone/));
     });
 
     // The earlier server/data/pricing.csv row (SiteOne, 1 gal, $57.17, no item number) as the admin pricing import writes it

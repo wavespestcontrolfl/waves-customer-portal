@@ -7137,10 +7137,12 @@ function priceTrenching(property = {}, options = {}, replay) {
   // a manual override sent to review (pre-push audits 20 and 21). The code field outlives a config rename, so the configured product
   // must still name a bottle whose label was read (Crosscheck Plus or Talak 7.9 F; pre-push audit 22). The chart halves the label's
   // own volume (labelFinishedGallonsPer10LFPerFtDepth, 4.0 gal per 10 LF per foot of depth): a configured volume off the chart keeps
-  // it too, since half of it is not the label's reduced volume (pre-push audit at the fourth push).
+  // it too, since half of it is not the label's reduced volume (pre-push audit at the fourth push). That stronger dilution at a
+  // volume off the chart is neither labeled amount, so its line goes to review (pre-push audit at the eighth push).
   const gallonsPer10LFPerFtDepth = cfg.finishedGallonsPer10LFPerFtDepth || 4;
-  const labelHalfVolume = product.labelHalfVolumeOzPerFinishedGallon > 0 && namesHalfVolumeLabel(product)
-    && Math.abs(productOzPerFinishedGallon - product.labelHalfVolumeOzPerFinishedGallon) < 1e-9
+  const labelStrongerDilution = product.labelHalfVolumeOzPerFinishedGallon > 0 && namesHalfVolumeLabel(product)
+    && Math.abs(productOzPerFinishedGallon - product.labelHalfVolumeOzPerFinishedGallon) < 1e-9;
+  const labelHalfVolume = labelStrongerDilution
     && Math.abs(gallonsPer10LFPerFtDepth - product.labelFinishedGallonsPer10LFPerFtDepth) < 1e-9;
   const volumeFactor = labelHalfVolume ? 0.5 : 1;
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
@@ -7171,6 +7173,8 @@ function priceTrenching(property = {}, options = {}, replay) {
     // be achieved (pre-push audit 29). Only this engine knows whether it applies the volume adjustment (the configured dilution and
     // bottle), so this warning names both conditions on the line, and the line stays in review (reduced_volume_confirmation_required).
     warningList.push('Stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). The label allows it only where the soil will not accept the labeled volume and a continuous barrier can still be achieved. Requires label confirmation.');
+  } else if (labelStrongerDilution) {
+    warningList.push('Stronger dilution at a configured finished volume off the label volume chart: the label allows this dilution only at its reduced volume. Requires review before sending.');
   } else if (rateResolution.applicationRate === 'high') {
     warningList.push('High/problem-soil rate increases chemical usage and requires label confirmation.');
   }
@@ -7197,6 +7201,8 @@ function priceTrenching(property = {}, options = {}, replay) {
   // audits 30 and at the second push: a configured high rate of 1.5 fl oz per gallon keeps the full volume).
   if (volumeFactor < 1) {
     manualReviewReasons.push('reduced_volume_confirmation_required');
+  } else if (labelStrongerDilution) {
+    manualReviewReasons.push('off_chart_volume_confirmation_required');
   }
   if (hasValue(options.customProductCost) || hasValue(options.customProductOzPerFinishedGallon)) {
     manualReviewReasons.push('product_manual_override_used');

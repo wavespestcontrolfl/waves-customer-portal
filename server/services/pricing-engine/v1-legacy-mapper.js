@@ -426,6 +426,9 @@ const TERMITICIDE_METADATA_FIELDS = [
   'productOz',
   'units',
   'containersRequired',
+  // The exact container cost the pre-slab line priced with, so a replay of the sent quote prices with it (pre-push audit at the
+  // eighth push: a cost with fractional cents does not survive fullContainerProductCost / containersRequired).
+  'containerCost',
   'containerOz',
   'chemicalCostPerOz',
   'allocatedProductCost',
