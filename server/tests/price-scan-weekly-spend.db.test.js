@@ -2,9 +2,10 @@
 // job costing booked over the last 12 months, read from the product lines on job_costs.products_used. Synthetic rows only.
 // Skips without DATABASE_URL; CI runs it.
 //
-// Pinned: a product's booked lines are summed across visits; a visit on the first day of the window counts and the day before
-// it does not; a product nobody asked about, a line with no number, a line with no product and a products_used that is not an
-// array add nothing and break nothing; a product booked only at $0 has zero spend (the scan then leaves it out).
+// Pinned: a product's booked lines are summed across visits; a visit on the first day of the window and one today count, the
+// day before the window and a visit dated after today do not; a product nobody asked about, a line with no number, a line
+// with no product and a products_used that is not an array add nothing and break nothing; a product booked only at $0 has
+// zero spend (the scan then leaves it out).
 const SKIP = !process.env.DATABASE_URL;
 const describeDb = SKIP ? describe.skip : describe;
 
@@ -36,6 +37,8 @@ describeDb('weekly price scan: booked spend through PostgreSQL', () => {
       visit(-40, [line(ids.used, 2.5), line(ids.second, 0.38), line(ids.second, 2.01)]),
       visit(-SPEND_WINDOW_DAYS, [line(ids.used, 1)]), // the first day of the window counts
       visit(-SPEND_WINDOW_DAYS - 1, [line(ids.used, 50), line(ids.old, 70)]), // the day before it does not
+      visit(0, [line(ids.second, 1)]), // today counts
+      visit(1, [line(ids.used, 40), line(ids.old, 30)]), // a visit dated after today does not
       visit(-5, [line(ids.used, '12.00'), { qty: 1, line: 7 }, 'not a line']), // no number, no product, not an object
       visit(-6, { note: 'hand-entered job cost' }), // products_used that is not an array
     ]);
@@ -50,8 +53,8 @@ describeDb('weekly price scan: booked spend through PostgreSQL', () => {
   test('sums each asked product\'s booked lines inside the window and nothing else', async () => {
     const spend = await bookedSpendByProduct(knex, [ids.used, ids.second, ids.zero, ids.old], { now });
     expect(Object.fromEntries(spend)).toEqual({
-      [ids.used]: 8.5, // 5 + 2.5 + 1; the older $50 line and the text "12.00" line do not count
-      [ids.second]: 2.39,
+      [ids.used]: 8.5, // 5 + 2.5 + 1; the older $50, tomorrow's $40 and the text "12.00" line do not count
+      [ids.second]: 3.39, // 0.38 + 2.01 + today's 1
       [ids.zero]: 0, // booked at $0 only: assembleScanSpecs leaves it out
     });
     expect(spend.has(ids.old)).toBe(false);

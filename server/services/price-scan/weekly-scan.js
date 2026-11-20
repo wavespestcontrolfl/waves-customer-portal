@@ -171,21 +171,24 @@ function toScanSpec(row, vendors = [], urlByVendorId = null, spend = 0) {
   return { product, vendors: vlist, spend: Number(spend) || 0 };
 }
 
-// Each product's booked material cost over the last 12 months (ET calendar days): the
-// product lines job costing wrote on each visit's job_costs row (job-costing.js
-// calcProductsCost -> products_used [{ product_id, line, ... }]). Reading the booked lines
-// keeps job costing's rules in one place: an inventory movement's cost first, else the
-// application priced per unit, and no cost for an amount the completion refused. So the scan
-// ranks on the same cost the job-cost reports show. Map product_id -> spend.
+// Each product's booked material cost over the last 12 months (ET calendar days, today
+// included; a visit dated after today is not booked use yet): the product lines job costing
+// wrote on each visit's job_costs row (job-costing.js calcProductsCost -> products_used
+// [{ product_id, line, ... }]). Reading the booked lines keeps job costing's rules in one
+// place: an inventory movement's cost first, else the application priced per unit, and no
+// cost for an amount the completion refused. So the scan ranks on the same cost the job-cost
+// reports show. Map product_id -> spend.
 async function bookedSpendByProduct(db, productIds, { now = new Date() } = {}) {
   const spend = new Map();
   if (!productIds || !productIds.length) return spend;
   const since = etDateString(addETDays(now, -SPEND_WINDOW_DAYS));
+  const today = etDateString(now);
   const productOf = "line.value ->> 'product_id'";
   const rows = await db('job_costs as jc')
     // A row whose products_used is not an array (a hand-entered job cost) has no lines.
     .joinRaw("cross join lateral jsonb_array_elements(case when jsonb_typeof(jc.products_used) = 'array' then jc.products_used else '[]'::jsonb end) as line(value)")
     .where('jc.service_date', '>=', since)
+    .where('jc.service_date', '<=', today)
     .whereRaw("jsonb_typeof(line.value -> 'line') = 'number'")
     .whereIn(db.raw(productOf), productIds.map(String))
     .groupByRaw(productOf)
