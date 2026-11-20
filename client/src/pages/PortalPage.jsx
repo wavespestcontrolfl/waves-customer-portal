@@ -14040,7 +14040,7 @@ function ReferTab({ customer, onSwitchTab }) {
     : Number(stats.totalEarned || 0);
   const availableBalance = Number(data?.availableBalance || 0) / 100;
   const pendingEarnings = Number(data?.pendingEarnings || 0) / 100;
-  const shareText = `I use Waves Pest Control and thought you might want their info. Here is my referral link: ${shareLink}`;
+  const shareText = `I use Waves and thought you might want their info. Here is my referral link: ${shareLink}`;
   const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
