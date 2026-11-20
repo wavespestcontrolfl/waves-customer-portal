@@ -2708,14 +2708,22 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // while that lock is held.
     // The booking address is the profile's own there; at the same pin it stays
     // the typed address, as the list and the next commit's own check read it.
-    // createSelfBooking reads its zone from that address, else from its
-    // customer's city on file (slot-zone.js leadBookingZone; owner rule B,
-    // pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f). When the city
-    // decides, the re-check and a 409's fresh times build from the profile's
-    // own address, the zone the booking checks, so a refreshed time is one
-    // the next commit books.
+    // With the funnel on, createSelfBooking reads its zone from that address,
+    // else from its customer's city on file (slot-zone.js leadBookingZone;
+    // owner rule B, pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f).
+    // When the city decides, the re-check and a 409's fresh times build from
+    // the profile's own address, the zone the booking checks, so a refreshed
+    // time is one the next commit books. With the funnel off the booking reads
+    // no zone address, so nothing is looked up here. A failed lookup keeps the
+    // booking address (logged); the booking still checks its own zone under
+    // its date lock (pre-push P1 on 84c9b2d840).
     const bookingAddress = locationMoved ? customerAddressFields(custRow) : resolved.address;
-    const { fromCustomer } = await leadBookingZone(db, zoneFunnelInputs(bookingAddress), custRow.city);
+    const { fromCustomer } = funnelOn()
+      ? await leadBookingZone(db, zoneFunnelInputs(bookingAddress), custRow.city).catch((err) => {
+        logger.warn(`[inspection-public] lead zone lookup failed for lead ${lead.id}: ${err.message}`);
+        return { fromCustomer: false };
+      })
+      : { fromCustomer: false };
     const zoneSource = fromCustomer ? customerAddressFields(custRow) : bookingAddress;
     const bookingSlot = await revalidateSlotAt(bookingLocation, {
       slot, moved: locationMoved, zoneMoved: fromCustomer, date, time, config, catalog, leadId: lead.id, address: zoneSource,

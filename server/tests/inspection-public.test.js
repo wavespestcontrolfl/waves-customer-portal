@@ -1998,13 +1998,20 @@ describe('POST /:token commit', () => {
     // re-check (per truck only: a one-day build funnels to itself with one truck) and a 409's fresh times build from
     // the profile's own address: the re-check books the truck that zone allows, and a refreshed time is one the next
     // commit books. The booking's own zone address stays the typed one; it falls back itself, on its own customer row.
+    // With the funnel off nothing is looked up and the fresh times keep the typed address, as before; a failed lookup
+    // keeps it too (logged), and the booking still runs (pre-push P1 on 84c9b2d840).
     test.each([
-      ['per truck', { perTruck: true, funnel: true }, ['Laurel', 'Nokomis', 'Nokomis'], 'tech-2'],
-      ['one truck', { perTruck: false, funnel: true }, ['Laurel', 'Nokomis'], 'tech-1'],
-      ['the funnel off', { perTruck: true, funnel: false }, ['Laurel', 'Nokomis'], 'tech-1'],
-    ])('the typed city in no zone, the profile\'s city in one (%s): the re-check and the fresh times read the profile\'s city', async (_label, gates, builtCities, bookedTech) => {
+      ['per truck', { perTruck: true, funnel: true }, 'read', ['Laurel', 'Nokomis', 'Nokomis'], 'tech-2'],
+      ['one truck', { perTruck: false, funnel: true }, 'read', ['Laurel', 'Nokomis'], 'tech-1'],
+      ['the funnel off: no lookup', { perTruck: true, funnel: false }, 'none', ['Laurel', 'Laurel'], 'tech-1'],
+      ['a failed lookup', { perTruck: true, funnel: true }, 'fails', ['Laurel', 'Laurel'], 'tech-1'],
+    ])('the typed city in no zone, the profile\'s city in one (%s): the re-check and the fresh times', async (_label, gates, zoneLookup, builtCities, bookedTech) => {
       Object.assign(mockFarSouthGates, gates);
-      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis'] }];
+      const zoneReads = jest.fn(() => {
+        if (zoneLookup === 'fails') throw new Error('zones unreadable');
+        return [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis'] }];
+      });
+      listResults.service_zones = zoneReads;
       firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -2025,7 +2032,9 @@ describe('POST /:token commit', () => {
       expect(res.statusCode).toBe(409);
       expect(res.body.code).toBe('SLOT_TAKEN');
       expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(builtCities);
-      expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject({ zoneFunnelAddress: '123 Palm Ave, Nokomis, FL, 34209', zoneFunnelCity: 'Nokomis' });
+      const refreshCity = builtCities.at(-1);
+      expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject({ zoneFunnelAddress: `123 Palm Ave, ${refreshCity}, FL, 34209`, zoneFunnelCity: refreshCity });
+      expect(zoneReads.mock.calls.length > 0).toBe(zoneLookup !== 'none');
       expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe(bookedTech);
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
     });
