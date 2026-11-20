@@ -684,6 +684,70 @@ describe('the email ledger snapshot', () => {
     expect(mockSendOne.mock.calls[0][0].html).toContain(token); // the provider still gets the real link
   });
 
+  // Codex P0 (round 27): the editor takes a custom subject, and the ledger stored it as typed.
+  test('hides an offer link pasted into a custom subject; the provider still gets the subject as typed', async () => {
+    const token = require('crypto').createHash('sha256').update('ledger subject').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.email_messages = [];
+    mockSendOne.mockClear();
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: `Your offer: ${link}`, emailBody: 'Pick a time for your interview.' });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.subject_snapshot).toBe('Your offer: https://portal.wavespestcontrol.com/careers/offer/[link hidden]');
+    expect(mockSendOne.mock.calls[0][0].subject).toBe(`Your offer: ${link}`);
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    expect(history.find((e) => e.channel === 'email').body).not.toContain(token);
+  });
+
+  // Codex P0 (round 28): the ledger redacted each part alone, so a bare copy of the token in a custom subject stayed
+  // when the link was only in the body. Codex P0 (round 29): a "%" right before the copy hid two of its digits from
+  // the decoded reading, while the subject stored all 64.
+  test.each([
+    ['a bare copy', ''],
+    ['a copy after a percent sign', '%'],
+  ])('hides %s of the token in a custom subject when the link is in the body', async (label, before) => {
+    const token = require('crypto').createHash('sha256').update('ledger cross-part').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockSendOne.mockClear();
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: `Your offer code ${before}${token}`, emailBody: `Read it: ${link}` });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.subject_snapshot).toBe('Your offer code [link hidden]');
+    for (const field of ['subject_snapshot', 'html_snapshot', 'text_snapshot']) {
+      expect(row[field]).not.toContain(token.slice(0, 20));
+      expect(row[field]).not.toContain(token.slice(-20));
+    }
+    expect(mockSendOne.mock.calls[0][0].subject).toBe(`Your offer code ${before}${token}`);
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    expect(history.find((e) => e.channel === 'email').body).not.toContain(token.slice(0, 20));
+  });
+
+  // An owner who pastes a quoted reply: the link wraps over two quoted lines. The edited path wraps the text into html,
+  // which writes each line's "> " as "&gt; "; a reader skips it there as in the text.
+  test('hides a token a pasted quoted reply wraps over two lines, in the html and the text', async () => {
+    const token = require('crypto').createHash('sha256').update('ledger quoted wrap').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockSendOne.mockClear();
+    const emailBody = `Thanks!\n\n> Your offer: ${link.slice(0, 80)}\n> ${link.slice(80)}`;
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: 'Re: your offer', emailBody });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.html_snapshot).toContain('&gt; Your offer: [link hidden]'); // the edited text, wrapped into html
+    expect(row.text_snapshot).toContain('> Your offer: [link hidden]');
+    for (const field of ['subject_snapshot', 'html_snapshot', 'text_snapshot']) {
+      expect(row[field]).not.toContain(token.slice(0, 20));
+      expect(row[field]).not.toContain(token.slice(-20));
+    }
+    expect(mockSendOne.mock.calls[0][0].text).toContain(`${link.slice(0, 80)}\n> ${link.slice(80)}`); // the provider gets it as typed
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    const body = history.find((e) => e.channel === 'email').body;
+    expect(body).not.toContain(token.slice(0, 20));
+    expect(body).not.toContain(token.slice(-20));
+  });
+
   // An email may also show the link as text with an &nbsp; or a <wbr> inside the token; a reader still reads it whole.
   test('hides a token the email shows split by an &nbsp; or a tag, beside the hidden href', async () => {
     const token = require('crypto').createHash('sha256').update('ledger split').digest('hex');

@@ -8632,7 +8632,10 @@ the not-valid page). A last segment that looks like a file name (`bad.pdf`) gets
 every SPA path, and never the page; no offer token has a dot. The page itself opens only the link as sent: a token of
 64 lowercase hex and no percent-encoding in the path (any letter case of `/careers/offer/` is fine). Any other spelling
 shows the not-valid state with no API read. Stored messages hide the token in every spelling of the link
-(`utils/offer-link-redaction.js`). The text is read in units, each what a browser takes as one link: a quoted HTML
+(`utils/offer-link-redaction.js`): the comms history, the email ledger row (its subject too, since the editor takes a
+custom subject), the deferred queue row, and the SMS log and messages rows. An email's subject, html and text are read
+as one record (`redactOfferLinksTogether`): a token found on an offer path in any part, and a part past the decoding
+budget, count for every part, in the ledger row and in the history entry. The text is read in units, each what a browser takes as one link: a quoted HTML
 attribute value or an unbroken run of text. The link as sent keeps its host with the token hidden. Each other unit is
 read as a browser reads it (as typed and with its HTML character references decoded: tabs and line breaks dropped,
 backslashes as slashes, the path cut at the first `?` or `#`, dot segments resolved also when written with `%2e`, an
@@ -8652,14 +8655,28 @@ history, another offer's link in the offer text) is not queued, and the owner se
 units' reader text is also read run together (once with every unit, once with the units outside tags only) with
 every character a reader does not see dropped, so a link or a copy split by markup, white space (also `&nbsp;`), line
 breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
-every piece: the marker in the first unit, nothing in the rest, the tags kept. The
+every piece (angle brackets drop out too: no unit of raw text holds one, so a quoted reply's `> ` at each line start,
+which the html copy writes as `&gt; `, reads the same in both copies): the marker in the first unit, nothing in the rest, the tags kept. A copy is looked for at every stage of
+decoding, as typed and after each step of each pass, since a step can use up part of a token (a `%` before two of its
+hex digits) while the stored text still shows it whole; each unit is also decoded with the characters a reader does not
+see dropped first, so an escape split by one of them (a space in a quoted value) decodes. The run-together text is also
+decoded as a whole, case kept (so `&ZeroWidthSpace;` decodes), so an escape split by a tag or a line break, in the
+route word or in the token, decodes as a reader who puts the pieces together decodes it; each decoded character keeps
+the units it came from, and a token found there is hidden in each of them. Decoding stops after four passes; a unit
+that would still decode further may hide a route word, so it is hidden whole, and in such a text so is every unit that
+a run of 64 or more hex touches in the joined reading. Run-together text that would still decode further fails closed
+the same way: every unit holding part of an escape still undecoded is hidden, as is every unit such a hex run touches. Tags are found in one pass over the text, so malformed markup
+costs time in proportion to its length. Tokens are found, and put in source order, in one pass over each run of hex,
+so many links in one text, or in one unit, also cost time in proportion to its length. The
 service worker never handles an offer page, in any request mode (`client/public/sw.js` `isOfferLinkPath`: the path,
 percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the
 server routes `/API/` as `/api/`). It stores no URL that could carry the link, because a stored response or request
-keeps its URL: every entry is rebuilt without its URL (`withoutUrl`, `tagWithBuild`) and stored under a key with no
-query or fragment (the shell under `/`, any other same-origin GET under its own path; a shell whose asset reference is
-not a plain same-origin `/assets/` path is not stored), and a redirected response is served but not stored (the shell
-and its assets included). A request with a query or fragment that is not a page load is left to the browser. Its cache
+keeps its URL: every entry is rebuilt without its URL (`withoutUrl`, `tagWithBuild`) and stored under a plain key: the
+shell under `/`, and a static file under its own path (`isStorablePath`: segments of letters, digits, dot, dash and
+underscore that do not start with a dot, a static file type, no run of 32 hex), so no key has a query, a fragment, an
+encoding or a dot segment; a shell whose asset reference is not such an `/assets/` path is not stored. A redirected
+response is served but not stored (the shell and its assets included). Any other request that is not a page load is
+left to the browser. Its cache
 has a new name (`waves-customer-v13-private-links`), so activation drops the older worker's bucket whole, offer links
 included, before the worker claims a page, and each page load drops any older bucket found again
 (`sweepOlderCaches`). It never serves its offline shell in the page's place, so the browser always fetches the page
@@ -8683,9 +8700,19 @@ version}` (trimmed,
 (<= 500), version}` -> `{state:'declined'}`. Each answer carries the `version` the page shows, the text choice included,
 and a change since then (another tab's text choice) answers the same 409 `{state:'open'}` with no write, so a signature,
 a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is the
-contract before it and is answered as before, with no version check; the page always sends one. Each acts only from state `open`; any
-other state answers 409 with the current state body (an identical replay of a signature answers 200 with the stored
-signature). Every action runs in one transaction that
+contract before it and is answered as before, with no version check; the page always sends one. The page never
+applies an open read or a text-choice save without a `version` (a server from before it): such a read counts as failed,
+and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
+controls only for a read whose state is explicitly `open` and that carries the text choice and non-empty Terms; a read
+with no known state, or an open read without those, also counts as failed, and an
+action's 200 that does not name its answer (`signed`, `date_requested`, `declined`) is treated as a lost reply: the
+page reads the offer. Each acts only from state `open`; any
+other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter
+case, answers 200 with the stored signature and a replay mark, `{state:'signed', signedAt, signedName, replay: true}`:
+it signs nothing, so the page names the signer and never says "You signed"). The page tells an answer in the first
+person ("You signed", "You declined", "You asked to start on") only when it is the 200 answer to this tab's own action
+(a sign without the replay mark); an answer it learns from a read or a 409 is told in neutral words that name the
+signer and the date, since another tab may have given it. Every action runs in one transaction that
 locks the application row, then the offer row, and re-reads the state under the lock, so a double tap or a replay
 cannot sign twice. Accept records the IP, user agent and a signature hash (sha256 of the snapshot hash, the Terms
 content hash, the typed name and the signing instant), moves the application to `hired` and raises an owner bell;

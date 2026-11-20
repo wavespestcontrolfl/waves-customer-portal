@@ -14,7 +14,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { createHash } = require('crypto');
 const { decodeHTML } = require('entities');
-const { redactOfferLinks, offerLinkTokens, OFFER_LINK_HIDDEN } = require('../utils/offer-link-redaction');
+const { redactOfferLinks, redactOfferLinksTogether, offerLinkTokens, OFFER_LINK_HIDDEN } = require('../utils/offer-link-redaction');
 const { portalUrl } = require('../utils/portal-url');
 
 const TOKEN = 'cd'.repeat(32);
@@ -233,7 +233,7 @@ describe('every link a browser opens as the signing page is stored without its t
 });
 
 // What a reader can see in stored text, run together: once as plain text, once with the tags an email does not show
-// dropped. Both decoded, quote markers and white space dropped, lowercase.
+// dropped. Both decoded, quote markers (also decoded from &gt;), angle brackets and white space dropped, lowercase.
 function readerViews(text) {
   const read = (value) => {
     let out = value.replace(/^>+ ?/gm, '');
@@ -244,7 +244,7 @@ function readerViews(text) {
       if (next === out) break;
       out = next;
     }
-    return out.normalize('NFKC').replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '').toLowerCase();
+    return out.normalize('NFKC').replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800<>]/gu, '').toLowerCase();
   };
   return [read(text), read(text.replace(/<!--[\s\S]*?-->|<[^>]*>/g, ''))];
 }
@@ -252,13 +252,14 @@ function readerViews(text) {
 describe('a found token split anywhere is hidden in every piece', () => {
   // A token that does not repeat, as a real one does not. Every split point inside it, with each separator a reader
   // skips: markup an email shows nothing for, a space (also written &nbsp;, %C2%A0 or as a figure space), a line break,
-  // a quoted reply's wrap, an invisible character (a zero-width space, a soft hyphen, a blank braille pattern).
+  // a quoted reply's wrap (also as html writes it: "&gt; " after a line break or a <br>), an invisible character (a
+  // zero-width space, a soft hyphen, a blank braille pattern).
   // The link split alone, beside the whole link in an href, and as a plain copy.
   const token = createHash('sha256').update('split grid').digest('hex');
   const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
   const at = link.length - 64;
   const SEPARATORS = [
-    '<wbr>', '<span>', '</span><span style="x">', '<!-- -->', ' ', '\n', '\n> ', '&#8203;', '%E2%80%8B',
+    '<wbr>', '<span>', '</span><span style="x">', '<!-- -->', ' ', '\n', '\n> ', '\n&gt; ', '<br>&gt;&gt; ', '&#8203;', '%E2%80%8B',
     '&nbsp;', '%C2%A0', '&#x2007;', '&shy;', '&#10240;',
   ];
 
@@ -278,6 +279,217 @@ describe('a found token split anywhere is hidden in every piece', () => {
     }
     expect(checked).toBe(63 * SEPARATORS.length * 3);
   });
+});
+
+describe('past the decoding budget the text fails closed', () => {
+  // Decoding stops after four passes. A unit that would still decode further may hide a route word, so that unit is
+  // hidden whole, and every run of 64 hex in the text counts as a found token. A text that reads fully is unchanged.
+  const token = createHash('sha256').update('decode budget').digest('hex');
+  const layered = (k) => `https://portal.wavespestcontrol.com/careers/%${'25'.repeat(k - 1)}6Fffer/${token}`;
+
+  test('a route word encoded four times is still read; five times hides the unit and every copy of the token', () => {
+    expect(redactOfferLinks(`Open ${layered(4)} today`)).toBe(`Open ${portalUrl('/careers/offer/[link hidden]')} today`);
+    expect(redactOfferLinks(`Open ${layered(5)} today`)).toBe('Open [link hidden] today');
+    const stored = redactOfferLinks(`Open ${layered(5)} or copy ${token} today`);
+    expect(stored).not.toContain(token.slice(0, 20));
+    expect(stored).not.toContain(token.slice(-20));
+    expect(redactOfferLinks(`<a href="${layered(6)}">Read your offer</a>`)).toBe('<a href="[link hidden]">Read your offer</a>');
+    expect(offerLinkTokens(`Open ${layered(5)} today`)).toEqual([]); // nothing to pin: a held text with it is not queued
+  });
+
+  test('a text that reads fully keeps its 64 hex and its encodings', () => {
+    for (const text of [`Build ${token} shipped`, 'Save 50% off &amp; more', 'Tracking: https://example.com/?u=https%253A%252F%252Fwaves.example']) {
+      expect(redactOfferLinks(text)).toBe(text);
+    }
+  });
+});
+
+// Codex P0 (round 28): the email ledger redacted its subject, html and text one by one, so a copy of a token in a
+// custom subject stayed readable when the link was only in the body.
+describe('texts stored together are read as one record', () => {
+  const token = createHash('sha256').update('stored together').digest('hex');
+  const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+  const hiddenLink = portalUrl('/careers/offer/[link hidden]');
+
+  test('a copy of a token in one part is hidden when its link is only in another part', () => {
+    const parts = [`Your offer code ${token}`, `<p>Hi Jane,</p><a href="${link}">Read your offer</a>`, 'Read it on your phone.'];
+    expect(redactOfferLinks(parts[0])).toBe(parts[0]); // alone, a bare 64-hex word is not a link
+    expect(redactOfferLinksTogether(parts)).toEqual([
+      'Your offer code [link hidden]',
+      `<p>Hi Jane,</p><a href="${hiddenLink}">Read your offer</a>`,
+      'Read it on your phone.',
+    ]);
+  });
+
+  test('a part past the decoding budget makes every part fail closed', () => {
+    const layered5 = `https://portal.wavespestcontrol.com/careers/%${'25'.repeat(4)}6Fffer/${token}`;
+    expect(redactOfferLinks(`Or copy ${token} into the page`)).toBe(`Or copy ${token} into the page`);
+    expect(redactOfferLinksTogether([`Your offer ${layered5}`, `Or copy ${token} into the page`]))
+      .toEqual(['Your offer [link hidden]', 'Or copy [link hidden] into the page']);
+  });
+
+  test('parts with no offer link come back unchanged, and a part that is not a string comes back as it is', () => {
+    const parts = [`Build ${token} shipped`, '<p>See you Monday</p>', '', null, undefined];
+    expect(redactOfferLinksTogether(parts)).toEqual(parts);
+  });
+});
+
+// Codex P0 (round 29): the copy check read only the end of decoding, but the stored text is the unit as typed. A "%"
+// right before a copy used up two of its hex digits in the decoded reading, so all 64 stayed in the stored text.
+describe('a copy is looked for at every stage of decoding', () => {
+  // Starts with a letter, so "%63" (a "c") cannot show it as typed in the middle case.
+  const token = `c${createHash('sha256').update('every stage').digest('hex').slice(1)}`;
+  const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+  const hiddenLink = portalUrl('/careers/offer/[link hidden]');
+
+  test.each([
+    ['as typed, with a "%" before the copy', `%${token}`],
+    ['as typed, with a "&#x" before the copy', `&#x${token}`],
+    ['only between two passes ("%25%63" turns into "%c", which the next pass uses up)', `%25%63${token.slice(1)}`],
+  ])('a copy readable %s is hidden, alone and in a record', (label, copy) => {
+    expect(redactOfferLinks(`Read ${link} or code ${copy}`)).toBe(`Read ${hiddenLink} or code [link hidden]`);
+    expect(redactOfferLinksTogether([`Your code ${copy}`, `<a href="${link}">Read</a>`])[0]).toBe('Your code [link hidden]');
+  });
+
+  test('a copy split by a tag after a "%" is hidden in every piece', () => {
+    expect(redactOfferLinks(`<p>Code %${token.slice(0, 30)}<wbr>${token.slice(30)}</p><a href="${link}">Read</a>`))
+      .toBe(`<p>Code [link hidden]<wbr></p><a href="${hiddenLink}">Read</a>`);
+  });
+});
+
+describe('the joined text is decoded as a whole', () => {
+  // An escape split by a tag or a line break decodes only once a reader puts the pieces together. Each case keeps the
+  // token on the round 29 code, which decoded each unit alone.
+  const token = createHash('sha256').update('joined escape').digest('hex');
+  const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+  const hiddenLink = portalUrl('/careers/offer/[link hidden]');
+  const escaped = `%${token.charCodeAt(20).toString(16)}`; // the token's 21st character as a percent escape
+  const head = `${token.slice(0, 20)}${escaped.slice(0, 2)}`;
+  const tail = `${escaped.slice(2)}${token.slice(21)}`;
+
+  test.each([
+    ['the route word split inside an escape by a tag', `<p>Open https://portal.wavespestcontrol.com/careers/off%6<wbr>5r/${token}</p>`,
+      '<p>Open https://portal.wavespestcontrol.com/careers/off%6<wbr>[link hidden]</p>'],
+    ['the route word split inside an escape by a line break', `Open https://portal.wavespestcontrol.com/careers/off%6\n5r/${token} today`,
+      'Open https://portal.wavespestcontrol.com/careers/off%6\n[link hidden] today'],
+    ['the route word split inside a named reference by a tag (decoded with its case kept)', `<p>/care&Zero<wbr>WidthSpace;ers/offer/${token}</p>`,
+      '<p>/care&Zero<wbr>[link hidden]</p>'],
+    ['the token split inside an escape by a tag', `<p>Code: /careers/offer/${head}<b></b>${tail}</p>`, '<p>Code: [link hidden]<b></b></p>'],
+  ])('%s: the token is hidden', (label, text, stored) => {
+    expect(redactOfferLinks(text)).toBe(stored);
+  });
+
+  test.each([
+    ['a line break', `${head}\n${tail}`, '[link hidden]\n'],
+    ['a blank braille pattern', `${head}⠀${tail}`, '[link hidden]'],
+  ])('a copy split inside an escape by %s is hidden, alone and in a record', (label, copy, hidden) => {
+    expect(redactOfferLinks(`Read ${link} or code ${copy}`)).toBe(`Read ${hiddenLink} or code ${hidden}`);
+    expect(redactOfferLinksTogether([`Your code ${copy}`, `<a href="${link}">Read</a>`])[0]).toBe(`Your code ${hidden}`);
+  });
+
+  test("a copy split inside an escape by a space in the link's own quoted value is hidden", () => {
+    expect(redactOfferLinks(`<a href="${link}?c=${head} ${tail}">Read</a>`)).toBe(`<a href="${hiddenLink}">Read</a>`);
+  });
+
+  test('joined text still encoded after four passes fails closed', () => {
+    // Every character of the path escaped, then each "%" escaped four more times (five levels), and each escape split
+    // by a tag after "%2", so no unit alone holds a whole escape.
+    let deep = [...`/careers/offer/${token}`].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+    for (let level = 0; level < 4; level += 1) deep = deep.replace(/%/g, '%25');
+    const stored = redactOfferLinks(`<p>Code ${deep.replace(/%2/g, '%2<wbr>')}</p>`);
+    let read = stored.replace(/<[^>]*>/g, '').replace(/\s/g, '');
+    for (let pass = 0; pass < 8; pass += 1) {
+      read = decodeHTML(read).replace(/(?:%[0-9a-f]{2})+/gi, (m) => { try { return decodeURIComponent(m); } catch { return m; } });
+    }
+    expect(read.toLowerCase()).not.toContain(token);
+    expect(stored.startsWith('<p>Code [link hidden]<wbr>')).toBe(true);
+  });
+
+  test('a text with split escapes and no offer link comes back unchanged', () => {
+    const text = '<p>Fees: 5%&nbsp;off &amp; more, %41 &Tab; x, a%2<wbr>Fb and /care&Zero<wbr>WidthSpace;ers/jobs</p>';
+    expect(redactOfferLinks(text)).toBe(text);
+  });
+});
+
+describe('malformed markup', () => {
+  const token = createHash('sha256').update('malformed markup').digest('hex');
+  test.each([
+    ['unfinished tag starts', '<a '],
+    ['tag starts inside a tag', '<<a'],
+    ['unclosed quotes', '<a "x '],
+    ['unclosed comments', '<!-- '],
+  ])('%s: a link after them is still hidden, and the rest is kept', (name, piece) => {
+    const filler = piece.repeat(400);
+    expect(redactOfferLinks(`${filler} Open ${portalUrl(`/careers/offer/${token}`)} today`))
+      .toBe(`${filler} Open ${portalUrl('/careers/offer/[link hidden]')} today`);
+  });
+
+});
+
+describe('a large text costs work in proportion to its length', () => {
+  // Every stored text is redacted on the request, inbound ones with no offer link included, so the work must grow with
+  // the length of the text only. Measured in CPU time, which a busy machine does not stretch as it does wall time.
+  // On the code before round 25: 100 KB of "<a " took about 6 s of CPU (the tag pattern rescanned the rest of the body
+  // from each "<"), and 6,000 distinct links about 7 s (one search of the whole text per found token). On the round 26
+  // code, 6,000 links run together in one unit took about 4 s (a search of the unit for each sort comparison). All now
+  // take under 1 s.
+  const cpuMs = (run) => {
+    const start = process.cpuUsage();
+    run();
+    const { user, system } = process.cpuUsage(start);
+    return (user + system) / 1000;
+  };
+
+  test('200 KB of unfinished tag starts comes back unchanged', () => {
+    for (const piece of ['<a ', '<<a']) {
+      const body = piece.repeat(Math.ceil(200000 / piece.length));
+      let stored;
+      expect(cpuMs(() => { stored = redactOfferLinks(body); })).toBeLessThan(3000);
+      expect(stored).toBe(body);
+    }
+  }, 120000);
+
+  test('6,000 distinct links, each also copied split by markup, are all hidden', () => {
+    const tokens = Array.from({ length: 6000 }, (_, i) => createHash('sha256').update(`many links ${i}`).digest('hex'));
+    const text = tokens.map((t, i) => `Link ${i}: ${portalUrl(`/careers/offer/${t}`)} and copy ${t.slice(0, 32)}<wbr>${t.slice(32)}`).join('\n');
+    let stored;
+    expect(cpuMs(() => { stored = redactOfferLinks(text); })).toBeLessThan(3000);
+    expect(stored).not.toMatch(/[0-9a-f]{32}/);
+    expect(stored.split(portalUrl('/careers/offer/[link hidden]')).length - 1).toBe(6000);
+  }, 120000);
+
+  test('1,000 tokens in one run of escapes that spans a unit per escape are all hidden', () => {
+    // About 1 s of CPU here. On the round 33 code it took about 8 s, growing with the square of the count: each token
+    // found in the decoded run mapped back to the whole run, and so to every unit in it.
+    const tokens = Array.from({ length: 1000 }, (_, i) => createHash('sha256').update(`escape run ${i}`).digest('hex'));
+    const links = tokens.map((t) => portalUrl(`/careers/offer/${t}`)).join(' ');
+    const run = tokens.join('').split('').map((c) => `%${c.charCodeAt(0).toString(16)}`).join('<b></b>');
+    let stored;
+    expect(cpuMs(() => { stored = redactOfferLinks(`<p>${links}</p><p>${run}</p>`); })).toBeLessThan(4000);
+    for (const view of readerViews(stored)) expect(view).not.toMatch(/[0-9a-f]{64}/);
+  }, 120000);
+
+  test('16,000 distinct links in one unit with an escape (so the text is also decoded as a whole) are all hidden', () => {
+    // About 1.3 s of CPU here. On the round 30 code it took about 8.7 s, growing with the square of the count (each
+    // token was looked up in a scan of its whole unit).
+    const tokens = Array.from({ length: 16000 }, (_, i) => createHash('sha256').update(`decoded unit ${i}`).digest('hex'));
+    const body = `${tokens.map((t) => portalUrl(`/careers/offer/${t}`)).join(',')},%41`;
+    let stored;
+    expect(cpuMs(() => { stored = redactOfferLinks(body); })).toBeLessThan(4000);
+    expect(stored).not.toMatch(/[0-9a-f]{64}/);
+    expect(stored.split(portalUrl('/careers/offer/[link hidden]')).length - 1).toBe(16000);
+  }, 120000);
+
+  test('8,000 distinct links run together in one unit are all hidden and pinned in order', () => {
+    const tokens = Array.from({ length: 8000 }, (_, i) => createHash('sha256').update(`one unit ${i}`).digest('hex'));
+    // Not the sent spelling, so the unit is hidden whole: one standard hidden link per token, in source order.
+    const text = tokens.map((t) => portalUrl(`/Careers/Offer/${t}`)).join(',');
+    let stored;
+    expect(cpuMs(() => { stored = redactOfferLinks(text); })).toBeLessThan(2500);
+    expect(stored).not.toMatch(/[0-9a-f]{32}/);
+    expect(stored.split(portalUrl('/careers/offer/[link hidden]')).length - 1).toBe(8000);
+    expect(offerLinkTokens(text)).toEqual(tokens);
+  }, 120000);
 });
 
 describe('the deferred replay body', () => {
@@ -349,14 +561,15 @@ describe('offerLinkTokens', () => {
 describe('every writer of a stored message body redacts the offer link (source guard)', () => {
   const fs = require('fs');
   const path = require('path');
-  const count = (file) => (fs.readFileSync(path.join(__dirname, '..', file), 'utf8').match(/redactOfferLinks\(/g) || []).length;
+  const count = (file) => (fs.readFileSync(path.join(__dirname, '..', file), 'utf8').match(/redactOfferLinks(?:Together)?\(/g) || []).length;
 
   test.each([
     ['services/twilio.js', 2], // the sms_log row and the unified messages row
     ['services/messaging/audit.js', 1], // the audit preview
     ['services/sms-suggest-mode.js', 2], // the reply-holding reservation row, written and renewed
-    ['services/recruiting-comms.js', 4], // history masking, the email ledger html + text, the deferred queue row
-  ])('%s calls redactOfferLinks at least %i time(s)', (file, minimum) => {
+    // history masking, the email history and the email ledger (each email's parts together), the deferred queue row
+    ['services/recruiting-comms.js', 4],
+  ])('%s calls redactOfferLinks (or its together form) at least %i time(s)', (file, minimum) => {
     expect(count(file)).toBeGreaterThanOrEqual(minimum);
   });
 });

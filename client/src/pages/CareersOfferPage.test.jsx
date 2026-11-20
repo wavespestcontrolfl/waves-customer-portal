@@ -152,7 +152,7 @@ describe('CareersOfferPage — open state', () => {
   it('posts the text consent choice and puts the box back when saving fails', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
-      .mockResolvedValueOnce(jsonResponse({ textConsent: true }))
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' }))
       .mockResolvedValueOnce(jsonResponse({ error: 'Try later' }, 400));
     globalThis.fetch = fetchMock;
     renderPage();
@@ -229,7 +229,7 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockRejectedValueOnce(new Error('offline')) // POST consent true: reply lost
       .mockRejectedValueOnce(new Error('offline')) // the read fails
-      .mockResolvedValueOnce(jsonResponse({ textConsent: true })); // Try again: the same choice, saved
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' })); // Try again: the same choice, saved
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -248,7 +248,7 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
       .mockRejectedValueOnce(new Error('offline')) // POST consent false: reply lost
       .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true }))) // the read: the lost save has not landed yet
-      .mockResolvedValueOnce(jsonResponse({ textConsent: false })); // Try again: the same choice, saved
+      .mockResolvedValueOnce(jsonResponse({ textConsent: false, version: '2026-12-11T15:21:00.000Z' })); // Try again: the same choice, saved
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -285,6 +285,82 @@ describe('CareersOfferPage — open state', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(bodyOf(fetchMock, 1)).toEqual({ consent: true, version: VERSION });
     expect(bodyOf(fetchMock, 2)).toEqual({ consent: false, version: '2026-12-11T15:21:00.000Z' });
+  });
+
+  // A server from before the version answers a save with the choice only. The
+  // page must not lose its version (a signature without one skips the check),
+  // so it reads the offer and signs with the version that read carries.
+  it.each([
+    ['a version', { textConsent: true }],
+    ['the choice', { version: '2026-12-11T15:24:00.000Z' }],
+  ])('reads the offer when a text choice save answers without %s, and signs with the version of that read', async (label, saved) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse(saved)) // saved, but the answer cannot be applied
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: '2026-12-11T15:25:00.000Z' })))
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' }));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(fetchMock.mock.calls[2][1]).toBeUndefined(); // a read, not a write
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText(/You signed this offer/)).toBeInTheDocument();
+    expect(bodyOf(fetchMock, 3)).toEqual({ signedName: 'Jordan Rivera', version: '2026-12-11T15:25:00.000Z' });
+  });
+
+  it('keeps signing locked when the read after a save without a version has no version either', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true })) // saved, no version
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: undefined })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('shows the load error, not the offer, when the open offer read has no version', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined })));
+    renderPage();
+    expect(await screen.findByText(/load that offer link/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
+  });
+
+  // Only an explicit open state with its version shows the signing controls.
+  it.each([
+    ['an empty answer', {}],
+    ['an unknown state', { ...openPayload(), state: 'pending' }],
+    ['open without the text choice', openPayload({ textConsent: undefined })],
+    ['open without the Terms', openPayload({ terms: null })],
+    ['open with empty Terms', openPayload({ terms: { title: 'Technician Terms', markdown: '  ' } })],
+  ])('shows the load error, not the offer, when the offer read is %s', async (label, body) => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(body));
+    renderPage();
+    expect(await screen.findByText(/load that offer link/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
+  });
+
+  // A 200 that does not name the answer cannot be read: the page reads the
+  // offer, as for a lost reply, and never claims the signature as its own.
+  it('reads the offer when the signature answer names no state, and shows what the read says', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'Jordan Rivera', signedAt: '2026-12-12T13:15:00.000Z' })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
+    expect(fetchMock.mock.calls[2][1]).toBeUndefined(); // a read, not a write
   });
 
   // An applicant who unticks the box must not sign believing texts are off
@@ -339,9 +415,9 @@ describe('CareersOfferPage — open state', () => {
   it.each([
     ['sign', { state: 'withdrawn', message: 'This offer is no longer open. Please call Sam.', contactPhone: '(941) 297-5749' }, 'This offer is no longer open. Please call Sam.', 2],
     ['consent', { state: 'withdrawn', message: 'This offer is no longer open. Please call Sam.', contactPhone: '(941) 297-5749' }, 'This offer is no longer open. Please call Sam.', 2],
-    ['sign', { state: 'signed' }, /This offer was already signed\. Welcome to Waves\./, 3],
-    ['consent', { state: 'declined' }, 'You declined this offer. Thank you for your time.', 3],
-    ['date', { state: 'date_requested' }, /will look at your new date/, 3],
+    ['sign', { state: 'signed' }, /^This offer was signed\. Welcome to Waves\./, 3],
+    ['consent', { state: 'declined' }, 'This offer was declined. Thank you for your time.', 3],
+    ['date', { state: 'date_requested' }, /^Sam will look at the new date\. If it works, he will send an updated offer\./, 3],
   ])('after a %s refused with %o, shows where the offer stands even when the next read fails', async (act, refusal, text, calls) => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
@@ -365,7 +441,7 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
   });
 
-  it('after a sign refused because the offer is signed, says it was already signed, with the name and time on record', async () => {
+  it('after a sign refused because the offer is signed, names the signer and the time on record', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({ state: 'signed' }, 409)) // another name is on record
@@ -374,8 +450,32 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
-    expect(await screen.findByText(/^This offer was already signed by Jordan M\. Rivera on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(await screen.findByText(/^This offer was signed by Jordan M\. Rivera on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
     expect(screen.queryByText(/You signed this offer/)).toBeNull();
+  });
+
+  // Codex P1 (round 27): an answer another tab gave reaches this tab through a
+  // 409 and a read. It is not this tab's doing, so it is told in neutral words.
+  it.each([
+    ['sign', { state: 'declined' }, openPayload({ state: 'declined' }), 'This offer was declined. Thank you for your time.', /You declined/],
+    ['decline', { state: 'date_requested' }, openPayload({ state: 'date_requested', requestedStartDate: '2027-01-11' }), 'A new start date was asked for: Mon, Jan 11, 2027.', /You asked to start on|your new date/],
+  ])('after a %s refused because another tab answered, tells that answer in neutral words', async (act, refusal, read, text, notMine) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse(refusal, 409))
+      .mockResolvedValueOnce(jsonResponse(read));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    if (act === 'sign') {
+      fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    } else {
+      fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Yes, decline' }));
+    }
+    expect(await screen.findByText(text)).toBeInTheDocument();
+    expect(screen.queryByText(notMine)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('the text box follows a fresh read of the open offer, such as a choice made in another tab', async () => {
@@ -393,7 +493,9 @@ describe('CareersOfferPage — open state', () => {
     await waitFor(() => expect(screen.getByLabelText('Text me about this offer')).toBeChecked());
   });
 
-  it('re-reads the offer when a successful sign reply cannot be read', async () => {
+  // Only a read shows the signature (the reply was lost): another tab may have
+  // signed in the same name, so the page names the signer, never "You signed".
+  it('re-reads the offer when a successful sign reply cannot be read, and names the signer', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('cut off'); } })
@@ -402,7 +504,46 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
-    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026/)).toBeInTheDocument();
+    expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
+  });
+
+  // Codex P1: the server answers a sign in the name already signed (another
+  // tab signed first) with 200 and a replay mark. This tab signed nothing, so
+  // the page names the stored signature, never "You signed".
+  it('a sign answered as a replay names the stored signer, never "You signed"', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z', signedName: 'Jordan Rivera', replay: true }));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'jordan rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  // Codex P1: this tab's sign was refused, then a signature in the same name
+  // came from elsewhere. Nothing this tab sent went through, so the page names
+  // the signer, never "You signed".
+  it('after this tab\'s sign is refused, a signature in the same name from elsewhere is never "You signed"', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'This offer changed. Please review it.' }, 409)) // the sign: refused
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: '2026-12-11T09:00:00.000Z' }))) // the read: still open
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed' }, 409)) // the decline: signed meanwhile
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'Jordan Rivera', signedAt: '2026-12-12T13:15:00.000Z' })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Decline' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, decline' }));
+    expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it('sends a date request for a future Monday to Thursday only', async () => {
@@ -480,7 +621,7 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockRejectedValueOnce(new Error('offline')) // sign: reply lost
       .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: the sign has not landed yet
-      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the resend: it had landed
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the resend signs
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -525,7 +666,7 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: not landed yet
       .mockResolvedValueOnce(jsonResponse({ error: 'Too many requests, please try again shortly.' }, 429)) // the resend
       .mockResolvedValueOnce(jsonResponse(openPayload())) // the read after it: still open
-      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the next resend: it had landed
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the next resend signs
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -572,7 +713,7 @@ describe('CareersOfferPage — open state', () => {
       .mockRejectedValueOnce(new Error('offline')) // POST consent true: reply lost
       .mockRejectedValueOnce(new Error('offline')) // the read fails
       .mockResolvedValueOnce(jsonResponse({ error: 'Too many requests, please try again shortly.' }, 429)) // the resend is refused
-      .mockResolvedValueOnce(jsonResponse({ textConsent: true })); // the next resend is saved
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' })); // the next resend is saved
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -614,7 +755,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     await waitFor(() => expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled());
-    finish(jsonResponse({ textConsent: false }));
+    finish(jsonResponse({ textConsent: false, version: '2026-12-11T15:21:00.000Z' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
   });
@@ -625,17 +766,17 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByText(/^This offer was signed on Sat, Dec 12, 2026\./)).toBeInTheDocument();
   });
 
-  it('re-reads the offer when signing answers 502; the name on record is this signature in any letter case and spacing', async () => {
+  it('re-reads the offer when signing answers 502, and names the signer on record', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({}, 502))
       .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'JORDAN RIVERA', signedAt: '2026-12-12T13:15:00.000Z' })));
     globalThis.fetch = fetchMock;
     renderPage();
-    // The server stores "Jordan Rivera": each run of spaces collapsed, as job-offers.js cleanText does.
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: '  Jordan   Rivera ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
-    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026/)).toBeInTheDocument();
+    expect(await screen.findByText(/^This offer was signed by JORDAN RIVERA on Sat, Dec 12, 2026\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
   });
 
   // Another tab signed under another name while this tab's reply was lost:
@@ -643,7 +784,7 @@ describe('CareersOfferPage — open state', () => {
   it.each([
     ['sign', 'Jordan M. Rivera'],
     ['decline', 'Jordan Rivera'],
-  ])('after a lost %s reply, a read that shows a signature this tab did not send says whose it is', async (act, onRecord) => {
+  ])('after a lost %s reply, a read that shows a signature names the signer, never "You signed"', async (act, onRecord) => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockRejectedValueOnce(new Error('offline')) // this tab's send: reply lost
@@ -657,7 +798,7 @@ describe('CareersOfferPage — open state', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
       fireEvent.click(screen.getByRole('button', { name: 'Yes, decline' }));
     }
-    expect(await screen.findByText(new RegExp(`^This offer was already signed by ${onRecord.replace('.', '\\.')} on Sat, Dec 12, 2026\\.`))).toBeInTheDocument();
+    expect(await screen.findByText(new RegExp(`^This offer was signed by ${onRecord.replace('.', '\\.')} on Sat, Dec 12, 2026\\.`))).toBeInTheDocument();
     expect(screen.queryByText(/You signed this offer/)).toBeNull();
   });
 
@@ -686,15 +827,18 @@ describe('CareersOfferPage — other states', () => {
     expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
   });
 
-  it('shows the declined and date-asked messages', async () => {
+  // Anyone with the link may open it, so a return visit tells a decline or a
+  // date request in neutral words, as it does a signature.
+  it('tells a declined or date-asked offer in neutral words on a return visit', async () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'declined' })));
     const first = renderPage();
-    expect(await screen.findByText('You declined this offer. Thank you for your time.')).toBeInTheDocument();
+    expect(await screen.findByText('This offer was declined. Thank you for your time.')).toBeInTheDocument();
     first.unmount();
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'date_requested', requestedStartDate: '2027-01-11' })));
     renderPage();
-    expect(await screen.findByText(/Sam will look at your new date/)).toBeInTheDocument();
-    expect(screen.getByText('You asked to start on Mon, Jan 11, 2027.')).toBeInTheDocument();
+    expect(await screen.findByText('Sam will look at the new date. If it works, he will send an updated offer.')).toBeInTheDocument();
+    expect(screen.getByText('A new start date was asked for: Mon, Jan 11, 2027.')).toBeInTheDocument();
+    expect(screen.queryByText(/You asked to start on|You declined/)).toBeNull();
   });
 
   it.each(['expired', 'withdrawn', 'superseded'])('shows only the message and the phone for %s', async (state) => {

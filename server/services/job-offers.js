@@ -1012,8 +1012,12 @@ async function acceptOffer(token, { signedName, version, ip, userAgent }) {
     const found = await lockByToken(trx, token);
     if (!found) return { notFound: true };
     const { offer, state } = found;
-    // An identical replay of a signature is answered with the stored one, never a second signature.
-    if (state === 'signed' && name && sameName(name, offer.signed_name)) return { body: { state: 'signed', signedAt: iso(offer.signed_at) } };
+    // An identical replay of a signature is answered with the stored one, never a second signature. `replay`: this
+    // request signed nothing (another tab, or an earlier send whose reply was lost, signed first), so the page names
+    // the signer instead of saying "You signed".
+    if (state === 'signed' && name && sameName(name, offer.signed_name)) {
+      return { body: { state: 'signed', signedAt: iso(offer.signed_at), signedName: offer.signed_name, replay: true } };
+    }
     if (state !== 'open') return refusal(state, offer);
     if (!name) return { invalid: 'Type your full name to sign.' };
     if (changedSince(offer, version)) return CHANGED;
