@@ -243,6 +243,10 @@ const DEFAULTS = Object.freeze({
   // since that day) ran past its 5 s share on 2 of 2 production voice fills,
   // where Luna had answered 22 of 22 at about 2.3 s.
   OPENAI_FAST_INTERACTIVE: 'gpt-5.6-luna',
+  // Speech-to-speech model for the Sandy GPT-Live trial on the sandbox test number
+  // (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19). Its backend reasoning model is
+  // OPENAI_FAST_INTERACTIVE above. Override: MODEL_OPENAI_VOICE_LIVE.
+  OPENAI_VOICE_LIVE: 'gpt-live-1.1',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
   OPENAI_FRONTIER: 'gpt-6-astra',
   OPENAI_ESTIMATE_VISION: 'gpt-6-sol',
@@ -405,6 +409,7 @@ const OPENAI_BALANCED      = process.env.MODEL_OPENAI_BALANCED
 const OPENAI_FAST          = process.env.MODEL_OPENAI_FAST          || DEFAULTS.OPENAI_FAST;
 // Never derived from OPENAI_FAST: see DEFAULTS.OPENAI_FAST_INTERACTIVE.
 const OPENAI_FAST_INTERACTIVE = process.env.MODEL_OPENAI_FAST_INTERACTIVE || DEFAULTS.OPENAI_FAST_INTERACTIVE;
+const OPENAI_VOICE_LIVE = process.env.MODEL_OPENAI_VOICE_LIVE || DEFAULTS.OPENAI_VOICE_LIVE;
 // Backwards-compatible export for older callers/env configuration. New routes
 // should select BALANCED or FAST explicitly instead of treating one model as
 // universally "best".
@@ -916,6 +921,7 @@ module.exports = {
   OPENAI_BALANCED,
   OPENAI_FAST,
   OPENAI_FAST_INTERACTIVE,
+  OPENAI_VOICE_LIVE,
   OPENAI_REPORT_WRITER,
   OPENAI_FRONTIER,
   OPENAI_ESTIMATE_VISION,

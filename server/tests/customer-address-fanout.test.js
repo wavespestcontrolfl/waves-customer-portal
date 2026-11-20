@@ -16,6 +16,7 @@ const {
   propagateCustomerAddressChange,
 } = require('../services/customer-address-fanout');
 const { NEW_SOD_COLUMNS } = require('../services/lawn-sod-holds');
+const { CONTROLLER_TIMER_FIELDS } = require('../services/controller-timer');
 
 // Minimal knex-shaped stub: select() resolves the preset rows for the table,
 // update() records { table, ids, patch } and resolves the id count. Captures
@@ -567,7 +568,9 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     expect(stamp.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
     // The move stamp + a reset of the per-field confirmation set — never the settings themselves.
     // The new-sod record (all four columns) described the home just left: cleared by the same stamp.
-    expect(Object.keys(stamp.patch)).toEqual(['irrigation_home_changed_at', 'irrigation_confirmed_fields', ...NEW_SOD_COLUMNS]);
+    // So did the sprinkler timer on file (brand, model, phone-app answer): one box on that home's wall.
+    expect(Object.keys(stamp.patch)).toEqual(['irrigation_home_changed_at', 'irrigation_confirmed_fields', ...NEW_SOD_COLUMNS, ...CONTROLLER_TIMER_FIELDS]);
+    for (const column of CONTROLLER_TIMER_FIELDS) expect(stamp.patch[column]).toBeNull();
     expect(stamp.patch.irrigation_confirmed_fields).toBe('[]');
     for (const column of NEW_SOD_COLUMNS) expect(stamp.patch[column]).toBeNull();
     expect(counts.property_preferences).toBe(1); // mock: no prefs row → the guard is upserted
@@ -598,7 +601,7 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     // …and, with no preferences row (the mock's update matched 0), upserts a minimal one carrying only the stamp.
     const up = conn.__updates.find((u) => u.table === 'property_preferences' && u.kind === 'upsert');
     expect(up.conflict).toBe('customer_id');
-    expect(Object.keys(up.row).sort()).toEqual(['customer_id', 'irrigation_confirmed_fields', 'irrigation_home_changed_at', ...NEW_SOD_COLUMNS].sort());
+    expect(Object.keys(up.row).sort()).toEqual(['customer_id', 'irrigation_confirmed_fields', 'irrigation_home_changed_at', ...NEW_SOD_COLUMNS, ...CONTROLLER_TIMER_FIELDS].sort());
     const fs = require('fs');
     const path = require('path');
     expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/if \(!sameHomeFlip\) await require\('\.\/customer-address-fanout'\)\.markSprinklerSettingsMoved\(customerId, trx\);/);

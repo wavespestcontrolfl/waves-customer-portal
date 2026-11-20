@@ -9,10 +9,20 @@ jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(), syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/voice-agent/relay-server', () => ({ isRelayAttached: jest.fn(() => true) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), voiceGptLiveTestLive: () => process.env.GATE_VOICE_GPT_LIVE_TEST === 'true' }));
 jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
+// The REST client is a fake (the TwiML builder stays real), so a run with real
+// Twilio credentials in the environment can never call the API.
+const mockCallUpdate = jest.fn(() => Promise.resolve({}));
+const mockCalls = jest.fn(() => ({ update: mockCallUpdate }));
+jest.mock('twilio', () => {
+  const actual = jest.requireActual('twilio');
+  const client = jest.fn(() => ({ calls: mockCalls }));
+  return Object.assign(client, actual);
+});
 
 const db = require('../models/db');
+const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
 const logger = require('../services/logger');
 const { isRelayAttached } = require('../services/voice-agent/relay-server');
 const voiceRouter = require('../routes/twilio-voice-webhook');
@@ -442,6 +452,264 @@ describe('POST /relay-sandbox/cell', () => {
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-8', To: '+19415550188', Digits: '03' } }, res);
     expect(res.status).toHaveBeenCalledWith(403);
+  });
+});
+
+describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
+  // The cell handler's reads and writes: the ownership read (db `first`; the
+  // production path stamps with db `update` = prodUpdate), then ONE transaction
+  // for GPT-Live: the budget lock, the spent read (`whereNot(...).first(raw)`
+  // answers `usd`) and the reservation stamp (trx `update`).
+  // The ledger (voice_gpt_live_ledger): the spent read (`first(raw)` answers
+  // `usd`) and the claim (`insert().onConflict().ignore().returning()`,
+  // [] = already claimed). call_log in the same transaction: the stamp.
+  function primeLive({ usd = 0, budgetFails = false, stampFails = false, stampRows = 1, claimed = true } = {}) {
+    const prodUpdate = jest.fn(() => Promise.resolve(1));
+    const builder = { where: jest.fn(() => builder), first: jest.fn(async () => ({ source: VOICE_RELAY_SANDBOX_SOURCE })), update: prodUpdate };
+    db.mockImplementation(() => builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const spent = jest.fn(async () => {
+      if (budgetFails) throw new Error('pool down');
+      return { usd };
+    });
+    const insert = jest.fn(() => ledger);
+    const returning = jest.fn(async () => (claimed ? [{ call_sid: 'CA-sb-live' }] : []));
+    const release = jest.fn(async () => 0); // stale, never-admitted rows released at $0
+    const ledger = {
+      first: spent, insert, onConflict: jest.fn(() => ledger), ignore: jest.fn(() => ledger), returning,
+      whereNull: jest.fn(() => ledger), whereRaw: jest.fn(() => ledger), update: release,
+    };
+    const update = jest.fn(() => (stampFails ? Promise.reject(new Error('pool down')) : Promise.resolve(stampRows)));
+    const tb = { where: jest.fn(() => tb), whereRaw: jest.fn(() => tb), update };
+    const trx = jest.fn((table) => (table === 'voice_gpt_live_ledger' ? ledger : tb));
+    trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    trx.fn = { now: () => 'NOW()' };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    return { update, prodUpdate, spent, insert, release, ledger, tb, trx };
+  }
+  // A cell request as Twilio sends it: signed over the public URL and the form
+  // body (the route checks it itself; the shared middleware may only log).
+  const CELL_PATH = '/api/webhooks/twilio/relay-sandbox/cell';
+  const cell = (digits, CallSid = 'CA-sb-live', { signed = true } = {}) => {
+    const body = { CallSid, To: SANDBOX, Digits: digits };
+    const headers = { host: 'portal.example.com', 'x-forwarded-proto': 'https' };
+    if (signed) {
+      headers['x-twilio-signature'] = require('twilio').getExpectedTwilioSignature(process.env.TWILIO_AUTH_TOKEN || '', `https://portal.example.com${CELL_PATH}`, body);
+    }
+    return { body, headers, originalUrl: CELL_PATH, protocol: 'http', get: (name) => headers[String(name).toLowerCase()] };
+  };
+
+  beforeEach(() => { process.env.TWILIO_AUTH_TOKEN = 'test-token'; });
+  afterEach(() => {
+    delete process.env.GATE_VOICE_GPT_LIVE_TEST;
+    delete process.env.VOICE_GPT_LIVE_TEST_MAX_USD;
+    delete process.env.TWILIO_AUTH_TOKEN;
+    delete process.env.TWILIO_SIGNATURE_VALIDATION;
+  });
+
+  test('an unsigned or wrongly signed live cell request is refused before any ledger write or Twilio update, whatever the middleware mode', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.TWILIO_ACCOUNT_SID = 'AC-test';
+    try {
+      for (const mode of ['log', 'disabled', 'enforce']) {
+        process.env.TWILIO_SIGNATURE_VALIDATION = mode;
+        const tampered = cell('71');
+        tampered.body.Digits = '72'; // signed over 71
+        for (const req of [cell('71', 'CA-sb-live', { signed: false }), tampered]) {
+          primeLive();
+          mockCallUpdate.mockClear();
+          const res = mockRes();
+          await handlerFor('/relay-sandbox/cell')(req, res);
+          expect(res.body).toContain('not available right now');
+          expect(res.body).not.toContain('<Stream');
+          expect(db.transaction).not.toHaveBeenCalled();
+          expect(mockCallUpdate).not.toHaveBeenCalled();
+        }
+      }
+      delete process.env.TWILIO_AUTH_TOKEN; // nothing to verify with: refused too
+      primeLive();
+      const res = mockRes();
+      await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+      expect(res.body).toContain('not available right now');
+      expect(db.transaction).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.TWILIO_ACCOUNT_SID;
+    }
+  });
+
+  test('gate off: 71 is an unknown code and renders the unchanged production-profile TwiML', async () => {
+    process.env.VOICE_RELAY_PROFILE = 'nova_hints_v1';
+    const { prodUpdate, update } = primeLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('<ConversationRelay');
+    expect(res.body).toContain('<Parameter name="relay_profile" value="nova_hints_v1" />');
+    expect(res.body).not.toContain('<Stream');
+    expect(JSON.parse(prodUpdate.mock.calls[0][0].metadata.bindings[0]).relay_profile_id).toBe('nova_hints_v1');
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('gate on: 71 plays the disclosure, then connects a Stream with the CallSid and token as path segments and no query string', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.TWILIO_ACCOUNT_SID = 'AC-test';
+    process.env.TWILIO_AUTH_TOKEN = 'test-token';
+    const { update, trx, tb, insert, release, ledger, spent } = primeLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    // Twilio's own stop at 600 s, on the fake client
+    expect(mockCalls).toHaveBeenCalledWith('CA-sb-live');
+    expect(mockCallUpdate).toHaveBeenCalledWith({ timeLimit: 600 });
+    expect(res.body).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Play>https:\/\/[^<]+\.mp3<\/Play><Connect action="\/api\/webhooks\/twilio\/relay-sandbox\/live-complete">/);
+    const url = res.body.match(/<Stream url="([^"]+)"/)[1];
+    expect(url).toMatch(/^wss:\/\/portal\.example\.com\/ws\/voice-live\/CA-sb-live\/[0-9a-z]+\.\d+\.[0-9a-f]{16}\.[0-9a-f]+$/);
+    expect(url).not.toContain('?');
+    // the same builder the upgrade's Twilio signature check uses
+    expect(url).toBe(require('../services/voice-agent/relay-protocol').liveStreamUrl('portal.example.com', 'CA-sb-live', url.split('/').pop()));
+    expect(res.body).not.toContain('<ConversationRelay');
+    expect(res.body).not.toContain('shh-secret-123');
+    // The ledger read, the ledger claim and the stamp run under one lock, in one transaction.
+    expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['voice_gpt_live_budget']);
+    expect(trx).toHaveBeenCalledWith('voice_gpt_live_ledger');
+    // First, reservations whose stream never opened within the token's life go back at $0.
+    expect(ledger.whereNull).toHaveBeenCalledWith('admitted_at');
+    expect(ledger.whereNull).toHaveBeenCalledWith('cost_usd');
+    expect(ledger.whereRaw).toHaveBeenCalledWith("created_at < now() - (? * interval '1 second')", [360]);
+    expect(release).toHaveBeenCalledWith({ cost_usd: 0, settled_at: 'NOW()' });
+    expect(release.mock.invocationCallOrder[0]).toBeLessThan(spent.mock.invocationCallOrder[0]);
+    expect(insert).toHaveBeenCalledWith({ call_sid: 'CA-sb-live', reserved_usd: PER_CALL_RESERVE_USD });
+    expect(ledger.onConflict).toHaveBeenCalledWith('call_sid');
+    // single-use: the stamp lands only on a row with no gpt_live yet
+    expect(tb.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-sb-live' });
+    expect(tb.whereRaw).toHaveBeenCalledWith("(metadata->'gpt_live') IS NULL");
+    // The stamp the WS upgrade later requires, carrying this call's reservation.
+    const stamp = JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live;
+    // ...bound to the one token this response issues (its digest, never the token)
+    const { callTokenDigest, verifyCallToken, LIVE_TOKEN_AUDIENCE } = require('../services/voice-agent/relay-protocol');
+    // signed for /ws/voice-live/ only: the relay socket's verify refuses it
+    expect(verifyCallToken(url.split('/').pop(), 'CA-sb-live', { audience: LIVE_TOKEN_AUDIENCE })).toBe(true);
+    expect(verifyCallToken(url.split('/').pop(), 'CA-sb-live')).toBe(false);
+    expect(stamp).toEqual({
+      cell: '71', voice: 'marin', started_at: expect.any(String), reserved_usd: PER_CALL_RESERVE_USD,
+      stream_token_sha256: callTokenDigest(url.split('/').pop()),
+    });
+    expect(update.mock.calls[0][0].metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+    delete process.env.TWILIO_ACCOUNT_SID;
+    delete process.env.TWILIO_AUTH_TOKEN;
+  });
+
+  test('gate on: 72 selects the delta voice', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    const { update } = primeLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('72'), res);
+    expect(res.body).toContain('/ws/voice-live/CA-sb-live/');
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live).toMatchObject({ cell: '72', voice: 'delta' });
+  });
+
+  test('gate on: any other code still takes the production path', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    primeLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('09'), res);
+    expect(res.body).toContain('speechModel="flux"');
+    expect(res.body).not.toContain('<Stream');
+  });
+
+  test('a reservation that does not fit under $5 (settled costs, else reservations): a spoken notice and a hangup, no stamp, no stream', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    const { update, spent } = primeLive({ usd: 5 - PER_CALL_RESERVE_USD + 0.01 });
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('The GPT-Live test budget is used up. Goodbye.');
+    expect(res.body).toContain('<Hangup/>');
+    expect(res.body).not.toContain('<Stream');
+    expect(update).not.toHaveBeenCalled();
+    // the ledger table, never call_log (whose rows can be deleted): settled cost, else the reservation
+    expect(spent.mock.calls[0][0].sql).toBe('COALESCE(SUM(COALESCE(cost_usd, reserved_usd)), 0) AS usd');
+  });
+
+  test('VOICE_GPT_LIVE_TEST_MAX_USD moves the cap; the whole reservation must fit', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.VOICE_GPT_LIVE_TEST_MAX_USD = '2';
+    primeLive({ usd: 2 - PER_CALL_RESERVE_USD }); // exactly fits under 2
+    let res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('<Stream');
+    primeLive({ usd: 2 - PER_CALL_RESERVE_USD + 0.01 }); // does not
+    res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('budget is used up');
+  });
+
+  test('the budget comparison is exact: $0.0450 spent + the $0.525 reservation fits a $0.57 cap; one ten-thousandth more does not', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.VOICE_GPT_LIVE_TEST_MAX_USD = '0.57';
+    let res = mockRes();
+    primeLive({ usd: '0.0450' });
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('<Stream');
+    res = mockRes();
+    primeLive({ usd: '0.0451' });
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('budget is used up');
+  });
+
+  test('a set VOICE_GPT_LIVE_TEST_MAX_USD that is not a plain number refuses the call; it never falls back to $5', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    for (const bad of ['', '   ', '$1', '-1', 'five', '1e3', '9'.repeat(400), '0.52499']) {
+      process.env.VOICE_GPT_LIVE_TEST_MAX_USD = bad;
+      const { insert } = primeLive();
+      const res = mockRes();
+      await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+      expect(res.body).toContain('not available right now');
+      expect(res.body).not.toContain('<Stream');
+      expect(insert).not.toHaveBeenCalled();
+    }
+  });
+
+  test('a database error on the budget read or the stamp, or a call that already claimed a reservation (a repeated cell request), refuses the call (fail closed)', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    for (const opts of [{ budgetFails: true }, { stampFails: true }, { stampRows: 0 }, { claimed: false }]) {
+      primeLive(opts);
+      const res = mockRes();
+      await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+      expect(res.body).toContain('not available right now');
+      expect(res.body).toContain('<Hangup/>');
+      expect(res.body).not.toContain('<Stream');
+    }
+  });
+
+  test('relay not attached: the same spoken notice as the answer handler', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    primeLive();
+    isRelayAttached.mockImplementation(() => false);
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('not attached');
+    expect(res.body).not.toContain('<Stream');
+  });
+
+  test('a row that is not sandbox-sourced is refused before any of this', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    primeLive();
+    const builder = { where: jest.fn(() => builder), first: jest.fn(async () => ({ source: 'twilio_voice' })) };
+    db.mockImplementation(() => builder);
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.statusCode).toBe(403);
+    expect(res.body).not.toContain('<Stream');
+  });
+
+  test('/relay-sandbox/live-complete hangs up, and refuses a number that is not the sandbox', async () => {
+    let res = mockRes();
+    await handlerFor('/relay-sandbox/live-complete')({ body: { CallSid: 'CA-sb-live', To: SANDBOX } }, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Hangup/>');
+    res = mockRes();
+    await handlerFor('/relay-sandbox/live-complete')({ body: { CallSid: 'CA-prod', To: '+19415550188' } }, res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.body).toContain('<Hangup/>');
   });
 });
 

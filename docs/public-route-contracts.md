@@ -7952,6 +7952,31 @@ the test number, can neither create dispatch work nor move a metric. The
 transcript, latency summary and version stamps land on the sandbox row
 exactly as in production; that record is the bake-off. Any change to the
 number gate or the dry-run invariant is security-critical).
+`/api/webhooks/twilio/relay-sandbox/live-complete` + the `/ws/voice-live/{CallSid}/{token}` WebSocket path
+(GPT-Live trial, dark behind `GATE_VOICE_GPT_LIVE_TEST`, owner 2026-11-19, spend cap $5. With the gate on, cell code
+`71` or `72` on the sandbox number answers `/relay-sandbox/cell` with a disclosure replay and
+`<Connect action="…/relay-sandbox/live-complete"><Stream url="wss://HOST/ws/voice-live/CALLSID/TOKEN"/></Connect>`
+(Twilio forbids a query string on a `<Stream>` url, so the CallSid and the per-call minted token are path segments).
+`live-complete` is a POST TwiML webhook, Twilio-signature validated at the mount, refused with a 403 `<Hangup/>` unless
+`To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`, and answers a bare `<Hangup/>`. The WebSocket upgrade first requires the
+raw request target to be exactly the canonical `/ws/voice-live/{encoded CallSid}/{token}` (no query string), then checks
+Twilio's handshake signature (`X-Twilio-Signature` over the exact wss URL, `liveStreamUrl` in relay-protocol.js, with
+`TWILIO_AUTH_TOKEN`; missing or invalid = refused before any database read), then runs the relay's door in the same
+order: the token must verify for that CallSid, the call_log row must be sandbox-sourced and carry the
+`metadata.gpt_live` stamp the cell route wrote, the token must be signed for this path (`LIVE_TOKEN_AUDIENCE`; the
+relay socket refuses such a token, and this path refuses a relay token) and be the one that stamp names by digest
+(`stream_token_sha256`; any other valid token for the call is refused), the gate must be on, and the token is then
+burned; any failure destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`, which admits the
+call's ledger row once after the handshake and before OpenAI opens (a reservation already released or settled opens
+no OpenAI session). It has no tools and no lookups (client
+delegation: the bridge answers every delegation with one fixed sentence). No booking, lead, text or transfer. Before any write, the cell
+route verifies the request's Twilio signature itself (the shared middleware lets unsigned requests through in its
+`log` and `disabled` modes); unsigned or invalid = refused with no ledger write and no Twilio update. The cell route
+reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_live_ledger`, one row per CallSid)
+under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
+within the token's life), and refuses the call
+when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.
+Reply delay and cost land on `call_log.metadata.gpt_live`; the call's words are never stored.)
 `/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —
 the voice URL of the staff-only "Waves Tech" voice line, `TECH_VOICE_NUMBER`,
 which a technician calls from their own cell; dark behind
