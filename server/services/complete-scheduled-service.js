@@ -732,6 +732,19 @@ function effectiveReviewAskDecision({ lateCloseReviewKept, packetEffects, standa
   return lateCloseReviewKept === true ? !packetEffects : standardRequestReview;
 }
 
+// A backdated closeout never has its first ask forced on (a never-asked customer's reason-less turn-off stays an ask for a
+// normal completion): the forced-on answer is dropped, the off reason (when sent) is kept. Exported for testability.
+function lockForBackdatedCloseout(lock, backfill) {
+  return backfill === true && lock?.forcedOn ? null : lock;
+}
+
+// The explicit-choice rule for a kept late-close ask: eligible, the client sent requestReview === true (a missing, false or
+// "true" string is no ask), the re-service verdict allows it, and no blocking client suppression. Exported for testability.
+function lateCloseChoiceKept({ lateCloseEligible, requestReview, reviewAskAllowed, reviewSuppression }) {
+  return lateCloseEligible === true && requestReview === true && reviewAskAllowed === true
+    && !(reviewSuppression && reviewSuppression !== 'invoice_created');
+}
+
 // The late-close ask is kept only when the pre-read eligibility (which also ran the first-ask rules), the unchanged customer and
 // the locked verdict ALL say so. The verdict is not even asked otherwise. Exported for testability.
 async function lateCloseEligibleAfterPreRead({ preReadEligible, customerMoved, verdict }) {
@@ -3461,6 +3474,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           customerId: lockVisit.customer_id, requestReview: requestReviewPosted, optOutReason: reviewOptOutReason,
         }, db);
       }
+      // A backdated closeout never has its ask forced on: a reason-less turn-off stays silent, today's backfill behavior.
+      // The off reason, when sent ("Already left a review"), is still kept and marks the customer reviewed.
+      reviewFirstAskLock = lockForBackdatedCloseout(reviewFirstAskLock, backfill);
       if (reviewFirstAskLock?.forcedOn) {
         requestReview = true;
         // The tech cleared the box, so a timing left in the form is not a choice: Automatic.
@@ -7394,8 +7410,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The same verdict immediate enrollment reads (effectiveRequestReview): a blocking client suppression or a refused
           // re-service ask freezes false, so the paid-invoice enrollment, which reads only the frozen boolean, cannot send it.
           // Strict: only an explicit true counts (a server-forced first ask sets it true above); anything else is no ask.
-          lateCloseReviewKept = lateCloseEligible === true && requestReview === true && reviewAskAllowed === true
-            && !(reviewSuppression && reviewSuppression !== 'invoice_created');
+          lateCloseReviewKept = lateCloseChoiceKept({ lateCloseEligible, requestReview, reviewAskAllowed, reviewSuppression });
           if (isBackfillCompletion && !lateCloseEligible) reviewFirstAskLock = null;
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
@@ -16634,6 +16649,8 @@ module.exports = {
   lateCloseFirstAskEligible,
   firstAskCustomerMoved,
   lateCloseEligibleAfterPreRead,
+  lockForBackdatedCloseout,
+  lateCloseChoiceKept,
   firstAskVisitStillApplies,
   effectiveReviewAskDecision,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,

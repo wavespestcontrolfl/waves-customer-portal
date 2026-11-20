@@ -76,7 +76,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseFirstAskEligible, firstAskCustomerMoved, lateCloseEligibleAfterPreRead, firstAskVisitStillApplies, effectiveReviewAskDecision, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
+const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, lateCloseFirstAskEligible, firstAskCustomerMoved, lateCloseEligibleAfterPreRead, firstAskVisitStillApplies, lockForBackdatedCloseout, lateCloseChoiceKept, effectiveReviewAskDecision, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
@@ -1031,6 +1031,46 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
     });
   });
 
+  describe('a backdated closeout keeps the ask only on an explicit requestReview === true; the first ask is never forced on', () => {
+    // The lock shapes firstAskLockChoice answers for a never-asked customer.
+    const forcedOnLock = { requestReview: true, forcedOn: true, optOutReason: null };
+    const alreadyLeftLock = { requestReview: false, forcedOn: false, optOutReason: 'already_left_review' };
+    // The commit's steps in order: the lock block (backdated closeouts drop a forced-on answer), then the kept choice.
+    const run = ({ posted, lock, eligible = true }) => {
+      let requestReview = posted;
+      const kept = lockForBackdatedCloseout(lock, true);
+      if (kept?.forcedOn) requestReview = true;
+      return { lock: kept, kept: lateCloseChoiceKept({ lateCloseEligible: eligible, requestReview, reviewAskAllowed: true }) };
+    };
+
+    test('false, omitted or a "true" string, with a never-asked customer: no ask (a reason-less off is silence)', () => {
+      expect(run({ posted: false, lock: forcedOnLock })).toEqual({ lock: null, kept: false });
+      expect(run({ posted: undefined, lock: null }).kept).toBe(false);
+      expect(run({ posted: 'true', lock: null }).kept).toBe(false);
+      expect(run({ posted: 1, lock: null }).kept).toBe(false);
+    });
+
+    test('true and eligible: the ask is kept; not eligible: it is not', () => {
+      expect(run({ posted: true, lock: null }).kept).toBe(true);
+      expect(run({ posted: true, lock: null, eligible: false }).kept).toBe(false);
+    });
+
+    test('"Already left a review" is still kept on the lock (it marks the customer reviewed) and the ask stays off', () => {
+      expect(run({ posted: false, lock: alreadyLeftLock })).toEqual({ lock: alreadyLeftLock, kept: false });
+    });
+
+    test('a normal completion keeps its forced-on first ask', () => {
+      expect(lockForBackdatedCloseout(forcedOnLock, false)).toBe(forcedOnLock);
+      expect(lockForBackdatedCloseout(forcedOnLock, undefined)).toBe(forcedOnLock);
+    });
+
+    test('a blocking client suppression or a refused re-service ask is no ask even with an explicit true', () => {
+      expect(lateCloseChoiceKept({ lateCloseEligible: true, requestReview: true, reviewAskAllowed: true, reviewSuppression: 'customer_concern' })).toBe(false);
+      expect(lateCloseChoiceKept({ lateCloseEligible: true, requestReview: true, reviewAskAllowed: true, reviewSuppression: 'invoice_created' })).toBe(true);
+      expect(lateCloseChoiceKept({ lateCloseEligible: true, requestReview: true, reviewAskAllowed: false })).toBe(false);
+    });
+  });
+
   describe('firstAskVisitStillApplies: the first-ask visit predicates are read again under the lock', () => {
     test('no first-ask check ran: nothing to revalidate', async () => {
       const readVisit = jest.fn();
@@ -1104,7 +1144,8 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
       expect(src).toMatch(/verdict: \(\) => require\('\.\/review-visit-day'\)\.lateCloseAskVerdict\(\{/);
       // The choice is resolved once, as the initial enrollment reads it (an omitted requestReview is no ask), and frozen as that boolean.
       // The same verdict immediate enrollment reads: a blocking client suppression or a refused re-service ask freezes false.
-      expect(src).toMatch(/lateCloseReviewKept = lateCloseEligible === true && requestReview === true && reviewAskAllowed === true\s*\n\s*&& !\(reviewSuppression && reviewSuppression !== 'invoice_created'\);/);
+      expect(src).toMatch(/lateCloseReviewKept = lateCloseChoiceKept\(\{ lateCloseEligible, requestReview, reviewAskAllowed, reviewSuppression \}\);/);
+      expect(src).toMatch(/reviewFirstAskLock = lockForBackdatedCloseout\(reviewFirstAskLock, backfill\);/);
       // The verdict gets the locked row, the pre-lock row (drift), the transaction (strict profile read) and the recap mode.
       expect(src).toMatch(/visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: new Date\(\),/);
       // No caller anchors the window to completionEndedAt (a packet's can be a member's historical end).
