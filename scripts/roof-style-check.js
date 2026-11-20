@@ -68,6 +68,25 @@ function firstDefined(sources, key) {
   return null;
 }
 
+// The photo's tile style, honouring the lookup's tile-only guard: an enriched
+// result that carries the key (even as an explicit null, which means the
+// lookup rejected the read) decides; a raw AI analysis counts only beside a
+// TILE roof read, as in buildEnrichedProfile.
+function photoStyleOf(row) {
+  const enriched = [row, row?.enriched, row?.enriched_snapshot];
+  for (const source of enriched) {
+    if (source && typeof source === 'object' && Object.prototype.hasOwnProperty.call(source, 'roofTileStyle')) {
+      return source.roofTileStyle;
+    }
+  }
+  for (const source of [row?.ai_analysis, row?.aiAnalysis]) {
+    if (source && typeof source === 'object' && source.roofTileStyle != null) {
+      return source.roofMaterial === 'TILE' ? source.roofTileStyle : null;
+    }
+  }
+  return null;
+}
+
 function readLookup(row) {
   const sources = [
     row, row?.enriched, row?.enriched_snapshot, row?.property_record, row?.ai_analysis,
@@ -76,7 +95,7 @@ function readLookup(row) {
   const address = row?.address || row?.normalized_address || row?.formattedAddress
     || firstDefined(sources, 'formattedAddress');
   const hint = String(firstDefined(sources, 'roofStyleHint') || '').replace(/_tile$/, '');
-  const photo = String(firstDefined(sources, 'roofTileStyle') || '').toLowerCase();
+  const photo = String(photoStyleOf(row) || '').toLowerCase();
   return {
     key: normalizeAddress(address),
     hint: ['barrel', 'flat', 'clay'].includes(hint) ? hint : null,

@@ -199,7 +199,7 @@ describe('scripts/roof-style-check', () => {
     const jsonPath = path.join(dir, 'lookups.json');
     const csvPath = path.join(dir, 'known.csv');
     fs.writeFileSync(jsonPath, JSON.stringify([
-      { normalized_address: '1 test st bradenton fl 34211', property_record: { roofStyleHint: 'barrel_tile' }, ai_analysis: { roofTileStyle: 'BARREL' } },
+      { normalized_address: '1 test st bradenton fl 34211', property_record: { roofStyleHint: 'barrel_tile' }, ai_analysis: { roofMaterial: 'TILE', roofTileStyle: 'BARREL' } },
       { address: '2 Test St, Venice, FL 34293', enriched: { roofStyleHint: 'flat_tile', roofTileStyle: 'BARREL' } },
       { address: '3 Test St, Venice, FL 34293', enriched: { roofStyleHint: null, roofTileStyle: null } },
     ]));
@@ -211,5 +211,18 @@ describe('scripts/roof-style-check', () => {
     expect(result.knownWithoutLookup).toBe(1);
     expect(roofCheck.formatReport(result)).toContain('roofStyleHint: 3 matched, 2 with a read, 2 agree (100.0% of reads');
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('honours the tile-only guard: a rejected or non-tile photo read never counts', () => {
+    // Enriched result with an explicit null = the lookup rejected the read;
+    // the raw AI style must not leak through behind it.
+    expect(roofCheck.readLookup({
+      address: '4 Test St, Venice, FL 34293',
+      enriched_snapshot: { roofTileStyle: null },
+      ai_analysis: { roofMaterial: 'SHINGLE', roofTileStyle: 'FLAT' },
+    }).photo).toBeNull();
+    // Raw AI analysis alone counts only beside a TILE read.
+    expect(roofCheck.readLookup({ address: '5 Test St', ai_analysis: { roofMaterial: 'SHINGLE', roofTileStyle: 'FLAT' } }).photo).toBeNull();
+    expect(roofCheck.readLookup({ address: '6 Test St', ai_analysis: { roofMaterial: 'TILE', roofTileStyle: 'FLAT' } }).photo).toBe('flat');
   });
 });

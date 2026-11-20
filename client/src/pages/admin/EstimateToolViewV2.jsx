@@ -403,6 +403,8 @@ function commercialSuiteSizeNote(enrichedProfile) {
 // Read-only roof evidence line (owner 2026-11-19): the county's own roof words
 // and the photo's tile-style read, beside the collapsed "TILE roof" above.
 // Nothing here is priced yet. Returns null when the lookup carries neither.
+// Reads the lookup profile the estimate was built from (engineRequest.profile):
+// the engine's echoed E.property does not carry these fields.
 function roofEvidenceLine(property) {
   const raw = property?.countyRoofRaw;
   const county = [raw?.material, raw?.structure].filter(Boolean).join(" ");
@@ -8974,10 +8976,10 @@ export default function EstimateToolViewV2({
                             {E.property?.roofType} roof
                           </>
                         )}
-                        {roofEvidenceLine(E.property) && (
+                        {roofEvidenceLine(E.engineRequest?.profile) && (
                           <>
                             <br />
-                            {roofEvidenceLine(E.property)}
+                            {roofEvidenceLine(E.engineRequest?.profile)}
                           </>
                         )}
                         {E.property?.estimatedValue && (
