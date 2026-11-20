@@ -639,7 +639,8 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
     test.each([
       ['the stale quote expires', [vendorRow({ shipping_cost: '5.00' }), UNREAD_PACK], {}, 30.9, /is expired/],
       ['no quote offers the stale price', [vendorRow({ is_active: false }), UNREAD_PACK], {}, 30.9, /is the owner's \$30\.90 per 128 fl oz, marked needs pricing/],
-      ['a 96 oz catalog row at the stale $43.82 with no quote offering it', [vendorRow({ is_active: false }), UNREAD_PACK], AT_96_OZ, 23.17, /is the owner's/],
+      // $30.90 x 96 / 128 = $23.175: scaled from whole cents and rounded once (pre-push audit 27).
+      ['a 96 oz catalog row at the stale $43.82 with no quote offering it', [vendorRow({ is_active: false }), UNREAD_PACK], AT_96_OZ, 23.18, /is the owner's/],
     ])('%s, and the only current quote has a pack the inventory cannot read: the catalog holds the owner\'s price, still marked', async (_name, vendors, catalog, price, changelog) => {
       const db = world({ vendors, catalog: [catalogRow(catalog)] });
       const knex = fakeKnex(db);
@@ -647,8 +648,10 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.vendor_pricing[1]).toEqual(UNREAD_PACK); // its own offer: never expired
       const owners = { best_price: price, best_price_status: 'stale', needs_pricing: true };
       expect(db.products_catalog[0]).toMatchObject(owners);
-      expect(calculateInventoryCost({ product: db.products_catalog[0], deductedAmount: 16, inventoryUnit: 'fl_oz', amount: 16, amountUnit: 'fl_oz' }))
-        .toMatchObject({ unitCost: 0.2414 });
+      expect(db.vendor_pricing.map((quote) => quote.is_best_price)).toEqual([false, false]); // the recalculation cleared the winner flag
+      // Job costing reads the owner's $0.2414 an oz (to a tenth of a cent: $23.18 / 96 rounds to $0.2415).
+      const { unitCost } = calculateInventoryCost({ product: db.products_catalog[0], deductedAmount: 16, inventoryUnit: 'fl_oz', amount: 16, amountUnit: 'fl_oz' });
+      expect(unitCost).toBeCloseTo(30.9 / 128, 3);
       expect(warn.mock.calls.map((c) => c[0]).join('\n'))
         .toContain(`marked needs pricing. The catalog price is now ${price}, the owner's $30.90 per 128 fl oz at its package size, still marked`);
       const own = db.pricing_config_audit.find((r) => r.config_key === migration.STALE_AUDIT_KEY);
@@ -662,6 +665,27 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       await migration.down(knex);
       expect(db.products_catalog[0]).toMatchObject({ best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
       expect(Number(db.products_catalog[0].best_price)).toBe(Number(catalogRow(catalog).best_price));
+      expect(db.vendor_pricing.map((quote) => quote.is_best_price)).toEqual([true, false]); // the winner's flag is back with it
+      expect(db.pricing_config_audit).toEqual([]);
+    });
+
+    // Pre-push audit 27: a SiteOne D00001542 quote whose pack the inventory cannot read, with no per-oz figure, has no known gallon
+    // price, so it stays and its auto-orders keep working. The recalculation cannot scale it and keeps the catalog's stale $58.42
+    // marked, so the catalog gets the owner's price, still marked; down() puts the catalog and the winner flag back.
+    test('a SiteOne quote whose pack the inventory cannot read stays; the catalog holds the owner\'s price, still marked', async () => {
+      const unread = vendorRow({ quantity: 'case', price_per_oz: null, normalized_unit_price: null, landed_unit_price: null });
+      const db = world({ vendors: [unread] });
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(db.vendor_pricing[0]).toEqual({ ...unread, is_best_price: false });
+      const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
+      expect(warnings).toMatch(/price left alone/);
+      expect(warnings).not.toMatch(STALE_WARNING);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_price_status: 'stale', needs_pricing: true });
+      expect(auditKeys(db)).toContain('inventory:lesco_crosscheck_plus_stale');
+      await migration.down(knex);
+      expect(db.vendor_pricing[0]).toEqual(unread);
+      expect(db.products_catalog[0]).toMatchObject({ best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
       expect(db.pricing_config_audit).toEqual([]);
     });
 

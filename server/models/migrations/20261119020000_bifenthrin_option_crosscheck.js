@@ -44,7 +44,8 @@
  * clears it. So each SiteOne D00001542 quote of the product (the stale entry's own vendor and item number) that is eligible
  * (vendor-pricing-eligibility, the predicate every recalculation and auto-order reads: active, approved or auto-approved,
  * unexpired, positive) and that the recalculation would read as $58.42 a gallon (routes/admin-inventory vendorRowPricePerOz: the
- * authoritative price over its own pack, else its stored per-oz figure; with neither, its raw price) gets expires_at = now.
+ * authoritative price over its own pack, else its stored per-oz figure) gets expires_at = now. A quote with neither has no known
+ * gallon price, and stays (pre-push audit 27).
  * Another vendor's quote, another item number or another pack price is an independent offer and stays: the catalog follows it
  * (owner 2026-07-10). The inventory recalculation then runs at once: the catalog holds the winner of the current quotes, scaled to
  * its own package size, or none (best_price null, needs_pricing, 'no_valid_price'). When no current quote can be scaled to the
@@ -75,8 +76,8 @@
  * what up() wrote (an admin edit since then is kept); it restores the catalog price only when its audit row exists AND the vendor
  * row still holds exactly what up() wrote, and it restores a stale quote's expiry only while the quote still holds exactly what
  * up() wrote; after either it runs the recalculation again, so the catalog follows the restored rows (a mark up()'s recalculation
- * cleared comes back when the winner up() saw returns); with neither, it puts back a catalog price up() replaced only while the
- * catalog still holds exactly what up() wrote; it restores the pest breakdown only when its audit row exists AND the row still
+ * cleared comes back when the winner up() saw returns); with neither, it puts back a catalog price up() replaced, and the winner
+ * flags up()'s recalculation cleared, only while the catalog still holds exactly what up() wrote; it restores the pest breakdown only when its audit row exists AND the row still
  * deep-equals what up() wrote; then it deletes this migration's price_history and price_snapshots rows (a restored vendor row
  * links its earlier snapshot again), audit rows and changelog row.
  *
@@ -346,7 +347,11 @@ async function fixProductPrice(knex, productId) {
 
   const catalogColumns = await existingColumns(knex, 'products_catalog', CATALOG_AUDIT_COLUMNS);
   const vendorColumns = await existingColumns(knex, 'vendor_pricing', VENDOR_COLUMNS);
-  const before = { product_id: productId, catalog_seen: pickColumns(product, catalogColumns) };
+  // The winner flags up() saw: a recalculation that keeps the catalog price clears every one, and down() puts them back with it.
+  const before = {
+    product_id: productId, catalog_seen: pickColumns(product, catalogColumns),
+    is_best_price_ids: rows.filter((quote) => quote.is_best_price === true).map((quote) => quote.id),
+  };
   if (row) Object.assign(before, await writeNewPrice(knex, productId, row, now, vendorColumns));
   const expired = await expireQuotes(knex, stale, now);
   before.stale_quotes = expired.before;
@@ -388,21 +393,21 @@ async function staleQuotes(knex, productId, siteOne, now) {
   const eligible = new Set((await eligibleVendorPricing(knex('vendor_pricing').where({ product_id: productId }), now)).map((quote) => quote.id));
   const { vendorRowPricePerOz } = inventory();
   return siteOne.filter((quote) => {
+    // Null when neither its pack nor a stored per-oz figure gives a gallon price (pre-push audit 27): such a quote stays.
     const perOz = vendorRowPricePerOz(quote);
-    const gallon = perOz != null ? perOz * STALE_SIZE_OZ : num(filled(quote.price_amount) ? quote.price_amount : quote.price);
-    return eligible.has(quote.id) && Math.round(gallon * 100) / 100 === STALE_PRICE;
+    return eligible.has(quote.id) && perOz != null && Math.round(perOz * STALE_SIZE_OZ * 100) / 100 === STALE_PRICE;
   });
 }
 
 // When no current quote can be scaled to the catalog, the recalculation keeps the catalog price marked stale (needs_pricing), and
 // so does every later one (recalcBestPriceLocked); job costing reads best_price as it stands (calculateInventoryCost). So a catalog
-// it left on the stale price gets the owner's $30.90 per 128 fl oz at its own package size, scaled and rounded as the recalculation
-// scales a quote, with the mark kept: the links still skip it (pre-push audits 25 and 26). A stale-sized price it wrote as current
-// is an independent offer's own price, and stays. True when it replaced one.
+// it left on the stale price gets the owner's $30.90 per 128 fl oz at its own package size, scaled from whole cents and rounded once
+// to the nearest cent ($23.18 at 96 oz), with the mark kept: the links still skip it (pre-push audits 25 to 27). A stale-sized price
+// it wrote as current is an independent offer's own price, and stays. True when it replaced one.
 async function repriceKeptStalePrice(knex, productId, now) {
   const catalog = await knex('products_catalog').where({ id: productId }).first();
   if (!catalog || catalog.best_price_status === 'current' || !holdsStalePrice(catalog)) return false;
-  const bestPrice = Math.round((NEW_PRICE / STALE_SIZE_OZ) * num(catalog.unit_size_oz) * 100) / 100;
+  const bestPrice = Math.round((Math.round(NEW_PRICE * 100) * num(catalog.unit_size_oz)) / STALE_SIZE_OZ) / 100;
   await knex('products_catalog').where({ id: productId }).update({ best_price: bestPrice, best_price_updated_at: now });
   return true;
 }
@@ -500,18 +505,24 @@ async function restoreProductPrice(knex, before, written) {
     }
   }
   if (restored) await recalcRestoringMark(knex, before.product_id, before.catalog_seen);
-  else if (written.catalog_repriced) await restoreRepricedCatalog(knex, before.product_id, before.catalog_seen, written.catalog_recalculated);
+  else if (written.catalog_repriced) await restoreRepricedCatalog(knex, before, written.catalog_recalculated);
 }
 
-// A catalog price up() replaced, with no vendor row restored to recalculate from: the catalog as up() saw it, only while it still
-// holds exactly what up() wrote (a price entered since recalculates the catalog, and is kept).
-async function restoreRepricedCatalog(knex, productId, seen, wrote) {
+// A catalog price up() replaced, with no vendor row restored to recalculate from: the catalog as up() saw it, and the winner flags
+// up()'s recalculation cleared back on the rows that held them (pre-push audit 27), only while the catalog still holds exactly what
+// up() wrote (a price entered since recalculates the catalog and the flags, and is kept). A flag goes back only where it is still
+// what up() left (false).
+async function restoreRepricedCatalog(knex, before, wrote) {
+  const { product_id: productId, catalog_seen: seen, is_best_price_ids: bestIds } = before;
   const catalog = await knex('products_catalog').where({ id: productId }).forUpdate().first();
   if (!catalog || !seen || !wrote || !sameColumns(catalog, wrote)) {
     console.warn(`${LOG} down: the ${CATALOG_NAME} catalog price changed since this migration - leaving it alone`);
     return;
   }
   await knex('products_catalog').where({ id: productId }).update(seen);
+  if (Array.isArray(bestIds) && bestIds.length) {
+    await knex('vendor_pricing').where({ product_id: productId, is_best_price: false }).whereIn('id', bestIds).update({ is_best_price: true });
+  }
 }
 
 // True when it put back at least one quote's expiry.
