@@ -14720,7 +14720,7 @@ export function CompletionPanel({
   useEffect(() => {
     if (reviewFirstAsk && !requestReview && !reviewOptOutReason) setRequestReview(true);
   }, [reviewFirstAsk, requestReview, reviewOptOutReason]);
-  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk, reviewedOn: reviewAlreadyReviewed?.reviewedOn, lateCloseAskKept: backfillQuietCloseout && reviewLateCloseAskKept });
+  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk, reviewedOn: reviewAlreadyReviewed?.reviewedOn, lateCloseAskKept: backfillQuietCloseout && reviewLateCloseAskKept, willReview });
   const handleReviewToggle = (checked) => {
     const next = nextReviewChoice({
       checked,

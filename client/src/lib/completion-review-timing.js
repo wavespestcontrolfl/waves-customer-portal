@@ -280,7 +280,7 @@ export function completionReviewSuppressionReason({
   if (isIncompleteVisit) return "incomplete";
   // The one-time recap closeout has its own review rule, so the late-close ask never lifts it.
   // Only a completed visit keeps the ask (the server's rule): inspection-only and follow-up outcomes stay suppressed.
-  if (backfillQuietCloseout && !(lateCloseAskKept && !oneTimeRecapOnly && visitOutcome === "completed")) return "backfill";
+  if (backfillQuietCloseout && !(lateCloseAskKept === true && !oneTimeRecapOnly && visitOutcome === "completed")) return "backfill";
   if (visitOutcome === "customer_declined") return "customer_declined";
   if (visitOutcome === "customer_concern" || customerConcernInteraction) {
     return "customer_concern";
@@ -331,14 +331,14 @@ export const LATE_CLOSE_ASK_LABEL = "Review ask still goes (closed within 3 days
 
 // The label of the review box: the suppressed, included and plain wordings are today's.
 // `reviewedOn` ('YYYY-MM-DD' or null) dates the already-reviewed label.
-export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk, reviewedOn = null, lateCloseAskKept = false }) {
+export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk, reviewedOn = null, lateCloseAskKept = false, willReview = false }) {
   if (reviewSuppressionReason === ALREADY_REVIEWED_SUPPRESSION) {
     const on = formatETDateOnly(reviewedOn, { month: "short", day: "numeric", year: "numeric" });
     return on ? `${ALREADY_REVIEWED_LABEL} (${on})` : ALREADY_REVIEWED_LABEL;
   }
   if (reviewSuppressionReason) return "Review request suppressed";
   if (oneTimeRecapOnly) return "Review request included";
-  if (lateCloseAskKept && !firstAsk) return LATE_CLOSE_ASK_LABEL;
+  if (lateCloseAskKept === true && willReview === true && !firstAsk) return LATE_CLOSE_ASK_LABEL;
   return firstAsk ? FIRST_REVIEW_ASK_LABEL : "Send review request";
 }
 
@@ -346,7 +346,7 @@ export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firs
 // when the closeout keeps it (GATE_REVIEW_LATE_CLOSE_ASK) and the review box is on.
 export function backfillCheckboxHint({ backfillCloseout = false, reviewAskGoes = false } = {}) {
   if (!backfillCloseout) return "Unchecked: completes as today with the normal customer messages.";
-  return reviewAskGoes
+  return reviewAskGoes === true
     ? "Records to the visit day, sends no customer messages except the review ask (closed within 3 days), and skips auto-charge."
     : "Records to the visit day, sends no customer messages, and skips auto-charge.";
 }

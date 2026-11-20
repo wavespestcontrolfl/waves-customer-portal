@@ -7349,7 +7349,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // first-ask lock the earlier read applied, so only a kept ask can mark the customer reviewed.
           // The same verdict immediate enrollment reads (effectiveRequestReview): a blocking client suppression or a refused
           // re-service ask freezes false, so the paid-invoice enrollment, which reads only the frozen boolean, cannot send it.
-          lateCloseReviewKept = lateCloseEligible && !!requestReview && reviewAskAllowed
+          // Strict: only an explicit true counts (a server-forced first ask sets it true above); anything else is no ask.
+          lateCloseReviewKept = lateCloseEligible === true && requestReview === true && reviewAskAllowed === true
             && !(reviewSuppression && reviewSuppression !== 'invoice_created');
           if (isBackfillCompletion && !lateCloseEligible) reviewFirstAskLock = null;
           const structuredNotes = {

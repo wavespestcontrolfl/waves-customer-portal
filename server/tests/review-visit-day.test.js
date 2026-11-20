@@ -1,7 +1,7 @@
 // The day a drafted review text speaks about (owner 2026-10-27, "FIX"): the day the
 // technician was at the visit, not the close day a late completion stamps on the record.
 jest.mock('../models/db', () => jest.fn());
-const mockProfile = { value: { findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' } };
+const mockProfile = { value: { serviceKey: 'pest_general', findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' } };
 const mockResolve = jest.fn(async () => {
   if (mockProfile.value instanceof Error) throw mockProfile.value;
   return mockProfile.value;
@@ -172,17 +172,17 @@ describe('lateCloseAskKeptForVisit: the preview read', () => {
 
   describe('delivery posture the commit enforces (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
     const inWindow = { ...IDENT, arrived_at: null, scheduled_date: '2026-11-18' };
-    afterEach(() => { mockProfile.value = { findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' }; });
+    afterEach(() => { mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' }; });
 
     test('an internal-only assessment is never kept', async () => {
-      mockProfile.value = { findingsType: null, completionMode: 'internal_only', deliveryMode: 'auto_send', category: 'pest' };
+      mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'internal_only', deliveryMode: 'auto_send', category: 'pest' };
       expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
     });
 
     test('a typed profile with delivery off is never kept; an auto-send one is', async () => {
-      mockProfile.value = { findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'internal_only', category: 'pest' };
+      mockProfile.value = { serviceKey: 'pest_general', findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'internal_only', category: 'pest' };
       expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
-      mockProfile.value = { findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' };
+      mockProfile.value = { serviceKey: 'pest_general', findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' };
       expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(true);
     });
 
@@ -206,12 +206,12 @@ describe('lateCloseAskVerdict', () => {
   const closedAt = new Date('2026-11-20T15:00:00Z');
   const ident = { id: 'v1', service_id: 'sv-1', service_type: 'General Pest Control', service_key_snapshot: null, is_recurring: true };
   const visit = { ...ident, arrived_at: null, scheduled_date: '2026-11-18' };
-  const base = { isBackfill: true, visitOutcome: 'completed', deliverySuppressed: false, visit, preLockVisit: { ...visit }, knex: {}, closedAt };
+  const base = { isBackfill: true, visitOutcome: 'completed', systemQuietCloseout: false, recapReviewOnly: false, isInternalOnlyCompletion: false, deliverySuppressed: false, visit, preLockVisit: { ...visit }, knex: {}, closedAt };
   let saved;
   beforeEach(() => {
     saved = process.env.GATE_REVIEW_LATE_CLOSE_ASK; process.env.GATE_REVIEW_LATE_CLOSE_ASK = 'true';
     mockResolve.mockClear();
-    mockProfile.value = { findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' };
+    mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' };
   });
   afterEach(() => { if (saved === undefined) delete process.env.GATE_REVIEW_LATE_CLOSE_ASK; else process.env.GATE_REVIEW_LATE_CLOSE_ASK = saved; });
 
@@ -245,6 +245,48 @@ describe('lateCloseAskVerdict', () => {
     }
   });
 
+  test('an omitted or non-boolean flag is unknown: not kept', async () => {
+    for (const flag of ['systemQuietCloseout', 'recapReviewOnly', 'isInternalOnlyCompletion', 'deliverySuppressed']) {
+      const { [flag]: _gone, ...without } = base;
+      expect(await lateCloseAskVerdict(without)).toBe(false);
+      expect(await lateCloseAskVerdict({ ...base, [flag]: null })).toBe(false);
+      expect(await lateCloseAskVerdict({ ...base, [flag]: 'false' })).toBe(false);
+    }
+    expect(await lateCloseAskVerdict({ ...base, isBackfill: 'true' })).toBe(false);
+    expect(await lateCloseAskVerdict({ ...base, isBackfill: undefined })).toBe(false);
+  });
+
+  test('the resolver\'s synthesized fallback (an ambiguous or missing profile) is not kept, even when it names a key', async () => {
+    // The real resolver's answer for a visit whose service resolves to nothing.
+    const none = () => { const q = { where: () => q, whereRaw: () => q, first: async () => null, select: async () => [] }; return q; };
+    const actual = jest.requireActual('../services/service-completion-profiles');
+    mockResolve.mockImplementationOnce((row, k, opts) => actual.resolveCompletionProfileForScheduledService(row, k, opts));
+    const fallback = await actual.resolveCompletionProfileForScheduledService(visit, none, { strict: true });
+    expect(fallback.synthesized).toBe(true);
+    mockResolve.mockImplementationOnce(async () => fallback);
+    expect(await lateCloseAskVerdict({ ...base, knex: none })).toBe(false);
+    mockProfile.value = { ...fallback, serviceKey: 'pest_general' };
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+    mockProfile.value = { ...mockProfile.value, synthesized: undefined, serviceKey: null };
+    expect(await lateCloseAskVerdict(base)).toBe(false);
+  });
+
+  test('inside the closeout transaction the profile read runs in its own savepoint: an error drops the ask and rolls only the savepoint back', async () => {
+    const raw = jest.fn(async () => ({}));
+    const trx = { isTransaction: true, raw };
+    mockProfile.value = new Error('relation does not exist');
+    expect(await lateCloseAskVerdict({ ...base, knex: trx })).toBe(false);
+    const sql = raw.mock.calls.map((c) => String(c[0]));
+    expect(sql[0]).toMatch(/^SAVEPOINT scope_/);
+    expect(sql[1]).toMatch(/^ROLLBACK TO SAVEPOINT scope_/);
+    expect(sql[2]).toMatch(/^RELEASE SAVEPOINT scope_/);
+    // The transaction handle is untouched and still usable: a later good read releases its savepoint normally.
+    raw.mockClear();
+    mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'standard', deliveryMode: 'auto_send', category: 'pest' };
+    expect(await lateCloseAskVerdict({ ...base, knex: trx })).toBe(true);
+    expect(raw.mock.calls.map((c) => String(c[0]))).toEqual([expect.stringMatching(/^SAVEPOINT scope_/), expect.stringMatching(/^RELEASE SAVEPOINT scope_/)]);
+  });
+
   test('a delivery posture that already silenced comms (or an omitted one) is never lifted', async () => {
     expect(await lateCloseAskVerdict({ ...base, deliverySuppressed: true })).toBe(false);
     const { deliverySuppressed: _omit, ...unsaid } = base;
@@ -259,9 +301,9 @@ describe('lateCloseAskVerdict', () => {
   });
 
   test('the locked profile silencing delivery (internal-only mode, typed delivery off) is not kept', async () => {
-    mockProfile.value = { findingsType: null, completionMode: 'internal_only', deliveryMode: 'auto_send', category: 'pest' };
+    mockProfile.value = { serviceKey: 'pest_general', findingsType: null, completionMode: 'internal_only', deliveryMode: 'auto_send', category: 'pest' };
     expect(await lateCloseAskVerdict(base)).toBe(false);
-    mockProfile.value = { findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'disabled', category: 'pest' };
+    mockProfile.value = { serviceKey: 'pest_general', findingsType: 'pest_findings', completionMode: 'standard', deliveryMode: 'disabled', category: 'pest' };
     expect(await lateCloseAskVerdict(base)).toBe(false);
   });
 

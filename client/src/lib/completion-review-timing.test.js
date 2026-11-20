@@ -287,11 +287,19 @@ describe('late close ask (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
     expect(lateCloseAskKeptFrom({ lateCloseAskKept: 'true' })).toBe(false);
   });
 
+  test('the affirmative label needs the box on (willReview) as well as the preview verdict, both strictly true', () => {
+    expect(reviewBoxLabel({ reviewSuppressionReason: null, lateCloseAskKept: true, willReview: false })).toBe('Send review request');
+    expect(reviewBoxLabel({ reviewSuppressionReason: null, lateCloseAskKept: true })).toBe('Send review request');
+    expect(reviewBoxLabel({ reviewSuppressionReason: null, lateCloseAskKept: 'true', willReview: true })).toBe('Send review request');
+    expect(reviewBoxLabel({ reviewSuppressionReason: null, lateCloseAskKept: true, willReview: true })).toBe(LATE_CLOSE_ASK_LABEL);
+    expect(completionReviewSuppressionReason({ backfillQuietCloseout: true, lateCloseAskKept: 'true' })).toBe('backfill');
+  });
+
   test('the label says the ask still goes, never over a suppression or a first ask', () => {
-    expect(reviewBoxLabel({ reviewSuppressionReason: null, lateCloseAskKept: true })).toBe(LATE_CLOSE_ASK_LABEL);
+    expect(reviewBoxLabel({ reviewSuppressionReason: null, lateCloseAskKept: true, willReview: true })).toBe(LATE_CLOSE_ASK_LABEL);
     expect(LATE_CLOSE_ASK_LABEL).toBe('Review ask still goes (closed within 3 days)');
-    expect(reviewBoxLabel({ reviewSuppressionReason: 'backfill', lateCloseAskKept: true })).toBe('Review request suppressed');
-    expect(reviewBoxLabel({ reviewSuppressionReason: null, firstAsk: true, lateCloseAskKept: true })).toBe(FIRST_REVIEW_ASK_LABEL);
+    expect(reviewBoxLabel({ reviewSuppressionReason: 'backfill', lateCloseAskKept: true, willReview: true })).toBe('Review request suppressed');
+    expect(reviewBoxLabel({ reviewSuppressionReason: null, firstAsk: true, lateCloseAskKept: true, willReview: true })).toBe(FIRST_REVIEW_ASK_LABEL);
     expect(reviewBoxLabel({ reviewSuppressionReason: null })).toBe('Send review request');
   });
 });

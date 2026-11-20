@@ -1017,7 +1017,7 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
       expect((src.match(/const lateCloseEligible = await require\('\.\/review-visit-day'\)\.lateCloseAskVerdict\(/g) || []).length).toBe(1);
       // The choice is resolved once, as the initial enrollment reads it (an omitted requestReview is no ask), and frozen as that boolean.
       // The same verdict immediate enrollment reads: a blocking client suppression or a refused re-service ask freezes false.
-      expect(src).toMatch(/lateCloseReviewKept = lateCloseEligible && !!requestReview && reviewAskAllowed\s*\n\s*&& !\(reviewSuppression && reviewSuppression !== 'invoice_created'\);/);
+      expect(src).toMatch(/lateCloseReviewKept = lateCloseEligible === true && requestReview === true && reviewAskAllowed === true\s*\n\s*&& !\(reviewSuppression && reviewSuppression !== 'invoice_created'\);/);
       // The verdict gets the locked row, the pre-lock row (drift), the transaction (strict profile read) and the recap mode.
       expect(src).toMatch(/visit: lockedSvcRow, preLockVisit: svc, knex: trx, closedAt: completionEndedAt,/);
       expect(src).toMatch(/issuedInvoiceCloseout, visitOutcome, recapReviewOnly,/);
