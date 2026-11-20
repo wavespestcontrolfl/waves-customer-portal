@@ -26,7 +26,7 @@ const BOARD = {
   commission: { year: 2026, yearToDateCents: 30000, paidCents: 20000, unpaidCents: 10000, recordedThrough: { weekEnd: '2026-11-08' } },
   multiplier: { multiplierE4: 15833, parts: { baseE4: 10000, tenureE4: 2500, reviewRateE4: 3333, levelE4: 0 }, tenureYears: 1, level: 1, levelSource: 'entry_default' },
   seasonBonus: { grossCents: 1000000, estimate: true, estimateCents: 63332, rateBps: 400, multiplierE4: 15833 },
-  stayBonus: { dueDate: '2027-01-05', years: 1, rateBps: 200, estimateCents: 40000, estimate: true },
+  stayBonus: { dueDate: '2027-01-05', years: 1, rateBps: 200, estimateCents: 40000, estimate: true, earningsStart: '2026-01-05', earningsEnd: '2027-01-04' },
 };
 
 beforeEach(() => { adminFetch.mockReset(); });
@@ -52,11 +52,11 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText('6 Google reviews from 30 asks this season.')).toBeInTheDocument();
     expect(screen.getByText('$300.00')).toBeInTheDocument();
     expect(screen.getByText('Commission recorded, 2026')).toBeInTheDocument();
-    expect(screen.getByText(/Payments through Nov 8\. \$200\.00 paid, \$100\.00 not paid yet\. A later payment is not counted until a pay run records it\./)).toBeInTheDocument();
+    expect(screen.getByText(/Payments through Nov 8, 2026\. \$200\.00 paid, \$100\.00 not paid yet\. A later payment is not counted until a pay run records it\./)).toBeInTheDocument();
     expect(screen.getByText('$633.32')).toBeInTheDocument();
     expect(screen.getByText(/Estimate, final at season end\. 4\.0% of \$10,000\.00 pay x 1\.58x multiplier\./)).toBeInTheDocument();
     expect(screen.getByText('Jan 5, 2027')).toBeInTheDocument();
-    expect(screen.getByText(/1-year bonus, about \$400\.00\. Estimate, final at season end\./)).toBeInTheDocument();
+    expect(screen.getByText(/1-year bonus, about \$400\.00\. Estimate, final on Jan 4, 2027\./)).toBeInTheDocument();
     expect(screen.getByText(/your level is not recorded yet/)).toBeInTheDocument();
   });
 
@@ -126,6 +126,12 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText('20.0%')).toBeInTheDocument();
     expect(screen.getByText('$300.00')).toBeInTheDocument();
     expect(screen.getByText('Jan 5, 2027')).toBeInTheDocument();
+  });
+
+  it('shows the cutoff with its year, including a year after the commission year', async () => {
+    const board = { ...BOARD, commission: { ...BOARD.commission, recordedThrough: { weekEnd: '2027-01-03' } } };
+    await showBoard(board);
+    expect(screen.getByText(/Payments through Jan 3, 2027\./)).toBeInTheDocument();
   });
 
   it('shows no cutoff date when none can be established', async () => {

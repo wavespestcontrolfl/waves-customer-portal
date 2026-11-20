@@ -28,8 +28,6 @@ const NO_BONUS_REASONS = {
   hired_after_season: 'No estimate: you started after this season.',
 };
 
-// 'Nov 15' (the year is the commission year beside it)
-const shortDay = dateStr => dayLabel(dateStr).replace(/, \d{4}$/, '');
 const percent = value => `${Number(value)}%`;
 const bpsPercent = bps => `${(bps / 100).toFixed(1)}%`;
 const times = e4 => `${(e4 / 10000).toFixed(2)}x`;
@@ -90,7 +88,7 @@ function BonusCard({ scoreboard }) {
         note={stayBonus
           ? (stayBonus.estimateCents === null
             ? `${stayBonus.years}-year bonus. Estimate starts ${dayLabel(stayBonus.earningsStart)}, when the 12 months of pay that count toward it begin.`
-            : `${stayBonus.years}-year bonus, about ${centsToDollars(stayBonus.estimateCents)}. ${ESTIMATE_NOTE}`)
+            : `${stayBonus.years}-year bonus, about ${centsToDollars(stayBonus.estimateCents)}. Estimate, final on ${dayLabel(stayBonus.earningsEnd)}.`)
           : 'The 1, 3 and 5 year stay bonuses are behind you, or your hire date is not on file.'}
       />
     </div>
@@ -115,7 +113,7 @@ export function ScoreboardView({ scoreboard }) {
       <Stat
         label={`Commission recorded, ${commission.year}`}
         value={centsToDollars(commission.yearToDateCents)}
-        note={`${commission.recordedThrough ? `Payments through ${shortDay(commission.recordedThrough.weekEnd)}.` : 'Recorded through the last pay run.'} ${centsToDollars(commission.paidCents)} paid, ${centsToDollars(commission.unpaidCents)} not paid yet. A later payment is not counted until a pay run records it.`}
+        note={`${commission.recordedThrough ? `Payments through ${dayLabel(commission.recordedThrough.weekEnd)}.` : 'Recorded through the last pay run.'} ${centsToDollars(commission.paidCents)} paid, ${centsToDollars(commission.unpaidCents)} not paid yet. A later payment is not counted until a pay run records it.`}
       />
     </Card>
     <BonusCard scoreboard={scoreboard} />
