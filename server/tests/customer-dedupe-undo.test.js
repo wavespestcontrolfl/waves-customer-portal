@@ -1674,8 +1674,9 @@ describe('revertMerge', () => {
   describe('an inherited address goes back while a sprinkler timer stays with the kept customer', () => {
     const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
     const NO_TIMER = { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null };
-    const revertWithPrefs = async (prefsRow, backfills = { address_line1: '9 Inherited Ln', city: 'Sampleville' }, winnerOwn = {}) => {
+    const revertWithPrefs = async (prefsRow, backfills = { address_line1: '9 Inherited Ln', city: 'Sampleville' }, winnerOwn = {}, keptTimer = undefined) => {
       const journal = baseJournal();
+      if (keptTimer !== undefined) journal.repointed_ids.kept_customer_timer = keptTimer;
       journal.winner_backfills = { email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only', ...backfills };
       const winner = { ...baseWinner(), ...winnerOwn, ...backfills };
       const tables = { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } };
@@ -1718,6 +1719,26 @@ describe('revertMerge', () => {
     it('an inherited unit goes back (the home changes): REFUSES while a timer is on file', async () => {
       const { error } = await revertWithPrefs(X2, { address_line2: 'Apt 4' }, OWN_STREET);
       expect(error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer is on file for the kept customer/) });
+    });
+
+    // A merge that cleared the kept customer's own timer because its backfill changed their home (only they had a
+    // preferences row) journaled it as kept_customer_timer: the undo that takes that home back puts it back.
+    const timerWrites = (state) => state.flagRestores.filter((r) => r.table === 'property_preferences' && 'irrigation_controller_brand' in r.payload);
+    const CLEARED_BY_MERGE = { row_id: 'pp-9', before: X2 };
+    it('the merge cleared the kept customer\'s own timer: the undo that takes the inherited unit back puts it back on their empty row', async () => {
+      const { error, state } = await revertWithPrefs(NO_TIMER, { address_line2: 'Apt 4' }, OWN_STREET, CLEARED_BY_MERGE);
+      expect(error).toBeUndefined();
+      expect(timerWrites(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-9', customer_id: WINNER }, payload: X2 }]);
+    });
+
+    it('a timer entered since still REFUSES; a journaled row that is not theirs now, or an undo that keeps their home, writes nothing', async () => {
+      const refused = await revertWithPrefs({ ...NO_TIMER, irrigation_controller_brand: 'rain_bird' }, { address_line2: 'Apt 4' }, OWN_STREET, CLEARED_BY_MERGE);
+      expect(refused.error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer is on file for the kept customer/) });
+      for (const [backfills, entry] of [[{ address_line2: 'Apt 4' }, { ...CLEARED_BY_MERGE, row_id: 'pp-other' }], [{ zip: '34205' }, CLEARED_BY_MERGE]]) {
+        const { error, state } = await revertWithPrefs(NO_TIMER, backfills, OWN_STREET, entry);
+        expect(error).toBeUndefined();
+        expect(timerWrites(state)).toEqual([]);
+      }
     });
   });
 
