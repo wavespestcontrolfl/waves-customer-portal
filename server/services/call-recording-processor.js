@@ -11190,14 +11190,16 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
 const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 
 // Phone-only prospects (owner 2026-11-19). `call_left_open` on the stored extraction is true when
-// a valid V2 extraction did not end with nothing to do (callEndedWithNothingToDo, the canonical
-// rule). hasWorkableLeadSignal reads it: a live caller who gave only a phone number then makes a
-// customer-less lead in Needs Review, where before the call made none. A call Waves closed on the
-// phone (service not sold, price refused, nothing asked) keeps making none. Written on every pass,
+// the V2 extraction that primary adoption used did not end with nothing to do
+// (callEndedWithNothingToDo, the canonical rule). hasWorkableLeadSignal reads it: a live caller who
+// gave only a phone number then makes a customer-less lead in Needs Review, where before the call
+// made none. A call Waves closed on the phone (service not sold, price refused, nothing asked)
+// keeps making none. `adoptedV2Extraction` is null when adoption did not run (no valid V2 result,
+// shadow mode, or CALL_EXTRACTION_V2_PRIMARY=false): a V2 result that may not drive the canonical
+// writes never opens a lead, so the stamp is false and the old rule stands. Written on every pass,
 // false included, so a retry never inherits an earlier pass's true.
-function stampCallLeftOpen(extracted, v2Result) {
-  const leftOpen = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
-    && !callEndedWithNothingToDo(v2Result.extraction);
+function stampCallLeftOpen(extracted, adoptedV2Extraction) {
+  const leftOpen = !!adoptedV2Extraction && !callEndedWithNothingToDo(adoptedV2Extraction);
   return { ...extracted, call_left_open: leftOpen };
 }
 
@@ -12871,6 +12873,8 @@ const CallRecordingProcessor = {
     // is a service disagreement, not a WDO).
     const preAdoptionExtracted = { ...extracted };
     let serviceFieldsAdopted = [];
+    // The V2 extraction when primary adoption ran for this pass, else null (stampCallLeftOpen).
+    let adoptedV2Extraction = null;
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
         etWallClock: v2IsoToEtWallClock,
@@ -12890,6 +12894,7 @@ const CallRecordingProcessor = {
         if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
       serviceFieldsAdopted = adoption.adoptedFields;
+      adoptedV2Extraction = v2Result.extraction;
     }
     // The V1 values of the service fields adoption replaced ride on the canonical
     // extraction ({} when none, or when the primary gate kept adoption off), so the
@@ -12900,7 +12905,7 @@ const CallRecordingProcessor = {
       // Only while the no-price assessment lane is live (gate off: the persisted record is unchanged).
       if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };
     }
-    extracted = stampCallLeftOpen(extracted, v2Result);
+    extracted = stampCallLeftOpen(extracted, adoptedV2Extraction);
 
     // (Hold helpers live above the tech follow-up and voicemail returns: both arm the hold too; codex #6112 r10/r12 P2.)
     // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT

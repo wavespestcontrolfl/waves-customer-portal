@@ -1412,32 +1412,49 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, call_left_open: true }, phone: null })).toBe(false);
   });
 
-  test('stampCallLeftOpen writes the V2 verdict on the stored extraction on every pass', () => {
-    const v2 = (over = {}) => ({
-      status: 'valid',
-      extraction: {
-        meta: { schema_version: '1.28.0', is_voicemail: false },
-        recommended_disposition: 'lead_response_flow_triggered',
-        scheduling: { status: 'none', follow_up_mentioned: false },
-        service_request: { quote_promised: false },
-        ...over,
-      },
+  test('stampCallLeftOpen writes the adopted V2 verdict on the stored extraction on every pass', () => {
+    // The V2 extraction primary adoption used for this pass.
+    const adopted = (over = {}) => ({
+      meta: { schema_version: '1.28.0', is_voicemail: false },
+      recommended_disposition: 'lead_response_flow_triggered',
+      scheduling: { status: 'none', follow_up_mentioned: false },
+      service_request: { quote_promised: false },
+      ...over,
     });
     const stored = { matched_service: 'WDO Inspection Service' };
     // The caller will call back: the model left the call open.
-    expect(stampCallLeftOpen(stored, v2())).toEqual({ ...stored, call_left_open: true });
+    expect(stampCallLeftOpen(stored, adopted())).toEqual({ ...stored, call_left_open: true });
     // Waves does not sell the service: the model closed it with nothing to do.
-    expect(stampCallLeftOpen(stored, v2({ recommended_disposition: 'no_action_needed' })).call_left_open).toBe(false);
+    expect(stampCallLeftOpen(stored, adopted({ recommended_disposition: 'no_action_needed' })).call_left_open).toBe(false);
     // ...but a quote Waves promised keeps the same call open (the canonical rule).
-    expect(stampCallLeftOpen(stored, v2({
+    expect(stampCallLeftOpen(stored, adopted({
       recommended_disposition: 'no_action_needed', service_request: { quote_promised: true },
     })).call_left_open).toBe(true);
-    // No valid V2 extraction: the old rule stands.
+    // Adoption did not run (no valid V2 result, shadow mode, or the primary
+    // switch is off): the processor passes null and the old rule stands.
     expect(stampCallLeftOpen(stored, null).call_left_open).toBe(false);
-    expect(stampCallLeftOpen(stored, { ...v2(), status: 'invalid' }).call_left_open).toBe(false);
-    expect(stampCallLeftOpen(stored, { status: 'valid', extraction: { recommended_disposition: 'estimate_send' } }).call_left_open).toBe(false);
     // A retry overwrites an earlier pass's true.
     expect(stampCallLeftOpen({ ...stored, call_left_open: true }, null).call_left_open).toBe(false);
+  });
+
+  test('the processor stamps call_left_open from the ADOPTED V2 extraction only (rollback: CALL_EXTRACTION_V2_PRIMARY=false)', () => {
+    // A valid V2 result in shadow mode, or with the primary switch off, may not
+    // drive the canonical writes. The stamp must read the extraction only
+    // after the same condition that runs adoptV2PrimaryFields.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const adoptionIf = src.indexOf("if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {\n      const adoption = adoptV2PrimaryFields(");
+    const decl = src.lastIndexOf('let adoptedV2Extraction = null;', adoptionIf);
+    const assign = src.indexOf('adoptedV2Extraction = v2Result.extraction;', adoptionIf);
+    const blockEnd = src.indexOf('\n    }\n', adoptionIf);
+    const stamp = src.indexOf('extracted = stampCallLeftOpen(extracted, adoptedV2Extraction);', adoptionIf);
+    expect(adoptionIf).toBeGreaterThan(-1);
+    expect(decl).toBeGreaterThan(-1);
+    // Assigned once, inside the adoption block; the stamp runs after it.
+    expect(assign).toBeGreaterThan(adoptionIf);
+    expect(assign).toBeLessThan(blockEnd);
+    expect(src.split('adoptedV2Extraction = ').length - 1).toBe(2);
+    expect(stamp).toBeGreaterThan(blockEnd);
+    expect(src.split('stampCallLeftOpen(').length - 1).toBe(2);
   });
 
   test('normalizeCallExtraction carries is_lead + call_type through', () => {
