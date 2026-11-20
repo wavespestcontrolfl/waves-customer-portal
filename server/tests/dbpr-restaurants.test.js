@@ -285,6 +285,10 @@ describe('parseInspectionReport', () => {
     const starred = b.replace('</table>', '<tr><td><u>35A-02-8*</u></td><td>&nbsp;&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>\n</table>');
     expect(starred).toContain('35A-02-8*');
     expect(svc.parseInspectionReport(starred)).toBeNull();
+    // A row whose code cell is blank, its observation a 35A code alone: cells keep their places, so no answer.
+    const blankCode = b.replace('</table>', '<tr><td></td><td>&nbsp;&nbsp;</td><td>35A-02-8</td></tr>\n</table>');
+    expect(blankCode).toContain('<td></td><td>&nbsp;&nbsp;</td><td>35A-02-8</td>');
+    expect(svc.parseInspectionReport(blankCode)).toBeNull();
     // A row with an observation and no code cell: no answer either.
     expect(svc.parseInspectionReport(b.replace('</table>', '<tr><td>High Priority - Live flies at the bar.</td></tr>\n</table>'))).toBeNull();
     // A row of blank cells is skipped.

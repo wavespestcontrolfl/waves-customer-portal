@@ -261,8 +261,13 @@ const VIOLATION_CODE_RE = /^\d\d[A-Z]?-\d\d-\d$/;
 // and the state's pages do, so a cell runs to the next table tag (a cell, a row or a table, start or end), as a
 // browser closes it, and any row or table tag ends the row. A cell that holds a table gives only its text before it.
 const CELL_OR_ROW_END_RE = /<t[dh]\b[^>]*>((?:(?!<\/?(?:t[dhr]|table|tbody|thead|tfoot)\b)[\s\S])*)|<\/?(tr|table|tbody|thead|tfoot)\b[^>]*>/gi;
-// The row that heads the violations table: "Violation" and "Observation" (a blank spacer cell between them).
-const isViolationsHead = (cells) => cells.length === 2 && /^violation$/i.test(cells[0]) && /^observation$/i.test(cells[1]);
+// The row that heads the violations table names two columns, "Violation" and "Observation", with blank spacer cells
+// around them. Returns the Violation column's position in the row, or -1 for any other row.
+function violationsColumn(cells) {
+  const named = cells.filter(Boolean);
+  if (named.length !== 2 || !/^violation$/i.test(named[0]) || !/^observation$/i.test(named[1])) return -1;
+  return cells.findIndex((cell) => /^violation$/i.test(cell));
+}
 
 // Tags out, the six entities the pages use decoded, NUL characters and runs of white space made one space.
 function htmlText(html) {
@@ -298,10 +303,10 @@ function newestNoteFirst(text) {
  * answers only when it is whole (the state office footer closes it) and lists the violation 35 the file counted (a
  * 35A or 35B code). An error page, a changed layout or a page cut short is a failed read, retried later, never
  * "no pests". The violations table is the rows after its "Violation" / "Observation" head, up to the next table
- * tag. Each of its rows is read whole: the first cell is the code, the rest is the observation, so a code quoted in
- * a note, a comment or a script never starts an entry. A violations row whose first cell is not a code alone, or a
- * code cell outside that table (another table, the footer), means the page is not laid out as expected: no answer,
- * never a guess either way. findings holds the
+ * tag. Each of its rows is read whole, by cell position: the cell in the Violation column is the code and the cells
+ * after it are the observation, so a code quoted in a note, a comment or a script never starts an entry. A row whose
+ * Violation cell is not a code alone (blank, or 35A-02-8*), or a code cell outside that table (another table, the
+ * footer), means the page is not laid out as expected: no answer, never a guess either way. findings holds the
  * 35A entries only, each note of a follow-up report newest first (newestNoteFirst).
  */
 function parseInspectionReport(html) {
@@ -310,28 +315,32 @@ function parseInspectionReport(html) {
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
   const entries = [];
   let unreadable = false;
-  let inViolations = false;
-  let row = []; // the non-empty cell texts of the row being read
-  // A row ends at a row or table tag, or at the page end. In the violations table its first cell must be a code
-  // alone; anywhere else no cell may be one.
+  let codeColumn = -1; // the Violation column's position while in the violations table, else -1
+  let row = []; // the cell texts of the row being read, blank cells kept so each keeps its position
+  // A row ends at a row or table tag, or at the page end. In the violations table a row with anything in it must hold
+  // a code alone in the Violation column and nothing before it; anywhere else no cell may be a code.
   const endRow = () => {
-    if (inViolations && row.length) {
-      if (VIOLATION_CODE_RE.test(row[0])) entries.push({ code: row[0], parts: row.slice(1) });
-      else unreadable = true;
+    if (codeColumn >= 0 && row.some(Boolean)) {
+      const code = row[codeColumn] || '';
+      if (VIOLATION_CODE_RE.test(code) && !row.slice(0, codeColumn).some(Boolean)) {
+        entries.push({ code, parts: row.slice(codeColumn + 1).filter(Boolean) });
+      } else {
+        unreadable = true;
+      }
     } else if (row.some((cell) => VIOLATION_CODE_RE.test(cell))) {
       unreadable = true;
     }
   };
   for (const match of page.matchAll(CELL_OR_ROW_END_RE)) {
     if (match[1] !== undefined) {
-      const cell = htmlText(match[1]);
-      if (cell) row.push(cell);
+      row.push(htmlText(match[1]));
       continue;
     }
     endRow();
     // The violations table runs from its head row to the next table tag.
-    if (isViolationsHead(row)) inViolations = true;
-    if (/^table$/i.test(match[2])) inViolations = false;
+    const column = violationsColumn(row);
+    if (column >= 0) codeColumn = column;
+    if (/^table$/i.test(match[2])) codeColumn = -1;
     row = [];
   }
   endRow();
