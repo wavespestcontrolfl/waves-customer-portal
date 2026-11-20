@@ -3153,8 +3153,11 @@ export function calculateEstimate(inputs) {
       const labeledDirtGallons = dl * 0.4 * depth;
       const labeledConcreteGallons = cl * 0.4 * depth * (1 + concretePad);
       // Mirrors server priceTrenching: a label that allows its high-rate dilution only at a reduced volume (the bifenthrin
-      // bottles) gets the volume cut in proportion; the included chemistry stays the labeled volume.
-      const volumeFactor = applicationRate === 'high' && product.highRateReducesVolume ? product.standardOzPerGal / product.highOzPerGal : 1;
+      // bottles) charts one adjustment, twice the standard dilution at half the volume; any other dilution keeps the full
+      // volume. The included chemistry stays the labeled volume.
+      const labelHalfVolume = applicationRate === 'high' && product.highRateReducesVolume
+        && Math.abs(product.highOzPerGal - 2 * product.standardOzPerGal) < 1e-9;
+      const volumeFactor = labelHalfVolume ? 0.5 : 1;
       const dirtFinishedGallons = labeledDirtGallons * volumeFactor;
       const concreteFinishedGallons = labeledConcreteGallons * volumeFactor;
       const finishedGallons = dirtFinishedGallons + concreteFinishedGallons;

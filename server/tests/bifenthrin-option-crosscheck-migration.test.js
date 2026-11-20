@@ -291,6 +291,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(added).toMatchObject({
         product_id: 'p1', vendor_id: 'ven1', vendor_pricing_id: 'v1', price: 30.9, price_amount: 30.9, quantity: '1 gal',
         normalized_unit_price: 0.2414, normalized_unit: 'oz', landed_unit_price: 0.2414, source_type: 'manual', price_type: 'manual',
+        availability_status: 'unknown', confidence_score: 0.8, source_confidence: 0.75, price_confidence: 0.8,
       });
       expect(JSON.parse(added.metadata)).toEqual({ source: 'migration:20261119020000_bifenthrin_option_crosscheck' });
       expect(db.vendor_pricing[0]).toMatchObject({ price: 30.9, latest_snapshot_id: added.id });

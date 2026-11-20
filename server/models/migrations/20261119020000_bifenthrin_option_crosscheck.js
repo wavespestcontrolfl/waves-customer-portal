@@ -169,9 +169,11 @@ const PLANS = {
 
 const VENDOR_COLUMNS = ['previous_price', 'price', 'price_amount', 'landed_cost', 'price_per_oz', 'normalized_unit_price', 'landed_unit_price', 'last_checked_at',
   'latest_snapshot_id'];
-// The handler's price_snapshots fields for a manual entry that Step P can know (no URL, branch or availability was entered).
+// The handler's price_snapshots fields for a manual entry with no URL, branch, availability, expiry or confidence entered (its
+// defaults: confidence 0.80, source confidence 0.75, availability unknown).
 const SNAPSHOT_COLUMNS = ['product_id', 'vendor_id', 'vendor_pricing_id', 'price', 'price_amount', 'quantity', 'uom', 'normalized_unit_price',
-  'normalized_unit', 'landed_unit_price', 'fetched_at', 'captured_at', 'source_type', 'price_type', 'metadata'];
+  'normalized_unit', 'landed_unit_price', 'availability_status', 'fetched_at', 'captured_at', 'source_type', 'price_type', 'confidence_score',
+  'source_confidence', 'price_confidence', 'metadata'];
 // The catalog prices a recalculation rewrites (the stale mark's own columns aside): the stale mark keeps them as it saw them, so
 // down() can tell no price was entered since.
 const CATALOG_SEEN_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_price_updated_at', 'best_vendor_pricing_id', 'unit_size_oz'];
@@ -276,7 +278,8 @@ async function insertPriceSnapshot(knex, productId, row, now) {
   const inserted = await knex('price_snapshots').insert(pickColumns({
     product_id: productId, vendor_id: row.vendor_id, vendor_pricing_id: row.id, price: NEW_PRICE, price_amount: NEW_PRICE,
     quantity: row.quantity, uom: row.unit ?? null, normalized_unit_price: NEW_PER_OZ, normalized_unit: 'oz', landed_unit_price: NEW_PER_OZ,
-    fetched_at: now, captured_at: now, source_type: 'manual', price_type: 'manual', metadata: JSON.stringify({ source: TAG }),
+    availability_status: 'unknown', fetched_at: now, captured_at: now, source_type: 'manual', price_type: 'manual', confidence_score: 0.8,
+    source_confidence: 0.75, price_confidence: 0.8, metadata: JSON.stringify({ source: TAG }),
   }, columns)).returning('id');
   const first = Array.isArray(inserted) ? inserted[0] : inserted;
   const snapshotId = first && typeof first === 'object' ? first.id : first || null;
