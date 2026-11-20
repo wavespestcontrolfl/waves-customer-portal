@@ -114,11 +114,11 @@ describe('parseLicenseRows and the phone rule', () => {
     const rows = parseDbprCsv(licCsv([
       licRow(), licRow({ app: '7002', county: 'Polk' }), licRow({ app: '7003', county: 'Charlotte', seats: '' }),
       licRow({ app: '7004', county: 'Charlotte', city: 'Punta Gorda', zip: '33982-0001' }),
-      licRow({ app: '7005', line3: 'BLDG B' }),
+      licRow({ app: '7005', line3: 'BLDG B', zip: ' 34236-0001' }),
     ]));
     const out = svc.parseLicenseRows(rows, 'new_license');
     expect(out.map((r) => r.source_key)).toEqual(['7001', '7003', '7005']);
-    expect(out[2].address).toBe('200 SAMPLE TRL UNIT 3 BLDG B');
+    expect(out[2]).toMatchObject({ address: '200 SAMPLE TRL UNIT 3 BLDG B', zip: '34236' });
     expect(out[0]).toMatchObject({
       kind: 'new_license', license_number: 'SEA0000002', business_name: 'SAMPLE DINER', address: '200 SAMPLE TRL UNIT 3',
       city: 'SARASOTA', zip: '34231', county: 'Sarasota', phone: '9415550101', seats: 40, event_date: '2026-08-21',
@@ -253,6 +253,14 @@ describe('syncRestaurantProspects', () => {
     expect(result.files[kind]).toEqual({ failed: true });
     expect(result.failures).toBe(1);
     expect(upserts.some((r) => r.kind === kind)).toBe(false);
+  });
+
+  test('a file with a header and no rows fails; a file whose rows all fall outside the area does not', async () => {
+    store = makeStore();
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]), 'newfood.csv': () => licCsv([licRow({ county: 'Polk' })]) });
+    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(result.failures).toBe(1);
+    expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 0, malformed: 0 }, owner_change: { kept: 1 } });
   });
 
   test('a file without a column the parsers need is refused whole, and the other files still load', async () => {

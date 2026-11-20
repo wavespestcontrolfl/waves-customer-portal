@@ -195,7 +195,7 @@ function parseLicenseRows(rows, kind, counts = { malformed: 0 }) {
       address: clean(['Location Street Address', 'Location Address Line 2', 'Location Address Line 3']
         .map((column) => row[column]).filter(Boolean).join(' '), 200),
       city: clean(row['Location City'], 80),
-      zip: clean(String(row['Location Zip Code'] || '').slice(0, 5), 10),
+      zip: (clean(row['Location Zip Code']) || '').slice(0, 5) || null,
       county: clean(row['Location County'], 40),
       phone: pickPhone(row),
       seats: wholeNumber(row['Number of Seats']),
@@ -259,12 +259,17 @@ async function loadFile(kind, fetchText) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
   const counts = { malformed: 0 };
   const records = [];
+  let rowsRead = 0;
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
   const header = await eachDbprCsvRow(text, (row) => {
+    rowsRead += 1;
     records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts) : parseLicenseRows([row], kind, counts)));
   });
   // A required column missing from the header is renamed or gone: the whole file is refused.
   if (REQUIRED_COLUMNS[kind].some((column) => !header.includes(column))) throw new Error('unexpected file layout');
+  // A header with no rows is a download cut short, not a quiet week, so the file fails. (A file whose rows all fall
+  // outside the area is fine. The first file of a fiscal year can also be empty: a run on July 1 reads as failed.)
+  if (!rowsRead) throw new Error('empty file');
   return { records, malformed: counts.malformed };
 }
 
