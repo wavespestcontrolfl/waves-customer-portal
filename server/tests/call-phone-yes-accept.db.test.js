@@ -291,6 +291,13 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     });
     return id;
   };
+  // An annual prepay term and its prepay invoice (read as the churn guard reads them: customer-lifecycle-guard.js).
+  const prepayTerm = async (customerId, status, invoiceStatus) => {
+    await trx('annual_prepay_terms').insert({
+      customer_id: customerId, term_start: inDays(-30), term_end: inDays(335), status, prepay_invoice_id: await invoiceOn(customerId, null, invoiceStatus),
+      coverage_service_type: 'General Pest Control', coverage_visit_count: 4, prepay_amount: 400,
+    });
+  };
 
   test("a yes on a visit that bills a third-party payer of its own: auto would accept no, visit_payer", async () => {
     const [{ id: payerId }] = await trx('payers').insert({ display_name: 'Sample Property Managers' }).returning('id');
@@ -402,6 +409,10 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['another live plan', ({ customerId }) => visit(customerId, null, {
       source_action: 'admin', is_recurring: true, recurring_pattern: 'quarterly', scheduled_date: inDays(30),
     }), 'existing_plan'],
+    // An annual prepay: a term whose paid coverage is still live, or a prepay invoice still payable (paying it later
+    // starts the term and seeds its visits). The tap would start a second, separately billed series beside it.
+    ['an annual prepay term still covered', ({ customerId }) => prepayTerm(customerId, 'active', 'paid'), 'existing_plan'],
+    ['an annual prepay invoice still payable', ({ customerId }) => prepayTerm(customerId, 'payment_pending', 'sent'), 'existing_plan'],
     // The shared live-plan reader (loadLiveRecurringObligationRows): a plan visit in progress is the customer's plan.
     ['a plan visit is in progress', ({ customerId }) => visit(customerId, null, {
       source_action: 'admin', is_recurring: true, recurring_pattern: 'quarterly', scheduled_date: inDays(0), status: 'on_site',

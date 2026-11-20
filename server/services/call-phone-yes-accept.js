@@ -113,7 +113,7 @@ const REASONS = {
   visit_unreviewed: 'The booked visit waits for the office to review it (the customer cannot see it yet).',
   visit_off_hour: 'The booked visit starts off the hour, and the plan would copy that start to every next visit.',
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
-  existing_plan: 'The customer already has a live plan or a WaveGuard membership.',
+  existing_plan: 'The customer already has a live plan, a WaveGuard membership, or an annual prepay (paid, or invoiced and not yet paid).',
   estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
   terms_may_differ: 'The estimate may not show the terms the caller heard: its prices changed after it was last sent, or it was sent again after the yes.',
 };
@@ -332,12 +332,16 @@ const TAP_ROW_RULES = [
 ];
 
 // The customer already holds a plan: a WaveGuard membership (tier or legacy monthly rate; strict, so a failed read
-// throws instead of reading as "no plan") or another live recurring obligation, by the shared reader
-// (loadLiveRecurringObligationRows: a visit en route or on site counts, a past phantom row, a callback or a one-time
-// booking does not; a failed catalog join throws). The accept would replace that billing.
+// throws instead of reading as "no plan"), an annual prepay by the churn guard's own reads (customer-lifecycle-guard.js:
+// a term whose paid coverage is still live, or a prepay invoice still payable, which starts the term and seeds its
+// visits when paid), or another live recurring obligation, by the shared reader (loadLiveRecurringObligationRows: a
+// visit en route or on site counts, a past phantom row, a callback or a one-time booking does not; a failed catalog join
+// throws). The accept would replace that billing, or start a second series beside it.
 async function existingPlan(conn, customerId, visitId) {
   const Existing = require('./waveguard-existing-services');
   if (await Existing.isActivePlanCustomer(conn, customerId, { strict: true })) return true;
+  if (await require('./customer-lifecycle-guard').findActivePrepayTerm(conn, customerId)) return true;
+  if (await require('./admin-cancellation').findPendingPrepayInvoice(customerId, null, conn)) return true;
   const rows = await Existing.loadLiveRecurringObligationRows(conn, customerId);
   return rows.some((row) => String(row.id) !== String(visitId));
 }
