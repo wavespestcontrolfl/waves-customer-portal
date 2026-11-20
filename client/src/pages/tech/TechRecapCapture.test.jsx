@@ -61,6 +61,20 @@ describe('TechRecapCapture upload recovery', () => {
     await waitFor(() => expect(reloadHoldNames()).not.toContain('recap-upload'));
   });
 
+  it('a picked clip waiting for its tag holds the reload; cancelling the picker ends the hold', async () => {
+    const request = vi.fn(async (path, options) => {
+      if (isListRequest(path, options)) return { items: [] };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
+    pickPhoto('waiting.jpg');
+    const title = await screen.findByText('What were you doing?');
+    expect(reloadHoldNames()).toContain('recap-upload');
+    fireEvent.click(title.parentElement.parentElement);
+    await waitFor(() => expect(screen.queryByText('What were you doing?')).not.toBeInTheDocument());
+    expect(reloadHoldNames()).not.toContain('recap-upload');
+  });
+
   it('retries a lost confirm response against the same media row without uploading twice', async () => {
     let confirmAttempts = 0;
     let confirmed = false;
@@ -254,6 +268,7 @@ describe('TechRecapCapture upload recovery', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('put-retry.jpg · Spray — perimeter');
     expect(screen.getByRole('button', { name: 'Resolve pending clip' })).toBeDisabled();
+    expect(reloadHoldNames()).toContain('recap-upload');
     fireEvent.click(screen.getByRole('button', { name: 'Retry upload' }));
 
     await waitFor(() => expect(pathsMatching(request, '/media-two/confirm')).toHaveLength(1));
@@ -263,6 +278,7 @@ describe('TechRecapCapture upload recovery', () => {
     expect(fetch.mock.calls[1][0]).toBe('https://upload.test/media-two');
     expect(fetch.mock.calls[1][1].body).toBe(file);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    await waitFor(() => expect(reloadHoldNames()).not.toContain('recap-upload'));
   });
 
   it('restores a failed service draft after A to B to A and retries its original file and media id', async () => {
@@ -321,6 +337,7 @@ describe('TechRecapCapture upload recovery', () => {
     render(<TechRecapCapture service={SERVICE_ONE} request={request} />);
     await tagPerimeter('discard-me.jpg');
     await screen.findByRole('alert');
+    expect(reloadHoldNames()).toContain('recap-upload');
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
 
     await waitFor(() => expect(request).toHaveBeenCalledWith(
@@ -329,6 +346,7 @@ describe('TechRecapCapture upload recovery', () => {
     ));
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: '+ Capture recap clip' })).toBeEnabled();
+    expect(reloadHoldNames()).not.toContain('recap-upload');
   });
 
   it('retains discard-only cleanup when a lost-confirm media delete fails', async () => {

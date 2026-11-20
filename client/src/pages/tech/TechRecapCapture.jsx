@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { deleteRecapClipDraft, getRecapClipDraft, putRecapClipDraft } from '../../lib/completion-resume-store';
-import { holdForRecapUpload } from '../../lib/recapUploads';
+import { holdForRecapUpload, useRecapRecoveryHold } from '../../lib/recapUploads';
 
 // During-visit recap clip capture for the tech portal ("Your Visit, in Motion", P4b).
 // Native camera -> tag the action -> presigned PUT to S3 -> lands in the customer's
@@ -181,6 +181,9 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
   const serviceId = service?.id;
   const [itemState, setItemState] = useState({ serviceId: null, items: [] });
   const [pendingFile, setPendingFile] = useState(null);
+  // A picked clip waiting for its tag is only in this page: it holds the
+  // reload until it is tagged (the upload then holds) or cancelled.
+  useEffect(() => (pendingFile ? holdForRecapUpload() : undefined), [pendingFile]);
   const [failedUpload, setFailedUpload] = useState(null);
   const [showMore, setShowMore] = useState(false);
   const [uploading, setUploading] = useState(0);
@@ -196,6 +199,7 @@ export default function TechRecapCapture({ service, request, staffId, recoverySt
   const mountedRef = useRef(false);
   const [localRecoveryStore] = useState(createRecoveryStore);
   const recoveryStore = ownedRecoveryStore || localRecoveryStore;
+  useRecapRecoveryHold(recoveryStore);
   serviceIdRef.current = serviceId;
 
   const isCurrentService = (targetServiceId, generation) => (
