@@ -30,6 +30,11 @@ export function todayET(now = new Date()) {
   return etDateString(now);
 }
 
+// A Monday (the pay step's day).
+export function isMonday(value) {
+  return isValidDay(value) && weekdayOf(value) === 1;
+}
+
 // Monday to Thursday only (the offer's start days).
 export function isStartWeekday(value) {
   if (!isValidDay(value)) return false;

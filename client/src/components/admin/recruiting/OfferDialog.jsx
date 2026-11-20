@@ -26,6 +26,7 @@ import {
   formatIssued,
   isGateOffAnswer,
   isLostAnswer,
+  isMonday,
   isStartWeekday,
   isStaleWrite,
   LOST_ANSWER_TEXT,
@@ -91,11 +92,11 @@ function Row({ label, children }) {
   );
 }
 
-function OfferFields({ fields, onChange, startError, rateErrors, sendTo, disabled }) {
+function OfferFields({ fields, onChange, startError, rateErrors, textErrors, stepError, sendTo, disabled }) {
   const set = (key) => (e) => onChange(key, e.target.value);
   return (
     <div className="flex flex-col gap-3">
-      <Field label="Job">
+      <Field label="Job" error={textErrors.jobTitle}>
         <Input value={fields.jobTitle} onChange={set("jobTitle")} disabled={disabled} maxLength={100} />
       </Field>
       <Field label="Start date" error={startError} help="Monday to Thursday only.">
@@ -113,11 +114,11 @@ function OfferFields({ fields, onChange, startError, rateErrors, sendTo, disable
           <Input type="text" inputMode="decimal" value={fields.stepRate} onChange={set("stepRate")} disabled={disabled} />
         </Field>
         {/* A save sends a step date only with a step rate, so the date is set only once a rate is. */}
-        <Field label="Step date" help="First Monday after day 90.">
+        <Field label="Step date" error={stepError} help="First Monday after day 90.">
           <Input type="date" value={fields.stepEffectiveOn} onChange={set("stepEffectiveOn")} disabled={disabled || fields.stepRate === ""} />
         </Field>
       </div>
-      <Field label="Hours">
+      <Field label="Hours" error={textErrors.hoursLine}>
         <Input value={fields.hoursLine} onChange={set("hoursLine")} disabled={disabled} maxLength={300} />
       </Field>
       {sendTo && <Row label="Send to">{<span className="text-14 text-zinc-800">{sendTo}</span>}</Row>}
@@ -186,25 +187,57 @@ function letterFor(data, pinned) {
 // A start date that cannot be formed, is today or earlier (the server's rule), falls on Friday to Sunday, or would push
 // the pay step date past year 9999 gets a plain message (and no step date).
 function startDateError({ startDate, stepRate }) {
-  if (!startDate) return null;
+  if (!startDate) return "Pick a start date.";
   if (!isValidDay(startDate)) return "Enter a valid date.";
   if (startDate <= todayET()) return "Pick a date in the future.";
   if (!isStartWeekday(startDate)) return "Pick a Monday to Thursday.";
   return stepRate !== "" && !stepDateFor(startDate) ? "That start date is too far out for a pay step date." : null;
 }
 
-// The rates are text fields, so the form checks exactly what the owner sees: a number field reports text it cannot
-// read as empty, and an empty step rate means no raise (it clears the step date). A rate is dollars and cents, the
-// server's own format; the server checks the range.
+// The form checks the server's own field rules (validateOffer in server/services/job-offers.js: LIMITS,
+// FORBIDDEN_COPY and the step rules) as the owner types, so Save stays off with the reason beside the field instead
+// of a save the server refuses. The server stays the judge: a rule it adds later still refuses the save, with its
+// sentence on the form. The rates are text fields, so the form checks exactly what the owner sees (a number field
+// reports text it cannot read as empty); an empty step rate means no raise (it clears the step date).
 const RATE_TEXT = /^\d+(\.\d{1,2})?$/;
-const rateError = (value) => (value === "" || RATE_TEXT.test(value.trim()) ? null : "Enter dollars and cents, like 23.50.");
+const RATE_MIN = 15;
+const RATE_MAX = 60;
+const FORBIDDEN_TEXT = /background check|drug test|drug screen/i;
+// The server's cleanText: control characters dropped, each run of spaces made one, the ends trimmed.
+const CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+const cleanText = (value) => value.replace(CONTROL_CHARS, "").replace(/\s+/g, " ").trim();
+
+function rateError(value) {
+  if (value === "") return null;
+  if (!RATE_TEXT.test(value.trim())) return "Enter dollars and cents, like 23.50.";
+  const n = Number(value);
+  return n < RATE_MIN || n > RATE_MAX ? `Enter $${RATE_MIN}.00 to $${RATE_MAX}.00.` : null;
+}
+
+function textError(value, what) {
+  const text = cleanText(value);
+  if (!text) return `Enter the ${what}.`;
+  return FORBIDDEN_TEXT.test(text) ? `The ${what} cannot mention a background check or a drug test.` : null;
+}
+
+// The step date goes with a step rate (the server takes both or neither): a Monday after the start date.
+function stepDateError({ stepRate, stepEffectiveOn, startDate }) {
+  if (stepRate === "") return null;
+  if (!isValidDay(stepEffectiveOn)) return "Pick the step date.";
+  if (!isMonday(stepEffectiveOn)) return "Pick a Monday.";
+  return isValidDay(startDate) && stepEffectiveOn <= startDate ? "Pick a day after the start date." : null;
+}
 
 function fieldChecks(fields) {
   const startError = startDateError(fields);
-  const rateErrors = { hourlyRate: rateError(fields.hourlyRate), stepRate: rateError(fields.stepRate) };
-  const ratesOk = fields.hourlyRate !== "" && !rateErrors.hourlyRate && !rateErrors.stepRate;
-  const fieldsOk = Boolean(fields.startDate) && !startError && ratesOk && fields.hoursLine.trim() !== "";
-  return { startError, rateErrors, fieldsOk };
+  const hourly = fields.hourlyRate === "" ? "Enter the hourly rate." : rateError(fields.hourlyRate);
+  const stepAbove = fields.stepRate === "" || hourly || Number(fields.stepRate) > Number(fields.hourlyRate);
+  const rateErrors = { hourlyRate: hourly, stepRate: rateError(fields.stepRate) || (stepAbove ? null : "Enter a step rate above the hourly rate.") };
+  const textErrors = { jobTitle: textError(fields.jobTitle, "job title"), hoursLine: textError(fields.hoursLine, "hours") };
+  const stepError = stepDateError(fields);
+  const errors = [startError, rateErrors.hourlyRate, rateErrors.stepRate, textErrors.jobTitle, textErrors.hoursLine, stepError];
+  const fieldsOk = errors.every((e) => !e);
+  return { startError, rateErrors, textErrors, stepError, fieldsOk };
 }
 
 // The step date follows the start date whenever a step rate is set, and is
@@ -232,7 +265,7 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
   const { sms: phone, email } = data.sendTo || {};
   const base = fieldsFrom(pinned || data.defaults);
   const fields = { ...base, ...edits };
-  const { startError, rateErrors, fieldsOk } = fieldChecks(fields);
+  const { startError, rateErrors, textErrors, stepError, fieldsOk } = fieldChecks(fields);
   const dirty = !pinned || FIELD_KEYS.some((k) => fields[k] !== base[k]);
   // Send needs a phone or an email to send to, and the letter preview of this exact draft on
   // screen: what the owner reads is what goes out.
@@ -244,6 +277,8 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
     sendTo: [phone && `Text ${phone}`, email && `Email ${email}`].filter(Boolean).join(" · "),
     startError,
     rateErrors,
+    textErrors,
+    stepError,
     fieldsOk,
     dirty,
     sendReady,
@@ -256,8 +291,9 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
 // The form's read-only state. A background read that differs from the pinned draft,
 // or a refused stale write (`conflict`), makes it "changed": read-only, with the
 // owner's edits still on screen, until they load the newer version (`newer`; after a
-// refused first save, the open draft another admin made). It is also read-only until
-// a read has succeeded and holds the draft this form is about.
+// refused first save, the open draft another admin made). A draft the read no longer
+// holds (another admin sent or discarded it) is "changed" too, never a failed read. It is
+// also read-only until a read has succeeded and holds the draft this form is about.
 // reviewedOut: the offers out (the read's outStamp) as the owner last reviewed them.
 // A read with other offers out (an answer, a date request) while the draft itself is
 // unchanged locks a saved draft too (outOnly): the notice says what changed, and
@@ -267,7 +303,8 @@ function formLock({ data, draftId, pinned, needRead, conflict, reviewedOut }) {
   // A form with no draft yet: an open draft in the read is another admin's (this form's own
   // save sets draftId first). It shows as changed, with the owner's edits kept, until they load it.
   const newer = latest || (!draftId ? openDraft(data) : null);
-  const draftMoved = Boolean(!draftId && newer) || (Boolean(pinned) && (!latest || latest.draftHash !== pinned.draftHash));
+  // A form for a draft: that draft is gone or another version. A form with no draft yet: another admin opened one.
+  const draftMoved = draftId ? !latest || Boolean(pinned && latest.draftHash !== pinned.draftHash) : Boolean(newer);
   const outOnly = Boolean(pinned) && !draftMoved && data.outStamp !== reviewedOut;
   const changed = !needRead && (conflict || draftMoved || outOnly);
   return { newer, changed, outOnly, locked: needRead || changed || Boolean(draftId && !pinned) };
@@ -349,7 +386,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
   const { newer, changed, outOnly, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict, reviewedOut });
   // A refused write's sentence shows once, in the read-only notice (after the re-read); else a change to the offers out.
   const notice = conflict ? error : outOnly && OUT_CHANGED_TEXT;
-  const { base, fields, firstName, sendTo, startError, rateErrors, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
+  const { base, fields, firstName, sendTo, startError, rateErrors, textErrors, stepError, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
   // A read that changes the draft, or locks the form, while the Send question is open closes
   // the question: Send carries only the hash of the draft whose letter is on screen.
   useEffect(() => {
@@ -373,13 +410,14 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
     }
   };
 
-  // Re-read after a write. The form stays read-only until the read holds the draft it
-  // expects (Try again re-reads). A draft the form already pins (`kept`; after a save, the
-  // version that save wrote) is never swapped for another version of itself: formLock shows
-  // a newer one as changed, for the owner to review before Send. A form with no draft of
-  // that id pins the one in the read. With no expected id (a form with no draft yet), a read
-  // that works only ends the wait: an open draft in it is another admin's, and formLock shows
-  // it as changed, edits kept, until the owner loads it (Show the new version).
+  // Re-read after a write. The form stays read-only until a read works (Try again re-reads).
+  // A draft the form already pins (`kept`; after a save, the version that save wrote) is never
+  // swapped for another version of itself: formLock shows a newer one as changed, for the owner
+  // to review before Send. A form with no draft of that id pins the one in the read. A read
+  // that no longer holds the draft (another admin sent or discarded it) still ends the wait:
+  // formLock shows the draft as no longer open, edits kept, and the owner closes the form.
+  // With no expected id (a form with no draft yet), an open draft in the read is another
+  // admin's, and formLock shows it as changed, edits kept, until the owner loads it.
   const refresh = async (expectId, kept = pinned) => {
     const next = await onChanged();
     const found = next && expectId ? reviewedDraft(next, expectId) : null;
@@ -387,17 +425,15 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
       setPinned(found);
       setEdits({});
     }
-    if (found || (next && !expectId)) {
-      if (found) setDraftId(found.id);
-      setNeedRead(false);
-    }
+    if (found) setDraftId(found.id);
+    if (next) setNeedRead(false);
     return next;
   };
 
-  // Try again after a failed read. After a save it pins the saved draft; if the read shows
-  // that draft is gone (another admin sent or discarded it), a form with nothing typed closes
-  // and the card shows the offer's state. After a refused write, or one that found offers
-  // turned off, it only re-reads: the owner still picks, and edits stay on screen.
+  // Try again after a failed read. After a save it pins the saved draft; a draft the read no
+  // longer holds shows as no longer open, and the owner closes the form: it never closes on
+  // its own. After a refused write, or one that found offers turned off, it only re-reads:
+  // the owner still picks, and edits stay on screen.
   const reread = async () => {
     if (conflict || lost || off) {
       const next = await onChanged();
@@ -407,13 +443,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
       if (lost) settleLost(next, lost);
       return;
     }
-    const expected = pinned?.id || draftId;
-    const next = await refresh(expected);
-    if (!next || !expected || reviewedDraft(next, expected)) return;
-    // The draft is gone. With typed edits, the form stays read-only and says so, as after any read of that state: the
-    // owner closes it and loses nothing unseen.
-    if (dirty) setNeedRead(false);
-    else onClose();
+    await refresh(pinned?.id || draftId);
   };
   const retryRead = () => run(reread);
 
@@ -578,7 +608,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
               refreshFailed={stale && !needRead}
             />
           )}
-          <OfferFields fields={fields} onChange={onChange} startError={startError} rateErrors={rateErrors} sendTo={sendTo} disabled={busy || locked} />
+          <OfferFields fields={fields} onChange={onChange} startError={startError} rateErrors={rateErrors} textErrors={textErrors} stepError={stepError} sendTo={sendTo} disabled={busy || locked} />
           <Row label="Shared terms attached">
             <TermsBlock data={data} />
           </Row>

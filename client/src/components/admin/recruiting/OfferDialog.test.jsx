@@ -112,7 +112,7 @@ describe("OfferDialog", () => {
   // the version this save wrote and shows the draft as changed, so Send waits until the owner reviews the new one.
   it("after a save, a read of another admin's newer version shows the draft as changed, and Send waits for review", async () => {
     saveOfferDraft.mockResolvedValueOnce({ offer: draftRow({ hourlyRate: 24, draftHash: "hash-2" }) });
-    render(<Harness initial={panel(draftRow())} reads={[panel(draftRow({ hourlyRate: 26, draftHash: "hash-3" }))]} />);
+    render(<Harness initial={panel(draftRow())} reads={[panel(draftRow({ hourlyRate: 26, stepRate: 28, draftHash: "hash-3" }))]} />);
     fireEvent.change(rate(), { target: { value: "24" } });
     fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
     expect(await screen.findByText("This draft changed. Review the new version.")).toBeInTheDocument();
@@ -196,7 +196,7 @@ describe("OfferDialog", () => {
     render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} />);
     fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
     expect(await screen.findByRole("dialog", { name: "Send offer" })).toBeInTheDocument();
-    act(() => outside.read(panel(draftRow({ hourlyRate: 26, draftHash: "hash-3" }))));
+    act(() => outside.read(panel(draftRow({ hourlyRate: 26, stepRate: 28, draftHash: "hash-3" }))));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Send offer" })).toBeNull());
     expect(screen.getByText("This draft changed. Review the new version.")).toBeInTheDocument();
     expect(sendOffer).not.toHaveBeenCalled();
@@ -264,7 +264,7 @@ describe("OfferDialog", () => {
   // as changed, and only Show the new version replaces the typing.
   it("keeps the owner's typing when Try again finds another admin's first draft, until they load it", async () => {
     const outside = {};
-    const theirs = draftRow({ id: "offer-2", hourlyRate: 27, draftHash: "hash-9" });
+    const theirs = draftRow({ id: "offer-2", hourlyRate: 27, stepRate: 29, draftHash: "hash-9" });
     render(<Harness initial={{ ...panel(draftRow()), current: null, letterPreview: null }} reads={[panel(theirs)]} outside={outside} />);
     fireEvent.change(rate(), { target: { value: "24" } });
     act(() => outside.fail());
@@ -292,13 +292,40 @@ describe("OfferDialog", () => {
     expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
   });
 
-  // With nothing typed, the same Try again closes the form, and the card shows where the offer stands.
-  it("closes the form when Try again finds the draft gone and nothing was typed", async () => {
-    const outside = {};
-    render(<Harness initial={panel(draftRow())} reads={[panel(draftRow({ status: "sent" }))]} outside={outside} />);
-    act(() => outside.fail());
-    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(screen.queryByLabelText("Hourly rate ($)")).toBeNull());
+  // A save whose read finds the draft gone (another admin sent it between the save and the read): the read worked, so
+  // the form says the draft is no longer open, never that the read failed, and the owner closes it.
+  it("after a save, a read that no longer holds the draft says it is no longer open, not that the read failed", async () => {
+    saveOfferDraft.mockResolvedValueOnce({ offer: draftRow({ hourlyRate: 24, draftHash: "hash-2" }) });
+    render(<Harness initial={panel(draftRow())} reads={[panel(draftRow({ hourlyRate: 24, draftHash: "hash-2", status: "sent" }))]} />);
+    fireEvent.change(rate(), { target: { value: "24" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    expect(await screen.findByText("This draft is no longer open. Close this form to see the offer.")).toBeInTheDocument();
+    expect(screen.queryByText(/could not be loaded/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(rate()).toBeDisabled();
+  });
+
+  // Every rule the server checks on a save is checked as the owner types: Save stays off, with the reason beside the
+  // field, instead of a save the server refuses.
+  it.each([
+    ["a blank job", "Job", "", "Enter the job title."],
+    ["a job that mentions a drug test", "Job", "Technician (drug test required)", "The job title cannot mention a background check or a drug test."],
+    ["a job whose double space hides a drug test", "Job", "Technician, drug  test", "The job title cannot mention a background check or a drug test."],
+    ["a blank start date", "Start date", "", "Pick a start date."],
+    ["blank hours", "Hours", " ", "Enter the hours."],
+    ["a blank hourly rate", "Hourly rate ($)", "", "Enter the hourly rate."],
+    ["an hourly rate under $15", "Hourly rate ($)", "14.99", "Enter $15.00 to $60.00."],
+    ["a step rate over $60", "Step rate ($)", "60.01", "Enter $15.00 to $60.00."],
+    ["a step rate not above the hourly rate", "Step rate ($)", "23", "Enter a step rate above the hourly rate."],
+    ["a cleared step date with a step rate", "Step date", "", "Pick the step date."],
+    ["a step date that is not a Monday", "Step date", "2027-04-06", "Pick a Monday."],
+    ["a step date not after the start", "Step date", "2026-12-28", "Pick a day after the start date."],
+  ])("keeps Save off for %s, with the reason beside the field", async (_case, label, value, message) => {
+    render(<Harness initial={panel(draftRow())} reads={[]} />);
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+    expect(screen.getByText(message)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
+    expect(saveOfferDraft).not.toHaveBeenCalled();
   });
 
   // The send's result shows at once, but the card behind still shows the draft until the read after the send lands.
