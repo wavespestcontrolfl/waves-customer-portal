@@ -626,15 +626,17 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // landed reply and the sync's restore both do. Until that sync the card
       // shows this attempt, and the older draft never reads as a person's own
       // words that Post now publishes as written.
-      if (isDraftReply(allowOverwrite ? review.review_reply : prePutState.slot)) Object.assign(uncertain, { review_reply: null, reply_updated_at: null });
+      if (isDraftReply(prePutState.slot)) Object.assign(uncertain, { review_reply: null, reply_updated_at: null });
     }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {
       // Human / IB-edit publishers: the row may be never-queued (NULL) or
       // skipped/manual_reply with a real prior reply — CAS on the reply
-      // slot exactly as this attempt observed it, so a sync that already
-      // reconciled a newer reply is left alone.
-      if (review.review_reply == null) q.whereNull('review_reply'); else q.where('review_reply', review.review_reply);
+      // slot exactly as this attempt observed it inside its claim (the slot
+      // the pre-PUT fence compared), so a sync that already reconciled a
+      // newer reply is left alone, and a runner draft stored before the
+      // claim gives way to the attempt.
+      if (prePutState.slot == null) q.whereNull('review_reply'); else q.where('review_reply', prePutState.slot);
     } else if (ibAttempt) {
       // An Intelligence Bar submission may answer any unanswered review,
       // whatever its pipeline status (never queued, skipped, retracted, a
