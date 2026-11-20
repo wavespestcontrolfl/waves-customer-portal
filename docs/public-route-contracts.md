@@ -7678,16 +7678,18 @@ customer's city. A matched profile at another stored location books with its
 own address (the slot is checked again with it); at the same pin the booking
 keeps the typed address, as the list read it. When the customer's city decides
 the zone, the slot is checked again per truck (both far-south gates on). A
-refused booking's `SLOT_TAKEN` refresh offers times the page's next commit
-admits. With an address typed (the page sends it again), it is built with the
-booking's zone address, and when the booking moved to a matched profile's other
-stored location it keeps only the starts also open at the typed location, which
-the next commit checks first (read there with the far-south funnel's one-day
-rules on each day, as that one-day check reads them); a failed build answers
-with no times. With none
-typed, it is built with the matched profile's stored address, which the next
-commit resolves first once this one has linked it. No field, status, error code, limiter or header
-changes. `POST /:token/find-slots` is the same natural-language search
+refused booking's `SLOT_TAKEN` answer carries fresh times only when the page's
+next commit reads this one's inputs: an address typed (the page sends it again)
+at the same pin. They are built there with the booking's zone address. Any other
+refusal answers `availability: null`, and the page reloads its own list (GET, or
+`POST /:token/availability` with the address it holds), which reads the same
+resolver and trusted customer as its next commit. A booking moved to a matched
+profile's other stored location also answers `address_changed: true` when that
+profile is the trusted customer the next commit loads: the page drops the typed
+address, so its reload and its retry read that profile's stored location and
+address. When the next commit would load another profile, or that read fails,
+the typed address stays. A failed build answers with no times too. No field,
+status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
 a raw `resolveServiceAddress` — a directly supplied out-of-area address
