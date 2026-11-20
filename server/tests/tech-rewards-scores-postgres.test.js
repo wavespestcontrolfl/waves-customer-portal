@@ -189,6 +189,7 @@ describe('tech rewards scores input checks', () => {
       t.integer('damaged_count').notNullable().defaultTo(0);
     });
     await require('../models/migrations/20261120150000_tech_rewards_scores').up(db);
+    await require('../models/migrations/20261120190000_tech_protocol_audit_evidence').up(db);
     scores = require('../services/tech-rewards-scores');
     calc = require('../services/tech-rewards-calc');
     [{ id: tech }, { id: other }] = await db('technicians').insert([{ name: 'Fixture One' }, { name: 'Fixture Two' }]).returning('id');
@@ -251,6 +252,7 @@ describe('tech rewards scores input checks', () => {
       }
       await down(db); // repeatable
       await require('../models/migrations/20261120150000_tech_rewards_scores').up(db);
+      await require('../models/migrations/20261120190000_tech_protocol_audit_evidence').up(db);
       expect(await db.schema.hasTable('tech_reward_settings')).toBe(true);
     });
   });

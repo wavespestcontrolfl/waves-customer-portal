@@ -20,6 +20,9 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/photos', () => ({ getViewUrl: jest.fn(async (key) => `https://photos.test/${key}`) }));
 
+// the first board read loads the report module that holds the protocol-version reader: slow once
+jest.setTimeout(60000);
+
 const MONTH = '2026-04';
 const MONTH_START = '2026-04-01';
 
@@ -75,8 +78,9 @@ describe('pickSample (pure)', () => {
   // marks a visit under the technician and month its record shows now (what the board would have sent)
   const save = async (args) => {
     const [current] = /^[0-9a-f-]{36}$/.test(args.scheduledServiceId) ? await audit.eligibleVisits({ scheduledServiceId: args.scheduledServiceId }) : [];
+    const fingerprint = current ? (await audit.evidenceFingerprints([current])).get(current.scheduled_service_id) : '0'.repeat(64);
     return audit.saveMark({ technicianId: current ? current.technician_id : tech, month: current ? current.month.slice(0, 7) : MONTH,
-      recordId: current ? current.record_id : '00000000-0000-4000-8000-000000000000', ...args });
+      recordId: current ? current.record_id : '00000000-0000-4000-8000-000000000000', evidenceFingerprint: fingerprint, ...args });
   };
   const board = async (month = MONTH) => (await audit.getBoard(month)).technicians;
   const ids = (t) => t.visits.map((v) => v.scheduledServiceId);
@@ -91,6 +95,16 @@ describe('pickSample (pure)', () => {
     await db.schema.withSchema(mockSchema).createTable('scheduled_services', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
       t.uuid('technician_id');
+      t.text('lawn_protocol_version');
+      t.text('lawn_protocol_window_key');
+      t.text('lawn_protocol_window_title');
+    });
+    await db.schema.withSchema(mockSchema).createTable('lawn_protocol_service_completions', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('service_record_id').notNullable().unique();
+      t.text('protocol_version');
+      t.text('window_key');
+      t.text('window_title');
     });
     await db.schema.withSchema(mockSchema).createTable('customers', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -136,6 +150,7 @@ describe('pickSample (pure)', () => {
       t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
     });
     await require('../models/migrations/20261120150000_tech_rewards_scores').up(db);
+    await require('../models/migrations/20261120190000_tech_protocol_audit_evidence').up(db);
     audit = require('../services/tech-protocol-audit');
     scores = require('../services/tech-rewards-scores');
     [{ id: tech }, { id: other }] = await db('technicians').insert([{ name: 'Fixture One' }, { name: 'Fixture Two' }]).returning('id');
@@ -152,6 +167,7 @@ describe('pickSample (pure)', () => {
     await db('tech_protocol_audits').del();
     await db('service_products').del();
     await db('service_photos').del();
+    await db('lawn_protocol_service_completions').del();
     await db('service_records').del();
     await db('scheduled_services').del();
   });
@@ -290,8 +306,7 @@ describe('pickSample (pure)', () => {
     expect((await board())[0].visits[0]).toMatchObject({ audit: null, needsRecheck: true });
     expect((await board())[0].markedCount).toBe(0);
     expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBeNull();
-    await new Promise((resolve) => { setTimeout(resolve, 5); });
-    await db('tech_protocol_audits').update({ audited_at: new Date(Date.now() + 120000) }); // a re-mark after the replacement
+    await save({ scheduledServiceId: svc.id, result: 'match', auditedBy: tech }); // a re-mark names the new record
     expect((await board())[0].visits[0]).toMatchObject({ audit: { result: 'match' }, needsRecheck: false });
     expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBe(100);
   });
@@ -330,7 +345,7 @@ describe('pickSample (pure)', () => {
     const { svc, record } = await visit(tech);
     const shown = (await board())[0].visits[0];
     expect(shown).toMatchObject({ technicianId: tech, month: MONTH, scheduledServiceId: svc.id });
-    const send = (over = {}) => audit.saveMark({ scheduledServiceId: svc.id, technicianId: shown.technicianId, month: shown.month, recordId: shown.recordId, result: 'match', auditedBy: tech, ...over });
+    const send = (over = {}) => audit.saveMark({ scheduledServiceId: svc.id, technicianId: shown.technicianId, month: shown.month, recordId: shown.recordId, evidenceFingerprint: shown.evidenceFingerprint, result: 'match', auditedBy: tech, ...over });
     await expect(send({ technicianId: undefined })).rejects.toMatchObject({ status: 400, code: 'INVALID_CONTEXT' });
     await expect(send({ month: '2026-4' })).rejects.toMatchObject({ status: 400, code: 'INVALID_CONTEXT' });
     await db('service_records').where({ id: record.id }).update({ technician_id: other }); // reassigned after the board loaded
@@ -364,6 +379,102 @@ describe('pickSample (pure)', () => {
     const score = await scores.readAudit(tech, window);
     expect(score).toBe(counted.filter((m) => m.result === 'match').length * 20);
     expect(after.visits.filter((v) => v.audit).map((v) => v.audit.result).sort()).toEqual(counted.map((m) => m.result).sort());
+  });
+
+  test('a mark stores the record and the evidence the owner reviewed; a missing fingerprint is refused', async () => {
+    const { svc, record } = await visit(tech);
+    const shown = (await board())[0].visits[0];
+    expect(shown.evidenceFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    const base = { scheduledServiceId: svc.id, technicianId: tech, month: MONTH, recordId: record.id, result: 'match', auditedBy: tech };
+    await expect(audit.saveMark({ ...base, evidenceFingerprint: undefined })).rejects.toMatchObject({ status: 400, code: 'INVALID_EVIDENCE' });
+    await audit.saveMark({ ...base, evidenceFingerprint: shown.evidenceFingerprint });
+    expect(await db('tech_protocol_audits').first()).toMatchObject({ reviewed_record_id: record.id, evidence_fingerprint: shown.evidenceFingerprint });
+    expect((await board())[0].visits[0].evidenceFingerprint).toBe(shown.evidenceFingerprint); // stable between loads
+  });
+
+  test('a photo added after the mark changes the evidence: the save is refused as stale, and an earlier mark stops counting', async () => {
+    const { svc, record } = await visit(tech);
+    const window = { from: '2026-04-01', to: '2026-04-30' };
+    const shown = (await board())[0].visits[0];
+    await save({ scheduledServiceId: svc.id, result: 'match', auditedBy: tech });
+    expect(await scores.readAudit(tech, window)).toBe(100);
+    await db('service_photos').insert({ service_record_id: record.id, photo_type: 'after', s3_key: 'k/late.jpg' });
+    expect((await board())[0].visits[0]).toMatchObject({ audit: null, needsRecheck: true });
+    expect(await scores.readAudit(tech, window)).toBeNull();
+    const send = (fingerprint) => audit.saveMark({ scheduledServiceId: svc.id, technicianId: tech, month: MONTH, recordId: record.id, evidenceFingerprint: fingerprint, result: 'match', auditedBy: tech });
+    await expect(send(shown.evidenceFingerprint)).rejects.toMatchObject({ status: 409, code: 'STALE_EVIDENCE' }); // marked on what the board showed before the photo
+    const reloaded = (await board())[0].visits[0];
+    expect(reloaded.evidenceFingerprint).not.toBe(shown.evidenceFingerprint);
+    await send(reloaded.evidenceFingerprint);
+    expect(await scores.readAudit(tech, window)).toBe(100); // counted again on the new evidence
+  });
+
+  test('correcting the service line (same service type) changes the evidence and the mark stops counting', async () => {
+    const { svc, record } = await visit(tech, { service_type: 'Lawn and Tree Care' });
+    await save({ scheduledServiceId: svc.id, result: 'match', auditedBy: tech });
+    expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBe(100);
+    await db('service_records').where({ id: record.id }).update({ service_line: 'tree_shrub' });
+    expect((await board())[0].visits[0]).toMatchObject({ serviceLine: 'tree_shrub', audit: null, needsRecheck: true });
+    expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBeNull();
+  });
+
+  test('an older sibling record never inherits a mark when the newest record stops being eligible', async () => {
+    const { svc, record: older } = await visit(tech);
+    const [newer] = await db('service_records').insert({ technician_id: tech, customer_id: customerId, scheduled_service_id: svc.id, status: 'completed',
+      service_date: '2026-04-11', service_type: 'Lawn Care Treatment', service_line: 'lawn', created_at: new Date(Date.now() + 1000) }).returning('*');
+    const window = { from: '2026-04-01', to: '2026-04-30' };
+    const shown = (await board())[0].visits[0];
+    expect(shown.recordId).toBe(newer.id);
+    await save({ scheduledServiceId: svc.id, result: 'match', auditedBy: tech });
+    expect(await scores.readAudit(tech, window)).toBe(100);
+    await db('service_records').where({ id: newer.id }).update({ status: 'incomplete' }); // the newest record is no longer a completed one
+    expect((await board())[0].visits[0]).toMatchObject({ recordId: older.id, audit: null, needsRecheck: true });
+    expect(await scores.readAudit(tech, window)).toBeNull();
+    // the same shape on an OLD row (no stored record or fingerprint) keeps today's rule: the older record predates the mark
+    await db('tech_protocol_audits').update({ reviewed_record_id: null, evidence_fingerprint: null });
+    expect((await board())[0].visits[0]).toMatchObject({ audit: { result: 'match' }, needsRecheck: false });
+    expect(await scores.readAudit(tech, window)).toBe(100);
+  });
+
+  test('a legacy row with no stored record or fingerprint counts as before, and still drops when a newer record follows it', async () => {
+    const { svc } = await visit(tech);
+    const window = { from: '2026-04-01', to: '2026-04-30' };
+    await db('tech_protocol_audits').insert({ technician_id: tech, scheduled_service_id: svc.id, audit_month: MONTH_START, result: 'match' });
+    expect(await scores.readAudit(tech, window)).toBe(100);
+    await db('service_records').insert({ technician_id: tech, customer_id: customerId, scheduled_service_id: svc.id, status: 'completed',
+      service_date: '2026-04-11', service_type: 'Lawn Care Treatment', service_line: 'lawn', created_at: new Date(Date.now() + 60000) });
+    expect(await scores.readAudit(tech, window)).toBeNull();
+  });
+
+  test("the board shows the visit's frozen lawn protocol version and window, from the closeout ledger first, else the visit's pin; none = not recorded", async () => {
+    const withLedger = await visit(tech);
+    const withPin = await visit(tech);
+    const none = await visit(tech, { service_line: 'tree_shrub', service_type: 'Tree & Shrub Treatment' });
+    await db('lawn_protocol_service_completions').insert({ service_record_id: withLedger.record.id, protocol_version: '2026.10-v13', window_key: 'apr_v13', window_title: 'April take-all' });
+    await db('scheduled_services').where({ id: withLedger.svc.id }).update({ lawn_protocol_version: 'older', lawn_protocol_window_key: 'older_window' }); // the ledger wins
+    await db('scheduled_services').where({ id: withPin.svc.id }).update({ lawn_protocol_version: '2026.06', lawn_protocol_window_key: 'jun', lawn_protocol_window_title: 'June' });
+    const shown = new Map((await board())[0].visits.map((v) => [v.scheduledServiceId, v]));
+    expect(shown.get(withLedger.svc.id).protocol).toEqual({ version: '2026.10-v13', windowKey: 'apr_v13', windowTitle: 'April take-all' });
+    expect(shown.get(withPin.svc.id).protocol).toEqual({ version: '2026.06', windowKey: 'jun', windowTitle: 'June' });
+    expect(shown.get(none.svc.id).protocol).toBeNull();
+    // the protocol is part of the evidence: changing the recorded version changes the fingerprint
+    const before = shown.get(withLedger.svc.id).evidenceFingerprint;
+    await db('lawn_protocol_service_completions').update({ protocol_version: '2026.11-v14' });
+    expect((await board())[0].visits.find((v) => v.scheduledServiceId === withLedger.svc.id).evidenceFingerprint).not.toBe(before);
+  });
+
+  test('the evidence migration is additive: two nullable columns, repeatable, constraints untouched, down drops only them', async () => {
+    const migration = require('../models/migrations/20261120190000_tech_protocol_audit_evidence');
+    await migration.up(db);
+    const columns = await db.raw("SELECT column_name, is_nullable FROM information_schema.columns WHERE table_schema = ? AND table_name = 'tech_protocol_audits' AND column_name IN ('reviewed_record_id', 'evidence_fingerprint') ORDER BY 1", [mockSchema]);
+    expect(columns.rows).toEqual([{ column_name: 'evidence_fingerprint', is_nullable: 'YES' }, { column_name: 'reviewed_record_id', is_nullable: 'YES' }]);
+    const svc = (await db('scheduled_services').insert({ technician_id: tech }).returning('*'))[0];
+    await expect(db('tech_protocol_audits').insert({ technician_id: tech, scheduled_service_id: svc.id, audit_month: MONTH_START, result: 'maybe' })).rejects.toThrow(/result_check/);
+    await migration.down(db);
+    expect(await db.schema.hasColumn('tech_protocol_audits', 'reviewed_record_id')).toBe(false);
+    expect(await db.schema.hasColumn('tech_protocol_audits', 'result')).toBe(true);
+    await migration.up(db);
+    expect(await db.schema.hasColumn('tech_protocol_audits', 'evidence_fingerprint')).toBe(true);
   });
 
   test('a marked visit stays on the board when more visits complete later, and the season score reads the marks', async () => {

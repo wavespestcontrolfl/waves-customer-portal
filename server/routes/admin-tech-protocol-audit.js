@@ -3,12 +3,12 @@
  *
  * GET /?month=YYYY-MM          the month's board (default: this ET month): per technician with eligible visits,
  *                              five sampled completed lawn / tree & shrub visits with products, rates, targets,
- *                              counts, photos and the current mark.
- * PUT /visits/:scheduledServiceId   { result: 'match' | 'mismatch', note?, technicianId, month, recordId? } mark one
- *                              sampled visit (a mismatch needs a note; technicianId + month (YYYY-MM) + recordId = what the
- *                              board showed, refused with 409 if the visit's current record no longer matches).
- *                              One row per visit: marking again changes it. 404 not an eligible visit, 409 not in the
- *                              technician's sample for the month or changed since loaded.
+ *                              counts, photos, the frozen lawn protocol version and window, an evidenceFingerprint and the current mark.
+ * PUT /visits/:scheduledServiceId   { result: 'match' | 'mismatch', note?, technicianId, month, recordId,
+ *                              evidenceFingerprint } mark one sampled visit (a mismatch needs a note; the last four = what the
+ *                              board showed). One row per visit: marking again changes it. 404 not an eligible visit, 409
+ *                              STALE_VISIT (record, technician or month changed), STALE_EVIDENCE (photos, products or
+ *                              protocol changed) or NOT_IN_SAMPLE.
  * Writes only tech_protocol_audits (read by tech-rewards-scores.js readAudit). Never touches visits or records.
  */
 const express = require('express');
@@ -43,6 +43,7 @@ router.put('/visits/:scheduledServiceId', async (req, res) => {
       technicianId: req.body?.technicianId,
       month: req.body?.month,
       recordId: req.body?.recordId,
+      evidenceFingerprint: req.body?.evidenceFingerprint,
       result: req.body?.result,
       note: req.body?.note,
       auditedBy: req.technicianId,

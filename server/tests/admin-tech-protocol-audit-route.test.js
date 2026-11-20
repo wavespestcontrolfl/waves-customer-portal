@@ -63,10 +63,10 @@ describe('/api/admin/tech-protocol-audits', () => {
   });
 
   test('PUT saves the mark as the signed-in admin', async () => {
-    const res = await put({ result: 'mismatch', note: 'rate off', technicianId: TECH, month: '2026-04', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' });
+    const res = await put({ result: 'mismatch', note: 'rate off', technicianId: TECH, month: '2026-04', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', evidenceFingerprint: 'a'.repeat(64) });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ mark: { scheduledServiceId: VISIT } });
-    expect(audit.saveMark).toHaveBeenCalledWith({ scheduledServiceId: VISIT, result: 'mismatch', note: 'rate off', technicianId: TECH, month: '2026-04', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', auditedBy: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+    expect(audit.saveMark).toHaveBeenCalledWith({ scheduledServiceId: VISIT, result: 'mismatch', note: 'rate off', technicianId: TECH, month: '2026-04', recordId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', evidenceFingerprint: 'a'.repeat(64), auditedBy: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
   });
 
   test("the service's refusals keep their status and code; any other failure is a plain 500", async () => {
@@ -76,6 +76,10 @@ describe('/api/admin/tech-protocol-audits', () => {
     expect(await bad.json()).toEqual({ error: 'month must be YYYY-MM', code: 'INVALID_MONTH' });
     audit.saveMark.mockRejectedValueOnce(new audit.ProtocolAuditError(409, 'NOT_IN_SAMPLE', 'not in sample'));
     expect((await put({ result: 'match' })).status).toBe(409);
+    audit.saveMark.mockRejectedValueOnce(new audit.ProtocolAuditError(409, 'STALE_EVIDENCE', 'photos changed'));
+    const stale = await put({ result: 'match' });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({ error: 'photos changed', code: 'STALE_EVIDENCE' });
     audit.saveMark.mockRejectedValueOnce(new Error('connection lost with details'));
     const broken = await put({ result: 'match' });
     expect(broken.status).toBe(500);

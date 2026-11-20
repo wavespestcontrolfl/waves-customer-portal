@@ -9,7 +9,7 @@ vi.mock('../../lib/adminFetch', () => ({ adminFetch: vi.fn() }));
 
 const reply = (body, ok = true, status = ok ? 200 : 400) => Promise.resolve({ ok, status, json: async () => body });
 const VISIT = (over = {}) => ({
-  scheduledServiceId: 'visit-1', recordId: 'rec-1', technicianId: 'tech-a', month: '2026-04', serviceDate: '2026-04-10', serviceType: 'Lawn Care Treatment', serviceLine: 'lawn',
+  scheduledServiceId: 'visit-1', recordId: 'rec-1', technicianId: 'tech-a', month: '2026-04', evidenceFingerprint: 'f'.repeat(64), protocol: { version: '2026.10-v13', windowKey: 'apr_v13', windowTitle: 'April take-all' }, serviceDate: '2026-04-10', serviceType: 'Lawn Care Treatment', serviceLine: 'lawn',
   protocolName: 'Sample protocol', areaSqft: 5000, customerName: 'Sample Customer',
   products: [
     { name: 'Sample Product', rate: 2.5, rateUnit: 'oz/1000 sq ft', totalAmount: null, amountUnit: null, area: '5000 sq ft', targets: ['chinch bugs'] },
@@ -50,6 +50,7 @@ describe('Protocol audit tab', () => {
     expect(within(tech).getAllByText(/2 products · 2 photos \(1 before, 1 after\)/)).toHaveLength(2);
     expect(within(tech).getAllByText('Sample Product')).toHaveLength(2);
     expect(within(tech).getAllByText('chinch bugs')).toHaveLength(2);
+    expect(within(tech).getAllByText('Lawn protocol: version 2026.10-v13 · window April take-all')).toHaveLength(2);
     expect(within(tech).getAllByText('total 12 oz')).toHaveLength(2); // a recorded total shows even with no rate or area
     expect(within(tech).getAllByAltText('Front lawn')[0]).toHaveAttribute('src', 'https://photos.test/a.jpg');
     expect(within(tech).getAllByText('Photo unavailable')).toHaveLength(2);
@@ -65,7 +66,7 @@ describe('Protocol audit tab', () => {
     fireEvent.click(within(card).getByLabelText('Match'));
     fireEvent.click(within(card).getByRole('button', { name: 'Save mark' }));
     await waitFor(() => expect(calls.find(c => c.method === 'PUT')).toBeTruthy());
-    expect(calls.find(c => c.method === 'PUT')).toMatchObject({ path: '/admin/tech-protocol-audits/visits/visit-1', body: { result: 'match', note: '', technicianId: 'tech-a', month: '2026-04', recordId: 'rec-1' } });
+    expect(calls.find(c => c.method === 'PUT')).toMatchObject({ path: '/admin/tech-protocol-audits/visits/visit-1', body: { result: 'match', note: '', technicianId: 'tech-a', month: '2026-04', recordId: 'rec-1', evidenceFingerprint: 'f'.repeat(64) } });
     expect(await screen.findByText(/2 of 2 marked/)).toBeInTheDocument();
   });
 
@@ -84,6 +85,14 @@ describe('Protocol audit tab', () => {
     adminFetch.mockImplementation(() => reply({ month: '2026-04', sampleSize: 5, technicians: [] }));
     render(<ProtocolAudit />);
     expect(await screen.findByText(/No completed lawn or tree & shrub visits this month/)).toBeInTheDocument();
+  });
+});
+
+describe('Protocol audit tab, a visit with no recorded protocol', () => {
+  it('says not recorded', async () => {
+    adminFetch.mockImplementation(() => reply(BOARD([VISIT({ protocol: null })])));
+    render(<ProtocolAudit />);
+    expect(await screen.findByText('Lawn protocol: not recorded')).toBeInTheDocument();
   });
 });
 
