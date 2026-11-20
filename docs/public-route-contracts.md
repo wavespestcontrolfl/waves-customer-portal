@@ -4454,8 +4454,8 @@ inserted only while the row still holds the intake stage
 (`lead_webhook_received`, checked in the UPDATE's WHERE): once a price page
 has continued the lead (the attach token, see
 `/api/public/estimator/property-lookup` below), a late triage answer is
-dropped and never replaces the price page's stage, address verdict or
-profile;
+dropped whole: it never replaces the price page's stage, address verdict or
+profile, re-prices no draft and records no `ai_triage` activity;
 and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`

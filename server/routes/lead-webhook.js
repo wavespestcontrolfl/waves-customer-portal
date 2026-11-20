@@ -1110,15 +1110,19 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             // and the service the visitor priced, and this intake-time answer
             // must not replace them. The check is in the WHERE, so it cannot
             // race the price page's own write. An attached call lead merges
-            // and is unchanged.
-            let triageStale = false;
+            // and is unchanged. Nothing of a dropped answer is recorded: no
+            // re-price of the form's draft, and no ai_triage activity (the
+            // Lead Response Agent reads the newest one as current).
             if (Object.keys(updates).length > 0) {
               updates.updated_at = new Date();
               const triageWrite = db('leads').where('id', leadRecord.id);
               if (!attachedCallLead) triageWrite.whereRaw("COALESCE(extracted_data->>'stage', '') = ?", [webhookStageBase.stage]);
-              triageStale = (await triageWrite.update(updates)) === 0;
+              if (!(await triageWrite.update(updates))) {
+                logger.info(`[lead-webhook] AI triage answer dropped for lead ${leadRecord.id}: the lead has moved past intake`);
+                return;
+              }
             }
-            if (createdEstimateId && triageServiceInterestUpdate && !triageStale) {
+            if (createdEstimateId && triageServiceInterestUpdate) {
               const triageReadiness = applyLeadEstimateAutomationGate(evaluateLeadEstimateAutomationReadiness({
                 intake: {
                   ...intake,

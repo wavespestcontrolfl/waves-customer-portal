@@ -2559,7 +2559,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         }
       }
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
-        await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
+        // Fills an EMPTY source only, judged in the write itself: a source
+        // the office set since the ownership write above is kept.
+        await db('leads').where({ id: lead.id }).whereNull('lead_source_id').update({ lead_source_id: sourceMeta.leadSourceId });
       }
     }
     // Same inquiry submitted again without the lead token (a fresh browser

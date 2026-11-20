@@ -268,7 +268,7 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
   describe('the lead webhook\'s AI triage, answering late', () => {
     afterEach(() => { mockTriage.mockImplementation(async () => null); });
 
-    test('writes nothing once a price page has continued the lead; a lead still at intake takes it', async () => {
+    test('writes and records nothing once a price page has continued the lead; a lead still at intake takes it', async () => {
       const answers = [];
       mockTriage.mockImplementation(() => new Promise((resolve) => { answers.push(resolve); }));
       const continued = quizSubmission();
@@ -294,6 +294,9 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
       const kept = await dataOf(continuedId);
       expect(kept).toMatchObject({ stage: 'property_lookup_complete', quiz: QUIZ });
       expect(kept.summary).toBeUndefined();
+      // The dropped answer is not recorded as the lead's current triage.
+      const triaged = await db('lead_activities').where({ activity_type: 'ai_triage' }).whereIn('lead_id', [intakeId, continuedId]).pluck('lead_id');
+      expect(triaged).toEqual([intakeId]);
     }, 120000);
   });
 });
