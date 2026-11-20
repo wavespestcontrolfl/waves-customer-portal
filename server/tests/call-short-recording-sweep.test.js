@@ -128,7 +128,7 @@ describe('the sweep query text', () => {
     expect(on).toContain(`"updated_at" < NOW() - INTERVAL '10 minutes'`);
   });
 
-  test('every sweep pass asks the claim to re-check the length rule (a timer may finish a row while it waits)', async () => {
+  test('every sweep pass asks its claim to re-check the candidate rule (a timer may change a row while it waits)', async () => {
     const select = jest.spyOn(processor, 'pendingCandidatesQuery').mockResolvedValue([{ twilio_call_sid: 'CAfixture01' }, { twilio_call_sid: 'CAfixture02' }]);
     const run = jest.spyOn(processor, 'processRecording').mockResolvedValue({ success: true });
     try {
@@ -140,11 +140,12 @@ describe('the sweep query text', () => {
     }
   });
 
-  test('the claim carries that re-check for a sweep pass only (the live-PG block below runs it)', () => {
+  test('the claim re-checks the very rule the sweep selects on, for a sweep pass only (the live-PG block below runs it)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const clause = "if (opts.sweep) this.whereRaw(`(${sweepLengthSql()} OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')`);";
+    const query = src.slice(src.indexOf('  pendingCandidatesQuery() {'), src.indexOf('.limit(20);'));
+    expect(query).toContain('.where(function sweepCandidate() { whereSweepCandidate(this); })');
     // Once: in the ordinary claim, the one a sweep pass takes (it never sends force).
-    expect(src.split(clause)).toHaveLength(2);
+    expect(src.split('.where(function sweepStillSelects() { if (opts.sweep) whereSweepCandidate(this); })')).toHaveLength(2);
   });
 
   test('the stuck-transcript fallback leaves the retry states to their own capped branches', async () => {
@@ -178,7 +179,18 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   // 8 s voicemail whose transcript was never stored: it matches the stuck-transcript
   // fallback and the claim accepts a voicemail row, so the gate must never run it again.
   const SID_SHORT_VOICEMAIL = sid('s9');
-  const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP, SID_SHORT_DIED, SID_SHORT_VOICEMAIL];
+  // A card number was read on the call: the quarantine nulled recording_url and kept the masked
+  // transcript (a placeholder here, no digits). The sweep has no length floor for such a row.
+  const PAN_QUARANTINED = {
+    recording_url: null,
+    transcription: '[masked transcript]',
+    transcription_status: 'completed',
+    transcription_metadata: JSON.stringify({ pan_detected: true, recording_quarantined: true, pan_notified: true }),
+  };
+  const SID_PAN_RETRY = sid('sa'); // 4 s, extraction failed once: the sweep's masked-transcript branch takes it, gate on or off
+  const SID_PAN_FINISHED = sid('sb'); // 4 s, a timer finished it as voicemail: never swept, and a sweep pass's claim refuses it
+  const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP, SID_SHORT_DIED, SID_SHORT_VOICEMAIL,
+    SID_PAN_RETRY, SID_PAN_FINISHED];
   const REC = 'RE' + '9'.repeat(32);
   const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
 
@@ -221,6 +233,8 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
       processing_status: 'processing', processing_started_at: minutesAgo(30), processing_heartbeat_at: minutesAgo(30),
     });
     await insertCall(SID_SHORT_VOICEMAIL, { seconds: 8, createdMinutesAgo: 120, updatedMinutesAgo: 60, processing_status: 'voicemail' });
+    await insertCall(SID_PAN_RETRY, { seconds: 4, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...PAN_QUARANTINED, processing_status: 'extraction_failed', extraction_attempts: 1 });
+    await insertCall(SID_PAN_FINISHED, { seconds: 4, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...PAN_QUARANTINED, processing_status: 'voicemail' });
   });
 
   afterAll(async () => {
@@ -228,26 +242,32 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     await db.destroy();
   });
 
-  test('gate off: only the long call is swept, as before; a long call at the attempt cap takes no slot', async () => {
+  test('gate off: only the long call and the quarantined retry are swept, as before; a long call at the attempt cap takes no slot', async () => {
     await withGate(undefined, async () => {
-      expect(await candidates()).toEqual([SID_LONG]);
+      expect(await candidates()).toEqual([SID_LONG, SID_PAN_RETRY].sort());
     });
   });
 
   test('gate on: a stranded short first pass is swept too; a day-old one, one still settling, and a short retry or finished row are not', async () => {
     await withGate('true', async () => {
-      expect(await candidates()).toEqual([SID_SHORT, SID_LONG, SID_SHORT_DIED].sort());
+      expect(await candidates()).toEqual([SID_SHORT, SID_LONG, SID_SHORT_DIED, SID_PAN_RETRY].sort());
     });
   });
 
-  test('gate on: a sweep pass refuses a short call a timer finished while it waited, and changes nothing', async () => {
-    // The claim accepts a voicemail row; the re-check of the length rule is what refuses it.
-    await withGate('true', async () => {
-      const out = await processor.processRecording(SID_SHORT_VOICEMAIL, { sweep: true });
-      expect(out).toMatchObject({ success: false, skipped: true });
-      const row = await db('call_log').where({ twilio_call_sid: SID_SHORT_VOICEMAIL }).first('processing_status', 'processing_token');
-      expect(row).toEqual({ processing_status: 'voicemail', processing_token: null });
-    });
+  // The ordinary claim accepts a voicemail row, and a quarantined row has no length floor: the
+  // claim's re-check of the whole candidate rule is what refuses these (pre-push Codex P1, rounds 4-5).
+  test.each([
+    ['a short call', SID_SHORT_VOICEMAIL],
+    ['a card-number-quarantined call', SID_PAN_FINISHED],
+  ])('a sweep pass refuses %s a timer finished while it waited, gate on or off, and changes nothing', async (_what, target) => {
+    for (const value of [undefined, 'true']) {
+      await withGate(value, async () => {
+        const out = await processor.processRecording(target, { sweep: true });
+        expect(out).toMatchObject({ success: false, skipped: true });
+        const row = await db('call_log').where({ twilio_call_sid: target }).first('processing_status', 'processing_token');
+        expect(row).toEqual({ processing_status: 'voicemail', processing_token: null });
+      });
+    }
   });
 
   test('gate on: the stats that mirror the sweep run on the same rule', async () => {

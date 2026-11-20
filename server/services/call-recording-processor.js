@@ -4509,6 +4509,118 @@ const reclaimableClaim = (quietMinutes) => "("
   + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
   + ` OR ${shutdownInterruptedClaim}`
   + ")";
+// The sweep's candidate rule (processAllPending), as one WHERE. The candidate
+// query selects on it, and a sweep pass's claim re-checks it atomically: the
+// sweep selects up to 20 rows, then runs them one at a time, so a webhook
+// timer can change a selected row before its turn (finish it as voicemail or
+// spam, quarantine a card number, take its claim), and the ordinary claim
+// accepts a finished row. A sweep pass takes a row only if the sweep would
+// still select it now (pre-push Codex P1, rounds 4 and 5).
+// Eligibility: a row needs (re)processing if it has a recording (or a
+// PAN-quarantined masked transcript) AND one of the status branches below,
+// AND the length rule. The comment in processAllPending lists the branches.
+// The sandbox exclusion stays at the query site: a call's source never
+// changes, so the claim has nothing to re-check there.
+function whereSweepCandidate(qb) {
+  return qb
+    .where(function () {
+      this.where(function () {
+        this.where('recording_url', '!=', '').whereNotNull('recording_url');
+      })
+      // PAN-quarantined rows keep recording_url NULL by design, but their
+      // MASKED transcript still needs extraction/lead/appointment
+      // processing — the webhook processes them immediately, and this
+      // branch is the restart-safe backstop (Codex #2676 round-11 P1).
+      // 10-min age gate lets the immediate path win.
+      .orWhere(function () {
+        this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
+          .whereNotNull('transcription')
+          .where(function () {
+            this.whereNull('processing_status')
+              .orWhere('processing_status', 'pending')
+              // The immediate webhook processing can claim the row and
+              // die — a stale 'processing' quarantined row must re-enter
+              // the backstop too (round-12 P1).
+              .orWhere(function () {
+                this.where('processing_status', 'processing')
+                  .andWhereRaw(reclaimableClaim(10));
+              })
+              // A transient extraction failure on a quarantined row must
+              // keep its normal retry budget (round-13 P1): the outer
+              // extraction_failed branch requires recording_url, which
+              // quarantine keeps null by design.
+              .orWhere(function () {
+                this.where('processing_status', 'extraction_failed')
+                  .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+                  .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
+              });
+          })
+          .andWhere(function quarantineBackstopAge() {
+            this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+              .orWhereRaw(stampedDeadClaim);
+          });
+      });
+    })
+    .where(function () {
+      this.where(function () {
+        // Fresh / waiting branches — only after the 10-min CDN-settle window.
+        // updated_at on these rows is the recording-status webhook timestamp
+        // (or the Twilio transcription webhook if that fired first); either
+        // way it tracks recording-land time, not call-start time, so it's a
+        // tighter gate than created_at for long calls.
+        this.where(function () {
+          this.whereNull('processing_status')
+            .orWhere('processing_status', 'pending')
+            .orWhere(function () {
+              // A stuck transcript on a row no retry lane owns. The retry
+              // states have their own capped branches below; admitted here
+              // too, an at-cap one came back every tick, the claim refused
+              // it, and it took one of the 20 slots, and an
+              // extraction_failed one skipped its 7-day creation fence
+              // (pre-push Codex P1).
+              this.where('transcription_status', 'pending').whereNull('transcription')
+                .whereRaw("processing_status IS DISTINCT FROM 'no_transcription' AND processing_status IS DISTINCT FROM 'extraction_failed'");
+            });
+        })
+        .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+      })
+      // no_transcription: retried under the same attempt cap as
+      // extraction_failed, spaced 10 min, with NO creation fence — an
+      // operator adopting replacement audio for an old call resets the
+      // count and that audio must still retry. At the cap the lane ends:
+      // the row is terminal, and a settlement its old verdict made is
+      // retired (codex #6271 r38 P1 / r39 P2; the predicate twin is
+      // exhaustedExtractionSql in call-commitments).
+      .orWhere(function () {
+        this.where('processing_status', 'no_transcription')
+          .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+          .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+      })
+      .orWhere(function () {
+        this.where('processing_status', 'extraction_failed')
+          .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+          .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+          .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
+      })
+      .orWhere(function () {
+        this.where('processing_status', 'processing')
+          .andWhereRaw(reclaimableClaim(10));
+      });
+    })
+    .where(function () {
+      // The length rule (config/call-extraction-retry.js): over 10 s, or,
+      // with GATE_SHORT_CALL_RECORDING_SWEEP on, a shorter recording on its
+      // first pass (NULL, pending, or a stale processing claim) while the
+      // call is under 24 h old, so a short call whose in-memory timer a
+      // deploy wiped is swept too (owner 2026-11-19, "FIX"). A retry state
+      // or a finished one keeps the 10-second floor: no new retries.
+      this.whereRaw(sweepLengthSql())
+        // Quarantined rows already proved they carry real content (a card
+        // readback was heard) — never duration-filter them out.
+        .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
+    });
+}
+
 // Passes this process currently holds a claim for (call_log.id → claim token),
 // so markInFlightForShutdown knows which rows to stamp. Filled right after the
 // claim, cleared in processRecording's outer finally.
@@ -11556,17 +11668,13 @@ const CallRecordingProcessor = {
           // refuse (reason recording_changed below) instead of processing
           // audio the operator never chose (Codex #3736 r6 P1).
           .where(function expectedRecording() { if (opts.expectedRecordingSid) this.where('recording_sid', opts.expectedRecordingSid); })
-          // A sweep pass re-checks the sweep's length rule in this atomic
-          // claim (pre-push Codex P1). The sweep selects up to 20 rows, then
-          // runs them one at a time, so a webhook timer can finish a selected
-          // short call (voicemail, spam) before its turn, and this claim
-          // accepts those states. With GATE_SHORT_CALL_RECORDING_SWEEP on, a
-          // short row passes only on its first pass, so the finished one is
-          // refused here instead of running the paid pipeline again. A
-          // PAN-quarantined row has no length floor, as in the sweep.
-          .where(function sweepLengthStillHolds() {
-            if (opts.sweep) this.whereRaw(`(${sweepLengthSql()} OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')`);
-          })
+          // A sweep pass re-checks the sweep's whole candidate rule here,
+          // atomically (whereSweepCandidate, pre-push Codex P1 rounds 4 and
+          // 5): a timer can finish a selected row as voicemail or spam, or
+          // quarantine a card number, before the sweep reaches it, and this
+          // claim accepts those states. Such a row no longer matches, so the
+          // claim refuses it instead of running the paid pipeline again.
+          .where(function sweepStillSelects() { if (opts.sweep) whereSweepCandidate(this); })
           .update({
             processing_status: 'processing',
             processing_token: procToken,
@@ -25728,8 +25836,8 @@ const CallRecordingProcessor = {
     const results = [];
     for (const call of pending) {
       try {
-        // `sweep`: the claim re-checks the length rule this row was selected
-        // on, since a timer may have finished it while it waited its turn.
+        // `sweep`: the claim re-checks the candidate rule this row was
+        // selected on, since a timer may have changed it while it waited.
         const result = await this.processRecording(call.twilio_call_sid, { sweep: true });
         results.push({ callSid: call.twilio_call_sid, ...result });
       } catch (err) {
@@ -25744,102 +25852,7 @@ const CallRecordingProcessor = {
   pendingCandidatesQuery() {
     return db('call_log')
       .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
-      .where(function () {
-        this.where(function () {
-          this.where('recording_url', '!=', '').whereNotNull('recording_url');
-        })
-        // PAN-quarantined rows keep recording_url NULL by design, but their
-        // MASKED transcript still needs extraction/lead/appointment
-        // processing — the webhook processes them immediately, and this
-        // branch is the restart-safe backstop (Codex #2676 round-11 P1).
-        // 10-min age gate lets the immediate path win.
-        .orWhere(function () {
-          this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
-            .whereNotNull('transcription')
-            .where(function () {
-              this.whereNull('processing_status')
-                .orWhere('processing_status', 'pending')
-                // The immediate webhook processing can claim the row and
-                // die — a stale 'processing' quarantined row must re-enter
-                // the backstop too (round-12 P1).
-                .orWhere(function () {
-                  this.where('processing_status', 'processing')
-                    .andWhereRaw(reclaimableClaim(10));
-                })
-                // A transient extraction failure on a quarantined row must
-                // keep its normal retry budget (round-13 P1): the outer
-                // extraction_failed branch requires recording_url, which
-                // quarantine keeps null by design.
-                .orWhere(function () {
-                  this.where('processing_status', 'extraction_failed')
-                    .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
-                    .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
-                });
-            })
-            .andWhere(function quarantineBackstopAge() {
-              this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
-                .orWhereRaw(stampedDeadClaim);
-            });
-        });
-      })
-      .where(function () {
-        this.where(function () {
-          // Fresh / waiting branches — only after the 10-min CDN-settle window.
-          // updated_at on these rows is the recording-status webhook timestamp
-          // (or the Twilio transcription webhook if that fired first); either
-          // way it tracks recording-land time, not call-start time, so it's a
-          // tighter gate than created_at for long calls.
-          this.where(function () {
-            this.whereNull('processing_status')
-              .orWhere('processing_status', 'pending')
-              .orWhere(function () {
-                // A stuck transcript on a row no retry lane owns. The retry
-                // states have their own capped branches below; admitted here
-                // too, an at-cap one came back every tick, the claim refused
-                // it, and it took one of the 20 slots, and an
-                // extraction_failed one skipped its 7-day creation fence
-                // (pre-push Codex P1).
-                this.where('transcription_status', 'pending').whereNull('transcription')
-                  .whereRaw("processing_status IS DISTINCT FROM 'no_transcription' AND processing_status IS DISTINCT FROM 'extraction_failed'");
-              });
-          })
-          .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
-        })
-        // no_transcription: retried under the same attempt cap as
-        // extraction_failed, spaced 10 min, with NO creation fence — an
-        // operator adopting replacement audio for an old call resets the
-        // count and that audio must still retry. At the cap the lane ends:
-        // the row is terminal, and a settlement its old verdict made is
-        // retired (codex #6271 r38 P1 / r39 P2; the predicate twin is
-        // exhaustedExtractionSql in call-commitments).
-        .orWhere(function () {
-          this.where('processing_status', 'no_transcription')
-            .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
-            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
-        })
-        .orWhere(function () {
-          this.where('processing_status', 'extraction_failed')
-            .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
-            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
-            .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
-        })
-        .orWhere(function () {
-          this.where('processing_status', 'processing')
-            .andWhereRaw(reclaimableClaim(10));
-        });
-      })
-      .where(function () {
-        // The length rule (config/call-extraction-retry.js): over 10 s, or,
-        // with GATE_SHORT_CALL_RECORDING_SWEEP on, a shorter recording on its
-        // first pass (NULL, pending, or a stale processing claim) while the
-        // call is under 24 h old, so a short call whose in-memory timer a
-        // deploy wiped is swept too (owner 2026-11-19, "FIX"). A retry state
-        // or a finished one keeps the 10-second floor: no new retries.
-        this.whereRaw(sweepLengthSql())
-          // Quarantined rows already proved they carry real content (a card
-          // readback was heard) — never duration-filter them out.
-          .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
-      })
+      .where(function sweepCandidate() { whereSweepCandidate(this); })
       .orderBy('created_at', 'desc')
       .limit(20);
   },

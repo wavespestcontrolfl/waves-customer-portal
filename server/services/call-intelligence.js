@@ -26,14 +26,16 @@ function addressText(addr) {
   return parts.length ? parts.join(', ') : (addr.raw_text || null);
 }
 
-// The two retry lanes' state, in one place (the sweep's eligibility, read
-// back): under the attempt cap (and, for extraction_failed, inside the 7-day
-// creation window), with something to process (a recording; for
-// extraction_failed also a PAN-quarantined masked transcript, which the
-// sweep's transcript-only branch takes) and over the sweep's 10-second floor
-// (a retry state keeps it, gate on or off; a PAN-quarantined row has none),
-// the sweep retries. Otherwise the row is terminal and only Reprocess tries
-// again, so the panel agrees with the ops queue and the agent-control runs.
+// The two retry lanes' state, in one place: under the attempt cap (and, for
+// extraction_failed, inside the 7-day creation window) a lane retries the
+// row unless a reason below applies, so the panel agrees with the ops queue
+// and the agent-control runs. The sweep retries a row from its recording,
+// over 10 s (a retry state keeps that floor, gate on or off), or the masked
+// transcript of a PAN-quarantined row after a failed extraction (no floor).
+// A quarantined row keeps no recording, and GATE_LIVE_CALL_BACKUP_TRANSCRIPT's
+// live-text pass skips it, so nothing else retries it. A row with no
+// recording and no quarantine keeps its old reading: that live-text pass
+// may retry it.
 function retryLaneState(status, call) {
   const attempts = Number(call.extraction_attempts || 0);
   const what = status === 'no_transcription' ? 'Transcription produced nothing' : 'Extraction failed';
@@ -42,14 +44,14 @@ function retryLaneState(status, call) {
   }
   const pan = String(parseJson(call.transcription_metadata, {})?.pan_detected) === 'true';
   const recording = !!String(call.recording_url || '').trim();
-  // The first reason that applies, in the sweep's order; none = it retries.
+  // The first reason that applies; none = a lane retries it.
   // Date.parse: no creation time is never "too old" (NaN compares false).
   const stop = [
     [status === 'extraction_failed' && Date.now() - Date.parse(call.created_at) > EXTRACTION_RETRY_WINDOW_DAYS * 864e5,
       `the call is older than ${EXTRACTION_RETRY_WINDOW_DAYS} days, so the sweep no longer retries it`],
-    [!recording && !(status === 'extraction_failed' && pan && call.transcription != null),
+    [pan && !recording && !(status === 'extraction_failed' && call.transcription != null),
       'there is no recording to retry, so the sweep does not retry it'],
-    [!pan && !sweepLengthOk(call), `the recording is ${SWEEP_MIN_SECONDS} seconds or less, so the sweep does not retry it`],
+    [recording && !pan && !sweepLengthOk(call), `the recording is ${SWEEP_MIN_SECONDS} seconds or less, so the sweep does not retry it`],
   ].find(([applies]) => applies);
   const tried = `${what} (attempt ${attempts || 1})`;
   return stop
