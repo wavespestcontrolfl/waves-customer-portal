@@ -109,6 +109,8 @@ router.get('/', async (req, res, next) => {
         stats: { totalReferrals: 0, converted: 0, pending: 0, totalClicks: 0 },
         referrals: [],
         rewardPerReferral: settings.referrer_reward_cents / 100,
+        // GATE_REFERRAL_STEP2: the member's real offer (its rewardPerReferral replaces the legacy amount above).
+        ...(isEnabled('referralStep2') ? await engine.step2OfferFor(db, req.customerId, settings) : {}),
       });
     }
 

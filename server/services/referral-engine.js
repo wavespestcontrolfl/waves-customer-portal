@@ -775,7 +775,9 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue, trx
   const settings = withStep2Deferral(await getSettings());
 
   // Calculate reward (base + tier bonus)
-  let rewardCents = settings.referrer_reward_cents;
+  // GATE_REFERRAL_STEP2: the amount staged on the promoter's pending earnings is the Step 2 standard member credit
+  // (the settlement moves total earned by actual minus staged, so a near or capped credit shows truly).
+  let rewardCents = isEnabled('referralStep2') ? step2.step2Settings(settings).step2_referrer_reward_cents : settings.referrer_reward_cents;
   if (tier) {
     const tierKey = `bonus_${tier.toLowerCase()}_cents`;
     if (settings[tierKey]) rewardCents += settings[tierKey];
@@ -1243,6 +1245,8 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       ...(memberCredit ? {
         referrer_credit_cents: Math.round(memberCredit.dollars * 100),
         referrer_reward_reason: memberCredit.reason,
+        // The friend's customer row, for the finance views (no phone matching).
+        referee_customer_id: customerId,
       } : {}),
       status: 'credited',
       updated_at: new Date(),
@@ -1293,10 +1297,21 @@ async function liveSettingsOrThrow(conn) {
 // What staff are told before confirming a referral, under the gate: the rule from the live settings and whether the
 // member is at the yearly limit (null when the settings cannot be read; the prompts then say credits follow the
 // program settings). referral-inbound attaches it to each Queue card.
+// The customer a confirm for `memberId` would pay: the referral's referrer_customer_id is the promoter's customer, and a
+// household's profiles share one promoter (resolvePromoter hands back the owner's), so a secondary profile's confirm
+// pays the household promoter's customer. Read-only mirror of that rule: the member's own promoter, else the
+// household's, else the member (who would be enrolled).
+async function creditedMemberFor(conn, memberId) {
+  const own = await conn('referral_promoters').where({ customer_id: memberId }).first('customer_id');
+  if (own) return own.customer_id;
+  const household = await findHouseholdPromoter(memberId, conn);
+  return household?.customer_id || memberId;
+}
+
 async function step2TermsFor(conn, memberId) {
   const live = await getLiveSettings(conn);
   if (!live) return null;
-  const atCap = memberId ? step2.capReached(await memberCreditsThisYear(conn, memberId), live) : false;
+  const atCap = memberId ? step2.capReached(await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId)), live) : false;
   return { ...step2.ruleTerms(live, atCap), forCustomerId: memberId ? String(memberId) : null };
 }
 
@@ -1311,21 +1326,32 @@ async function referralAcquisitionCost(conn, customerIds, perConversionDollars) 
   // shared household phones cannot misattribute a referral. A settled referral whose friend credit was $0 posted no
   // such row and is not found, so it keeps the flat amount. The member's side is the referral's own
   // referrer_credit_cents. Recorded amounts count whatever the gate says now (a Step 2 settlement stays what it was).
-  const posted = await conn('customer_credit_ledger as l')
+  // The friend's customer row on the referral (referee_customer_id, stamped at the Step 2 settlement) comes first; it
+  // needs no friend credit row, so a $0 friend credit costs the member amount alone. The friend's ledger row is the
+  // fallback for a referral settled before that column.
+  const referrals = new Map();
+  const settledFor = async (column) => conn('referrals as r')
+    .whereIn(`r.${column}`, customerIds)
+    .whereNotNull('r.referrer_credit_cents')
+    .select('r.id', `r.${column} as customer_id`, 'r.referrer_credit_cents');
+  for (const row of await settledFor('referee_customer_id')) {
+    referrals.set(row.id, { customerId: row.customer_id, member: Number(row.referrer_credit_cents) / 100, friend: 0 });
+  }
+  const linked = await conn('customer_credit_ledger as l')
     .join('referrals as r', 'r.id', 'l.referral_id')
     .whereIn('l.customer_id', customerIds)
     .where('l.source', 'referral')
     .where('l.delta', '>', 0)
     .whereNotNull('r.referrer_credit_cents')
     .whereRaw('l.customer_id <> r.referrer_customer_id')
-    .select('l.customer_id', 'r.id as referral_id', 'r.referrer_credit_cents', 'l.delta');
-  if (!posted.length) return flat;
-  const referrals = new Map();
-  for (const row of posted) {
-    const entry = referrals.get(row.referral_id) || { customerId: row.customer_id, member: Number(row.referrer_credit_cents) / 100, friend: 0 };
+    .select('l.customer_id', 'r.id as referral_id', 'r.referrer_credit_cents', 'l.delta', 'r.referee_customer_id');
+  for (const row of linked) {
+    const entry = referrals.get(row.referral_id)
+      || { customerId: row.customer_id, member: Number(row.referrer_credit_cents) / 100, friend: 0 };
     entry.friend += Number(row.delta);
     referrals.set(row.referral_id, entry);
   }
+  if (!referrals.size) return flat;
   const actualByCustomer = new Map();
   for (const { customerId, member, friend } of referrals.values()) {
     actualByCustomer.set(customerId, (actualByCustomer.get(customerId) || 0) + member + friend);

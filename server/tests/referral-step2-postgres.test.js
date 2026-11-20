@@ -36,6 +36,7 @@ const DAY = 86400000;
   let sendCustomerMessage;
   let sendTemplate;
   let migration;
+  let refereeMigration;
   let legacyMemberId;
 
   let phoneSeq = 0;
@@ -279,6 +280,8 @@ const DAY = 86400000;
 
     migration = require('../models/migrations/20261120150000_referral_step2_member_credit');
     await migration.up(db);
+    refereeMigration = require('../models/migrations/20261120160000_referral_referee_customer');
+    await refereeMigration.up(db);
 
     gates = require('../config/feature-gates').gates;
     engine = require('../services/referral-engine');
@@ -331,6 +334,16 @@ const DAY = 86400000;
       for (const col of migration._SETTING_COLUMNS) expect(await db.schema.hasColumn('referral_program_settings', col)).toBe(false);
       await migration.up(db);
       for (const col of migration._REFERRAL_COLUMNS) expect(await db.schema.hasColumn('referrals', col)).toBe(true);
+    });
+
+    test('the second migration adds referee_customer_id, runs twice, and its down drops only that column', async () => {
+      expect(await db.schema.hasColumn('referrals', 'referee_customer_id')).toBe(true);
+      await refereeMigration.up(db);
+      await refereeMigration.down(db);
+      expect(await db.schema.hasColumn('referrals', 'referee_customer_id')).toBe(false);
+      for (const col of migration._REFERRAL_COLUMNS) expect(await db.schema.hasColumn('referrals', col)).toBe(true);
+      await refereeMigration.up(db);
+      expect(await db.schema.hasColumn('referrals', 'referee_customer_id')).toBe(true);
     });
   });
 
@@ -393,6 +406,16 @@ const DAY = 86400000;
       const half = await performed({ memberFields: { latitude: 27.499, longitude: 0 }, friendFields: { latitude: 27.499, longitude: 0 } });
       await firstService(half.friend, half.visit);
       expect(await amounts(half.member.id)).toEqual([25]);
+    });
+
+    test('the amount staged on the promoter at conversion is the Step 2 standard credit', async () => {
+      await db('referral_program_settings').where({ id: 1 }).update({ step2_referrer_reward_cents: 3000, referrer_reward_cents: 9900 });
+      const ctx = await performed();
+      expect(await db('referral_promoters').where({ id: ctx.ref.promoter_id }).first()).toMatchObject({ pending_earnings_cents: 3000, total_earned_cents: 3000 });
+      await firstService(ctx.friend, ctx.visit);
+      expect(await amounts(ctx.member.id)).toEqual([30]);
+      expect(await db('referral_promoters').where({ id: ctx.ref.promoter_id }).first()).toMatchObject({ pending_earnings_cents: 0, total_earned_cents: 3000 });
+      await db('referral_program_settings').where({ id: 1 }).update({ referrer_reward_cents: 2500 });
     });
 
     test('a home with no map point pays $25', async () => {
@@ -680,6 +703,18 @@ const DAY = 86400000;
       expect(await engine.referralAcquisitionCost(db, [], 40)).toBe(0);
     });
 
+    test('a $0 friend credit still costs the member amount (the friend is found by referee_customer_id)', async () => {
+      await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 0 });
+      const ctx = await performed({ memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
+      await firstService(ctx.friend, ctx.visit);
+      expect(await credits(ctx.friend.id)).toHaveLength(0);
+      expect(await row(ctx.ref.id)).toMatchObject({ referee_customer_id: ctx.friend.id, referrer_credit_cents: 5000 });
+      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id], 40)).toBe(50);
+      // An older settled row with no referee_customer_id falls back to the friend's ledger row.
+      await db('referrals').where({ id: ctx.ref.id }).update({ referee_customer_id: null });
+      expect(await engine.referralAcquisitionCost(db, [ctx.friend.id], 40)).toBe(40);
+    });
+
     test('a formatted friend phone and a household sharing it cannot misattribute the cost (no phone matching)', async () => {
       const ctx = await performed({ memberFields: HOME, friendFields: { phone: '(941) 555-0199', latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
       await db('referrals').where({ id: ctx.ref.id }).update({ referee_phone: '+19415550199' });
@@ -704,6 +739,27 @@ const DAY = 86400000;
         atCap: false, forCustomerId: String(member.id), conditional: 'Member: $25, or $50 within half a mile, unless at the yearly limit; friend: $25 credit',
       });
       expect(await inbound.previewTerms(db, null)).toMatchObject({ forCustomerId: null });
+    });
+
+    test('the cap is counted for the customer a confirm pays: a secondary household profile resolves the household promoter', async () => {
+      const accountId = randomUUID();
+      const owner = await customer({ account_id: accountId, phone: '+19415558800' });
+      const secondary = await customer({ account_id: accountId, phone: '+19415558800' });
+      await promoterFor(owner);
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: owner.id, referee_name: `Prior ${i}`, referee_phone: `+1941566${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: owner.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      // Staff pick the secondary profile; the confirm pays the household promoter's customer, who is at the limit.
+      expect(await engine.step2TermsFor(db, secondary.id)).toMatchObject({ atCap: true, forCustomerId: String(secondary.id) });
+      expect(await engine.step2TermsFor(db, owner.id)).toMatchObject({ atCap: true });
+      // An unrelated customer with no credits is not at the limit.
+      expect(await engine.step2TermsFor(db, (await customer()).id)).toMatchObject({ atCap: false });
     });
   });
 

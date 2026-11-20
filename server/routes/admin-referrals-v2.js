@@ -431,7 +431,8 @@ router.post('/payouts/:id/request', async (req, res, next) => {
 router.get('/settings', async (req, res, next) => {
   try {
     const settings = await engine.getSettings();
-    res.json({ settings });
+    // `step2`: GATE_REFERRAL_STEP2 is on, so the Settings tab shows the four Step 2 member numbers.
+    res.json({ settings, ...(isEnabled('referralStep2') ? { step2: true } : {}) });
   } catch (err) { next(err); }
 });
 

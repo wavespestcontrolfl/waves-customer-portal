@@ -234,4 +234,18 @@ describe('referral reward honesty', () => {
 
     expect(await screen.findByText('$40 credit')).toBeInTheDocument();
   });
+
+  it('promises no credit to a member at the yearly limit (Step 2)', async () => {
+    api.getReferrals.mockResolvedValue({
+      stats: { totalReferrals: 10, converted: 10 },
+      rewardPerReferral: 25,
+      capReached: true,
+      annualCap: 10,
+    });
+
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+
+    expect(await screen.findByText('View details')).toBeInTheDocument();
+    expect(screen.queryByText(/\$25 credit/)).not.toBeInTheDocument();
+  });
 });

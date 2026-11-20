@@ -846,10 +846,14 @@ export default function ReferralsPageV2() {
 
   const [settingsError, setSettingsError] = useState(false);
   const [analyticsError, setAnalyticsError] = useState(false);
+  const [settingsStep2, setSettingsStep2] = useState(false);
   const loadSettings = useCallback(() => {
     setSettingsError(false);
     af("/admin/referrals/settings")
-      .then((r) => setSettings(r.settings))
+      .then((r) => {
+        setSettings(r.settings);
+        setSettingsStep2(r.step2 === true);
+      })
       .catch(() => setSettingsError(true));
   }, []);
   const loadAnalytics = useCallback(() => {
@@ -1854,7 +1858,9 @@ export default function ReferralsPageV2() {
               items: [
                 {
                   key: "referrer_reward_cents",
-                  label: "Referrer Reward (cents)",
+                  label: settingsStep2
+                    ? "Referrer Reward (cents), used only while Step 2 is off"
+                    : "Referrer Reward (cents)",
                   type: "number",
                 },
                 {
@@ -1864,6 +1870,19 @@ export default function ReferralsPageV2() {
                 },
               ],
             },
+            ...(settingsStep2
+              ? [
+                  {
+                    section: "Step 2 member credit",
+                    items: [
+                      { key: "step2_referrer_reward_cents", label: "Member credit (cents)", type: "number" },
+                      { key: "step2_near_referrer_reward_cents", label: "Member credit when the friend lives near (cents)", type: "number" },
+                      { key: "step2_near_radius_miles", label: "Near distance (miles)", type: "number", decimal: true },
+                      { key: "step2_annual_credit_cap", label: "Member credits per year", type: "number" },
+                    ],
+                  },
+                ]
+              : []),
             {
               section: "Tier Bonuses",
               items: [
@@ -2101,13 +2120,13 @@ export default function ReferralsPageV2() {
                             onChange={(e) =>
                               upd(
                                 f.key,
-                                f.type === "number"
+                                f.type === "number" && !f.decimal
                                   ? Math.max(0, parseInt(e.target.value) || 0)
                                   : e.target.value,
                               )
                             }
                             disabled={!isEditing}
-                            {...(f.type === "number" ? { min: 0, step: 1 } : {})}
+                            {...(f.type === "number" ? { min: 0, step: f.decimal ? 0.05 : 1 } : {})}
                             style={{ ...inputSt, opacity: isEditing ? 1 : 0.6 }}
                           />
                         )}
