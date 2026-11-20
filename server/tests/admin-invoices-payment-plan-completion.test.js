@@ -49,6 +49,9 @@ jest.mock('../services/review-request', () => ({
 jest.mock('../services/annual-prepay-renewals', () => ({
   syncTermForInvoicePayment: jest.fn(async () => undefined),
 }));
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({
+  reconcileInvoice: jest.fn(async () => null),
+}));
 jest.mock('../services/payment-lifecycle-email', () => ({
   sendPaymentPlanConfirmed: jest.fn(async () => ({ ok: true })),
 }));
@@ -60,6 +63,7 @@ jest.mock('../services/customer-credit', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+const { reconcileInvoice } = require('../services/commercial-prepay-dispatch-review');
 const router = require('../routes/admin-invoices');
 
 const INVOICE = {
@@ -167,6 +171,7 @@ describe('active payment plans auto-complete when the invoice settles', () => {
         stripe_payment_intent_id: null,
         processor: null,
       }));
+      expect(reconcileInvoice).toHaveBeenCalledWith(trx, 'inv-1');
       // The completion rides the SAME trx as the status flip — a paid
       // invoice must never keep an 'active' plan that blocks edits.
       expect(trx).toHaveBeenCalledWith('payment_plans');
@@ -203,6 +208,7 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       expect(trxVisits.forUpdate).toHaveBeenCalled();
       expect(trxInvoices.update).not.toHaveBeenCalled();
       expect(trx).not.toHaveBeenCalledWith('payment_plans');
+      expect(reconcileInvoice).not.toHaveBeenCalled();
     });
   });
 
@@ -214,6 +220,7 @@ describe('active payment plans auto-complete when the invoice settles', () => {
         body: JSON.stringify({}),
       });
       expect(res.status).toBe(200);
+      expect(reconcileInvoice).toHaveBeenCalledWith(trx, 'inv-1');
       expect(trx).toHaveBeenCalledWith('payment_plans');
       expect(trxPlans.where).toHaveBeenCalledWith({ invoice_id: 'inv-1', status: 'active' });
       expect(trxPlans.update).toHaveBeenCalledWith(expect.objectContaining({

@@ -51,6 +51,7 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https:
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(), acquireTermiteGateForCharge: jest.fn(async () => []), withTermiteGateForCharge: jest.fn(async (_keys, fn) => fn()), acquireTermiteGateAtEntry: jest.fn(async () => undefined), suspendActiveTermsForDisputedInvoice: jest.fn(async () => undefined) }));
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({ reconcileInvoice: jest.fn(async () => null) }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })), handleDepositDisputeClosed: jest.fn(async () => ({ handled: false })) }));
 // Fee-lane detection's guarded fallback retrieves the PI when no local
 // pointer row exists; model Stripe answering "not a fee PI" so the
@@ -62,6 +63,7 @@ jest.mock('../services/stripe', () => ({
 
 const db = require('../models/db');
 const AnnualPrepay = require('../services/annual-prepay-renewals');
+const { reconcileInvoice } = require('../services/commercial-prepay-dispatch-review');
 const {
   _handleRefundFailed: handleRefundFailed,
   _handleChargeRefunded: handleChargeRefunded,
@@ -133,6 +135,7 @@ describe('handleRefundFailed', () => {
   let paymentsFirst;
   let dbInvoices;
   let dbPrepayTerms;
+  let trx;
 
   const failedRefund = (over = {}) => ({
     id: 're_fail',
@@ -173,7 +176,7 @@ describe('handleRefundFailed', () => {
       update: jest.fn().mockResolvedValue(1),
     };
     const trxInvoicesQuery = trxInvoices;
-    const trx = jest.fn((table) => {
+    trx = jest.fn((table) => {
       if (table === 'payments') return trxPaymentsQuery;
       if (table === 'invoices') return trxInvoicesQuery;
       if (table === 'notifications') return { insert: notificationInsert };
@@ -228,6 +231,7 @@ describe('handleRefundFailed', () => {
     // stripe_refund_id goes with it. Metadata keeps the durable record.
     expect(args.refund_status).toBeNull();
     expect(args.stripe_refund_id).toBeNull();
+    expect(reconcileInvoice).not.toHaveBeenCalled();
     expect(args.status).toBe('paid');
     expect(JSON.parse(args.metadata).failed_refund_ids).toEqual(['re_fail']);
 
@@ -296,6 +300,7 @@ describe('handleRefundFailed', () => {
     await handleRefundFailed(failedRefund());
 
     expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paid' }));
+    expect(reconcileInvoice).toHaveBeenCalledWith(trx, 'inv-1');
     expect(fullText(notificationInsert.mock.calls[0][0])).toContain('WPC-2026-0001 was restored to paid');
     // No payment_intent.succeeded ever fires for a bounce — the handler is
     // the only place coverage can re-sync.
@@ -312,6 +317,7 @@ describe('handleRefundFailed', () => {
 
     expect(trxInvoices.where).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1', status: 'refunded' }));
     expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paid' }));
+    expect(reconcileInvoice).toHaveBeenCalledWith(trx, 'inv-1');
     expect(fullText(notificationInsert.mock.calls[0][0])).toContain('WPC-2026-0001 was restored to paid');
   });
 
@@ -326,6 +332,7 @@ describe('handleRefundFailed', () => {
 
     expect(dbInvoices.where).toHaveBeenCalledWith({ stripe_charge_id: 'ch_1' });
     expect(trxInvoices.where).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-2', status: 'refunded' }));
+    expect(reconcileInvoice).toHaveBeenCalledWith(trx, 'inv-2');
     expect(fullText(notificationInsert.mock.calls[0][0])).toContain('WPC-2026-0002 was restored to paid');
   });
 
@@ -335,6 +342,7 @@ describe('handleRefundFailed', () => {
     await handleRefundFailed(failedRefund());
 
     const body = fullText(notificationInsert.mock.calls[0][0]);
+    expect(reconcileInvoice).toHaveBeenCalledWith(trx, 'inv-1');
     expect(body).toContain('term term-9 was CANCELLED');
     expect(body).toContain('reactivate it manually');
   });

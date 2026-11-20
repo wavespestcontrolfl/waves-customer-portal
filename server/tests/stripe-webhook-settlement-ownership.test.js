@@ -65,6 +65,15 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   scheduleReceiptDeliveryDrain: jest.fn(),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
+jest.mock('../services/commercial-prepay-sale-record', () => ({
+  hasRecordedUnbookedSale: jest.fn(async () => mockState.recordedCommercialSale),
+}));
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({
+  reconcileInvoice: jest.fn(async (conn, invoiceId) => {
+    mockState.updates.push({ table: 'commercial-review', payload: { invoiceId }, inTrx: conn?.isTransaction === true });
+    return 'active';
+  }),
+}));
 jest.mock('../services/estimate-deposits', () => ({
   handleDepositChargeReversed: jest.fn(async () => ({ handled: false })),
   handleDepositIntentSucceeded: jest.fn(async () => {}),
@@ -105,6 +114,7 @@ function resetMockState() {
     settleReadThrows: false,
     // A payments row the fallback's FOR UPDATE read finds (null = none).
     fallbackPayment: null,
+    recordedCommercialSale: false,
     updates: [],
   });
 }
@@ -171,8 +181,12 @@ jest.mock('../models/db', () => {
   db.fn = { now: () => 'NOW()' };
   db.transaction = jest.fn(async (fn) => {
     const trx = jest.fn((table) => mockMakeBuilder(table, { inTrx: true }));
-    trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    trx.raw = jest.fn((sql, bindings) => {
+      mockState.updates.push({ table: 'raw', payload: { sql, bindings }, inTrx: true });
+      return { __raw: sql, bindings };
+    });
     trx.fn = { now: () => 'NOW()' };
+    trx.isTransaction = true;
     return fn(trx);
   });
   return db;
@@ -237,13 +251,14 @@ describe('a part payment already on the invoice survives the settlement rewrite'
     expect(flip.payload.total).toBe(130);
   });
 
-  test('the in-SQL rewrite after it adds amount_paid back and resets it in the same UPDATE', async () => {
+  test('the fallback keeps its principal rewrite inside the locked UPDATE', async () => {
     await handlePaymentIntentSucceeded(succeededPI());
 
-    const flip = mockState.updates.find((u) => u.table === 'invoices' && !u.inTrx && u.payload?.status === 'paid');
+    const flip = mockState.updates.find((u) => u.table === 'invoices' && u.inTrx && u.payload?.status === 'paid');
     expect(flip).toBeTruthy();
     expect(flip.payload.amount_paid).toBe(0);
-    expect(flip.payload.total.__raw).toMatch(/COALESCE\(credit_applied, 0\) \+ COALESCE\(amount_paid, 0\)/);
+    expect(flip.payload.total).toBe(100);
+    expect(mockState.updates.find((u) => u.table === 'invoices' && !u.inTrx && u.payload?.status === 'paid')).toBeFalsy();
   });
 });
 
@@ -280,6 +295,56 @@ describe('a withdrawn invoice never settles from a customer-minted intent', () =
 
     await expect(handlePaymentIntentSucceeded(succeededPI())).rejects.toThrow('connection reset');
     expect(mockState.inserts.find((i) => i.table === 'customer_health_alerts')).toBeFalsy();
+  });
+});
+
+describe('processing-to-paid commercial restoration is one fenced transaction', () => {
+  test('the PI fence, payment flip, invoice flip and review observation are ordered inside one transaction', async () => {
+    mockState.processingPaymentsUpdated = 1;
+    mockState.recordedCommercialSale = true;
+    mockState.preLockInvoice = {
+      ...mockState.preLockInvoice,
+      status: 'processing',
+      stripe_payment_intent_id: 'pi_test_1',
+    };
+    mockState.settleReadInvoice = { ...mockState.preLockInvoice };
+
+    await handlePaymentIntentSucceeded(succeededPI({ payment_method_types: ['us_bank_account'] }));
+
+    const fenceAt = mockState.updates.findIndex((row) => row.table === 'raw'
+      && row.payload.bindings?.[0] === 'stripe.pi.payment'
+      && row.payload.bindings?.[1] === 'pi_test_1');
+    const customerAt = mockState.updates.findIndex((row) => row.table === 'customers:share-lock');
+    const paymentAt = mockState.updates.findIndex((row) => row.table === 'payments'
+      && row.inTrx && row.payload.status === 'paid');
+    const invoiceAt = mockState.updates.findIndex((row) => row.table === 'invoices'
+      && row.inTrx && row.payload.status === 'paid');
+    const reviewAt = mockState.updates.findIndex((row) => row.table === 'commercial-review');
+    expect(fenceAt).toBeGreaterThanOrEqual(0);
+    expect(customerAt).toBeGreaterThan(fenceAt);
+    expect(paymentAt).toBeGreaterThan(customerAt);
+    expect(invoiceAt).toBeGreaterThan(paymentAt);
+    expect(reviewAt).toBeGreaterThan(invoiceAt);
+    expect(mockState.updates[reviewAt]).toMatchObject({
+      inTrx: true,
+      payload: { invoiceId: 'inv-1' },
+    });
+  });
+
+  test('a processing row cannot certify a commercial restoration after the invoice rebinds to another PI', async () => {
+    mockState.processingPaymentsUpdated = 1;
+    mockState.recordedCommercialSale = true;
+    mockState.settleReadInvoice = {
+      ...mockState.preLockInvoice,
+      status: 'processing',
+      stripe_payment_intent_id: 'pi_unrelated_replacement',
+    };
+
+    await handlePaymentIntentSucceeded(succeededPI({ payment_method_types: ['us_bank_account'] }));
+
+    expect(mockState.updates.find((row) => row.table === 'commercial-review')).toBeFalsy();
+    expect(mockState.updates.find((row) => row.table === 'invoices'
+      && row.inTrx && row.payload.status === 'paid')).toBeFalsy();
   });
 });
 
@@ -333,13 +398,16 @@ describe('the withdrawal is re-read under the settlement lock', () => {
     expect(alert.payload.alert_type).toBe('wh_payer_billed_settled');
     expect(alert.payload.alert_type.length).toBeLessThanOrEqual(30);
     expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
-    // Merge fence before the settlement locks, in executeMerge's order
-    // (customers, then payments), so the two cannot deadlock.
-    const lockAt = mockState.updates.findIndex((u) => u.table === 'customers:share-lock');
+    // Both processing and succeeded deliveries take the PI fence before the
+    // merge/customer lock. Row locks remain customers, then payments.
+    const piFenceAt = mockState.updates.findIndex((u) => u.table === 'raw'
+      && u.payload.bindings?.[0] === 'stripe.pi.payment');
+    const customerLockAt = mockState.updates.findIndex((u) => u.table === 'customers:share-lock');
     const flipAt = mockState.updates.findIndex((u) => u.table === 'payments');
-    expect(lockAt).toBeGreaterThanOrEqual(0);
-    expect(mockState.updates[lockAt].payload).toContain(WINNER);
-    expect(flipAt).toBeGreaterThan(lockAt);
+    expect(piFenceAt).toBeGreaterThanOrEqual(0);
+    expect(customerLockAt).toBeGreaterThan(piFenceAt);
+    expect(mockState.updates[customerLockAt].payload).toContain(WINNER);
+    expect(flipAt).toBeGreaterThan(customerLockAt);
   });
 });
 

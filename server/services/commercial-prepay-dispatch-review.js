@@ -1,6 +1,7 @@
 'use strict';
 
 const { createAlert, resolveAlert } = require('./dispatch-alerts');
+const { readReceiptState } = require('./commercial-prepay-receipt-proof');
 
 const REVIEW_TYPE = 'commercial_prepay_setup_review';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -99,7 +100,31 @@ async function hydrateCurrentCustomerLinks(conn, alerts) {
   });
 }
 
+async function reconcileOriginalInvoice(conn, invoiceId) {
+  // An ordinary invoice has no sale receipt and needs no Dispatch locks.
+  if (!await require('./commercial-prepay-sale-record').hasRecordedUnbookedSale(conn, invoiceId)) return null;
+  const observation = await updateReview(conn, invoiceId, async (trx, sale) => ({
+    context: sale.reviewContext,
+    state: await readReceiptState(trx, sale.invoice),
+  }));
+  return observation?.state ?? null;
+}
+
+async function reconcileInvoice(conn, invoiceId) {
+  if (typeof conn.transaction !== 'function') return reconcileOriginalInvoice(conn, invoiceId);
+  try {
+    return await conn.transaction((trx) => reconcileOriginalInvoice(trx, invoiceId));
+  } catch (err) {
+    // A schema without the sale-event table cannot own a recorded setup.
+    // The savepoint lets ordinary invoice collection continue in that schema.
+    if (err.code === '42P01' && !(await conn.schema.hasTable('audit_log'))) return null;
+    throw err;
+  }
+}
+
 module.exports = {
+  reconcileInvoice,
+  readReceiptState,
   REVIEW_TYPE,
   updateReview,
   hydrateCurrentCustomerLinks,

@@ -30,6 +30,12 @@ const {
   computeRefundSurcharge,
 } = require('./stripe-pricing');
 
+// Permanent invoice provenance for a consumed deposit that a terminal invoice
+// transition returned to the live estimate ledger. The ledger row has to clear
+// credited_invoice_id when it becomes reusable, so the same transaction writes
+// this exact, immutable before-image for observational refund proof.
+const INVOICE_DEPOSIT_CREDIT_RETURNED = 'invoice.deposit_credit.returned';
+
 // RETIRED (owner ruling 2026-08-10): acceptance deposits are permanently
 // not-enforced — the card-hold model (ONE_TIME_CARD_HOLD) superseded them
 // for one-time work (owner choice 2026-06-24) and recurring accepts collect
@@ -1983,7 +1989,11 @@ async function handleDepositIntentCanceled(paymentIntent) {
 
 // Automatic collection needs invoice-specific backing. Partially consumed
 // historical pools without that attribution remain manual reconciliation.
-async function invoiceDepositCreditIsBacked(invoice, trx = db) {
+// `exactSourceBinding` is for observational receipt proof only. A partially
+// consumed deposit may be economically valid while still lacking a durable
+// invoice id on the current ledger; that shape must stay unconfirmed here,
+// not be inferred from the invoice's discount line or gross deposit balance.
+async function invoiceDepositCreditIsBacked(invoice, trx = db, { exactSourceBinding = false } = {}) {
   const lines = require('./invoice')._parseInvoiceLineItems(invoice.line_items)
     .filter((line) => line.category === 'deposit_credit');
   const required = new Map();
@@ -1993,17 +2003,114 @@ async function invoiceDepositCreditIsBacked(invoice, trx = db) {
     required.set(line.estimate_id, (required.get(line.estimate_id) || 0) + cents);
   }
   if (!required.size) return true;
-  const rows = await trx('estimate_deposits').where({ credited_invoice_id: invoice.id,
-    customer_id: invoice.customer_id }).whereIn('estimate_id', [...required.keys()])
-    .orderBy('id').forUpdate().noWait();
+  if (exactSourceBinding) {
+    const ownedEstimates = await trx('estimates').where({ customer_id: invoice.customer_id })
+      .whereIn('id', [...required.keys()]).select('id');
+    if (new Set(ownedEstimates.map((row) => String(row.id))).size !== required.size) return false;
+  }
+  const rowQuery = trx('estimate_deposits').where({ credited_invoice_id: invoice.id });
+  if (!exactSourceBinding) {
+    rowQuery.where({ customer_id: invoice.customer_id }).whereIn('estimate_id', [...required.keys()]);
+  }
+  // Collection locks the backing funds. Dispatch only reads committed
+  // allocations and must leave a concurrent refund or collection free to finish.
+  rowQuery.orderBy('id');
+  if (!exactSourceBinding) rowQuery.forUpdate().noWait();
+  const rows = await rowQuery;
   for (const row of rows) {
     const credited = Math.round(Number(row.credited_amount) * 100);
     const remaining = Math.round((Number(row.amount) - Number(row.refunded_amount || 0)) * 100);
-    if (!['received', 'credited'].includes(row.status) || !Number.isSafeInteger(credited)
+    if ((exactSourceBinding && (String(row.customer_id || '') !== String(invoice.customer_id)
+      || !required.has(row.estimate_id)))
+      || !['received', 'credited'].includes(row.status) || !Number.isSafeInteger(credited)
         || !Number.isSafeInteger(remaining) || credited <= 0 || credited > remaining) return false;
     required.set(row.estimate_id, required.get(row.estimate_id) - credited);
   }
   return [...required.values()].every((cents) => cents === 0);
+}
+
+function invoiceDepositCreditRequirements(invoice) {
+  let lines;
+  try {
+    const raw = invoice?.line_items;
+    lines = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(lines)) return null;
+  const required = new Map();
+  for (const line of lines.filter((item) => item?.category === 'deposit_credit')) {
+    const amountCents = Math.abs(Math.round(Number(line.amount ?? line.unit_price ?? 0) * 100));
+    if (!line.estimate_id || !Number.isSafeInteger(amountCents) || amountCents <= 0) return null;
+    const estimateId = String(line.estimate_id);
+    required.set(estimateId, (required.get(estimateId) || 0) + amountCents);
+  }
+  return required;
+}
+
+// A refund reader cannot use the live deposit row after the unwind: making the
+// money reusable necessarily clears credited_invoice_id. Accept only the exact
+// summary emitted by restoreDepositCreditForVoidedInvoice. One event, the same
+// invoice/customer, owned estimates, unique fully-bound deposit rows, and an
+// exact per-estimate dollar match are all required; malformed/legacy evidence
+// stays unknown. The timestamp lets the receipt reader reject a return from a
+// prior money episode.
+async function readInvoiceDepositCreditReturn(invoice, trx = db) {
+  const required = invoiceDepositCreditRequirements(invoice);
+  if (!required?.size || !invoice?.id || !invoice?.customer_id) return null;
+  const events = await trx('audit_log').where({
+    action: INVOICE_DEPOSIT_CREDIT_RETURNED,
+    resource_type: 'invoices',
+    resource_id: invoice.id,
+  }).select('id', 'metadata', 'created_at').limit(2);
+  if (events.length !== 1) return null;
+  const event = events[0];
+  const value = typeof event.metadata === 'string'
+    ? (() => { try { return JSON.parse(event.metadata); } catch { return null; } })()
+    : event.metadata;
+  const currentUpdatedAt = invoice.updated_at ? new Date(invoice.updated_at).getTime() : NaN;
+  if (!value || value.version !== 2
+    || String(value.invoiceId || '') !== String(invoice.id)
+    || String(value.customerId || '') !== String(invoice.customer_id)
+    || String(value.terminalStatus || '') !== String(invoice.status || '').toLowerCase()
+    || !Number.isFinite(currentUpdatedAt) || value.terminalUpdatedAtMs !== currentUpdatedAt
+    || !Number.isSafeInteger(value.requestedCents)
+    || !Number.isSafeInteger(value.restoredCents)
+    || value.requestedCents <= 0 || value.restoredCents !== value.requestedCents
+    || !Array.isArray(value.allocations) || !value.allocations.length) return null;
+  const refundProof = value.refundProof == null ? null : value.refundProof;
+  if (refundProof && (typeof refundProof !== 'object'
+    || typeof refundProof.refundId !== 'string' || !refundProof.refundId.trim()
+    || (refundProof.paymentId != null
+      && (typeof refundProof.paymentId !== 'string' || !refundProof.paymentId.trim())))) return null;
+
+  const returned = new Map();
+  const depositIds = new Set();
+  for (const allocation of value.allocations) {
+    const depositId = String(allocation?.depositId || '');
+    const estimateId = String(allocation?.estimateId || '');
+    const returnedCents = allocation?.returnedCents;
+    if (!depositId || depositIds.has(depositId) || !required.has(estimateId)
+      || !Number.isSafeInteger(returnedCents) || returnedCents <= 0) return null;
+    depositIds.add(depositId);
+    returned.set(estimateId, (returned.get(estimateId) || 0) + returnedCents);
+  }
+  if ([...required].some(([estimateId, amountCents]) => returned.get(estimateId) !== amountCents)
+    || [...returned.keys()].some((estimateId) => !required.has(estimateId))) return null;
+  const returnedCents = [...returned.values()].reduce((sum, amount) => sum + amount, 0);
+  if (returnedCents !== value.restoredCents) return null;
+
+  const owned = await trx('estimates').where({ customer_id: invoice.customer_id })
+    .whereIn('id', [...required.keys()]).select('id');
+  if (new Set(owned.map((row) => String(row.id))).size !== required.size) return null;
+  const returnedAt = event.created_at ? new Date(event.created_at).getTime() : NaN;
+  if (!Number.isFinite(returnedAt)) return null;
+  return {
+    returnedCents,
+    returnedAt,
+    refundId: refundProof ? String(refundProof.refundId) : null,
+    paymentId: refundProof?.paymentId != null ? String(refundProof.paymentId) : null,
+  };
 }
 
 // Reverse a voided invoice's deposit consumption. The voided invoice's own
@@ -2019,7 +2126,12 @@ async function invoiceDepositCreditIsBacked(invoice, trx = db) {
 // committing beside a still-consumed ledger with no retry path — a blocked
 // void beats stranded money, and the human resolving the alert unblocks it.
 // Returns dollars restored on full success.
-async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
+async function restoreDepositCreditForVoidedInvoice({
+  invoice,
+  trx = db,
+  refundId = null,
+  paymentId = null,
+}) {
   const items = (() => {
     try {
       const raw = invoice?.line_items;
@@ -2030,6 +2142,7 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
   const creditLines = items.filter((item) => item?.category === 'deposit_credit');
   let totalRequestedCents = 0;
   let totalRestoredCents = 0;
+  const exactInvoiceAllocations = [];
   for (const line of creditLines) {
     const requestedCents = Math.abs(Math.round(Number(line.amount ?? line.unit_price ?? 0) * 100));
     if (!(requestedCents > 0)) continue;
@@ -2042,7 +2155,7 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
       .where({ estimate_id: estimateId })
       .whereIn('status', ['received', 'credited'])
       .orderBy('updated_at', 'desc')
-      .select('id', 'status', 'credited_amount');
+      .select('id', 'status', 'customer_id', 'credited_amount', 'credited_invoice_id');
     for (const row of rows) {
       if (remainingCents <= 0) break;
       const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
@@ -2063,6 +2176,21 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
         });
       if (!updatedCount) continue;
       remainingCents -= giveCents;
+      // credited_invoice_id is trustworthy only when THIS invoice owned the
+      // whole consumed slice. A $55 application into a $75 row remains
+      // status=received/unbound and is intentionally not promoted to proof;
+      // likewise, a fully-consumed row that accumulated older partial credits
+      // cannot attribute only part of its before-image to the final invoice.
+      if (row.status === 'credited'
+        && String(row.credited_invoice_id || '') === String(invoice?.id || '')
+        && String(row.customer_id || '') === String(invoice?.customer_id || '')
+        && giveCents === creditedCents) {
+        exactInvoiceAllocations.push({
+          depositId: String(row.id),
+          estimateId: String(estimateId),
+          returnedCents: giveCents,
+        });
+      }
     }
     totalRestoredCents += requestedCents - remainingCents;
   }
@@ -2081,6 +2209,78 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
     throw new Error(
       `deposit credit restore incomplete for invoice ${invoice?.id} (restored $${totalRestoredCents / 100} of $${totalRequestedCents / 100}) — void blocked until the ledger is reconciled`,
     );
+  }
+  let hasUnbookedCommercialSale = false;
+  if (exactInvoiceAllocations.length) {
+    try {
+      // A failed PostgreSQL statement poisons its transaction even when JS
+      // catches the rejection. Isolate this optional Dispatch lookup in a
+      // savepoint so its rollback restores the surrounding financial
+      // transaction to a committable state.
+      hasUnbookedCommercialSale = await trx.transaction((lookupTrx) =>
+        require('./commercial-prepay-sale-record')
+          .hasRecordedUnbookedSale(lookupTrx, invoice.id));
+    } catch (err) {
+      // Dispatch proof is observational. A read outage must not turn an
+      // ordinary invoice's otherwise-complete money unwind into a refund
+      // failure; the conservative result is simply no new proof event.
+      logger.warn(`[estimate-deposits] unbooked-sale proof lookup failed for invoice ${invoice.id}: ${err.message}`);
+    }
+  }
+  if (hasUnbookedCommercialSale) {
+    // The caller's object may be the pre-transition row. Re-read after the
+    // ledger unwind so proof and post-commit reconciliation bind to the true
+    // terminal episode, never to a still-live invoice or an older return.
+    const terminalInvoice = await trx('invoices').where({ id: invoice.id })
+      .first('status', 'updated_at', 'subtotal', 'discount_amount', 'tax_amount', 'total');
+    const terminalStatus = String(terminalInvoice?.status || '').toLowerCase();
+    const terminalUpdatedAtMs = terminalInvoice?.updated_at
+      ? new Date(terminalInvoice.updated_at).getTime() : NaN;
+    const terminal = ['void', 'refunded', 'canceled', 'cancelled'].includes(terminalStatus)
+      && Number.isFinite(terminalUpdatedAtMs);
+    if (!terminal) return totalRestoredCents / 100;
+    await require('./audit-log').recordAuditEvent({
+      trx,
+      critical: true,
+      actor_type: 'system',
+      action: INVOICE_DEPOSIT_CREDIT_RETURNED,
+      resource_type: 'invoices',
+      resource_id: invoice.id,
+      metadata: {
+        version: 2,
+        invoiceId: invoice.id,
+        customerId: invoice.customer_id,
+        terminalStatus,
+        terminalUpdatedAtMs,
+        requestedCents: totalRequestedCents,
+        restoredCents: totalRestoredCents,
+        allocations: exactInvoiceAllocations,
+        // A refund webhook may replay long after the deposit was returned
+        // and legitimately touch payments.updated_at again. Bind mixed
+        // deposit/card proof to the provider refund identity instead of that
+        // mutable timestamp. Void/cancel returns have no provider identity.
+        ...(refundId ? {
+          refundProof: {
+            refundId: String(refundId),
+            ...(paymentId != null ? { paymentId: String(paymentId) } : {}),
+          },
+        } : {}),
+      },
+    });
+    const netInvoiceCents = Math.max(0, Math.round(((Number(terminalInvoice.subtotal) || 0)
+      - (Number(terminalInvoice.discount_amount) || 0)
+      + (Number(terminalInvoice.tax_amount) || 0)) * 100));
+    const depositOnlyReturn = totalRestoredCents === netInvoiceCents
+      && Math.round(Number(terminalInvoice.total || 0) * 100) === 0;
+    if (depositOnlyReturn) {
+      // This exact deposit-only terminalization has no provider refund whose
+      // webhook could reconcile it. Record the Dispatch review in the SAME
+      // transaction, after the writer's terminal invoice update + deposit
+      // restore. Receipt reconciliation takes no financial row locks; its only
+      // lock is the already-observed sale record, so it cannot invert the
+      // invoice/deposit locks held by this writer.
+      await require('./commercial-prepay-dispatch-review').reconcileInvoice(trx, invoice.id);
+    }
   }
   return totalRestoredCents / 100;
 }
@@ -2164,6 +2364,7 @@ module.exports = {
   DEPOSIT_FOLLOWUP_WINDOW,
   consumeDepositCredit,
   invoiceDepositCreditIsBacked,
+  readInvoiceDepositCreditReturn,
   handleDepositChargeReversed,
   handleDepositDisputeClosed,
   handleDepositIntentCanceled,

@@ -40,6 +40,7 @@ jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async
 jest.mock('../services/billing-pause', () => ({ maybeResumeBillingPauseOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => undefined) }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({ reconcileInvoice: jest.fn(async () => null) }));
 jest.mock('../services/payment-plans', () => ({ completeActivePlansForInvoice: jest.fn(async () => undefined) }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn(async () => true) }));
 jest.mock('../services/receipt-delivery-queue', () => ({
@@ -394,6 +395,11 @@ describe('recordManualPayment — settlement', () => {
     const { activity } = settle(openInvoice());
     const out = await recordManualPayment('inv-1', { method: 'zelle', reference: 'Pat Doe', recordedBy: 'zelle-notice-reconciler' });
     expect(out.invoice).toBeTruthy();
+    const { recordAuditEvent } = require('../services/audit-log');
+    const { reconcileInvoice } = require('../services/commercial-prepay-dispatch-review');
+    const receipt = recordAuditEvent.mock.calls.find(([event]) => event.metadata?.paymentId === 'pay-1')[0];
+    expect(reconcileInvoice).toHaveBeenCalledWith(receipt.trx, 'inv-1');
+    expect(reconcileInvoice.mock.invocationCallOrder[0]).toBeGreaterThan(recordAuditEvent.mock.invocationCallOrder[0]);
     expect(out.receipt).toEqual({ email: { ok: true }, sms: { ok: true } });
     expect(sendReceiptEmail).toHaveBeenCalledWith('inv-1');
     expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ force: true, hasEmailLeg: true, operatorInitiated: true }));

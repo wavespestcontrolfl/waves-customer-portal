@@ -6471,6 +6471,14 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       });
       if (!term) throw new Error('Annual prepay term could not be created');
 
+      // A fully consumed deposit has no payment webhook. Once its exact
+      // allocation, setup claim, invoice and term coexist, persist the
+      // observation in this same mint transaction.
+      if (settledByDepositCredit) {
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, invoice.id);
+      }
+
       await trx('activity_log').insert({
         customer_id: customer.id,
         action: 'annual_prepay_invoice_created',
@@ -6795,6 +6803,18 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
             amount: collectedSetupFee,
           });
         }
+        // A recorded setup with no visit anchor is the same original,
+        // unbooked commercial sale as the invoice-first route. Cash/check
+        // has no later provider webhook that could recover this immutable
+        // fact, so ledger it beside the paid invoice and setup claim.
+        if (!collectedSetupAnchor) {
+          await require('../services/commercial-prepay-sale-record').recordUnbookedCoverageSale(trx, {
+            invoiceId: updatedInvoice.id,
+            customerId: customer.id,
+            coverageServiceType,
+            setupAmount: collectedSetupFee,
+          });
+        }
       }
       // The setup line's tax-proportional share of the PAID total never
       // enters the coverage basis the term slices across visits.
@@ -6834,6 +6854,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 
       const [payment] = await trx('payments').insert({
         customer_id: customer.id,
+        payer_id: updatedInvoice.payer_id || null,
         amount: Number(updatedInvoice.total),
         status: 'paid',
         description: `Invoice ${updatedInvoice.invoice_number} - annual prepay (${method.replace(/_/g, ' ')})`,
@@ -6842,6 +6863,8 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           invoice_id: updatedInvoice.id,
           annual_prepay_term_id: term.id,
           source: 'customer360_annual_prepay',
+          payer_id: updatedInvoice.payer_id || null,
+          principal_cents: Math.round(Number(updatedInvoice.total) * 100),
           method,
           reference: reference || null,
           term_start: termStart,
@@ -6851,6 +6874,12 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           coverage_cadence: coverageCadence,
         }),
       }).returning('*');
+
+      // Cash/check annual prepay has no provider redelivery. Its invoice,
+      // term, payer/principal snapshot and receipt become observable in the
+      // same commit, so a restoration episode cannot be lost on restart.
+      await require('../services/commercial-prepay-dispatch-review')
+        .reconcileInvoice(trx, updatedInvoice.id);
 
       await trx('activity_log').insert({
         customer_id: customer.id,

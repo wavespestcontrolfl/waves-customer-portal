@@ -21,6 +21,18 @@ function recordUnbookedSale(trx, { invoiceId, customerId, estimateId = null, set
   });
 }
 
+// Settlement writers already hold their money locks. This existence read
+// decides whether to capture payment evidence before full verification.
+async function hasRecordedUnbookedSale(conn, invoiceId) {
+  if (!invoiceId) return false;
+  const row = await conn('audit_log').where({
+    action: UNBOOKED_SALE,
+    resource_type: 'invoices',
+    resource_id: invoiceId,
+  }).first('id');
+  return !!row;
+}
+
 async function recordUnbookedCoverageSale(trx, sale) {
   const service = require('./estimate-converter').recurringServiceKey({ name: sale.coverageServiceType });
   const commercial = service === 'commercial_rodent_bait'
@@ -144,6 +156,7 @@ module.exports = {
   recordUnbookedSale,
   recordUnbookedCoverageSale,
   findUnbookedSale,
+  hasRecordedUnbookedSale,
   invoiceOwnerReachedByAuditedMerge,
   verifiedCustomerLinks,
 };

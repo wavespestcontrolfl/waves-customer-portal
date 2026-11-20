@@ -19,13 +19,18 @@ jest.mock('../services/contracts', () => ({}));
 jest.mock('../services/customer-credit', () => ({}));
 jest.mock('../services/secure-appointment-plans', () => ({
   findDirectRodentSetupObligationForCoverage: jest.fn(async () => null),
+  retireCoverageOnlySetupClaim: jest.fn(async () => null),
 }));
 jest.mock('../services/billing-pause', () => ({ maybeResumeBillingPauseOnPayment: jest.fn(async () => {}) }));
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({ reconcileInvoice: jest.fn(async () => null) }));
+jest.mock('../services/commercial-prepay-sale-record', () => ({
+  recordUnbookedCoverageSale: jest.fn(async () => null),
+}));
 jest.mock('../services/invoice', () => ({
   create: jest.fn(async ({ database, customerId, lineItems }) => {
     const [invoice] = await database('invoices').insert({
       id: 'invoice-1', invoice_number: 'TEST-ANNUAL', customer_id: customerId,
-      total: lineItems[0].unit_price, status: 'draft',
+      total: lineItems.reduce((sum, line) => sum + Number(line.unit_price || 0), 0), status: 'draft',
     }).returning('*');
     return invoice;
   }),
@@ -59,6 +64,8 @@ const { sendReceiptEmail } = require('../services/invoice-email');
 const { scheduleReceiptDeliveryDrain, processReceiptDeliveryJob } = require('../services/receipt-delivery-queue');
 const { checkSendWindow } = require('../services/messaging/validators/send-window');
 const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+const { reconcileInvoice } = require('../services/commercial-prepay-dispatch-review');
+const { recordUnbookedCoverageSale } = require('../services/commercial-prepay-sale-record');
 const { recordAuditEvent } = require('../services/audit-log');
 const { retiredServicesNotHeldBy } = require('../services/service-library');
 const { retiredSaleKeyForLabel } = require('../services/pricing-engine/retired-sale-catalog');
@@ -72,6 +79,7 @@ let transactionWrites;
 let queueError;
 let commitError;
 let events;
+let transactionHandle;
 
 // Only the columns/operations this route uses; transaction writes live in a
 // separate snapshot until commit. This is not PostgreSQL verification.
@@ -136,6 +144,7 @@ beforeEach(() => {
     const trx = (name) => table(transactionWrites, name);
     trx.fn = db.fn;
     trx.raw = jest.fn(async () => ({}));
+    transactionHandle = trx;
     await callback(trx);
     if (commitError) throw commitError;
     committed = transactionWrites;
@@ -146,6 +155,13 @@ beforeEach(() => {
     expect(committed.payments).toHaveLength(1);
     expect(committed.receipt_delivery_jobs).toHaveLength(1);
     events.push('drain');
+  });
+  reconcileInvoice.mockImplementation(async () => {
+    events.push('reconcile:source');
+    return 'active';
+  });
+  recordUnbookedCoverageSale.mockImplementation(async () => {
+    events.push('record:unbooked-sale');
   });
 });
 
@@ -186,6 +202,45 @@ test.each(['cash', 'check', 'card_present', 'zelle', 'venmo', 'paypal', 'other']
     expect(sendReceiptEmail).not.toHaveBeenCalled();
   },
 );
+
+test.each(['cash', 'check'])('%s receipt binds invoice, term, payer and principal before same-transaction source reconcile', async (method) => {
+  const { next } = await recordPrepay({ method });
+  expect(next).not.toHaveBeenCalled();
+  const [payment] = committed.payments;
+  expect(payment).toMatchObject({
+    customer_id: 'customer-1', payer_id: null, amount: 420, status: 'paid',
+  });
+  expect(JSON.parse(payment.metadata)).toMatchObject({
+    source: 'customer360_annual_prepay',
+    invoice_id: 'invoice-1',
+    annual_prepay_term_id: 'term-1',
+    payer_id: null,
+    principal_cents: 42000,
+    method,
+  });
+  expect(reconcileInvoice).toHaveBeenCalledWith(transactionHandle, 'invoice-1');
+  expect(events.indexOf('insert:payments')).toBeLessThan(events.indexOf('reconcile:source'));
+  expect(events.indexOf('reconcile:source')).toBeLessThan(events.indexOf('commit'));
+});
+
+test.each(['cash', 'check'])('%s unbooked setup records its original sale before source reconcile and commit', async (method) => {
+  const { next } = await recordPrepay({
+    amount: 759,
+    setupFeeAmount: 99,
+    serviceType: 'Commercial Rodent Bait Stations',
+    planLabel: 'Commercial Rodent Bait Stations Annual Prepay',
+    method,
+  });
+  expect(next).not.toHaveBeenCalled();
+  expect(recordUnbookedCoverageSale).toHaveBeenCalledWith(transactionHandle, {
+    invoiceId: 'invoice-1',
+    customerId: 'customer-1',
+    coverageServiceType: 'Commercial Rodent Bait Stations',
+    setupAmount: 99,
+  });
+  expect(events.indexOf('record:unbooked-sale')).toBeLessThan(events.indexOf('reconcile:source'));
+  expect(events.indexOf('reconcile:source')).toBeLessThan(events.indexOf('commit'));
+});
 
 test('an after-hours admin entry holds its receipt SMS until 8 AM ET without losing the email', async () => {
   const originalSendWindow = gates.smsSendWindow;
