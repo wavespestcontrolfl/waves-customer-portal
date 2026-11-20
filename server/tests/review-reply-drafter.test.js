@@ -899,8 +899,9 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(w('We love that you like our app.')).toBe('We love that you like the Waves app.');
     expect(w('The app is a big part of it. Our mobile app helps.')).toBe('The Waves app is a big part of it. The Waves app helps.');
     expect(w('Glad the app\u2019s alerts help, and the app\'s notes too.')).toBe('Glad the Waves app\u2019s alerts help, and the Waves app\'s notes too.');
-    expect(w('Thanks for using YOUR APP.')).toBe('Thanks for using The Waves app.');
-    expect(w('Glad the Waves app helps.')).toBe('Glad the Waves app helps.');
+    expect(w('Thanks for using YOUR APP.')).toBe('Thanks for using the Waves app.');
+    expect(w('Glad the Waves app helps. Thanks! our app is new.')).toBe('Glad the Waves app helps. Thanks! The Waves app is new.');
+    expect(w('Hi Dana,\n\nthe app works. Try the Waves Pest Control app and our Waves mobile app.')).toBe('Hi Dana,\n\nThe Waves app works. Try the Waves app and the Waves app.');
     const same = 'Happy to apply the apps and our application, the App Store and the app-based tools.';
     expect(w(same)).toBe(same);
   });

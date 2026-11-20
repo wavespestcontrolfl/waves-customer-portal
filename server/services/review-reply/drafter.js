@@ -558,8 +558,11 @@ function classifyReplyMode(grounding) {
 
 // Owner 2026-11-19: the app is always "the Waves app". A rewrite, not a
 // verifier rejection: a rejection would park the review for a person.
-const BARE_APP_RE = /\b(?:the|our|your)(?:\s+mobile)?\s+app\b(?!-|\s+store)/gi;
-const wavesApp = (text) => String(text || '').replace(BARE_APP_RE, (m) => (/^[A-Z]/.test(m) ? 'The Waves app' : 'the Waves app'));
+// "the/our/your [Waves [Pest Control]] [mobile] app" becomes "the Waves app",
+// with a capital "The" only at the start of a sentence or a line.
+const APP_NAME_RE = /\b(?:the|our|your)(?:\s+waves(?:\s+pest\s+control)?)?(?:\s+mobile)?\s+app\b(?!-|\s+store)/gi;
+const SENTENCE_START_RE = /(?:^|[.!?]["')\]\u2019\u201d]*\s+|\n\s*)$/;
+const wavesApp = (text) => String(text || '').replace(APP_NAME_RE, (m, at, s) => (SENTENCE_START_RE.test(s.slice(0, at)) ? 'The Waves app' : 'the Waves app'));
 
 /**
  * Split a candidate into { body, signOff } and normalize whitespace.
