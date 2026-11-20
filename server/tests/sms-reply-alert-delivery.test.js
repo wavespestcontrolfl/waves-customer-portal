@@ -370,7 +370,6 @@ describe('unknown-sender text to an office line', () => {
 
   test.each([
     ['a customer on file', { customer: { id: 'c-1' } }],
-    ['a known secondary or service-contact phone', { knownCaller: true }],
     ['a staff sender', { staffSender: true }],
     ['a reaction', { smsReaction: true }],
     ['a courtesy closer', { courtesyOnly: true }],

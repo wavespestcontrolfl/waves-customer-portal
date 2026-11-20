@@ -156,10 +156,8 @@ function officeLineWords(numberConfig) {
 // and any line but a location or Google profile line (not the AI line, a tech line or the internal alert line). A text
 // the spam screen silenced never gets here (the route returns first); one it judged but did not silence (a failed
 // verdict write, a spam tag undone in flight) was let through on purpose and rings like any other.
-// knownCaller: the webhook's known-caller lookup (primary, secondary and service-contact phones) matched the sender, or the
-// lookup failed. Either way the sender is not shown to be a new contact, so no new-lead ring (the quiet Activity row stays).
-function isRingableUnknownText({ customer, knownCaller, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, message, mediaCount }) {
-  if (customer || knownCaller || staffSender || smsReaction || courtesyOnly || isAiNumber) return false;
+function isRingableUnknownText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, message, mediaCount }) {
+  if (customer || staffSender || smsReaction || courtesyOnly || isAiNumber) return false;
   if (!(message || mediaCount) || !OFFICE_LINE_TYPES.has(numberConfig?.type)) return false;
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   return !TWILIO_NUMBERS.isTechLine(To) && TWILIO_NUMBERS.internalAlertLine?.()?.number !== To;
