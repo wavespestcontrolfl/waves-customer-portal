@@ -28,22 +28,16 @@ const home = (over) => ({ permit_no: `H-${Math.random().toString(36).slice(2, 10
 describeDb('Builders list (PostgreSQL)', () => {
   beforeAll(async () => {
     // Only this worktree's own QA database, or CI's: another worktree's database would have its permit rows deleted
-    // (inside a transaction that is rolled back) and its writes blocked until the rollback.
+    // (inside a transaction that is rolled back) and its writes blocked until the rollback. The URL carries no query
+    // options: one there (?host=, ?sslmode=) could move the connection or change its TLS where this check cannot see.
     const url = new URL(process.env.DATABASE_URL);
     const ownedQa = process.env.WAVES_LOCAL_DEV === '1'
       && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
-    if (!ownedQa && !ciTest) throw new Error('Use this worktree\'s private QA database or the isolated CI database');
-    // Knex gets the host, port and database checked above, never the raw URL: a ?host= or other override in the
-    // query string cannot move the connection somewhere the check did not see.
-    const connection = {
-      host: url.hostname,
-      port: Number(url.port) || 5432,
-      user: decodeURIComponent(url.username),
-      password: decodeURIComponent(url.password),
-      database: url.pathname.slice(1),
-    };
-    database = knex({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    if ((!ownedQa && !ciTest) || url.search) {
+      throw new Error('Use this worktree\'s private QA database or the isolated CI database, with no query options');
+    }
+    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
     mockPg = database;
   });
   beforeEach(async () => {
