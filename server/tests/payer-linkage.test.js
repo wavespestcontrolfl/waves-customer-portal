@@ -69,10 +69,10 @@ describe('payer-linked SQL exclusion matches the in-memory linkage', () => {
     expect(sql).toContain("metadata->>'invoice_id'");
     expect(sql).toContain("metadata->>'dispute_invoice_id'");
     expect(sql).toContain("metadata->>'waves_invoice_id'");
-    expect(sql).toContain('stripe_payment_intent_id NOT IN');
-    expect(sql).toContain('stripe_charge_id NOT IN');
+    expect(sql).toContain('stripe_payment_intent_id <> ALL');
+    expect(sql).toContain('stripe_charge_id <> ALL');
     expect(sql).toContain("substring(payments.description from '^Invoice\\s+([A-Za-z0-9-]+)\\s+—')");
-    expect(calls.flatMap(([, bindings]) => bindings)).toEqual(expect.arrayContaining([
+    expect(calls.flatMap(([, bindings]) => bindings).flat()).toEqual(expect.arrayContaining([
       PAYER_INV.id, 'pi_ap', 'ch_ap', PAYER_INV.invoice_number,
     ]));
   });

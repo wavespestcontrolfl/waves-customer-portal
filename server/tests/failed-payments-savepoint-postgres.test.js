@@ -49,6 +49,26 @@ postgres('failed-payment status lookup savepoint (PostgreSQL)', () => {
     if (admin) await admin.destroy();
   });
 
+  test('Billing excludes string-encoded payer links with a bounded number of SQL parameters', async () => {
+    const { excludeDirectPayerPayments, excludeLiveOwnedPayerPayments } = require('../services/payer-linkage');
+    const owner = randomUUID();
+    const invoiceId = randomUUID();
+    const ownPayment = randomUUID();
+    const rows = [
+      [randomUUID(), { payer_id: randomUUID() }],
+      [randomUUID(), { waves_invoice_id: invoiceId.toUpperCase() }],
+      [ownPayment, { label: 'own ordinary payment' }],
+    ];
+    for (const [id, metadata] of rows) {
+      await app('payments').insert({ id, customer_id: owner, amount: 1, status: 'failed',
+        metadata: app.raw('to_jsonb(?::text)', [JSON.stringify(metadata)]) });
+    }
+    const payerInvRows = Array.from({ length: 17000 }, (_, i) => ({ id: i === 0 ? invoiceId : randomUUID(), invoice_number: `AP-${i}` }));
+    const q = excludeLiveOwnedPayerPayments(excludeDirectPayerPayments(app('payments').where({ customer_id: owner })), { payerInvRows });
+    expect(q.toSQL().bindings.length).toBeLessThan(10);
+    expect(await q.pluck('id')).toEqual([ownPayment]);
+  });
+
   test('a failed classification read is withheld and the read-only snapshot remains usable', async () => {
     const customerId = randomUUID();
     const invoiceId = randomUUID();
