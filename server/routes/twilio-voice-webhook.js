@@ -2698,7 +2698,9 @@ async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
     return gptLiveSayAndHangup(res, 'The voice relay is not attached on this deploy. Goodbye.');
   }
   try {
-    const token = require('../services/voice-agent/relay-protocol').mintCallToken(callSid);
+    // Signed for /ws/voice-live/ only: the relay socket refuses it.
+    const { mintCallToken, LIVE_TOKEN_AUDIENCE } = require('../services/voice-agent/relay-protocol');
+    const token = mintCallToken(callSid, { audience: LIVE_TOKEN_AUDIENCE });
     if (!token) throw new Error('no call token (VOICE_RELAY_WS_SECRET unset)');
     if (!(await reserveGptLiveCall(callSid, { cell, voice, token }))) {
       logger.warn(`[gpt-live] budget used up — refused ${maskSid(callSid)} cell ${cell}`);

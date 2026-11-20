@@ -7904,10 +7904,12 @@ number gate or the dry-run invariant is security-critical).
 `live-complete` is a POST TwiML webhook, Twilio-signature validated at the mount, refused with a 403 `<Hangup/>` unless
 `To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`, and answers a bare `<Hangup/>`. The WebSocket upgrade runs the relay's
 door in the same order: the token must verify for that CallSid, the call_log row must be sandbox-sourced and carry the
-`metadata.gpt_live` stamp the cell route wrote, the token must be the one that stamp names by digest
+`metadata.gpt_live` stamp the cell route wrote, the token must be signed for this path (`LIVE_TOKEN_AUDIENCE`; the
+relay socket refuses such a token, and this path refuses a relay token) and be the one that stamp names by digest
 (`stream_token_sha256`; any other valid token for the call is refused), the gate must be on, and the token is then
-burned and the call's ledger row admitted once (a reservation already released or settled opens nothing); any failure
-destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`. It has no tools and no lookups (client
+burned; any failure destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`, which admits the
+call's ledger row once after the handshake and before OpenAI opens (a reservation already released or settled opens
+no OpenAI session). It has no tools and no lookups (client
 delegation: the bridge answers every delegation with one fixed sentence). No booking, lead, text or transfer. The cell route
 reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_live_spend`, one row per CallSid)
 under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened

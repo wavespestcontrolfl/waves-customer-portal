@@ -42,28 +42,9 @@ let mockBurnFails = false;
 // default: no row (generic). Tests set these to exercise the routing.
 let mockCallLogRow;
 let mockCallLogFails = false;
-// The GPT-Live ledger: rows admitted so far, and whether the row is open
-// (unreleased, unsettled, never admitted) for admission.
-const mockAdmitted = [];
-let mockLedgerOpen = true;
-let mockAdmitFails = false;
 // One db fake for the whole suite (a function declaration, so the hoisted
 // jest.mock factory and the stall test's restore share it).
 function mockDbImpl(table) {
-  if (table === 'voice_gpt_live_spend') {
-    const chain = {
-      where: () => chain,
-      whereNull: () => chain,
-      update: (row) => {
-        if (mockAdmitFails) return Promise.reject(new Error('db down'));
-        if (!mockLedgerOpen) return Promise.resolve(0);
-        mockLedgerOpen = false; // admitted once
-        mockAdmitted.push(row);
-        return Promise.resolve(1);
-      },
-    };
-    return chain;
-  }
   if (table === 'call_log') {
     return {
       where: () => ({
@@ -89,7 +70,7 @@ function mockDbImpl(table) {
     where: () => ({ del: () => Promise.resolve(0) }),
   };
 }
-jest.mock('../models/db', () => Object.assign(jest.fn(mockDbImpl), { fn: { now: () => 'NOW()' } }));
+jest.mock('../models/db', () => jest.fn(mockDbImpl));
 jest.mock('../services/collections/outbound-voice/collections-conversation', () => ({
   CollectionsConversation: jest.fn(() => ({ end: jest.fn(async () => {}) })),
 }));
@@ -587,7 +568,8 @@ test('a failed source read rejects the upgrade WITHOUT burning the token', async
 describe('ws upgrade — GPT-Live path', () => {
   const { runLiveBridge } = require('../services/voice-agent/live-bridge');
   const LIVE_SID = 'CA-live-up-1';
-  const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
+  const { callTokenDigest, LIVE_TOKEN_AUDIENCE } = require('../services/voice-agent/relay-protocol');
+  const mintLive = (sid) => mintCallToken(sid, { audience: LIVE_TOKEN_AUDIENCE });
   let LIVE_TOKEN; // the one token the cell route issued, minted per test once the secret is set
   let STAMP;
   let httpServer;
@@ -599,14 +581,11 @@ describe('ws upgrade — GPT-Live path', () => {
     mockBurned.clear();
     mockBurnFails = false;
     mockCallLogFails = false;
-    mockAdmitted.length = 0;
-    mockLedgerOpen = true;
-    mockAdmitFails = false;
     process.env.VOICE_RELAY_ENABLED = 'true';
     process.env.ANTHROPIC_API_KEY = 'sk-test';
     process.env.VOICE_RELAY_WS_SECRET = SECRET;
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    LIVE_TOKEN = mintCallToken(LIVE_SID);
+    LIVE_TOKEN = mintLive(LIVE_SID);
     STAMP = { gpt_live: { cell: '71', voice: 'marin', started_at: '2026-11-19T12:00:00.000Z', stream_token_sha256: callTokenDigest(LIVE_TOKEN) } };
     mockCallLogRow = { source: 'voice_relay_sandbox', metadata: STAMP };
     httpServer = attach();
@@ -627,25 +606,24 @@ describe('ws upgrade — GPT-Live path', () => {
     const socket = await upgrade(httpServer, liveUrl());
     expect(socket.destroy).not.toHaveBeenCalled();
     expect(runLiveBridge).toHaveBeenCalledWith(ws, { callSid: LIVE_SID, voice: 'marin', cell: '71' });
-    expect(mockAdmitted).toEqual([{ admitted_at: 'NOW()' }]); // the reservation is admitted
   });
 
-  test('a reservation already released or settled (or an admit error) opens nothing', async () => {
-    mockLedgerOpen = false; // the cell route released it: the caller hung up during the disclosure
-    let socket = await upgrade(httpServer, liveUrl());
-    expect(socket.destroy).toHaveBeenCalled();
-    mockLedgerOpen = true;
-    mockAdmitFails = true;
-    LIVE_TOKEN = mintCallToken(LIVE_SID);
-    mockCallLogRow = { source: 'voice_relay_sandbox', metadata: { gpt_live: { ...STAMP.gpt_live, stream_token_sha256: callTokenDigest(LIVE_TOKEN) } } };
-    socket = await upgrade(httpServer, liveUrl());
-    expect(socket.destroy).toHaveBeenCalled();
+  test('a GPT-Live token never opens the relay socket, and a relay token never opens the live socket', async () => {
+    const liveForRelay = mintCallToken('CA-cross-1', { audience: LIVE_TOKEN_AUDIENCE });
+    const relay = await upgrade(httpServer, `/ws/voice-agent?callSid=CA-cross-1&t=${liveForRelay}`);
+    expect(relay.destroy).toHaveBeenCalled();
+    // a relay token, even under a stamp naming its own digest
+    const relayToken = mintCallToken(LIVE_SID);
+    mockCallLogRow = { source: 'voice_relay_sandbox', metadata: { gpt_live: { ...STAMP.gpt_live, stream_token_sha256: callTokenDigest(relayToken) } } };
+    const live = await upgrade(httpServer, liveUrl(LIVE_SID, relayToken));
+    expect(live.destroy).toHaveBeenCalled();
+    expect(mockBurned.size).toBe(0);
     expect(mockHandleUpgrade).not.toHaveBeenCalled();
     expect(runLiveBridge).not.toHaveBeenCalled();
   });
 
   test('a bad, missing, wrong-call or malformed token destroys the socket', async () => {
-    const good = mintCallToken(LIVE_SID);
+    const good = mintLive(LIVE_SID);
     for (const url of [
       `/ws/voice-live/${LIVE_SID}/${good.slice(0, -1)}${good.endsWith('0') ? '1' : '0'}`, // last MAC digit always changes
       `/ws/voice-live/${LIVE_SID}/`,
@@ -678,8 +656,8 @@ describe('ws upgrade — GPT-Live path', () => {
     expect(mockHandleUpgrade).not.toHaveBeenCalled();
   });
 
-  test('another valid token for the same call (e.g. the greeting\'s relay token) cannot open a second paid session', async () => {
-    const other = mintCallToken(LIVE_SID);
+  test('another valid live token for the same call cannot open a second paid session', async () => {
+    const other = mintLive(LIVE_SID);
     expect(other).not.toBe(LIVE_TOKEN);
     const socket = await upgrade(httpServer, liveUrl(LIVE_SID, other));
     expect(socket.destroy).toHaveBeenCalled();

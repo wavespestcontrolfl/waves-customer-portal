@@ -64,9 +64,11 @@ function setup({ closeReply = true, deps = {} } = {}) {
   const db = jest.fn((table) => (table === 'voice_gpt_live_spend' ? { where: ledgerWhere } : { where }));
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   const openaiFactory = jest.fn(() => openai);
+  const admit = jest.fn(async () => true);
   const bridge = runLiveBridge(twilio, { callSid: CALL_SID, voice: 'marin', cell: '71' }, {
     openaiFactory,
     now: () => clock,
+    admit,
     buildInstructions: () => 'INSTRUCTIONS',
     greeting: () => 'Waves, this is Sandy.',
     scrubTurns: (turns) => turns.map((turn) => ({ ...turn })), // the real scrubber has its own test
@@ -75,14 +77,19 @@ function setup({ closeReply = true, deps = {} } = {}) {
     ...deps,
   });
   return {
-    twilio, openai, bridge, update, where, ledgerUpdate, ledgerWhere, db, openaiFactory,
+    twilio, openai, bridge, update, where, ledgerUpdate, ledgerWhere, db, openaiFactory, admit,
     advance: (ms) => { clock += ms; },
     tick: () => clock,
-    twilioStart: (callSid = CALL_SID) => twilio.emit('message', JSON.stringify({ event: 'start', start: { callSid, streamSid: STREAM_SID } })),
+    // OpenAI opens after the reservation is admitted (async), so wait it out.
+    twilioStart: async (callSid = CALL_SID) => {
+      twilio.emit('message', JSON.stringify({ event: 'start', start: { callSid, streamSid: STREAM_SID } }));
+      await flush();
+    },
     twilioMedia: (payload = 'AAAA') => twilio.emit('message', JSON.stringify({ event: 'media', media: { track: 'inbound', payload } })),
     twilioStop: () => twilio.emit('message', JSON.stringify({ event: 'stop' })),
     ready: async () => {
       twilio.emit('message', JSON.stringify({ event: 'start', start: { callSid: CALL_SID, streamSid: STREAM_SID } }));
+      await flush();
       openai.emit('open');
       openai.receive({ type: 'session.started', session: { id: 's1' } });
       await flush();
@@ -97,7 +104,7 @@ beforeEach(() => jest.clearAllMocks());
 describe('session setup and caller audio', () => {
   test('opens the OpenAI socket on start and sends session.start with the model, voice, client delegation and no storage', async () => {
     const t = setup();
-    t.twilioStart();
+    await t.twilioStart();
     expect(t.openaiFactory).toHaveBeenCalledWith({ url: 'wss://api.openai.com/v1/live/sessions', headers: { Authorization: 'Bearer sk-test' } });
     t.openai.emit('open');
     const msg = t.openai.sent[0];
@@ -114,7 +121,7 @@ describe('session setup and caller audio', () => {
 
   test('caller audio is dropped until session.started, then forwarded unchanged', async () => {
     const t = setup();
-    t.twilioStart();
+    await t.twilioStart();
     t.openai.emit('open');
     t.twilioMedia('BEFORE');
     expect(t.openai.types()).toEqual(['session.start']);
@@ -133,7 +140,7 @@ describe('session setup and caller audio', () => {
 
   test('a start frame for another CallSid closes the call and never opens OpenAI', async () => {
     const t = setup();
-    t.twilioStart('CA-someone-else');
+    await t.twilioStart('CA-someone-else');
     await flush();
     expect(t.openaiFactory).not.toHaveBeenCalled();
     expect(t.twilio.close).toHaveBeenCalled();
@@ -144,7 +151,7 @@ describe('session setup and caller audio', () => {
   test('a start frame with no streamSid closes the call and never opens OpenAI; a later good start changes nothing', async () => {
     const t = setup();
     t.twilio.emit('message', JSON.stringify({ event: 'start', start: { callSid: CALL_SID } }));
-    t.twilioStart();
+    await t.twilioStart();
     await flush();
     expect(t.openaiFactory).not.toHaveBeenCalled();
     expect(t.twilio.close).toHaveBeenCalled();
@@ -153,15 +160,15 @@ describe('session setup and caller audio', () => {
 
   test('a second start frame never opens a second paid session', async () => {
     const t = setup();
-    t.twilioStart();
-    t.twilioStart();
+    await t.twilioStart();
+    await t.twilioStart();
     await flush();
     expect(t.openaiFactory).toHaveBeenCalledTimes(1);
   });
 
   test('an error before session.started is a refused start: the call ends', async () => {
     const t = setup();
-    t.twilioStart();
+    await t.twilioStart();
     t.openai.emit('open');
     t.openai.receive({ type: 'error', error: { code: 'unknown_parameter', type: 'invalid_request_error' } });
     await flush();
@@ -181,7 +188,7 @@ describe('session setup and caller audio', () => {
 
   test('no session.started within the deadline ends the call instead of leaving a silent line', async () => {
     const t = setup({ deps: { startDeadlineMs: 20 } });
-    t.twilioStart();
+    await t.twilioStart();
     t.openai.emit('open');
     await waitFor(() => t.update.mock.calls.length > 0);
     expect(t.twilio.close).toHaveBeenCalled();
@@ -190,7 +197,7 @@ describe('session setup and caller audio', () => {
 
   test('a missing OPENAI_API_KEY closes the call instead of opening a socket', async () => {
     const t = setup({ deps: { apiKey: () => '' } });
-    t.twilioStart();
+    await t.twilioStart();
     await flush();
     expect(t.openaiFactory).not.toHaveBeenCalled();
     expect(t.twilio.close).toHaveBeenCalled();
@@ -201,9 +208,19 @@ describe('session setup and caller audio', () => {
     expect(t.ledgerUpdate).toHaveBeenCalledWith({ cost_usd: 0, settled_at: expect.any(Date) }); // frees the reservation
   });
 
+  test('an OpenAI connection that fails before session.start left (DNS, TLS, HTTP) settles at zero', async () => {
+    const t = setup();
+    await t.twilioStart();
+    t.openai.emit('error', Object.assign(new Error('getaddrinfo'), { code: 'ENOTFOUND' }));
+    await waitFor(() => t.update.mock.calls.length > 0);
+    expect(t.openai.sent).toEqual([]); // session.start never left
+    expect(summaryOf(t)).toMatchObject({ openai_contacted: false, usage_seconds: 0, cost_usd: 0 });
+    expect(t.ledgerUpdate).toHaveBeenCalledWith({ cost_usd: 0, settled_at: expect.any(Date) });
+  });
+
   test('a socket that throws at construction ends the call, settled at zero, without an uncaught error', async () => {
     const t = setup({ deps: { openaiFactory: () => { throw new Error('bad url'); } } });
-    t.twilioStart();
+    await t.twilioStart();
     await flush();
     expect(t.twilio.close).toHaveBeenCalled();
     const s = summaryOf(t);
@@ -369,14 +386,15 @@ describe('model audio, barge-in and latency', () => {
 describe('delegation', () => {
   const created = (id, target = 'client') => ({ type: 'session.delegation.created', delegation: { id, target }, offset_ms: 100 });
 
-  test('a client delegation gets the fixed no-lookups answer as unspoken context, once per delegation', async () => {
+  test('a client delegation gets the fixed no-lookups answer, spoken, once per delegation', async () => {
     const t = setup();
     await t.ready();
     t.openai.receive(created('d1'));
     t.openai.receive(created('d1')); // the same delegation again: no second answer
-    const answers = t.openai.sent.filter((m) => m.type === 'session.thinking.append');
-    expect(answers).toEqual([{ type: 'session.thinking.append', delegation_id: 'd1', content: DELEGATION_REPLY }]);
-    expect(DELEGATION_REPLY).toMatch(/no lookups/);
+    const answers = t.openai.sent.filter((m) => m.type === 'session.commentary.append' && m.delegation_id);
+    // spoken to the caller (commentary), never silent context
+    expect(answers).toEqual([{ type: 'session.commentary.append', delegation_id: 'd1', content: DELEGATION_REPLY }]);
+    expect(DELEGATION_REPLY).toMatch(/can't look that up on this test line/);
     expect(DELEGATION_REPLY).toMatch(/call or text the Waves office/);
     t.twilioStop();
     await flush();
@@ -388,7 +406,7 @@ describe('delegation', () => {
     await t.ready();
     t.openai.receive(created('d2', 'responses'));
     await flush();
-    expect(t.openai.sent.some((m) => m.type === 'session.thinking.append')).toBe(false);
+    expect(t.openai.sent.some((m) => m.delegation_id)).toBe(false);
     expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(true);
     expect(t.twilio.close).toHaveBeenCalled();
     expect(summaryOf(t)).toMatchObject({ close_reason: 'unexpected_delegation', errors: ['unexpected_delegation'] });
@@ -403,7 +421,7 @@ describe('delegation', () => {
     t.openai.receive(created('d-late'));
     t.openai.receive({ type: 'session.closed', reason: 'close_requested', session: {}, usage: { seconds: 45 } });
     await waitFor(() => t.update.mock.calls.length > 0);
-    expect(t.openai.sent.some((m) => m.type === 'session.thinking.append')).toBe(false);
+    expect(t.openai.sent.some((m) => m.delegation_id)).toBe(false);
   });
 });
 
@@ -590,6 +608,42 @@ describe('finish', () => {
     const s = summaryOf(t);
     expect(s.transcript).toEqual([]);
     expect(s.errors).toContain('transcript_scrub_unavailable');
+  });
+});
+
+describe('reservation admission', () => {
+  test('the bridge claims the ledger row after the handshake, then opens OpenAI', async () => {
+    const t = setup();
+    await t.ready();
+    expect(t.admit).toHaveBeenCalledWith(CALL_SID);
+    expect(t.admit.mock.invocationCallOrder[0]).toBeLessThan(t.openaiFactory.mock.invocationCallOrder[0]);
+  });
+
+  test('a reservation not admitted (released, settled, or a database error) opens no OpenAI session and leaves the ledger alone', async () => {
+    for (const admit of [jest.fn(async () => false), jest.fn(async () => { throw new Error('db down'); })]) {
+      const t = setup({ deps: { admit } });
+      await t.twilioStart();
+      await waitFor(() => t.update.mock.calls.length > 0);
+      expect(t.openaiFactory).not.toHaveBeenCalled();
+      expect(t.twilio.close).toHaveBeenCalled();
+      expect(t.ledgerUpdate).not.toHaveBeenCalled();
+      expect(summaryOf(t)).toMatchObject({ close_reason: 'not_admitted', openai_contacted: false });
+    }
+  });
+
+  test('admitReservation claims only an unreleased, unsettled, never-admitted row, once', async () => {
+    const db = require('../models/db');
+    const update = jest.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), update };
+    db.mockImplementation(() => chain);
+    db.fn = { now: () => 'NOW()' };
+    await expect(bridgeMod.admitReservation(CALL_SID)).resolves.toBe(true);
+    await expect(bridgeMod.admitReservation(CALL_SID)).resolves.toBe(false);
+    expect(db).toHaveBeenCalledWith('voice_gpt_live_spend');
+    expect(chain.where).toHaveBeenCalledWith({ call_sid: CALL_SID });
+    expect(chain.whereNull).toHaveBeenCalledWith('admitted_at');
+    expect(chain.whereNull).toHaveBeenCalledWith('cost_usd');
+    expect(update).toHaveBeenCalledWith({ admitted_at: 'NOW()' });
   });
 });
 

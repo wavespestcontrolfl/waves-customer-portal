@@ -540,7 +540,10 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     // The stamp the WS upgrade later requires, carrying this call's reservation.
     const stamp = JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live;
     // ...bound to the one token this response issues (its digest, never the token)
-    const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
+    const { callTokenDigest, verifyCallToken, LIVE_TOKEN_AUDIENCE } = require('../services/voice-agent/relay-protocol');
+    // signed for /ws/voice-live/ only: the relay socket's verify refuses it
+    expect(verifyCallToken(url.split('/').pop(), 'CA-sb-live', { audience: LIVE_TOKEN_AUDIENCE })).toBe(true);
+    expect(verifyCallToken(url.split('/').pop(), 'CA-sb-live')).toBe(false);
     expect(stamp).toEqual({
       cell: '71', voice: 'marin', started_at: expect.any(String), reserved_usd: PER_CALL_RESERVE_USD,
       stream_token_sha256: callTokenDigest(url.split('/').pop()),

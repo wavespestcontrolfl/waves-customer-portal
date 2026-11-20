@@ -27,9 +27,8 @@ const logger = require('../logger');
 const OPENAI_LIVE_URL = 'wss://api.openai.com/v1/live/sessions';
 const LIVE_VOICES = Object.freeze(['marin', 'delta']);
 const DEFAULT_VOICE = 'marin';
-// The one answer to every delegation: the trial has no lookups.
-const DELEGATION_REPLY = 'This test line has no lookups. Tell the caller this test line cannot check that, '
-  + 'and that they can call or text the Waves office.';
+// The one answer to every delegation, spoken to the caller: the trial has no lookups.
+const DELEGATION_REPLY = "I can't look that up on this test line. You can call or text the Waves office for that.";
 
 const WS_OPEN = 1;
 const SESSION_CAP_MS = 10 * 60 * 1000;
@@ -106,6 +105,20 @@ function errCode(err) {
   return String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32);
 }
 
+// The call's ledger row (voice_gpt_live_spend) turns admitted once, after the
+// WebSocket handshake and before OpenAI opens. A row the cell route released
+// (never admitted within the token's life) or already settled cannot be, so a
+// stream never opens a paid session on a freed reservation.
+async function admitReservation(callSid) {
+  const db = require('../../models/db');
+  const n = await db('voice_gpt_live_spend')
+    .where({ call_sid: callSid })
+    .whereNull('admitted_at')
+    .whereNull('cost_usd')
+    .update({ admitted_at: db.fn.now() });
+  return n === 1;
+}
+
 function median(sorted) {
   return sorted.length ? sorted[Math.ceil(sorted.length * 0.5) - 1] : null;
 }
@@ -115,6 +128,7 @@ function defaultDeps() {
   return {
     openaiFactory: ({ url, headers }) => new WebSocket(url, { headers }),
     now: () => Date.now(),
+    admit: admitReservation,
     buildInstructions: buildLiveInstructions,
     greeting: () => require('./relay-protocol').defaultWelcomeGreeting(),
     scrubTurns: (turns) => require('./relay-transcript').scrubTurnsForStorage(turns),
@@ -136,6 +150,9 @@ class LiveBridge {
     this.openai = null;
     this.streamSid = null;
     this.ready = false; // session.started seen: caller audio may flow
+    this.admitted = false; // this bridge claimed the call's ledger row
+    this.admission = null;
+    this.startSent = false; // session.start left the bridge: OpenAI may bill from here
     this.startSeen = false; // the Twilio start frame is handled once, whatever it holds
 
     this.startedAt = this.deps.now();
@@ -182,6 +199,10 @@ class LiveBridge {
   }
 
   start() {
+    this.admission = Promise.resolve()
+      .then(() => this.deps.admit(this.callSid))
+      .then((ok) => { this.admitted = ok === true; return this.admitted; })
+      .catch(() => { this.noteError('admit_failed'); return false; });
     this.capTimer = setTimeout(() => { void this.finalize('cap'); }, this.deps.sessionCapMs);
     if (this.capTimer.unref) this.capTimer.unref();
     this.twilio.on('message', (raw) => this.onTwilioMessage(raw));
@@ -214,7 +235,16 @@ class LiveBridge {
       return;
     }
     this.streamSid = streamSid;
-    this.openOpenAi();
+    // OpenAI opens only on an admitted reservation.
+    void this.admission.then((ok) => {
+      if (this._finalizing) return;
+      if (ok) {
+        this.openOpenAi();
+        return;
+      }
+      this.noteError('not_admitted');
+      void this.finalize('not_admitted');
+    });
   }
 
   onTwilioMedia(media) {
@@ -257,7 +287,7 @@ class LiveBridge {
       void this.finalize('start_timeout');
     }, this.deps.startDeadlineMs);
     if (this.startTimer.unref) this.startTimer.unref();
-    this.openai.on('open', () => this.toOpenAi(startMsg));
+    this.openai.on('open', () => { if (this.toOpenAi(startMsg)) this.startSent = true; });
     this.openai.on('message', (raw) => this.onOpenAiMessage(raw));
     this.openai.on('close', () => this.onOpenAiGone());
     this.openai.on('error', (err) => {
@@ -385,7 +415,8 @@ class LiveBridge {
 
   // ── delegation ───────────────────────────────────────────────────────────
   // GPT-Live asks THIS bridge for help (client delegation). The trial has no
-  // lookups, so each ask gets the same fixed answer as unspoken context, once.
+  // lookups, so each ask gets the same fixed answer, once, as commentary: the
+  // caller hears it (thinking would be silent and leave the caller waiting).
   // A delegation to any other target would be paid backend work this session
   // never set up: end the call.
   onDelegation(delegation) {
@@ -397,7 +428,7 @@ class LiveBridge {
       void this.finalize('unexpected_delegation');
       return;
     }
-    this.toOpenAi({ type: 'session.thinking.append', delegation_id: id, content: DELEGATION_REPLY });
+    this.toOpenAi({ type: 'session.commentary.append', delegation_id: id, content: DELEGATION_REPLY });
   }
 
   // ── finish ───────────────────────────────────────────────────────────────
@@ -413,6 +444,7 @@ class LiveBridge {
     clearTimeout(this.startTimer);
     await this.closeOpenAi();
     try { this.twilio.close(); } catch { /* already closed */ }
+    await this.admission; // settled, never thrown: whether this bridge owns the ledger row
     try {
       await this.writeSummary(reason);
     } catch (err) {
@@ -445,14 +477,15 @@ class LiveBridge {
     } catch { /* already closed */ }
   }
 
-  // The seconds to record and whether the cost can be settled. A call that
-  // never reached OpenAI (no key, a local setup failure, a bad start frame)
+  // The seconds to record and whether the cost can be settled. A call whose
+  // session.start never left the bridge (no key, a local setup failure, a bad
+  // start frame, a DNS/TLS/HTTP handshake failure) started no session and
   // provably used nothing: it settles at zero and frees its reservation.
   // Otherwise only session.closed confirms the final usage (OpenAI: a close
   // without it "does not confirm successful finalization"); unconfirmed, no
   // cost is settled and the call keeps its full reservation.
   settledUsage(errors) {
-    if (this.openai === null) return { usage: 0, settled: true };
+    if (!this.startSent) return { usage: 0, settled: true };
     let usage = this.usageSeconds;
     if (usage === null) {
       usage = Math.max(0, Math.round((this.deps.now() - this.startedAt) / 1000));
@@ -477,7 +510,7 @@ class LiveBridge {
     }
     return {
       usage_seconds: usage,
-      openai_contacted: this.openai !== null,
+      openai_contacted: this.startSent,
       usage_confirmed: this.usageConfirmed,
       ...(settled ? { cost_usd: callCostUsd(usage) } : {}),
       // Why the bridge ended the call (cap, caller hangup, ...), and OpenAI's
@@ -498,8 +531,9 @@ class LiveBridge {
     const db = this.deps.db();
     const summary = this.summary(reason);
     // The ledger first: it is the budget. A settled cost frees the rest of the
-    // reservation; an unsettled call leaves its row alone (it keeps it all).
-    if (summary.cost_usd !== undefined) {
+    // reservation; an unsettled call leaves its row alone (it keeps it all). A
+    // bridge that never claimed the row leaves it to the cell route's release.
+    if (summary.cost_usd !== undefined && this.admitted) {
       try {
         await db('voice_gpt_live_spend').where({ call_sid: this.callSid }).update({ cost_usd: summary.cost_usd, settled_at: new Date() });
       } catch (err) {
@@ -527,6 +561,7 @@ module.exports = {
   LiveBridge,
   buildLiveInstructions,
   buildSessionStart,
+  admitReservation,
   DELEGATION_REPLY,
   TRIAL_LIMITS,
   OPENAI_LIVE_URL,
