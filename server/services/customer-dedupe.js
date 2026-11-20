@@ -7416,17 +7416,20 @@ async function nonFkMergeRewrites(database, winner, loser) {
   return out;
 }
 
-// What the merge does to a sprinkler timer, for the approval card. Pinned with the rest, so a timer entered or
-// removed on either side after the card was prepared changes the fingerprint and the locked recheck refuses the
-// stale approval. Keys (each 1 when it applies):
+// What the merge does to a sprinkler timer, for the approval card. Each key's value is the timer it names, as
+// brand/model/app ('-' for an empty field), so the card shows which timer, and the fingerprint (which pins it)
+// changes when a timer is entered, removed or edited on either side after the card was prepared: the locked
+// recheck then refuses the stale approval. Keys, when they apply:
 // - merged_away_sprinkler_timer_kept: the loser's timer ends on the kept customer (its row moves whole to the home
 //   the timer describes, or a fold copies it whole);
-// - sprinkler_timer_cleared: the loser's row moves whole and its timer does not follow (settleMovedPrefTimer's key);
+// - sprinkler_timer_cleared: the loser's row moves whole and its timer does not follow (the executor's own key for
+//   it, settleMovedPrefTimer, where it counts rows);
 // - merged_away_sprinkler_timer_dropped: a fold does not keep the loser's timer (it deletes that row);
 // - kept_customer_sprinkler_timer_cleared: the kept customer's own timer goes because their home changes (a fold,
 //   or settleKeptPrefTimer when only they have a row).
 async function predictTimerEffects(database, winner, loser, out) {
   const key = (name) => `property_preferences.${name}`;
+  const text = (row) => CONTROLLER_TIMER_FIELDS.map((field) => row?.[field] ?? '-').join('/');
   try {
     const rows = await database('property_preferences').whereIn('customer_id', [winner.id, loser.id])
       .select('customer_id', ...CONTROLLER_TIMER_FIELDS);
@@ -7435,14 +7438,14 @@ async function predictTimerEffects(database, winner, loser, out) {
     const loserRow = rowOf(loser);
     const premise = timerPremiseOf(winner, loser);
     if (!winnerRow) {
-      if (hasControllerTimer(loserRow)) out[key(premise.loserFollows ? 'merged_away_sprinkler_timer_kept' : 'sprinkler_timer_cleared')] = 1;
+      if (hasControllerTimer(loserRow)) out[key(premise.loserFollows ? 'merged_away_sprinkler_timer_kept' : 'sprinkler_timer_cleared')] = text(loserRow);
       return;
     }
     // A fold, or the kept customer's row alone (no loser row): controllerTimerToCarry decides both.
     const kept = controllerTimerToCarry(winnerRow, loserRow, premise);
-    if (hasControllerTimer(winnerRow) && Object.keys(kept).length) out[key('kept_customer_sprinkler_timer_cleared')] = 1;
-    if (hasControllerTimer(kept)) out[key('merged_away_sprinkler_timer_kept')] = 1;
-    else if (hasControllerTimer(loserRow)) out[key('merged_away_sprinkler_timer_dropped')] = 1;
+    if (hasControllerTimer(winnerRow) && Object.keys(kept).length) out[key('kept_customer_sprinkler_timer_cleared')] = text(winnerRow);
+    if (hasControllerTimer(kept)) out[key('merged_away_sprinkler_timer_kept')] = text(loserRow);
+    else if (hasControllerTimer(loserRow)) out[key('merged_away_sprinkler_timer_dropped')] = text(loserRow);
   } catch (err) {
     out[key('sprinkler_timer_cleared')] = 'unknown';
     logger.warn(`[customer-dedupe] nonFkMergeRewrites: sprinkler timer prediction failed: ${err.message}`);

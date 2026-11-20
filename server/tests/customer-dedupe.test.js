@@ -695,29 +695,40 @@ describe('mergeSingletonPrefRow', () => {
       return Object.fromEntries(Object.entries(out).filter(([key]) => key.includes('sprinkler_timer')));
     };
 
+    // Each key names the timer it is about (brand/model/app), so an edit changes the pin as well.
+    const X2_TEXT = 'hunter/x2/yes';
+    const RAIN_BIRD_TEXT = 'rain_bird/-/-';
+
     it('the loser\'s row moves whole to a kept customer with none: a timer that does not follow is cleared, one that follows is adopted; both pinned', async () => {
-      expect(await rewrites([{ customer_id: 'L', ...X2 }])).toEqual({ [CLEARED]: 1 });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }], { loserAddr: SAME })).toEqual({ [ADOPTED]: 1 });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }], { loserAddr: UNIT })).toEqual({ [ADOPTED]: 1 });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }])).toEqual({ [CLEARED]: X2_TEXT });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }], { loserAddr: SAME })).toEqual({ [ADOPTED]: X2_TEXT });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }], { loserAddr: UNIT })).toEqual({ [ADOPTED]: X2_TEXT });
       expect(await rewrites([{ customer_id: 'L', ...NONE }])).toEqual({});
     });
 
     it('two rows fold at different homes: the loser\'s timer is dropped, and a timer entered after the card changes the pin', async () => {
       expect(await rewrites([{ customer_id: 'L', ...NONE }, { customer_id: 'W', ...NONE }])).toEqual({});
-      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }])).toEqual({ [DROPPED]: 1 });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }])).toEqual({ [DROPPED]: X2_TEXT });
+    });
+
+    it('editing a timer the card names (brand, model or phone-app answer) changes the pin', async () => {
+      const before = await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }]);
+      for (const edit of [{ irrigation_controller_brand: 'rain_bird' }, { irrigation_controller_model: 'x2-400' }, { irrigation_controller_app: 'no' }]) {
+        expect(await rewrites([{ customer_id: 'L', ...X2, ...edit }, { customer_id: 'W', ...NONE }])).not.toEqual(before);
+      }
     });
 
     it('two rows fold at the same home: a timer entered on the loser\'s row after the card is adopted, and that changes the pin', async () => {
       expect(await rewrites([{ customer_id: 'L', ...NONE }, { customer_id: 'W', ...NONE }], { loserAddr: SAME })).toEqual({});
-      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }], { loserAddr: SAME })).toEqual({ [ADOPTED]: 1 });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: SAME })).toEqual({ [DROPPED]: 1 });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }], { loserAddr: SAME })).toEqual({ [ADOPTED]: X2_TEXT });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: SAME })).toEqual({ [DROPPED]: X2_TEXT });
     });
 
     it('a street-only kept customer that takes the loser\'s unit: their own timer goes (their home changes), replaced by the loser\'s or cleared', async () => {
-      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: 1, [ADOPTED]: 1 });
-      expect(await rewrites([{ customer_id: 'L', ...NONE }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: 1 });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: RAIN_BIRD_TEXT, [ADOPTED]: X2_TEXT });
+      expect(await rewrites([{ customer_id: 'L', ...NONE }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: RAIN_BIRD_TEXT });
       // Only the kept customer has a row (settleKeptPrefTimer): the same clear, and none when their home stays.
-      expect(await rewrites([{ customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: 1 });
+      expect(await rewrites([{ customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: RAIN_BIRD_TEXT });
       expect(await rewrites([{ customer_id: 'W', ...RAIN_BIRD }], { loserAddr: SAME })).toEqual({});
     });
 
