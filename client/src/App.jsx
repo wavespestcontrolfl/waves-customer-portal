@@ -414,6 +414,7 @@ const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage
 const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestPressureSettingsPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
 const CareersInterviewPage = lazyWithRetry(() => import('./pages/CareersInterviewPage'));
+const CareersOfferPage = lazyWithRetry(() => import('./pages/CareersOfferPage'));
 const CardPage = lazyWithRetry(() => import('./pages/CardPage'));
 const AdminTwoStepPage = lazyWithRetry(() => import('./pages/AdminTwoStepPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
@@ -685,6 +686,8 @@ export default function App() {
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><RatePage /></WavesShell></Suspense>} />
           {/* Applicant self-scheduling link (recruiting-comms) — same external-WavesShell shape as /rate/:token. */}
           <Route path="/careers/interview/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><CareersInterviewPage /></WavesShell></Suspense>} />
+          {/* Applicant job offer link (job offer flow) — same shape as the interview link above. */}
+          <Route path="/careers/offer/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><CareersOfferPage /></WavesShell></Suspense>} />
           {/* Digital business card — navy glass scene, so the fallback wash
               matches the scene instead of the light doc wash. */}
           <Route path="/card/:token" element={<Suspense fallback={<div style={{background:'#04395E',minHeight:'100vh'}}/>}><WavesShell><CardPage /></WavesShell></Suspense>} />
