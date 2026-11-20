@@ -104,6 +104,24 @@ it("shows a plain error with Try again when the list fails, and recovers", async
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
+it("a success answer whose body cannot be read shows Try again, and recovers", async () => {
+  let calls = 0;
+  const cutOff = () => Promise.resolve({ ok: true, status: 200, json: async () => { throw new SyntaxError("Unexpected end of JSON input"); } });
+  route({ "/admin/prospects/builders?kind=pool": () => (++calls === 1 ? cutOff() : reply(POOL)) });
+  renderPage();
+  expect(await screen.findByRole("alert")).toHaveTextContent("The answer could not be read.");
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByText("SAMPLE POOLS LLC")).toBeInTheDocument();
+});
+
+it("says no county data is on file when the permit list is empty, and claims no week and no 12 months", async () => {
+  route({ "/admin/prospects/builders?kind=pool": () => reply({ kind: "pool", dataThrough: null, week: null, builders: [] }) });
+  renderPage();
+  expect(await screen.findByText("No county permit data on file.")).toBeInTheDocument();
+  expect(screen.queryByText(/in the 7 days to|newest 7 days|last 12 months/)).toBeNull();
+  expect(screen.queryByRole("table")).toBeNull();
+});
+
 it("shows an empty message when a kind has no builders", async () => {
   route({ "/admin/prospects/builders?kind=pool": () => reply({ ...POOL, week: { ...POOL.week, permits: 0, builders: 0 }, builders: [] }) });
   renderPage();

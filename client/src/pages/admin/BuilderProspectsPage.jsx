@@ -15,11 +15,15 @@ const KINDS = [
   { key: "home", label: "Home builders", noun: "new-home permit", empty: "No home builders pulled a new-home permit in the last 12 months." },
 ];
 
+// An error answer may carry no JSON body. A success whose body cannot be read (cut off on the way) is an error
+// too, so the page shows Try again, never a broken list.
 async function api(path) {
   const res = await adminFetch(`/admin/prospects${path}`);
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-  return body;
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `HTTP ${res.status}`);
+  }
+  return res.json().catch(() => { throw new Error("The answer could not be read."); });
 }
 
 const dayText = (value) => (value ? formatETDateOnly(value, { month: "short", day: "numeric", year: "numeric" }) : "");
@@ -208,7 +212,9 @@ export default function BuilderProspectsPage({ embedded = false }) {
 
       {loading && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading builders…</div>}
       {error && <ActionFeedback error onRetry={load} className="mb-3">{error}</ActionFeedback>}
-      {data && (
+      {/* No permit on file yet (before the first county sync): no week and no 12-month claim to make. */}
+      {data && !data.week && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">No county permit data on file.</div>}
+      {data && data.week && (
         <>
           <p className="mb-3 text-ui-body text-zinc-900">{summaryText(data, active.noun)}</p>
           {data.builders.length === 0
