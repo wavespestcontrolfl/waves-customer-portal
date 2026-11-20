@@ -318,53 +318,6 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
       expect(await dayOf('invoices', { id: f.invoiceId })).toBe(oldDay);
     } finally { await cleanup(f); }
   });
-
-  // GATE_REPORT_AFTER_PAY (owner 2026-11-19, *report after pay*): a payment on the visit day no longer closes an arrived visit,
-  // so its technician completes it after the money is in. Pre-push audit P0: with an older paid invoice and a newer draft both
-  // linked to the visit, the completion took the newest row and would bill the draft for money already received.
-  describe('a paid invoice and a newer draft linked to the same arrived visit', () => {
-    const savedGate = process.env.GATE_REPORT_AFTER_PAY;
-    afterEach(() => { if (savedGate === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = savedGate; });
-
-    async function seedPaidThenDraft() {
-      const f = await seedInvoicedVisit({ invoiceStatus: 'paid' });
-      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site' });
-      f.draftId = randomUUID();
-      // An office draft made after the payment: the newest row linked to the visit.
-      await mockPg('invoices').insert({ id: f.draftId, customer_id: f.customerId, scheduled_service_id: f.serviceId, invoice_number: `TST-${f.draftId.slice(0, 8)}`,
-        token: randomUUID().replace(/-/g, ''), status: 'draft', total: PRICE, subtotal: PRICE, service_date: etDateString(new Date()), service_type: LAWN_TYPE,
-        created_at: new Date(Date.now() + 60000), line_items: JSON.stringify([{ description: LAWN_TYPE, amount: PRICE, quantity: 1, unit_price: PRICE }]) });
-      return f;
-    }
-
-    test('gate on: the completion reuses the paid invoice; the newer draft is not reused, linked, sent or charged, and nothing is minted', async () => {
-      process.env.GATE_REPORT_AFTER_PAY = 'true';
-      const f = await seedPaidThenDraft();
-      try {
-        const out = await complete(f, {});
-        expect(out.status).toBe(200);
-        expect(out.body.invoicePaymentActionRequired).toBe(false);
-        const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
-        const invoices = await invoicesOf(f);
-        expect(invoices).toHaveLength(2);
-        expect(invoices.find((row) => row.id === f.invoiceId)).toMatchObject({ status: 'paid', service_record_id: record.id });
-        expect(invoices.find((row) => row.id === f.draftId)).toMatchObject({ status: 'draft', service_record_id: null });
-        expect(textsWithPayLink()).toEqual([]);
-        expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
-      } finally { await cleanup(f); }
-    });
-
-    test('control, gate off: the completion takes the newest row (the draft), as before', async () => {
-      delete process.env.GATE_REPORT_AFTER_PAY;
-      const f = await seedPaidThenDraft();
-      try {
-        const out = await complete(f, {});
-        expect(out.status).toBe(200);
-        const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
-        expect((await invoicesOf(f)).find((row) => row.id === f.draftId)).toMatchObject({ service_record_id: record.id });
-      } finally { await cleanup(f); }
-    });
-  });
 });
 
 // A completion form sent days after the tech's arrival (owner 2026-10-31): the record takes the arrival day, every

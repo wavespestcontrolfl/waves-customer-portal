@@ -10737,8 +10737,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     }
     let existingCompletionInvoice = null;
-    // GATE_REPORT_AFTER_PAY: the settled invoice this completion binds to (see the lookup below), or null.
-    let settledVisitInvoice = null;
     // A REFUNDED invoice on THIS visit (codex #3456): the suppressor
     // above skips it (it collects nothing), but a fresh mint beside it is
     // unsafe while its refund can still bounce — so it blocks the mint via
@@ -10763,17 +10761,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
         }
         if (!existingCompletionInvoice && !issuedInvoiceCloseout) {
-          // GATE_REPORT_AFTER_PAY (owner 2026-11-19, *report after pay*): a payment on the visit day no longer
-          // closes an arrived visit, so its technician completes it after the money is in. A settled invoice on
-          // the visit is then this visit's bill, as the issued-invoice closeout pins the paid invoice by id with
-          // the gate off: a newer unpaid row linked beside it (an office draft) is never reused here, because
-          // that would send a pay link for, or charge, money already received (pre-push audit P0). That row
-          // stays the office's, as the closeout leaves it. Gate off: the newest linked row, as before.
-          if (require('../config/feature-gates').reportAfterPayLive?.() === true) {
-            settledVisitInvoice = await completionSuppressorInvoiceLookup(db, (q) => q.where({ scheduled_service_id: svc.id }).whereIn('status', ['paid', 'prepaid']));
-          }
-          existingCompletionInvoice = settledVisitInvoice
-            || await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
+          existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
         }
         if (existingCompletionInvoice && !existingCompletionInvoice.service_record_id) {
           await db('invoices').where({ id: existingCompletionInvoice.id }).update({
@@ -11258,8 +11246,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (!recapReviewOnly) {
           // The issued invoice is pinned above (existingCompletionInvoice) —
           // the newest-linked-row lookup would hand back a sibling draft here.
-          // So is a settled invoice under GATE_REPORT_AFTER_PAY (settledVisitInvoice).
-          preMintedInvoice = issuedInvoiceCloseout || settledVisitInvoice
+          preMintedInvoice = issuedInvoiceCloseout
             ? existingCompletionInvoice
             : await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
           // Refunded-invoice reconciliation wins here too (pre-push P0): when

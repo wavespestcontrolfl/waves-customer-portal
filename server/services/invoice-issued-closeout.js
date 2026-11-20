@@ -24,8 +24,8 @@ const OPEN_VISIT_STATUSES = ['pending', 'confirmed'];
 // so refusing on_site left the closeout with nothing to close: from the gate
 // flip (2026-09-24) to 2026-10-04 it closed no visit at all. An arrived visit
 // closes like an unstarted one once its day has passed; on its own day only
-// money received closes it, and with GATE_REPORT_AFTER_PAY on nothing does
-// (see issuedCloseoutVisitRefusal). en_route is NOT
+// money received closes it, and with GATE_REPORT_AFTER_PAY on only for a
+// visit with another invoice on it (see issuedCloseoutVisitRefusal). en_route is NOT
 // here: nobody has reached the property, so the visit stays with its
 // technician. The r9 P1 concern (#4127: a quiet closeout would complete a
 // visit whose job timer is still running) is answered by its real condition
@@ -92,9 +92,16 @@ function newestStamp(...values) {
 //    send or a payment; today closes only on money received (a send proves
 //    nothing about today — the office picker sends pre-completion invoices
 //    before the tech arrives, Codex P1 r7 #4131). With GATE_REPORT_AFTER_PAY
-//    on, today never closes (owner 2026-11-19, *report after pay*): the visit
-//    stays with its technician, who sends the report on the paid invoice, and
-//    the daily retry sweep closes it once its day has passed.
+//    on (owner 2026-11-19, *report after pay*), today does not close a visit
+//    this invoice alone bills (`onlyInvoice`, read by the resolver): the visit
+//    stays with its technician, whose completion reuses the paid invoice, and
+//    the daily retry sweep closes it once its day has passed. A visit with
+//    another invoice on it closes on the payment, as with the gate off, and
+//    the closeout pins the paid invoice by id (pre-push audit round 3: held
+//    open, its two invoices were picked differently by Dispatch, Charge Now,
+//    the completion and the sweep). Left out, as by the completion's locked
+//    recheck, `onlyInvoice` is false: a closeout that got past the resolver
+//    closes as with the gate off.
 //  - UNSTARTED (pending / confirmed / NULL): nobody is known to have gone, so
 //    the INVOICE must carry the proof: it was settled / delivered on a LATER
 //    ET day than the visit (`issuedDay`, from the invoice's own stamps).
@@ -112,12 +119,12 @@ function newestStamp(...values) {
 //    module has never heard of fails CLOSED on a same-day visit.
 //  - Future or unparseable dates, en_route and every terminal status never
 //    close.
-function issuedCloseoutVisitRefusal(status, scheduledDate, { today = etDateString(), trigger = null, issuedDay = null } = {}) {
+function issuedCloseoutVisitRefusal(status, scheduledDate, { today = etDateString(), trigger = null, issuedDay = null, onlyInvoice = false } = {}) {
   const arrived = isArrivedVisitStatus(status);
   if (!arrived && !isLiveVisitStatus(status)) return `visit_${status}`;
   const day = dateOnly(scheduledDate);
   if (!day || day > today) return 'visit_in_future';
-  if (day === today) return arrived && trigger === 'paid' && !reportAfterPayLive() ? null : 'visit_scheduled_today';
+  if (day === today) return arrived && trigger === 'paid' && !(onlyInvoice === true && reportAfterPayLive()) ? null : 'visit_scheduled_today';
   if (arrived) return null;
   // Never later than the call: a stamp from the future proves nothing yet.
   const proofDay = issuedDay && issuedDay < today ? issuedDay : today;
@@ -188,6 +195,16 @@ async function probeVisitRefusal(conn, svc) {
   return (profile?.requiresProject || profile?.projectBacked) ? 'project_backed' : null;
 }
 
+// GATE_REPORT_AFTER_PAY's `onlyInvoice` (issuedCloseoutVisitRefusal): no
+// other row on the visit stands before a completion mint (every live row,
+// plus a refunded one: completionInvoicesOnVisits). Void and canceled rows
+// collected nothing and do not count.
+async function invoiceIsVisitsOnlyBill(conn, visitId, invoiceId) {
+  const { completionInvoicesOnVisits } = require('./completion-invoice-candidate');
+  const rows = await completionInvoicesOnVisits(conn, [visitId]);
+  return rows.every((row) => String(row.id) === String(invoiceId));
+}
+
 // The visit this invoice bills, or null with the reason it was left alone.
 // Every "no" keeps the visit open: a future date, a visit already closed, a
 // grouped stop (the whole visit closes together), or a visit whose billing a
@@ -196,13 +213,13 @@ async function probeVisitRefusal(conn, svc) {
 // resume its OWN partially committed closeout on a completed one (see
 // resumableIssuedCloseoutAttempt), never anyone else's.
 // deferSameDay (issuedCloseoutTarget for the record_payment card only): with
-// GATE_REPORT_AFTER_PAY on, an arrived visit paid on its own day stays open
-// for its technician's report, and the retry sweep closes it once that day
-// has passed. The card discloses and pins that later close, so this judges
-// such a visit as the sweep will: neither the same-day rule nor a running
-// job timer (it ends before then, and the sweep checks it again) keeps it
-// open; every other refusal still does. The answer carries `deferred: true`:
-// that visit must not be closed today.
+// GATE_REPORT_AFTER_PAY on, an arrived visit paid on its own day that this
+// invoice alone bills stays open for its technician, and the retry sweep
+// closes it once that day has passed. The card discloses and pins that later
+// close, so this judges such a visit as the sweep will: neither the same-day
+// rule nor a running job timer (it ends before then, and the sweep checks it
+// again) keeps it open; every other refusal still does. The answer carries
+// `deferred: true`: that visit must not be closed today.
 async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null, deferSameDay = false } = {}) {
   if (!invoice) return { svc: null, reason: 'no_invoice' };
   const linked = await linkedVisitForInvoice(conn, invoice);
@@ -214,15 +231,22 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // #4131), an arrived visit closes on a past day or on money received
   // today, and a visit nobody arrived at closes only on an invoice settled
   // or delivered after its day.
+  // GATE_REPORT_AFTER_PAY holds an arrived visit paid on its own day only
+  // while this invoice is its only bill (`onlyInvoice`), read only when that
+  // can decide.
+  const heldIfOnlyBill = trigger === 'paid' && reportAfterPayLive()
+    && isArrivedVisitStatus(svc.status) && dateOnly(svc.scheduled_date) === today;
   let issuedDay;
+  let onlyInvoice = false;
   try {
     issuedDay = await issuedDayForInvoice(conn, invoice, trigger);
+    if (heldIfOnlyBill) onlyInvoice = await invoiceIsVisitsOnlyBill(conn, svc.id, invoice.id);
   } catch (err) {
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
   }
-  const deferred = deferSameDay && trigger === 'paid' && reportAfterPayLive()
-    && isArrivedVisitStatus(svc.status) && dateOnly(svc.scheduled_date) === today;
-  const refusedByState = deferred ? null : issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay });
+  // onlyInvoice is true only for a visit the gate holds.
+  const deferred = deferSameDay && onlyInvoice;
+  const refusedByState = deferred ? null : issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay, onlyInvoice });
   if (refusedByState) return leaveOpen(refusedByState);
   // Every read from here on is against a visit already in hand: a failed
   // one is an outage of THIS visit's closeout, rethrown carrying the visit
@@ -338,22 +362,28 @@ const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempt
 // closeout was still running audited `visit_completed`, and if that worker
 // then died the parked attempt is the truth, not the audit row. System
 // actor: nobody is behind a retry.
-// The rule's status + day admission, as SQL, for both sweeps: an unstarted
-// visit on a past day; an arrived one on a past day, or today when the
-// invoice / statement is SETTLED (`settledSql`, a boolean SQL expression —
-// a send never closes a same-day visit) and GATE_REPORT_AFTER_PAY is off (on,
-// today never closes) — or a visit already completed with THIS closeout's own
-// attempt still parked.
+// The rule's status + day admission, as SQL, for both sweeps (candidate
+// invoice `i`, visit `s`): an unstarted visit on a past day; an arrived one on
+// a past day, or today when the invoice / statement is SETTLED (`settledSql`,
+// a boolean SQL expression — a send never closes a same-day visit) and, with
+// GATE_REPORT_AFTER_PAY on, another invoice stands on the visit (the rule's
+// `onlyInvoice`, counted as invoiceIsVisitsOnlyBill counts it) — or a visit
+// already completed with THIS closeout's own attempt still parked.
 function retryableVisitFilter(q, today, settledSql) {
-  const sameDayClosesOnPayment = !reportAfterPayLive();
+  const reportAfterPay = reportAfterPayLive();
   return q
     .where((open) => open
       .where((unstarted) => unstarted.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<', today))
       .orWhere((arrived) => arrived.whereIn('s.status', ARRIVED_VISIT_STATUSES)
-        .where((day) => {
-          day.where('s.scheduled_date', '<', today);
-          if (sameDayClosesOnPayment) day.orWhere((sameDay) => sameDay.where('s.scheduled_date', '=', today).whereRaw(settledSql));
-        })))
+        .where((day) => day.where('s.scheduled_date', '<', today)
+          .orWhere((sameDay) => {
+            sameDay.where('s.scheduled_date', '=', today).whereRaw(settledSql);
+            if (reportAfterPay) {
+              sameDay.whereExists((other) => other.select(1).from('invoices as oi')
+                .whereRaw('oi.scheduled_service_id = s.id').whereRaw('oi.id <> i.id')
+                .whereNotIn('oi.status', require('./completion-invoice-candidate').replacedByMintStatuses()));
+            }
+          }))))
     .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL));
 }
 

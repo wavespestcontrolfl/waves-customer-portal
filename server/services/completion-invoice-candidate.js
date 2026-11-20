@@ -34,9 +34,7 @@ function completionSuppressorInvoiceLookup(conn, where) {
 // status vocabulary as the single-visit lookups.
 async function completionInvoicesOnVisits(conn, visitIds, { lock = false } = {}) {
   if (!visitIds || !visitIds.length) return [];
-  const InvoiceService = require('./invoice');
-  const dropped = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES
-    .filter((status) => !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(status));
+  const dropped = replacedByMintStatuses();
   const columns = ['id', 'scheduled_service_id', 'total', 'status', 'created_at'];
   const rows = await conn('invoices')
     .whereIn('scheduled_service_id', visitIds)
@@ -57,6 +55,15 @@ async function completionInvoicesOnVisits(conn, visitIds, { lock = false } = {})
   return locked
     .filter((r) => wanted.has(String(r.scheduled_service_id)) && !dropped.includes(r.status))
     .sort((x, y) => time(y) - time(x) || String(y.id).localeCompare(String(x.id)));
+}
+
+// The statuses of a row that collected nothing and is replaced by a normal
+// mint (void, canceled): the rows completionInvoicesOnVisits leaves out. The
+// retry sweeps' "another invoice on the visit" (GATE_REPORT_AFTER_PAY,
+// invoice-issued-closeout.js) reads the same set in SQL.
+function replacedByMintStatuses() {
+  return require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES
+    .filter((status) => !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(status));
 }
 
 // Terminal status that BLOCKS the completion mint instead of being
@@ -158,6 +165,7 @@ function splitTerminalCompletionInvoice(row) {
 module.exports = {
   completionSuppressorInvoiceLookup,
   completionInvoicesOnVisits,
+  replacedByMintStatuses,
   completionTerminalInvoiceLookup,
   completionNewestLiveInvoiceLookup,
   reconcileLiveVsRefunded,

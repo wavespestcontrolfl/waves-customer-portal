@@ -96,20 +96,24 @@ describe('backfillCompletionPlan same-day switch', () => {
     }
   });
 
-  test('report after pay (GATE_REPORT_AFTER_PAY, owner 2026-11-19): a payment on the visit day no longer closes an arrived visit; a past day still does', () => {
-    const rule = (status, day, trigger) => issuedCloseoutVisitRefusal(status, day, { today: '2040-03-04', trigger });
+  test('report after pay (GATE_REPORT_AFTER_PAY, owner 2026-11-19): a payment on the visit day no longer closes an arrived visit it alone bills; a past day still does', () => {
+    const rule = (status, day, trigger, onlyInvoice) => issuedCloseoutVisitRefusal(status, day, { today: '2040-03-04', trigger, onlyInvoice });
     mockGate.reportAfterPay = true;
     try {
-      expect(rule('on_site', '2040-03-04', 'paid')).toBe('visit_scheduled_today');
-      expect(rule('on_site', '2040-03-04', 'sent')).toBe('visit_scheduled_today');
-      expect(rule('on_site', '2040-03-03', 'paid')).toBeNull();
-      expect(rule('on_site', '2040-03-03', 'sent')).toBeNull();
+      expect(rule('on_site', '2040-03-04', 'paid', true)).toBe('visit_scheduled_today');
+      expect(rule('on_site', '2040-03-04', 'sent', true)).toBe('visit_scheduled_today');
+      expect(rule('on_site', '2040-03-03', 'paid', true)).toBeNull();
+      expect(rule('on_site', '2040-03-03', 'sent', true)).toBeNull();
       // A visit nobody arrived at keeps the prepayment rule.
-      expect(rule('confirmed', '2040-03-04', 'paid')).toBe('visit_scheduled_today');
+      expect(rule('confirmed', '2040-03-04', 'paid', true)).toBe('visit_scheduled_today');
+      // Another invoice on the visit (pre-push audit round 3), or no answer at all (the completion's locked recheck): the
+      // payment closes it, as with the gate off.
+      expect(rule('on_site', '2040-03-04', 'paid', false)).toBeNull();
+      expect(rule('on_site', '2040-03-04', 'paid')).toBeNull();
     } finally {
       mockGate.reportAfterPay = false;
     }
-    expect(rule('on_site', '2040-03-04', 'paid')).toBeNull();
+    expect(rule('on_site', '2040-03-04', 'paid', true)).toBeNull();
   });
 
   test('the panel rule stays past-only; the internal issued-invoice trigger admits today, never the future', () => {
@@ -893,6 +897,36 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(args.serviceId).toBe(svc.id);
     expect(args.issuedInvoiceCloseout).toMatchObject({ trigger: 'paid', expectedVisit: { serviceType: svc.service_type, date: TODAY, status: 'on_site' } });
     expect(args.issuedInvoiceCloseout.expectedVisit).not.toHaveProperty('updatedAtMs');
+  });
+
+  // Pre-push audit round 3: held open, a visit with a second invoice had its two invoices picked differently by Dispatch, Charge
+  // Now, the completion and the sweep. The gate holds only a visit its paid invoice alone bills; any other closes as with it off.
+  test('report after pay: a visit with another invoice on it is not held: the card names an immediate close, and the same-day payment closes it on the paid invoice, as with the gate off', async () => {
+    mockGate.reportAfterPay = true;
+    const svc = await visit({ status: 'on_site', date: TODAY });
+    const open = await invoice({ status: 'sent', scheduled_service_id: svc.id, date: TODAY });
+    const draft = await invoice({ status: 'draft', scheduled_service_id: svc.id, date: TODAY });
+    const target = await issuedCloseoutTarget(open, { today: TODAY, conn: trx, includeDeferred: true });
+    expect(target).toMatchObject({ visitId: svc.id, status: 'on_site' });
+    expect(target).not.toHaveProperty('deferred');
+    await trx('invoices').where({ id: open.id }).update({ status: 'paid', paid_at: new Date() });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: open.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: true, visitId: svc.id });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout])).toEqual([[svc.id, { invoiceId: open.id, trigger: 'paid' }]]);
+    // The other row is left as it was, for the office.
+    expect(await trx('invoices').where({ id: draft.id }).first()).toMatchObject({ status: 'draft', service_record_id: null });
+  });
+
+  test('report after pay: on the visit day the sweep admits a settled invoice whose visit carries another invoice, never one its invoice alone bills (a void row does not count)', async () => {
+    const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
+    mockGate.reportAfterPay = true;
+    const shared = await visit({ status: 'on_site', date: TODAY });
+    const paid = await invoice({ status: 'paid', paid_at: new Date(), scheduled_service_id: shared.id, date: TODAY });
+    await invoice({ status: 'draft', scheduled_service_id: shared.id, date: TODAY });
+    const alone = await visit({ status: 'on_site', date: TODAY });
+    await invoice({ status: 'paid', paid_at: new Date(), scheduled_service_id: alone.id, date: TODAY });
+    await invoice({ status: 'void', scheduled_service_id: alone.id, date: TODAY });
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 1, retried: 1, closed: 1 });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout])).toEqual([[shared.id, { invoiceId: paid.id, trigger: 'paid' }]]);
   });
 
   test('a refused completion is reported, audited as refused, and never thrown', async () => {

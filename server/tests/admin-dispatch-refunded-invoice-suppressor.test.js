@@ -396,10 +396,9 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   });
 
   test('the pre-minted lookup cannot resurrect the older live row once the refunded invoice won', () => {
-    // The issued-invoice closeout pins its own invoice (#4127), and so does a
-    // settled invoice under GATE_REPORT_AFTER_PAY (settledVisitInvoice); every
-    // other completion still asks the helper for the newest linked row.
-    const at = src.search(/preMintedInvoice = issuedInvoiceCloseout \|\| settledVisitInvoice\s*\n\s*\? existingCompletionInvoice\s*\n\s*: await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\);/);
+    // The issued-invoice closeout pins its own invoice (#4127); every other
+    // completion still asks the helper for the newest linked row.
+    const at = src.search(/preMintedInvoice = issuedInvoiceCloseout\s*\n\s*\? existingCompletionInvoice\s*\n\s*: await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\);/);
     expect(at).toBeGreaterThan(-1);
     expect(src.slice(at, at + 800)).toContain('if (terminalCompletionInvoice) preMintedInvoice = null;');
   });
@@ -545,10 +544,8 @@ describe('completion route wiring (source contract)', () => {
 
   test('both suppressor lookups route through the helper — no bare whereNot(void) invoice filter in the completion route', () => {
     expect(completeRoute).toMatch(/existingCompletionInvoice = await completionSuppressorInvoiceLookup\(db, \{ service_record_id: record\.id \}\)/);
-    expect(completeRoute).toMatch(/existingCompletionInvoice = settledVisitInvoice\s*\n\s*\|\| await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
-    // GATE_REPORT_AFTER_PAY's settled-invoice lookup goes through the same helper (its resolved-status filter).
-    expect(completeRoute).toMatch(/settledVisitInvoice = await completionSuppressorInvoiceLookup\(db, \(q\) => q\.where\(\{ scheduled_service_id: svc\.id \}\)\.whereIn\('status', \['paid', 'prepaid'\]\)\)/);
-    expect(completeRoute).toMatch(/preMintedInvoice = issuedInvoiceCloseout \|\| settledVisitInvoice\s*\n\s*\? existingCompletionInvoice\s*\n\s*: await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
+    expect(completeRoute).toMatch(/existingCompletionInvoice = await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
+    expect(completeRoute).toMatch(/preMintedInvoice = issuedInvoiceCloseout\s*\n\s*\? existingCompletionInvoice\s*\n\s*: await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
     expect(completeRoute).not.toMatch(/db\('invoices'\)[\s\S]{0,200}\.whereNot\('status', 'void'\)/);
   });
 
