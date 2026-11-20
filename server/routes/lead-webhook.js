@@ -1978,12 +1978,14 @@ function normalizeLeadServiceKey(body = {}) {
   return /^[a-z0-9_]{1,80}$/.test(key) ? key : null;
 }
 
-// True when either service key field holds any nonblank value. Wider than
-// normalizeLeadServiceKey on purpose: a value it drops (malformed), or one a
-// blank `serviceKey` masks, still says the page meant a catalog product, and
-// such a submission keeps the path every form takes (the quiz hand-off).
+// True when either service key field holds a value: a nonblank string, or
+// anything else that is not null (never coerced, so no JSON value can throw
+// here). Wider than normalizeLeadServiceKey on purpose: a value it drops
+// (malformed), or one a blank `serviceKey` masks, still says the page meant
+// a catalog product, and such a submission keeps the path every form takes
+// (the quiz hand-off).
 function submitsServiceKey(body = {}) {
-  return [body.serviceKey, body.service_key].some((value) => String(value ?? '').trim() !== '');
+  return [body.serviceKey, body.service_key].some((value) => (typeof value === 'string' ? value.trim() !== '' : value != null));
 }
 
 function normalizeLeadServiceInterest(body = {}) {

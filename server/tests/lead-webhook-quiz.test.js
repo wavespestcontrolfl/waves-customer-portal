@@ -170,6 +170,15 @@ describe('submitsServiceKey: a submission that names a service key never asks fo
     expect([submitsServiceKey(malformed), submitsServiceKey(masked)]).toEqual([true, true]);
   });
 
+  test('a value that is not a string counts too, and is never coerced', () => {
+    // JSON.parse output: an object whose toString is not a function throws when coerced to a string.
+    const hostile = JSON.parse('{"toString":1,"valueOf":1}');
+    for (const value of [[], {}, 0, false, ['pest_quarterly'], hostile]) {
+      expect(submitsServiceKey({ serviceKey: '', service_key: value })).toBe(true);
+      expect(submitsServiceKey({ serviceKey: value })).toBe(true);
+    }
+  });
+
   test('absent or blank fields name none', () => {
     for (const body of [{}, undefined, { serviceKey: null }, { serviceKey: '', service_key: '   ' }, { service_key: undefined }]) {
       expect(submitsServiceKey(body)).toBe(false);
