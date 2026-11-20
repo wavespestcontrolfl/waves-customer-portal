@@ -359,3 +359,24 @@ describe('clickStatsByEstimateId (the click read the list route and the Call tod
     }
   });
 });
+
+describe('callTodayFields: an undelivered self-serve quote carries no sentAt (codex pre-push P1)', () => {
+  const { callTodayFields } = require('../services/estimate-call-list');
+  const stored = {
+    status: 'viewed', customer_phone: '+19415550101', archived_at: null, sent_at: '2026-11-12T15:00:00.000Z',
+    viewed_at: '2026-11-12T15:05:00.000Z', last_viewed_at: '2026-11-13T15:00:00.000Z', last_follow_up_at: null,
+  };
+
+  test('its sent_at is the mint stamp, so the row shows no send; the customer\'s opens stay as stored', () => {
+    expect(callTodayFields(stored, { undeliveredSelfServe: true })).toMatchObject({
+      status: 'viewed', sentAt: null, viewedAt: stored.viewed_at, lastViewedAt: stored.last_viewed_at, undeliveredSelfServe: true,
+    });
+  });
+
+  test('any other row reads as stored', () => {
+    expect(callTodayFields(stored)).toMatchObject({
+      status: 'viewed', sentAt: stored.sent_at, viewedAt: stored.viewed_at, lastViewedAt: stored.last_viewed_at,
+      undeliveredSelfServe: false,
+    });
+  });
+});

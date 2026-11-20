@@ -1,6 +1,6 @@
 /**
  * Pest Insider blog posts: the reviewed link from a lead fact to the live
- * blog post that tells its full story ("Read the full story on our blog").
+ * blog post that tells its full story ("Read the full story on the Waves blog").
  *
  * Loaded from server/data/pest-insider-posts-v1.json. Each entry maps a main
  * fact id to a post on the website: `path` is the post's own slug (its URL

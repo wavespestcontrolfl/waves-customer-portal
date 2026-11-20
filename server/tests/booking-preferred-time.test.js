@@ -443,6 +443,8 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     // One internal bell (staff), zero customer messages of any kind.
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
     expect(mockTriggerNotification.mock.calls[0][0]).toBe('new_lead');
+    // The bell of a lead this request created: the new-lead reminder reads it as the lead's intake bell.
+    expect(mockTriggerNotification.mock.calls[0][1]).toMatchObject({ createdLead: true });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockSendSMS).not.toHaveBeenCalled();
     expect(mockSendEmail).not.toHaveBeenCalled();

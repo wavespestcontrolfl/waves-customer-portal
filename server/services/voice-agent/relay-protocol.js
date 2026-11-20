@@ -109,11 +109,35 @@ const CALL_TOKEN_VERSION = 'v1';
 // How long a minted token stays valid. The relay socket opens seconds after the
 // TwiML renders; five minutes is slack for a slow answer, not a window.
 const CALL_TOKEN_TTL_MS = 5 * 60 * 1000;
+// The audience a GPT-Live trial token is signed for (/ws/voice-live/). The MAC
+// covers it, so a live token never verifies at /ws/voice-agent (no audience)
+// and a relay token never verifies at /ws/voice-live/. A payload with an
+// audience cannot equal one without: its last field is never a 16-hex nonce.
+const LIVE_TOKEN_AUDIENCE = 'voice-live';
+// The GPT-Live trial's Media Streams path. Twilio forbids a query string on a
+// <Stream> url, so the CallSid and the token ride as path segments.
+const LIVE_WS_PREFIX = '/ws/voice-live/';
 
-function callTokenMac(callSid, expSec, nonce, secret) {
+// The public host a WebSocket URL names: the configured domain, else the
+// request's own Host (port dropped).
+function publicWsHost(hostHeader) {
+  return process.env.SERVER_DOMAIN
+    || process.env.RAILWAY_PUBLIC_DOMAIN
+    || String(hostHeader || '').replace(/:\d+$/, '')
+    || 'portal.wavespestcontrol.com';
+}
+
+// The exact <Stream> url the cell route renders, and the URL Twilio signs on
+// the WebSocket handshake (X-Twilio-Signature), so both sides build it here.
+function liveStreamUrl(host, callSid, token) {
+  return `wss://${host}${LIVE_WS_PREFIX}${encodeURIComponent(callSid)}/${token}`;
+}
+
+function callTokenMac(callSid, expSec, nonce, secret, audience = '') {
+  const payload = `${CALL_TOKEN_VERSION}.${String(callSid)}.${expSec}.${nonce}`;
   return require('crypto')
     .createHmac('sha256', String(secret))
-    .update(`${CALL_TOKEN_VERSION}.${String(callSid)}.${expSec}.${nonce}`)
+    .update(audience ? `${payload}.${audience}` : payload)
     .digest('hex')
     .slice(0, 32); // 128 bits — plenty against forgery, short enough for a URL
 }
@@ -123,7 +147,7 @@ function callTokenMac(callSid, expSec, nonce, secret) {
  * a misconfigured deploy renders a URL the server will REFUSE rather than one
  * it will silently accept.
  */
-function mintCallToken(callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, now = Date.now(), ttlMs = CALL_TOKEN_TTL_MS } = {}) {
+function mintCallToken(callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, now = Date.now(), ttlMs = CALL_TOKEN_TTL_MS, audience = '' } = {}) {
   const sid = String(callSid || '').trim();
   if (!secret || !sid) return '';
   const expSec = Math.floor((now + ttlMs) / 1000);
@@ -151,7 +175,7 @@ function mintCallToken(callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, no
   // verified and stays strictly fenced.
   const nonce = now.toString(16).padStart(12, '0')
     + require('crypto').randomBytes(2).toString('hex');
-  return `${CALL_TOKEN_VERSION}.${expSec}.${nonce}.${callTokenMac(sid, expSec, nonce, secret)}`;
+  return `${CALL_TOKEN_VERSION}.${expSec}.${nonce}.${callTokenMac(sid, expSec, nonce, secret, audience)}`;
 }
 
 /**
@@ -163,7 +187,7 @@ function mintCallToken(callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, no
  * beyond the TTL the minter is allowed to grant is refused, which keeps the
  * lifetime a property of this code rather than of whoever rendered the URL.
  */
-function verifyCallToken(token, callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, now = Date.now(), maxTtlMs = CALL_TOKEN_TTL_MS } = {}) {
+function verifyCallToken(token, callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, now = Date.now(), maxTtlMs = CALL_TOKEN_TTL_MS, audience = '' } = {}) {
   const sid = String(callSid || '').trim();
   if (!secret || !sid) return false;
   const parts = String(token || '').split('.');
@@ -179,7 +203,7 @@ function verifyCallToken(token, callSid, { secret = process.env.VOICE_RELAY_WS_S
   // Allow a minute of clock skew between the renderer and this process on top
   // of the grant the minter is permitted.
   if (expMs > now + maxTtlMs + 60 * 1000) return false;
-  const expected = callTokenMac(sid, expSec, nonce, secret);
+  const expected = callTokenMac(sid, expSec, nonce, secret, audience);
   const crypto = require('crypto');
   const a = Buffer.from(expected);
   const b = Buffer.from(String(parts[3]));
@@ -513,6 +537,14 @@ function buildRelayTwiML({
   );
 }
 
+// SHA-256 hex of a minted call token. The GPT-Live trial stores it on the
+// call's stamp so only the ONE token its cell route issued can open the paid
+// bridge; any other valid token for the same CallSid (the greeting's relay
+// token) is refused.
+function callTokenDigest(token) {
+  return require('crypto').createHash('sha256').update(String(token || '')).digest('hex');
+}
+
 module.exports = {
   RELAY_WS_PATH,
   VOICE_RELAY_SANDBOX_SOURCE,
@@ -540,6 +572,11 @@ module.exports = {
   appendCallAuth,
   mintCallToken,
   verifyCallToken,
+  LIVE_TOKEN_AUDIENCE,
+  LIVE_WS_PREFIX,
+  publicWsHost,
+  liveStreamUrl,
+  callTokenDigest,
   CALL_TOKEN_TTL_MS,
   parsePrompt,
   textFrame,

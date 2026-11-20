@@ -47,10 +47,12 @@ beforeEach(() => {
   releaseFails = false;
   claimed = new Set();
   mockLastCalled.mockResolvedValue(new Map());
-  mockDb.raw.mockImplementation(async (_sql, [key]) => {
-    if (claimed.has(key)) return { rows: [] };
+  mockDb.raw.mockImplementation((sql, bindings) => {
+    if (!bindings) return { raw: sql }; // a select expression (the undelivered self-serve flag)
+    const [key] = bindings;
+    if (claimed.has(key)) return Promise.resolve({ rows: [] });
     claimed.add(key);
-    return { rows: [{ id: claimed.size }] };
+    return Promise.resolve({ rows: [{ id: claimed.size }] });
   });
   const chain = (rows) => {
     const q = { where: () => q, whereNull: () => q, whereRaw: () => q, whereIn: () => q, groupBy: () => q, select: () => q, sum: () => q, max: () => q, then: (ok, no) => Promise.resolve(rows).then(ok, no) };
@@ -93,6 +95,20 @@ describe('the count is the page list', () => {
     expect(await countCallToday(NOW.getTime())).toBe(1);
   });
 
+  test('a self-serve quote nobody delivered is never counted, by the shared rule the page reads (zero-follow-up contract)', async () => {
+    const { undeliveredSelfServeSql } = require('../services/self-serve-estimates');
+    estimateRows = [row('a', 5), row('undelivered', 5, { undelivered_self_serve: true }), row('delivered', 5, { undelivered_self_serve: false })];
+    expect(await countCallToday(NOW.getTime())).toBe(2);
+    // The flag is the list route's rule as SQL, selected as one more column before the page's limit.
+    const selects = estimateCalls.filter(([name]) => name === 'select').map(([, arg]) => arg);
+    expect(selects).toContainEqual({ raw: `${undeliveredSelfServeSql('estimates')} AS undelivered_self_serve` });
+    expect(estimateCalls.findIndex(([name, arg]) => name === 'select' && arg?.raw))
+      .toBeLessThan(estimateCalls.findIndex(([name]) => name === 'limit'));
+    // The page drops the same row: the shared rule reads the flag through the shared mapping.
+    expect(shared.isCallTodayEstimate(callTodayFields(estimateRows[1], { undeliveredSelfServe: true }), NOW.getTime())).toBe(false);
+    expect(shared.isCallTodayEstimate(callTodayFields(estimateRows[1]), NOW.getTime())).toBe(true);
+  });
+
   test('a row never sent has no views, so only a tap can put it on the list (the page rule)', async () => {
     estimateRows = [row('unsent', 5, { sent_at: null })];
     expect(await countCallToday(NOW.getTime())).toBe(0);
@@ -131,7 +147,7 @@ describe('the count is the page list', () => {
     const route = fs.readFileSync(path.join(repo, 'server/routes/admin-estimates.js'), 'utf8');
     const push = fs.readFileSync(path.join(repo, 'server/services/estimate-call-today-push.js'), 'utf8');
     expect(route).toMatch(/estimateListQuery\(db, \{/);
-    expect(push).toMatch(/estimateListQuery\(db, \{ sentOnly: true \}\)\.clearSelect\(\)\.select\(CALL_TODAY_COLUMNS\)\.limit\(ESTIMATE_LIST_LIMIT\)/);
+    expect(push).toMatch(/estimateListQuery\(db, \{ sentOnly: true \}\)\.clearSelect\(\)\.select\(CALL_TODAY_COLUMNS\)\s*\.select\(undeliveredSelfServe\)\.limit\(ESTIMATE_LIST_LIMIT\)/);
     expect(route).not.toMatch(/db\('estimates'\)\s*\.leftJoin\('technicians'/);
   });
 
@@ -187,7 +203,8 @@ describe('the banner', () => {
     const result = await runEstimateCallTodayPush({ now: NOW });
     expect(result).toEqual({ count: 0, sent: false, skipped: 'nothing_to_call' });
     expect(mockTrigger).not.toHaveBeenCalled();
-    expect(mockDb.raw).not.toHaveBeenCalled();
+    // No claim: the only raw call is the list query's select expression (no bindings).
+    expect(mockDb.raw.mock.calls.filter(([, bindings]) => bindings)).toEqual([]);
   });
 
   test('a failed read sends nothing and says so', async () => {
@@ -393,7 +410,8 @@ describe('the banner', () => {
 
   test('a failed claim sends nothing', async () => {
     estimateRows = [row('a', 5)];
-    mockDb.raw.mockRejectedValue(Object.assign(new Error('x'), { code: '57P01' }));
+    // The claim INSERT fails; the list query's select expression (no bindings) still builds.
+    mockDb.raw.mockImplementation((sql, bindings) => (bindings ? Promise.reject(Object.assign(new Error('x'), { code: '57P01' })) : { raw: sql }));
     await expect(runEstimateCallTodayPush({ now: NOW })).resolves.toEqual({ count: 1, sent: false, error: 'claim_failed' });
     expect(mockTrigger).not.toHaveBeenCalled();
   });

@@ -80,6 +80,17 @@ test('list_commercial_proposals is found for its own searches and never pushes t
   expect(ids('customer estimate')).not.toContain('list_commercial_proposals');
 });
 
+test('get_sprinkler_timer_counts leads its own searches and stays out of unrelated customer searches', () => {
+  const scope = { role: 'admin', context: 'dashboard', fullAccess: true };
+  const ids = (query) => registry.discover({ query }, scope).result.capabilities.map((c) => c.id);
+  for (const query of ['sprinkler timer counts', 'how many customers have a Hunter X2', 'how many use the Hydrawise app']) {
+    expect(ids(query)[0]).toBe('get_sprinkler_timer_counts');
+  }
+  for (const query of ['add customer property', 'customer estimate', 'call log', 'why is a customer not getting texts']) {
+    expect(ids(query)).not.toContain('get_sprinkler_timer_counts');
+  }
+});
+
 test('get_customer_text_status leads the search the bar ran before gap #23 and stays out of unrelated customer searches', () => {
   const scope = { role: 'admin', context: 'dashboard', fullAccess: true };
   const ids = (query) => registry.discover({ query }, scope).result.capabilities.map((c) => c.id);

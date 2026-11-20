@@ -1,0 +1,388 @@
+/**
+ * New-lead re-alert (owner 2026-11-19, "do phase 1 first"; plan: "15 min, no person contact: push again; 60 min:
+ * phone call to the owner's cell; at most twice per lead; Mon-Sat 8-6").
+ *
+ * In production (12 weeks to 2026-11-19) 82 of 437 leads never got a call, text, email or estimate from a person, and
+ * none of them booked. A form lead gets one bell and one push; 44 of 129 form bells in 30 days were never opened.
+ *
+ * An OPEN new-lead bell (category `new_lead`, naming a lead), or the repeat-form bell (lead-webhook.js
+ * ringRepeatFormAlert: a lead sent the quote form again; the relevance sweep's lead_repeat_form class), that no person
+ * has reached gets ONE more phone push 15 minutes after the bell's latest event. A lead's latest inquiry sets its clock:
+ * an older open bell of the lead waits for the newer one (dueItems). No gate: the push goes to admin users
+ * only. (A second step, a ring to the owner's cell at 60 minutes behind its own gate, is a separate change.)
+ * At most one push for each event of a bell row: it is stamped first, in one statement fenced on the row being open and
+ * unchanged since it was read (metadata.newLeadRealertAt), under notifyAdmin's lock for the bell's dedupe key. And at most one push per
+ * lead in 48 hours (leadClaim; the plan's "at most twice per lead" is this push and the 60-minute call): a lead with two
+ * bells due in one sweep (its intake bell and a repeat form) gets one, for the latest inquiry, and a bell of that lead
+ * that rings or is written in the next 48 hours gets none. A row that rang again after its stamp (a repeat form
+ * refreshes its row and keeps the stamp) is read again: after those 48 hours, it can push for its new event. Stamp first, then send:
+ * a send that fails after its stamp is lost, never repeated. The push goes only while the row is still an open bell in
+ * the bell feed with exactly the stamped metadata (a bell that rang again since then sends nothing), and while the lead
+ * still waits when judged again with fresh reads just before it goes (lead-reminder-sweep.js).
+ *
+ * - The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM America/New_York (callback-cards staffedDeadline;
+ *   holidays are not skipped). Nothing is sent outside those hours. A push more than 2 business hours past its due time
+ *   is dropped, so a restart cannot burst old bells. Both are asked again with a fresh clock before the stamp and at
+ *   dispatch (lead-reminder-sweep.js), since the reads in between take time.
+ * - Bells of the last 48 hours only (a 6 PM Saturday bell is due Monday morning).
+ * - "Reached" (reachedLeads) is judged on the lead, whatever the close gates of admin-alert-relevance.js say, and NOT
+ *   only after the bell: a "New call lead" bell is written minutes after a call a person already answered. Reached =
+ *   the lead is deleted, not open or already converted (lead-statuses.js isOpenLeadRow: spam, cancelled, won, lost and the like
+ *   are out), or has an estimate sent or viewed; the call that made the lead was
+ *   answered by a person (only for the lead's intake bell: the one the new-lead trigger writes for a lead its writer
+ *   created, metadata.triggerKey new_lead and payload.createdLead, or the call processor's bell by its title, also one
+ *   written before that mark existed, within 15 minutes of the lead's creation; every other bell, such as a repeat
+ *   form, a form attached to an open call lead, an email follow-up's draft or another bell written before the mark
+ *   existed, is a fresh inquiry); a person's
+ *   text or call, or a Gmail send, or a visit
+ *   booked, reached the lead's customer or phone after that bell's inquiry began (for the intake bell:
+ *   the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself; a bell that
+ *   names an email, metadata.emailId, counts from that message's received_at; the push deadline stays on the bell);
+ *   a person's email to the lead's own address since the same moment (one the shared linkage ties to this lead's customer,
+ *   or one it shows names no customer at all; a send it cannot settle is no proof); or an estimate was sent (sent_at, as the new-lead
+ *   class of admin-alert-relevance.js reads it: the one the bell names, the lead's own, or any to its customer) or handed
+ *   off to the customer. A lead needs a customer, a 10-digit
+ *   phone or an email address to be judged: an email-only lead is judged on email and estimate evidence. A lead row that is
+ *   missing, or a witness read that fails, is no verdict: nothing is sent.
+ * - The scan, stamp, open-row recheck and push are the shared steps of lead-reminder-sweep.js, which also carries a capped
+ *   scan across sweeps, so old reached bells cannot hide a due one.
+ * - Sends nothing to a lead or a customer. Never throws into the sweep.
+ *
+ * Runs inside the alert-relevance sweep (every 10 minutes), after its closes. Read-only apart from its stamp.
+ */
+
+const db = require('../models/db');
+const { etParts, etDateString, parseETDateTime } = require('../utils/datetime-et');
+const logger = require('./logger');
+const sweep = require('./lead-reminder-sweep');
+const { isOpenLeadRow } = require('./lead-statuses');
+
+const LABEL = 'new-lead-reminder';
+const PUSH_STAMP = 'newLeadRealertAt';
+// The per-lead record kept with each stamp, { leadId: ISO time }: the lead a push was for, whatever the row names later.
+const LEAD_STAMPS = 'newLeadRealertLeads';
+const PUSH_AFTER_MINUTES = 15;
+const PUSH_LATE_MINUTES = 120;
+const WINDOW_MS = 48 * 60 * 60 * 1000;
+// A bell written within this long of the lead's creation was raised with the lead itself (the intake bell, or the call
+// lead's bell minutes after the call); a later one is a fresh inquiry on a lead already on file.
+const INTAKE_BELL_MS = 15 * 60 * 1000;
+const OPEN_HOUR = 8;
+const CLOSE_HOUR = 18;
+// Monday to Saturday: a closed day is a Sunday (staffedDeadline asks `.has(date)` for each ET date).
+const OFFICE = Object.freeze({
+  start: '08:00',
+  end: '18:00',
+  closed: { has: (date) => new Date(`${date}T12:00:00Z`).getUTCDay() === 0 },
+});
+// A lead the shared open-lead predicate admits (lead-statuses.js: new, contacted, estimate_sent, estimate_viewed, and not
+// converted) but that already has a quote: this reminder is for a lead nobody has answered, so these two are out.
+const ESTIMATE_STATUSES = new Set(['estimate_sent', 'estimate_viewed']);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const relevance = () => require('./admin-alert-relevance');
+
+// Monday to Saturday, 8:00 AM up to 6:00 PM Eastern, read in America/New_York for the instant given.
+function inBusinessHours(date) {
+  const { hour, dayOfWeek } = etParts(date);
+  return dayOfWeek !== 0 && hour >= OPEN_HOUR && hour < CLOSE_HOUR;
+}
+
+// `minutes` of business time after `from`.
+const businessDueAt = (from, minutes) => require('./callback-cards').staffedDeadline(from, OFFICE, minutes);
+
+// 6:00 PM Eastern on the day of `date`: a push sent that day expires then (lead-reminder-sweep.js closesAt).
+const businessDayClose = (date) => parseETDateTime(`${etDateString(date)}T${OFFICE.end}`);
+
+// The push window of a bell whose latest event is `askedAt`: due `afterMinutes` of business time after it, and stale
+// (`expiresAt`) `lateMinutes` of business time after that.
+function pushWindow(askedAt, afterMinutes, lateMinutes) {
+  const dueAt = businessDueAt(askedAt, afterMinutes);
+  return { dueAt, expiresAt: businessDueAt(dueAt, lateMinutes) };
+}
+
+// The relevance sweep's own class for the repeat-form bell (lead-webhook.js ringRepeatFormAlert): its category and
+// dedupeKey prefix. lead-webhook-repeat-form.test.js pins the writer to it.
+const repeatFormClass = () => relevance().CLASSES.find((c) => c.key === 'lead_repeat_form');
+
+// The open, unpushed bell rows: the shared read (lead-reminder-sweep.js) of every new-lead bell, and of the repeat-form
+// bell by its relevance class, so the two read one definition.
+function kind() {
+  const repeatForm = repeatFormClass();
+  return {
+    stamp: PUSH_STAMP,
+    match: [{ categories: ['new_lead'] }, { categories: repeatForm.categories, keyPrefixes: [repeatForm.prefix] }],
+    // A row that rang again after its stamp is news again (lead-reminder-sweep.js candidateQuery); leadClaim decides.
+    rearm: true,
+  };
+}
+const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQuery(kind(), since, cursor, pageSize);
+
+// The rows with a push due now: { row, meta, askedAt, leadId, expiresAt, intakeTrigger }. A row that names no lead (a
+// tracking-line text, or a repeat form from a customer row with no lead row) cannot be judged, so it sends nothing.
+// intakeTrigger: the bell's writer created its lead and says so (intakeMarked). Any other bell is a later inquiry: a form
+// the webhook attached to an open call lead (createdLead false), or a bell written before the mark existed. inquiryOf
+// reads it.
+// The row was stamped at or after its latest event: that event already had its push. A stamp that does not parse counts
+// as current, so the row is not read as news.
+function stampedSince(meta, askedAt) {
+  if (!meta[PUSH_STAMP]) return false;
+  const at = Date.parse(meta[PUSH_STAMP]);
+  return !(at < askedAt.getTime());
+}
+
+// The titles of the call processor's new-lead bell (call-recording-processor.js notifyNewCallLead); no other writer uses
+// them. Each of its callers mints the lead just before it, so it is always that lead's intake bell.
+const CALL_LEAD_TITLES = ['New call lead', 'New voicemail lead'];
+
+// The writer's mark that it created this bell's lead: the new-lead trigger's payload.createdLead (notification-triggers.js
+// new_lead, metadata.triggerKey: lead-webhook.js, call-recording-processor.js notifyNewCallLead,
+// booking-preferred-time.js), or the quote wizard's own metadata.createdLead (public-quote.js writes its bell straight to
+// notifyAdmin, so it has no triggerKey; it marks its own quote_wizard row, never a repeat filed as a duplicate, nor a
+// call lead the prefill token attached the form to). A call processor's bell written before the mark existed carries
+// no mark, but its title says what it is: its call, which ends before the bell is written, is still judged (a mark of
+// false is never read past).
+const intakeMarked = (meta) => (meta.triggerKey === 'new_lead' && (meta.payload?.createdLead === true
+    || (meta.payload?.createdLead === undefined && CALL_LEAD_TITLES.includes(meta.payload?.title))))
+  || (!meta.triggerKey && meta.createdLead === true);
+
+// The lead's latest inquiry sets its clock: of a lead's open, unpushed bells (every page of the scan), only the one with
+// the latest event can be due, so a form sent again just before an older bell falls due holds that bell, and the lead's
+// one push comes 15 minutes after the newer form, not minutes after its own ring.
+function dueItems(rows, now) {
+  const { bellEventAt, parseMeta, refsFromRow } = relevance();
+  const floor = now.getTime() - WINDOW_MS;
+  const open = [];
+  const latest = new Map();
+  for (const row of rows) {
+    const meta = parseMeta(row.metadata);
+    const askedAt = bellEventAt(row);
+    const leadId = refsFromRow(row).leadId;
+    if (!leadId || !askedAt || askedAt.getTime() <= floor || stampedSince(meta, askedAt)) continue;
+    const key = String(leadId).toLowerCase();
+    latest.set(key, Math.max(latest.get(key) || 0, askedAt.getTime()));
+    open.push({ row, meta, askedAt, leadId, key });
+  }
+  const items = [];
+  for (const { row, meta, askedAt, leadId, key } of open) {
+    if (askedAt.getTime() < latest.get(key)) continue;
+    const { dueAt, expiresAt } = pushWindow(askedAt, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES);
+    if (dueAt.getTime() > now.getTime() || expiresAt.getTime() < now.getTime()) continue;
+    items.push({ row, meta, askedAt, leadId, expiresAt, intakeTrigger: intakeMarked(meta) });
+  }
+  return items;
+}
+
+const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+// The lead's own email address as a mailbox address, or '' (the shared parser the Gmail linkage uses).
+const leadEmail = (lead) => require('./email/email-customer-link').extractEmailAddresses(lead.email)[0] || '';
+// The lead's phone as the witnesses and lead-contact-sync.js key it, or null.
+const leadPeer = (lead) => require('../utils/phone').phoneIdentityKey(lead.phone) || null;
+
+// Which of a lead's identities another open lead also holds (lead-contact-sync.js openLeadIdentities, the identity check
+// its own sweep uses): a reply on a phone or to a mailbox two open leads share cannot say which of them it answered, so
+// it is no proof for either. Evidence tied to the lead's own customer still counts. One read for the batch; returns
+// (key, lead) => true when an open lead other than `lead` holds `key` ('phone:<peer>' or 'email:<address>').
+async function identitiesHeldByAnother(items) {
+  const peers = [...new Set(items.map(({ lead }) => leadPeer(lead)).filter(Boolean))];
+  const emails = [...new Set(items.map(({ lead }) => leadEmail(lead)).filter(Boolean))];
+  const owners = peers.length || emails.length
+    ? await require('./lead-contact-sync').openLeadIdentities(db, { peers, emails, customerIds: [] })
+    : new Map();
+  return (key, lead) => [...(owners.get(key) || [])].some((id) => id !== String(lead.id));
+}
+
+// When each email bell's message came in: { emailId -> Date }, one batched read. An email bell written for a follow-up on a
+// lead already on file (email-actions.js) comes after classification and drafting, so staff may have replied before the
+// bell; the message's own received_at is where their reply counts from.
+async function emailReceivedAt(items) {
+  const ids = [...new Set(items.map(({ meta }) => String(meta.emailId || '').toLowerCase()).filter((id) => UUID_RE.test(id)))];
+  const rows = ids.length ? await db('emails').whereIn('id', ids).select('id', 'received_at') : [];
+  return new Map(rows.filter((r) => r.received_at).map((r) => [String(r.id).toLowerCase(), new Date(r.received_at)]));
+}
+
+// When the inquiry this bell reports began, and whether it is the lead's intake bell. The intake bell is the one a writer
+// marks as the bell of a lead it created (intakeMarked: the new-lead trigger's bell, triggerKey new_lead as the relevance
+// sweep's new_lead class reads it, or the quote wizard's own row), within 15 minutes of the lead's creation. It looks
+// back to the lead's first contact (an email lead's first_contact_at is the message's receipt time, before the
+// classification that created the lead), and the call that made the lead counts only for it. A wizard row is the visitor's
+// own run: a second run on it inside those 15 minutes is the same inquiry, and a run on it after them is judged from its
+// own bell. Every other bell is a fresh inquiry about a lead already on file, however soon after the lead it came: a
+// repeat form (category lead), a form attached to an open call lead (by the webhook, or by the wizard's prefill token),
+// or a bell written straight to the bell (notifyAdmin('new_lead'): an email follow-up's draft, a wizard repeat filed as
+// a duplicate). Its evidence counts only
+// from the bell itself, or, for a bell that names an email (`emailAt`, the message's received_at), from the message. The
+// push deadline stays on the bell.
+function inquiryOf({ askedAt, lead, intakeTrigger = false }, emailAt = null) {
+  const intake = intakeTrigger && askedAt.getTime() - new Date(lead.created_at).getTime() <= INTAKE_BELL_MS;
+  const starts = [askedAt.getTime()];
+  if (intake) starts.push(new Date(lead.first_contact_at || lead.created_at).getTime());
+  if (emailAt) starts.push(emailAt.getTime());
+  // No look-back before the start: a person's call or text just before a fresh form is not an answer to it.
+  return { intake, anchor: new Date(Math.min(...starts)) };
+}
+
+// The leads that still wait on a person, each item with `lead` and `customerId`. Throws when a read fails: no verdict.
+async function reachedLeads(items) {
+  const leadIds = [...new Set(items.map((item) => item.leadId))];
+  const leads = new Map((await db('leads').whereIn('id', leadIds)
+    .select('id', 'customer_id', 'phone', 'first_name', 'last_name', 'status', 'deleted_at', 'created_at', 'first_contact_at', 'converted_at', 'twilio_call_sid', 'estimate_id', 'email'))
+    .map((lead) => [String(lead.id).toLowerCase(), lead]));
+  const received = await emailReceivedAt(items);
+  // A lead is judged when it is open and unconverted (the shared predicate: spam, cancelled, won, lost and the rest are out),
+  // has no quote yet, and has a customer, a phone or an email address (an email-only lead has the address alone).
+  const open = items
+    .map((item) => ({ ...item, lead: leads.get(item.leadId) }))
+    .filter(({ lead }) => lead && !lead.deleted_at && isOpenLeadRow(lead) && !ESTIMATE_STATUSES.has(String(lead.status))
+      && (lead.customer_id || lastTen(lead.phone).length === 10 || leadEmail(lead)))
+    .map((item) => ({ ...item, ...inquiryOf(item, received.get(String(item.meta.emailId || '').toLowerCase())) }));
+  if (!open.length) return [];
+  // The call that made the lead, when a person answered it: its bell is written after that call, so the witnesses below
+  // (judged after the lead came in) cannot see it. It says nothing about a later bell on the same lead.
+  const sids = open.filter((item) => item.intake).map(({ lead }) => lead.twilio_call_sid).filter(Boolean);
+  const answered = new Set((sids.length
+    ? await db('call_log').whereIn('twilio_call_sid', sids).where({ direction: 'inbound', status: 'completed', answered_by: 'human' }).select('twilio_call_sid')
+    : []).map((call) => call.twilio_call_sid));
+  const waiting = open.filter((item) => !(item.intake && answered.has(item.lead.twilio_call_sid)));
+  if (!waiting.length) return [];
+  const { loadContactBundles } = require('./admin-alert-contact-witnesses');
+  const { reached, estimateHandedOff } = require('./lead-call-reminder').__private;
+  const heldByAnother = await identitiesHeldByAnother(waiting);
+  // Kind 'customer', as lead-call-reminder does: it also reads a person's Gmail send to the customer's own address.
+  // Exclusive (admin-alert-contact-witnesses.js exclusiveMatch): a text or call tied to another customer never counts,
+  // and the lead's phone is left out when another open lead holds it, so only its own customer's evidence counts then.
+  const bundles = await loadContactBundles(
+    waiting.map((item) => {
+      const peer = leadPeer(item.lead);
+      const phone = peer && !heldByAnother(`phone:${peer}`, item.lead) ? item.lead.phone : null;
+      return { id: item.row.id, kind: 'customer', bellAt: item.anchor, refs: { customerId: item.lead.customer_id || null, phone, exclusive: true } };
+    }),
+    { conn: db, bookedVisits: (ids) => relevance().bookedVisitsByCustomer(db, ids) },
+  );
+  const sent = await estimatesSent(waiting);
+  const emailed = await personEmailed(waiting, heldByAnother);
+  const still = [];
+  for (const item of waiting) {
+    // The witnesses return no bundle for a lead with no customer and no phone of its own (an email-only lead): its text,
+    // call and visit evidence is empty, and the email and estimate checks below judge it.
+    const bundle = bundles.get(String(item.row.id)) || { anchor: item.anchor, textAt: null, backAt: null, inAt: null, replyAt: null, visitAt: null };
+    const customerId = item.lead.customer_id || null;
+    if (reached(bundle) || sent(item, bundle.anchor) || emailed(item, bundle.anchor)) continue;
+    if (customerId && await estimateHandedOff(customerId, bundle.anchor)) continue;
+    still.push({ ...item, customerId });
+  }
+  return still;
+}
+
+// The sweep stamps the latest inquiry first (lead-reminder-sweep.js runSweep `order`): when two bells of one lead are due
+// in one sweep, the newer one is stamped and pushes, and leadClaim then holds the older one back.
+const latestInquiryFirst = (a, b) => b.anchor.getTime() - a.anchor.getTime();
+
+// At most one push per lead in 48 hours (the same window the scan reads). The plan's "at most twice per lead" is this
+// push and the 60-minute call; a lead that sends the form again while it waits does not ring the phones again here (the
+// writer's own ring does). A bell does not push when any bell, this row included, holds a push for its lead in the 48
+// hours before `at`. Each stamp keeps the lead it was for (LEAD_STAMPS, { leadId: time }), because a row can name another
+// lead later: the repeat-form row is keyed by customer, so a form for the customer's other lead refreshes it. That
+// record is never rewritten for another lead, so the first lead stays capped and the other lead is judged on its own.
+// The stamp asks it under a lock on the lead, in its own transaction (lead-reminder-sweep.js stampOnce), so two sweeps
+// never both push one lead. A stamp holds the claim even when its push did not go (the row rang again, a Done, the
+// close): at most once, as for the row itself. The read is bounded like the scan: a row stamped after `from` was a
+// candidate then, so its latest event was after `from` less the window.
+function leadClaim(item) {
+  const lead = String(item.leadId).toLowerCase();
+  const held = item.meta[LEAD_STAMPS];
+  return {
+    key: `${LABEL}:lead:${lead}`,
+    taken: async (conn, at) => {
+      const from = new Date(at.getTime() - WINDOW_MS);
+      const since = new Date(from.getTime() - WINDOW_MS).toISOString();
+      const rows = await conn('notifications').where({ recipient_type: 'admin' })
+        .whereRaw(`metadata->'${LEAD_STAMPS}'->>(?::text) > ?`, [lead, from.toISOString()])
+        .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since]))
+        .select('id').limit(1);
+      return rows.length > 0;
+    },
+    record: (at) => ({ [LEAD_STAMPS]: { ...(held && typeof held === 'object' && !Array.isArray(held) ? held : {}), [lead]: at.toISOString() } }),
+  };
+}
+
+// An email a person sent to the lead's own address since the item's anchor (a Gmail SENT row): the witnesses read only a
+// customer's address, and a lead that came in by email may have no customer yet. A send counts only when the witnesses'
+// own linkage (emailCustomerLink) says it is this lead's: linked to the lead's customer, or provably naming no customer
+// (Cc and Bcc captured, no customer in its thread, no recipient on a customer's file, so not a mailbox another customer
+// shares). A send linked to another customer says nothing about this lead, and neither does one the linkage cannot
+// settle (Cc or Bcc never captured, a mixed thread, recipients naming two customers): the push still goes. A send that
+// names no customer counts only while no other open lead holds the address (`heldByAnother`, identitiesHeldByAnother):
+// two leads sharing one mailbox cannot tell which of them was answered. The read starts at the earliest anchor of these
+// items, so a reply inside an old lead's own window is never cut off. Returns the test for one item.
+async function personEmailed(items, heldByAnother) {
+  const { personSentFilter, extractEmailAddresses, emailCustomerLink } = require('./email/email-customer-link');
+  const addresses = [...new Set(items.map(({ lead }) => leadEmail(lead)).filter(Boolean))];
+  if (!addresses.length) return () => false;
+  const earliest = new Date(Math.min(...items.map((item) => item.anchor.getTime())));
+  const rows = await db('emails as er').whereRaw(personSentFilter('er'))
+    .where('er.received_at', '>', earliest)
+    .whereRaw("EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), a.addr) > 0)", [addresses])
+    .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at');
+  const sent = [];
+  for (const r of rows) {
+    const { customerId, namesNoCustomer } = await emailCustomerLink(db, r);
+    sent.push({
+      at: new Date(r.received_at).getTime(),
+      to: new Set(extractEmailAddresses([r.to_address, r.cc_address, r.bcc_address].filter(Boolean).join(','))),
+      linked: customerId,
+      namesNoCustomer,
+    });
+  }
+  return ({ lead }, anchor) => {
+    const address = leadEmail(lead);
+    if (!address) return false;
+    const own = lead.customer_id ? String(lead.customer_id) : null;
+    const shared = heldByAnother(`email:${address}`, lead);
+    return sent.some((m) => m.at > anchor.getTime() && m.to.has(address) && (m.linked ? String(m.linked) === own : m.namesNoCustomer && !shared));
+  };
+}
+
+// A quote sent to the lead since `anchor`, the way the new-lead class of admin-alert-relevance.js (newLeadMovedOn) reads
+// it: the estimate the bell names (an email lead's draft bell carries metadata.estimateId, and the lead may since point
+// at another draft), the lead's own estimate, or any estimate to its customer, with a sent_at. Returns the test for one
+// item.
+async function estimatesSent(items) {
+  const { refsFromRow } = relevance();
+  const named = ({ row, lead }) => [refsFromRow(row).estimateId, lead.estimate_id].filter(Boolean).map((id) => String(id).toLowerCase());
+  const customerIds = [...new Set(items.map(({ lead }) => lead.customer_id).filter(Boolean).map(String))];
+  const estimateIds = [...new Set(items.flatMap(named))];
+  const rows = customerIds.length || estimateIds.length
+    ? await db('estimates').whereNotNull('sent_at').where((q) => {
+      if (customerIds.length) q.whereIn('customer_id', customerIds);
+      if (estimateIds.length) q.orWhereIn('id', estimateIds);
+    }).select('id', 'customer_id', 'sent_at')
+    : [];
+  return (item, anchor) => {
+    const { lead } = item;
+    const ids = new Set(named(item));
+    return rows.some((e) => new Date(e.sent_at).getTime() > anchor.getTime()
+      && ((lead.customer_id && String(e.customer_id) === String(lead.customer_id)) || ids.has(String(e.id).toLowerCase())));
+  };
+}
+
+/**
+ * One pass. Returns { skipped, reason } or { skipped: false, due, pushed, sends }; `sends` are the push sends, never
+ * awaited here (tests await them). Throws only when a page cannot be read; the sweep catches it.
+ */
+async function runNewLeadReminder({ now = new Date(), pageSize, clock } = {}) {
+  if (!inBusinessHours(now)) return { skipped: true, reason: 'quiet_hours' };
+  const out = await sweep.runSweep({
+    ...kind(), label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: reachedLeads, inHours: inBusinessHours,
+    closesAt: businessDayClose, claim: leadClaim, order: latestInquiryFirst,
+  }, { now, pageSize, clock });
+  if (out.sent) logger.info(`[${LABEL}] queued ${out.sent} push(es): a new lead nobody has reached`);
+  return { skipped: false, due: out.due, pushed: out.sent, sends: out.sends };
+}
+
+module.exports = {
+  runNewLeadReminder,
+  PUSH_STAMP,
+  LEAD_STAMPS,
+  __private: { inBusinessHours, businessDueAt, businessDayClose, pushWindow, kind, dueItems, reachedLeads, inquiryOf, leadClaim, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES, CALL_LEAD_TITLES },
+};

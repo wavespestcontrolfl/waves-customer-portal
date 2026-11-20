@@ -9,11 +9,11 @@ jest.mock('../services/lead-estimate-link', () => ({
 }));
 jest.mock('../services/email/email-customer-link', () => ({
   ...jest.requireActual('../services/email/email-customer-link'),
-  resolveEmailCustomerLink: jest.fn(async () => null),
+  emailCustomerLink: jest.fn(async () => ({ customerId: null, namesNoCustomer: false })),
 }));
 
 const { markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
-const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+const { emailCustomerLink } = require('../services/email/email-customer-link');
 const { runLeadContactSync, _test } = require('../services/lead-contact-sync');
 
 const T = (minutes) => new Date(Date.UTC(2026, 10, 4, 14, minutes, 0));
@@ -142,7 +142,7 @@ describe('lead contact sync: what does not count', () => {
   });
 
   test('an email linked to another customer: skipped', async () => {
-    resolveEmailCustomerLink.mockResolvedValueOnce('cust-9');
+    emailCustomerLink.mockResolvedValueOnce({ customerId: 'cust-9', namesNoCustomer: false });
     const result = await run({
       leads: [[lead({ phone: null, email: 'pat@example.invalid', customer_id: 'cust-1' })], []],
       emails: [{ id: 'mail-1', gmail_thread_id: 't', to_address: 'pat@example.invalid', cc_address: '', bcc_address: '', at: T(30) }],

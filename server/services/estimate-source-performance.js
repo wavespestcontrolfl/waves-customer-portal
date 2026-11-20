@@ -40,6 +40,8 @@ const KNOWN_SOURCES = [
   // Plan-restart mints (C4) — same publish-without-delivery shape, own
   // bucket so restart taps don't contaminate the catch-all.
   'plan_restart',
+  // Portal plan-start mints (GATE_PORTAL_PLAN_START) — same shape, own bucket.
+  'plan_start',
 ];
 const SOURCE_ORDER = [...KNOWN_SOURCES, 'other'];
 
@@ -147,7 +149,8 @@ async function sourcePerformance({ days = 90 } = {}) {
     // the self-serve view the tap's redirect produces seconds after mint.
     // plan_restart mints share the shape (C4 restart taps publish without
     // delivery too — codex GH #3671 r8 P1): same real-delivery witness.
-    if (['service_report_cta', 'plan_restart'].includes(String(row.source || ''))) {
+    // plan_start mints (portal pricing card) share it as well.
+    if (['service_report_cta', 'plan_restart', 'plan_start'].includes(String(row.source || ''))) {
       if (row.cta_first_delivered_at) {
         bucket.sent += 1;
         const created = new Date(row.created_at).getTime();

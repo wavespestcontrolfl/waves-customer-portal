@@ -47,6 +47,7 @@ const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech, hintSearchPlan, buildHintSummary, loadSummaryDayFacts,
+  openTimesBoxLive,
 } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { createPickerBudget } = require('../services/scheduling/hint-road-times');
@@ -244,7 +245,7 @@ async function techsLackingServices(techIds, { serviceType, serviceTypes }) {
 // The pickers ask once which box to draw, so a search is shaped for it from
 // the start. Read at call time: a flip needs no redeploy.
 router.get('/ui', (req, res) => {
-  res.json({ ok: true, openTimes: gateEnvValue('GATE_BEST_TIME_HINTS') && gateEnvValue('GATE_OPEN_TIMES_BOX') });
+  res.json({ ok: true, openTimes: openTimesBoxLive() });
 });
 
 // Scopes this request so a refused Google

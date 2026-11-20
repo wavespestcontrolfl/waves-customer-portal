@@ -20,6 +20,7 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etW
 // can't sneak past. Add new names here as they come up.
 // Shared so the MRR breakdown + snapshot exclude the same accounts this tool does.
 const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
+const { whereNotUndeliveredSelfServe, sentAtSql, countableViewAtSql } = require('../self-serve-estimates');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 const { customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
 const { CANONICAL_SIBLING } = require('../completion-record-invariants');
@@ -89,6 +90,28 @@ function dateRange(period) {
   ranges.year_end = today;
 
   return ranges;
+}
+
+// The Eastern calendar days from..to (YYYY-MM-DD, both inclusive) as the
+// half-open window [fromTs, toTs) of real instants, for a timestamptz
+// column (codex pre-push P1): a naive 'YYYY-MM-DDT00:00:00' string reads in
+// the database session's zone, 4-5 hours off the business day.
+// get_report_engagement, get_estimate_funnel and compare_periods all read
+// their bounds here.
+function etDayWindow(from, to) {
+  if (!validCalendarDate(from) || !validCalendarDate(to)) {
+    return { error: 'date_from and date_to must be real YYYY-MM-DD dates' };
+  }
+  const fromTs = parseETDateTime(`${from}T00:00`);
+  const toTs = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${to}T12:00`), 1))}T00:00`);
+  if (!(fromTs < toTs)) return { error: 'date_from must be on or before date_to' };
+  return { fromTs, toTs };
+}
+
+// whereRaw arguments: the timestamptz SQL `instantSql` (a code constant,
+// never input) falls in an etDayWindow.
+function inWindowRaw(instantSql, { fromTs, toTs }) {
+  return [`${instantSql} >= ? AND ${instantSql} < ?`, [fromTs, toTs]];
 }
 
 const DASHBOARD_TOOLS = [
@@ -363,6 +386,11 @@ async function comparePeriods(input) {
 
   const a = resolvePeriod(period_a);
   const b = resolvePeriod(period_b);
+  for (const period of [a, b]) {
+    if (etDayWindow(period.from, period.to).error) {
+      return { error: `Unknown period "${period.label}". Use this_week, last_week, this_month, last_month, this_quarter, ytd, YYYY-MM or YYYY-MM-DD.` };
+    }
+  }
 
   // Each metric query mirrors the funnel-fix discipline applied in
   // PR #247:
@@ -374,8 +402,9 @@ async function comparePeriods(input) {
   //   - Exclude INTERNAL_TEST_CUSTOMERS (Adam Martinez et al.) so test
   //     activity can't skew period-over-period deltas.
   async function getMetrics(from, to) {
-    const fromTs = `${from}T00:00:00`;
-    const toTs = `${to}T23:59:59`;
+    // Estimate events are timestamptz: Eastern calendar days, as the funnel
+    // counts them.
+    const bounds = etDayWindow(from, to);
     const m = {};
     if (wantAll || metrics.includes('revenue')) {
       const rev = await excludeInternalPayments(
@@ -412,20 +441,19 @@ async function comparePeriods(input) {
       const es = await excludeInternalEstimates(
         db({ e: 'estimates' })
           .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-          .whereNotNull('e.sent_at')
-          .whereBetween('e.sent_at', [fromTs, toTs])
-          // plan_restart sent_at is a synthetic publish stamp (the
-          // customer self-served the quote; nothing was delivered) — it
-          // is not an estimate SENT (codex GH r19 P1 on #3671) UNLESS an
-          // operator later really delivered it: the admin send path stamps
-          // deliveryState.firstDeliveredAt, the same real-delivery witness
-          // estimate-source-performance counts for this source (r26 P2).
-          // NULL-aware (r20 P2): legacy rows carry source NULL, which a
-          // bare <> would drop from the count.
-          .where(function notUndeliveredPlanRestart() {
-            this.whereNull('e.source').orWhereNot('e.source', 'plan_restart')
-              .orWhereRaw("(e.estimate_data #>> '{deliveryState,firstDeliveredAt}') IS NOT NULL");
-          })
+          // A self-serve quote's sent_at (plan_restart, plan_start, the report
+          // card's service_report_cta) is a synthetic publish stamp (the
+          // customer self-served the quote; nothing was delivered) — it is
+          // not an estimate SENT (codex GH
+          // r19 P1 on #3671) UNLESS an operator later really delivered it:
+          // the admin send path stamps deliveryState.firstDeliveredAt, the
+          // same real-delivery witness estimate-source-performance counts
+          // for these sources (r26 P2), and the send is dated by it, since a
+          // later suppressed resend rewrites sent_at (sentAtSql; codex
+          // pre-push r16 P1). NULL-aware (r20 P2): legacy rows carry source
+          // NULL, which a bare NOT IN would drop from the count.
+          .whereRaw(...inWindowRaw(sentAtSql('e'), bounds))
+          .where(whereNotUndeliveredSelfServe('e'))
       ).count('* as count').first();
       m.estimates_sent = parseInt(es?.count || 0);
     }
@@ -434,16 +462,21 @@ async function comparePeriods(input) {
         db({ e: 'estimates' })
           .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
           .where('e.status', 'accepted')
-          .whereBetween('e.accepted_at', [fromTs, toTs])
+          .whereRaw(...inWindowRaw('e.accepted_at', bounds))
       ).count('* as count').first();
       m.estimates_accepted = parseInt(ea?.count || 0);
     }
     if (wantAll || metrics.includes('churn')) {
+      // churned_at is a DATE: calendar days, both ends included. A row
+      // without one falls back to updated_at, a timestamptz: the Eastern
+      // bounds, so the database session's zone never moves it a day (codex
+      // pre-push P1).
+      const [updatedInWindow, updatedBounds] = inWindowRaw('c.updated_at', bounds);
       const ch = await excludeInternalCustomers(
         db({ c: 'customers' })
           .where('c.active', false)
           .whereNull('c.deleted_at')
-          .whereRaw('COALESCE(c.churned_at, c.updated_at) BETWEEN ? AND ?', [fromTs, toTs])
+          .whereRaw(`(c.churned_at BETWEEN ? AND ? OR (c.churned_at IS NULL AND ${updatedInWindow}))`, [from, to, ...updatedBounds])
       ).count('* as count').first();
       m.churned = parseInt(ch?.count || 0);
     }
@@ -691,8 +724,9 @@ async function getEstimateFunnel(input) {
   const r = dateRange();
   const from = input.date_from || r.month_start;
   const to = input.date_to || r.today;
-  const fromTs = `${from}T00:00:00`;
-  const toTs = `${to}T23:59:59`;
+  // Every date this funnel compares is a timestamptz: Eastern calendar days.
+  const bounds = etDayWindow(from, to);
+  if (bounds.error) return { error: bounds.error };
 
   // Each stage counts estimates whose stage *transition* timestamp
   // (sent_at / viewed_at / accepted_at / declined_at) falls in the
@@ -703,40 +737,60 @@ async function getEstimateFunnel(input) {
   // INTERNAL_TEST_CUSTOMERS are excluded at every stage via the
   // excludeInternalEstimates helper so funnel/close-rate metrics
   // reflect real prospect activity only.
-  function stageQuery(stageColumn, status) {
+  //
+  // The funnel is the estimates staff delivered: every query here leaves out
+  // a self-serve quote the customer opened from the portal or a report card
+  // (plan restart, plan start, report card), whose sent_at is a mint stamp,
+  // unless staff really delivered it
+  // (whereNotUndeliveredSelfServe, as compare_periods counts sends; codex
+  // pre-push P1). Every stage leaves out the same rows. Each stage still
+  // counts by its own timestamp in the window (stage-transition volume, as
+  // on main), so view_rate and close_rate are window ratios, not send-cohort
+  // rates; the by-service block below is the cohort view.
+  // compare_periods' accepted count still includes them (a count with no
+  // rate). A delivered one counts as sent at its first delivery
+  // (sentAtSql, in every query dated by the send; codex pre-push r16: a
+  // suppressed resend rewrites sent_at) and as viewed only from its delivery
+  // on (countableViewAtSql; codex pre-push r15): the portal look before the
+  // send is not a viewed send.
+  function stageQuery(instantSql, status) {
     let qb = db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-      .whereNotNull(`e.${stageColumn}`)
-      .whereBetween(`e.${stageColumn}`, [fromTs, toTs]);
+      .whereRaw(...inWindowRaw(instantSql, bounds))
+      .where(whereNotUndeliveredSelfServe('e'));
     if (status) qb = qb.where('e.status', status);
     return excludeInternalEstimates(qb);
   }
 
   const [sent, viewed, accepted, declined] = await Promise.all([
-    stageQuery('sent_at').count('* as c').first(),
-    stageQuery('viewed_at').count('* as c').first(),
-    stageQuery('accepted_at', 'accepted').count('* as c').first(),
-    stageQuery('declined_at', 'declined').count('* as c').first(),
+    stageQuery(sentAtSql('e')).count('* as c').first(),
+    stageQuery(countableViewAtSql('e')).count('* as c').first(),
+    stageQuery('e.accepted_at', 'accepted').count('* as c').first(),
+    stageQuery('e.declined_at', 'declined').count('* as c').first(),
   ]);
 
-  const totalSent = parseInt(sent?.c || 0);
-  const totalViewed = parseInt(viewed?.c || 0);
-  const totalAccepted = parseInt(accepted?.c || 0);
-  const totalDeclined = parseInt(declined?.c || 0);
+  const [totalSent, totalViewed, totalAccepted, totalDeclined] = [sent, viewed, accepted, declined]
+    .map((row) => parseInt(row?.c || 0));
 
   const avgResponse = await excludeInternalEstimates(
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
       .where('e.status', 'accepted')
-      .whereBetween('e.accepted_at', [fromTs, toTs])
-      .whereNotNull('e.sent_at')
-  ).select(db.raw("AVG(EXTRACT(EPOCH FROM (e.accepted_at - e.sent_at)) / 3600) as avg_hrs")).first();
+      .whereRaw(...inWindowRaw('e.accepted_at', bounds))
+      // A response follows the send it answers: an acceptance before the send
+      // anchor (a portal accept while a staff send was in flight, which the
+      // send path keeps) has no response time, and still counts as accepted
+      // above (codex pre-push P1). A NULL anchor drops the row, as before.
+      .whereRaw(`e.accepted_at >= ${sentAtSql('e')}`)
+      .where(whereNotUndeliveredSelfServe('e'))
+  ).select(db.raw(`AVG(EXTRACT(EPOCH FROM (e.accepted_at - ${sentAtSql('e')})) / 3600) as avg_hrs`)).first();
 
   const totalValue = await excludeInternalEstimates(
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
       .where('e.status', 'accepted')
-      .whereBetween('e.accepted_at', [fromTs, toTs])
+      .whereRaw(...inWindowRaw('e.accepted_at', bounds))
+      .where(whereNotUndeliveredSelfServe('e'))
   ).select(db.raw('COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)), 0) as total')).first();
 
   // What leads asked for: the window's SENT cohort grouped by the free-text
@@ -757,9 +811,9 @@ async function getEstimateFunnel(input) {
   const byService = await excludeInternalEstimates(
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-      .whereNotNull('e.sent_at')
       .whereNull('e.archived_at')
-      .whereBetween('e.sent_at', [fromTs, toTs])
+      .whereRaw(...inWindowRaw(sentAtSql('e'), bounds))
+      .where(whereNotUndeliveredSelfServe('e'))
   )
     .select(
       db.raw(`${SERVICE_KEY_SQL} as service`),
@@ -780,10 +834,10 @@ async function getEstimateFunnel(input) {
   const openNow = await excludeInternalEstimates(
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-      .whereNotNull('e.sent_at')
       .whereNull('e.archived_at')
-      .whereBetween('e.sent_at', [fromTs, toTs])
+      .whereRaw(...inWindowRaw(sentAtSql('e'), bounds))
       .whereIn('e.status', ['sent', 'viewed'])
+      .where(whereNotUndeliveredSelfServe('e'))
   ).count('* as c').first();
 
   return {
@@ -1102,14 +1156,11 @@ async function getReportEngagement(input = {}) {
   // Inclusive lower bound: 29 days back + today = exactly 30 ET calendar days.
   const from = input.date_from || etDateString(addETDays(now, -29));
   const to = input.date_to || etDateString(now);
-  if (!validCalendarDate(from) || !validCalendarDate(to)) {
-    return { error: 'date_from and date_to must be real YYYY-MM-DD dates' };
-  }
   // ET wall-clock day bounds as real Dates — the send timestamps are
   // timestamptz, so a naive string here would shift the window 4-5 hours.
-  const fromTs = parseETDateTime(`${from}T00:00`);
-  const toTs = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${to}T12:00`), 1))}T00:00`);
-  if (!(fromTs < toTs)) return { error: 'date_from must be on or before date_to' };
+  const bounds = etDayWindow(from, to);
+  if (bounds.error) return { error: bounds.error };
+  const { fromTs, toTs } = bounds;
 
   const actionFlags = REPORT_ACTION_EVENTS
     .map((name) => `BOOL_OR(sre.event_name = '${name}') AS ${name}`)

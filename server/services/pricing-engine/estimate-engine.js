@@ -860,6 +860,107 @@ function stripBedBugInternalPricing(result) {
   return clean;
 }
 
+// Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): the V2 pricer inputs for a request that asks for it,
+// else null (a spot seal, or the gate off). The home size is the request's, else the property's TOTAL living
+// area (input homeSqFt), and only then its footprint (the ground floor: a two-story home would tier too low).
+// With none of them it stays 0: the pricer then flags its rows footprintWasDefaulted (a guessed size).
+//
+// THE one GATE_EXCLUSION_WHOLE_HOME decision for pricing. A NEW request that asks for a whole-home seal while the
+// gate is off is refused (fail closed, like a gated misting pick): pricing it as a spot seal would silently drop the
+// included guarantee and cut the price. A stored estimate re-priced as sold (input.savedEstimateReplay, set by
+// extractEngineInputs and the persisted-estimate replay) keeps the terms it was quoted after a rollback. The
+// pricer and the routes read no gate of their own. Checked BEFORE the pricing-version branch: a whole-home pick
+// only exists on the V2 shape, so any other shape is refused rather than priced as a legacy line.
+//
+// A stored estimate re-priced as sold also restores its quote-time minimum and renewal price (input
+// .wholeHomeSealReplay, read from the saved priced rows by estimate-whole-home-replay.js and honored only on a
+// replay): a Settings change never moves a quoted price. A NEW quote reads the live Settings table.
+function wholeHomeSealInputs(exclusion, property, input) {
+  if (exclusion.sealScope !== 'whole_home') return null;
+  const replay = input.savedEstimateReplay === true;
+  if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true && !replay) {
+    throw wholeHomeInputError('The whole-home seal is not enabled on this environment (GATE_EXCLUSION_WHOLE_HOME). Choose Spot seal for Seal scope and reprice.', 'EXCLUSION_WHOLE_HOME_GATED');
+  }
+  if (exclusion.pricingVersion !== 'v2') {
+    throw wholeHomeInputError('A whole-home seal needs the per-point exclusion (pricingVersion v2). Choose Spot seal or reprice from the estimate tool.', 'EXCLUSION_WHOLE_HOME_INCOMPATIBLE');
+  }
+  const frozen = replay ? input.wholeHomeSealReplay : null;
+  return {
+    sealScope: 'whole_home',
+    homeSqFt: exclusion.homeSqFt || property.homeSqFt || property.footprint || 0,
+    stories: exclusion.stories || property.stories || 1,
+    roofType: exclusion.roofType || property.roofType || 'shingle',
+    ...(frozen ? { frozenMinimum: frozen.minimum, frozenRenewal: frozen.renewal } : {}),
+  };
+}
+
+// Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, owner 2026-11-19 choice 2A): the technician's one-tap answer on site, as V2
+// pricer inputs, else null (no pick). THE one gate decision for roof-style pricing, shaped like wholeHomeSealInputs and read
+// for EVERY exclusion shape: a NEW request with a pick while the gate is off is refused (fail closed), never priced as if
+// nothing was tapped; a stored estimate re-priced as sold (input.savedEstimateReplay) keeps its quote-time multiplier and
+// per-foot rate (input.roofStyleReplay, read from its own saved rows and honored only on a replay). The pick never changes
+// the shape: it prices only the V2 per-point model, and measured barrel feet on a request that is not V2-shaped are refused.
+const ROOF_STYLES = ['shingle', 'flat_tile', 'barrel_tile', 'metal', 'other'];
+
+// Is this exclusion V2-shaped AND carrying priced work: a whole-home seal, or at least one finite positive point, bird box
+// or mesh quantity? Read with the pricer's own coercion (Number(x) || 0, negatives clamp to 0), so a '0', negative or NaN
+// count never counts: the pricing version alone does not make a closure-only quote.
+const V2_QUANTITY_KEYS = ['standardWireMeshPoints', 'advancedWireMeshPoints', 'standardBirdBoxes', 'tileHighBirdBoxes',
+  'customBirdBoxes', 'meshSoftLF', 'meshConcreteLF'];
+function pricesV2Work(exclusion) {
+  if (exclusion.pricingVersion !== 'v2') return false;
+  if (exclusion.sealScope === 'whole_home') return true;
+  return V2_QUANTITY_KEYS.some((key) => {
+    const quantity = Number(exclusion[key]) || 0;
+    return Number.isFinite(quantity) && quantity > 0;
+  });
+}
+
+// THE one roof type for exclusion and rodent guarantee work: the technician's confirmed roof style when there is one
+// (tile = 'tile', the tier and multiplier key every pricer reads), else the lookup's roof type, untouched.
+function effectiveExclusionRoofType(lookupRoofType, roofStyle) {
+  if (!roofStyle) return lookupRoofType;
+  return ['flat_tile', 'barrel_tile'].includes(roofStyle) ? 'tile' : roofStyle;
+}
+function roofStyleInputs(exclusion, input) {
+  const style = exclusion.roofStyle;
+  if (style === undefined || style === null || style === '') return null;
+  const replay = input.savedEstimateReplay === true;
+  if (require('../../config/feature-gates').exclusionRoofStylePricingLive?.() !== true && !replay) {
+    throw wholeHomeInputError('Roof style pricing is not enabled on this environment (GATE_EXCLUSION_ROOF_STYLE_PRICING). Clear the roof style and reprice.', 'EXCLUSION_ROOF_STYLE_GATED');
+  }
+  if (!ROOF_STYLES.includes(style)) {
+    throw wholeHomeInputError('The roof style must be shingle, flat tile, barrel tile, metal or other.', 'EXCLUSION_ROOF_STYLE_INVALID');
+  }
+  // Barrel feet are validated before any coercion (the route runs the same check); other styles carry none.
+  const { parseBarrelEaveFt, invalidBarrelEaveFtError } = require('../estimate-roof-style-replay');
+  const barrelEaveFt = style === 'barrel_tile' ? parseBarrelEaveFt(exclusion.barrelEaveFt) : 0;
+  if (barrelEaveFt === null) throw invalidBarrelEaveFtError();
+  if (barrelEaveFt > 0 && !pricesV2Work(exclusion)) {
+    throw wholeHomeInputError('Count the entry points, or choose Whole home, before adding the barrel eave closure.', 'EXCLUSION_ROOF_STYLE_NEEDS_COUNTS');
+  }
+  const frozen = replay ? input.roofStyleReplay : null;
+  return {
+    roofStyle: style,
+    barrelEaveFt,
+    ...(frozen ? { frozenTileMultiplier: frozen.multiplier, frozenBarrelPerFt: frozen.perFt, frozenBarrelMinimum: frozen.minimum } : {}),
+  };
+}
+
+// A fail-closed 400 for a whole-home pick that cannot be priced as asked (never silently priced another way).
+function wholeHomeInputError(message, code) {
+  const err = new Error(message);
+  err.status = 400;
+  err.statusCode = 400;
+  err.code = code;
+  err.failClosed = true;
+  err.isOperational = true;
+  return err;
+}
+
+// A priced exclusion result that already includes the 1-year re-entry guarantee.
+const includesReentryGuarantee = (result) => result?.includesReentryGuarantee === true;
+
 // ── Generate Complete Estimate ────────────────────────────────
 function generateEstimate(input) {
   const services = input.services || {};
@@ -2228,6 +2329,11 @@ function generateEstimate(input) {
   // (equivalent points, mesh LF) even though the estimate now carries the
   // V2 exclusion as per-section line items rather than one combined row.
   let rodentExclusionV2Summary = null;
+  const wholeHomeSeal = wholeHomeSealInputs(services.exclusion || {}, property, input);
+  const roofStyle = roofStyleInputs(services.exclusion || {}, input);
+  // The technician's confirmed roof style beats the lookup's roof type for the rodent guarantee tier (whole-home renewal and
+  // the separate guarantee line only). The legacy exclusion pricers and the guarantee combo keep reading the lookup, as before.
+  const exclusionRoofType = (lookupRoofType) => effectiveExclusionRoofType(lookupRoofType, roofStyle?.roofStyle);
   if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control', {
     // Only the V2 shape is unit-scoped (per point + per LF, no home-sqft
     // floors) — this is the LIVE producer shape (property-lookup-v2 sends
@@ -2237,7 +2343,12 @@ function generateEstimate(input) {
     // a positive count; an all-zero V2 request still prices the point-only
     // floor + inspection fee as a firm line (pre-audit of the codex #3594 r4
     // pattern). Unscoped → manual quote.
+    // A whole-home seal (gate on) is priced from the HOME's size, which a commercial
+    // property has no minimum table for: it never counts as a scoped one-time. Neither does a
+    // roof-style pick (tile multiplier, barrel closure): commercial stays a manual quote.
     scopedOneTime: services.exclusion.pricingVersion === 'v2'
+      && !wholeHomeSeal
+      && !roofStyle
       && ['standardWireMeshPoints', 'advancedWireMeshPoints', 'standardBirdBoxes', 'tileHighBirdBoxes',
         'customBirdBoxes', 'meshSoftLF', 'meshConcreteLF']
         .some((k) => Number(services.exclusion[k]) > 0),
@@ -2260,6 +2371,9 @@ function generateEstimate(input) {
         approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
+        ...wholeHomeSeal,
+        ...(wholeHomeSeal ? { roofType: exclusionRoofType(wholeHomeSeal.roofType) } : {}),
+        ...roofStyle,
       });
       rodentExclusionV2Summary = result;
       // Per-section rows (wire mesh points / bird boxes / linear mesh, plus
@@ -2400,7 +2514,9 @@ function generateEstimate(input) {
   // Rodent guarantee — gated. Caller must pass eligibility flags explicitly;
   // we no longer auto-fire on any trap + exclusion presence. Caller signals
   // intent by setting services.rodentGuarantee = { eligibility: {...} }.
-  if (services.rodentGuarantee && !useCommercialManualQuote(services.rodentGuarantee, 'pest_control')) {
+  // A whole-home exclusion already includes the 1-year re-entry guarantee: no second, paid line.
+  if (services.rodentGuarantee && !includesReentryGuarantee(rodentExclusionV2Summary)
+    && !useCommercialManualQuote(services.rodentGuarantee, 'pest_control')) {
     const opts = typeof services.rodentGuarantee === 'object' ? services.rodentGuarantee : {};
     // Prefer the V2 summary: the estimate carries V2 exclusion as per-section
     // rows, and a section row has no aggregate equivalent-point fields.
@@ -2409,7 +2525,7 @@ function generateEstimate(input) {
     const guaranteeOpts = {
       homeSqFt: opts.homeSqFt || property.footprint || 2000,
       stories: opts.stories || property.stories || 1,
-      roofType: opts.roofType || property.roofType || 'shingle',
+      roofType: exclusionRoofType(opts.roofType || property.roofType || 'shingle'),
       eligibility: opts.eligibility || {},
     };
     if (exclusionResult?.pricingVersion === 'RODENT_EXCLUSION_V2_MESH_BIRD_BOX') {

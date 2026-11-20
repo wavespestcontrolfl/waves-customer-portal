@@ -38,7 +38,7 @@ const contextAggregator = require('../../context-aggregator');
 
 const { redactAccessCodes } = contextAggregator;
 const { excludeUnresolvedSendReservations } = require('../../messaging/review-ask-reservation');
-const { resolveEmailCustomerLink, personSentFilter, extractEmailAddresses } = require('../../email/email-customer-link');
+const { emailCustomerLink, personSentFilter, extractEmailAddresses } = require('../../email/email-customer-link');
 const { emailPlainText, stripQuotedAndSignature, ownReplySubject } = require('../../email/email-strip');
 const { operatorReply, smsContactSelects } = require('../../staff-contact');
 const { etOffsetIso } = require('../../../utils/datetime-et');
@@ -971,7 +971,7 @@ async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
     candidates = await live(conn('emails').whereNull('customer_id')).whereRaw(personSentFilter('emails'))
       .where(function ours() {
         if (threads.size) this.whereIn('gmail_thread_id', [...threads]);
-        // A coarse pre-filter only; resolveEmailCustomerLink decides.
+        // A coarse pre-filter only; emailCustomerLink decides.
         if (address) this.orWhereRaw("position(? in lower(concat_ws(' ', to_address, cc_address, bcc_address))) > 0", [address]);
       })
       .select(columns);
@@ -982,7 +982,7 @@ async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
       if (threads.has(row.gmail_thread_id)) unread.push({ channel: 'email', at: eastern(row.received_at), reason: 'recipients_not_captured' });
       continue;
     }
-    const owner = await resolveEmailCustomerLink(conn, row, { asOf });
+    const { customerId: owner } = await emailCustomerLink(conn, row, { asOf });
     if (owner != null && String(owner) === String(customerId)) replies.push(row);
   }
   const subjects = await ownSubjectsAsOf(conn, [...linked, ...replies], asOf, live, unread);

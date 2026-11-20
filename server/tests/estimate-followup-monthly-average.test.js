@@ -14,6 +14,8 @@ jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
+  // The final send check reads from one snapshot transaction.
+  mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
   return mockDb;
 });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
@@ -325,12 +327,16 @@ describe('send-time check: the average is re-read at the provider boundary', () 
     return EmailTemplates.sendTemplate.mock.calls[0][0].withProviderHandoff;
   };
 
-  test('the email spec records the exact copy it carries; an unpinned email installs no handoff', async () => {
+  test('the email spec records the exact copy it carries; an unpinned email carries only the checkout handoff', async () => {
     const email = await pinned();
     expect(email.averageText).toBe('$94.00 per application · $31.33 a month\nAveraged over the year. You pay after each application.');
     mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null }; // no note block: no average
     const plain = { templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } };
-    expect(await installedHandoff(await _private.withAverageEmail(plain, row()))).toBeUndefined();
+    const handoff = await installedHandoff(await _private.withAverageEmail(plain, row()));
+    // No average and no PDF: the only check is the mid-checkout one, which passes for an idle customer.
+    const check = await checkOf(handoff);
+    await expect(check()).resolves.toEqual({ ok: true });
+    freshOverride = undefined;
   });
 
   test('unchanged row: the check passes (PDF gate off)', async () => {
@@ -379,12 +385,46 @@ describe('send-time check: the average is re-read at the provider boundary', () 
     await expect(check()).rejects.toMatchObject({ reason: 'monthly_average_changed' });
   });
 
-  test('a PDF-only email (no average) keeps the PDF handoff untouched', async () => {
-    const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(); return { ok: true }; });
+  test('the PDF fence and the average run first on their own reads; the final check reads last, in its own snapshot', async () => {
+    // No transaction is held open across the PDF fingerprint and the average: their helpers read
+    // through the pool, so a held snapshot could wait on a second connection. The final check stays
+    // last and fresh, so an acceptance during the content checks is still seen.
+    const order = [];
+    const pdfCheck = jest.fn(async () => { order.push('pdf fence'); return { ok: true }; });
+    const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; });
+    mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: pdfHandoff };
+    const check = await checkOf(await installedHandoff(await pinned()));
+    freshOverride = row();
+    const final = Object.assign(jest.fn((table) => db(table)), { raw: db.raw, fn: db.fn });
+    db.transaction.mockClear();
+    db.transaction.mockImplementationOnce(async (fn) => { order.push('final snapshot'); return fn(final); });
+    db.mockClear();
+    await expect(check({ database: undefined })).resolves.toEqual({ ok: true });
+    expect(order).toEqual(['pdf fence', 'final snapshot']);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+    expect(final.mock.calls.map(([table]) => table)).toEqual(expect.arrayContaining(['estimates', 'scheduled_services', 'estimate_checkout_events']));
+    // The average re-read went through the pool, outside the final snapshot.
+    expect(db.mock.calls.length - final.mock.calls.length).toBe(1);
+    expect(db.mock.calls[0][0]).toBe('estimates');
+  });
+
+  test('a snapshot that cannot open is a retryable check failure, not a pass', async () => {
+    const check = await checkOf(await installedHandoff(await pinned()));
+    db.transaction.mockRejectedValueOnce(new Error('pool exhausted'));
+    await expect(check()).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+  });
+
+  test('a PDF-only email (no average) keeps the PDF handoff, with the checkout check composed after it', async () => {
+    const pdfCheck = jest.fn(async () => ({ ok: true }));
+    const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; });
     mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: pdfHandoff };
     mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null }; // no note block: no average
     const email = { templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } };
-    expect(await installedHandoff(await _private.withAverageEmail(email, row()))).toBe(pdfHandoff);
+    const check = await checkOf(await installedHandoff(await _private.withAverageEmail(email, row())));
+    expect(pdfHandoff).toHaveBeenCalledTimes(1);
+    await expect(check()).resolves.toEqual({ ok: true });
+    expect(pdfCheck).toHaveBeenCalledTimes(1);
   });
 
   test('a vetoed send (no text went out) takes the existing abort path: counters stay, the stage claim is released', async () => {

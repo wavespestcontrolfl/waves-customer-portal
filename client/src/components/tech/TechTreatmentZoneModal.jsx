@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 import {
   MAP_WIDTH,
   MAP_HEIGHT,
@@ -385,7 +386,7 @@ export default function TechTreatmentZoneModal({
     }
   };
 
-  const save = useCallback(async () => {
+  const saveSnapshot = useCallback(async () => {
     setSaveState('saving');
     try {
       const { center, zoom, url, image, angle = 0 } = mapState;
@@ -507,6 +508,10 @@ export default function TechTreatmentZoneModal({
       setSaveState(err.message || 'Save failed');
     }
   }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, lawnMode, yardMode, interior, expectedPropertyId, openVisitOnly]);
+  // The snapshot is drawn into an image, at times after a fetch of the map,
+  // before its upload starts, so no save is open yet: the save holds an
+  // out-of-date tab's reload until it settles (lib/reloadHolds.js).
+  const save = useCallback(() => holdReloadWhileSending('zone-map', saveSnapshot), [saveSnapshot]);
 
   useEffect(() => {
     // Back to trace = the trace may change; the next Play must save fresh.

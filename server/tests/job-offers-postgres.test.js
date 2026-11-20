@@ -340,9 +340,11 @@ jest.setTimeout(120000);
       await root('job_offers').where({ id: sent.offer.id }).update({ created_at: new Date(Date.now() - 3600e3) });
       const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
       const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor());
+      // The answer carries the version the applicant's page showed (#8115: an answer without it is refused).
+      const version = await shownVersion(token);
       const out = answer === 'signs'
-        ? await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera' })
-        : await JobOffers.declineOffer(token, {});
+        ? await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version })
+        : await JobOffers.declineOffer(token, { version });
       expect(out.refused).toBeUndefined();
       const panel = await JobOffers.adminPanel(app.id, actor());
       expect(panel.current).toMatchObject({ id: sent.offer.id, status: answer === 'signs' ? 'accepted' : 'declined' });
@@ -505,16 +507,51 @@ jest.setTimeout(120000);
         expect((await root('job_offers').where({ id: offer.id }).first()).text_consent_at).toBeTruthy();
       });
 
-      // A body with no version is the contract these routes served before the version, so it is answered as before,
-      // even after a change its sender did not see. The page always sends one (CareersOfferPage.test.jsx).
+      // A write with no version is refused like one made on an older version (409, state open) and writes nothing, so
+      // no answer skips the check. The page always sends one (CareersOfferPage.test.jsx).
       test.each([
-        ['text choice', (t) => JobOffers.setTextConsent(t, false), { textConsent: false, version: expect.any(String) }],
-        ['sign', (t) => JobOffers.acceptOffer(t, { signedName: 'Jordan Rivera' }), expect.objectContaining({ state: 'signed' })],
-        ['date request', (t) => JobOffers.requestDate(t, { requestedStartDate: addStaffWorkDays(JobOffers.suggestStartDate(), 7) }), { state: 'date_requested' }],
-        ['decline', (t) => JobOffers.declineOffer(t, { reason: 'Took another job' }), { state: 'declined' }],
-      ])('a %s sent with no version is answered as before', async (_, answer, body) => {
+        ['text choice', (t) => JobOffers.setTextConsent(t, false)],
+        ['sign', (t) => JobOffers.acceptOffer(t, { signedName: 'Jordan Rivera' })],
+        ['date request', (t) => JobOffers.requestDate(t, { requestedStartDate: addStaffWorkDays(JobOffers.suggestStartDate(), 7) })],
+        ['decline', (t) => JobOffers.declineOffer(t, { reason: 'Took another job' })],
+      ])('a %s sent with no version is refused, and nothing is written', async (_, answer) => {
         await JobOffers.setTextConsent(token, true, await shownVersion(token));
-        expect((await answer(token)).body).toEqual(body);
+        const before = await root('job_offers').where({ id: offer.id }).first();
+        expect(await answer(token)).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await root('job_offers').where({ id: offer.id }).first()).toEqual(before);
+        expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
+      });
+
+      // The server signs only a frozen offer that carries every term the page shows, so no client (a tab from before
+      // the page's own check included) signs a gap. The answer is the same 409, and nothing is written.
+      test.each([
+        ['no hourly rate', { hourlyRate: null }],
+        ['an hourly rate that shows as $0.00', { hourlyRate: 0.001 }],
+        ['an hourly rate sent as text', { hourlyRate: '23.00' }],
+        ['a step rate with no step date', { stepEffectiveOn: null }],
+        ['no pay step fields', { stepRate: undefined, stepEffectiveOn: undefined }],
+        ['no job', { jobTitle: ' ' }],
+        ['no start date', { startDate: null }],
+        ['empty Terms', { terms: { title: 'Technician Terms', markdown: '' } }],
+      ])('a signature on a frozen offer with %s is refused, and nothing is written', async (_, gap) => {
+        const sent = await root('job_offers').where({ id: offer.id }).first();
+        const snapshot = typeof sent.snapshot === 'string' ? JSON.parse(sent.snapshot) : sent.snapshot;
+        await root('job_offers').where({ id: offer.id }).update({ snapshot: JSON.stringify({ ...snapshot, ...gap }) });
+        const version = await shownVersion(token); // read before the row: a view stamps last_viewed_at
+        const before = await root('job_offers').where({ id: offer.id }).first();
+        expect(await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version })).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await root('job_offers').where({ id: offer.id }).first()).toEqual(before);
+        expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
+      });
+
+      // A text choice equal to the stored one writes nothing either way, so with no version it answers as any resend
+      // does: the stored choice and the version on file.
+      test('a text choice equal to the stored one, sent with no version, writes nothing and answers the stored choice', async () => {
+        await JobOffers.setTextConsent(token, true, await shownVersion(token));
+        const version = await shownVersion(token); // read before the row: a view stamps last_viewed_at
+        const before = await root('job_offers').where({ id: offer.id }).first();
+        expect(await JobOffers.setTextConsent(token, true)).toEqual({ body: { textConsent: true, version } });
+        expect(await root('job_offers').where({ id: offer.id }).first()).toEqual(before);
       });
 
       test('past its expiry the offer reads expired before any sweep, and nothing can be signed', async () => {

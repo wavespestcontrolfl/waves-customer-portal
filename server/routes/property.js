@@ -11,6 +11,7 @@ const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irriga
 const AwayWatch = require('../services/away-watch');
 const { yardPets } = require('../services/pet-name-line');
 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
+const { hasCustomerLawnCare } = require('../services/lawn-health-shared');
 const { movingPortalLive } = require('../config/feature-gates');
 
 // GATE_AWAY_WATCH: the Property tab shows its Away Watch section only when the server says so: the gate is live and
@@ -62,7 +63,12 @@ const {
   customerHasLawnCare,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage,
+  prefsRenderStamp,
+  renderedAgainstCurrentHome,
 } = require('../services/property-preferences-schema');
+const { controllerTimerSeen, settleControllerTimer } = require('../services/controller-timer');
+// The locked write found nothing left to save (the only fields were a rejected sprinkler timer).
+const NOTHING_SAVED = Symbol('nothing saved');
 
 const prefsSchema = Joi.object(PREFS_FIELD_SCHEMAS).unknown(false);
 
@@ -153,10 +159,16 @@ router.get('/pet-name-ask', async (req, res) => {
 
 router.get('/preferences', async (req, res, next) => {
   try {
-    const [prefs, hasLawnCare] = await Promise.all([
+    const [prefs, hasLawnCare, hasLawnService] = await Promise.all([
       db('property_preferences').where({ customer_id: req.customerId }).first(),
       customerQualifiesForLawnInches(req.customer).catch((err) => {
         logger.warn(`[property] lawn evidence lookup failed for ${req.customerId}: ${err.message}`);
+        return false;
+      }),
+      // The sprinkler timer card is a lawn surface, so it follows the Lawn Health card's rule (owner ruling 2026-08-28:
+      // on lawn care itself; a tier or a turf type on file is not), not the wider Weekly Inches one above.
+      hasCustomerLawnCare(req.customerId).catch((err) => {
+        logger.warn(`[property] lawn care lookup failed for ${req.customerId}: ${err.message}`);
         return false;
       }),
     ]);
@@ -171,6 +183,7 @@ router.get('/preferences', async (req, res, next) => {
           preferredDay: 'no_preference', preferredTime: 'no_preference', contactPreference: 'text',
           blackoutStart: null, blackoutEnd: null,
           irrigationSystem: true, irrigationControllerLocation: '', irrigationZones: null,
+          irrigationControllerBrand: null, irrigationControllerModel: null, irrigationControllerApp: null,
           irrigationInchesPerWeek: null, irrigationRunMinutes: null,
           irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: [],
           rainSensor: false, irrigationWaterSource: null, irrigationIssues: '',
@@ -183,6 +196,7 @@ router.get('/preferences', async (req, res, next) => {
           updatedAt: null,
         },
         hasLawnCare,
+        hasLawnService,
         irrigationSuppressed: false,
         ...awayWatchPayload(req),
       });
@@ -213,7 +227,7 @@ router.get('/preferences', async (req, res, next) => {
     const irrigationSuppressed = fields.irrigation_system === false;
     camelFields.irrigationSystem = true;
 
-    res.json({ preferences: camelFields, hasLawnCare, irrigationSuppressed, ...awayWatchPayload(req) });
+    res.json({ preferences: camelFields, hasLawnCare, hasLawnService, irrigationSuppressed, ...awayWatchPayload(req) });
   } catch (err) {
     next(err);
   }
@@ -289,10 +303,7 @@ router.put('/preferences', async (req, res, next) => {
     // serialization orders the writes but says nothing about when the form
     // was rendered. The fields themselves still save; only the ledger entry
     // is withheld (fail closed — the customer re-saves after reloading).
-    const stampMs = (v) => (v ? new Date(v).getTime() : null);
-    const bodyRaw = req.body || {};
-    const hasRenderStamp = 'confirmed_as_of' in bodyRaw || 'confirmedAsOf' in bodyRaw;
-    const renderedAgainstMs = stampMs(bodyRaw.confirmed_as_of ?? bodyRaw.confirmedAsOf ?? null);
+    const renderStamp = prefsRenderStamp(req.body);
 
     // The read-then-upsert holds the customer-scoped preference advisory
     // lock (`property-preferences:<customerId>`): a collective series move
@@ -311,8 +322,12 @@ router.put('/preferences', async (req, res, next) => {
       // Rendered against the current home? No move on record always passes;
       // after a move the request must carry the matching stamp (an absent
       // token — an old bundle — fails closed, gh-r43).
-      const requestFresh = stampMs(current?.irrigation_home_changed_at) == null
-        || (hasRenderStamp && renderedAgainstMs === stampMs(current.irrigation_home_changed_at));
+      const requestFresh = renderedAgainstCurrentHome(current, renderStamp);
+      // The sprinkler timer on file is one record about one home: it saves whole, only from a page rendered against
+      // the current home (a move clears it under this lock), and only over the timer that page showed. A rejected
+      // timer leaves `updates` without it.
+      rejected.push(...settleControllerTimer(updates, { fresh: requestFresh, stored: current, seen: controllerTimerSeen(req.body) }));
+      if (Object.keys(updates).length === 0) return NOTHING_SAVED;
       // The confirmation union is ONE atomic statement over the row's
       // CURRENT value — an unlocked pre-move read could write a full pre-move
       // set back over the fan-out's reset when an autosave overlaps an
@@ -339,6 +354,10 @@ router.put('/preferences', async (req, res, next) => {
       }
       return current;
     });
+
+    if (existing === NOTHING_SAVED) {
+      return res.status(400).json({ error: [...new Set(rejected.map((r) => r.message))].join('; '), rejected });
+    }
 
     // Return the full updated record
     const prefs = await db('property_preferences')

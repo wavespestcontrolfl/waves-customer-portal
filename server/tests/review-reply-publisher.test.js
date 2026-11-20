@@ -18,7 +18,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/google-business', () => mockGbp);
 jest.mock('../services/social-content-studio', () => ({ publishWithReviewLivenessLock: (...a) => mockLock(...a) }));
 const mockNotify = jest.fn(async () => ({}));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a), safeErrorSummary: (e) => (e && (e.code || e.name)) || 'error' }));
 const mockAccountFacts = jest.fn(async () => null);
 jest.mock('../services/review-reply/grounding', () => ({
   loadAccountFacts: (...a) => mockAccountFacts(...a),
@@ -59,7 +59,7 @@ jest.mock('../models/db', () => {
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       async first() { return state.rows.filter((r) => filters.every((f) => f(r)))[0] || null; },
       async update(patch) {
-        if (state.failNextUpdate) { state.failNextUpdate = false; throw new Error('connection reset'); }
+        if (state.failNextUpdate) { state.failNextUpdate = false; throw Object.assign(new Error(`update "google_reviews" set "review_reply" = 'Hi Dana W.' - connection reset`), { code: 'ECONNRESET' }); }
         const hits = state.rows.filter((r) => filters.every((f) => f(r)));
         hits.forEach((r) => Object.assign(r, patch));
         return hits.length;
@@ -103,6 +103,42 @@ describe('publishReviewReply', () => {
     expect(state.rows[0].review_reply).toBe('Thanks Dana.');
     expect(state.activity[0].action).toBe('review_replied');
     expect(JSON.parse(state.activity[0].metadata).source).toBe('ib');
+  });
+
+  test('owner 2026-11-19: a reply that says "our app" (the owner\'s never list) is refused before anything is written, on every path', async () => {
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad our app helps.', actor: { type: 'admin' }, allowOverwrite: true }))
+      .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422, message: expect.stringContaining('says "our app"') });
+    // The runner and the Intelligence Bar post agent text: the strict rule.
+    for (const actor of [{ type: 'ib' }, { type: 'auto' }]) {
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad our app helps.', actor, allowOverwrite: actor.type !== 'auto' }))
+        .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422, message: expect.stringContaining('came from an AI draft and says "app"') });
+    }
+    expect(mockLock).not.toHaveBeenCalled();
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(state.activity).toEqual([]);
+    // The name posts, and so do other uses of the word in a person's reply: a word test cannot tell the App Store from a verb.
+    for (const text of ['Thanks Dana. Glad the Waves app helps.', 'Thanks Dana. Did the Waves app store your service notes?', 'Thanks Dana. Get the Waves app on the App Store.']) {
+      state.rows[0].review_reply = null;
+      const r = await publishReviewReply({ reviewId: 'rev-1', text, actor: { type: 'admin' }, allowOverwrite: true });
+      expect(r.googlePosted).toBe(true);
+      expect(state.rows[0].review_reply).toBe(text);
+    }
+  });
+
+  test('owner 2026-11-19: a post that started from an AI or Agent Ops draft meets the strict app-name rule; a person\'s own words meet the never list', async () => {
+    const { asDraft } = require('../services/review-reply/draft-prefix');
+    const machine = 'Thanks Dana. Glad our customer app helps.';
+    const refused = { code: CODES.APP_NAME, status: 422, message: expect.stringContaining('came from an AI draft and says "app"') };
+    // The caller says the post started from an AI or Agent Ops draft (Use Draft, AI Reply, a restored agent draft), edited or not.
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true, fromDraft: true })).rejects.toMatchObject(refused);
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    // No row state is read to guess: a person's own reply, typed while an Agent Ops draft stands, meets the never list only.
+    Object.assign(state.rows[0], { auto_reply_draft: null, auto_reply_version: 'agent_ops', review_reply: asDraft('Hi Dana, thank you for the kind review.') });
+    const own = 'Thanks Dana. Get the Waves app on the App Store.';
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: own, actor: { type: 'admin' }, allowOverwrite: true });
+    expect(r.googlePosted).toBe(true);
+    expect(state.rows[0].review_reply).toBe(own);
   });
 
   test('P0: a human reply that lands between the pre-check and the publish claim aborts inside the claim', async () => {
@@ -481,7 +517,10 @@ describe('publishReviewReply', () => {
     state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: draft };
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: draft }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     state.failNextUpdate = true;
-    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.RECONCILE_FAILED, status: 503 });
+    const err = await publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: CODES.RECONCILE_FAILED, status: 503, message: 'Google shows an owner reply but recording it failed: ECONNRESET' });
+    // The database error quoted the reply and the reviewer's name: only its code reaches the bell, the row and the log.
+    expect(err.message).not.toMatch(/Dana|update/);
     // The reconciliation park is intact for the next attempt.
     expect(state.rows[0]).toMatchObject({ review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
@@ -615,21 +654,152 @@ describe('publishReviewReply', () => {
     // codex r75: the manual attempt's exact text + a manual version ride the
     // park, so the clearing sync hands it back to a person, not the auto lane.
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana.', auto_reply_version: 'human', auto_reply_mode: null });
+    // Its own grounding: the review it was written for; a person's own words
+    // carry no account facts.
+    const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toEqual({ fingerprint: reviewFingerprint(state.rows[0]), accountFingerprint: null });
   });
 
-  test('a non-overwriting PUT timeout on a never-queued (NULL state) row still records google_uncertain', async () => {
+  test('owner 2026-11-19: a timed-out post that started from an AI draft keeps that origin (version agent_ops) for its restored [DRAFT]', async () => {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
-    state.rows[0].auto_reply_status = null;
+    // The editor posts over the pipeline's [DRAFT], from a fresh AI draft
+    // whose grounding token carried other account facts than the row's
+    // older snapshot.
+    Object.assign(state.rows[0], { auto_reply_status: 'drafted', auto_reply_reason: null, auto_reply_draft: 'Hi Dana, pipeline words.', review_reply: '[DRAFT] Hi Dana, pipeline words.', reply_updated_at: null, auto_reply_grounding: JSON.stringify({ fingerprint: 'old-review', accountFingerprint: 'acct-old' }) });
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
     mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
     mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
-    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'ib' } });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'admin' }, allowOverwrite: true, fromDraft: true, expectedAccountFingerprint: 'acct-ai-draft' });
     const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
     await jest.advanceTimersByTimeAsync(31000);
     await assertion;
     jest.useRealTimers();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null });
+    // The grounding of the text that timed out, never the older snapshot; the
+    // pipeline's [DRAFT] it replaced leaves the slot.
+    const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toEqual({ fingerprint: reviewFingerprint(state.rows[0]), accountFingerprint: 'acct-ai-draft' });
+    expect(state.rows[0]).toMatchObject({ review_reply: null, reply_updated_at: null });
+  });
+
+  test('an editor timeout compares the slot its claim read: a runner draft stored before the claim gives way to the attempt', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => {
+      // A runner stores its draft after the publisher's first read, before the
+      // claim (a new row object: the first read keeps what it saw).
+      state.rows[0] = { ...state.rows[0], auto_reply_status: 'drafted', auto_reply_draft: 'Runner words.', review_reply: '[DRAFT] Runner words.' };
+      out.result = await fn();
+      return out;
+    });
+    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana, the owner here.', actor: { type: 'admin' }, allowOverwrite: true });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana, the owner here.', auto_reply_version: 'human', review_reply: null });
+  });
+
+  // An Intelligence Bar post whose PUT times out (non-overwrite path).
+  async function ibTimeout({ duringPut } = {}) {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(() => { if (duringPut) duringPut(); return new Promise(() => {}); });
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'ib' }, expectedAccountFingerprint: 'acct-fp-1' });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(out.abandonClaim).toHaveBeenCalled();
+  }
+
+  test('an Intelligence Bar post that times out records its exact text, version agent_ops and its own grounding on a never-queued row', async () => {
+    state.rows[0].auto_reply_status = null;
+    // An automatic runner had claimed the row mid-draft.
+    state.rows[0].auto_reply_claimed_until = '2099-01-01T00:00:00.000Z';
+    const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+    const fingerprint = reviewFingerprint(state.rows[0]);
+    let claimAtPut;
+    await ibTimeout({ duringPut: () => { claimAtPut = state.rows[0].auto_reply_claimed_until; } });
+    // The runner's claim was already gone when the PUT went out: it cannot
+    // store over the row while Google's PUT is in flight.
+    expect(claimAtPut).toBeNull();
+    // The clearing sync hands this text back to a person as a [DRAFT] (never
+    // the automatic lane), or marks it posted once Google shows it.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null });
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toEqual({ fingerprint, accountFingerprint: 'acct-fp-1' });
+    // The person's attempt takes the row from that runner, as a posted manual reply does.
+    expect(state.rows[0].auto_reply_claimed_until).toBeNull();
+  });
+
+  test('an Intelligence Bar timeout on a skipped review with no reply records the attempt: the status the claim read, not the automatic lane\'s', async () => {
+    Object.assign(state.rows[0], { auto_reply_status: 'skipped', auto_reply_reason: 'low_rating' });
+    await ibTimeout();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops' });
+  });
+
+  test('an Intelligence Bar timeout on a retracted review records the attempt without the retracted reply\'s publication time', async () => {
+    Object.assign(state.rows[0], { auto_reply_status: 'retracted', auto_reply_reason: 'retracted_by_admin', auto_reply_published_at: '2026-11-01T15:00:00.000Z' });
+    await ibTimeout();
+    // A landed reply is then dated by Google's time, never the old reply's.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_published_at: null });
+  });
+
+  test('an Intelligence Bar timeout over the pipeline\'s [DRAFT] clears it: until the next sync the row shows the attempt, never the old draft as a person\'s', async () => {
+    Object.assign(state.rows[0], { auto_reply_status: 'drafted', auto_reply_reason: null, auto_reply_draft: 'Hi Dana, pipeline words.', review_reply: '[DRAFT] Hi Dana, pipeline words.', reply_updated_at: null });
+    await ibTimeout();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', review_reply: null, reply_updated_at: null });
+  });
+
+  test('an Intelligence Bar post refuses before the PUT when a runner stored a draft over the row during the live read', async () => {
+    state.rows[0].auto_reply_status = null;
+    state.rows[0].auto_reply_claimed_until = '2099-01-01T00:00:00.000Z';
+    mockGbp.getReview.mockImplementationOnce(async () => {
+      Object.assign(state.rows[0], { auto_reply_status: 'drafted', auto_reply_draft: 'Runner words.', review_reply: '[DRAFT] Runner words.' });
+      return { reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } };
+    });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'ib' } }))
+      .rejects.toMatchObject({ code: CODES.STALE, status: 409 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'drafted', review_reply: '[DRAFT] Runner words.' });
+  });
+
+  test('a database error from the pre-post fence posts nothing, and the reply text and the reviewer name stay out of the log and the answer', async () => {
+    const logger = require('../services/logger');
+    state.rows[0].auto_reply_status = null;
+    // The mock's error quotes the bound reply text and the reviewer's name, as a Postgres error can.
+    state.failNextUpdate = true;
+    const err = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'ib' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: CODES.LOCAL_WRITE_FAILED, status: 503 });
+    expect(err.message).toMatch(/ECONNRESET.*nothing was sent to Google/);
+    expect(err.message).not.toMatch(/Dana|update/);
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    const logged = [...logger.warn.mock.calls, ...logger.error.mock.calls].map((c) => c.join(' ')).join('\n');
+    expect(logged).toMatch(/pre-post fence failed for rev-1: ECONNRESET/);
+    expect(logged).not.toMatch(/Dana|update/);
+  });
+
+  test('a failed park write after an Intelligence Bar timeout logs only the database error code', async () => {
+    const logger = require('../services/logger');
+    state.rows[0].auto_reply_status = null;
+    // The park write fails; the mock's error quotes the bound text and the reviewer's name.
+    await ibTimeout({ duringPut: () => { state.failNextUpdate = true; } });
+    const logged = logger.error.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toMatch(/google_uncertain park failed for rev-1: ECONNRESET/);
+    expect(logged).not.toMatch(/Dana|update/);
+  });
+
+  test('an Intelligence Bar timeout records nothing when the row changed during the PUT (the change wins)', async () => {
+    state.rows[0].auto_reply_status = null;
+    await ibTimeout({ duringPut: () => Object.assign(state.rows[0], { auto_reply_status: 'skipped', auto_reply_reason: 'dismissed' }) });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'dismissed' });
+    expect(state.rows[0].auto_reply_draft).toBeUndefined();
+    expect(state.rows[0].auto_reply_grounding).toBeUndefined();
   });
 
   test('a live GET that never completes → GOOGLE_FAILED (retryable), no PUT attempted', async () => {
@@ -679,6 +849,44 @@ describe('publishReviewReply', () => {
     mockGbp.getAllLocationReviews.mockResolvedValueOnce([]);
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
       .rejects.toMatchObject({ code: CODES.NO_RESOURCE });
+  });
+
+  test('a failed read of Google\'s review list is a Google failure with its cause, not NO_RESOURCE: the runner retries it on the long ladder', async () => {
+    state.rows[0].gbp_review_name = null;
+    // Google's response text can quote a reviewer: the message keeps the status only.
+    mockGbp.getAllLocationReviews.mockRejectedValueOnce(Object.assign(new Error('GBP getAllLocationReviews 503: {"reviews":[{"reviewer":{"displayName":"Dana W."},"comment":"Great"}]}'), { googleStatus: 503 }));
+    const err = await publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: CODES.GOOGLE_FAILED, status: 502, identityLookup: true });
+    expect(err.message).toBe("Could not read Google's review list to find this review (HTTP 503)");
+    expect(err.message).not.toMatch(/Dana|Great|displayName/);
+    expect(err.cause).toMatchObject({ googleStatus: 503 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBeNull();
+  });
+
+  test('a matched review whose GBP name cannot be saved posts nothing: no match, retried (Retract finds the reply by that name)', async () => {
+    state.rows[0].gbp_review_name = null;
+    state.rows[0].review_created_at = '2026-08-20T10:00:00Z';
+    mockGbp.getAllLocationReviews.mockResolvedValueOnce([
+      { name: 'accounts/1/locations/2/reviews/77', reviewer: { displayName: 'Dana W.' }, createTime: '2026-08-20T11:00:00Z', starRating: 'FIVE', comment: 'Great' },
+    ]);
+    state.failNextUpdate = true;
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.NO_RESOURCE });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].gbp_review_name).toBeNull();
+  });
+
+  test('a GBP name the sync attaches while the lookup runs wins: the match never overwrites it, and the reply goes to the synced name', async () => {
+    state.rows[0].gbp_review_name = null;
+    state.rows[0].review_created_at = '2026-08-20T10:00:00Z';
+    mockGbp.getAllLocationReviews.mockImplementationOnce(async () => {
+      state.rows[0].gbp_review_name = 'accounts/1/locations/2/reviews/synced'; // the hourly sync lands mid-lookup
+      return [{ name: 'accounts/1/locations/2/reviews/77', reviewer: { displayName: 'Dana W.' }, createTime: '2026-08-20T11:00:00Z', starRating: 'FIVE', comment: 'Great' }];
+    });
+    await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } });
+    expect(state.rows[0].gbp_review_name).toBe('accounts/1/locations/2/reviews/synced');
+    expect(mockGbp.replyToReview.mock.calls[0][0]).toBe('accounts/1/locations/2/reviews/synced');
   });
 
   test('location without credentials → NOT_CONFIGURED', async () => {

@@ -52,6 +52,18 @@ const MAX_ATTEMPTS = 3;
 const MANUAL_VERSIONS = new Set(['human', 'agent_ops']);
 const CLAIM_MS = 10 * 60 * 1000;
 const RETRY_BACKOFF_MIN = 10;
+// A Google refusal (GBP 404/5xx) is usually temporary: two parked reviews in
+// 2026-09/11 posted fine by hand once Google recovered. Retry it for about a
+// day (6 retries, 7 attempts) on a widening ladder before a person is rung.
+const GOOGLE_RETRY_DELAYS_MIN = [10, 30, 60, 180, 360, 720];
+// Statuses where Google may still say yes later. 404 counts: a new review's single-review read answered
+// 404 for a while (2026-09, 2026-11) while the list endpoint already returned it. A permanent refusal
+// (400, 401, 403, other 4xx) and a failure with no status (a network error, missing credentials) keep
+// the short MAX_ATTEMPTS retry, as before.
+const GOOGLE_TEMPORARY_STATUSES = new Set([404, 408, 429]);
+const googleMayAcceptLater = (cause) => cause?.timedOut === true || GOOGLE_TEMPORARY_STATUSES.has(cause?.googleStatus) || cause?.googleStatus >= 500;
+const PUBLISH_RETRYABLE_CODES = new Set([CODES.LOCK_BUSY, CODES.GOOGLE_FAILED, CODES.NO_RESOURCE, CODES.RECONCILE_FAILED, 'account_read_failed', 'unexpected']);
+const LAST_RETRY_MARGIN_MS = 60 * 60 * 1000;
 const IDENTITY_BACKOFF_MIN = 60;
 // Deploy-forward is a property of the REVIEW: nothing older than this at
 // first sight ever enters the lane, whichever insert path (GBP, Places, a
@@ -284,7 +296,10 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
   for (const c of (candidates || [])) {
     const fields = autoReplyInsertFields({ ...c, owner_reply: c.review_reply }, { now, cfg });
     if (!Object.keys(fields).length) continue;
-    const updated = await db('google_reviews').where({ id: c.id }).whereNull('auto_reply_status').update(fields);
+    const updated = await db('google_reviews').where({ id: c.id }).whereNull('auto_reply_status')
+      // Never under an in-flight publish (see claimDueRows).
+      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [now.toISOString()])
+      .update(fields);
     n += Array.isArray(updated) ? updated.length : (updated || 0);
   }
   if (n) logger.info(`[review-auto-reply] catch-up queued ${n} review(s) synced while the pipeline was off / out of scope`);
@@ -309,6 +324,8 @@ async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
     .whereIn('auto_reply_status', [STATUS.QUEUED, STATUS.FAILED])
     .where('review_created_at', '<', cutoff)
     .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()])
+    // Never under an in-flight publish (see claimDueRows).
+    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [now.toISOString()])
     .update({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: null });
   const count = Array.isArray(n) ? n.length : (n || 0);
   if (count) logger.info(`[review-auto-reply] ${count} queued review(s) older than ${cfg.maxQueueAgeHours}h left the lane unposted (queue_expired)`);
@@ -328,7 +345,14 @@ async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = n
   // narrowing REVIEW_AUTO_REPLY_LOCATIONS immediately stops already-queued
   // rows outside it. Post-now (force) is an explicit admin action and ignores it.
   const locClause = !force && cfg.locations.length ? 'AND lower(location_id) = ANY(?)' : '';
-  const params = force ? [token, force, nowIso, limit] : [token, nowIso, cutoff, ...(locClause ? [cfg.locations] : []), nowIso, limit];
+  // A live publish claim means a publish of this review is in flight (a
+  // person's post, Post now, a testimonial). A claim taken now could store a
+  // draft or a retry under that PUT, and a timed-out manual post's record
+  // would then miss the row it read (codex r3 on #8127). The publisher
+  // clears the runner's claim before a manual PUT; this keeps a new one off
+  // until the publish ends. Post now gets the publisher's own answer
+  // (LOCK_BUSY), before any drafting.
+  const params = force ? [token, force, nowIso, nowIso, limit] : [token, nowIso, cutoff, ...(locClause ? [cfg.locations] : []), nowIso, nowIso, limit];
   const res = await db.raw(
     `UPDATE google_reviews SET auto_reply_claimed_until = ?
      WHERE id IN (
@@ -339,6 +363,7 @@ async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = n
          ${forceClause}
          ${locClause}
          AND (auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)
+         AND (publish_claimed_until IS NULL OR publish_claimed_until < ?)
        ORDER BY auto_reply_due_at ASC NULLS LAST
        LIMIT ?
        FOR UPDATE SKIP LOCKED
@@ -933,22 +958,37 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     }
     if (transientStale) code = 'account_read_failed';
     const attempts = (merged.auto_reply_attempts || 0) + 1;
-    // Every transient class (lock contention, Google failure, unexpected)
-    // shares ONE retry ceiling; after it the row parks for a person.
+    // Every transient class (lock contention, unexpected) shares ONE retry
+    // ceiling (MAX_ATTEMPTS); a Google failure that Google may still accept
+    // later follows its own longer ladder. After the ceiling the row parks
+    // for a person.
     // NO_RESOURCE is usually a Places-fallback row whose GBP identity the
     // next healthy sync will attach — retry on a longer backoff (and the
     // sync re-queues a parked row the moment it attaches the name).
     const backoffMin = code === CODES.NO_RESOURCE ? IDENTITY_BACKOFF_MIN : RETRY_BACKOFF_MIN;
+    // No delay left (undefined → NaN) parks. So does a retry due in the last
+    // hour of the queue-age window (the last quarter of a window shorter
+    // than 4 h): expireOverAgeQueued clears an over-age row with no bell
+    // (deploy-forward, codex r74), so the 5-minute cron must claim the retry
+    // inside the window. The margin covers a busy batch and missed ticks; a
+    // longer outage clears the row with every other pending row, as before.
+    const delayMin = code === CODES.GOOGLE_FAILED && googleMayAcceptLater(err.cause) ? GOOGLE_RETRY_DELAYS_MIN[attempts - 1] : (attempts < MAX_ATTEMPTS ? backoffMin * attempts : undefined);
+    const dueMs = Date.now() + delayMin * 60000;
+    const windowMs = cfg.maxQueueAgeHours * 3600000;
+    const lastRetryMs = new Date(merged.review_created_at).getTime() + windowMs - Math.min(LAST_RETRY_MARGIN_MS, windowMs / 4);
     // RECONCILE_FAILED (codex r74): Google shows an owner reply but the
     // local record of it failed — transient, retry; never "already replied".
-    if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === CODES.NO_RESOURCE || code === CODES.RECONCILE_FAILED || code === 'account_read_failed' || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
-      const due = new Date(Date.now() + backoffMin * attempts * 60000).toISOString();
+    if (PUBLISH_RETRYABLE_CODES.has(code) && dueMs < lastRetryMs) {
+      const due = new Date(dueMs).toISOString();
       await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: (draft.reused && merged.auto_reply_drafted_at) || new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
       logger.warn(`[review-auto-reply] publish deferred for ${merged.id}: ${code} (${err.message})`);
       return { outcome: 'retry', reason: code };
     }
+    // A failed read of Google's review list while matching the review
+    // (identityLookup) parks as an identity park too: the sync re-queues it
+    // once it attaches the review's GBP name (requeueFieldsOnIdentity).
     const parkReason = code === CODES.NOT_CONFIGURED ? 'gbp_not_configured'
-      : code === CODES.NO_RESOURCE ? 'no_gbp_resource'
+      : code === CODES.NO_RESOURCE || err?.identityLookup === true ? 'no_gbp_resource'
         : code === CODES.LOCK_BUSY ? 'lock_busy'
           : code === 'account_read_failed' ? 'account_read_failed'
             : 'google_failed';
@@ -1084,12 +1124,41 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
     && isDraftReply(row.review_reply) && stripDraftPrefix(row.review_reply).trim() === String(row.auto_reply_draft).trim()
     ? row.auto_reply_draft : null;
   const hadStoredDraft = !!row.auto_reply_draft && DRAFT_HOLDING_STATUSES.includes(row.auto_reply_status);
+  // A machine-authored attempt (from an AI or Agent Ops draft) that the sync
+  // restored as a [DRAFT] after an uncertain post: published as written, like
+  // a person's draft, but it keeps its agent origin (version agent_ops)
+  // through the post and another timeout (owner 2026-11-19, app name).
+  const restoredAgentDraft = !!humanDraft && row.auto_reply_version === 'agent_ops';
+  const manualVersion = restoredAgentDraft ? 'agent_ops' : 'human';
+  // A manual attempt (editor or Intelligence Bar; version human or
+  // agent_ops) whose PUT timed out: restored by the sync as a [DRAFT], or
+  // still in its reconciliation park with the text in auto_reply_draft.
+  // Post now re-attempts that exact text as written (the publisher's live
+  // read promotes it if it landed — codex r69 / r76), only while the
+  // grounding its attempt recorded still holds.
+  const manualOnRow = MANUAL_VERSIONS.has(row.auto_reply_version || '');
+  const restoredDraft = !!humanDraft && manualOnRow;
+  const parkedAttempt = !humanDraft && manualOnRow && row.auto_reply_draft
+    && row.auto_reply_status === STATUS.PARKED && RECONCILE_REASONS.has(row.auto_reply_reason)
+    ? String(row.auto_reply_draft).trim() : null;
+  // The grounding that describes the text Post now would publish: a stored
+  // draft's snapshot, or the one a restored attempt recorded. Any other
+  // [DRAFT] a person left has none.
+  const textGrounding = !humanDraft || restoredDraft ? storedGrounding : null;
   if (humanDraft && row.auto_reply_reason === HUMAN_DRAFT_STALE) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.STALE, 'This draft was written before the review changed — read the current review and edit the draft first.', { status: 409 });
   }
+  // A manual attempt is published as written only while the review and the
+  // account facts its grounding records still hold.
+  const restoredMoved = restoredDraft || parkedAttempt ? await manualAttemptMoved(row, accountFpNow, { requireReview: !!parkedAttempt }) : null;
+  if (restoredMoved) {
+    await releaseClaim(row);
+    throw new ReviewReplyError(CODES.STALE, `This draft cannot be posted as written: ${restoredMoved}.`, { status: 409 });
+  }
   let existing = humanDraft
     || agentDraft
+    || parkedAttempt
     || (row.auto_reply_draft
       && DRAFT_HOLDING_STATUSES.includes(row.auto_reply_status)
       && storedFp === reviewFingerprint(row)
@@ -1099,8 +1168,9 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   // another review may have posted the same opening since, or the verifier
   // may have tightened. Re-verify it against the current state (same rule as
   // the retry lane) and draft fresh when it no longer passes. A human
-  // "[DRAFT]" is the admin's own text and is published as written.
-  if (existing && !humanDraft) {
+  // "[DRAFT]" is the admin's own text and is published as written, as is a
+  // parked manual attempt (a person confirmed that exact text).
+  if (existing && !humanDraft && !parkedAttempt) {
     try {
       const groundingNow = await buildReplyGrounding(row);
       const recentNow = await loadRecentPostedReplies(row.location_id);
@@ -1138,22 +1208,28 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
           // human draft too), so reconciliation and Retract see it.
           auto_reply_draft: existing,
           // A human draft carries HUMAN provenance — never the earlier model
-          // version / mode / grounding snapshot (codex r40).
+          // version / mode / grounding snapshot (codex r40). A restored
+          // attempt keeps the grounding its attempt recorded.
           ...(humanDraft
-            ? { auto_reply_version: 'human', auto_reply_mode: null, auto_reply_grounding: null, auto_reply_drafted_at: publishedAt }
+            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: restoredDraft ? JSON.stringify(textGrounding || null) : null, auto_reply_drafted_at: publishedAt }
             : { auto_reply_drafted_at: row.auto_reply_drafted_at || publishedAt, auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
           auto_reply_published_at: publishedAt,
           auto_reply_error: null,
           auto_reply_claimed_until: null,
         },
-        auditMeta: humanDraft ? { version: 'human', mode: null, intent: 'post_now' } : { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
+        auditMeta: humanDraft ? { version: manualVersion, mode: null, intent: 'post_now' } : { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
+        // A pipeline or Agent Ops draft, or a manual attempt that started
+        // from one (version agent_ops, parked or restored), is agent text:
+        // the publisher's strict app-name rule (owner 2026-11-19). A
+        // person's own words, parked or restored, keep the person's rule.
+        fromDraft: restoredDraft || parkedAttempt ? row.auto_reply_version === 'agent_ops' : !humanDraft,
         // Post-now publishes the draft the admin is looking at — a human
         // draft on the row is the payload, not an intervention.
-        guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraft ? null : storedGrounding?.accountFingerprint || null }),
+        guard: claimGuard(row, { publishingText: existing, accountFingerprint: textGrounding?.accountFingerprint || null }),
         // …and the same fingerprint for the publisher's transactional
         // post-PUT check (codex r42): facts that change while the PUT is in
         // flight park the reply instead of recording it cleanly posted.
-        expectedAccountFingerprint: humanDraft ? undefined : (storedGrounding?.accountFingerprint || undefined),
+        expectedAccountFingerprint: textGrounding?.accountFingerprint || undefined,
         requireGoogle: true,
       });
       if (publishedExisting?.editedDuringPut) return { outcome: 'parked', reason: 'review_edited_after_post', mode: row.auto_reply_mode, live: true };
@@ -1177,7 +1253,12 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         await db('google_reviews').where({ id: reviewId }).update({
           auto_reply_draft: existing,
           ...(humanDraft
-            ? { auto_reply_version: 'human', auto_reply_mode: null, auto_reply_grounding: null, auto_reply_drafted_at: new Date().toISOString() }
+            // The review this text was attempted for: a restored attempt's
+            // recorded grounding, else the review as this claim read it (the
+            // claim guard refused any change before the PUT). A person's
+            // words carry no account facts. The next restore or Post now
+            // checks it (manualAttemptMoved).
+            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: JSON.stringify(restoredDraft && textGrounding ? textGrounding : { fingerprint: reviewFingerprint(row), accountFingerprint: null }), auto_reply_drafted_at: new Date().toISOString() }
             : { auto_reply_version: row.auto_reply_version || null, auto_reply_mode: row.auto_reply_mode || null, auto_reply_drafted_at: row.auto_reply_drafted_at || new Date().toISOString(), auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
         }).catch(() => {});
         throw err;
@@ -1338,9 +1419,18 @@ async function applyReviewEditFields(reviewId, existing, normalized, { conn = db
 async function applyRequeueOnIdentity(reviewId, existing, normalized, { conn = db } = {}) {
   const fields = requeueFieldsOnIdentity(existing, normalized);
   if (!Object.keys(fields).length) return 0;
-  const n = await conn('google_reviews')
-    .where({ id: reviewId, auto_reply_status: existing.auto_reply_status, auto_reply_reason: existing.auto_reply_reason })
-    .update(fields);
+  const q = conn('google_reviews')
+    .where({ id: reviewId, auto_reply_status: existing.auto_reply_status, auto_reply_reason: existing.auto_reply_reason });
+  // A row parked gbp_not_configured can take a person's post once the
+  // location's credentials work, so its requeue waits for a live publish
+  // claim (see claimDueRows); every authoritative sync checks it again. The
+  // one-time requeues (identity attached, review reinstated) cannot wait:
+  // this sync saves the GBP name or clears missing_since in the same pass,
+  // so a deferred requeue would leave the row parked for good. Neither runs
+  // under a manual PUT: the publisher saves the GBP name before its PUT and
+  // refuses a missing review.
+  if (fields.auto_reply_reason === 'gbp_connected') q.whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()]);
+  const n = await q.update(fields);
   return Array.isArray(n) ? n.length : n;
 }
 
@@ -1526,6 +1616,34 @@ function dismissCancelFields(conn = db) {
 }
 
 /**
+ * Why a manual attempt whose PUT timed out (version human or agent_ops;
+ * still parked, or restored by the sync as a [DRAFT]) may not be published
+ * as written: the review or the account facts moved since the grounding on
+ * its row (the publisher records the attempt's own when its PUT times out;
+ * a person's own words carry no account facts). The sync keeps a
+ * google_uncertain park through a review edit (KEEP_ON_EDIT_REASONS), so
+ * such a draft is never marked stale for one. Null when it may be
+ * published: no grounding recorded, or both fingerprints still match. Pass
+ * accountFpNow when the caller already read the account facts.
+ * requireReview (a still-parked attempt sent again unchanged, by Post now
+ * or from the editor): an attempt with no recorded review (parked before
+ * the publisher recorded one, or a malformed record) is never sent again as
+ * written; the park stays for the sync's restore or an edited reply.
+ */
+async function manualAttemptMoved(row, accountFpNow, { requireReview = false } = {}) {
+  const g = row.auto_reply_grounding;
+  const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
+  if (requireReview && !snap?.fingerprint) return 'this earlier attempt has no record of the review it was written for — read the current review and edit the reply first';
+  if (snap?.fingerprint && snap.fingerprint !== reviewFingerprint(row)) return 'the review or its customer link changed since this draft was written — read the current review and edit the draft first';
+  if (!snap?.accountFingerprint) return null;
+  let current = accountFpNow;
+  if (current === undefined) {
+    try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(row))); } catch { return 'account facts could not be re-read'; }
+  }
+  return current === snap.accountFingerprint ? null : 'the customer facts changed since this draft was written — read the current review and edit the draft first';
+}
+
+/**
  * Guard for the HUMAN reply route: when the text being posted is the
  * pipeline's own stored draft ("Use Draft" on the Reviews page), it was
  * written against a review + account-facts snapshot; a re-attribution, a
@@ -1567,6 +1685,23 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
     const human = humanDraftOn(fresh);
     if (human && submitted === human && fresh.auto_reply_reason === HUMAN_DRAFT_STALE) {
       return 'this draft was written before the review changed — read the current review and edit the draft first';
+    }
+    // A restored manual attempt submitted verbatim (Use Draft): the
+    // grounding rule Post now applies. Edited text is the admin's own; a
+    // grounding token binds a freshly drafted text to its own facts below.
+    if (!gReview && human && submitted === human && MANUAL_VERSIONS.has(fresh.auto_reply_version || '')) {
+      const moved = await manualAttemptMoved(fresh);
+      if (moved) return moved;
+    }
+    // The same rule for a manual attempt still parked (its PUT timed out and
+    // the sync has not restored it yet, so its text is in auto_reply_draft
+    // and the slot is empty) submitted verbatim from the editor. Never the
+    // automatic-draft snapshot check below: a person's own words record no
+    // account facts, so that check would refuse an unchanged review.
+    if (!gReview && !token && !human && fresh.auto_reply_draft && submitted === String(fresh.auto_reply_draft).trim()
+      && fresh.auto_reply_status === STATUS.PARKED && RECONCILE_REASONS.has(fresh.auto_reply_reason)
+      && MANUAL_VERSIONS.has(fresh.auto_reply_version || '')) {
+      return manualAttemptMoved(fresh, undefined, { requireReview: true });
     }
     if (gReview) {
       if (gReview !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was generated — reload and draft again';
@@ -1821,6 +1956,7 @@ module.exports = {
   skipAutoReply,
   dismissCancelFields,
   whereNoReconcilePark,
+  RECONCILE_REASONS,
   whereNotAutoPosted,
   manualReplyCloseFields,
   whereNoLivePublishClaim,

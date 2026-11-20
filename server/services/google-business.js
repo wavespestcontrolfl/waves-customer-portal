@@ -115,7 +115,7 @@ const MISSING_REVIEW_GRACE_MS = 48 * 60 * 60 * 1000;
 // chain — they sometimes return 2xx with an HTML body. Parsing that as JSON
 // produces an opaque SyntaxError that bubbles up to the user as "Unexpected
 // token '<'". Read as text first, only JSON.parse when the body looks like
-// JSON, and surface the raw status + a truncated body on anything else.
+// JSON, and surface the status (never the response text) on anything else.
 // A mutation whose request was sent but whose response never arrived
 // (ECONNRESET, socket hang-up, abort) may have been applied by Google.
 // Flag it so the reply publisher parks for reconciliation instead of
@@ -148,17 +148,33 @@ function abortableDelay(ms, signal) {
   });
 }
 
+// Google's status word from a JSON error body ({"error":{"status":"NOT_FOUND"}}), or ''.
+function googleErrorWord(body) {
+  try {
+    const word = JSON.parse(body)?.error?.status;
+    return typeof word === 'string' && /^[A-Z_]{2,40}$/.test(word) ? word : '';
+  } catch { return ''; }
+}
+
+// Every message thrown here names the operation, the HTTP status and Google's status word only, never
+// the response text: a review read or reply response can quote a reviewer's name, review text or a
+// reply, and callers copy the message into logs, stored errors and bells (the review-reply runner logs
+// it on every retry). JSON.parse's own message quotes the text too, so it is left out.
 async function readJsonOrThrow(res, label) {
+  if (!res.ok) {
+    // googleStatus (not status/httpStatus): the review-reply runner tells a refusal Google may still
+    // accept later (404, 429, 5xx) from a permanent one (400, 403), and an Express handler reads err.status.
+    // A body read that fails (the connection reset after the headers) keeps the status.
+    const word = googleErrorWord(await res.text().catch(() => ''));
+    throw Object.assign(new Error(`${label} ${res.status}${word ? ` ${word}` : ''}`), { googleStatus: res.status });
+  }
   const text = await res.text();
   const ct = (res.headers.get('content-type') || '').toLowerCase();
-  if (!res.ok) {
-    throw new Error(`${label} ${res.status}: ${text.slice(0, 500)}`);
-  }
   if (!ct.includes('application/json') && !text.trimStart().startsWith('{') && !text.trimStart().startsWith('[')) {
-    throw new Error(`${label} returned non-JSON response (status ${res.status}, content-type ${ct || 'unknown'}): ${text.slice(0, 500)}`);
+    throw new Error(`${label} returned non-JSON response (status ${res.status}, content-type ${ct || 'unknown'})`);
   }
   try { return JSON.parse(text); }
-  catch (e) { throw new Error(`${label} returned malformed JSON (status ${res.status}): ${e.message}`); }
+  catch { throw new Error(`${label} returned malformed JSON (status ${res.status})`); }
 }
 
 // The same-signature repeat path's digest rewrite: same row shape
@@ -486,8 +502,10 @@ class GoogleBusinessService {
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
     const res = await mutationFetch(url, { method: 'DELETE', headers, ...(signal ? { signal } : {}) });
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`GBP deleteReply ${res.status}: ${text.slice(0, 500)}`);
+      // As in readJsonOrThrow: the status and Google's status word, never the response text (the admin
+      // Retract route returns this message, and a response can quote the reply or the reviewer).
+      const word = googleErrorWord(await res.text().catch(() => ''));
+      throw Object.assign(new Error(`GBP deleteReply ${res.status}${word ? ` ${word}` : ''}`), { googleStatus: res.status });
     }
     return true;
   }
@@ -2723,8 +2741,13 @@ class GoogleBusinessService {
             });
 
             if (match && gbpRev.name) {
-              await db('google_reviews').where({ id: match.id }).update({ gbp_review_name: gbpRev.name });
-              logger.info(`[gbp] Resolved GBP resource name for ${gbpName}: ${gbpRev.name}`);
+              // Compare-and-set on the empty slot, as the publisher's match
+              // save is (review-reply/publisher.js resolveGbpReviewName): the
+              // rows were read before Google's list, so a name the publisher
+              // saved meanwhile (and may be posting to) is never replaced.
+              // Retract finds the reply by the name on the row.
+              const saved = await db('google_reviews').where({ id: match.id }).whereNull('gbp_review_name').update({ gbp_review_name: gbpRev.name });
+              if (saved) logger.info(`[gbp] Resolved GBP resource name for review ${match.id}: ${gbpRev.name}`);
             }
           }
         } catch (err) {
