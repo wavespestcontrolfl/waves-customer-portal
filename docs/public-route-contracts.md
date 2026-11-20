@@ -4459,13 +4459,10 @@ profile, re-prices no draft and records no `ai_triage` activity;
 and both accept an OPTIONAL `price_handoff` — the JSON boolean `true`, sent
 by a quiz page whose answers end on a price page and whose browser can
 carry the hand-off there (owner *build* 2026-11-19, "one visitor makes one
-lead"), together with `offline_lead_id`: the id of that form fill
-(`^[\w-]{8,64}$`), which the page makes once per fill and sends again on a
-retry or a saved replay of the same fill. Any other `price_handoff` value
-(absent, `false`, the string `"true"`, `1`), or a missing or malformed id,
-is a no-op; no other form sends the flag, and a page must leave the flag
-out of a request it saves to replay later (nobody is there to use the
-hand-off). The server's own rule must agree (`quizContinuesToPrice`,
+lead"). Any other value (absent, `false`, the string `"true"`, `1`) is a
+no-op; no other form sends it, and a page must leave it out of a request it
+saves to replay later (nobody is there to use the hand-off, and the lead
+would get no draft). The server's own rule must agree (`quizContinuesToPrice`,
 `server/services/lead-quiz.js`: a named problem, `property` `house` |
 `townhome` | `condo`, `timeline` `this_week` | `this_month` | `browsing`).
 When all hold AND this request INSERTS the `leads` row (never an attach to
@@ -4475,25 +4472,21 @@ gains `handoff: { lead_id, token, expires_in }`: an ATTACH token for that
 one lead (see `/api/public/estimator/property-lookup` below), 2 hours. That
 request creates NO `lead_webhook` draft estimate: the price page makes the
 visitor's one estimate, and `/api/public/quote/calculate` refuses its own
-draft while another open estimate sits on the phone. The hand-off is
-recorded on the lead (`lead_activities` `price_handoff`, with the form
-fill's id) and is given only when that record is written. A submission that
-asked and gets no hand-off gets the usual draft, created after the lead
-step instead of before it (the lead's own
+draft while another open estimate sits on the phone. A lead that is handed
+off says so in its activity list (`lead_activities` `price_handoff`, best
+effort). It keeps no draft when the visitor leaves the price page early, or
+never receives this response: the office has the lead, its alert and that
+line, and makes the estimate by hand (a later repeat of the form lands on
+the repeat-form reply, which makes no draft for any form). A submission
+that asked and gets no hand-off gets the usual draft, created after the
+lead step instead of before it (the lead's own
 `automation.draftEstimateAutomation` copy then stays null; the estimate row
-carries the record). A hand-off whose reply the page never processed is
-recovered by its record: when the same `offline_lead_id` arrives again and
-lands on the repeat-form reply (the customer now exists), a lead of that
-customer that carries the record, still passes the hand-off's rule
-(`applyQuizHandoffLeadPredicate`) and still holds the intake stage gets the
-form's draft then, once (the draft step's own duplicate guard). The reply
-to that repeat is unchanged and carries no `handoff`. Every other
-submission is unchanged: the draft as before, and `{ success, customerId }`
-with no `handoff`. The texts, the bell, the automation enrollment and the
-ad attribution are the same with or without a hand-off. Safe in either
-deploy order: a portal without this change ignores both keys' new meaning
-and answers with no `handoff`, and the site then shows its office-review
-ending;
+carries the record). Every other submission is unchanged: the draft as
+before, and `{ success, customerId }` with no `handoff`. The texts, the
+bell, the automation enrollment and the ad attribution are the same with or
+without a hand-off. Safe in either deploy order: a portal without this
+change ignores the key and answers with no `handoff`, and the site then
+shows its office-review ending;
 and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`

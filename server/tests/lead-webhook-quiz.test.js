@@ -10,11 +10,9 @@
  *    replaces extracted_data, and never replaced by a model-returned key),
  *    both Customer 360 notes, the unverified hold and the new-lead bell;
  *  - a quiz page that asked to continue on a price page gets an attach-only
- *    token for the lead that request inserted (quizHandoffFor), and only
- *    with the id of its form fill (normalizeSubmissionId). The route's own
- *    rules (a hand-off or the draft estimate, never both; the draft for a
- *    hand-off whose reply was lost) run on real rows in
- *    lead-quiz-handoff-postgres.test.js.
+ *    token for the lead that request inserted (quizHandoffFor). The route's
+ *    own rule (a hand-off or the draft estimate, never both) runs on real
+ *    rows in lead-quiz-handoff-postgres.test.js.
  */
 
 jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(); return db; });
@@ -29,7 +27,6 @@ const { verifyLeadAttachToken, verifyLeadPrefillToken, ATTACH_TTL_SECONDS } = re
 
 const {
   buildLeadWebhookIntake, commercialLeadFields, TRIAGE_REPLACE_EXTRACTED_SQL, triageExtractedForWrite, quizHandoffFor,
-  normalizeSubmissionId,
 } = _test;
 
 const quizBody = (extra = {}) => ({
@@ -216,15 +213,3 @@ describe('quizHandoffFor: the price page hand-off in the response', () => {
   });
 });
 
-describe('normalizeSubmissionId: the id of one form fill (offline_lead_id)', () => {
-  test('keeps the two shapes the site makes', () => {
-    expect(normalizeSubmissionId('0b8f4c1e-7a52-4f0e-9d3a-5c1e2f3a4b5c')).toBe('0b8f4c1e-7a52-4f0e-9d3a-5c1e2f3a4b5c');
-    expect(normalizeSubmissionId('mb3k9x2a-7f3k2m9q')).toBe('mb3k9x2a-7f3k2m9q');
-  });
-
-  test('anything else is no id, so the page gets no hand-off', () => {
-    for (const bad of [undefined, null, '', 'short', 'a'.repeat(65), 'has space 12345', "x' OR 1=1 --", 12345678, ['0b8f4c1e-7a52'], { id: '0b8f4c1e-7a52' }]) {
-      expect(normalizeSubmissionId(bad)).toBeNull();
-    }
-  });
-});
