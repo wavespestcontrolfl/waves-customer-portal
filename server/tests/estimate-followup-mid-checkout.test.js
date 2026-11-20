@@ -455,43 +455,68 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
   });
 });
 
-describe('the text leg asks the same final-send check as its last step before the provider', () => {
+describe('the text leg asks the same final-send check at the Twilio boundary', () => {
   const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
   const est = { id: 'est-1', status: 'viewed', customer_id: 'cust-1', customer_phone: '+19415550100', customer_email: null, estimate_group_id: null, created_at: new Date() };
   const OPEN = { id: 'est-1', status: 'viewed', archived_at: null, viewed_at: new Date(), estimate_group_id: null, expires_at: new Date(Date.now() + 5 * 86400000) };
 
-  // The preDispatchCheck the text was handed (sendCustomerMessage runs it after every validator).
+  // The providerPreSendCheck the text was handed (twilio.js runs it right before its request).
   async function installedTextCheck(stage = 'viewed') {
     arrange({ est: OPEN });
     await _private.sendDualChannel(est, { sms: 'Still deciding? Reply with any questions.', stage });
-    return sendCustomerMessage.mock.calls.at(-1)[0].preDispatchCheck;
+    const input = sendCustomerMessage.mock.calls.at(-1)[0];
+    // One check only, at the provider: none before the pipeline's own preparation.
+    expect(input.preDispatchCheck).toBeUndefined();
+    return input.providerPreSendCheck;
   }
 
   test('an open estimate with no checkout lets the text go', async () => {
     const check = await installedTextCheck();
-    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: true });
+    await expect(check({ channel: 'sms', dbi: db })).resolves.toEqual({ ok: true });
   });
 
-  test('accepted while the text was prepared: a final block, not retryable', async () => {
+  test('accepted while the text was prepared: a terminal refusal, not retryable', async () => {
     const check = await installedTextCheck();
     arrange({ est: { ...OPEN, status: 'accepted' } });
-    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'terminal-status:accepted' });
+    await expect(check({ channel: 'sms', dbi: db })).resolves.toEqual({ ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'terminal-status:accepted' });
   });
 
-  test('checkout started while the text was prepared: a retryable block', async () => {
+  test('checkout started while the text was prepared: a retryable refusal at the time the card step lapses', async () => {
     const check = await installedTextCheck();
     arrange({ est: OPEN, hold: { id: 'hold-1' } });
-    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: false, code: 'CUSTOMER_MID_CHECKOUT', reason: 'customer-mid-checkout', retryable: true });
+    const before = Date.now();
+    const verdict = await check({ channel: 'sms', dbi: db });
+    expect(verdict).toEqual({ ok: false, code: 'CUSTOMER_MID_CHECKOUT', reason: 'customer-mid-checkout', retryable: true, nextAllowedAt: expect.any(String) });
+    const retryIn = new Date(verdict.nextAllowedAt).getTime() - before;
+    expect(retryIn).toBeGreaterThanOrEqual(_private.CHECKOUT_ACTIVE_MINUTES * 60000 - 1000);
+    expect(retryIn).toBeLessThanOrEqual(_private.CHECKOUT_ACTIVE_MINUTES * 60000 + 1000);
   });
 
   test('an SMS-only unopened reminder is final once the estimate is opened', async () => {
     const check = await installedTextCheck('unviewed');
-    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'estimate-viewed' });
+    await expect(check({ channel: 'sms', dbi: db })).resolves.toEqual({ ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'estimate-viewed' });
   });
 
-  test('an unreadable state throws, which the pipeline turns into a fail-closed block', async () => {
+  test('an unreadable state is a retryable refusal, never a pass', async () => {
     const check = await installedTextCheck();
     db.mockImplementation(() => { throw new Error('db down'); });
-    await expect(check({ channel: 'sms' })).rejects.toThrow('db down');
+    await expect(check({ channel: 'sms', dbi: db })).resolves.toEqual({ ok: false, code: 'ESTIMATE_CHECK_FAILED', reason: expect.stringContaining('db down'), retryable: true });
+  });
+
+  test('a queued text asks the same check at the boundary, with the stage and deadline it was queued with', async () => {
+    const registry = require('../services/messaging/deferred-replay-registry');
+    const quoted = OPEN.expires_at.toISOString();
+    const check = registry.deferredProviderPreSendCheck('estimate_follow_up_deferred', { estimate_id: 'est-1', followup_stage: 'expiring', quoted_expires_at: quoted });
+    arrange({ est: OPEN });
+    await expect(check({ channel: 'sms', dbi: db })).resolves.toEqual({ ok: true });
+    // Accepted after the replay's recheck passed.
+    arrange({ est: { ...OPEN, status: 'accepted' } });
+    await expect(check({ channel: 'sms', dbi: db })).resolves.toMatchObject({ ok: false, code: 'ESTIMATE_NOT_SENDABLE' });
+    // An extension moved the deadline the queued copy quotes.
+    arrange({ est: { ...OPEN, expires_at: new Date(OPEN.expires_at.getTime() + 86400000) } });
+    await expect(check({ channel: 'sms', dbi: db })).resolves.toEqual({ ok: false, code: 'ESTIMATE_NOT_SENDABLE', reason: 'deadline-changed' });
+    // Mid-checkout keeps a timed retry.
+    arrange({ est: OPEN, card: { id: 'evt-1' } });
+    await expect(check({ channel: 'sms', dbi: db })).resolves.toMatchObject({ ok: false, code: 'CUSTOMER_MID_CHECKOUT', retryable: true, nextAllowedAt: expect.any(String) });
   });
 });

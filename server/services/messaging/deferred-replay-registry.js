@@ -386,6 +386,18 @@ const REGISTRY = {
       const { deferredFollowupStillEligible } = require('../estimate-follow-up');
       return deferredFollowupStillEligible(meta.estimate_id, { stage: meta.followup_stage, quotedExpiresAt: meta.quoted_expires_at });
     },
+    // The final check again at the true provider boundary: the customer can
+    // accept or reach the card step after the recheck passed, while the
+    // executor and the pipeline do their own work. Checkout in progress is a
+    // retryable refusal with its own retry time (nextAllowedAt); an accepted,
+    // closed or opened-unopened-reminder estimate is a terminal one.
+    providerPreSendCheck(meta) {
+      return async () => {
+        if (!meta.estimate_id) return { ok: true };
+        const { followupTextProviderCheck } = require('../estimate-follow-up');
+        return followupTextProviderCheck(meta.estimate_id, { stage: meta.followup_stage, quotedExpiresAt: meta.quoted_expires_at });
+      };
+    },
   },
 
   estimate_extension_deferred: {

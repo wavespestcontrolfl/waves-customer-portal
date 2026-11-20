@@ -385,6 +385,32 @@ describe('send-time check: the average is re-read at the provider boundary', () 
     await expect(check()).rejects.toMatchObject({ reason: 'monthly_average_changed' });
   });
 
+  test('the PDF fence, the average and the checkout check all read from ONE read-only snapshot', async () => {
+    // With separate reads, a price or recipient edit between them could pass the content checks on the
+    // old row and the checkout check on the new one.
+    const pdfCheck = jest.fn(async () => ({ ok: true }));
+    const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; });
+    mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: pdfHandoff };
+    const check = await checkOf(await installedHandoff(await pinned()));
+    freshOverride = row();
+    const snapshot = Object.assign(jest.fn((table) => db(table)), { raw: db.raw, fn: db.fn });
+    db.transaction.mockImplementationOnce(async (fn) => fn(snapshot));
+    db.mockClear();
+    await expect(check({ database: undefined })).resolves.toEqual({ ok: true });
+    expect(db.transaction.mock.calls.at(-1)[1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+    expect(pdfCheck).toHaveBeenCalledWith(expect.objectContaining({ snapshot }));
+    const viaSnapshot = snapshot.mock.calls.map(([table]) => table);
+    expect(viaSnapshot.filter((table) => table === 'estimates')).toHaveLength(2); // the average re-read and the final check
+    expect(viaSnapshot).toEqual(expect.arrayContaining(['scheduled_services', 'estimate_checkout_events']));
+    expect(db.mock.calls.length).toBe(snapshot.mock.calls.length); // no read outside the snapshot
+  });
+
+  test('a snapshot that cannot open is a retryable check failure, not a pass', async () => {
+    const check = await checkOf(await installedHandoff(await pinned()));
+    db.transaction.mockRejectedValueOnce(new Error('pool exhausted'));
+    await expect(check()).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+  });
+
   test('a PDF-only email (no average) keeps the PDF handoff, with the checkout check composed after it', async () => {
     const pdfCheck = jest.fn(async () => ({ ok: true }));
     const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; });

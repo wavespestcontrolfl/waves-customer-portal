@@ -345,9 +345,10 @@ function followupFinalVerdict(est, { stage = null, quotedExpiresAt = null, nowMs
 // it shows either the hold (a wait) or the accepted row (a final no). A failed
 // read, the checkout lookup's included, throws; the caller decides what an
 // unreadable state means (both legs make it a retryable non-send).
-async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, nowMs = Date.now() } = {}) {
-  const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
-  return db.transaction(async (trx) => {
+// `snapshot`: a caller that composes several checks passes its own snapshot
+// transaction (opened with FINAL_CHECK_SNAPSHOT), so they all judge one revision.
+async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, nowMs = Date.now(), snapshot = null } = {}) {
+  const judge = async (trx) => {
     const est = await trx("estimates").where({ id: estimateId }).first();
     if (!est) return { ok: false, final: true, reason: "estimate-missing" };
     const reason = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs });
@@ -356,7 +357,30 @@ async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt 
       return { ok: false, final: false, reason: "customer-mid-checkout", retryAt: new Date(nowMs + CHECKOUT_ACTIVE_MINUTES * 60000) };
     }
     return { ok: true };
-  }, FINAL_CHECK_SNAPSHOT);
+  };
+  if (snapshot) return judge(snapshot);
+  const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
+  return db.transaction(judge, FINAL_CHECK_SNAPSHOT);
+}
+
+// The text leg's final check. twilio.js runs it at the provider boundary
+// (providerPreSendCheck), after every other await, for the immediate send and
+// the queued replay alike (deferred-replay-registry estimate_follow_up_deferred).
+// A follow-up text never routes to the App (push-channel-routing
+// APP_FIRST_TYPES has no estimate type), so Twilio always runs it. A final no
+// is a terminal refusal; checkout in progress is a retryable refusal at the
+// time the card step lapses; an unreadable state is a retryable refusal, never
+// a pass.
+async function followupTextProviderCheck(estimateId, { stage = null, quotedExpiresAt = null } = {}) {
+  let verdict;
+  try {
+    verdict = await followupMayStillSend(estimateId, { stage, quotedExpiresAt });
+  } catch (err) {
+    return { ok: false, code: "ESTIMATE_CHECK_FAILED", reason: `estimate ${estimateId} send check unavailable: ${err.message}`, retryable: true };
+  }
+  if (verdict.ok) return { ok: true };
+  if (verdict.final) return { ok: false, code: "ESTIMATE_NOT_SENDABLE", reason: verdict.reason };
+  return { ok: false, code: "CUSTOMER_MID_CHECKOUT", reason: verdict.reason, retryable: true, nextAllowedAt: verdict.retryAt.toISOString() };
 }
 
 // The two TEMPORARY holds in safetyGate are waits, not verdicts: the customer
@@ -608,10 +632,10 @@ async function withAverageEmail(email, est) {
 // (providerBoundaryCheckFailed). Either way the caller releases the stage and the next
 // sweep sends fresh copy.
 function averageBoundaryCheck(estimateId, expectedText) {
-  return async () => {
+  return async ({ snapshot } = {}) => {
     let current;
     try {
-      const row = await db("estimates").where({ id: estimateId }).first();
+      const row = await (snapshot || db)("estimates").where({ id: estimateId }).first();
       current = row ? monthlyAverageService().averageText(await monthlyAverageService().emailAverageParts(row)) : null;
     } catch (err) {
       const unavailable = new Error(`estimate ${estimateId} monthly average check unavailable: ${err.message}`);
@@ -642,7 +666,7 @@ function averageProviderHandoff(estimateId, expectedText, pdfHandoff = null) {
   return (dispatch) => pdfHandoff(async (database, pdfCheck) => {
     await dispatch(database, async (args) => {
       if (pdfCheck) await pdfCheck(args);
-      return check();
+      return check(args);
     });
   });
 }
@@ -656,10 +680,10 @@ function averageProviderHandoff(estimateId, expectedText, pdfHandoff = null) {
 // so the engine can wait (midCheckout) or drop the job (finalReason) instead of
 // counting a failed attempt. An unreadable row is a retryable non-send.
 function checkoutBoundaryCheck(est, outcome, { stage = null, quotedExpiresAt = null } = {}) {
-  return async () => {
+  return async ({ snapshot } = {}) => {
     let verdict;
     try {
-      verdict = await followupMayStillSend(est.id, { stage, quotedExpiresAt });
+      verdict = await followupMayStillSend(est.id, { stage, quotedExpiresAt, snapshot });
     } catch (err) {
       const unavailable = new Error(`estimate ${est.id} send check unavailable: ${err.message}`);
       unavailable.providerBoundaryCheckFailed = true;
@@ -682,19 +706,36 @@ function checkoutBoundaryCheck(est, outcome, { stage = null, quotedExpiresAt = n
 
 // Composes that check after whatever handoff the send already has (the PDF
 // fence, the monthly-average check, both, or none), as averageProviderHandoff does.
+// Every check reads from ONE read-only snapshot (FINAL_CHECK_SNAPSHOT), so they
+// judge the same estimate revision: with separate reads, a price or recipient
+// edit between them could pass the content checks on the old row and the
+// checkout check on the new one. A snapshot that cannot open is a retryable
+// non-send, like any unreadable check.
 function checkoutProviderHandoff(est, outcome, inner = null, ctx = {}) {
   const check = checkoutBoundaryCheck(est, outcome, ctx);
+  const inOneSnapshot = (innerCheck) => async (args = {}) => {
+    const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
+    try {
+      return await db.transaction(async (snapshot) => {
+        if (innerCheck) await innerCheck({ ...args, snapshot });
+        return check({ ...args, snapshot });
+      }, FINAL_CHECK_SNAPSHOT);
+    } catch (err) {
+      if (err.providerBoundaryBlocked || err.providerBoundaryCheckFailed) throw err;
+      const unavailable = new Error(`estimate ${est.id} send check unavailable: ${err.message}`);
+      unavailable.providerBoundaryCheckFailed = true;
+      unavailable.cause = err;
+      throw unavailable;
+    }
+  };
   if (!inner) {
     return async (dispatch) => {
-      await dispatch(undefined, check);
+      await dispatch(undefined, inOneSnapshot(null));
       return { ok: true };
     };
   }
   return (dispatch) => inner(async (database, innerCheck) => {
-    await dispatch(database, async (args) => {
-      if (innerCheck) await innerCheck(args);
-      return check();
-    });
+    await dispatch(database, inOneSnapshot(innerCheck));
   });
 }
 
@@ -820,22 +861,12 @@ async function sendDualChannel(est, { sms, email, stage = null }, outcome = null
             },
         entryPoint: "estimate_follow_up_cron",
         metadata: { original_message_type: "estimate_followup" },
-        // The same final-send predicate as the email handoff, as the last
-        // step before the provider: the customer can accept, open the
-        // estimate or start checkout while links mint and the copy renders.
-        // A no is a plain block (logged, not queued, not attempted), so the
-        // stage looks again on its next tick. An unreadable state throws,
-        // which the pipeline turns into a fail-closed block.
-        preDispatchCheck: async () => {
-          const verdict = await followupMayStillSend(est.id, { stage: followupStage, quotedExpiresAt });
-          if (verdict.ok) return { ok: true };
-          return {
-            ok: false,
-            code: verdict.final ? "ESTIMATE_NOT_SENDABLE" : "CUSTOMER_MID_CHECKOUT",
-            reason: verdict.reason,
-            ...(verdict.final ? {} : { retryable: true }),
-          };
-        },
+        // The same final-send predicate as the email handoff, run by twilio.js
+        // right before its request: the customer can accept, open the
+        // estimate or start checkout while links mint, the copy renders and
+        // the pipeline prepares. A no is a plain block (logged, not queued,
+        // not attempted), so the stage looks again on its next tick.
+        providerPreSendCheck: () => followupTextProviderCheck(est.id, { stage: followupStage, quotedExpiresAt }),
       });
       if (result.blocked || result.sent === false) {
         logger.warn(
@@ -1875,6 +1906,8 @@ const EstimateFollowUp = {
 module.exports = EstimateFollowUp;
 // Called by the scheduled-SMS executor before replaying a deferred touch.
 module.exports.deferredFollowupStillEligible = deferredFollowupStillEligible;
+// The replay's provider-boundary check (deferred-replay-registry).
+module.exports.followupTextProviderCheck = followupTextProviderCheck;
 module.exports._private = {
   sendDualChannel,
   estimateEmailPayload,
