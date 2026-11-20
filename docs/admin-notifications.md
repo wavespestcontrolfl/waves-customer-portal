@@ -635,7 +635,10 @@ comes first (`payload.expiresAt`, as for the call-back banner). The push is stam
 under the same dedupe-key lock (the hours and the late window are asked again once the lock is held), so a row gets
 at most one for each event of the row. A lead gets at most one push in 48 hours (the plan's "at most twice per lead" is
 this push and the 60-minute call): the stamp also takes an advisory lock on the lead, after the dedupe-key lock, and holds
-back a bell when any bell of its lead, itself included, was stamped in the 48 hours before. So a lead with an open intake
+back a bell when any bell, itself included, holds a push for its lead in the 48 hours before. Each stamp keeps the lead it
+was for (`metadata.newLeadRealertLeads`, left out of the bell version like the stamps), because the repeat-form row is
+keyed by customer and a form for the customer's other lead refreshes it: the first lead stays capped, and the other lead
+is judged on its own. So a lead with an open intake
 bell and a repeat form gets one push, for the latest inquiry (the sweep judges every page first, then stamps the latest
 inquiry first), and a bell of that lead written or rung in the next 48 hours gets none (the writer's own ring still
 reaches the phones). A row that rang again after its stamp (a repeat form refreshes its row and keeps the stamp) is read
@@ -656,7 +659,8 @@ the bell's inquiry began, with no look-back before it (the shared contact witnes
 earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
 lead made days ago, the bell itself); a person's email to the lead's own address since that moment (only one the shared email linkage,
 `emailCustomerLink`, ties to the lead's customer, or shows names no customer at all: Cc and Bcc captured, no customer in its
-thread, no recipient on a customer's file; a send the linkage cannot settle, such as a mixed thread, is no proof; a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up
+thread, no recipient on a customer's file, and no other open lead holding the address, by `lead-contact-sync.js`
+`openLeadIdentities`; a send the linkage cannot settle, such as a mixed thread, is no proof; a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up
 bell is written after classification and drafting; the push deadline stays on the bell); or an estimate sent (`sent_at`, as
 `newLeadMovedOn` reads it: the one the bell names, `metadata.estimateId`, the lead's own, or any to its customer) or handed off. A lead needs a customer, a 10-digit phone or an email
 address to be judged, so a lead from email intake with no phone is judged on email and estimate evidence. A missing lead

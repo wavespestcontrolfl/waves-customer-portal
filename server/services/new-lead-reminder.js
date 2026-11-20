@@ -57,6 +57,8 @@ const { isOpenLeadRow } = require('./lead-statuses');
 
 const LABEL = 'new-lead-reminder';
 const PUSH_STAMP = 'newLeadRealertAt';
+// The per-lead record kept with each stamp, { leadId: ISO time }: the lead a push was for, whatever the row names later.
+const LEAD_STAMPS = 'newLeadRealertLeads';
 const PUSH_AFTER_MINUTES = 15;
 const PUSH_LATE_MINUTES = 120;
 const WINDOW_MS = 48 * 60 * 60 * 1000;
@@ -228,25 +230,29 @@ const latestInquiryFirst = (a, b) => b.anchor.getTime() - a.anchor.getTime();
 
 // At most one push per lead in 48 hours (the same window the scan reads). The plan's "at most twice per lead" is this
 // push and the 60-minute call; a lead that sends the form again while it waits does not ring the phones again here (the
-// writer's own ring does). A bell does not push when any bell of its lead, this row included, was stamped in the 48
-// hours before `at`. The stamp asks it under a lock on the lead, in its own transaction (lead-reminder-sweep.js
-// stampOnce), so two sweeps never both push one lead. A stamp holds the claim even when its push did not go (the row
-// rang again, a Done, the close): at most once, as for the row itself. Only this reminder stamps PUSH_STAMP, so the
-// stamped rows are its bells; each names its lead the way dueItems reads it (refsFromRow). The read is bounded like the
-// scan: a row stamped after `from` was a candidate then, so its latest event was after `from` less the window.
+// writer's own ring does). A bell does not push when any bell, this row included, holds a push for its lead in the 48
+// hours before `at`. Each stamp keeps the lead it was for (LEAD_STAMPS, { leadId: time }), because a row can name another
+// lead later: the repeat-form row is keyed by customer, so a form for the customer's other lead refreshes it. That
+// record is never rewritten for another lead, so the first lead stays capped and the other lead is judged on its own.
+// The stamp asks it under a lock on the lead, in its own transaction (lead-reminder-sweep.js stampOnce), so two sweeps
+// never both push one lead. A stamp holds the claim even when its push did not go (the row rang again, a Done, the
+// close): at most once, as for the row itself. The read is bounded like the scan: a row stamped after `from` was a
+// candidate then, so its latest event was after `from` less the window.
 function leadClaim(item) {
+  const lead = String(item.leadId).toLowerCase();
+  const held = item.meta[LEAD_STAMPS];
   return {
-    key: `${LABEL}:lead:${item.leadId}`,
+    key: `${LABEL}:lead:${lead}`,
     taken: async (conn, at) => {
-      const { refsFromRow } = relevance();
       const from = new Date(at.getTime() - WINDOW_MS);
       const since = new Date(from.getTime() - WINDOW_MS).toISOString();
-      const stamped = await conn('notifications').where({ recipient_type: 'admin' })
-        .whereRaw(`metadata->>'${PUSH_STAMP}' > ?`, [from.toISOString()])
+      const rows = await conn('notifications').where({ recipient_type: 'admin' })
+        .whereRaw(`metadata->'${LEAD_STAMPS}'->>(?::text) > ?`, [lead, from.toISOString()])
         .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since]))
-        .select('id', 'link', 'metadata');
-      return stamped.some((r) => String(refsFromRow(r).leadId || '').toLowerCase() === String(item.leadId).toLowerCase());
+        .select('id').limit(1);
+      return rows.length > 0;
     },
+    record: (at) => ({ [LEAD_STAMPS]: { ...(held && typeof held === 'object' && !Array.isArray(held) ? held : {}), [lead]: at.toISOString() } }),
   };
 }
 
@@ -255,14 +261,17 @@ function leadClaim(item) {
 // own linkage (emailCustomerLink) says it is this lead's: linked to the lead's customer, or provably naming no customer
 // (Cc and Bcc captured, no customer in its thread, no recipient on a customer's file, so not a mailbox another customer
 // shares). A send linked to another customer says nothing about this lead, and neither does one the linkage cannot
-// settle (Cc or Bcc never captured, a mixed thread, recipients naming two customers): the push still goes. The read
-// starts at the earliest anchor of these items, so a reply inside an old lead's own window is never cut off. Returns the
-// test for one item.
+// settle (Cc or Bcc never captured, a mixed thread, recipients naming two customers): the push still goes. A send that
+// names no customer counts only while no other open lead holds the address (lead-contact-sync.js openLeadIdentities,
+// the same identity check its own sweep uses): two leads sharing one mailbox cannot tell which of them was answered.
+// The read starts at the earliest anchor of these items, so a reply inside an old lead's own window is never cut off.
+// Returns the test for one item.
 async function personEmailed(items) {
   const { personSentFilter, extractEmailAddresses, emailCustomerLink } = require('./email/email-customer-link');
   const addresses = [...new Set(items.map(({ lead }) => leadEmail(lead)).filter(Boolean))];
   if (!addresses.length) return () => false;
   const earliest = new Date(Math.min(...items.map((item) => item.anchor.getTime())));
+  const owners = await require('./lead-contact-sync').openLeadIdentities(db, { peers: [], emails: addresses, customerIds: [] });
   const rows = await db('emails as er').whereRaw(personSentFilter('er'))
     .where('er.received_at', '>', earliest)
     .whereRaw("EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), a.addr) > 0)", [addresses])
@@ -281,7 +290,8 @@ async function personEmailed(items) {
     const address = leadEmail(lead);
     if (!address) return false;
     const own = lead.customer_id ? String(lead.customer_id) : null;
-    return sent.some((m) => m.at > anchor.getTime() && m.to.has(address) && (m.linked ? String(m.linked) === own : m.namesNoCustomer));
+    const shared = [...(owners.get(`email:${address}`) || [])].some((id) => id !== String(lead.id));
+    return sent.some((m) => m.at > anchor.getTime() && m.to.has(address) && (m.linked ? String(m.linked) === own : m.namesNoCustomer && !shared));
   };
 }
 
@@ -325,5 +335,6 @@ async function runNewLeadReminder({ now = new Date(), pageSize, clock } = {}) {
 module.exports = {
   runNewLeadReminder,
   PUSH_STAMP,
+  LEAD_STAMPS,
   __private: { inBusinessHours, businessDueAt, businessDayClose, pushWindow, kind, dueItems, reachedLeads, inquiryOf, leadClaim, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES },
 };

@@ -75,32 +75,34 @@ function openBell(query) {
     .whereRaw("metadata->'retired' IS NULL");
 }
 
-// The row's metadata once `stamp` lands at `now`: what stampOnce writes, and what the dispatch check expects to find.
-const stampedMeta = (stamp, meta, now) => ({ ...meta, [stamp]: now.toISOString() });
+// What a stamp at `at` writes onto the row (merged with ||): the reminder's stamp, and the claim's own record when it
+// keeps one. The dispatch check then expects the row's metadata with exactly this merged in.
+const stampPatch = (stamp, at, claim) => ({ [stamp]: at.toISOString(), ...(claim?.record ? claim.record(at) : {}) });
 
 // The one stamp: this row, still open and unchanged since it was read. Returns true when it landed. A bell with a
 // dedupe key is stamped under notifyAdmin's advisory lock for that key (notification-service.js dedupeAndInsert): a
 // refresh reads the row and writes its whole metadata back under that lock, so a stamp landing between its read and
 // its write would be overwritten, and the bell could push a second time. With the lock the stamp waits for the
 // refresh, whose new metadata then fails the fence; a refresh after the stamp merges onto it and keeps it. `claim`
-// (optional, { key, taken(conn, at) }) caps the pushes per claim: its own lock is taken after the dedupe-key lock (always
-// in that order, and notifyAdmin takes only the first), and `taken` reads in this transaction; a claim already taken
-// writes nothing. `ready` (optional) is asked last, just before the write: a stamp that waited on a lock or a slow read
-// past the reminder's hours or the item's late window is not written, so the next open sweep can still judge the bell.
-// The stamp is the fresh clock at the write. Returns that time (a Date) when the stamp landed, else null.
+// (optional, { key, taken(conn, at), record?(at) }) caps the pushes per claim: its own lock is taken after the dedupe-key
+// lock (always in that order, and notifyAdmin takes only the first), and `taken` reads in this transaction; a claim
+// already taken writes nothing. `record` is what the claim keeps on the row with the stamp. `ready` (optional) is asked
+// last, just before the write: a stamp that waited on a lock or a slow read past the reminder's hours or the item's late
+// window is not written, so the next open sweep can still judge the bell. The stamp is the fresh clock at the write.
+// Returns the patch it wrote (stampPatch) when the stamp landed, else null.
 async function stampOnce(stamp, { row, meta }, clock, ready = () => true, claim = null) {
   return db.transaction(async (trx) => {
     if (meta.dedupeKey) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${meta.dedupeKey}`]);
     if (claim) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [claim.key]);
     if (claim && (await claim.taken(trx, clock()))) return null;
     if (!ready()) return null;
-    const at = clock();
+    const patch = stampPatch(stamp, clock(), claim);
     const landed = await trx('notifications')
       .where({ id: row.id, recipient_type: 'admin' })
       .whereNull('done_at')
       .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(meta)])
-      .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stampedMeta(stamp, {}, at))]) });
-    return Number(landed) === 1 ? at : null;
+      .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]) });
+    return Number(landed) === 1 ? patch : null;
   });
 }
 
@@ -216,10 +218,10 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
     // Its late window closed while the reads above ran: not stamped, and no later sweep finds it due.
     if (expired(item)) continue;
     try {
-      const at = await stampOnce(stamp, item, clock, () => ready() && !expired(item), kind.claim ? kind.claim(item) : null);
-      if (!at) continue;
+      const patch = await stampOnce(stamp, item, clock, () => ready() && !expired(item), kind.claim ? kind.claim(item) : null);
+      if (!patch) continue;
       total.sent += 1;
-      sends.push(sendPush({ ...item, stamped: stampedMeta(stamp, item.meta, at) }, label, () => ready() && !expired(item),
+      sends.push(sendPush({ ...item, stamped: { ...item.meta, ...patch } }, label, () => ready() && !expired(item),
         () => waitingNow(kind, item), expiryOf(item)));
     } catch (err) {
       logger.warn(`[${label}] notification ${item.row.id} not stamped: ${safeError(err)}`);

@@ -217,6 +217,38 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     expect(metaOf(await db('notifications').where({ id: formBell.id }).first())[reminder.PUSH_STAMP]).toBe(saturday.toISOString());
   }, 180000);
 
+  test('the cap stays with the lead a push was for: the writer refreshes the repeat-form row for the customer\'s other lead, which pushes, and the first lead stays capped', async () => {
+    const { customer, lead: leadA } = await leadOnFile();
+    const leadB = await insert('leads', {
+      customer_id: customer.id, phone: customer.phone, first_name: 'Lead', last_name: 'Sample', status: 'new', created_at: mins(-3 * 24 * 60),
+    });
+    const formBell = await repeatFormBell(customer, leadA, mins(-18));
+    await run();
+    expect(pushesFor(formBell.id)).toHaveLength(1);
+    // A form for lead B refreshes the same row (keyed by the customer) at +10 minutes: it now names lead B, and keeps the
+    // stamp and lead A's record. The ring moves created_at and rungAt, set to the suite's clock here.
+    await ringRepeatFormAlert(customer, leadB.id);
+    await db('notifications').where({ id: formBell.id })
+      .update({ created_at: mins(10), metadata: db.raw('metadata || ?::jsonb', [JSON.stringify({ rungAt: mins(10).toISOString() })]) });
+    expect(metaOf(await db('notifications').where({ id: formBell.id }).first())).toMatchObject({
+      leadId: leadB.id, [reminder.PUSH_STAMP]: NOW.toISOString(), [reminder.LEAD_STAMPS]: { [leadA.id]: NOW.toISOString() },
+    });
+    const sweepAt = async (at) => {
+      jest.clearAllMocks();
+      const result = await reminder.runNewLeadReminder({ now: at, clock: () => at });
+      await Promise.all(result.sends || []);
+    };
+    // Lead B has had no push: the refreshed row pushes for it.
+    await sweepAt(mins(30));
+    expect(pushesFor(formBell.id)).toHaveLength(1);
+    expect(metaOf(await db('notifications').where({ id: formBell.id }).first())[reminder.LEAD_STAMPS])
+      .toEqual({ [leadA.id]: NOW.toISOString(), [leadB.id]: mins(30).toISOString() });
+    // Lead A's own new-lead bell is still capped by its push at NOW.
+    const aBell = await newLeadBell(leadA, mins(20));
+    await sweepAt(mins(40));
+    expect(pushesFor(aBell.id)).toHaveLength(0);
+  }, 180000);
+
   // Two sweeps (two app instances, or a slow sweep and the next one) can reach two bells of one lead at once. Each stamp
   // takes the lead's lock in its own transaction and reads the claim under it, so the second waits for the first to
   // commit, then reads its stamp and writes nothing.
@@ -251,7 +283,7 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
       const gotLock = new Promise((resolve) => { locked = resolve; });
       const held = new Promise((resolve) => { release = resolve; });
       const claim = leadClaim(item(newer));
-      const holding = { key: claim.key, taken: async (conn, t) => { const taken = await claim.taken(conn, t); locked(); await held; return taken; } };
+      const holding = { ...claim, taken: async (conn, t) => { const taken = await claim.taken(conn, t); locked(); await held; return taken; } };
       stamps.push(stampOnce(reminder.PUSH_STAMP, item(newer), () => at, () => true, holding));
       await gotLock;
       stamps.push(stampOnce(reminder.PUSH_STAMP, item(older), () => at, () => true, leadClaim(item(older))));
@@ -262,7 +294,7 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
       }
       expect(sawWait).toBe(true);
       release();
-      expect(await Promise.all(stamps)).toEqual([at, null]);
+      expect(await Promise.all(stamps)).toEqual([{ [reminder.PUSH_STAMP]: at.toISOString(), [reminder.LEAD_STAMPS]: { [leadId]: at.toISOString() } }, null]);
       const after = new Map((await db.real('notifications').whereIn('id', ids)).map((r) => [r.id, metaOf(r)]));
       expect(after.get(newer.id)[reminder.PUSH_STAMP]).toBe(at.toISOString());
       expect(after.get(older.id)).not.toHaveProperty(reminder.PUSH_STAMP);

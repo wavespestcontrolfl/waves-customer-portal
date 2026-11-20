@@ -121,12 +121,13 @@ const CUSTOMER_UNREAD_INBOUND_SQL = `(
       AND NOT EXISTS (SELECT 1 FROM messages tw WHERE tw.twilio_sid = ul.twilio_sid AND tw.channel = 'sms'))
 )`;
 
-// The lead reminders' once-only stamps (lead-call-reminder.js leadCallReminderAt, new-lead-reminder.js newLeadRealertAt):
+// The lead reminders' once-only stamps (lead-call-reminder.js leadCallReminderAt, new-lead-reminder.js newLeadRealertAt,
+// and its per-lead record newLeadRealertLeads):
 // bookkeeping the bell never shows, so they are left out of the version. A stamp that lands after an admin opened the
 // bell then never refuses that admin's Done (409 changed). The reminders fence their own writes on the whole metadata
 // (lead-reminder-sweep.js). A row without these keys keeps the version it had. Only an object can carry them: any other
 // metadata (null, an array, a scalar) is hashed as stored, because `-` on a JSON scalar is an error.
-const REMINDER_STAMP_KEYS = Object.freeze(['leadCallReminderAt', 'newLeadRealertAt']);
+const REMINDER_STAMP_KEYS = Object.freeze(['leadCallReminderAt', 'newLeadRealertAt', 'newLeadRealertLeads']);
 const VERSIONED_METADATA_SQL = `CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata${REMINDER_STAMP_KEYS.map((key) => ` - '${key}'`).join('')} ELSE metadata END`;
 const NOTIFICATION_VERSION_SQL = `md5(jsonb_build_array(title, body, link, detail, ${VERSIONED_METADATA_SQL})::text)`;
 // GATE_ALERT_BELL_ORDER: where a row sits in the admin bell. 0 = metadata.severity is 'needs-you'; 1 = no severity label

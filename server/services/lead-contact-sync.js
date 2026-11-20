@@ -378,6 +378,7 @@ module.exports = {
   runLeadContactSync,
   judgeLeads,
   candidateLeadsQuery,
+  openLeadIdentities,
   PERFORMED_BY,
   LOOKBACK_DAYS,
   _test: { usablePhoneKey, leadEmail, resumeAfter: () => resumeAfter, resetResume: () => { resumeAfter = null; } },

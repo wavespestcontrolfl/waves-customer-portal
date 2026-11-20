@@ -22,20 +22,20 @@ jest.mock('../models/db', () => {
     if (state.table === 'emails') return mockState.emailRows;
     if (state.table === 'customers') return state.verb === 'first' ? mockState.customer : [];
     if (state.table !== 'notifications') return [];
-    // The per-lead claim's read (new-lead-reminder.js leadClaim): the bells stamped after `from`. With
+    // The per-lead claim's read (new-lead-reminder.js leadClaim): a bell holding a push for this lead after `from`. With
     // mockState.recordStamps, each landed stamp is recorded as the database would hold it; otherwise there are none.
-    const claimRead = state.raws.find(([sql]) => String(sql).includes("'newLeadRealertAt' >"));
+    const claimRead = state.raws.find(([sql]) => /'newLeadRealert(At|Leads)'.*> \?/.test(String(sql)));
     if (claimRead) {
       if (mockState.onClaimRead) mockState.onClaimRead();
-      const from = claimRead[1][0];
-      return mockState.stamped.filter((r) => r.stampedAt > from);
+      const [, [lead, from]] = claimRead;
+      return mockState.stamped.filter((r) => (r.leads || {})[lead] > from).slice(0, 1);
     }
     if (state.verb === 'update') {
       const landed = mockState.stampResults.length ? mockState.stampResults.shift() : 1;
       const stamped = [...mockState.rows, ...mockState.served].find((r) => r.id === state.id);
       if (mockState.recordStamps && Number(landed) === 1 && stamped) {
-        const stampedAt = JSON.parse(state.update.metadata.bindings[0]).newLeadRealertAt;
-        mockState.stamped.push({ id: stamped.id, link: stamped.link, metadata: { ...stamped.metadata, newLeadRealertAt: stampedAt }, stampedAt });
+        const patch = JSON.parse(state.update.metadata.bindings[0]);
+        mockState.stamped.push({ id: stamped.id, stampedAt: patch.newLeadRealertAt, leads: patch.newLeadRealertLeads });
       }
       return landed;
     }
@@ -111,7 +111,7 @@ jest.mock('../services/email/email-customer-link', () => ({
 const { triggerNotification } = require('../services/notification-triggers');
 const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
 const sweepShared = require('../services/lead-reminder-sweep');
-const { runNewLeadReminder: runReminder, PUSH_STAMP, __private: { inBusinessHours, businessDueAt } } = require('../services/new-lead-reminder');
+const { runNewLeadReminder: runReminder, PUSH_STAMP, LEAD_STAMPS, __private: { inBusinessHours, businessDueAt } } = require('../services/new-lead-reminder');
 // The dispatch-time clock is the sweep's `now` unless a test sets one: the real clock is not part of these cases.
 const runNewLeadReminder = (opts = {}) => runReminder({ clock: () => opts.now, ...opts });
 
@@ -277,7 +277,8 @@ describe('the 15-minute push (no gate)', () => {
     const result = await run(PUSH_NOW);
     expect(result).toMatchObject({ skipped: false, due: 1, pushed: 1 });
     expect(updates()).toHaveLength(1);
-    expect(JSON.parse(updates()[0].update.metadata.bindings[0])).toEqual({ [PUSH_STAMP]: PUSH_NOW.toISOString() });
+    // The stamp, and the lead it was for (the per-lead cap reads that, whatever lead the row names later).
+    expect(JSON.parse(updates()[0].update.metadata.bindings[0])).toEqual({ [PUSH_STAMP]: PUSH_NOW.toISOString(), [LEAD_STAMPS]: { [LEAD]: PUSH_NOW.toISOString() } });
     expect(pushes()).toHaveLength(1);
     const [, payload, opts] = pushes()[0];
     expect(payload).toEqual({
@@ -441,7 +442,7 @@ describe('the 15-minute push (no gate)', () => {
     mockState.rows = [repeatFormRow('rf-1', est('09', '10:30'))];
     expect(await run(est('09', '10:50'))).toMatchObject({ due: 1, pushed: 0 });
     // The first bell rang again at 11:00 (a refresh keeps its stamp): its new event is due at 11:15, and still capped.
-    const rang = (at) => row('n-1', { metadata: { rungAt: at.toISOString(), [PUSH_STAMP]: PUSH_NOW.toISOString() } });
+    const rang = (at) => row('n-1', { metadata: { rungAt: at.toISOString(), [PUSH_STAMP]: PUSH_NOW.toISOString(), [LEAD_STAMPS]: { [LEAD]: PUSH_NOW.toISOString() } } });
     mockState.rows = [rang(est('09', '11:00'))];
     expect(await run(est('09', '11:20'))).toMatchObject({ due: 1, pushed: 0 });
     expect(triggerNotification).not.toHaveBeenCalled();
@@ -451,15 +452,39 @@ describe('the 15-minute push (no gate)', () => {
     expect(pushes().map(([, payload]) => payload.alertRowId)).toEqual(['n-1']);
   });
 
+  test('the cap stays with the lead a push was for: a repeat-form row refreshed for the customer\'s other lead pushes for it, and the first lead stays capped', async () => {
+    const LEAD_B = '44444444-4444-4444-8444-444444444444';
+    mockState.recordStamps = true;
+    mockState.leads = [lead(), lead({ id: LEAD_B, email: 'pat.b@example.invalid' })];
+    // The repeat form for lead A (the customer's first lead) pushes at 10:20.
+    mockState.rows = [repeatFormRow('rf-1', est('09', '10:03'))];
+    expect(await run(PUSH_NOW)).toMatchObject({ pushed: 1 });
+    // A form for the customer's other lead refreshes the same row (keyed by customer) at 10:40: it now names lead B, its
+    // stamp and A's record kept.
+    const refreshed = repeatFormRow('rf-1', est('09', '10:40'));
+    refreshed.link = `/admin/leads?lead=${LEAD_B}`;
+    refreshed.metadata = { ...refreshed.metadata, leadId: LEAD_B, subject: { type: 'lead', id: LEAD_B }, rungAt: est('09', '10:40').toISOString(),
+      [PUSH_STAMP]: PUSH_NOW.toISOString(), [LEAD_STAMPS]: { [LEAD]: PUSH_NOW.toISOString() } };
+    triggerNotification.mockClear();
+    mockState.rows = [refreshed];
+    expect(await run(est('09', '11:00'))).toMatchObject({ due: 1, pushed: 1 });
+    // The stamp adds B's record next to A's.
+    expect(JSON.parse(updates().at(-1).update.metadata.bindings[0])[LEAD_STAMPS]).toEqual({ [LEAD]: PUSH_NOW.toISOString(), [LEAD_B]: est('09', '11:00').toISOString() });
+    // Lead A's own new-lead bell is still capped by its 10:20 push.
+    triggerNotification.mockClear();
+    mockState.rows = [row('n-1')];
+    expect(await run(est('09', '11:05'))).toMatchObject({ due: 1, pushed: 0 });
+  });
+
   test('the stamp is the clock when it is written, and the push\'s dispatch check expects exactly that stamp', async () => {
     // The sweep began at 10:20; its reads ran to 10:21, when the stamp is written.
     const result = await runNewLeadReminder({ now: PUSH_NOW, clock: () => est('09', '10:21') });
     await Promise.all(result.sends);
-    expect(JSON.parse(updates()[0].update.metadata.bindings[0])).toEqual({ [PUSH_STAMP]: est('09', '10:21').toISOString() });
+    expect(JSON.parse(updates()[0].update.metadata.bindings[0])).toEqual({ [PUSH_STAMP]: est('09', '10:21').toISOString(), [LEAD_STAMPS]: { [LEAD]: est('09', '10:21').toISOString() } });
     mockState.calls.length = 0;
     expect(await pushes()[0][2].beforePush()).toBe(true);
     const [read] = mockState.calls.filter((c) => c.table === 'notifications' && c.verb === 'first');
-    const stamped = { ...row('n-1').metadata, [PUSH_STAMP]: est('09', '10:21').toISOString() };
+    const stamped = { ...row('n-1').metadata, [PUSH_STAMP]: est('09', '10:21').toISOString(), [LEAD_STAMPS]: { [LEAD]: est('09', '10:21').toISOString() } };
     expect(read.raws).toContainEqual(['metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(stamped)]]);
   });
 
@@ -492,7 +517,7 @@ describe('the 15-minute push (no gate)', () => {
     expect(await beforePush()).toBe(true);
     const [read] = mockState.calls.filter((c) => c.table === 'notifications' && c.verb === 'first');
     // A bell that rang again (notifyAdmin advanced rungAt), moved to Activity, or lost its stamp no longer matches.
-    const stamped = { ...row('n-1').metadata, [PUSH_STAMP]: PUSH_NOW.toISOString() };
+    const stamped = { ...row('n-1').metadata, [PUSH_STAMP]: PUSH_NOW.toISOString(), [LEAD_STAMPS]: { [LEAD]: PUSH_NOW.toISOString() } };
     expect(read.raws).toContainEqual(['metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(stamped)]]);
     expect(read.raws).toContainEqual(["metadata->'retired' IS NULL"]);
   });
@@ -511,7 +536,7 @@ describe('the 15-minute push (no gate)', () => {
 
   test('both reminders\' stamps are left out of the bell version, so a stamp never refuses an admin\'s Done', () => {
     const { REMINDER_STAMP_KEYS } = jest.requireActual('../services/notification-service')._private;
-    expect([...REMINDER_STAMP_KEYS].sort()).toEqual([PUSH_STAMP, require('../services/lead-call-reminder').__private.STAMP].sort());
+    expect([...REMINDER_STAMP_KEYS].sort()).toEqual([PUSH_STAMP, LEAD_STAMPS, require('../services/lead-call-reminder').__private.STAMP].sort());
   });
 
   test('a bell with a dedupe key is stamped under notifyAdmin\'s lock for that key, then the lead\'s; one without takes only the lead\'s', async () => {
@@ -687,6 +712,18 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.links = {};
     mockState.leads = [lead({ customer_id: null })];
     mockState.rows = [row('n-4')];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+  });
+
+  test('a send that names no customer is no proof when another open lead holds the same address', async () => {
+    const OTHER_LEAD = '55555555-5555-4555-8555-555555555555';
+    mockState.emails = [{ id: 'm-1', gmail_thread_id: 't-1', to_address: 'pat@example.invalid', cc_address: '', bcc_address: '', received_at: est('09', '10:05') }];
+    // Two email leads with no customer share one mailbox: the reply cannot say which of them it answered.
+    mockState.leads = [lead({ customer_id: null }), lead({ id: OTHER_LEAD, customer_id: null, phone: '+19415550199' })];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    // The address is this lead's alone: the same send reached it.
+    mockState.leads = [lead({ customer_id: null })];
+    mockState.rows = [row('n-2')];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
   });
 
