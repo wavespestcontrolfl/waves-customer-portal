@@ -287,6 +287,13 @@ const VISIT_LABEL_RE = /\bfrom\s+(?:initial|follow\W{0,3}up|call\W{0,3}back|re\W
 // An inspection type that names a later visit ("Callback - Food", "Follow-up", "Re-inspection"): not a first visit.
 const CALLBACK_TYPE_RE = /call\W{0,3}back|follow\W{0,3}up|re\W{0,3}inspect/i;
 
+// Whether the inspection table's visit row is the read visit's, as a first visit: its date reads (and is visitDate
+// when given), and its inspection type is given and names no callback, follow-up or re-inspection.
+function isFirstVisitRow(visit, visitDate) {
+  const date = parseUsDate(visit.date);
+  return Boolean(date) && (!visitDate || date === visitDate) && Boolean(visit.type) && !CALLBACK_TYPE_RE.test(visit.type);
+}
+
 // How a row's text names its visits: { routine: true } without labels (all of it the read visit's own), { label,
 // notes } with labels (a note's date is null for the initial visit), or { unreadable: true } when a label does not
 // read (another date form, other case): such a row cannot be tied to a visit.
@@ -375,7 +382,7 @@ function readReportTables(page) {
  * a failed read, retried later, never "no pests". The page answers only when:
  * - it is whole (the state office footer closes it): an error page or a page cut short gives no answer;
  * - it is one first visit's: its inspection table lists one visit, whose date reads (and is visitDate when given)
- *   and whose inspection type is not a callback, follow-up or re-inspection;
+ *   and whose inspection type is given and names no callback, follow-up or re-inspection;
  * - the read visit is its inspection's first (visitNumber 1). A later visit's page holds free text that may clear an
  *   earlier citation ("No flies observed", "door repaired"), labelled or not, so a later visit, or one whose number
  *   is not known, gets no answer either way;
@@ -400,8 +407,7 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
   const { entries, unreadable, visits } = readReportTables(page);
   // A page that lists two visits, whose date does not read, of another visit, or of a callback cannot answer.
-  const pageDate = visits.length === 1 ? parseUsDate(visits[0].date) : null;
-  if (!pageDate || (visitDate && pageDate !== visitDate) || CALLBACK_TYPE_RE.test(visits[0].type)) return null;
+  if (visits.length !== 1 || !isFirstVisitRow(visits[0], visitDate)) return null;
   const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => {
     const text = entry.parts.join(' ');
     return { code: entry.code, text, notes: visitNotes(text) };
@@ -474,14 +480,21 @@ async function pendingInspections({ cutoff, limit }) {
   return rows.map((row) => ({ ...row, violation35: wholeNumber(row.violation35), visitNumber: wholeNumber(row.visitNumber) }));
 }
 
-async function saveReport(id, report) {
-  await db('restaurant_prospects')
-    .where({ id })
+// Saves a page's answer for the read it came from (a pendingInspections row: id, violation35, visitNumber), only while
+// the row is unanswered and still holds that count and visit number: a file re-read in between (a higher count)
+// leaves the row for a later read. Returns whether the answer was saved.
+async function saveReport(read, report) {
+  const asText = (value) => (value === null || value === undefined ? null : String(value));
+  const saved = await db('restaurant_prospects')
+    .where({ id: read.id })
     .whereNull('pest_evidence')
+    .whereRaw("detail->>'violation35' IS NOT DISTINCT FROM ?", [asText(read.violation35)])
+    .whereRaw("detail->>'visitNumber' IS NOT DISTINCT FROM ?", [asText(read.visitNumber)])
     .update({
       pest_evidence: report.pestEvidence,
       detail: db.raw("COALESCE(detail, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ findings: report.findings })]),
     });
+  return saved > 0;
 }
 
 async function bumpAttempts(id) {

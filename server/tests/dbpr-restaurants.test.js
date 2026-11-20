@@ -487,6 +487,9 @@ describe('parseInspectionReport', () => {
     for (const type of ['Callback - Food', 'Call Back - Food', 'Follow-up - Food', 'Re-Inspection - Food']) {
       expect(read(reportPage(rows, '10/20/2026').replace('Routine - Food', type), '2026-10-20')).toBeNull();
     }
+    // A blank inspection type, or no type column: no answer.
+    expect(read(reportPage(rows, '10/20/2026').replace('Routine - Food', ''), '2026-10-20')).toBeNull();
+    expect(read(reportPage(rows, '10/20/2026').replace('<td>Inspection Type</td>', '<td>Kind</td>'), '2026-10-20')).toBeNull();
     // The fixtures carry the real layout.
     expect(parse(fixture('report-35a.html'), { visitDate: '2026-10-20' })).toMatchObject({ pestEvidence: true });
     expect(parse(fixture('report-35b.html'), { violation35: 1, visitDate: '2026-10-21' })).toEqual({ pestEvidence: false, findings: [] });

@@ -26,6 +26,8 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     phone: null, seats: null, event_date: '2026-11-10', detail: { disposition: 'Warning Issued' }, ...over,
   });
   const rows = () => db('restaurant_prospects').where('source_key', 'like', `t-${RUN}-%`);
+  // The read a page's answer is saved for, as pendingInspections gives it: the row's id, count and visit number.
+  const readOf = (row) => ({ id: row.id, violation35: row.detail.violation35 ?? null, visitNumber: row.detail.visitNumber ?? null });
 
   beforeAll(() => {
     const target = new URL(process.env.DATABASE_URL);
@@ -106,7 +108,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   test('a re-read refreshes last_seen_at and never touches an answer, findings or attempts', async () => {
     await svc.upsertRecords([rec(2)]);
     const [row] = await rows().where({ source_key: key(2) });
-    await svc.saveReport(row.id, { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
+    await svc.saveReport(readOf(row), { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
     await db('restaurant_prospects').where({ id: row.id }).update({ detail_attempts: 2, last_seen_at: '2026-01-01T00:00:00Z' });
     await svc.upsertRecords([rec(2, { detail: { disposition: 'changed' } })]);
     const [after] = await rows().where({ id: row.id });
@@ -119,7 +121,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   test('a re-read fills the count and the visit number; an unanswered row takes the higher count and the file\'s visit number', async () => {
     await svc.upsertRecords([rec(20), rec(21)]);
     const [answered] = await rows().where({ source_key: key(21) });
-    await svc.saveReport(answered.id, { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
+    await svc.saveReport(readOf(answered), { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
     await svc.upsertRecords([
       rec(20, { detail: { disposition: 'changed', violation35: 2, visitNumber: 1 } }),
       rec(21, { detail: { disposition: 'changed', violation35: 1, visitNumber: 2 } }),
@@ -144,11 +146,26 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(await detail(22)).toEqual({ disposition: 'Warning Issued', violation35: 1, visitNumber: 1 });
   });
 
+  test('saveReport saves only while the row holds the count and visit number the page was read with', async () => {
+    await svc.upsertRecords([rec(5, { detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 1 } })]);
+    const [row] = await rows().where({ source_key: key(5) });
+    const read = readOf(row);
+    // A file re-read raises the count after the read began: no save, and the row waits for a later read.
+    await svc.upsertRecords([rec(5, { detail: { disposition: 'Warning Issued', violation35: 2, visitNumber: 1 } })]);
+    expect(await svc.saveReport(read, { pestEvidence: false, findings: [] })).toBe(false);
+    expect((await rows().where({ id: row.id }))[0].pest_evidence).toBeNull();
+    // Another visit number: no save either.
+    expect(await svc.saveReport({ ...read, violation35: 2, visitNumber: 2 }, { pestEvidence: false, findings: [] })).toBe(false);
+    // Read again with the row's values, it saves.
+    expect(await svc.saveReport({ ...read, violation35: 2 }, { pestEvidence: false, findings: [] })).toBe(true);
+    expect((await rows().where({ id: row.id }))[0].pest_evidence).toBe(false);
+  });
+
   test('saveReport does not overwrite an answer already written', async () => {
     await svc.upsertRecords([rec(3)]);
     const [row] = await rows().where({ source_key: key(3) });
-    await svc.saveReport(row.id, { pestEvidence: false, findings: [] });
-    await svc.saveReport(row.id, { pestEvidence: true, findings: [{ code: '35A-01-8', text: 'x' }] });
+    expect(await svc.saveReport(readOf(row), { pestEvidence: false, findings: [] })).toBe(true);
+    expect(await svc.saveReport(readOf(row), { pestEvidence: true, findings: [{ code: '35A-01-8', text: 'x' }] })).toBe(false);
     const [after] = await rows().where({ id: row.id });
     expect(after.pest_evidence).toBe(false);
     expect(after.detail.findings).toEqual([]);
