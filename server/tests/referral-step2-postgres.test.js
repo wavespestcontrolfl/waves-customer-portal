@@ -611,7 +611,7 @@ const DAY = 86400000;
     test('amounts, near radius, yearly limit and where the member stands', async () => {
       const member = await customer();
       expect(await engine.step2OfferFor(db, member.id, await engine.getSettings())).toEqual({
-        rewardPerReferral: 25, nearReward: 50, nearRadiusMiles: 0.5, annualCap: 10, creditsThisYear: 0, capReached: false,
+        rewardPerReferral: 25, standardReward: 25, nearReward: 50, nearRadiusMiles: 0.5, annualCap: 10, creditsThisYear: 0, capReached: false,
       });
       for (let i = 0; i < 10; i += 1) {
         const [prior] = await db('referrals').insert({
@@ -622,7 +622,16 @@ const DAY = 86400000;
           customer_id: member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
         });
       }
-      expect(await engine.step2OfferFor(db, member.id, await engine.getSettings())).toMatchObject({ creditsThisYear: 10, capReached: true });
+      // At the limit the existing field promises nothing; the standard amount is exposed separately.
+      expect(await engine.step2OfferFor(db, member.id, await engine.getSettings())).toMatchObject({
+        creditsThisYear: 10, capReached: true, rewardPerReferral: 0, standardReward: 25,
+      });
+      expect(await engine.step2OfferStrict(db, member.id)).toMatchObject({ capReached: true, rewardPerReferral: 0, standardReward: 25 });
+      // The strict reader never answers from defaults: with no settings row it is null.
+      const saved = await db('referral_program_settings').where({ id: 1 }).first();
+      await db('referral_program_settings').del();
+      expect(await engine.step2OfferStrict(db, member.id)).toBeNull();
+      await db('referral_program_settings').insert(saved);
     });
   });
 
@@ -730,6 +739,15 @@ const DAY = 86400000;
       const member = await customer({ email: 'member@example.invalid' });
       await sendReferralInviteEmail({ customerId: member.id });
       expect(lineOf()).toBe('you get a $30 referral reward and they get $25 off their first service.');
+    });
+
+    test('gate on, settings unreadable: no amount is promised and no email goes', async () => {
+      const member = await customer({ email: 'member@example.invalid' });
+      const saved = await db('referral_program_settings').where({ id: 1 }).first();
+      await db('referral_program_settings').del();
+      expect(await sendReferralInviteEmail({ customerId: member.id })).toBeNull();
+      expect(sendTemplate).not.toHaveBeenCalled();
+      await db('referral_program_settings').insert(saved);
     });
 
     test('gate on, member at the yearly limit: the member-reward part is dropped', async () => {

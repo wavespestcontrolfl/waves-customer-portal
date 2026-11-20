@@ -72,6 +72,7 @@ function confirmBlock(card, sure, { milestone, deferred }) {
 
 // GATE_REFERRAL_STEP2: the credits vary (a near member gets more, a member at the yearly limit gets none), so the
 // card states the rule instead of a flat $25 each. Gate off: the flat words below, unchanged.
+const { formatDollars } = require('./referral-step2');
 const step2Live = () => (typeof isEnabled === 'function' ? isEnabled('referralStep2') : false);
 // The card's effective rule (referral-inbound.js attaches `terms` from the live settings and the member's standing).
 const termsText = (card) => card.terms?.text || 'Credits follow the program settings';
@@ -311,7 +312,7 @@ const STEPS = {
     let after = result.credited ? 'Both $25 credits posted for the plan visit that just finished.' : '$25 each after the first plan visit.';
     if (step2Live()) {
       after = result.credited
-        ? `$${result.credited.referrerDollars} credited to the member and $${result.credited.refereeDollars} to the friend for the plan visit that just finished.`
+        ? `${formatDollars(result.credited.referrerDollars)} credited to the member and ${formatDollars(result.credited.refereeDollars)} to the friend for the plan visit that just finished.`
         : `${termsText(card)}.`;
     }
     return { ok: true, message: `${tidyName(sure.name)} is confirmed as ${name}'s referrer. ${after}`, resolution: CLOSE_RESOLUTIONS.confirmed };

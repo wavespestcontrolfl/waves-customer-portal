@@ -1402,14 +1402,30 @@ async function step2OfferFor(conn, memberId, settings) {
   const s = step2.step2Settings(settings);
   // The count is for the customer the credit is paid to (a household shares its promoter's customer).
   const creditsThisYear = await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId));
+  const capReached = step2.capReached(creditsThisYear, settings);
   return {
-    rewardPerReferral: s.step2_referrer_reward_cents / 100,
+    // The existing field: nothing is promised to a member at the yearly limit (a cached portal build reads this field
+    // alone); the configured standard amount is exposed as standardReward.
+    rewardPerReferral: capReached ? 0 : s.step2_referrer_reward_cents / 100,
+    standardReward: s.step2_referrer_reward_cents / 100,
     nearReward: s.step2_near_referrer_reward_cents / 100,
     nearRadiusMiles: s.step2_near_radius_miles,
     annualCap: s.step2_annual_credit_cap,
     creditsThisYear,
-    capReached: step2.capReached(creditsThisYear, settings),
+    capReached,
   };
+}
+
+// The offer for a member-facing promise, from the LIVE settings row (never getSettings()' defaults): null when the row
+// cannot be read, and the caller then promises nothing.
+async function step2OfferStrict(conn, memberId) {
+  try {
+    const live = await getLiveSettings(conn);
+    return live ? await step2OfferFor(conn, memberId, live) : null;
+  } catch (err) {
+    logger.warn(`[ReferralEngine] Step 2 offer unavailable: ${err.code || err.message}`);
+    return null;
+  }
 }
 
 // Step 2's member credit for the friend's first performed recurring service, inside creditReferralOnFirstService's
@@ -1784,6 +1800,7 @@ module.exports = {
   updateReferralStatus,
   creditReferralOnFirstService,
   step2OfferFor,
+  step2OfferStrict,
   step2TermsFor,
   referralAcquisitionCost,
   sendDueReferralRewardEmails,

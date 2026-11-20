@@ -5,7 +5,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const {
-  step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, STEP2_DEFAULTS,
+  step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars, STEP2_DEFAULTS,
 } = require('../services/referral-step2');
 
 describe('step2Settings', () => {
@@ -94,13 +94,29 @@ describe('etYearBounds', () => {
   });
 });
 
+describe('dollars are shown to the cent', () => {
+  test('whole dollars stay whole, cents are never rounded away', () => {
+    expect(formatDollars(25)).toBe('$25');
+    expect(formatDollars(25.5)).toBe('$25.50');
+    expect(formatDollars(12.5)).toBe('$12.50');
+    expect(ruleTerms({ referee_discount_cents: 1250, step2_referrer_reward_cents: 2550 }).text).toBe('Member: $25.50, or $50 within half a mile; friend: $12.50 credit');
+  });
+});
+
+describe('the merge executor finds referee_customer_id by its name rule', () => {
+  test('customer-dedupe repoints every column named customer_id or *_customer_id (customerFkColumns)', () => {
+    const rule = /(^|_)customer_id$/;
+    expect(['referee_customer_id', 'referrer_customer_id', 'customer_id'].every((c) => rule.test(c))).toBe(true);
+  });
+});
+
 describe('ruleTerms (what staff read before confirming a referral)', () => {
   test('the owner numbers, and the live row when the office changes them', () => {
     expect(ruleTerms({ referee_discount_cents: 2500 }).text).toBe('Member: $25, or $50 within half a mile; friend: $25 credit');
     expect(ruleTerms({
       referee_discount_cents: 2000, step2_referrer_reward_cents: 3000, step2_near_referrer_reward_cents: 6000, step2_near_radius_miles: '1.00',
     })).toMatchObject({ atCap: false, text: 'Member: $30, or $60 within 1 mile; friend: $20 credit', short: 'member $30 or $60 within 1 mile; friend $20' });
-    expect(ruleTerms({ referee_discount_cents: 2550, step2_near_radius_miles: 0.75 }).text).toBe('Member: $25, or $50 within 0.75 miles; friend: $25.5 credit');
+    expect(ruleTerms({ referee_discount_cents: 2550, step2_near_radius_miles: 0.75 }).text).toBe('Member: $25, or $50 within 0.75 miles; friend: $25.50 credit');
   });
   test('a member at the yearly limit gets $0, stated, and the friend credit still shows', () => {
     expect(ruleTerms({ referee_discount_cents: 2500 }, true)).toEqual({

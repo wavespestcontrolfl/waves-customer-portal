@@ -390,7 +390,8 @@ function inboundConfirmedMessage(result) {
   if (result.credited && result.step2) {
     const { referrerDollars, refereeDollars, referrerReason } = result.credited;
     const limit = referrerReason === "cap_reached" ? " The member is at the yearly limit." : "";
-    return `Referral confirmed. $${referrerDollars} credited to the member and $${refereeDollars} to the friend.${limit}`;
+    const cents = (n) => (Number.isInteger(Number(n)) ? `$${Number(n)}` : `$${Number(n).toFixed(2)}`);
+    return `Referral confirmed. ${cents(referrerDollars)} credited to the member and ${cents(refereeDollars)} to the friend.${limit}`;
   }
   if (result.credited) return "Referral confirmed. $25 credited to both accounts.";
   if (!result.creditsNow)

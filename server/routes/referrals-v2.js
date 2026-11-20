@@ -110,7 +110,7 @@ router.get('/', async (req, res, next) => {
         referrals: [],
         rewardPerReferral: settings.referrer_reward_cents / 100,
         // GATE_REFERRAL_STEP2: the member's real offer (its rewardPerReferral replaces the legacy amount above).
-        ...(isEnabled('referralStep2') ? await engine.step2OfferFor(db, req.customerId, settings) : {}),
+        ...(isEnabled('referralStep2') ? (await engine.step2OfferStrict(db, req.customerId)) || { rewardPerReferral: 0 } : {}),
       });
     }
 
@@ -186,7 +186,7 @@ router.get('/', async (req, res, next) => {
       rewardPerReferral: settings.referrer_reward_cents / 100,
       // GATE_REFERRAL_STEP2: the member's real offer (amounts, near radius, yearly limit, where the member stands).
       // Server side only here; PR 2 renders it. rewardPerReferral above keeps its meaning as the standard amount.
-      ...(isEnabled('referralStep2') ? await engine.step2OfferFor(db, promoter.customer_id || req.customerId, settings) : {}),
+      ...(isEnabled('referralStep2') ? (await engine.step2OfferStrict(db, promoter.customer_id || req.customerId)) || { rewardPerReferral: 0 } : {}),
     });
   } catch (err) { next(err); }
 });

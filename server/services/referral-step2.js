@@ -59,7 +59,12 @@ function capReached(creditsThisYear, settings) {
   return Number(creditsThisYear) >= step2Settings(settings).step2_annual_credit_cap;
 }
 
-const dollars = (cents) => `$${Number((Number(cents) / 100).toFixed(2))}`;
+// Cents-accurate: $25, $25.50 (never $26 or $25.5).
+const formatDollars = (dollarAmount) => {
+  const n = Number(dollarAmount) || 0;
+  return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
+};
+const dollars = (cents) => formatDollars(Number(cents) / 100);
 const miles = (n) => (n === 0.5 ? 'half a mile' : `${n} ${n === 1 ? 'mile' : 'miles'}`);
 
 // The rule as staff read it before confirming a referral, from the EFFECTIVE settings (the live row, never literals)
@@ -79,4 +84,4 @@ function ruleTerms(settings, atCap = false) {
   return { atCap: false, text: `Member: ${std}, or ${near} within ${within}; friend: ${friend} credit`, short: `member ${std} or ${near} within ${within}; friend ${friend}`, conditional };
 }
 
-module.exports = { STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms };
+module.exports = { STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars };

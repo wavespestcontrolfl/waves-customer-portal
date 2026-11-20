@@ -91,9 +91,9 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
       // GATE_REFERRAL_STEP2: a member at the yearly limit is not enrolled (the sequence's copy promises a reward the
       // settlement would post as $0); no new copy, the invite is just not sent.
       if (((require('../config/feature-gates').gates) || {}).referralStep2 === true) {
-        const { getSettings, step2OfferFor } = require('./referral-engine');
-        if ((await step2OfferFor(db, customerId, await getSettings())).capReached) {
-          logger.info(`[referral-invite-email] customer ${customerId} is at the yearly limit; referral_nudge not enrolled`);
+        const offer = await require('./referral-engine').step2OfferStrict(db, customerId);
+        if (!offer || offer.capReached) {
+          logger.info(`[referral-invite-email] customer ${customerId}: ${offer ? 'at the yearly limit' : 'settings unavailable'}; referral_nudge not enrolled`);
           return null;
         }
       }
@@ -115,8 +115,13 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
     let memberCents = settings.referrer_reward_cents;
     let atYearlyLimit = false;
     if (((require('../config/feature-gates').gates) || {}).referralStep2 === true) {
-      const offer = await require('./referral-engine').step2OfferFor(db, customerId, settings);
-      memberCents = Math.round(offer.rewardPerReferral * 100);
+      // The live settings row only: if it cannot be read, no amount is promised and no email goes.
+      const offer = await require('./referral-engine').step2OfferStrict(db, customerId);
+      if (!offer) {
+        logger.info(`[referral-invite-email] customer ${customerId}: program settings unavailable; invite skipped`);
+        return null;
+      }
+      memberCents = Math.round(offer.standardReward * 100);
       atYearlyLimit = offer.capReached;
     }
     const referrer = dollars(memberCents);

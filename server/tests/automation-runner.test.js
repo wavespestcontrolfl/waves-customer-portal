@@ -710,6 +710,70 @@ describe('automation runner suppression guardrails', () => {
   });
 });
 
+describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
+  const engine = require('../services/referral-engine');
+  const gates = require('../config/feature-gates').gates;
+  let savedGate;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    db.fn = { now: jest.fn(() => 'NOW()') };
+    savedGate = gates.referralStep2;
+    gates.referralStep2 = true;
+  });
+  afterEach(() => { gates.referralStep2 = savedGate; jest.restoreAllMocks(); });
+
+  function nudgeQueues({ sendUpdate = chain(), enrollmentUpdate = chain() } = {}) {
+    const enrollment = {
+      id: 'enrollment-n', template_key: 'referral_nudge', customer_id: 'cust-n', status: 'active',
+      current_step: 0, email: 'member@example.com', first_name: 'Sam', last_name: 'Member',
+      enrolled_at: new Date('2026-11-01T12:00:00Z'), metadata: {},
+    };
+    setDbQueues({
+      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
+      automation_templates: [chain({ first: { key: 'referral_nudge', name: 'Referral Nudge', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Share Waves, {{first_name}}',
+        html_body: '<p>Share it.</p>', text_body: 'Share it.', from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-n' }] }), sendUpdate],
+      email_suppressions: [chain({ result: [] })],
+    });
+    return { sendUpdate, enrollmentUpdate };
+  }
+
+  test('a member who reached the yearly limit is cancelled, not sent', async () => {
+    jest.spyOn(engine, 'step2OfferStrict').mockResolvedValue({ capReached: true });
+    const { sendUpdate, enrollmentUpdate } = nudgeQueues();
+    await expect(sendStep('enrollment-n')).resolves.toEqual({ sent: false, blocked: true, reason: 'The member reached the yearly referral credit limit' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked' }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'cancelled', metadata: { sql: expect.stringContaining('{cancel_reason}'), bindings: [JSON.stringify('referral_yearly_limit')] },
+    }));
+  });
+
+  test('unreadable program settings send no promise either', async () => {
+    jest.spyOn(engine, 'step2OfferStrict').mockResolvedValue(null);
+    nudgeQueues();
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ blocked: true });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a member under the limit still gets it, and the gate off never checks', async () => {
+    const spy = jest.spyOn(engine, 'step2OfferStrict').mockResolvedValue({ capReached: false });
+    nudgeQueues();
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-nudge' });
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    gates.referralStep2 = false;
+    spy.mockClear();
+    nudgeQueues();
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-nudge-2' });
+    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
 describe('automation runner prep sequence delivery stamp', () => {
   beforeEach(() => {
     jest.clearAllMocks();
