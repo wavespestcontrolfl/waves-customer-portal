@@ -136,6 +136,30 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// Waves Admin can open a customer link, such as a report, in its own
+// webview. There every page keeps the staff rules, and none reloads by
+// itself (selfReloadBarred, lib/portalReload.js).
+test('in Waves Admin a report link opened directly whose code is missing gets the staff retry screen: the preload error leaves its import to fail, and nothing reloads', async () => {
+  const reload = vi.fn();
+  vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+  window.webkit = { messageHandlers: { wavesAdmin: { postMessage: vi.fn() } } };
+  try {
+    let failReport;
+    renderInBoundary(lazyWithRetry(() => new Promise((_, reject) => { failReport = reject; })));
+    await waitFor(() => expect(failReport).toBeDefined());
+    const stale = preloadErrorEvent();
+    handleVitePreloadError(stale, reload);
+    expect(stale.defaultPrevented).toBe(false);
+    await act(async () => { failReport(new TypeError('Failed to fetch dynamically imported module: /assets/ReportViewPage-old.js')); });
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  } finally {
+    delete window.webkit;
+    vi.unstubAllGlobals();
+  }
+});
+
 test('the first stale-chunk preload error reloads once and marks the reload pending', () => {
   const reload = vi.fn();
   const first = preloadErrorEvent();

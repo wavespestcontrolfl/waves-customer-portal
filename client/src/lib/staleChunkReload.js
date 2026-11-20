@@ -66,13 +66,16 @@
 // on its way. There a page whose code is missing shows its retry screen.
 // That page keeps the staff rules, a customer page too, and a redirect
 // continues the move: Back from Today to /recap/:token, which redirects to
-// /report/:token, opens the report from Today.
+// /report/:token, opens the report from Today. In Waves Admin every page
+// keeps the staff rules, as the app can open a report link in its own
+// webview.
 //
 // The one reload for a missing chunk counts until the tab leaves the path it
 // reopened (chunkReloadAttempted): a route can load in parts, and the part
 // that loads clears the one-shot flag before the part still missing fails.
 
 import { decodedPath, isAdminPath, isFieldPath } from './adminBookmarkMeta';
+import { isWavesAdminApp } from '../native/platform';
 import {
   blockersBesideWork, isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
 } from './portalReload';
@@ -158,15 +161,16 @@ function pageInView() {
   return shownMove.to ?? window.location.pathname;
 }
 
-// Whether the staff rules apply: while the page in view or the address is a
-// staff page, or a page that a move from a field page opened, which never
-// reloads by itself (see the top of this file). A redirect continues the
+// Whether the staff rules apply: in Waves Admin, which can open a customer
+// link such as a report in its own webview, and elsewhere while the page in
+// view or the address is a staff page, or a page that a move from a field
+// page opened. Neither ever reloads by itself (see the top of this file). A redirect continues the
 // move it ends (PortalUpdateGate): after Back from Today to /recap/:token,
 // the report it redirects to asks for its code once the redirect is in view,
 // and that code keeps the staff rules. App.jsx and LazyPanel.jsx ask it too,
 // for a page or a part whose code is missing.
 export function staffTab() {
-  return [pageInView(), window.location.pathname]
+  return isWavesAdminApp() || [pageInView(), window.location.pathname]
     .some((pathname) => isAdminPath(pathname) || isFieldPath(moveFromFor(pathname)));
 }
 
