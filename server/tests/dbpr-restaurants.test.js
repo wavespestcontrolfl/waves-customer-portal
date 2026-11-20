@@ -388,6 +388,20 @@ describe('syncRestaurantProspects', () => {
     expect(result.files.inspection).toEqual({ kept: 1, malformed: 0, upserted: 1 });
   });
 
+  test('a stored visit whose count was corrected to zero, or that left the area, is still in the file: it passes', async () => {
+    store = makeStore();
+    store.keysSince = inspectionsOnFile(ON_FILE);
+    // All 20 visits are in the file: 3 now cite nothing and 1 moved out of the area, so 16 still qualify.
+    const rows = ON_FILE.map((visit, i) => {
+      if (i < 3) return inspRow({ visit, v35: 0 });
+      return i === 3 ? inspRow({ visit, county: 'Hillsborough' }) : inspRow({ visit });
+    });
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([...rows, inspRow({ visit: '9101' })]) });
+    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(result.files.inspection).toEqual({ kept: 17, malformed: 0, upserted: 17 });
+    expect(upserts.filter((r) => r.kind === 'inspection').map((r) => r.source_key)).toContain('9101');
+  });
+
   test.each([
     ['2026-07-01T03:59:00Z', '2025-07-01'], // 11:59 PM on June 30, Eastern
     ['2026-07-01T04:00:00Z', '2026-07-01'],

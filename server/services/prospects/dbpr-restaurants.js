@@ -283,10 +283,15 @@ async function keysSince(kind, since) {
 
 const defaultStore = { upsertRecords, keysSince };
 
+// The column that holds each file's key (the parsers' source_key).
+const KEY_COLUMN = { inspection: 'Inspection Visit ID', new_license: 'Application Number', owner_change: 'Application Number' };
+
 async function loadFile(kind, fetchText, now) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
   const counts = { malformed: 0, valid: 0 };
   const records = [];
+  // Every key in the file, kept or not: checkWholeYear compares them with the keys on file.
+  const keys = new Set();
   let rowsRead = 0;
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
   const header = await eachDbprCsvRow(text, (row, dropped) => {
@@ -297,6 +302,8 @@ async function loadFile(kind, fetchText, now) {
       counts.malformed += 1;
       return;
     }
+    const key = clean(row[KEY_COLUMN[kind]]);
+    if (key) keys.add(key);
     records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts) : parseLicenseRows([row], kind, counts)));
   });
   // A required column missing from the header is renamed or gone: the whole file is refused.
@@ -308,7 +315,7 @@ async function loadFile(kind, fetchText, now) {
   // Malformed rows and not one good row in the area mean a changed format (a new date format, say), not a quiet
   // week: the file fails. A file whose rows all fall outside the area, or whose good rows cite nothing, succeeds.
   if (!counts.valid && counts.malformed) throw new Error('no good row in the area');
-  return { records, malformed: counts.malformed };
+  return { records, malformed: counts.malformed, keys };
 }
 
 // The first day of the fiscal year the files hold: July 1, by the Eastern date.
@@ -317,27 +324,27 @@ function fiscalYearStart(now) {
   return `${month >= 7 ? year : year - 1}-07-01`;
 }
 
-// A full file shows again nearly every row of its fiscal year that is already on file. A download that stopped early
-// but ends on a whole row passes every check in loadFile, so it would report success with rows missing; a file that
-// shows under 90% of those rows fails, and none of its rows are written. A row can leave the kept set between reads
-// (a corrected violation count), hence 90%. Under 20 rows on file (early July) the check waits.
+// A full file holds again nearly every row of its fiscal year that is already on file: the same key, whatever the
+// row's area or violation count now (a corrected count keeps its visit id). A download that stopped early but ends on
+// a whole row passes every check in loadFile, so it would report success with rows missing; a file that holds under
+// 90% of those keys fails, and none of its rows are written. A row can leave the file (a record the state withdrew),
+// hence 90%. Under 20 rows on file (early July) the check waits.
 const WHOLE_YEAR_SHARE = 0.9;
 const WHOLE_YEAR_MIN_ROWS = 20;
 
-async function checkWholeYear(kind, unique, deps) {
+async function checkWholeYear(kind, keys, deps) {
   const onFile = await deps.store.keysSince(kind, fiscalYearStart(deps.now));
   if (onFile.length < WHOLE_YEAR_MIN_ROWS) return;
-  const seen = new Set(unique.map((record) => record.source_key));
-  const shown = onFile.filter((key) => seen.has(key)).length;
+  const shown = onFile.filter((key) => keys.has(key)).length;
   if (shown < onFile.length * WHOLE_YEAR_SHARE) throw new Error('file shorter than the rows on file');
 }
 
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
-      const { records, malformed } = await loadFile(kind, deps.fetchText, deps.now);
+      const { records, malformed, keys } = await loadFile(kind, deps.fetchText, deps.now);
+      await checkWholeYear(kind, keys, deps);
       const unique = dedupeByKey(records);
-      await checkWholeYear(kind, unique, deps);
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
     } catch (err) {
       result.failures += 1;
