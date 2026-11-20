@@ -117,11 +117,11 @@ describe('SiteOne deals digest catch-up (Mon + Tue 10:52)', () => {
     expect(logger.error).toHaveBeenCalledWith('Weekly SiteOne deals digest catch-up failed: boom');
   });
 
-  test('the Monday 8:00 tick is unchanged: plain run, no pre-check', async () => {
+  test('the Monday 8:00 tick: no pre-check, and it alone asks for AI end dates', async () => {
     await tick('0 8 * * 1')();
     expect(siteone.weekIsMissing).not.toHaveBeenCalled();
     expect(runExclusive).toHaveBeenCalledWith('siteone-deals-digest', expect.any(Function));
-    expect(siteone.runSiteOneDealsDigest).toHaveBeenCalledWith();
+    expect(siteone.runSiteOneDealsDigest).toHaveBeenCalledWith({ aiEndDates: true });
   });
 });
 

@@ -9,7 +9,12 @@ jest.mock('../services/technician-eligibility', () => ({
   applyAssignable: jest.fn((q) => q), absentTechDays: jest.fn(async () => new Set()),
 }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
-jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false), listOccupiedWindows: jest.fn(async () => []) }));
+jest.mock('../services/scheduling/occupancy', () => ({
+  techScopedConfirmActive: jest.fn(() => false),
+  listOccupiedWindows: jest.fn(async () => []),
+  // The office's occupancy guard compares hours with it (rain-out conflictsForTarget).
+  windowsOverlap: jest.requireActual('../services/scheduling/occupancy').windowsOverlap,
+}));
 jest.mock('../services/scheduling/departure-time', () => ({
   LEGACY_DEPARTURE_MINUTES: 480, readDepartureSetting: jest.fn(async () => ({ saved: true, minutes: 480 })), effectiveDepartureMinutes: jest.fn((s) => s.minutes),
 }));
@@ -20,8 +25,30 @@ jest.mock('../services/scheduling/tech-start-point', () => ({
 jest.mock('../services/day-replan/index', () => ({
   _internals: { loadDayStops: jest.fn(async () => []), loadBlocks: jest.fn(async () => []), blockedHoursFor: jest.fn(() => []) },
 }));
+// The finder that offers a lead its times (routes/booking.js availabilityForPin); its own suites cover how it builds.
+jest.mock('../routes/booking', () => ({ _internals: { availabilityForPin: jest.fn(async () => ({ days: [] })) } }));
+// The finder the office books a same-day caller with (scheduling/find-time.js findAvailableSlots), asked about today.
+jest.mock('../services/scheduling/find-time', () => ({
+  ...jest.requireActual('../services/scheduling/find-time'),
+  findAvailableSlots: jest.fn(async () => ({ slots: [], rejections_by_date: {} })),
+}));
+// The rest of the office list's chain for today: its capability rule, and its occupancy guard's snapshot
+// (find-time-hints guardHintStarts, which runs as is).
+jest.mock('../services/technician-capabilities', () => ({
+  ...jest.requireActual('../services/technician-capabilities'),
+  inactiveCapabilitiesForServices: jest.fn(async () => []),
+}));
+jest.mock('../services/rain-out', () => ({
+  ...jest.requireActual('../services/rain-out'),
+  loadOccupancy: jest.fn(),
+}));
 
+const db = require('../models/db');
 const { _internals: replan } = require('../services/day-replan/index');
+const { _internals: { availabilityForPin } } = require('../routes/booking');
+const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { inactiveCapabilitiesForServices } = require('../services/technician-capabilities');
+const { loadOccupancy } = require('../services/rain-out');
 const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
 const { absentTechDays } = require('../services/technician-eligibility');
 const { listOccupiedWindows } = require('../services/scheduling/occupancy');
@@ -331,21 +358,67 @@ describe('the totals', () => {
 describe('runRouteCheck', () => {
   const NOW = new Date('2026-11-19T15:30:00Z'); // Thu 10:30 AM ET
 
+  // The decision asks the live finder only on the wall clock's ET day (decideSlotRule), so the wall clock reads NOW.
+  // Only Date is faked: timers and promises run as usual.
+  beforeEach(() => jest.useFakeTimers({
+    now: NOW,
+    doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame',
+      'requestIdleCallback', 'cancelIdleCallback', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval',
+      'setTimeout', 'clearTimeout'],
+  }));
+  afterEach(() => jest.useRealTimers());
+  // New Appointment's open-times box is shown (production, 11-20), so today's list is there to count.
+  const BOX_GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX'];
+  const savedBoxGates = BOX_GATES.map((name) => process.env[name]);
+  beforeEach(() => { for (const name of BOX_GATES) process.env[name] = 'true'; });
+  afterEach(() => BOX_GATES.forEach((name, i) => {
+    if (savedBoxGates[i] === undefined) delete process.env[name]; else process.env[name] = savedBoxGates[i];
+  }));
+
+  // The slot rule's input: the service zones' centers (synthetic pins).
+  const ZONES = [
+    { zone_name: 'North', center_lat: 27.5, center_lng: -82.57 },
+    { zone_name: 'South', center_lat: 27.1, center_lng: -82.45 },
+  ];
+  // The decision when every zone answers with no slot: today (10:30 AM, from the office's finder) and the next 3 staffed
+  // days (from /book).
+  const FLOOR = {
+    mode: 'floor', service: 'pest_control',
+    dates: ['2026-11-19', '2026-11-20', '2026-11-21', '2026-11-23'],
+    sameDay: { date: '2026-11-19', travel: 'modeled' },
+    zones: ['North', 'South'].map((zone) => ({
+      zone, byDate: { '2026-11-19': 0, '2026-11-20': 0, '2026-11-21': 0, '2026-11-23': 0 }, first: null,
+    })),
+  };
+
   // `campaigns` an Error: the campaign read throws. `taken`: the unique key's rows (key -> row), shared across runs.
-  function fakeConn({ campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], taken = new Map() } = {}) {
+  // `zones`: the zone rows the decision reads (an Error throws). `techs`: the assignable technicians' ids.
+  function fakeConn({
+    campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], taken = new Map(), zones = ZONES, techs = [TECH], done = [],
+  } = {}) {
     const writes = [];
     const conflicts = [];
-    const conn = (table) => {
+    const doneReads = [];
+    const handle = (table) => {
       let filter = {};
       const q = {
         leftJoin() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, whereRaw() { return q; },
         where(arg) { if (arg && typeof arg === 'object') filter = arg; return q; },
         first: async () => taken.get(`${filter.service_date}|${filter.run_hour}`),
         select: async () => {
-          if (table === 'technicians') return [{ id: TECH }];
+          if (table === 'technicians') return techs.map((id) => ({ id }));
           if (table === 'ad_campaigns') {
             if (campaigns instanceof Error) throw campaigns;
             return campaigns;
+          }
+          if (table === 'service_zones') {
+            if (zones instanceof Error) throw zones;
+            return zones;
+          }
+          if (table === 'scheduled_services') {
+            doneReads.push(filter);
+            if (done instanceof Error) throw done;
+            return done;
           }
           return [];
         },
@@ -368,11 +441,22 @@ describe('runRouteCheck', () => {
       };
       return q;
     };
-    conn.raw = (sql) => sql;
-    return { conn, writes, conflicts };
+    // The fake is the shared handle itself (models/db): the run reads no other, and neither does the finder.
+    db.mockImplementation(handle);
+    db.raw = (sql) => sql;
+    delete db.transaction;
+    return { conn: db, writes, conflicts, doneReads };
   }
 
   beforeEach(() => {
+    availabilityForPin.mockReset();
+    availabilityForPin.mockImplementation(async () => ({ days: [] }));
+    findAvailableSlots.mockReset();
+    findAvailableSlots.mockImplementation(async () => ({ slots: [], rejections_by_date: {} }));
+    inactiveCapabilitiesForServices.mockReset();
+    inactiveCapabilitiesForServices.mockImplementation(async () => []);
+    loadOccupancy.mockReset();
+    loadOccupancy.mockImplementation(async () => ({ rows: [], canName: () => false, nameById: new Map() }));
     getBlackoutDates.mockResolvedValue(new Set(['2026-11-26']));
     absentTechDays.mockResolvedValue(new Set());
     replan.loadDayStops.mockImplementation(async (_c, date) => {
@@ -384,21 +468,21 @@ describe('runRouteCheck', () => {
 
   test('records one row: the staffed days after today, and the ad shadow; nothing else is written', async () => {
     const { conn, writes, conflicts } = fakeConn();
-    const result = await runRouteCheck({ conn, now: NOW });
+    const result = await runRouteCheck({ now: NOW });
     expect(writes.map(([table]) => table)).toEqual(['route_check_runs']);
     const row = writes[0][1];
     expect(row).toMatchObject({ run_at: NOW, service_date: '2026-11-19', run_hour: 10, status: 'completed' });
     expect(conflicts).toEqual([['service_date', 'run_hour']]);
     const days = JSON.parse(row.days);
-    // Today is not measured: its room depends on where the van is now (a follow-up).
+    // Today is not measured: its room depends on where the van is now (the decision asks the office's finder instead).
     expect(days.map((d) => d.date)).toEqual(['2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25']);
     expect(days[0]).toMatchObject({ stops: 1, slots: expect.any(Number) });
     expect(days[0].openings.length).toBeGreaterThan(0);
     const totals = JSON.parse(row.totals);
     expect(totals.next.dates).toEqual(['2026-11-20', '2026-11-21', '2026-11-23']);
     expect(totals.today).toBeUndefined();
-    // No budget decision: the live rule's campaigns only, to compare the counts with.
-    expect(JSON.parse(row.ad_shadow)).toEqual({ live: [{ id: 'c1', status: 'paused', mode: 'stop' }] });
+    // The live rule's campaigns, to compare with, and the slot rule's decision from the offer finder (no slot here).
+    expect(JSON.parse(row.ad_shadow)).toEqual({ live: [{ id: 'c1', status: 'paused', mode: 'stop' }], decision: FLOOR });
     // Only the measured dates and the Sundays are read: never today, never the whole 14-day scan.
     expect(replan.loadDayStops.mock.calls.map(([, d]) => d)).toEqual(['2026-11-22', '2026-11-29', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26']);
     expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ db: conn, dateFrom: '2026-11-20', dateTo: '2026-11-20' }));
@@ -408,8 +492,8 @@ describe('runRouteCheck', () => {
 
   test('a Sunday counts when the technician has a stop booked that day', async () => {
     replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-22' ? [stop('s1', '10:00:00', '11:00:00')] : []));
-    const { conn, writes } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    await runRouteCheck({ now: NOW });
     expect(JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-22')).toMatchObject({ stops: 1, staffed: true });
   });
 
@@ -420,8 +504,8 @@ describe('runRouteCheck', () => {
       if (date === '2026-11-22') return [placeholder(date)];
       return [];
     });
-    const { conn, writes } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    await runRouteCheck({ now: NOW });
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ stops: 1, slots: expect.any(Number) });
     expect(days.find((d) => d.date === '2026-11-20').skip).toBeUndefined();
@@ -437,8 +521,8 @@ describe('runRouteCheck', () => {
       [{ customer_id: 'cust-1', reservation_expires_at: expires }, true],
     ]) {
       replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-22' ? [stop('h1', '10:00:00', '11:00:00', extra)] : []));
-      const { conn, writes } = fakeConn();
-      await runRouteCheck({ conn, now: NOW });
+      const { writes } = fakeConn();
+      await runRouteCheck({ now: NOW });
       const days = JSON.parse(writes[0][1].days);
       expect([extra.customer_id, days.some((d) => d.date === '2026-11-22')]).toEqual([extra.customer_id, staffedSunday]);
       expect(JSON.parse(writes[0][1].totals).next.dates)
@@ -451,8 +535,8 @@ describe('runRouteCheck', () => {
       if (date === '2026-11-20') throw new Error('timeout');
       return [];
     });
-    const { conn, writes } = fakeConn();
-    const result = await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    const result = await runRouteCheck({ now: NOW });
     expect(result.status).toBe('completed_with_errors');
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ skip: 'FAILED' });
@@ -461,8 +545,8 @@ describe('runRouteCheck', () => {
 
   test("the check reads every visit staff have booked and every block, as dispatch's commit-time checks do (rounds 33, 34)", async () => {
     replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-20' ? [stop('s1', '10:00:00', null)] : []));
-    const { conn } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
+    fakeConn();
+    await runRouteCheck({ now: NOW });
     expect(replan.loadDayStops.mock.calls.length).toBeGreaterThan(0);
     expect(replan.loadDayStops.mock.calls.every(([, , booked]) => booked === true)).toBe(true);
     expect(replan.loadBlocks.mock.calls.length).toBeGreaterThan(0);
@@ -501,8 +585,8 @@ describe('runRouteCheck', () => {
     for (const [extra, skip] of [[{ time_window: '3 PM' }, 'UNASSIGNED_WORK'], [{ window_start: '09:00:00' }, 'UNASSIGNED_WORK'], [{}, undefined]]) {
       const row = stop('u1', null, null, { technician_id: null, scheduled_date: '2026-11-20', ...extra });
       replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-20' ? [stop('s1', '10:00:00', null), row] : []));
-      const { conn, writes } = fakeConn();
-      await runRouteCheck({ conn, now: NOW });
+      const { writes } = fakeConn();
+      await runRouteCheck({ now: NOW });
       const day = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
       expect([extra, day.skip, day.stops]).toEqual([extra, skip, 1]);
       expect(JSON.parse(writes[0][1].totals).next.unmeasured.includes('2026-11-20')).toBe(skip != null);
@@ -519,8 +603,8 @@ describe('runRouteCheck', () => {
     replan.loadBlocks.mockImplementation(async (_c, date) => (date === '2026-11-20' ? [{ startMin: 570, endMin: 600 }] : []));
     listOccupiedWindows.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-11-20'
       ? ['a1', 'a2'].map((id) => ({ ...member(id), reservation_service_mix: mix, startMin: 540, endMin: 600 })) : []));
-    const { conn, writes } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    await runRouteCheck({ now: NOW });
     // One stop: its 60 minutes move whole past the 9:30 block, done at 11:00 (not split around it, done at 10:30).
     expect(JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20')).toMatchObject({ stops: 1, endMin: 660 });
     listOccupiedWindows.mockResolvedValue([]);
@@ -535,8 +619,8 @@ describe('runRouteCheck', () => {
       estimated_duration_minutes: 60, reservation_service_mix: mix,
     }));
     listOccupiedWindows.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-11-20' ? occupiedRows(pair) : []));
-    const { conn, writes } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    await runRouteCheck({ now: NOW });
     listOccupiedWindows.mockResolvedValue([]);
     const friday = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
     expect(friday.openings.map((o) => [o.start, o.min])).toEqual([[660, 360]]); // 8-9 is under a job slot; 9-11 is held
@@ -547,8 +631,8 @@ describe('runRouteCheck', () => {
       if (date === '2026-11-22' || date === '2026-11-20') throw new Error('timeout');
       return [];
     });
-    const { conn, writes } = fakeConn();
-    const result = await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    const result = await runRouteCheck({ now: NOW });
     expect(result.status).toBe('completed_with_errors');
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ skip: 'FAILED' });
@@ -557,55 +641,535 @@ describe('runRouteCheck', () => {
 
   test("one row per ET hour: a second run of an hour already recorded writes nothing and reports that hour's status", async () => {
     const taken = new Map();
-    const first = fakeConn({ taken });
-    expect((await runRouteCheck({ conn: first.conn, now: NOW })).status).toBe('completed');
+    fakeConn({ taken });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
     // A second instance's run of the same 10:30 tick, after the first released the lock (a slot wait, at most 10 min).
     const second = fakeConn({ taken });
-    const result = await runRouteCheck({ conn: second.conn, now: new Date('2026-11-19T15:39:00Z') });
+    const result = await runRouteCheck({ now: new Date('2026-11-19T15:39:00Z') });
     expect(result).toMatchObject({ status: 'completed', duplicate: true });
     expect(second.writes).toHaveLength(0);
     // The next hour records its own row.
     const next = fakeConn({ taken });
-    expect((await runRouteCheck({ conn: next.conn, now: new Date('2026-11-19T16:30:00Z') })).status).toBe('completed');
+    expect((await runRouteCheck({ now: new Date('2026-11-19T16:30:00Z') })).status).toBe('completed');
     expect(next.writes[0][1]).toMatchObject({ service_date: '2026-11-19', run_hour: 11 });
   });
 
   test('a failed hour stays failed: a second run of it reports the recorded failure, never a success', async () => {
     const taken = new Map();
     getBlackoutDates.mockRejectedValueOnce(new Error('timeout'));
-    const first = fakeConn({ taken });
-    expect((await runRouteCheck({ conn: first.conn, now: NOW })).status).toBe('failed');
+    fakeConn({ taken });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('failed');
     const second = fakeConn({ taken });
-    expect(await runRouteCheck({ conn: second.conn, now: new Date('2026-11-19T15:39:00Z') }))
+    expect(await runRouteCheck({ now: new Date('2026-11-19T15:39:00Z') }))
       .toMatchObject({ status: 'failed', duplicate: true });
     expect(second.writes).toHaveLength(0);
   });
 
   test('an unread campaign list is an error of the run, with its message; an empty list is a completed run', async () => {
     const unread = fakeConn({ campaigns: new Error('timeout') });
-    expect((await runRouteCheck({ conn: unread.conn, now: NOW })).status).toBe('completed_with_errors');
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
     expect(unread.writes[0][1].status).toBe('completed_with_errors');
-    expect(JSON.parse(unread.writes[0][1].ad_shadow)).toEqual({ live: null, error: 'timeout' });
+    expect(JSON.parse(unread.writes[0][1].ad_shadow)).toEqual({ live: null, error: 'timeout', decision: FLOOR });
     const none = fakeConn({ campaigns: [] });
-    expect((await runRouteCheck({ conn: none.conn, now: NOW })).status).toBe('completed');
-    expect(JSON.parse(none.writes[0][1].ad_shadow)).toEqual({ live: [] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
+    expect(JSON.parse(none.writes[0][1].ad_shadow)).toEqual({ live: [], decision: FLOOR });
   });
 
   test('a run-wide read failing still writes the hour, as failed with its error', async () => {
     getBlackoutDates.mockRejectedValueOnce(new Error('timeout'));
-    const { conn, writes } = fakeConn();
-    const result = await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    const result = await runRouteCheck({ now: NOW });
     expect(result).toMatchObject({ status: 'failed', totals: { error: 'timeout' } });
     expect(writes).toHaveLength(1);
     expect(writes[0][1]).toMatchObject({ status: 'failed', service_date: '2026-11-19' });
     expect(JSON.parse(writes[0][1].totals)).toEqual({ error: 'timeout' });
+    // No staffed days were found, so neither finder is asked.
+    expect(JSON.parse(writes[0][1].ad_shadow)).toEqual({});
+    expect(availabilityForPin).not.toHaveBeenCalled();
+    expect(findAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  // An offer as availabilityForPin returns it: days[] with every offered start and its technician.
+  const offerOn = (date, ...slots) => ({
+    days: [{ date, slots: slots.map(([start_time, technician_id = TECH]) => ({ start_time, technician_id })) }],
+  });
+
+  test('slot rule (A3): a slot the offer finder gives any zone on a next staffed day makes the decision full', async () => {
+    availabilityForPin.mockImplementation(async ({ lat }) => (lat === 27.1 ? offerOn('2026-11-21', ['14:00'], ['10:00']) : { days: [] }));
+    const { writes } = fakeConn();
+    const result = await runRouteCheck({ now: NOW });
+    expect(JSON.parse(writes[0][1].ad_shadow).decision).toEqual({
+      ...FLOOR,
+      mode: 'full',
+      zones: [FLOOR.zones[0], { zone: 'South', byDate: { ...FLOOR.zones[1].byDate, '2026-11-21': 2 }, first: '2026-11-21 10:00' }],
+    });
+    // Each zone's center is asked as a lead is offered times there (no staff-side `internal` read), buying nothing
+    // (no road lookup, no forecast), searched through the last next staffed day, on the run's own clock, under the
+    // probe's own label (the customer route check logs it apart from customer searches), taking no fallback list:
+    // first with the run's crew; then, for North (no crew slot), /book's own pool. South's slot needs no second ask.
+    const askAt = (z, extra = {}) => ({
+      lat: z.center_lat, lng: z.center_lng, serviceKey: 'pest_control', paidLookups: false,
+      through: '2026-11-23', now: NOW, surface: 'route_check', verifiedOnly: true, ...extra,
+    });
+    expect(availabilityForPin.mock.calls.map(([ask]) => ask)).toEqual([
+      askAt(ZONES[0], { crew: expect.any(Map) }), askAt(ZONES[0]), askAt(ZONES[1], { crew: expect.any(Map) }),
+    ]);
+    // Hour mode: /book's own drive times are the same free model, so the answer carries no travel mark.
+    expect(JSON.parse(writes[0][1].ad_shadow).decision.travel).toBeUndefined();
+    expect(result.status).toBe('completed');
+  });
+
+  test('slot rule (A3): a zone with no answer is an error of the run; with no slot anywhere the decision is unknown', async () => {
+    // A thrown read, and no offer at all (/book off, or no pin: availabilityForPin's null).
+    for (const [north, error] of [[new Error('timeout'), 'timeout'], [null, 'no_offer']]) {
+      availabilityForPin.mockImplementation(async ({ lat }) => {
+        if (lat !== 27.5) return { days: [] };
+        if (north instanceof Error) throw north;
+        return north;
+      });
+      const none = fakeConn();
+      expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+      expect(JSON.parse(none.writes[0][1].ad_shadow).decision).toEqual({
+        // Today's answer (the office's finder) stands beside /book's failure.
+        ...FLOOR, mode: 'unknown', zones: [{ zone: 'North', byDate: { '2026-11-19': 0 }, first: null, error }, FLOOR.zones[1]],
+      });
+    }
+    // Any slot is full, so a slot in another zone still decides it; the zone with no answer still marks the run.
+    availabilityForPin.mockImplementation(async ({ lat }) => (lat === 27.5 ? null : offerOn('2026-11-23', ['09:00'])));
+    const some = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(some.writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'full', zones: [{ zone: 'North', error: 'no_offer' }, { zone: 'South', first: '2026-11-23 09:00' }],
+    });
+  });
+
+  test("slot rule (A3): with no crew slot, /book's own pool says whether the zero is an answer (its whole-week floor), and its crew starts count", async () => {
+    // /book's own pool answers too: its check kept no whole week, so the crew's zero is the zone's answer.
+    const zero = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
+    expect(JSON.parse(zero.writes[0][1].ad_shadow).decision).toEqual(FLOOR);
+    expect(availabilityForPin.mock.calls.map(([ask]) => [ask.lat, ask.crew instanceof Map])).toEqual([
+      [27.5, true], [27.5, false], [27.1, true], [27.1, false],
+    ]);
+    // /book's check would keep its whole week (every slot in it makes a customer late, and /book shows them): that ask
+    // throws (routes/booking.js verifiedOnly), so the zone has no answer and the decision is unknown, never floor.
+    availabilityForPin.mockImplementation(async ({ crew }) => {
+      if (!crew) throw new Error('route check: floor_kept');
+      return { days: [] };
+    });
+    const kept = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(kept.writes[0][1].ad_shadow).decision).toEqual({
+      ...FLOOR, mode: 'unknown', zones: FLOOR.zones.map((z) => ({ ...z, error: 'route check: floor_kept' })),
+    });
+    // A crew start /book's own pool offers counts (it opened between the two reads); another technician's does not.
+    const OTHER = '00000000-0000-4000-8000-000000000002';
+    availabilityForPin.mockImplementation(async ({ crew, lat }) => (
+      crew || lat !== 27.5 ? { days: [] } : offerOn('2026-11-21', ['11:00'], ['09:00', OTHER])));
+    const opened = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
+    expect(JSON.parse(opened.writes[0][1].ad_shadow).decision).toEqual({
+      ...FLOOR,
+      mode: 'full',
+      zones: [{ ...FLOOR.zones[0], byDate: { ...FLOOR.zones[0].byDate, '2026-11-21': 1 }, first: '2026-11-21 11:00' }, FLOOR.zones[1]],
+    });
+  });
+
+  test('slot rule (A3): a zone with no pin is asked as it is and answers nothing; no zone row at all is unknown', async () => {
+    // availabilityForPin applies its own pin rule (a blank coordinate is no pin: null); the zone is never left out.
+    availabilityForPin.mockImplementation(async ({ lat }) => (lat == null ? null : offerOn('2026-11-20', ['09:00'])));
+    // The zones are asked in name order, whatever order the table returns them in.
+    const blank = fakeConn({ zones: [...ZONES, { zone_name: 'Blank', center_lat: null, center_lng: null }] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    const decision = JSON.parse(blank.writes[0][1].ad_shadow).decision;
+    expect(decision).toMatchObject({ mode: 'full', zones: [{ zone: 'Blank', error: 'no_offer' }, { zone: 'North' }, { zone: 'South' }] });
+    expect(availabilityForPin.mock.calls[0][0]).toMatchObject({ lat: null, lng: null });
+    availabilityForPin.mockClear();
+    const empty = fakeConn({ zones: [] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(empty.writes[0][1].ad_shadow).decision).toEqual({ mode: 'unknown', reason: 'no_zones', dates: FLOOR.dates });
+    expect(availabilityForPin).not.toHaveBeenCalled();
+    // A read that throws is unknown too, with its message, and the row is still written.
+    const unread = fakeConn({ zones: new Error('timeout') });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(unread.writes[0][1].ad_shadow).decision).toEqual({ mode: 'unknown', error: 'timeout' });
+  });
+
+  test("slot rule (A3): the finder gets the run's crew per date: a Sunday only for a technician with a stop booked", async () => {
+    const OTHER = '00000000-0000-4000-8000-000000000002';
+    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-22' ? [stop('s1', '10:00:00', '11:00:00')] : []));
+    fakeConn({ techs: [TECH, OTHER] });
+    await runRouteCheck({ now: NOW });
+    const { crew, through } = availabilityForPin.mock.calls[0][0];
+    // TECH has the Sunday stop, so TECH alone works it; both work the Friday.
+    expect([...crew.get('2026-11-22')]).toEqual([TECH]);
+    expect([...crew.get('2026-11-20')].sort()).toEqual([TECH, OTHER]);
+    expect(through).toBe('2026-11-22');
+    // With no stop booked, a Sunday is worked by nobody.
+    replan.loadDayStops.mockImplementation(async () => []);
+    availabilityForPin.mockClear();
+    fakeConn({ techs: [TECH, OTHER] });
+    await runRouteCheck({ now: NOW });
+    expect(availabilityForPin.mock.calls[0][0].crew.get('2026-11-22').size).toBe(0);
+  });
+
+  test("slot rule (A3): under capacity routing the answer is the free drive model's, and says so", async () => {
+    fakeConn();
+    const crew = new Map([['2026-11-20', new Set([TECH])]]);
+    availabilityForPin.mockImplementation(async () => offerOn('2026-11-20', ['09:00']));
+    const before = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      expect(await rc.decideSlotRule({ now: NOW, dates: ['2026-11-20'], crew })).toMatchObject({ mode: 'full', travel: 'modeled' });
+    } finally {
+      if (before === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = before;
+    }
+    expect(await rc.decideSlotRule({ now: NOW, dates: ['2026-11-20'], crew })).not.toHaveProperty('travel');
+  });
+
+  test('slot rule (A3): a Sunday whose stops read failed has no known crew: its offers do not count, and alone it is unknown', async () => {
+    // The totals count the Sunday (its room unknown, never left out), so it is one of the next 3 dates.
+    replan.loadDayStops.mockImplementation(async (_c, date) => {
+      if (date === '2026-11-22') throw new Error('timeout');
+      return [];
+    });
+    availabilityForPin.mockImplementation(async () => offerOn('2026-11-22', ['09:00']));
+    const sunday = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    const unknown = JSON.parse(sunday.writes[0][1].ad_shadow).decision;
+    expect(unknown).toMatchObject({ mode: 'unknown', dates: ['2026-11-19', '2026-11-20', '2026-11-21', '2026-11-22'] });
+    expect(availabilityForPin.mock.calls[0][0].crew.get('2026-11-22')).toBeNull();
+    expect(unknown.zones.map((z) => z.byDate))
+      .toEqual(ZONES.map(() => ({ '2026-11-19': 0, '2026-11-20': 0, '2026-11-21': 0, '2026-11-22': null })));
+    // A slot on a day with a known crew still decides it.
+    availabilityForPin.mockImplementation(async () => ({
+      days: [...offerOn('2026-11-21', ['10:00']).days, ...offerOn('2026-11-22', ['09:00']).days],
+    }));
+    const saturday = fakeConn();
+    await runRouteCheck({ now: NOW });
+    expect(JSON.parse(saturday.writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'full', zones: [{ byDate: { '2026-11-21': 1, '2026-11-22': null }, first: '2026-11-21 10:00' }, { first: '2026-11-21 10:00' }],
+    });
+  });
+
+  test('slot rule (A3): with no staffed day ahead nothing can be booked: the floor, with no ask', async () => {
+    fakeConn();
+    expect(await rc.decideSlotRule({ now: NOW, dates: [], crew: new Map() })).toEqual({ mode: 'floor', reason: 'no_staffed_days', dates: [] });
+    expect(availabilityForPin).not.toHaveBeenCalled();
+  });
+
+  test("slot rule (A3): the finder answers for the wall clock's day only: a run on another ET day gets no decision and asks nothing", async () => {
+    availabilityForPin.mockImplementation(async () => offerOn('2026-11-20', ['09:00']));
+    // The wall clock reads Thu 10:30 AM ET. A run clock on Wednesday (a replay clock), or at 11:59 PM Wednesday (a run
+    // that crossed midnight), is another day: its dates and crew are not the finder's.
+    for (const now of [new Date('2026-11-18T15:30:00Z'), new Date('2026-11-19T04:59:00Z')]) {
+      availabilityForPin.mockClear();
+      const { writes } = fakeConn();
+      expect((await runRouteCheck({ now })).status).toBe('completed_with_errors');
+      const decision = JSON.parse(writes[0][1].ad_shadow).decision;
+      expect(decision).toEqual({ mode: 'unknown', reason: 'other_day', dates: JSON.parse(writes[0][1].totals).next.dates });
+      expect(decision.dates[0]).toBe('2026-11-19');
+      expect(availabilityForPin).not.toHaveBeenCalled();
+      expect(findAvailableSlots).not.toHaveBeenCalled();
+    }
+    // A clock on the next day is another day too, even with a slot on offer.
+    expect(await rc.decideSlotRule({ now: new Date('2026-11-20T15:30:00Z'), dates: ['2026-11-21'], crew: new Map() }))
+      .toEqual({ mode: 'unknown', reason: 'other_day', dates: ['2026-11-21'] });
+    expect(availabilityForPin).not.toHaveBeenCalled();
+  });
+
+  // The office's finder's answer for one technician-day: its open starts on that technician's route, and its refusals by
+  // reason. A start with the van's modeled arrival there ([start, arrival]) is the arrival search's (production's,
+  // GATE_ADMIN_ARRIVAL_WINDOWS); one without ([start]) is the legacy gap finder's, a gap that holds that start alone.
+  const found = (slots, rejections = {}, technicianId = TECH) => ({
+    slots: slots.map(([start_time, estimated_arrival]) => ({
+      date: '2026-11-19', start_time, technician: { id: technicianId },
+      ...(estimated_arrival ? { estimated_arrival, route_mode: 'arrival_windows' } : {}),
+    })),
+    rejections_by_date: { '2026-11-19': rejections },
+  });
+  const OFF_THE_SERVICE = (technician_id) => ({ technician_id, service_category: 'general', active: false });
+  const OTHER_TECH = '00000000-0000-4000-8000-000000000002';
+
+  test("slot rule, today (A2): the office's own finder answers for today, per technician of today's crew; a job must end by 6 PM", async () => {
+    // North's center, TECH: 6 PM (done at 7), 5 PM reached at 5:20 and 4 PM reached at 5:05 (done after 6: a start is an
+    // arrival window, and the van comes late in it), and 3 PM on time. The office could book all four; the rule counts
+    // 3 PM. OTHER_TECH, asked after: 4 PM and 3 PM on time, and 2 PM. An hour counts once, on any technician whose van
+    // makes it: 2, 3 and 4 PM.
+    findAvailableSlots.mockImplementation(async ({ lat, technicianId }) => {
+      if (lat !== 27.5) return found([]);
+      return technicianId === TECH
+        ? found([['18:00', '18:00'], ['17:00', '17:20'], ['16:00', '17:05'], ['15:00', '15:00']], {}, TECH)
+        : found([['16:00', '16:00'], ['15:00', '15:05'], ['14:00', '14:00']], {}, OTHER_TECH);
+    });
+    const { writes } = fakeConn({ techs: [TECH, OTHER_TECH] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
+    expect(JSON.parse(writes[0][1].ad_shadow).decision).toEqual({
+      ...FLOOR,
+      mode: 'full',
+      zones: [{ zone: 'North', byDate: { ...FLOOR.zones[0].byDate, '2026-11-19': 3 }, first: '2026-11-19 14:00' }, FLOOR.zones[1]],
+    });
+    // Asked as New Appointment's open-times box asks: a new stop at the pin, today only, each technician of today's crew
+    // alone, from the start point, every weekday, the day continuing from the stop under way, and no road purchase.
+    const askAt = (z, technicianId) => ({
+      lat: z.center_lat, lng: z.center_lng, durationMinutes: 60, serviceKey: 'pest_control',
+      dateFrom: '2026-11-19', dateTo: '2026-11-19', technicianId, techStartPoints: true, includeWeekends: true,
+      includeBlackoutDates: true, topN: Number.POSITIVE_INFINITY, providerTravel: false, fromActiveStop: true,
+      slotStepMinutes: 60, arrivalWindow: { prospective: { lat: z.center_lat, lng: z.center_lng, estimated_duration_minutes: 60 } },
+    });
+    expect(findAvailableSlots.mock.calls.map(([ask]) => ask)).toEqual([
+      askAt(ZONES[0], TECH), askAt(ZONES[0], OTHER_TECH), askAt(ZONES[1], TECH), askAt(ZONES[1], OTHER_TECH),
+    ]);
+    // The list's technicians: the capability rule by the service's name, as the office's list reads it, at each zone.
+    expect(inactiveCapabilitiesForServices.mock.calls).toEqual([
+      [db, [TECH, OTHER_TECH], [{ service_type: 'pest_control' }]], [db, [TECH, OTHER_TECH], [{ service_type: 'pest_control' }]],
+    ]);
+    // Arrival-search starts were checked by their own simulation: the guard reads no snapshot for them.
+    expect(loadOccupancy).not.toHaveBeenCalled();
+    // North's slot today needs no second /book ask; South, with none, still asks /book's own pool.
+    expect(availabilityForPin.mock.calls.map(([ask]) => [ask.lat, ask.crew instanceof Map])).toEqual([[27.5, true], [27.1, true], [27.1, false]]);
+  });
+
+  test("slot rule, today (A2): a route the office's finder cannot verify gives today no answer, unless another technician has a start", async () => {
+    // TECH's route cannot be verified (two stops under way, say): the finder offers nothing on it, so TECH's zero is no
+    // answer. OTHER_TECH's route is verified and simply has no room.
+    const cannot = found([], { route_unverified: 8 });
+    findAvailableSlots.mockImplementation(async ({ technicianId }) => (technicianId === TECH ? cannot : found([], { arrival_window: 8 })));
+    const none = fakeConn({ techs: [TECH, OTHER_TECH] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    const unknown = JSON.parse(none.writes[0][1].ad_shadow).decision;
+    expect(unknown.mode).toBe('unknown');
+    expect(unknown.zones.map((z) => z.byDate['2026-11-19'])).toEqual([null, null]);
+    // Another technician's start answers for today (here in the legacy finder's shape: a start with no modeled arrival is
+    // its own arrival).
+    findAvailableSlots.mockImplementation(async ({ technicianId }) => (technicianId === TECH ? cannot : found([['15:00']], {}, technicianId)));
+    const other = fakeConn({ techs: [TECH, OTHER_TECH] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
+    expect(JSON.parse(other.writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'full', zones: [{ byDate: { '2026-11-19': 1 }, first: '2026-11-19 15:00' }, { first: '2026-11-19 15:00' }],
+    });
+  });
+
+  test('slot rule, today (A2): today counts only while a job can still end by 6 PM, and only when someone works it', async () => {
+    // The office's earliest same-day start is 30 minutes out, on the hour: at 4:30 PM that is 5 PM (done at 6). The
+    // finder reads the wall clock, so the window does too: a 4:29 PM run deciding at 4:31 PM no longer counts today.
+    for (const [run, wall, counted] of [
+      ['2026-11-19T21:30:00Z', '2026-11-19T21:30:00Z', true],
+      ['2026-11-19T21:31:00Z', '2026-11-19T21:31:00Z', false],
+      ['2026-11-19T21:29:00Z', '2026-11-19T21:31:00Z', false],
+    ]) {
+      jest.setSystemTime(new Date(wall));
+      findAvailableSlots.mockClear();
+      const { writes } = fakeConn();
+      await runRouteCheck({ now: new Date(run) });
+      const decision = JSON.parse(writes[0][1].ad_shadow).decision;
+      expect([run, wall, decision.dates[0], decision.sameDay?.date, findAvailableSlots.mock.calls.length])
+        .toEqual([run, wall, counted ? '2026-11-19' : '2026-11-20', counted ? '2026-11-19' : undefined, counted ? 2 : 0]);
+    }
+    jest.setSystemTime(NOW);
+    // Nobody works today (TECH is off): nothing to ask, and today is not a date of the decision.
+    absentTechDays.mockResolvedValue(new Set([`${TECH}:2026-11-19`]));
+    findAvailableSlots.mockClear();
+    const off = fakeConn();
+    await runRouteCheck({ now: NOW });
+    expect(JSON.parse(off.writes[0][1].ad_shadow).decision).toMatchObject({ mode: 'floor', dates: ['2026-11-20', '2026-11-21', '2026-11-23'] });
+    expect(findAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('slot rule, today (A2): a Sunday counts today only for a technician with a stop booked; an unread Sunday has no known crew', async () => {
+    const SUNDAY = new Date('2026-11-22T15:30:00Z'); // Sun 10:30 AM ET
+    jest.setSystemTime(SUNDAY);
+    try {
+      replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-22' ? [stop('s1', '13:00:00', '14:00:00')] : []));
+      const booked = fakeConn();
+      await runRouteCheck({ now: SUNDAY });
+      expect(JSON.parse(booked.writes[0][1].ad_shadow).decision.dates[0]).toBe('2026-11-22');
+      expect(findAvailableSlots.mock.calls.map(([ask]) => [ask.dateFrom, ask.technicianId])).toEqual([['2026-11-22', TECH], ['2026-11-22', TECH]]);
+      // No stop today: nobody works it.
+      replan.loadDayStops.mockImplementation(async () => []);
+      findAvailableSlots.mockClear();
+      const free = fakeConn();
+      await runRouteCheck({ now: SUNDAY });
+      expect(JSON.parse(free.writes[0][1].ad_shadow).decision.dates).not.toContain('2026-11-22');
+      expect(findAvailableSlots).not.toHaveBeenCalled();
+      expect(free.doneReads).toEqual([{ scheduled_date: '2026-11-22', status: 'completed' }]);
+      // Today's only stop is done (the day's stops read leaves completed visits out): TECH still works today.
+      const finished = fakeConn({ done: [{ technician_id: TECH, customer_id: 'c1', reservation_expires_at: null, status: 'completed' }] });
+      await runRouteCheck({ now: SUNDAY });
+      expect(JSON.parse(finished.writes[0][1].ad_shadow).decision.dates[0]).toBe('2026-11-22');
+      expect(findAvailableSlots.mock.calls.map(([ask]) => [ask.dateFrom, ask.technicianId])).toEqual([['2026-11-22', TECH], ['2026-11-22', TECH]]);
+      // That read failing: who works today is unknown, so today has no answer, and nothing is asked.
+      findAvailableSlots.mockClear();
+      const doneUnread = fakeConn({ done: new Error('timeout') });
+      expect((await runRouteCheck({ now: SUNDAY })).status).toBe('completed_with_errors');
+      const unknownCrew = JSON.parse(doneUnread.writes[0][1].ad_shadow).decision;
+      expect(unknownCrew).toMatchObject({ mode: 'unknown', sameDay: { date: '2026-11-22' } });
+      expect(unknownCrew.zones.map((z) => [z.byDate['2026-11-22'], z.error])).toEqual([[null, undefined], [null, undefined]]);
+      expect(findAvailableSlots).not.toHaveBeenCalled();
+      // Today's stops unread: who works it is unknown, so today has no answer, and nothing is asked.
+      replan.loadDayStops.mockImplementation(async (_c, date) => {
+        if (date === '2026-11-22') throw new Error('timeout');
+        return [];
+      });
+      const unread = fakeConn();
+      expect((await runRouteCheck({ now: SUNDAY })).status).toBe('completed_with_errors');
+      expect(unread.doneReads).toEqual([]);
+      const decision = JSON.parse(unread.writes[0][1].ad_shadow).decision;
+      expect(decision).toMatchObject({ mode: 'unknown', sameDay: { date: '2026-11-22' } });
+      expect(decision.zones.map((z) => [z.byDate['2026-11-22'], z.error])).toEqual([[null, undefined], [null, undefined]]);
+      expect(findAvailableSlots).not.toHaveBeenCalled();
+    } finally {
+      jest.setSystemTime(NOW);
+      replan.loadDayStops.mockResolvedValue([]);
+    }
+  });
+
+  test("slot rule, today (A2): today's finder failing is the zone's error, and /book's answer still stands", async () => {
+    findAvailableSlots.mockRejectedValue(new Error('timeout'));
+    availabilityForPin.mockImplementation(async ({ lat }) => (lat === 27.1 ? offerOn('2026-11-21', ['10:00']) : { days: [] }));
+    const some = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(some.writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'full',
+      zones: [
+        { zone: 'North', byDate: { '2026-11-19': null, '2026-11-20': 0, '2026-11-21': 0, '2026-11-23': 0 }, first: null, error: 'timeout' },
+        { zone: 'South', first: '2026-11-21 10:00', error: 'timeout' },
+      ],
+    });
+    // The finder's own refusal (no pin: { error }) is a failure too; with no slot anywhere the decision is unknown.
+    findAvailableSlots.mockResolvedValue({ error: 'lat/lng required', slots: [] });
+    availabilityForPin.mockImplementation(async () => ({ days: [] }));
+    const none = fakeConn();
+    await runRouteCheck({ now: NOW });
+    expect(JSON.parse(none.writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'unknown', zones: [{ error: 'lat/lng required' }, { error: 'lat/lng required' }],
+    });
+  });
+
+  test("slot rule, today (A2): a technician who cannot do the service is not asked, as the office's list never lists one", async () => {
+    inactiveCapabilitiesForServices.mockImplementation(async () => [OFF_THE_SERVICE(TECH)]);
+    findAvailableSlots.mockImplementation(async ({ technicianId }) => found([['15:00', '15:00']], {}, technicianId));
+    const { writes } = fakeConn({ techs: [TECH, OTHER_TECH] });
+    await runRouteCheck({ now: NOW });
+    expect(findAvailableSlots.mock.calls.map(([ask]) => ask.technicianId)).toEqual([OTHER_TECH, OTHER_TECH]);
+    expect(JSON.parse(writes[0][1].ad_shadow).decision.zones.map((z) => z.byDate['2026-11-19'])).toEqual([1, 1]);
+    // Nobody left who can: no ask, and today's zero is an answer (the office's list is empty).
+    inactiveCapabilitiesForServices.mockImplementation(async (_db, ids) => ids.map(OFF_THE_SERVICE));
+    findAvailableSlots.mockClear();
+    const none = fakeConn({ techs: [TECH, OTHER_TECH] });
+    await runRouteCheck({ now: NOW });
+    expect(findAvailableSlots).not.toHaveBeenCalled();
+    expect(JSON.parse(none.writes[0][1].ad_shadow).decision.zones.map((z) => z.byDate['2026-11-19'])).toEqual([0, 0]);
+    // The rule unread: today has no answer.
+    inactiveCapabilitiesForServices.mockRejectedValue(new Error('capabilities unread'));
+    const unread = fakeConn({ techs: [TECH, OTHER_TECH] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(unread.writes[0][1].ad_shadow).decision.zones[0]).toMatchObject({
+      byDate: { '2026-11-19': null }, error: 'capabilities unread',
+    });
+  });
+
+  test("slot rule, today (A2): one technician's failed ask leaves the other's starts standing, and is the zone's error", async () => {
+    findAvailableSlots.mockImplementation(async ({ technicianId }) => {
+      if (technicianId === TECH) throw new Error('route read timeout');
+      return found([['15:00', '15:00']], {}, technicianId);
+    });
+    const { writes } = fakeConn({ techs: [TECH, OTHER_TECH] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'full',
+      zones: [
+        { byDate: { '2026-11-19': 1 }, first: '2026-11-19 15:00', error: 'route read timeout' },
+        { byDate: { '2026-11-19': 1 }, first: '2026-11-19 15:00', error: 'route read timeout' },
+      ],
+    });
+    expect(findAvailableSlots.mock.calls.map(([ask]) => ask.technicianId)).toEqual([TECH, OTHER_TECH, TECH, OTHER_TECH]);
+    // With no start from the other, the failure leaves today no answer: its zero is not one. One error, said once.
+    findAvailableSlots.mockImplementation(async ({ technicianId }) => (
+      technicianId === OTHER_TECH ? found([]) : { error: 'lat/lng required', slots: [] }));
+    const none = fakeConn({ techs: [TECH, OTHER_TECH, '00000000-0000-4000-8000-000000000003'] });
+    await runRouteCheck({ now: NOW });
+    expect(JSON.parse(none.writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'unknown', zones: [{ byDate: { '2026-11-19': null }, error: 'lat/lng required' }, { byDate: { '2026-11-19': null } }],
+    });
+  });
+
+  test("slot rule, today (A2): the legacy gap finder's starts go through the office's occupancy guard, strict", async () => {
+    // The gap finder (GATE_ADMIN_ARRIVAL_WINDOWS off) gives one candidate per gap: its earliest start and its last. The
+    // office's guard walks it hourly and vetoes the hours an unassigned 3:30-4:30 visit holds: 5 PM stays (done at 6).
+    findAvailableSlots.mockImplementation(async ({ lat, technicianId }) => ({
+      slots: lat === 27.5 ? [{ date: '2026-11-19', start_time: '15:00', latest_start_min: 17 * 60, technician: { id: technicianId } }] : [],
+      rejections_by_date: {},
+    }));
+    loadOccupancy.mockImplementation(async () => ({
+      rows: [{
+        id: 'u1', date: '2026-11-19', startMin: 15 * 60 + 30, endMin: 16 * 60 + 30, customer_id: 'c1', technician_id: null,
+        service_type: 'Pest Control', reservation_expires_at: null,
+      }],
+      canName: () => false,
+      nameById: new Map(),
+    }));
+    const { writes } = fakeConn();
+    await runRouteCheck({ now: NOW });
+    expect(JSON.parse(writes[0][1].ad_shadow).decision.zones[0]).toMatchObject({ byDate: { '2026-11-19': 1 }, first: '2026-11-19 17:00' });
+    expect(loadOccupancy.mock.calls).toEqual([[{ dateFrom: '2026-11-19', dateTo: '2026-11-19' }]]);
+    // The snapshot unreadable: today has no answer, never the office box's fail-open list.
+    loadOccupancy.mockRejectedValue(new Error('snapshot down'));
+    const unread = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(unread.writes[0][1].ad_shadow).decision.zones[0]).toMatchObject({
+      byDate: { '2026-11-19': null }, error: 'snapshot down',
+    });
+  });
+
+  test("slot rule, today (A2): with New Appointment's open-times box hidden, today has no answer and nothing is asked", async () => {
+    for (const hidden of ['GATE_OPEN_TIMES_BOX', 'GATE_BEST_TIME_HINTS']) {
+      process.env.GATE_BEST_TIME_HINTS = 'true';
+      process.env.GATE_OPEN_TIMES_BOX = 'true';
+      delete process.env[hidden];
+      findAvailableSlots.mockClear();
+      inactiveCapabilitiesForServices.mockClear();
+      availabilityForPin.mockImplementation(async () => ({ days: [] }));
+      const none = fakeConn();
+      expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+      const decision = JSON.parse(none.writes[0][1].ad_shadow).decision;
+      expect([hidden, decision.mode, decision.dates[0], decision.sameDay]).toEqual([hidden, 'unknown', '2026-11-19', { date: '2026-11-19', box: 'off' }]);
+      expect(decision.zones.map((z) => [z.byDate['2026-11-19'], z.error])).toEqual([[null, undefined], [null, undefined]]);
+      expect(findAvailableSlots).not.toHaveBeenCalled();
+      expect(inactiveCapabilitiesForServices).not.toHaveBeenCalled();
+      // /book's slot still decides.
+      availabilityForPin.mockImplementation(async ({ lat }) => (lat === 27.1 ? offerOn('2026-11-21', ['10:00']) : { days: [] }));
+      const some = fakeConn();
+      await runRouteCheck({ now: NOW });
+      expect(JSON.parse(some.writes[0][1].ad_shadow).decision).toMatchObject({ mode: 'full', sameDay: { box: 'off' } });
+    }
+  });
+
+  test("slot rule, today (A2): under capacity routing the office's finder buys no roads and starts today from the route as booked", async () => {
+    fakeConn();
+    const crew = new Map([['2026-11-19', new Set([TECH])]]);
+    const before = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    let decision;
+    try {
+      decision = await rc.decideSlotRule({ now: NOW, dates: [], crew });
+    } finally {
+      if (before === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = before;
+    }
+    // Today alone is still a date to decide on: no slot there is the floor.
+    expect(decision).toMatchObject({ mode: 'floor', travel: 'modeled', dates: ['2026-11-19'], sameDay: { date: '2026-11-19' } });
+    expect(decision.sameDay).not.toHaveProperty('travel');
+    expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ fromActiveStop: false });
+    expect(availabilityForPin).not.toHaveBeenCalled();
   });
 
   test('an unassigned booking ending off the hour holds only its own minutes', async () => {
     replan.loadDayStops.mockResolvedValue([]);
     listOccupiedWindows.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-11-20' ? [span('u1', null, 480, 930)] : [])); // 8:00-3:30
-    const { conn, writes } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    await runRouteCheck({ now: NOW });
     const friday = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
     expect(friday.openings).toEqual([expect.objectContaining({ start: 930, min: 90, slots: 1 })]); // drive 3:30-3:50, a 4 PM job
     listOccupiedWindows.mockResolvedValue([]);
@@ -618,8 +1182,8 @@ describe('runRouteCheck', () => {
       if (date === '2026-11-21') throw new Error('timeout');
       return [];
     });
-    const { conn, writes } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    await runRouteCheck({ now: NOW });
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20').openings).toEqual([expect.objectContaining({ start: 930 })]);
     expect(days.find((d) => d.date === '2026-11-21')).toMatchObject({ skip: 'FAILED' });
@@ -630,8 +1194,8 @@ describe('runRouteCheck', () => {
     const saved = process.env.GATE_AUTO_DISPATCH_DAY_RULES;
     process.env.GATE_AUTO_DISPATCH_DAY_RULES = 'true';
     departure.readDepartureSetting.mockRejectedValueOnce(new Error('timeout'));
-    const { conn, writes } = fakeConn();
-    const result = await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    const result = await runRouteCheck({ now: NOW });
     if (saved === undefined) delete process.env.GATE_AUTO_DISPATCH_DAY_RULES; else process.env.GATE_AUTO_DISPATCH_DAY_RULES = saved;
     expect(result).toMatchObject({ status: 'failed' });
     expect(writes[0][1]).toMatchObject({ status: 'failed' });
@@ -644,11 +1208,15 @@ describe('runRouteCheck', () => {
     snap.raw = conn.raw;
     snap.isTransaction = true;
     snap.transaction = jest.fn(async (fn) => fn(snap)); // a savepoint
-    const pool = (table) => conn(table);
-    pool.raw = conn.raw;
-    pool.transaction = jest.fn(async (fn, opts) => { seen.push(opts); return fn(snap); });
-    const result = await runRouteCheck({ conn: pool, now: NOW });
-    expect(pool.transaction).toHaveBeenCalledTimes(1);
+    const snapshot = jest.fn(async (fn, opts) => { seen.push(opts); return fn(snap); });
+    db.transaction = snapshot; // on the shared handle: the run reads no other
+    let result;
+    try {
+      result = await runRouteCheck({ now: NOW });
+    } finally {
+      delete db.transaction;
+    }
+    expect(snapshot).toHaveBeenCalledTimes(1);
     expect(seen[0]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
     expect(replan.loadDayStops.mock.calls.find(([, d]) => d === '2026-11-20')[0]).toBe(snap);
     expect(snap.transaction).toHaveBeenCalled();
@@ -661,8 +1229,8 @@ describe('runRouteCheck', () => {
       if (dateFrom === '2026-11-24') throw new Error('timeout');
       return [];
     });
-    const { conn, writes } = fakeConn();
-    const result = await runRouteCheck({ conn, now: NOW });
+    const { writes } = fakeConn();
+    const result = await runRouteCheck({ now: NOW });
     expect(result.status).toBe('completed_with_errors');
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-24')).toMatchObject({ skip: 'FAILED' });

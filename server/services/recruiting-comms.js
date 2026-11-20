@@ -30,7 +30,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { formatETTime } = require('../utils/datetime-et');
 const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
-const { redactOfferLinks, offerLinkTokens } = require('../utils/offer-link-redaction');
+const { redactOfferLinks, redactOfferLinksTogether, offerLinkTokens } = require('../utils/offer-link-redaction');
 const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -101,8 +101,8 @@ async function outboundNumberForApplicants() {
   }
 }
 
-// The job-offer link is the applicant's signing credential: every STORED copy (comms history, email ledger, deferred
-// queue row; the SMS log and messages rows through twilio.js) keeps the path with the token hidden
+// The job-offer link is the applicant's signing credential: every STORED copy (comms history, email ledger subject, html
+// and text, deferred queue row; the SMS log and messages rows through twilio.js) keeps the path with the token hidden
 // (utils/offer-link-redaction.js). The provider still gets the full body.
 const maskOfferLink = (text) => redactOfferLinks(String(text == null ? '' : text));
 
@@ -342,6 +342,9 @@ async function settleEmailRow(messageRow, sendAttemptToken, patch, conn = db) {
 }
 
 async function insertEmailLedgerRow({ app, to, subject, html, text, templateKey, sendAttemptToken }) {
+  // One email is one record: a token found on an offer path in any part is hidden in every part, so a copy of it in
+  // the subject (the editor takes a custom subject) goes when its link is only in the body.
+  const [subjectSnapshot, htmlSnapshot, textSnapshot] = redactOfferLinksTogether([subject, html, text]);
   const rows = await db('email_messages').insert({
     provider: 'sendgrid',
     send_attempt_token: sendAttemptToken,
@@ -352,9 +355,9 @@ async function insertEmailLedgerRow({ app, to, subject, html, text, templateKey,
     from_name_snapshot: FROM_NAME,
     from_email_snapshot: FROM_EMAIL,
     reply_to_snapshot: CONTACT_EMAIL,
-    subject_snapshot: subject,
-    html_snapshot: redactOfferLinks(html),
-    text_snapshot: redactOfferLinks(text),
+    subject_snapshot: subjectSnapshot,
+    html_snapshot: htmlSnapshot,
+    text_snapshot: textSnapshot,
     categories: JSON.stringify([templateKey]),
     status: 'queued',
     queued_at: new Date(),
@@ -889,10 +892,21 @@ async function queuedInviteRivals(app, stage, handoffEntry, trx) {
 
 // Offer links pasted into any other held text (an owner reply), pinned in order as { job_offer_id, token_hash } so the
 // replay can put each real link back (deferred-replay-registry replayBodyFor): the stored body hides them and the token
-// is never stored. null = no link to pin; false = a link that matches no offer, which cannot be rebuilt, so the text is
-// not queued (the owner sees it did not go out) rather than queued with a link that could never be sent.
-async function pinPastedOfferLinks(stage, body, trx) {
-  const tokens = stage === 'offer_sent' ? [] : offerLinkTokens(body);
+// is never stored. The replay must give back the text exactly as written, so it is checked here with the tokens the
+// replay will use: in the offer text, its own offer's link (read from the offer row) in every hidden link; in any other
+// text, the pasted links in order. A text it cannot give back (a link in another spelling, two links in one run of
+// text, a hidden copy of a token, a link split by spaces, a hidden link pasted from the message history, another
+// offer's link in the offer text) or whose link matches no offer is not queued: false, and the owner sees it did not
+// go out, rather than the applicant getting other words or nothing. null = nothing to pin.
+async function pinPastedOfferLinks(stage, body, trx, offerToken) {
+  const offerText = stage === 'offer_sent';
+  const tokens = offerText ? [] : offerLinkTokens(body);
+  const { replayBodyFor } = require('./messaging/deferred-replay-registry');
+  const recheck = offerText ? { offerToken } : { offerTokens: tokens };
+  if (replayBodyFor('recruiting_comms_deferred', recheck, redactOfferLinks(body)) !== body) {
+    logger.warn(`[recruiting-comms] held ${stage} text not queued: its replay would not give back the text as written`);
+    return false;
+  }
   if (!tokens.length) return null;
   const rows = await trx('job_offers').whereIn('token', [...new Set(tokens)]).select('id', 'token');
   const idOf = new Map(rows.map((r) => [r.token, r.id]));
@@ -918,7 +932,7 @@ async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber
       await trx('job_applications').where({ id: app.id }).forUpdate().first('id');
       const { superseded, rivals } = await queuedInviteRivals(app, stage, handoffEntry, trx);
       if (superseded) return 'superseded';
-      const offerLinks = await pinPastedOfferLinks(stage, body, trx);
+      const offerLinks = await pinPastedOfferLinks(stage, body, trx, opts.offerToken);
       if (offerLinks === false) return null;
       await trx('sms_log').insert({
         customer_id: null,
@@ -1128,9 +1142,11 @@ async function runEmailLeg(ctx) {
     logger.error(`[recruiting-comms] email leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
     sendRes = { outcome: 'failed', code: `threw:${errorSummary(err)}` };
   }
+  // The history keeps the subject and the text; the html is part of the same email, so its findings count too.
+  const [body] = redactOfferLinksTogether([`${subject}\n\n${text}`, html]);
   entries.push(historyEntry({
     stage, channel: 'email', to: contact.email, outcome: sendRes.outcome, code: sendRes.code,
-    body: `${subject}\n\n${text}`, by,
+    body, by,
   }));
   return sendRes.outcome;
 }

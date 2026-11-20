@@ -19,8 +19,8 @@ jest.mock('../utils/datetime-et', () => {
     etDateString: (date) => actual.etDateString(date || PINNED_NOW),
   };
 });
-// Pin every leg to 0.5 straight-line miles → 1 legacy minute, so the buffer's
-// contribution is visible to the minute.
+// Pin every leg to 0.5 straight-line miles → DRIVE minutes (9 on the drive
+// clock), so the buffer's contribution is visible to the minute.
 jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.39, lng: -82.39 },
   haversine: () => 0.5,
@@ -31,7 +31,11 @@ const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 
-const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
+const { milesToDriveMinutes } = require('../services/route-optimizer');
+const DRIVE = milesToDriveMinutes(0.5);
+const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+
+const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES'];
 const saved = {};
 beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
 beforeEach(() => { for (const k of ENV_KEYS) delete process.env[k]; });
@@ -78,16 +82,16 @@ const byInsertion = (slots) => ({
 
 test('gate off: legacy geometry — drive only, no buffer', async () => {
   const { before, after } = byInsertion((await findAvailableSlots(BASE)).slots);
-  expect(before.start_time).toBe('08:01');                 // HQ leg: 1 min drive
-  expect(before.latest_start_min).toBe(600 - 1 - 60);      // 10:00 − drive − duration
-  expect(after.start_time).toBe('11:01');                  // 11:00 + drive
+  expect(before.start_time).toBe(hhmm(480 + DRIVE));       // HQ leg: the drive
+  expect(before.latest_start_min).toBe(600 - DRIVE - 60);  // 10:00 − drive − duration
+  expect(after.start_time).toBe(hhmm(660 + DRIVE));        // 11:00 + drive
 });
 
 test('gate on but no bufferMinutes opt (staff / optimizer callers): legacy geometry, the buffer never leaks in', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   const { before, after } = byInsertion((await findAvailableSlots(BASE)).slots);
-  expect(before.latest_start_min).toBe(600 - 1 - 60);
-  expect(after.start_time).toBe('11:01');
+  expect(before.latest_start_min).toBe(600 - DRIVE - 60);
+  expect(after.start_time).toBe(hhmm(660 + DRIVE));
   expect(customerFacingBufferMinutes()).toBe(15);
   delete process.env.GATE_SLOT_TRAVEL_GAP;
   expect(customerFacingBufferMinutes()).toBe(0);
@@ -96,18 +100,18 @@ test('gate on but no bufferMinutes opt (staff / optimizer callers): legacy geome
 test('gate on, customer-facing buffer passed: 15 minutes against the stop on both sides, never on the HQ legs', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   const { before, after } = byInsertion((await findAvailableSlots({ ...BASE, bufferMinutes: customerFacingBufferMinutes() })).slots);
-  expect(before.start_time).toBe('08:01');                 // HQ start leg unbuffered
-  expect(before.latest_start_min).toBe(600 - 1 - 15 - 60); // 08:44
-  expect(after.start_time).toBe('11:16');                  // 11:00 + 1 drive + 15 buffer
+  expect(before.start_time).toBe(hhmm(480 + DRIVE));            // HQ start leg unbuffered
+  expect(before.latest_start_min).toBe(600 - DRIVE - 15 - 60);  // drive + buffer before the stop
+  expect(after.start_time).toBe(hhmm(660 + DRIVE + 15));        // 11:00 + drive + 15 buffer
 });
 
 test('gate on: the env buffer is honoured, and an explicit bufferMinutes opt overrides it', async () => {
   process.env.GATE_SLOT_TRAVEL_GAP = 'true';
   process.env.SLOT_TRAVEL_BUFFER_MINUTES = '30';
   const env = byInsertion((await findAvailableSlots({ ...BASE, bufferMinutes: customerFacingBufferMinutes() })).slots);
-  expect(env.after.start_time).toBe('11:31');
+  expect(env.after.start_time).toBe(hhmm(660 + DRIVE + 30));
   const explicit = byInsertion((await findAvailableSlots({ ...BASE, bufferMinutes: 5 })).slots);
-  expect(explicit.after.start_time).toBe('11:06');
+  expect(explicit.after.start_time).toBe(hhmm(660 + DRIVE + 5));
 });
 
 test('gate on: a gap too small for duration + drive + buffer disappears', async () => {
@@ -120,9 +124,9 @@ test('gate on: a gap too small for duration + drive + buffer disappears', async 
   expect(slots.some((s) => s.insertion.after_stop_id === 's1' && s.insertion.before_stop_id === 's2')).toBe(false);
   delete process.env.GATE_SLOT_TRAVEL_GAP;
   const legacy = await findAvailableSlots(BASE);
-  // Legacy: 11:01–12:01 > 11:59 latestEnd → also infeasible with 1-min drives
-  // each side; widen the hole by a minute to prove the buffer is the difference.
-  const wide = { ...second, window_start: '12:03', window_end: '13:03' };
+  // Legacy: the 60-minute job plus a drive each side does not fit the hole
+  // either; widen it by the two drives to prove the buffer is the difference.
+  const wide = { ...second, window_start: hhmm(720 + 2 * DRIVE + 1), window_end: hhmm(780 + 2 * DRIVE + 1) };
   db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([STOP, wide])));
   const legacyWide = await findAvailableSlots(BASE);
   expect(legacyWide.slots.some((s) => s.insertion.after_stop_id === 's1' && s.insertion.before_stop_id === 's2')).toBe(true);

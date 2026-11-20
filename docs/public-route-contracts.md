@@ -4208,13 +4208,13 @@ create customer/account rows or guess a customer name from message prose.
 Substantive messages ring the sender's one `new_lead` bell row (keyed on a
 hash of the number; each new text rewrites it, rings it again and pushes)
 linking to the inbox; reactions, empty messages and courtesy-only replies do not;
-`GATE_RING_NEW_CONTACTS` (owner 2026-11-04, dark): a text from a number with no
+Owner 2026-11-04: a text from a number with no
 customer record to a location line or a Google Business Profile tracking line
 rings that same row (title names the line, e.g. "New text from the Parrish (Pest)
 line"), and the quiet `inbound-text` Activity row is then skipped; if the ring fails
 the quiet row is written as before. Not rung: the AI assistant line, a tech line,
 the internal alert line, a staff sender, a reaction, a courtesy closer, a text a
-spam screen judged a sales pitch. Gate off = byte-identical;
+spam screen judged a sales pitch;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
 including replies that return early. STOP/HELP/START handling (opt-out
 suppression + the `<Message>` confirmation TwiML) applies only to a sender
@@ -4431,7 +4431,47 @@ the new-lead / existing-customer Customer 360 note so the office can give
 the sign host the $25 thank-you credit. STAFF-ONLY: it never joins
 `message`, the AI triage prose or the Lead Response Agent's message, and
 the agent's `get_lead_details` tool strips it; a missing, blank or
-non-string value is a no-op; and both accept an OPTIONAL `heard_about` —
+non-string value is a no-op; and both accept an OPTIONAL `quiz` object —
+the hub's two quiz pages (`/pest-control-quiz/`, `/lawn-care-quiz/`: the
+shared quote form with three tap questions in front of its contact steps,
+owner *build* 2026-11-19). Shape `{ kind, seeing, property }`, read from
+that exact key and reduced to FIXED tokens by `normalizeQuiz`
+(`server/services/lead-quiz.js`): `kind` `pest` | `lawn`; `seeing` one of
+that quiz's nine tiles (pest: `ants`, `roaches`, `spiders`, `rodents`,
+`termites`, `wasps`, `mosquitoes`, `bedbugs`, `unsure`; lawn: `weeds`,
+`patches`, `thinning`, `yellowing`, `bugs`, `fungus`, `shrubs`, `palms`,
+`unsure`); `property` `house` | `townhome` | `condo` | `business`. An
+unknown `kind`, a non-object or an absent key is a no-op; an unknown
+`seeing` / `property` is SILENTLY DROPPED and the rest kept; no other key
+of the object and no typed text is ever stored. The third quiz answer is
+the `timeline` field above. Stored in `extracted_data.quiz` (kept through
+the AI triage's extracted_data replace; a `quiz` or `timeline` key in the
+model's output is dropped before both triage writes, so it can never
+replace or supply the visitor's answers; kept on the unverified hold's
+stage too) and written as a "Pest Quiz: Roaches, condo,
+wants it today" line on the new-lead / existing-customer Customer 360 note
+and on the unverified hold's lead activity note.
+The new-lead bell reads "<name> via Pest Quiz (<zip>) - Roaches, condo,
+wants it today" when all three answers are known and name a problem
+(`quizNamesRequest`); a "Not sure" or partly answered quiz keeps the
+service line beside the answers ("- Wants Pest Control - Not sure, condo,
+wants it today"); the lead's source row (`lead_source_id`) is NOT changed by
+a quiz: a quiz is a form, not a traffic source.
+Two admin views read the stored answers: the Leads
+screen prints them under the lead (`client/src/lib/leadQuizAnswers.js`, the
+same fixed tokens; an unknown token prints nothing), and the lead funnel's
+Quiz view splits leads by `extracted_data.quiz.kind` into Pest Quiz, Lawn
+Quiz and "Not a quiz lead" (`server/services/lead-funnel.js`).
+`property: business` is a stated commercial premises: it sets the intake's
+`isCommercial`, so the readiness gate records
+`commercial_category_conflict`, the lead row is marked `is_commercial`, and
+no residential draft is priced (under `GATE_UNIT_SCOPE_GUARDRAILS`, as for
+every other commercial signal). The quiz answers are NOT a pricing input:
+`property` never becomes the draft's property type. They are not
+staff-only: the Lead Response Agent may read them. The response is
+unchanged. Safe in either deploy order: a portal without this change
+ignores the unknown key and files an ordinary form lead;
+and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
 `sanitizeHeardAbout`, shared with the online quote wizard): `google_search`, `google_maps`, `chatgpt`,
@@ -5225,7 +5265,10 @@ assessed-neighbor sample/range that back the admin estimator's home-size
 estimate for an unassessed vacant parcel) and MINUS the staff-only
 `permitBuildingFacts` block (the home's own building permit number, issue/CO
 dates and plan figures behind the admin estimator's new-construction home-size
-estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
+estimate; `GATE_LOOKUP_PERMIT_FACTS`) and MINUS the staff-only roof-style
+evidence (`countyRoofRaw`, `roofStyleHint`, `roofTileStyle`: the county's own
+roof words and the barrel-vs-flat tile reads, owner 2026-11-19, data only and
+not yet priced), with a story count the permit filled
 (`storiesSource: 'permit'`) returned to the default (`stories: 1`,
 `storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
 the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
@@ -5976,9 +6019,15 @@ logs (`redact-request-url.js`). No query parameters are read. The render cache i
 token.
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
-url-safe 4-32 code format gate before any DB read; every hit below the
-gate writes a `referral_clicks` row, malformed/unknown codes redirect
-home without touching the DB).
+url-safe 4-32 code format gate before any DB read; a malformed code
+redirects home without touching the DB. A well-formed code is looked up:
+an active promoter (or a merged alias of one) writes a `referral_clicks`
+row on every hit and redirects with `?ref=`; a legacy
+`customers.referral_code` redirects with `?ref=` and writes no click row;
+an unknown code redirects home. On a promoter hit, a crawler, link-preview,
+scanner or empty user agent (`utils/bot-ua.js` plus the empty check) still
+redirects and gets a row with `device_type` 'bot', but is never a unique
+click and never raises `total_clicks`).
 The estimate `/data` response includes `verifiedStaffPreview: true` only
 when `adminPreview=1` is accompanied by a valid staff bearer token. The
 customer SPA uses that verified field (or the existing verified
@@ -6541,6 +6590,15 @@ and rodent-trapping rows may carry the sold allowance used to render that
 copy: `includedFollowUps` / `includedCallbacks` (number, `'unlimited'`, or
 null), `unlimitedCallbacks` (boolean or null), and `includedScope` (string or
 null). These are terms from the saved pricing snapshot, not live job counts.
+Whole-home rodent exclusion rows (`GATE_EXCLUSION_WHOLE_HOME`, dark) may also carry
+`includesReentryGuarantee` (true only), `reentryGuaranteeMonths` (number or null) and
+`guaranteeRenewalPrice` (positive number or null), the sold 1-year re-entry guarantee and its yearly
+renewal price. The keys are absent on every other row. New pricing needs `GATE_EXCLUSION_WHOLE_HOME`; a saved
+row's terms survive a rollback, because the public rows read the saved flag, so a customer keeps the guarantee
+they were quoted after the gate goes off. Only
+`includesReentryGuarantee === true` makes the row's copy state the guarantee: its bullet stays in
+the `'satisfaction'` and `'none'` guarantee scopes (as a purchased trenching warranty does) and its terms
+line names the renewal price; a row without the flag never states it.
 Dead Rodent Removal & Odor Treatment rows (`rodent_dead_animal_removal`, dark behind
 `GATE_DEAD_ANIMAL_REMOVAL`) never carry `deadAnimalTier` or `onSiteMinutes`: the sold access
 tier and its on-site minutes stay in the unsanitized breakdown the booking path reads
@@ -7429,9 +7487,7 @@ a clash or a raced edit) books the re-service exactly as before. GET and
 `/api/public/moving/:token` (GET, plus `POST /:token/check` and
 `POST /:token/submit`; the moving page the office sends a customer who is
 moving, by email from the Customer 360 Moving card or by text from the
-Communications composer, always on a staff click). Dark behind
-`GATE_MOVING_FLOW` (strict `'true'`, read per request): off, every route is
-the generic 404 before any DB read. 48-hex token format gate on
+Communications composer, always on a staff click). 48-hex token format gate on
 `customer_moves.token`; a malformed, unknown or closed move is the same
 generic 404. Privacy headers (`Cache-Control: private, no-store`,
 `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) on every
@@ -7460,7 +7516,7 @@ alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
 receipt sentences. It changes no visit, price, property or primary address
 and sends nothing to a customer.
 Move pause (moving PR 2b, owner Q4, 2026-11-02): while `GATE_MOVING_PAUSE`
-is on (strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the
+is on (strict `'true'`, read per request), the
 receipt of a submit with no checked address on file and a move-out date
 follows the customer's billing lane (`customer-moves.js` `pauseLane`): a
 customer billed per visit reads that the visits pause after the move-out
@@ -7505,7 +7561,7 @@ accept right after it locks the estimate row, for every branch including the
 one-time accept (stale = the generic 404), and the converter for every other
 accept path (409 `MOVE_ESTIMATE_STALE`, rolled back). A new-home estimate is
 never a multi-property group member or anchor. While `GATE_MOVING_ESTIMATE` is on
-(strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the submitted,
+(strict `'true'`, read per request), the submitted,
 in-area move linked to the estimate (`customer_moves.estimate_id`,
 `moveForEstimate`) limits the first visit: `available-slots` / `find-slots`
 offer no day before the move-in date (the rolling window opens on it, a
@@ -7939,6 +7995,31 @@ the test number, can neither create dispatch work nor move a metric. The
 transcript, latency summary and version stamps land on the sandbox row
 exactly as in production; that record is the bake-off. Any change to the
 number gate or the dry-run invariant is security-critical).
+`/api/webhooks/twilio/relay-sandbox/live-complete` + the `/ws/voice-live/{CallSid}/{token}` WebSocket path
+(GPT-Live trial, dark behind `GATE_VOICE_GPT_LIVE_TEST`, owner 2026-11-19, spend cap $5. With the gate on, cell code
+`71` or `72` on the sandbox number answers `/relay-sandbox/cell` with a disclosure replay and
+`<Connect action="…/relay-sandbox/live-complete"><Stream url="wss://HOST/ws/voice-live/CALLSID/TOKEN"/></Connect>`
+(Twilio forbids a query string on a `<Stream>` url, so the CallSid and the per-call minted token are path segments).
+`live-complete` is a POST TwiML webhook, Twilio-signature validated at the mount, refused with a 403 `<Hangup/>` unless
+`To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`, and answers a bare `<Hangup/>`. The WebSocket upgrade first requires the
+raw request target to be exactly the canonical `/ws/voice-live/{encoded CallSid}/{token}` (no query string), then checks
+Twilio's handshake signature (`X-Twilio-Signature` over the exact wss URL, `liveStreamUrl` in relay-protocol.js, with
+`TWILIO_AUTH_TOKEN`; missing or invalid = refused before any database read), then runs the relay's door in the same
+order: the token must verify for that CallSid, the call_log row must be sandbox-sourced and carry the
+`metadata.gpt_live` stamp the cell route wrote, the token must be signed for this path (`LIVE_TOKEN_AUDIENCE`; the
+relay socket refuses such a token, and this path refuses a relay token) and be the one that stamp names by digest
+(`stream_token_sha256`; any other valid token for the call is refused), the gate must be on, and the token is then
+burned; any failure destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`, which admits the
+call's ledger row once after the handshake and before OpenAI opens (a reservation already released or settled opens
+no OpenAI session). It has no tools and no lookups (client
+delegation: the bridge answers every delegation with one fixed sentence). No booking, lead, text or transfer. Before any write, the cell
+route verifies the request's Twilio signature itself (the shared middleware lets unsigned requests through in its
+`log` and `disabled` modes); unsigned or invalid = refused with no ledger write and no Twilio update. The cell route
+reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_live_ledger`, one row per CallSid)
+under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
+within the token's life), and refuses the call
+when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.
+Reply delay and cost land on `call_log.metadata.gpt_live`; the call's words are never stored.)
 `/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —
 the voice URL of the staff-only "Waves Tech" voice line, `TECH_VOICE_NUMBER`,
 which a technician calls from their own cell; dark behind
@@ -8376,7 +8457,7 @@ server, no SSE). Each tool call is a `tool_health_events` row (source
 `mcp-knowledge`) with its outcome and time, never its arguments or answer.
 Treat the auth ordering and the read-only tool surface as
 security-critical).
-`/api/mcp-admin` (POST; token-only JSON-RPC — the owner's READ-ONLY MCP server over an allow-list of Intelligence Bar read tools for Claude Code, `server/routes/mcp-admin.js`; owner decision 2026-10-30). Separate from `/api/mcp` on purpose: that credential stays knowledge-only. The only credential is the owner's mcp_read key (`server/services/mcp-admin-key.js`): an HS256 JWT of TYPE `mcp_read`, never `access`, so every staff verifier (`isStaffAccessToken`) refuses it and it can never act as a staff session; it lives 30 days and is minted only by `ops/agents/mint-mcp-admin-key.js` (audit row `mcp.admin_key.mint`, key never printed). Mounted like `/api/mcp`: the global `/api/` limiter (per IP) runs first, then a pre-parser chain ahead of the global JSON parser — `noStore` (Cache-Control no-store, X-Robots-Tag noindex, Referrer-Policy no-referrer on every outcome), `mcpAdminAuth`, a 60/min limiter keyed per login (after auth, so a dark or unauthenticated probe never reaches it), a 64 kb JSON parse and the JSON-RPC body-error handler. `mcpAdminAuth` layers, in order: 403 unless `GATE_MCP_ADMIN_READ=true` (before any key or DB read); 401 without a Bearer; 401 when the JWT signature, expiry or type fails (the format gate — no DB read before it); then one `technicians` read by id and 401 unless the row is still an active admin on the IB full-access list with no forced password change and `auth_token_version` equal to the key's (a password change or reset revokes every key); 503 if that read fails. EXCEPTION to the generic-404 baseline, as for `/api/mcp`: an MCP client needs real 401/403 statuses, so dark answers 403 and credential failures 401; only a holder of a validly signed key can see the expired/revoked wording. Batches cap at 10 messages and 3 tools/call; GET is 405 (no SSE). Responses: each tool answer keeps only its `TOOL_FIELDS` paths (`keepPaths`; a field a tool adds later never leaves), strings are cut at 160 characters, a listed DATE field (`CALENDAR_DAY_PATHS`; pg sends a DATE as UTC midnight) leaves as `YYYY-MM-DD` while every timestamp keeps its time, and every answer carries an untrusted-text line; `list_commercial_proposals` (owner 2026-11-01, proposal readiness) lists the authored, unarchived commercial proposals (`scope` open, the default, or all; `limit` up to 50, `offset`, `next_offset`) as ids, codes, dates and flags only: `estimate_id`, `estimate_number`, `status`, `customer_id`, `created_at`, `sent_at`, `viewed_at`, `expires_at`, `bill_by_invoice`, `payment_terms`, `building_use`, `closed_online`, `signing` (`state`, `blocked`; null with `GATE_COMMERCIAL_PROPOSAL_SIGN` off, never the builder's note text) and `first_visit` (`state`, `reason`, `visit_date` when booked; null with `GATE_COMMERCIAL_FIRST_VISIT` off), from the same functions the builder's Readiness card calls, and never a title, name, address, note, line text or price; `get_call_log` and `get_open_commitments` (owner 2026-11-17, structured fields only) send call facts: per call `id`, `direction`, `from`, `to`, `customer`, `tier`, `status`, `duration_seconds`, `has_recording`, `has_transcript`, `time`, `answered_by` (the staff member who took the forwarded call), `call_nature`, `disposition`, `visit_status`, `quote_promised`, `service_category`, `voicemail` and `spam` (the last seven from the call's V2 extraction, read only when it passed its schema; null otherwise), plus the paging fields; per open promise `id`, `party`, `kind`, `due_at`, `effective_due_at`, `snoozed_until`, `overdue`, `call_at`, `customer`, `customer_id`, `call_log_id`, `source` and `possibly_kept` (`kind`, `basis`), plus the totals and `implicit_due_rules`; a transcript, transcript excerpt, match excerpt, transcript paging, summary, sentiment, recording link, promise `description` and the `link` never leave; `get_day_summary` sends `visit_price_total` (each visit's set price, a $0 one included, or its prepaid amount when no price is set) with `visits_with_price` and `visits_without_price`, so a visit with no price is counted, never given a guessed amount; a schema refusal (`invalid_input`) keeps the failing arguments' `path` and `rule`, never their values; `GATE_CLAUDE_INPUT_GUARD` (security audit run 3, dark by default, read at call time, strict `=== 'true'`; off = the answers above) changes two answers: `needs_me` keeps an alert's `why` only for the categories `system`, `llm_cost` and `agents` raised by no registry trigger (the bar's `needs_me` item now carries `category` and `trigger`, neither of which leaves this route), and every other alert's `why` becomes the fixed line `text withheld: may quote an outside sender; look the item up by id` (ids, `headline`, area and severity stay); `list_gap_reports` marks every non-system gap row `quoted_words`, so its `wanted` and `tried` text leaves as `[withheld: N characters]` (the Intelligence Bar writes its rows from model text or tool refusals, never from words the owner typed); each call is a `tool_health_events` row (source `mcp-admin`) without arguments or answer. `initialize` carries server `instructions` (Claude Code puts them in each session's system prompt): what never comes back, how to read dates (`Z` timestamps are UTC, `time_window` values are Eastern wall-clock times) and pages, and that tool names in the Intelligence Bar's descriptions that are not on this server are not to be substituted. Tools run through `ActionRegistry.execute` and must be action-policy `kind: read` with no approval (a reclassified tool drops out); no write tool, no general admin read (`read_admin_data`) and no tool without its own reviewed field list may be added. Kill switch: unset the gate. `server/tests/mcp-admin-route.test.js` pins the auth order, the allow-list and the projections).
+`/api/mcp-admin` (POST; token-only JSON-RPC — the owner's READ-ONLY MCP server over an allow-list of Intelligence Bar read tools for Claude Code, `server/routes/mcp-admin.js`; owner decision 2026-10-30). Separate from `/api/mcp` on purpose: that credential stays knowledge-only. The only credential is the owner's mcp_read key (`server/services/mcp-admin-key.js`): an HS256 JWT of TYPE `mcp_read`, never `access`, so every staff verifier (`isStaffAccessToken`) refuses it and it can never act as a staff session; it lives 30 days and is minted only by `ops/agents/mint-mcp-admin-key.js` (audit row `mcp.admin_key.mint`, key never printed). Mounted like `/api/mcp`: the global `/api/` limiter (per IP) runs first, then a pre-parser chain ahead of the global JSON parser — `noStore` (Cache-Control no-store, X-Robots-Tag noindex, Referrer-Policy no-referrer on every outcome), `mcpAdminAuth`, a 60/min limiter keyed per login (after auth, so a dark or unauthenticated probe never reaches it), a 64 kb JSON parse and the JSON-RPC body-error handler. `mcpAdminAuth` layers, in order: 403 unless `GATE_MCP_ADMIN_READ=true` (before any key or DB read); 401 without a Bearer; 401 when the JWT signature, expiry or type fails (the format gate — no DB read before it); then one `technicians` read by id and 401 unless the row is still an active admin on the IB full-access list with no forced password change and `auth_token_version` equal to the key's (a password change or reset revokes every key); 503 if that read fails. EXCEPTION to the generic-404 baseline, as for `/api/mcp`: an MCP client needs real 401/403 statuses, so dark answers 403 and credential failures 401; only a holder of a validly signed key can see the expired/revoked wording. Batches cap at 10 messages and 3 tools/call; GET is 405 (no SSE). Responses: each tool answer keeps only its `TOOL_FIELDS` paths (`keepPaths`; a field a tool adds later never leaves), strings are cut at 160 characters, a listed DATE field (`CALENDAR_DAY_PATHS`; pg sends a DATE as UTC midnight) leaves as `YYYY-MM-DD` while every timestamp keeps its time, and every answer carries an untrusted-text line; `list_commercial_proposals` (owner 2026-11-01, proposal readiness) lists the authored, unarchived commercial proposals (`scope` open, the default, or all; `limit` up to 50, `offset`, `next_offset`) as ids, codes, dates and flags only: `estimate_id`, `estimate_number`, `status`, `customer_id`, `created_at`, `sent_at`, `viewed_at`, `expires_at`, `bill_by_invoice`, `payment_terms`, `building_use`, `closed_online`, `signing` (`state`, `blocked`; null with `GATE_COMMERCIAL_PROPOSAL_SIGN` off, never the builder's note text) and `first_visit` (`state`, `reason`, `visit_date` when booked; null with `GATE_COMMERCIAL_FIRST_VISIT` off), from the same functions the builder's Readiness card calls, and never a title, name, address, note, line text or price; `get_call_log` and `get_open_commitments` (owner 2026-11-17, structured fields only) send call facts: per call `id`, `direction`, `from`, `to`, `customer`, `tier`, `status`, `duration_seconds`, `has_recording`, `has_transcript`, `time`, `answered_by` (the staff member who took the forwarded call), `call_nature`, `disposition`, `visit_status`, `quote_promised`, `service_category`, `voicemail` and `spam` (the last seven from the call's V2 extraction, read only when it passed its schema; null otherwise), plus the paging fields; per open promise `id`, `party`, `kind`, `due_at`, `effective_due_at`, `snoozed_until`, `overdue`, `call_at`, `customer`, `customer_id`, `call_log_id`, `source` and `possibly_kept` (`kind`, `basis`), plus the totals and `implicit_due_rules`; a transcript, transcript excerpt, match excerpt, transcript paging, summary, sentiment, recording link, promise `description` and the `link` never leave; `get_day_summary` sends `visit_price_total` (each visit's set price, a $0 one included, or its prepaid amount when no price is set) with `visits_with_price` and `visits_without_price`, so a visit with no price is counted, never given a guessed amount; a schema refusal (`invalid_input`) keeps the failing arguments' `path` and `rule`, never their values; two answers hold back words (security audit run 3): `needs_me` keeps an alert's `why` only for the categories `system`, `llm_cost` and `agents` raised by no registry trigger (the bar's `needs_me` item now carries `category` and `trigger`, neither of which leaves this route), and every other alert's `why` becomes the fixed line `text withheld: may quote an outside sender; look the item up by id` (ids, `headline`, area and severity stay); `list_gap_reports` marks every non-system gap row `quoted_words`, so its `wanted` and `tried` text leaves as `[withheld: N characters]` (the Intelligence Bar writes its rows from model text or tool refusals, never from words the owner typed); each call is a `tool_health_events` row (source `mcp-admin`) without arguments or answer. `initialize` carries server `instructions` (Claude Code puts them in each session's system prompt): what never comes back, how to read dates (`Z` timestamps are UTC, `time_window` values are Eastern wall-clock times) and pages, and that tool names in the Intelligence Bar's descriptions that are not on this server are not to be substituted. Tools run through `ActionRegistry.execute` and must be action-policy `kind: read` with no approval (a reclassified tool drops out); no write tool, no general admin read (`read_admin_data`) and no tool without its own reviewed field list may be added. Kill switch: unset the gate. `server/tests/mcp-admin-route.test.js` pins the auth order, the allow-list and the projections).
 `/api/ops/digest` and `/api/ops/digest/resolve` (POST; machine-to-machine
 — the external Waves ops crons on the owner's Mac post their FIX:/ACT:
 findings so they land as `ops_digest` admin bell rows (the Waves Ops lane
@@ -8668,20 +8749,94 @@ family before even the limiter runs, and `index.js` carves `/offer` out of the `
 sent offer keeps working if intake closes). The token is `job_offers.token`, 64 lowercase hex (32 random bytes set
 when the owner presses Send), format-gated via `router.param` before any database read; an unknown, malformed or
 draft token answers the same generic 404. Privacy headers (`noStore`) are mounted AHEAD of the gates and the global
-`/api` limiter so every answer, the dark 404 included, carries them; the SPA document `/careers/offer/<64-hex>` gets
-the same headers via `utils/sensitive-spa-headers.js`. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
+`/api` limiter so every answer, the dark 404 included, carries them; every SPA document the server sends for the
+browser route `/careers/offer/:token` gets the same headers via `utils/sensitive-spa-headers.js`, matched as the
+router matches: each segment percent-decoded, any case, extra trailing slashes ignored, any token (a bad one shows
+the not-valid page). A last segment that looks like a file name (`bad.pdf`) gets the plain missing-file 404, as on
+every SPA path, and never the page; no offer token has a dot. The page itself opens only the link as sent: a token of
+64 lowercase hex and no percent-encoding in the path (any letter case of `/careers/offer/` is fine). Any other spelling
+shows the not-valid state with no API read. Stored messages hide the token in every spelling of the link
+(`utils/offer-link-redaction.js`): the comms history, the email ledger row (its subject too, since the editor takes a
+custom subject), the deferred queue row, and the SMS log and messages rows. An email's subject, html and text are read
+as one record (`redactOfferLinksTogether`): a token found on an offer path in any part, and a part past the decoding
+budget, count for every part, in the ledger row and in the history entry. The text is read in units, each what a browser takes as one link: a quoted HTML
+attribute value or an unbroken run of text. The link as sent keeps its host with the token hidden. Each other unit is
+read as a browser reads it (as typed and with its HTML character references decoded: tabs and line breaks dropped,
+backslashes as slashes, the path cut at the first `?` or `#`, dot segments resolved also when written with `%2e`, an
+empty segment kept as a browser keeps it, other percent-encoding kept inside its segment) and as a reader can (every
+character reference and percent-encoding undone, full-width forms folded, invisible characters dropped, each part
+between `?` and `#` read as a path). A unit that holds `/careers/offer/<64-hex token>` in any letter case in any reading
+is stored as the standard link with the token hidden, once per such token in source order. A test checks every link
+that Node's WHATWG URL parser opens as the signing page across a grid of dot segments, empty segments, encoded
+delimiters and backslashes. The same scan pins only those tokens (a 64-hex query value beside them is not pinned),
+so a held text replays each one as the standard link. Any other copy of a token found on an offer path, anywhere in
+the text (the link's own query or fragment, or another word), is hidden too: that unit is stored as the standard link
+for each offer-path token it holds, or as the bare marker when it holds none. The replay rebuilds only the standard
+link, one pinned token per hidden link, so a held text is queued only when its replay, run with the tokens the replay
+will use (the offer text: its own offer's link in each hidden link), gives back the text exactly as written; any other
+(a bare marker, a link in another spelling, two links in one run of text, a hidden link pasted from the message
+history, another offer's link in the offer text) is not queued, and the owner sees it did not go out. The
+units' reader text is also read run together (once with every unit, once with the units outside tags only) with
+every character a reader does not see dropped, so a link or a copy split by markup, white space (also `&nbsp;`), line
+breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
+every piece (angle brackets drop out too: no unit of raw text holds one, so a quoted reply's `> ` at each line start,
+which the html copy writes as `&gt; `, reads the same in both copies): the marker in the first unit, nothing in the rest, the tags kept. A copy is looked for at every stage of
+decoding, as typed and after each step of each pass, since a step can use up part of a token (a `%` before two of its
+hex digits) while the stored text still shows it whole; each unit is also decoded with the characters a reader does not
+see dropped first, so an escape split by one of them (a space in a quoted value) decodes. The run-together text is also
+decoded as a whole, case kept (so `&ZeroWidthSpace;` decodes), so an escape split by a tag or a line break, in the
+route word or in the token, decodes as a reader who puts the pieces together decodes it; each decoded character keeps
+the units it came from, and a token found there is hidden in each of them. Decoding stops after four passes; a unit
+that would still decode further may hide a route word, so it is hidden whole, and in such a text so is every unit that
+a run of 64 or more hex touches in the joined reading. Run-together text that would still decode further fails closed
+the same way: every unit holding part of an escape still undecoded is hidden, as is every unit such a hex run touches. Tags are found in one pass over the text, so malformed markup
+costs time in proportion to its length. Tokens are found, and put in source order, in one pass over each run of hex,
+so many links in one text, or in one unit, also cost time in proportion to its length. The
+service worker never handles an offer page, in any request mode (`client/public/sw.js` `isOfferLinkPath`: the path,
+percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the
+server routes `/API/` as `/api/`). It stores no URL that could carry the link, because a stored response or request
+keeps its URL: every entry is rebuilt without its URL (`withoutUrl`, `tagWithBuild`) and stored under a plain key: the
+shell under `/`, and a static file under its own path (`isStorablePath`: segments of letters, digits, dot, dash and
+underscore that do not start with a dot, a static file type, no run of 32 hex), so no key has a query, a fragment, an
+encoding or a dot segment; a shell whose asset reference is not such an `/assets/` path is not stored. A redirected
+response is served but not stored (the shell and its assets included). Any other request that is not a page load is
+left to the browser. Its cache
+has a new name (`waves-customer-v13-private-links`), so activation drops the older worker's bucket whole, offer links
+included, before the worker claims a page, and each page load drops any older bucket found again
+(`sweepOlderCaches`). It never serves its offline shell in the page's place, so the browser always fetches the page
+with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
 behind the gates. GET returns `{state:'open'|'signed'|'declined'|'date_requested', firstName, jobTitle, startDate,
 hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{name,title,sentOn}, expiresAt,
-textConsent, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
+textConsent, version, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
 snapshot frozen at Send (`job_offers.snapshot`), never from live records, so the Terms the applicant reads are the
 issued version the owner sent; for `superseded`, `withdrawn` and `expired` it returns only `{state, message,
 contactPhone}` (no terms). A sent offer past `expires_at` reads `expired` before any sweep, and an offer whose
 application the owner moved to hired/rejected/withdrawn reads `withdrawn` (that stage change also marks the offer row withdrawn in the same transaction, so reopening the application cannot revive the link). The first GET stamps `opened_at`, every
-GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean}` -> `{textConsent}`; `accept {signedName}` (trimmed,
+GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` -> `{textConsent, version}`, where
+`version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with
+no write, and a change made from any other version answers 409 `{state:'open'}`, so a save that lands late (its reply
+was lost and the page saved the same choice again) cannot undo a later choice (on that 409 the page reads the offer,
+shows the stored choice and says "That did not go through. Please try again."; when that read fails, the page stays
+locked, and the read Try again makes says the same when the stored choice is not the refused one); `accept {signedName,
+version}` (trimmed,
 3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
-'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500)}` -> `{state:'date_requested'}`; `decline {reason? (<= 500)}` ->
-`{state:'declined'}`. Each acts only from state `open`; any other state answers 409 with the current state body (an
-identical replay of a signature answers 200 with the stored signature). Every action runs in one transaction that
+'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500), version}` -> `{state:'date_requested'}`; `decline {reason?
+(<= 500), version}` -> `{state:'declined'}`. Each answer carries the `version` the page shows, the text choice included,
+and a change since then (another tab's text choice) answers the same 409 `{state:'open'}` with no write, so a signature,
+a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is the
+contract before it and is answered as before, with no version check; the page always sends one. The page never
+applies an open read or a text-choice save without a `version` (a server from before it): such a read counts as failed,
+and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
+controls only for a read whose state is explicitly `open` and that carries the text choice and non-empty Terms; a read
+with no known state, or an open read without those, also counts as failed, and an
+action's 200 that does not name its answer (`signed`, `date_requested`, `declined`) is treated as a lost reply: the
+page reads the offer. Each acts only from state `open`; any
+other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter
+case, answers 200 with the stored signature and a replay mark, `{state:'signed', signedAt, signedName, replay: true}`:
+it signs nothing, so the page names the signer and never says "You signed"). The page tells an answer in the first
+person ("You signed", "You declined", "You asked to start on") only when it is the 200 answer to this tab's own action
+(a sign without the replay mark); an answer it learns from a read or a 409 is told in neutral words that name the
+signer and the date, since another tab may have given it. Every action runs in one transaction that
 locks the application row, then the offer row, and re-reads the state under the lock, so a double tap or a replay
 cannot sign twice. Accept records the IP, user agent and a signature hash (sha256 of the snapshot hash, the Terms
 content hash, the typed name and the signing instant), moves the application to `hired` and raises an owner bell;
@@ -9029,6 +9184,67 @@ a write failure is warn-logged by error kind ONLY). No cookie, user agent
 or referrer is ever read; the network address is used only by the
 one-minute per-IP limiter; nothing per-visitor is ever stored or logged. This is a pure aggregate count, never
 a session/visitor record.)
+`/api/public/form-steps` (write; anonymous, cookie-free quote-form and quiz
+step counter — a near copy of `/api/public/blog-read-depth` above. Owner
+approval: *build* 2026-11-19, quiz funnel scope ("Step counts with no cookie"
+on the two quizzes and the main form, all 17 sites). The quote
+form on every fleet site and the hub's two quiz pages fire one `fetch(url, {
+method: 'POST', body, keepalive: true, credentials: 'omit', mode: 'no-cors' })`
+per funnel step; the response is opaque to the browser by design, so it matters
+only for tests/abuse posture. **No gate**: it counts anonymous aggregate steps
+and cannot message a customer, change a price, charge, delete data, spend money
+or add a token page, so it ships live (`waves-ship` §6), unlike the read-depth
+route's `GATE_BLOG_READ_DEPTH`. Mounted in `server/index.js` right after the
+read-depth mount, ABOVE the global `cors({ origin: allowedOrigins })`, the
+global `app.use('/api/', limiter)` and the body parsers (own 120 req/min per-IP
+limiter, `FORM_STEPS_RATE_MAX`, applied before its own `express.text({ type: ()
+=> true, limit: '1kb' })` parse, which runs for `POST /` ONLY: every other
+method and subpath reaches the terminal 404 with its body unread), so a
+visitor's beacons never spend the shared budget a customer's quote-form or
+booking calls need. The router sets no-store/
+noindex/no-referrer headers first, sets no CORS headers, and ends in a terminal
+generic unknown-route 404, so no request that reaches it (any method, any
+subpath other than `POST /`) falls through to the app's request logger. Every
+answer (the 204, the 429, the 404) carries `Cross-Origin-Resource-Policy:
+cross-origin`, replacing the `same-origin` the app's helmet sets above the
+router: a browser turns a no-cors response marked `same-origin` into a network
+error, so without it the step would count while the page's fetch rejected and
+the console logged a blocked request for every step. No answer has a body
+worth keeping same-origin (two are empty, the 404 is the generic one).
+Body: `{"f":"<form>","s":"<step>"}` as `text/plain`. The allowlist
+(`FORM_STEPS` in `server/routes/public-form-steps.js`, own-property lookup
+only) is: `quote` (the main quote form on any site) = `view`, `start`,
+`interest`, `frequency`, `family`, `product`, `cadence`, `name`, `email`,
+`phone`, `address`, `lead`; `pest_quiz` and `lawn_quiz` (same list for both) =
+`view`, `start`, `seeing`, `property`, `timeline`, `name`, `email`, `phone`,
+`address`, `lead`, `end_call`, `end_business`, `end_price`, `end_review`,
+`call_tap`, `price_tap`. An unknown form (a prototype name such as `__proto__`
+or `constructor` as the form or the step is unknown too), a step from another
+form's list, a non-JSON or non-object body, or a body over 1 KB is dropped
+silently: the answer is ALWAYS 204 (the only other answer is the limiter's
+429), sent before any write, so the response never says what counted. Only `f`
+and `s` are read; any other key in the body is ignored and never stored. `site` is derived ONLY from the `Origin` header (never the body). The
+header must be ONE serialized `https` origin with no port (`scheme://host`
+and nothing else: a bare domain, a path, a JSON list or a comma-joined pair is
+refused before the registry sees it), and its hostname must be a fleet site in
+the spoke registry (`normalizeSpokeSites`); a missing/`null`/malformed/unknown
+origin drops the beacon with 204 and writes nothing. The Origin is attribution, not
+authentication (a non-browser caller can claim any fleet origin, and an
+anonymous beacon cannot be authenticated without a visitor identifier, which
+the approved scope rules out), so the bounds on a forged beacon are the fixed allowlist and
+a cap of 2,000 per `(day, site, form, step)` bucket a day (the upsert's `WHERE
+count < 2000`).
+Stored: daily totals only, in `form_step_daily` (migration
+`20261120020000_form_step_daily.js`), one row per `(day, site, form, step)`
+via `INSERT ... ON CONFLICT DO UPDATE SET count = count + 1`, `day` computed in
+SQL as the America/New_York calendar day. The table has NO timestamp column
+(no `created_at` / `updated_at`): a bucket records how many, never when. The write is fire-and-forget after
+the 204; a failure is warn-logged by error kind ONLY. Never stored or logged: a
+visitor id, IP address, cookie, user agent, referrer, the raw body, or any
+form field value (the beacon carries a step name, never what the visitor
+typed); the network address is used only by the one-minute per-IP limiter.
+Safe in either deploy order: a site without the beacon sends nothing; a
+portal without the route answers 404 and the site ignores it.)
 Typed-decision labeler token (`POST /api/admin/typed-decisions/reviews/:id/label`
 with header `X-Labeler-Token`; `server/routes/typed-decisions-labeler.js`;
 owner 2026-10-02, "token is fine"). The Claude labeling runner (two blind
@@ -9105,3 +9321,7 @@ Day-only customer screens (`GATE_DAY_ONLY_PROMISE`, part C1, additive; gate off 
 Referral code in the same field (`GATE_ESTIMATE_REFERRAL_CODE`, dark in prod, owner 2026-11-18): `POST /api/estimates/:token/promo-code` also takes a referrer's code. The route is live when either gate is on (both off = generic 404, limiter skipped); every guard above is unchanged. Under the estimate row lock the route keeps one code of either kind per estimate (the kind already on it answers), sends a code that is a promo code in admin Discounts to the promo path, and tries anything else as a referral code (`services/estimate-referral-code.js` `enterReferralCode`), which saves one `estimate_referral_codes` row and an activity row. It moves no money and sends nothing. Refusals are the same: `invalid_code` (nobody holds the code, the program is paused, the customer's own household, or a customer with a completed visit; one answer for all) and `code_already_entered`. Success answers `{ success, promoCode: { canEnter: false, applied: { code, referral: true, note } } }`; `code` is the referrer's code as issued and `note` is one sentence written by the server from the live program settings. It carries nothing else about the referrer: no name, id or contact. The `promoCode` block of `GET /api/estimates/:token/data` and the accept response gains, only with this gate on, `acceptsReferral: true` while a referral code can be entered (plus `acceptsPromo: false` when a promo code cannot), and the same `applied` shape once a referral code is on the estimate. With this gate off the block is byte-identical to the promo-only one. The referrer is confirmed later, off the request path (after the accept commits and hourly), through the existing deferred-only inbound confirm, which sends nothing. Treat the no-referrer-identity payload and the generic refusal as security-critical.
 
 `/api/pay/:token/promo-code` (POST, body `{ code }`; the "Have a promo code?" field on the invoice pay page, `GATE_PAY_PROMO_CODE`, dark in prod, owner 2026-11-18). It inherits the `/api/pay` router's baseline (token format gate with the generic 404, `payLimiter`, `noStore` privacy headers) and adds its own limiter, 10/hour keyed per caller and token, skipped while the gate is off so a dark route answers the generic 404 on every probe. Under the invoice row lock it saves one `invoice_promo_codes` row with the amount frozen from the `discounts` row, and an activity row. It changes nothing on the invoice, moves no money and makes no Stripe call. A refused code answers 400 `{ error }`: `invalid_code` (unknown, inactive, expired, out of uses, not a fixed-dollar code, a code scoped by a rule this path cannot check, a customer who is not eligible, or an invoice that takes no code: payer-billed, statement-billed, not collectible, nothing due, or one that must save a payment method first; one answer for all) or `code_already_entered` (one code per invoice, a unique index). Success answers `{ success, promoCode: { canEnter: false, applied: { code, creditAmount, credited } } }` and the page reloads. Logs carry the invoice id and the error code only, never the token or the typed code. `GET /api/pay/:token` gains, only with the gate on, a `promoCode` block: `{ canEnter: true, applied: null }` where a code can be entered, `{ canEnter: false, applied }` once one is on the invoice, absent otherwise; the GET stays a read. `POST /api/pay/:token/setup` is unchanged in request; its response gains, only with the gate on and a code on the invoice, a `promoCode` key: the same `{ canEnter: false, applied }` block once the credit has posted, or `null` when it did not (the code was voided, or the invoice took none of it), so the page drops its note and never promises a credit the payment was not priced with. With the gate on, a code waiting on the invoice is redeemed and its amount applied to the invoice as one all-or-nothing step inside its transaction (`services/invoice-promo-code.js` `redeemAndApplyPromoCode`, in a savepoint that can never fail the setup; the draw is `applyAccountCreditToInvoice` with `customerRequested` and `applyAtMost`; if the invoice takes none of it, nothing is posted and the code stays entered), after any open payment is retired and before the payment is priced, so the PaymentIntent, the invoice's amount due and the webhook-verified amount stay in agreement as they do for automatic credit. Treat the gate, the generic refusal, the one-code-per-invoice and one-mint-per-row indexes, the promo-amount-only draw and the no-Stripe-call rule of the entry route as security-critical.
+
+`/api/pay/:token/plan-choice` (POST, body `{ plan: 'prepay_annual' }`; the "prepay the year" pick on the invoice pay page, `GATE_PAY_PLAN_CHOICE`, dark everywhere unless exactly `true`, owner 2026-11-19). It inherits the `/api/pay` router's baseline (token format gate with the generic 404, `payLimiter`, `noStore` privacy headers) and answers that same 404 while the gate is off or the token is unknown. While the gate is off the request skips `payLimiter` (a `skip` on the router limiter for this path only), so a dark probe never sees a 429 and spends none of the caller's quota for the live pay routes. `400 { error: 'invalid_plan' }` for any other plan (paying per application is paying the invoice as it stands; it has no action here). `409 { error: 'plan_choice_unavailable' }` when the choice is not, or no longer, offered on this invoice. `200 { success: true, payUrl }`: `payUrl` is the pay link of the annual prepay invoice this pick minted (an unsent draft plus a `payment_pending` term), and a repeat answers with the same link, never a second invoice. `503` on a failure the customer can retry. Every amount is derived server-side from the booked series; the body's `plan` is the only field read. Nothing is charged, sent or voided: the first invoice stays payable, and paying the prepay closes it. The read side is a `planChoice` key on `GET /api/pay/:token`, absent with the gate off or when the choice is not offered (that payload stays byte-identical): `{ selected: false, serviceType, visitsPerYear, perApplication: { perVisit, setupFee, yearTotal }, prepay: { total, setupFeeWaived, discount, discountLabel, savings } }` before a pick, `{ selected: true, prepay: { total } }` after one. It never carries the prepay invoice's token; only the POST answers the link.
+
+`/pest-insider/cards/<fact>-<hash>.png` and `/pest-insider/heroes/<fact>-<hash>.jpg` (GET; static pictures inside Waves Pest Insider emails: each lead fact's card and top picture, `server/services/pest-insider/cards.js` and `heroes.js`). Served from `client/public/pest-insider/` (in production, its copy in `client/dist/`) by the two existing static mounts in `server/index.js`: no token, no database read, no gate, nothing taken from the caller, and the static mounts' own cache headers. The files are drawn on a Mac (`ops/agents/pest-insider-cards.js`, `pest-insider-heroes.js`) from reviewed copy only (a fact's title or one whole reviewed sentence, a tag from a fixed list, "Waves Pest Insider") and wordless ChatGPT art, and each name carries a hash of everything drawn on it, so a URL never changes what it shows. They carry the static mounts' headers unchanged, including helmet's `Cross-Origin-Resource-Policy: same-origin`, as the app-store badges in emails (`/app-email/`) do today: a mail app that loads pictures directly, with no image proxy, may block them and show the alt text instead. A `cross-origin` header on these folders changes both static mounts' allowlist keys, so it waits for owner review. No route or middleware of its own serves them. The drawing scripts never remove a file, because a sent email and the issue archive keep the exact picture URLs; an old file is removed by hand only once no sent issue uses it.

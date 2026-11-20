@@ -129,8 +129,8 @@ async function main() {
       else if (api === '/admin/communications/unread-count') body = { conversations: 0, messages: 0 };
       else if (api === '/admin/usage/track') body = { ok: true };
       else if (api === '/health') body = { status: 'ok', gates: {} };
-      // Ad health card ships dark: GATE_ADS_HEALTH_CARD off answers 404 and the card renders nothing.
-      if (api === '/admin/ads/health') return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'ads_health_off' }) });
+      // An empty reply keeps the Ad health card hidden, so these screenshots do not include it.
+      if (api === '/admin/ads/health') return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
       if (body === undefined) { report.fallbackFixtures.push(`${request.method()} ${api}${url.search}`); body = {}; }
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     });

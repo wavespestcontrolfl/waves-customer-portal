@@ -7,7 +7,14 @@ import { initNativePush } from './native/nativePush';
 import { initNativeLinks } from './native/nativeLinks';
 import { clearStaffDeviceData, getAdminAuthToken } from './lib/adminAuth';
 import { installStaffSessionGuard } from './lib/staffSessionGuard';
+import { installPortalVersionWatch } from './lib/portalVersion';
 import { handleVitePreloadError } from './lib/staleChunkReload';
+
+// Reads which client build the server runs from each staff API answer, so an
+// out-of-date staff tab can tell (lib/portalVersion.js). First, so later
+// fetch wrappers (the staff session guards) wrap it and can still remove
+// themselves.
+installPortalVersionWatch();
 
 // A staff session the server refuses anywhere in the app (admin pages too)
 // deletes the offline route copy and offline pass, so a later no-signal

@@ -613,6 +613,10 @@ async function processWebhookEvent(ev, messageId, email, handler) {
         event_type: ev.event || null,
         message_id: messageId,
         email: email || null,
+        // SendGrid's own event time. A batch it re-sends after an outage arrives
+        // late, and the Waves Pest Insider warm audience counts opens by when
+        // they happened (services/pest-insider/audience.js).
+        occurred_at: eventOccurredAt(ev),
         status: 'processing',
       })
       .onConflict('event_id')

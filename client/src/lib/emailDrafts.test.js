@@ -64,6 +64,11 @@ describe("local email editor recovery", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Synthetic quota failure"); });
     expect(store.updateEmailDrafts(session, (d) => ({ ...d, replies: { a: "Keep this" } })).saved).toBe(false);
     expect(store.loadEmailDrafts("fixture-owner")).toMatchObject({ saved: false, drafts: { replies: { a: "Keep this" } } });
+    // The same unsafe reload holds the automatic reload of an out-of-date tab.
+    const holds = await import("./reloadHolds");
+    expect(holds.reloadHoldName()).toBe("email-draft");
+    store.clearEmailDrafts();
+    expect(holds.reloadHoldName()).toBeNull();
   });
 
   it("does not recover an old draft when storing its removal fails", async () => {

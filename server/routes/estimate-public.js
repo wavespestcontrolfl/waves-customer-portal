@@ -68,6 +68,7 @@ const { classifyTermiteScope } = require('../../shared/estimate-termite-scope.cj
 const {
   collapseMirroredRows,
   hasPurchasedTrenchingWarranty,
+  includedReentryGuaranteeFields,
   isPreSlabTreatmentItem,
   matchingTrenchingWarrantyRow,
   preSlabExtendedWarrantySelected,
@@ -20594,6 +20595,9 @@ function savedFloorReplayOverrides(estData) {
   // Mosquito misting quote-time snapshot (GATE_MOSQUITO_MISTING): a sent misting quote keeps the prices it was sent at.
   const mistingKnobs = require('../services/estimate-tree-shrub-knob-replay').mistingKnobSignalForReplay(estData);
   if (mistingKnobs) overrides.mistingPricingKnobs = mistingKnobs;
+  // Whole-home exclusion quote-time minimum and renewal price (GATE_EXCLUSION_WHOLE_HOME): set even when EMPTY
+  // (undefined), like the pins below, so a value stored inside the browser-controlled inputs is neutralized.
+  overrides.wholeHomeSealReplay = require('../services/estimate-whole-home-replay').wholeHomeSealReplaySignal(estData) || undefined;
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.
@@ -20847,6 +20851,8 @@ function oneTimeItemsForRender(estResult, estData) {
     debrisRemovalIncluded: row.debrisRemovalIncluded === true,
     creditableWithinDays: row.creditableWithinDays || null,
     includesScreening: row.includesScreening === true,
+    // Whole-home exclusion's included 1-year re-entry guarantee (GATE_EXCLUSION_WHOLE_HOME); {} unless flagged.
+    ...includedReentryGuaranteeFields(row),
     // Trapping allowance (owner ruling 2026-09-26): the copy pack renders
     // the saved count; dropping these made every quote read as legacy
     // unlimited callbacks (codex #4932 pre-push P1).
@@ -21393,6 +21399,7 @@ function normalizeOneTimeBreakdown(estData) {
         debrisRemovalIncluded: item.debrisRemovalIncluded === true,
         creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
         includesScreening: item.includesScreening === true || /\+screening\b/.test(String(item.detail || item.det || '')),
+        ...includedReentryGuaranteeFields(item),
         // Trapping allowance the copy pack renders (codex #4932 pre-push P1).
         // Keep every other service's public item shape byte-compatible.
         ...(service === 'rodent_trapping' ? {

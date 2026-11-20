@@ -28,9 +28,10 @@ const { buildIssue, NEWSLETTER_TYPE } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
 const { SPECIES, planIssue } = require('../services/pest-insider/plan');
 const { postUrl } = require('../services/pest-insider/posts');
-const { POST_LINK_TEXT, withToolBlock } = require('../services/pest-insider/render');
+const { POST_LINK_TEXT, withToolBlock, escapeHtml } = require('../services/pest-insider/render');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { loadTools, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
+const { HEROES, heroFor } = require('../services/pest-insider/heroes');
 
 // Every main fact's post answers as live, unless a case says otherwise.
 const LIVE = FACTS.filter((f) => !f.reserve).map((f) => f.id);
@@ -70,6 +71,35 @@ describe('buildIssue', () => {
     // no live tool named: no tool, and no Amazon link anywhere
     expect(r.tool).toBeNull();
     for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
+  });
+
+  test("every identifier species builds: its band, latin name and verdict chip pass the copy and send checks", () => {
+    const failed = [];
+    for (const species of SPECIES) {
+      usePlan(A01, species);
+      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE });
+      if (!r.ok) failed.push(`${species.slug}: ${r.reason}`);
+      else {
+        expect(r.issue.text_body).toContain(`WHAT'S THIS?\n${species.name} (${species.scientific})\n`);
+        expect(r.issue.text_body.includes('\nVerdict: ')).toBe(species.verdict !== 'harmless');
+      }
+    }
+    expect(SPECIES.length).toBeGreaterThan(0);
+    expect(failed).toEqual([]);
+  });
+
+  test("every fact with a top picture builds an issue that opens with it, under the fact's own title", () => {
+    const missing = [];
+    for (const id of Object.keys(HEROES)) {
+      usePlan(factById(id));
+      // a fact that needs a send-time recheck builds only once a person re-read its source
+      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, recheckedFactIds: [id] });
+      const first = r.ok && /<img src="([^"]+)" alt="([^"]*)"/.exec(r.issue.html_body);
+      // the alt text is the title, escaped (R01's title has quotes)
+      if (!first || first[1] !== heroFor(id).url || first[2] !== escapeHtml(factById(id).title)) missing.push(`${id}: ${r.ok ? 'no picture' : r.reason}`);
+    }
+    expect(Object.keys(HEROES).length).toBeGreaterThan(0);
+    expect(missing).toEqual([]);
   });
 
   test('a live tool comes back as `tool`, outside the shared body; its opted-in copy still fails the send check until PR 4', () => {

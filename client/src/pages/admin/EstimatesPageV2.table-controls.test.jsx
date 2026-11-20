@@ -27,8 +27,11 @@ vi.mock("./PipelineAnalytics", () => ({
   default: () => <div>Pipeline summary</div>,
   isFollowUpOverdueEstimate: () => false,
   isGoingColdEstimate: () => false,
-  isCallTodayEstimate: () => false,
   isPickReasonEstimate: () => false,
+}));
+// The page imports the Call today rule from its shared home; stubbed as the analytics mock stubbed it before.
+vi.mock("@estimate-call-today", () => ({
+  isCallTodayEstimate: () => false,
   lastEngagementMs: () => null,
 }));
 vi.mock("./WinLossSlicesCard", () => ({ default: () => null }));

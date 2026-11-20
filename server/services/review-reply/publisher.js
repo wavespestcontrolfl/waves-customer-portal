@@ -55,6 +55,10 @@ const CODES = {
 };
 
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
+// The RECONCILE_FAILED message. Before 2026-11-20 the runner parked an
+// exhausted reconciliation as google_failed with this message, so the Monday
+// bell reads it to mark such a row "check Google first".
+const RECONCILE_FAILED_MSG = 'Google shows an owner reply but recording it failed';
 // Total deadline for each Google call. The runner processes rows serially
 // under a fleet-wide cron lease; a request that connects but never completes
 // must fail (retryable) instead of holding every later row and tick.
@@ -85,36 +89,58 @@ function withDeadline(call, label, ms = GOOGLE_CALL_TIMEOUT_MS) {
  * stored time whose rating and comment text also match. Anything else
  * resolves to null (NO_RESOURCE) — a reply must never land on the wrong
  * review. (The original admin-route fallback accepted the first same-name
- * review; that lenience is gone for every caller.)
+ * review; that lenience is gone for every caller.) A failed read of Google's
+ * list is not "no match": it throws GOOGLE_FAILED with the cause, so the
+ * runner retries a temporary one (a timeout, 429, 5xx) on the same long
+ * ladder as a failed getReview. The error carries identityLookup, so the
+ * runner's final park is no_gbp_resource, which the sync re-queues once it
+ * attaches the review's GBP name (requeueFieldsOnIdentity). Its message names
+ * the HTTP status only: Google's response text can quote reviewer names and
+ * review text, and the runner copies the message into the log and the bell.
  */
 async function resolveGbpReviewName(review, { conn = db } = {}) {
   if (review.gbp_review_name) return review.gbp_review_name;
   if (!review.location_id) return null;
+  const loc = WAVES_LOCATIONS.find((l) => l.id === review.location_id);
+  if (!loc?.googleLocationResourceName) return null;
+  let gbpReviews;
   try {
-    const loc = WAVES_LOCATIONS.find((l) => l.id === review.location_id);
-    if (!loc?.googleLocationResourceName) return null;
     // GBP caps pageSize at 50; the helper pages until exhausted.
-    const gbpReviews = await withDeadline((signal) => gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50, { signal }), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
-    const rName = (review.reviewer_name || '').toLowerCase();
-    const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
-    const rRating = Number(review.star_rating) || 0;
-    const rText = String(review.review_text || '').trim();
-    const ratingOf = (g) => ({ ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(g.starRating || '').toUpperCase()] || Number(g.starRating) || 0);
-    const candidates = gbpReviews.filter((g) => {
-      const gName = (g.reviewer?.displayName || '').toLowerCase();
-      const gTime = g.createTime ? new Date(g.createTime).getTime() : 0;
-      return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000
-        && ratingOf(g) === rRating
-        && String(g.comment || '').trim() === rText;
-    });
-    if (candidates.length === 1 && candidates[0].name) {
-      await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name });
-      return candidates[0].name;
-    }
-    if (candidates.length > 1) logger.warn(`GBP resource name lookup ambiguous for review ${review.id} (${candidates.length} candidates) — not resolved`);
+    gbpReviews = await withDeadline((signal) => gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50, { signal }), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
   } catch (lookupErr) {
-    logger.warn(`GBP resource name lookup failed: ${lookupErr.message}`);
+    const why = lookupErr?.timedOut ? 'timed out'
+      : Number.isInteger(lookupErr?.googleStatus) ? `HTTP ${lookupErr.googleStatus}`
+        : require('../notification-service').safeErrorSummary(lookupErr);
+    logger.warn(`GBP resource name lookup failed for review ${review.id}: ${why}`);
+    throw Object.assign(
+      new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read Google's review list to find this review (${why})`, { status: 502, cause: lookupErr }),
+      { identityLookup: true },
+    );
   }
+  const rName = (review.reviewer_name || '').toLowerCase();
+  const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
+  const rRating = Number(review.star_rating) || 0;
+  const rText = String(review.review_text || '').trim();
+  const ratingOf = (g) => ({ ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(g.starRating || '').toUpperCase()] || Number(g.starRating) || 0);
+  const candidates = gbpReviews.filter((g) => {
+    const gName = (g.reviewer?.displayName || '').toLowerCase();
+    const gTime = g.createTime ? new Date(g.createTime).getTime() : 0;
+    return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000
+      && ratingOf(g) === rRating
+      && String(g.comment || '').trim() === rText;
+  });
+  if (candidates.length === 1 && candidates[0].name) {
+    // The match is saved before any Google write: Retract finds the reply by
+    // this name. A failed save posts nothing (null: NO_RESOURCE, retried).
+    try {
+      await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name });
+    } catch (e) {
+      logger.warn(`GBP resource name not saved for review ${review.id}: ${require('../notification-service').safeErrorSummary(e)}`);
+      return null;
+    }
+    return candidates[0].name;
+  }
+  if (candidates.length > 1) logger.warn(`GBP resource name lookup ambiguous for review ${review.id} (${candidates.length} candidates) — not resolved`);
   return null;
 }
 
@@ -167,8 +193,12 @@ async function recordLiveOwnerReply(reviewId, live, fresh) {
     // google_uncertain / persist_failed park whose earlier PUT had actually
     // landed (its posted provenance and Retract). A transient error keeps
     // the row's state and retries; the next live read reconciles again.
-    logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`);
-    throw new ReviewReplyError(CODES.RECONCILE_FAILED, `Google shows an owner reply but recording it failed: ${e.message}`, { status: 503, cause: e });
+    // The failed write carried the live reply text, so a database error
+    // message can quote it (and the reviewer's name): only its code goes
+    // into the log, the bell and the row (AGENTS.md, PII in logs).
+    const summary = require('../notification-service').safeErrorSummary(e);
+    logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${summary}`);
+    throw new ReviewReplyError(CODES.RECONCILE_FAILED, `${RECONCILE_FAILED_MSG}: ${summary}`, { status: 503, cause: e });
   });
   // A landed write that parked (review / account facts moved since the
   // draft) needs a person: the retrying edited-after-post bell (codex r54).
@@ -790,6 +820,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
 
 module.exports = {
   CODES,
+  RECONCILE_FAILED_MSG,
   ReviewReplyError,
   resolveGbpReviewName,
   publishReviewReply,

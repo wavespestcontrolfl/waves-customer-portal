@@ -79,6 +79,7 @@ const SELECTORS = [
   { key: 'VISION', env: 'MODEL_VISION', description: 'Claude photo scoring', accepts: { providers: ['anthropic'], cap: 'vision' } },
   { key: 'LAWN_CHALLENGE', env: 'MODEL_LAWN_CHALLENGE', description: 'Lawn diagnostic adversarial challenge', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'LIVE_CALL', env: 'MODEL_LIVE_CALL', description: 'Live-call upset-caller check (owner 2026-11-16: Haiku 5.5; dark behind GATE_LIVE_CALL_UPSET_ALERT)', accepts: { providers: ['anthropic'], cap: 'text' } },
+  { key: 'DEAL_END_DATE', env: 'MODEL_DEAL_END_DATE', description: 'SiteOne deals bell offer end date (owner 2026-11-19: Haiku 5.5; dark behind GATE_SITEONE_DEAL_AI_END_DATE)', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VOICE_JUDGE', env: 'MODEL_VOICE_JUDGE', description: 'Voice relay eval judge (pinned: moving it re-baselines the voice agent scorecard)', accepts: { providers: ['anthropic'], cap: 'text' } },
   // deep: true — its only call sites are the newsletterWriter policy through
   // llm/call.js, whose wire cap gives always-thinking models (Opus 5.5, Fable)
@@ -400,6 +401,7 @@ const LANES = [
   L('social_judge', 'Social compliance judge', 'social-compliance-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('job_screen', 'Job application screening', 'job-application-screen.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('fast_complete_voice_fill', 'Fast Complete voice fill', 'fast-complete-voice-fill.js', 'fastText', T('FAST'), null, { inbound: true, note: 'GATE_FAST_COMPLETE_VOICE_FILL; technician speech mapped onto sheet choices, validated in code' }),
+  L('siteone_deal_end_date', 'SiteOne deals bell · offer end date', 'procurement/siteone-deal-end-date.js', 'fastText', T('DEAL_END_DATE'), null, { inbound: true, note: 'GATE_SITEONE_DEAL_AI_END_DATE; the quoted words must be in the email, checked in code' }),
   L('footprint_claim', 'Service-footprint claim classifier', 'content/footprint-claim-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('business_name_confirm', 'Competitor business-name confirmation', 'content/business-name-confirmer.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('photo_subject_confirm', 'Blog brief single-subject photo confirmation', 'content/photo-subject-confirmer.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
@@ -843,6 +845,7 @@ const LANE_AREA = {
   inventory_research: 'office',
   job_screen: 'office',
   fast_complete_voice_fill: 'office',
+  siteone_deal_end_date: 'office',
 };
 // One line a person reads to know what the lane does.
 const LANE_DESCRIBE = {
@@ -1015,6 +1018,7 @@ const LANE_DESCRIBE = {
   inventory_research: 'Matches vendors and researches prices',
   job_screen: 'Screens job applications',
   fast_complete_voice_fill: 'Maps what a tech said onto the Fast Complete sheet',
+  siteone_deal_end_date: 'Reads each SiteOne deal email\'s end date for the Monday deals bell (dark: GATE_SITEONE_DEAL_AI_END_DATE)',
 };
 // Continuity = what catches a regression after a model switch.
 //   judged    an LLM judge / replay eval scores output against human truth
@@ -1025,7 +1029,7 @@ const LANE_DESCRIBE = {
 const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
 // fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
 // and treats a missing findings array as "no findings", so `{}` passes.
-const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fast_complete_voice_fill", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
+const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fast_complete_voice_fill", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "siteone_deal_end_date", "transcription", "treatment_narrative", "turf_ocr"]);
 
 // ── Resolution ────────────────────────────────────────────────────────
 function firstSetEnv(names) {

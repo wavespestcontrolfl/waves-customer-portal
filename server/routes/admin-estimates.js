@@ -91,13 +91,10 @@ const {
 } = require('../services/lawn-service-outline');
 const { OUTLINE_PROGRAMS, outlineProgram } = require('../services/service-outline-programs');
 
-// Hard ceiling for limit=all list fetches. The estimates pipeline computes
-// all-time KPIs client-side from this list; if the table ever outgrows this
-// cap the analytics silently truncate to the newest rows, so keep generous
-// headroom (pricing-risk batch is pure compute after one inventory preload).
-const ESTIMATE_LIST_LIMIT = 2000;
+// ESTIMATE_LIST_LIMIT (the hard ceiling for limit=all list fetches) and SENT_ONLY_DELIVERY_ATTEMPT_STATUSES live with
+// the list's row selection in services/estimate-call-list.js, which the 9 AM Call today push shares.
+const { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId } = require('../services/estimate-call-list');
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
-const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
 
 function estimateMatchesSentOnlyScope(estimate = {}) {
   return !!estimate.sent_at || SENT_ONLY_DELIVERY_ATTEMPT_STATUSES.includes(String(estimate.status || ''));
@@ -4267,25 +4264,13 @@ router.get('/', async (req, res, next) => {
       ? 'all'
       : 'hide';
 
-    let query = db('estimates')
-      .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
-      .select('estimates.*', 'technicians.name as created_by_name')
-      .orderBy('estimates.created_at', 'desc');
-
-    if (status) query = query.where('estimates.status', status);
-    if (sentOnly) {
-      query = query.where(function () {
-        this.whereNotNull('estimates.sent_at')
-          .orWhereIn('estimates.status', SENT_ONLY_DELIVERY_ATTEMPT_STATUSES);
-      });
-    }
-    if (source) {
-      const sources = source.split(',');
-      query = query.whereIn('estimates.source', sources);
-    }
+    let query = estimateListQuery(db, {
+      status,
+      sentOnly,
+      sources: source ? source.split(',') : null,
+      archived,
+    });
     if (search) query = applyEstimateSearchFilter(query, search);
-    if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
-    else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
 
     let estimates;
     if (limit === 'all') {
@@ -4297,23 +4282,9 @@ router.get('/', async (req, res, next) => {
       estimates = await query.limit(lim).offset(offset);
     }
 
-    // Aggregate shortlink click telemetry per estimate. One estimate can
-    // accumulate multiple short_codes rows when /send is hit again (re-send
-    // / follow-up flows), so SUM the click counts and MAX the last-clicked
-    // timestamp. Bot UAs are filtered upstream in public-shortlinks so the
-    // numbers reflect real customer taps.
+    // Short-link click telemetry per estimate (summed counts, newest click), the read the Call today push shares.
     const ids = estimates.map((e) => e.id);
-    let clickStats = new Map();
-    if (ids.length) {
-      const rows = await db('short_codes')
-        .where({ entity_type: 'estimates' })
-        .whereIn('entity_id', ids)
-        .groupBy('entity_id')
-        .select('entity_id')
-        .sum({ click_count: 'click_count' })
-        .max({ last_clicked_at: 'last_clicked_at' });
-      clickStats = new Map(rows.map((r) => [r.entity_id, r]));
-    }
+    const clickStats = await clickStatsByEstimateId(db, ids);
 
     // The newest outline per estimate and program: each program's packets (service-outline-programs.js: Tree & Shrub,
     // Pest Control, Mosquito) apart; every other packet is lawn.
@@ -4485,9 +4456,10 @@ router.get('/', async (req, res, next) => {
     const soldByById = await loadSoldByForList(db, estimates);
     // Call list: the newest outbound call to each VIEWED row's phone, one batched read.
     // A failed read costs only the field (lastCalledAt stays null).
+    const { lastCalledAtByEstimateId, callTodayFields } = require('../services/estimate-call-list');
     let lastCalledById = new Map();
     try {
-      lastCalledById = await require('../services/estimate-call-list').lastCalledAtByEstimateId(db, estimates);
+      lastCalledById = await lastCalledAtByEstimateId(db, estimates);
     } catch (err) {
       // Never err.message: a Knex error carries the SQL with its bindings, i.e. every customer
       // phone in the batch's whereIn (AGENTS.md, PII in logs). The driver code is enough.
@@ -4530,9 +4502,9 @@ router.get('/', async (req, res, next) => {
           ),
         } : null;
         return {
-          id: e.id, status: e.status, customerName: e.customer_name,
+          id: e.id, customerName: e.customer_name,
           customerId: e.customer_id,
-          customerPhone: e.customer_phone, address: e.address,
+          address: e.address,
           customerEmail: e.customer_email,
           updatedAt: e.updated_at,
           monthlyTotal,
@@ -4545,18 +4517,23 @@ router.get('/', async (req, res, next) => {
           // staff, so the card opens the staff PDF instead.
           staffPreviewable: staffPreviewableIds.has(e.id),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
-          sentAt: e.sent_at,
-          viewedAt: hasBeenSent ? e.viewed_at : null,
           acceptedAt: e.accepted_at,
           scheduledAt: e.scheduled_at,
           expiresAt: e.expires_at,
           sendMethod: e.send_method,
           declinedAt: e.declined_at,
           viewCount: hasBeenSent ? e.view_count || 0 : 0,
-          lastViewedAt: hasBeenSent ? e.last_viewed_at : null,
           clickCount: parseInt(clickStats.get(e.id)?.click_count || 0, 10),
-          lastClickedAt: clickStats.get(e.id)?.last_clicked_at || null,
           createdAt: e.created_at,
+          // The follow-up fields (status, phone, archivedAt, sentAt, views, click, follow-up, newest answered
+          // call): one mapping shared with the 9 AM push (services/estimate-call-list.js callTodayFields).
+          // undeliveredSelfServe also keeps the quote out of Going cold and Follow-up overdue, and its
+          // mint stamp out of sentAt.
+          ...callTodayFields(e, {
+            lastClickedAt: clickStats.get(e.id)?.last_clicked_at,
+            lastCalledAt: lastCalledById.get(e.id),
+            undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
+          }),
           source: e.source || 'manual',
           serviceInterest,
           serviceLines,
@@ -4566,9 +4543,6 @@ router.get('/', async (req, res, next) => {
           description: serviceInterest || e.notes,
           notes: e.notes,
           followUpCount: e.follow_up_count || 0,
-          lastFollowUpAt: e.last_follow_up_at,
-          // Call list: newest outbound call to a viewed row's phone; null otherwise.
-          lastCalledAt: lastCalledById.get(e.id) || null,
           declineReason: e.decline_reason,
           disposition: e.disposition || null,
           dispositionSource: e.disposition_source || null,
@@ -4576,7 +4550,6 @@ router.get('/', async (req, res, next) => {
           competitorName: e.competitor_name || null,
           competitorPrice: e.competitor_price != null ? parseFloat(e.competitor_price) : null,
           token: e.token,
-          archivedAt: e.archived_at,
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
           // The row offers "Send booking link" only when the route would not refuse it

@@ -1,7 +1,6 @@
 /**
  * The quiet policy of admin-alert-retention.js (owner rulings 2026-11-04 "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD
- * FALL OFF" and 2026-11-05 "A": money alerts stay until settled), the parts that need no database: the gate states,
- * what a pass judges and writes through its io edges, the per-tick cap, the money list, the first-match RERING hold,
+ * FALL OFF" and 2026-11-05 "A": money alerts stay until settled), the parts that need no database: what a pass judges and writes through its io edges, the per-tick cap, the money list, the first-match RERING hold,
  * the Reopen hold surviving a quiet refresh, and the 10-minute cron. The rules against live Postgres are in
  * admin-alert-retention-quiet-db.test.js. The nightly policy's own tests are untouched.
  */
@@ -18,7 +17,6 @@ const path = require('path');
 const logger = require('../services/logger');
 const retention = require('../services/admin-alert-retention');
 const NotificationService = require('../services/notification-service');
-const { alertQuietFallOffMode } = require('../config/feature-gates');
 
 const HOUR = 60 * 60 * 1000;
 const now = new Date('2026-11-05T15:00:00.000Z');
@@ -44,23 +42,7 @@ function fakeIo({ pages = [], landed = null } = {}) {
 
 beforeEach(() => jest.clearAllMocks());
 
-describe('GATE_ALERT_QUIET_FALL_OFF', () => {
-  afterEach(() => { delete process.env.GATE_ALERT_QUIET_FALL_OFF; });
-  test('only shadow and true count; unset and anything else is off', () => {
-    expect(alertQuietFallOffMode()).toBe('off');
-    for (const [value, mode] of [['shadow', 'shadow'], [' TRUE ', 'true'], ['1', 'off'], ['on', 'off'], ['false', 'off']]) {
-      process.env.GATE_ALERT_QUIET_FALL_OFF = value;
-      expect(alertQuietFallOffMode()).toBe(mode);
-    }
-  });
-
-  test('off reads and writes nothing', async () => {
-    const { io, calls } = fakeIo({ pages: [[row('a')]] });
-    expect(await retention.runAdminAlertQuietPolicy({ now, mode: 'off', io })).toEqual({ skipped: true, reason: 'gate_off' });
-    expect(calls.limits).toEqual([]);
-    expect(calls.saved).toEqual([]);
-  });
-
+describe('the quiet policy pass', () => {
   test('shadow counts by category and logs; it writes and records nothing', async () => {
     const { io, calls } = fakeIo({ pages: [[row('a'), row('b'), row('c', {}, { category: 'schedule' })]] });
     const out = await retention.runAdminAlertQuietPolicy({ now, mode: 'shadow', io });
@@ -187,13 +169,12 @@ describe('the Reopen hold', () => {
 });
 
 describe('the 10-minute cron', () => {
-  test('is registered once, gate-checked inside its try and before any lock, and calls the retention module', () => {
+  test('is registered once, runs inside its try under a lock, and calls the retention module', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
     const at = src.indexOf("cron.schedule('6,16,26,36,46,56 * * * *'");
     expect(at).toBeGreaterThan(0);
     const block = src.slice(at, at + 700);
-    expect(block.indexOf('try {')).toBeLessThan(block.indexOf("alertQuietFallOffMode() === 'off'"));
-    expect(block.indexOf("alertQuietFallOffMode() === 'off'")).toBeLessThan(block.indexOf('runExclusive('));
+    expect(block.indexOf('try {')).toBeLessThan(block.indexOf('runExclusive('));
     expect(block).toContain("runExclusive('admin-alert-quiet-fall-off'");
     expect(block).toContain("require('./admin-alert-retention').runAdminAlertQuietPolicy()");
     expect(src.match(/'6,16,26,36,46,56 \* \* \* \*'/g)).toHaveLength(1);
