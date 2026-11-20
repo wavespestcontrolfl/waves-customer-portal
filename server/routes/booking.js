@@ -1742,7 +1742,10 @@ function crewSlots(slots, crew) {
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
 // Per truck (GATE_MULTI_TECH_CONFIRM, owner rule B) find-time's slots of a truck on another truck's zone
 // day go before any start is claimed (dropOtherTruckDays), so a start goes to the zone day's own truck.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, paidLookups, crew, verifiedOnly }) {
+// `zoneFunnelEachDay` (with `zoneFunnelAddress`): the one-day rules on every day of the window, as each commit's
+// one-day rebuild reads them: no cluster or seed day is chosen, and per truck dropOtherTruckDays still runs. Only
+// the lead link's refusal check at a typed pin passes it (inspection-public.js nextCommitRefresh).
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelEachDay, paidLookups, crew, verifiedOnly }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -2095,7 +2098,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // The far-south funnel's zone days (zoneFunnelAddress), read before the claims: per truck, a truck on another
   // truck's zone day never claims a start, so the zone truck keeps each start it has. Null = no funnel.
   const offerFunnel = result.slots?.length
-    ? await offerFunnelView({ address: zoneFunnelAddress, city: zoneFunnelCity, dateFrom: rangeFrom, dateTo: rangeTo, conn: db })
+    ? await offerFunnelView({ address: zoneFunnelAddress, city: zoneFunnelCity, dateFrom: rangeFrom, dateTo: rangeTo, conn: db, eachDay: zoneFunnelEachDay })
     : null;
   const findTimeSlots = dropOtherTruckDays(result.slots || [], offerFunnel || {}, (slot) => slot?.technician?.id);
   // A graced build never offers a slot whose simulated arrival delay is past
@@ -2166,7 +2169,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today, floor: !crew, verifiedOnly });
   // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL), opt-in per caller with the address text
   // (the lead assessment link): the pool narrows BEFORE the customer route check, as on the estimate page.
-  const funneledCandidates = await funnelOfferPool(stampedCandidates, offerFunnel, { routeDaySlug: zoneSlug, conn: db });
+  const funneledCandidates = await funnelOfferPool(stampedCandidates, offerFunnel, { routeDaySlug: zoneSlug, conn: db, eachDay: zoneFunnelEachDay });
   const candidates = await applyRouteCheck(routeCheck, funneledCandidates);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({

@@ -253,6 +253,28 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     });
   });
 
+  // A refused booking's check at the typed pin (inspection-public.js nextCommitRefresh, pre-push P1 on 910b741125)
+  // reads the one-day rules on every day of the window, as each retry's one-day rebuild does: the fleet view keeps
+  // every day and reads nothing; per truck the other truck's zone-day opening still goes, but no day is dropped for
+  // the cluster or seed day (a window build would offer D1 only).
+  test.each([
+    [undefined, [[D, '10:00', 'tech-2'], [D1, '10:00', 'tech-2'], [D2, '10:00', 'tech-2']], 0],
+    ['true', [[D, '10:00', 'tech-2'], [D1, '10:00', 'tech-1'], [D2, '10:00', 'tech-2']], 1],
+  ])('each day, GATE_MULTI_TECH_CONFIRM=%s: every day stays, with the one-day rules', async (gate, slots, reads) => {
+    await withTruckGate(gate, async () => {
+      stopRows = [TECH1_ON_D1];
+      findAvailableSlots.mockResolvedValue({
+        slots: [truckSlot(D, 'tech-2', 1), truckSlot(D1, 'tech-2', 2), truckSlot(D1, 'tech-1', 3), truckSlot(D2, 'tech-2', 4)], total_feasible: 4,
+      });
+      const eachDay = await require('../routes/inspection-public')._test.buildAvailabilityForLead(
+        { lat: 27.12, lng: -82.44 },
+        { rangeFrom: D, rangeTo: D2, config: CONFIG, duration: 60, address: VENICE, eachDay: true },
+      );
+      expect(slotsOf(eachDay)).toEqual(slots);
+      expect(stopLookups).toBe(reads);
+    });
+  });
+
   test('every build the route runs passes the address: the offered lists and the commit\'s one-day rebuilds', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/inspection-public.js'), 'utf8');
     const calls = [...src.matchAll(/await buildAvailabilityForLead\(([^;]*?)\);/gs)].map((m) => m[1]);

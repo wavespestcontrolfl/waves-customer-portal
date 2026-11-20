@@ -346,10 +346,12 @@ async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
 // window. Returns { days, techDays }, or null when the funnel does not apply (gate off, no address,
 // no funneled zone) or cannot be resolved (zone or lookup failure: logged, fail open, as the estimate page does).
 // In the fleet view a one-day window funnels to itself (clustered or seeded, that day stays whole), so it reads
-// nothing: the commit's single-day rebuild with the gate off runs exactly as before.
-async function offerFunnelView({ address, city = null, dateFrom, dateTo, conn }) {
+// nothing: the commit's single-day rebuild with the gate off runs exactly as before. `eachDay` asks for those one-day
+// rules on every day of a longer window (a refused lead booking's check at the typed pin, inspection-public.js
+// nextCommitRefresh): no view in the fleet view; per truck the window's view, and funnelOfferPool keeps every day.
+async function offerFunnelView({ address, city = null, dateFrom, dateTo, conn, eachDay }) {
   if (!address || !isEnabled('southZoneDayFunnel')) return null;
-  if (dateFrom === dateTo && !perTruckLive()) return null;
+  if ((dateFrom === dateTo || eachDay) && !perTruckLive()) return null;
   let estimateZone = null;
   try {
     estimateZone = await resolveEstimateZone(conn, { address, city });
@@ -362,9 +364,10 @@ async function offerFunnelView({ address, city = null, dateFrom, dateTo, conn })
 }
 
 // applyZoneDayFunnel over an offer pool with offerFunnelView's `view`: the cluster days, or one seed day (the
-// pool's score order, route day first). Returns `pool` itself (same array) when `view` is null or the pool empty.
-async function funnelOfferPool(pool, view, { routeDaySlug = null, conn } = {}) {
-  if (!view || !Array.isArray(pool) || !pool.length) return pool;
+// pool's score order, route day first). Returns `pool` itself (same array) when `view` is null, the pool empty, or
+// `eachDay` (offerFunnelView) asks for the one-day rules, where each day funnels to itself.
+async function funnelOfferPool(pool, view, { routeDaySlug = null, conn, eachDay } = {}) {
+  if (!view || eachDay || !Array.isArray(pool) || !pool.length) return pool;
   let preferredSeedDates = [...new Set(pool.map((s) => s?.date).filter(Boolean))];
   if (routeDaySlug) {
     const { preferRouteDayDates, readZoneRouteDays } = require('./zone-route-days');

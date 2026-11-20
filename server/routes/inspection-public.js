@@ -632,7 +632,8 @@ function storedAddressCandidates(lead, custRow) {
 // commit moved to a matched profile's other stored location, the next commit
 // books either there (re-checked with this commit's zone address,
 // revalidateSlotAt) or at the typed location, so only the starts open at both
-// are offered. With none typed, the next commit's resolver
+// are offered: at the typed location with the one-day rules on each day, as
+// that commit's one-day check reads them. With none typed, the next commit's resolver
 // (resolveServiceAddress) reads the profile phase 1 linked, at its stored
 // location: its stored address, else the lead's own.
 function nextCommitRefresh({ resolved, lead, custRow, zoneSource, locationMoved }) {
@@ -833,7 +834,9 @@ const customerAddressFields = (cust) => ({
 // `address`: the booking address ({line1, line2, city, state, zip}) on every list a customer is OFFERED; the
 // south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. The commit and re-validation rebuilds pass it too:
 // per truck (owner rule B) they drop the same openings as the list (zone-day-funnel.js dropOtherTruckDays).
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null }) {
+// `eachDay`: the funnel's one-day rules on every day of the window, as the commit's one-day rebuild reads them
+// (zoneFunnelEachDay; nextCommitRefresh's check at the typed pin).
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, eachDay }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   const zoneInputs = zoneFunnelInputs(address);
@@ -872,7 +875,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // same gate and grace value.
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
-    ...(zoneInputs ? { zoneFunnelAddress: zoneInputs.address, zoneFunnelCity: zoneInputs.city } : {}),
+    ...(zoneInputs ? { zoneFunnelAddress: zoneInputs.address, zoneFunnelCity: zoneInputs.city, zoneFunnelEachDay: eachDay } : {}),
   });
 }
 
@@ -2246,12 +2249,14 @@ function sendLocationFailure(res, failure, county, leadId) {
 // hand back the customer's CURRENT address alongside the refreshed times —
 // every other caller omits them and the body is byte-identical to before.
 // `alsoAt` ({ location, address }, nextCommitRefresh): only the starts open
-// there too.
+// there too, read with the one-day rules on each day (eachDay), as the next
+// commit's one-day check there reads them (pre-push P1 on 910b741125: a
+// window build there keeps only the funnel's cluster or seed day).
 async function sendSlotTaken(res, { location, address = null, alsoAt = null, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
   let refreshed = null;
   try {
     const here = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address });
-    const there = alsoAt && await buildAvailabilityForLead(alsoAt.location, { ...range, config, duration: catalog.durationMinutes, address: alsoAt.address });
+    const there = alsoAt && await buildAvailabilityForLead(alsoAt.location, { ...range, config, duration: catalog.durationMinutes, address: alsoAt.address, eachDay: true });
     // Set only once both builds succeed: a failed second build answers with no times, never the unfiltered ones.
     refreshed = alsoAt ? keepStartsOpenAt(here, there) : here;
   } catch (err) {

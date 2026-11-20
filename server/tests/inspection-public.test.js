@@ -2127,9 +2127,10 @@ describe('POST /:token commit', () => {
         expect(first.body.availability.slots.map((s) => `${s.date} ${s.start_time}`)).toEqual([`${FUTURE_DATE} 09:00`, `${FUTURE_DATE} 11:00`]);
         expect(first.body.availability.nearby).toBe(false);
         // After the anti-forgery build and the re-check, the refresh builds at the profile's location with its address
-        // (the zone address the booking checks) and at the typed location with the typed address.
-        expect(mockBuildAvailability.mock.calls.map(([a]) => [a.lat, a.zoneFunnelCity])).toEqual([
-          [27.4, 'Bradenton'], [27.1, 'West Bradenton'], [27.1, 'West Bradenton'], [27.4, 'Bradenton'],
+        // (the zone address the booking checks) and at the typed location with the typed address, there with the
+        // one-day rules on each day, as the retry's one-day check reads them (pre-push P1 on 910b741125).
+        expect(mockBuildAvailability.mock.calls.map(([a]) => [a.lat, a.zoneFunnelCity, a.zoneFunnelEachDay])).toEqual([
+          [27.4, 'Bradenton', undefined], [27.1, 'West Bradenton', undefined], [27.1, 'West Bradenton', undefined], [27.4, 'Bradenton', true],
         ]);
 
         // The retry: phase 1 linked the lead to that profile, and the page sends the typed address again.
