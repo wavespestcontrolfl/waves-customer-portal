@@ -8767,6 +8767,12 @@ describe('resolveSequencePlanForEnrollment results-visit rule (GATE_REVIEW_ASK_R
     // The same lawn-keyed catalog with a plain lawn label still skips.
     db.mockImplementation(makeMock({ scheduled_services: [visit('tt-1', 'tt', 'Lawn Care Program', 0, lawnCatalog)] }));
     expect((await resolve('tt', 'tt-1')).skip).toBe('results_not_yet');
+    // A generic service_type with an explicit combo in the catalog name keeps pest: asks.
+    db.mockImplementation(makeMock({ scheduled_services: [visit('tu-1', 'tu', 'Recurring Service', 0, { service_key: 'lawn_care_monthly', service_name: 'Lawn Care + Pest Control' })] }));
+    expect((await resolve('tu', 'tu-1')).skip).toBeUndefined();
+    // A three-service label with its own pest segment keeps pest, even beside rodent: asks.
+    db.mockImplementation(makeMock({ scheduled_services: [visit('tv-1', 'tv', 'Pest Control + Lawn Care + Rodent Control', 0)] }));
+    expect((await resolve('tv', 'tv-1')).skip).toBeUndefined();
   });
 
   test('a failed packet, history or catalog read logs and asks; nothing is substituted', async () => {
