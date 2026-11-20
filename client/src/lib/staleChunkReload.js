@@ -101,14 +101,20 @@ export function notePageMove(from, to) {
 // A move in view also ends the use of the page it left, as for the Reload
 // bar (usePageUsed): the move remounted the routes, so nothing unsaved stays
 // from that use, and Back to that page opens it unused. A move React dropped
-// leaves the page and its use. A move in view to another page also ends the
-// count of the one reload on the path it reopened (chunkReloadAttempted):
-// React.lazy keeps a page it loaded, so Back to that path loads nothing that
-// would end it (noteChunkLoaded).
+// leaves the page and its use. A move in view away from the path the one
+// reload reopened also ends that reload's count, path and flag
+// (chunkReloadAttempted), as a page that loads on another path does
+// (noteChunkLoaded). A move can load nothing: React.lazy keeps a page it
+// loaded, the More page is in the entry bundle, and the reopened page may
+// still fail. While a reload is under way, the flag must reach the page load
+// it opens. During an outage a page the tab then opens can take one more
+// reload; after it, that page shows its retry screen.
 export function notePageInView(from, to) {
   shownMove = { from, to };
   usedPath = null;
-  if (reloadedPath !== null && routerPath(to) !== routerPath(reloadedPath)) reloadedPath = null;
+  if (reloadPending || reloadedPath === null || routerPath(to) === routerPath(reloadedPath)) return;
+  reloadedPath = null;
+  clearChunkReloadFlag();
 }
 
 // The page that the move to `pathname` left. Null for a move the gate has not
@@ -177,7 +183,8 @@ function pathOpenedByChunkReload() {
 // path that reload reopened counts too, or a part still missing under a page
 // that loaded would reload the tab at every load. That path counts until the
 // tab leaves it: a page loads on another path, or a move to another page
-// comes into view (notePageInView). Throws when storage is blocked.
+// comes into view, which clears the flag too (notePageInView). Throws when
+// storage is blocked.
 function chunkReloadAttempted() {
   return window.location.pathname === reloadedPath || Boolean(sessionStorage.getItem(CHUNK_RELOAD_FLAG));
 }
@@ -205,6 +212,10 @@ export function takeChunkReload() {
 export function noteChunkLoaded() {
   if (reloadPending) return;
   if (window.location.pathname !== reloadedPath) reloadedPath = null;
+  clearChunkReloadFlag();
+}
+
+function clearChunkReloadFlag() {
   try { sessionStorage.removeItem(CHUNK_RELOAD_FLAG); } catch { /* storage blocked */ }
 }
 

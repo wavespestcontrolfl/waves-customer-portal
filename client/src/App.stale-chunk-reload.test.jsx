@@ -20,6 +20,7 @@ import {
   isChunkError,
   isStaleChunkReloadPending,
   markPageNavigating,
+  markStaleChunkReloadPending,
   noteChunkLoaded,
   notePageInView,
   reloadForMissingCode,
@@ -881,6 +882,32 @@ describe('on a staff page', () => {
     handleVitePreloadError(later, reload);
     expect(later.defaultPrevented).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('when the page the one reload reopened still fails, a move in view away from it ends that reload\'s count, flag included: a missing chunk on another page reloads once more', () => {
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    resetStaleChunkReloadForTests(); // the page load the one reload opened
+    notePageInView(null, '/admin/dashboard');
+    // Its page still fails: no page loads, so nothing clears the flag.
+    const again = preloadErrorEvent();
+    handleVitePreloadError(again, reload);
+    expect(again.defaultPrevented).toBe(false);
+    // To the More page, in the entry bundle: no page loads there either.
+    notePageInView('/admin/dashboard', '/admin/more');
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
+    const other = preloadErrorEvent();
+    handleVitePreloadError(other, reload);
+    expect(other.defaultPrevented).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('a move in view away from that path while a reload is under way keeps the one-shot flag: it must reach the page load that reload opens', () => {
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    resetStaleChunkReloadForTests(); // the page load the one reload opened
+    markStaleChunkReloadPending();
+    notePageInView('/admin/dashboard', '/admin/more');
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
   });
 
   test('a move in view to the path the one reload reopened, written another way, keeps that reload\'s count', () => {
