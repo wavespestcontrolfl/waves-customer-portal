@@ -892,6 +892,14 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
   beforeEach(() => { process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true'; });
   afterAll(() => { delete process.env.GATE_PEST_INSIDER_AUTO_SEND; });
 
+  test('a planned issue with no text body still sends its copy a text part, its banner, and records that part', async () => {
+    const { issuesChain } = wireDb({ sends: { first: { ...PI_DRAFT, text_body: null } }, issues: { first: ISSUE } });
+    expect(await sendNewsletterProof('send-1')).toEqual(expect.objectContaining({ sent: true }));
+    const { text } = mockSendOne.mock.calls[0][0];
+    expect(text).toMatch(/^SENDS BY ITSELF — NO REPLY NEEDED\n/);
+    expect(issuesChain.update).toHaveBeenCalledWith(recordedFyi('contact@wavespestcontrol.com'));
+  });
+
   test('its FYI copy goes out, and it is queued for its own Thursday 7:00 AM ET with its issue row', async () => {
     const { sendsChain, calendarChain, issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
     const r = await sendNewsletterProof('send-1');
@@ -1129,7 +1137,7 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
       authentication_results: 'mx.google.com; dkim=pass header.i=@wavespestcontrol.com header.s=s1 header.b=abc',
       // As it arrives: the same words, its own line breaks.
       body_text: COPY.replace(/\n/g, '\r\n'),
-    })).toBe(false);
+    })).toBe(true); // proof traffic: the sync skips classification and auto-actions for it
     expect(issuesChain.update).not.toHaveBeenCalled();
     expect(mockTrigger).not.toHaveBeenCalled();
   });

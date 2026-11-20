@@ -880,7 +880,9 @@ async function sendNewsletterProof(sendId) {
     const { html, text } = await renderSendPreview({
       ...send,
       html_body: delivery.bannerHtml + diagnosticsHtml + (send.html_body || ''),
-      text_body: send.text_body ? delivery.bannerText + send.text_body : send.text_body,
+      // A planned issue's copy always has a text part, its banner first, also when the draft has no
+      // text body: its row records that part by digest (isProofCopyItself).
+      text_body: (send.text_body || issueContext) ? delivery.bannerText + (send.text_body || '') : send.text_body,
     }, to);
     // Every address a copy of a planned issue's FYI goes to may HOLD it (verifiedHoldSender), and the
     // copy itself never does (isProofCopyItself): both are recorded with its row before the copy goes
@@ -1086,11 +1088,12 @@ async function maybeHandleProofApproval(email) {
   // type such an address into a From line), stops nothing, and the owner is told once.
   const planned = send ? await resolvePestInsiderIssueContext(send) : null;
   if (planned && isHoldReply(replyText)) {
-    // The FYI copy itself, back in this mailbox (it quotes the HOLD line): not an answer, and no warning.
+    // The FYI copy itself, back in this mailbox (it quotes the HOLD line): not an answer, and no
+    // warning. It is proof traffic, so the sync skips classification and auto-actions for it.
     const copies = issueFyiCopies(planned.issue);
     if (isProofCopyItself(email, copies)) {
       logger.info(`[newsletter-proof] ignoring the FYI copy of planned issue send ${send.id} itself`);
-      return false;
+      return true;
     }
     const fyiTos = issueFyiAddresses(planned.issue);
     const verified = verifiedHoldSender(email, fyiTos);
