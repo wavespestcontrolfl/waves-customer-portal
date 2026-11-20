@@ -184,9 +184,10 @@ maybeDescribe('monday review bell (live Postgres)', () => {
         await review({ auto_reply_status: 'queued' });
         const after = await Review._private.loadParkedReviews();
         expect(after.count - before.count).toBe(2);
-        const times = after.entries.map((e) => new Date(e.at).getTime());
-        expect(times).toEqual([...times].sort((a, b) => a - b));
-        expect(after.entries.find((e) => new Date(e.at).getFullYear() === 2000)).toMatchObject({ location: 'Lakewood Ranch' });
+        // Only this case's rows: the shared CI database may hold other parked reviews.
+        const mine = after.entries.filter((e) => e.name === `Monday Fixture ${RUN.slice(0, 8)}`);
+        expect(mine.map((e) => new Date(e.at).getUTCFullYear())).toEqual([2000, new Date(ago(2)).getUTCFullYear()]);
+        expect(mine.map((e) => e.location)).toEqual(['Lakewood Ranch', 'Lakewood Ranch']);
       } finally {
         await db('google_reviews').whereIn('id', ids).del();
       }
@@ -209,10 +210,12 @@ maybeDescribe('monday review bell (live Postgres)', () => {
       promises: async () => ({ count: 4, oldestAt: ago(9) }),
       drafts: async () => ({ count: 0, total: 0 }),
       visits: async () => ({ count: 1, priced: 80, oldestDate: '2026-10-01' }),
+      parked: async () => ({ count: 0, entries: [] }),
     };
     const empty = {
       alerts: async () => ({ count: 0, headlines: [] }), promises: async () => ({ count: 0 }),
       drafts: async () => ({ count: 0, total: 0 }), visits: async () => ({ count: 0, priced: 0 }),
+      parked: async () => ({ count: 0, entries: [] }),
     };
     const rowsFor = (key) => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]);
     const run = (loaders, now) => Review.runMondayReview({ now, loaders });
