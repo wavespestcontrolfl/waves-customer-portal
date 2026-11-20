@@ -6,6 +6,7 @@ const { SPECIES } = require('../services/pest-insider/plan');
 const { cardFor } = require('../services/pest-insider/cards');
 const { POSTS, POST_URLS, postUrl } = require('../services/pest-insider/posts');
 const { heroFor } = require('../services/pest-insider/heroes');
+const { partPictureForFact } = require('../services/pest-insider/parts');
 const { factById } = require('../services/pest-insider/facts');
 const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 const { bodyIsDarkAware } = require('../services/email-template');
@@ -52,10 +53,11 @@ describe('renderIssue', () => {
     expect(imgSrcs(r.html_body)).toEqual([DIVIDER]);
     // With the lead fact: its top picture, linked to the post too, then its
     // card; a picture that moves comes as its still (for Outlook) and its GIF.
+    // A fact that names a part then shows its part picture (parts.js).
     for (const id of Object.keys(POSTS)) {
       const [hero, card] = [heroFor(id), cardFor(id)];
       const issue = renderIssue({ ...BASE, lead: titledLead(id) });
-      expect([id, imgSrcs(issue.html_body)]).toEqual([id, [hero.url, hero.gifUrl, card.url, card.gifUrl, DIVIDER].filter(Boolean)]);
+      expect([id, imgSrcs(issue.html_body)]).toEqual([id, [hero.url, hero.gifUrl, card.url, card.gifUrl, partPictureForFact(id)?.url, DIVIDER].filter(Boolean)]);
       expect([id, [...issue.html_body.matchAll(/href="([^"]+)"/g)].filter((m) => m[1] === postUrl(id)).length]).toEqual([id, 2]);
     }
   });
@@ -104,10 +106,10 @@ describe('renderIssue', () => {
       expect([id, [...r.html_body.matchAll(/<source [^>]*>/g)].map((m) => m[0])])
         .toEqual([id, [hero, card].filter((p) => p.gifUrl).map((p) => `<source srcset="${p.url}" media="(prefers-reduced-motion: reduce)" />`)]);
       // a mail app that reads no Outlook comment shows the GIFs
-      expect([id, imgSrcs(r.html_body.replace(/<!--[\s\S]*?-->/g, ''))]).toEqual([id, [hero.gifUrl || hero.url, card.gifUrl || card.url, DIVIDER]]);
+      expect([id, imgSrcs(r.html_body.replace(/<!--[\s\S]*?-->/g, ''))]).toEqual([id, [hero.gifUrl || hero.url, card.gifUrl || card.url, partPictureForFact(id)?.url, DIVIDER].filter(Boolean)]);
       // classic Outlook shows what [if mso] holds and skips what [if !mso] holds: the stills
       const outlook = r.html_body.replace(/<!--\[if mso\]>([\s\S]*?)<!\[endif\]-->/g, '$1').replace(/<!--\[if !mso\]><!-->[\s\S]*?<!--<!\[endif\]-->/g, '');
-      expect([id, imgSrcs(outlook)]).toEqual([id, [hero.url, card.url, DIVIDER]]);
+      expect([id, imgSrcs(outlook)]).toEqual([id, [hero.url, card.url, partPictureForFact(id)?.url, DIVIDER].filter(Boolean)]);
     }
   });
 
