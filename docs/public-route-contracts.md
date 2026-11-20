@@ -8661,8 +8661,8 @@ decoding, as typed and after each step of each pass, since a step can use up par
 hex digits) while the stored text still shows it whole; each unit is also decoded with the characters a reader does not
 see dropped first, so an escape split by one of them (a space in a quoted value) decodes. The run-together text is also
 decoded as a whole, case kept (so `&ZeroWidthSpace;` decodes), so an escape split by a tag or a line break, in the
-route word or in the token, decodes as a reader who puts the pieces together decodes it; each decoded piece keeps the
-units it came from, and a token found there is hidden in each of them. Decoding stops after four passes; a unit
+route word or in the token, decodes as a reader who puts the pieces together decodes it; each decoded character keeps
+the units it came from, and a token found there is hidden in each of them. Decoding stops after four passes; a unit
 that would still decode further may hide a route word, so it is hidden whole, and in such a text so is every unit that
 a run of 64 or more hex touches in the joined reading. Run-together text that would still decode further fails closed
 the same way: every unit holding part of an escape still undecoded is hidden, as is every unit such a hex run touches. Tags are found in one pass over the text, so malformed markup
@@ -8703,7 +8703,8 @@ a date request or a decline never fixes a text choice the applicant did not see.
 contract before it and is answered as before, with no version check; the page always sends one. The page never
 applies an open read or a text-choice save without a `version` (a server from before it): such a read counts as failed,
 and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
-controls only for a read whose state is explicitly `open`; a read with no known state also counts as failed, and an
+controls only for a read whose state is explicitly `open` and that carries the text choice and non-empty Terms; a read
+with no known state, or an open read without those, also counts as failed, and an
 action's 200 that does not name its answer (`signed`, `date_requested`, `declined`) is treated as a lost reply: the
 page reads the offer. Each acts only from state `open`; any
 other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter

@@ -337,6 +337,9 @@ describe('CareersOfferPage — open state', () => {
   it.each([
     ['an empty answer', {}],
     ['an unknown state', { ...openPayload(), state: 'pending' }],
+    ['open without the text choice', openPayload({ textConsent: undefined })],
+    ['open without the Terms', openPayload({ terms: null })],
+    ['open with empty Terms', openPayload({ terms: { title: 'Technician Terms', markdown: '  ' } })],
   ])('shows the load error, not the offer, when the offer read is %s', async (label, body) => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(body));
     renderPage();

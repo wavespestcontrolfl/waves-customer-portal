@@ -783,10 +783,13 @@ const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 // with a read. Signing stays locked until a read carries a version.
 const hasVersion = (body) => typeof body?.version === 'string' && body.version.length > 0;
 // The states the offer read answers. A read with any other state, or an open
-// one without a version, is not shown (a failed read): only an explicit open
-// state with its version shows the signing controls.
+// one without its version, its text choice or the Terms, is not shown (a
+// failed read): only an explicit open state that carries all three shows the
+// signing controls, so no one signs without seeing the Terms and the choice.
 const OFFER_STATES = ['open', 'signed', 'declined', 'date_requested', 'expired', 'withdrawn', 'superseded'];
-const usableOffer = (body) => OFFER_STATES.includes(body?.state) && (body.state !== 'open' || hasVersion(body));
+const hasTerms = (body) => typeof body.terms?.markdown === 'string' && body.terms.markdown.trim() !== '';
+const signable = (body) => hasVersion(body) && typeof body.textConsent === 'boolean' && hasTerms(body);
+const usableOffer = (body) => OFFER_STATES.includes(body?.state) && (body.state !== 'open' || signable(body));
 // The answer each action's success names. A 200 that names any other is a
 // reply that cannot be read: the page reads the offer, as for a lost reply.
 const ANSWER_STATE = { '/accept': 'signed', '/date-request': 'date_requested', '/decline': 'declined' };

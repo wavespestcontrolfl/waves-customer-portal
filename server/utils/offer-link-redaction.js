@@ -44,8 +44,8 @@
  *   not see are dropped, so an escape split by one of them (a space in a quoted value) decodes too.
  * - The joined text is also decoded as a whole, with its case kept (so a named reference such as &ZeroWidthSpace;
  *   decodes), as a reader who puts the pieces together decodes it: an escape split by a tag or a line break, in the
- *   route word or in the token, decodes there. Each decoded piece keeps where it came from, so a token found there is
- *   hidden in every unit it came from. Joined text still encoded after four passes fails closed: every unit that holds
+ *   route word or in the token, decodes there. Each decoded character keeps the escape it came from, so a token found
+ *   there is hidden in every unit it came from, and a long run of escapes maps back one character at a time. Joined text still encoded after four passes fails closed: every unit that holds
  *   part of an escape still undecoded is hidden, and so is every unit that a run of 64 or more hex touches.
  * - A unit still encoded after four decoding passes (it may hide a route word or a token): the text fails closed. That
  *   unit is replaced as a whole by the bare marker, and so is every unit that a run of 64 or more hex touches in the
@@ -257,12 +257,41 @@ function viewOf(list, part) {
   return { text, spans };
 }
 
-const DECODE_STEPS = [[REFERENCE_RE, decodeHTML], [ESCAPES_RE, percentDecode]];
+// A run of percent escapes as the parts it decodes to, each with the stretch of the run it came from: one part per
+// character (a UTF-8 sequence of one to four escapes), so a long run maps back finely. A run that is not UTF-8 as a
+// whole reads one byte per escape, as percentDecode reads it.
+function escapeParts(run) {
+  const bytes = run.match(/%[0-9a-f]{2}/gi).map((b) => parseInt(b.slice(1), 16));
+  const parts = [];
+  let utf8 = true;
+  try {
+    decodeURIComponent(run);
+  } catch {
+    utf8 = false;
+  }
+  for (let i = 0; i < bytes.length;) {
+    let size = 1;
+    if (utf8 && bytes[i] >= 0xf0) size = 4;
+    else if (utf8 && bytes[i] >= 0xe0) size = 3;
+    else if (utf8 && bytes[i] >= 0xc0) size = 2;
+    const text = utf8 ? decodeURIComponent(run.slice(i * 3, (i + size) * 3)) : String.fromCharCode(bytes[i]);
+    parts.push({ from: i * 3, to: (i + size) * 3, text });
+    i += size;
+  }
+  return parts;
+}
+
+// Each step: what it replaces, how a match decodes, and the parts it decodes to (see trackedStep).
+const DECODE_STEPS = [
+  { re: REFERENCE_RE, decode: decodeHTML, parts: (match) => [{ from: 0, to: match.length, text: decodeHTML(match) }] },
+  { re: ESCAPES_RE, decode: percentDecode, parts: escapeParts },
+];
 
 // One decoding step over joined text that keeps where each piece of the result came from: a run kept as it was maps
-// character by character, a decoded run maps as a whole to the escape it came from. Each decoded run reads as a
-// reader reads it, case kept (typedOf, compact).
-function trackedStep(text, re, decode) {
+// character by character, and each decoded part (a character reference, or one character of a run of escapes) to the
+// escape it came from. Decoded parts that read as nothing in a row are one piece, so a long run of them costs one
+// step back. Each decoded part reads as a reader reads it, case kept (typedOf, compact).
+function trackedStep(text, { re, parts }) {
   const pieces = [];
   let out = '';
   let last = 0;
@@ -273,9 +302,14 @@ function trackedStep(text, re, decode) {
   };
   for (const m of text.matchAll(re)) {
     keepTo(m.index);
-    const decoded = compact(typedOf(decode(m[0])));
-    pieces.push({ at: out.length, len: decoded.length, from: m.index, to: m.index + m[0].length, kept: false });
-    out += decoded;
+    for (const part of parts(m[0])) {
+      const decoded = compact(typedOf(part.text));
+      const from = m.index + part.from;
+      const prev = pieces[pieces.length - 1];
+      if (!decoded && prev && !prev.kept && !prev.len && prev.to === from) prev.to = m.index + part.to;
+      else pieces.push({ at: out.length, len: decoded.length, from, to: m.index + part.to, kept: false });
+      out += decoded;
+    }
     last = m.index + m[0].length;
   }
   keepTo(text.length);
@@ -316,8 +350,8 @@ function decodedViews(raw) {
   let text = raw.text;
   for (let pass = 0; pass < DECODE_PASSES && decodable(text); pass += 1) {
     const before = text;
-    for (const [re, decode] of DECODE_STEPS) {
-      const step = trackedStep(text, re, decode);
+    for (const decodeStep of DECODE_STEPS) {
+      const step = trackedStep(text, decodeStep);
       if (step.text !== text) {
         steps.push(step.pieces);
         text = step.text;
@@ -329,7 +363,7 @@ function decodedViews(raw) {
   const pending = [];
   if (decodable(text)) {
     const back = backOf(steps);
-    for (const [re, decode] of DECODE_STEPS) {
+    for (const { re, decode } of DECODE_STEPS) {
       for (const m of text.matchAll(re)) {
         if (decode(m[0]) !== m[0]) pending.push(overlapping(raw.spans, ...back(m.index, m.index + m[0].length)));
       }
