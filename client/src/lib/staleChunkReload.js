@@ -21,6 +21,8 @@
 // lazyWithRetry hold later failures too; if this page is still here when the
 // window ends, the navigation never committed and the page reloads.
 
+import { staffReloadBlocker } from './portalReload';
+
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 
 // Long enough for a slow navigation to commit. It bounds how long a page whose
@@ -79,6 +81,9 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
     event.preventDefault();
     return;
   }
+  // Held work on a staff page keeps the tab: the import fails as it would
+  // with no handler, and lazyWithRetry shows the retry screen.
+  if (staffReloadBlocker()) return;
   try {
     if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');

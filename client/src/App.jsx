@@ -2,6 +2,8 @@ import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import { CHUNK_RELOAD_FLAG, isStaleChunkReloadPending, markStaleChunkReloadPending } from './lib/staleChunkReload';
+import { PortalUpdateBar, PortalUpdateGate } from './components/PortalUpdate';
+import { staffReloadBlocker } from './lib/portalReload';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -359,6 +361,9 @@ export function lazyWithRetry(factory) {
       const msg = String(err?.message || '');
       const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError/i.test(msg);
       if (isChunkError) {
+        // Held work on a staff page keeps the tab (lib/portalReload.js); the
+        // retry screen's button reloads when the person is ready.
+        if (staffReloadBlocker()) return { default: ChunkLoadFallback };
         if (!sessionStorage.getItem(CHUNK_RELOAD_FLAG)) {
           sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
           markStaleChunkReloadPending();
@@ -676,7 +681,9 @@ export default function App() {
         <PublicFunnelTracking />
         <AdminSafariShell />
         <InstallPrompt />
+        <PortalUpdateBar />
         <BiometricGate>
+        <PortalUpdateGate fallback={<RouteFallback label="Loading the new version..." />}>
         <RoutesErrorBoundary>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
@@ -894,6 +901,7 @@ export default function App() {
           />
         </Routes>
         </RoutesErrorBoundary>
+        </PortalUpdateGate>
         <CustomerDialogHost />
         </BiometricGate>
       </BrowserRouter>

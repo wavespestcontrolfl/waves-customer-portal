@@ -19,6 +19,11 @@ import {
   markPageNavigating,
   resetStaleChunkReloadForTests,
 } from './lib/staleChunkReload';
+import { registerReloadHold } from './lib/reloadHolds';
+
+// Work a reload would lose (lib/reloadHolds.js) keeps a staff tab here too.
+let holding = false;
+registerReloadHold('test-hold', () => holding);
 
 function preloadErrorEvent() {
   return new Event('vite:preloadError', { cancelable: true });
@@ -43,10 +48,11 @@ function renderInBoundary(Page) {
 beforeEach(() => {
   sessionStorage.clear();
   resetStaleChunkReloadForTests();
+  holding = false;
   reported.calls = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); window.history.pushState({}, '', '/'); });
 
 test('the first stale-chunk preload error reloads once and marks the reload pending', () => {
   const reload = vi.fn();
@@ -145,6 +151,35 @@ test('with no reload pending, a real page crash still shows the crash screen and
   expect(screen.getByText('real render bug')).toBeInTheDocument();
   expect(reported.calls).toHaveLength(1);
   expect(reported.calls[0][1]).toMatchObject({ context: 'PageErrorBoundary' });
+});
+
+test('held work on a staff page keeps the tab: the preload error neither reloads nor swallows the import', () => {
+  window.history.pushState({}, '', '/admin/communications');
+  holding = true;
+  const reload = vi.fn();
+  const event = preloadErrorEvent();
+  handleVitePreloadError(event, reload);
+  expect(event.defaultPrevented).toBe(false);
+  expect(reload).not.toHaveBeenCalled();
+  expect(isStaleChunkReloadPending()).toBe(false);
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+});
+
+test('held work on a staff page gets the retry screen for a page whose chunk is gone, with no reload', async () => {
+  window.history.pushState({}, '', '/admin/communications');
+  holding = true;
+  const GonePage = lazyWithRetry(() => Promise.reject(new Error('Failed to fetch dynamically imported module: /assets/Gone-abc123.js')));
+  renderInBoundary(GonePage);
+  expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  expect(isStaleChunkReloadPending()).toBe(false);
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+});
+
+test('on a customer page, held work leaves the stale-chunk reload as it was', () => {
+  holding = true;
+  const reload = vi.fn();
+  handleVitePreloadError(preloadErrorEvent(), reload);
+  expect(reload).toHaveBeenCalledTimes(1);
 });
 
 test('with no reload pending, a lazy page that loads normally clears the one-shot flag', async () => {
