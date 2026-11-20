@@ -4,7 +4,7 @@
 // in an out-of-date tab loads the live code, the first page never reloads, a
 // tab inside a page is not a move, held work stops it, and the Reload bar
 // shows on staff pages only.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
@@ -13,6 +13,7 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => false }));
 
 import { noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
 import { registerReloadHold } from '../lib/reloadHolds';
+import { countDeviceWrite } from '../lib/deviceWrites';
 import { PortalUpdateBar, PortalUpdateGate } from './PortalUpdate';
 
 let holding = false;
@@ -38,16 +39,28 @@ function Page({ name }) {
   );
 }
 
+// Like the completion panel: saves its draft to the device's own storage as
+// it closes.
+let finishDraftSave = null;
+function DraftPanel() {
+  useEffect(() => () => {
+    countDeviceWrite(new Promise((resolve) => { finishDraftSave = resolve; }));
+  }, []);
+  return <Page name="Dispatch" />;
+}
+
 // A field page whose changes live only in the page until Save, like the
-// truck check: a toggle button, a typed note and a search box.
+// truck check: toggles, a typed note and a search box.
 function TruckCheck() {
   const navigate = useNavigate();
   const [missing, setMissing] = useState(false);
+  const [damaged, setDamaged] = useState(false);
   const [note, setNote] = useState('');
   return (
     <div>
       <h1>Truck check</h1>
       <button type="button" aria-pressed={missing} onClick={() => setMissing(true)}>Missing</button>
+      <button type="button" role="switch" aria-checked={damaged} onClick={() => setDamaged(true)}>Damaged</button>
       <input aria-label="Note" value={note} onChange={(event) => setNote(event.target.value)} />
       <input type="search" aria-label="Find a tool" />
       <button type="button" onClick={() => navigate('/admin/today')}>Back</button>
@@ -65,6 +78,7 @@ function renderAt(path) {
           <Route path="/admin/pipeline" element={<Page name="Pipeline" />} />
           <Route path="/billing" element={<Page name="Billing" />} />
           <Route path="/admin/today" element={<Page name="Today" />} />
+          <Route path="/admin/dispatch" element={<DraftPanel />} />
           <Route path="/admin/today/truck-check" element={<TruckCheck />} />
         </Routes>
       </PortalUpdateGate>
@@ -90,6 +104,17 @@ afterEach(() => {
 });
 
 describe('PortalUpdateGate', () => {
+  test('a page move waits for the draft that the closing page saves on the device, then reloads', async () => {
+    renderAt('/admin/dispatch');
+    goLive('bbb222bbb222');
+    fireEvent.click(screen.getByText('Open Pipeline'));
+    expect(screen.getByText('Loading the new version...')).toBeTruthy();
+    await new Promise((resolve) => { setTimeout(resolve, 500); });
+    expect(reload).not.toHaveBeenCalled();
+    finishDraftSave();
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  });
+
   test('a page move in an out-of-date tab loads the live code once', async () => {
     renderAt('/admin/dashboard');
     goLive('bbb222bbb222');
@@ -176,6 +201,7 @@ describe('PortalUpdateBar', () => {
 
   test.each([
     ['a toggle button', () => fireEvent.click(screen.getByRole('button', { name: 'Missing' }))],
+    ['a switch', () => fireEvent.click(screen.getByRole('switch', { name: 'Damaged' }))],
     ['a typed note', () => fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose' } })],
   ])('a change on the page in view (%s) is named before Reload drops it', (_kind, change) => {
     renderAt('/admin/today/truck-check');

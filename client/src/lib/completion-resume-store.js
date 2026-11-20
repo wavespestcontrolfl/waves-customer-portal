@@ -16,6 +16,11 @@
 // IndexedDB (or a failing one) resolves null / false, which leaves today's
 // behavior — marker only, mismatch on retry → Billing Recovery.
 
+// Every write below counts from its call until it settles, also while it
+// waits behind another on the same key, so a reload waits for it
+// (deviceWrites.js).
+import { countDeviceWrite } from "./deviceWrites";
+
 const DB_NAME = "waves-completion-resume";
 const STORE = "bodies";
 const DB_VERSION = 1;
@@ -107,7 +112,7 @@ function withStore(dbName, mode, fallback, run) {
 // alone while its marker write may still be in flight in another tab.
 export function putCompletionResumeBody(serviceId, body, now = Date.now()) {
   if (!serviceId || !body || typeof body !== "object") return Promise.resolve(false);
-  return withStore(DB_NAME, "readwrite", false, (store) => store.put({ body, storedAt: now }, String(serviceId)))
+  return countDeviceWrite(withStore(DB_NAME, "readwrite", false, (store) => store.put({ body, storedAt: now }, String(serviceId))))
     .then((result) => result !== false);
 }
 
@@ -119,7 +124,7 @@ export function getCompletionResumeBody(serviceId) {
 
 export function deleteCompletionResumeBody(serviceId) {
   if (!serviceId) return Promise.resolve(false);
-  return withStore(DB_NAME, "readwrite", false, (store) => store.delete(String(serviceId)))
+  return countDeviceWrite(withStore(DB_NAME, "readwrite", false, (store) => store.delete(String(serviceId))))
     .then((result) => result !== false);
 }
 
@@ -202,7 +207,7 @@ function withFastCompletionAttempt(serviceId, operatorId, operation, timedOut) {
 // transaction lock and the mutation predicate are what keep another tab's
 // newer idempotency key from being overwritten or deleted by a late result.
 function mutateFastCompletionRow(key, mutate) {
-  return withFastCompletionKey(key, () => openDb(FAST_COMPLETION_DB_NAME).then((db) => {
+  return countDeviceWrite(withFastCompletionKey(key, () => openDb(FAST_COMPLETION_DB_NAME).then((db) => {
     if (!db) return false;
     return new Promise((resolve) => {
       let settled = false;
@@ -241,7 +246,7 @@ function mutateFastCompletionRow(key, mutate) {
         done(false);
       }
     });
-  }));
+  })));
 }
 
 // Fast Complete's final request is a committed retry attempt, not an editable
@@ -370,7 +375,7 @@ function withDraft(serviceId, scope, operation) {
 // draft id check keeps that late result from overwriting or deleting the new
 // work. The read and mutation share one IndexedDB readwrite transaction.
 function mutateDraftRow(key, mutate) {
-  return withDraftKey(key, (key) => openDb(DRAFT_DB_NAME).then((db) => {
+  return countDeviceWrite(withDraftKey(key, (key) => openDb(DRAFT_DB_NAME).then((db) => {
     if (!db) return false;
     return new Promise((resolve) => {
       let settled = false;
@@ -404,7 +409,7 @@ function mutateDraftRow(key, mutate) {
         done(false);
       }
     });
-  }));
+  })));
 }
 
 // Rows are { draft, storedAt, serviceId, scope }: storedAt ages the row for
@@ -412,7 +417,7 @@ function mutateDraftRow(key, mutate) {
 // and scope let the sweep report what it removed.
 export function putCompletionDraft(serviceId, draft, scope, now = Date.now()) {
   const row = { draft, storedAt: now, serviceId: String(serviceId), scope: scope ? String(scope) : "" };
-  return withDraft(serviceId, scope, (key) => withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.put(row, key)))
+  return countDeviceWrite(withDraft(serviceId, scope, (key) => withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.put(row, key))))
     .then((result) => result !== false);
 }
 
@@ -422,7 +427,7 @@ export function getCompletionDraft(serviceId, scope) {
 }
 
 export function deleteCompletionDraft(serviceId, scope) {
-  return withDraft(serviceId, scope, (key) => withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.delete(key)))
+  return countDeviceWrite(withDraft(serviceId, scope, (key) => withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.delete(key))))
     .then((result) => result !== false);
 }
 

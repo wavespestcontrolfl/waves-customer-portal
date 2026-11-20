@@ -9,6 +9,7 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => platform.wavesAdmi
 
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from './portalVersion';
 import { registerReloadHold } from './reloadHolds';
+import { countDeviceWrite } from './deviceWrites';
 import { RECENT_ANSWER_MS, WRITE_WAIT_MS, reloadDueAtMove, reloadForNewBuild, staffReloadBlocker } from './portalReload';
 
 const NOW = 1_000_000;
@@ -107,6 +108,22 @@ describe('reloadForNewBuild', () => {
     expect(reload).toHaveBeenCalledTimes(1);
     expect(sessionStorage.getItem('portal-reloaded-for')).toBe('bbb222bbb222');
     await expect(reloadForNewBuild({ reload })).resolves.toBe('reloaded');
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('waits for a write to the device storage that the closing page started, then reloads', async () => {
+    vi.useFakeTimers();
+    liveBuild('bbb222bbb222', Date.now());
+    let finishWrite;
+    countDeviceWrite(new Promise((resolve) => { finishWrite = resolve; }));
+    const reload = vi.fn();
+    const done = reloadForNewBuild({ reload });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(reload).not.toHaveBeenCalled();
+    expect(staffReloadBlocker('/admin/dispatch')).toBe('saving');
+    finishWrite();
+    await vi.advanceTimersByTimeAsync(400);
+    await expect(done).resolves.toBeNull();
     expect(reload).toHaveBeenCalledTimes(1);
   });
 

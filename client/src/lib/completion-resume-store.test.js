@@ -29,6 +29,7 @@ import {
   getVisitCompletionDraft,
   putVisitCompletionDraft,
 } from "./completion-resume-store";
+import { deviceWritesInFlight } from "./deviceWrites";
 import {
   clearCompletionResumeOwed,
   completionResumeOwed,
@@ -91,6 +92,15 @@ beforeEach(() => {
 });
 
 describe("completion resume store (IndexedDB)", () => {
+  it("counts each draft write from its call until it settles, also while it waits behind another, so a tab reload waits for it", async () => {
+    const before = deviceWritesInFlight();
+    const put = putCompletionDraft("svc-count", { draftId: "d-1", notes: "Treated" }, "tech-1");
+    const remove = deleteCompletionDraft("svc-count", "tech-1");
+    expect(deviceWritesInFlight()).toBe(before + 2);
+    await Promise.all([put, remove]);
+    expect(deviceWritesInFlight()).toBe(before);
+  });
+
   it("keeps Fast Complete attempts exact and private to operator plus service", async () => {
     const attempt = {
       body: committedBody(),

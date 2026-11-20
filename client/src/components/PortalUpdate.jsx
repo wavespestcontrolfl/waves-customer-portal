@@ -68,7 +68,9 @@ export function useHoldAwareReload(resetKey, beforeReload, pageEdited) {
 }
 
 // A change on the page in view: typing, a pick, a checkbox, or a toggle
-// button (aria-pressed), as on the truck check. Most staff forms keep such
+// (aria-pressed or aria-checked), as on the truck check and in Quick Move.
+// A choice made with a plain button is seen once the button says that it is
+// pressed (aria-pressed), as screen readers need too. Most staff forms keep such
 // changes only in the page until Save, and the bar's Reload reloads that page
 // in place. So the bar names the change first, as a browser does on a page
 // that asks before a reload. A search box is not a change. A page move ends
@@ -81,7 +83,7 @@ function usePageEdited(pathname) {
     const noteChange = (event) => {
       const { target } = event;
       if (!(target instanceof Element)) return;
-      if (event.type === 'click' ? target.closest('[aria-pressed]') : !target.matches('input[type="search"], [role="searchbox"]')) {
+      if (event.type === 'click' ? target.closest('[aria-pressed], [aria-checked]') : !target.matches('input[type="search"], [role="searchbox"]')) {
         edited.current = true;
       }
     };
