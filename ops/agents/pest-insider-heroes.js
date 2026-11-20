@@ -158,9 +158,11 @@ async function draw(H) {
   const wanted = Object.entries(HEROES).filter(([key]) => !only || only.has(key));
   const unknown = only ? [...only].filter((id) => !Object.prototype.hasOwnProperty.call(HEROES, id)) : [];
   if (unknown.length) { console.error(`No top picture for ${unknown.join(', ')}; nothing drawn.`); process.exit(2); }
-  const state = (file) => (fs.existsSync(path.join(outDir, file)) ? 'drawn' : 'would draw');
+  // A picture's files: its still, and its GIF when it moves.
+  const filesOf = (hero) => [hero.file, hero.gifFile].filter(Boolean);
+  const drawn = (file) => fs.existsSync(path.join(outDir, file));
   if (!execute) {
-    for (const [id, hero] of wanted) console.log(`${id}  ${hero.file}  ${state(hero.file)}${hero.gifFile ? `  ${hero.gifFile}  ${state(hero.gifFile)}` : ''}`);
+    for (const [id, hero] of wanted) console.log(`${id}  ${filesOf(hero).map((file) => `${file}  ${drawn(file) ? 'drawn' : 'would draw'}`).join('  ')}`);
     console.log(`Dry run: nothing written. Add --execute to draw into ${outDir}.`);
     return;
   }
@@ -170,9 +172,8 @@ async function draw(H) {
   const page = await browser.newPage({ viewport: { width: HERO_WIDTH, height: HERO_HEIGHT }, deviceScaleFactor: 2 });
   let failed = 0;
   for (const [id, hero] of wanted) {
-    const needStill = !fs.existsSync(path.join(outDir, hero.file));
-    const needGif = Boolean(hero.gifFile) && !fs.existsSync(path.join(outDir, hero.gifFile));
-    if (!needStill && !needGif) { console.log(`${id}  ${hero.file}  already drawn; kept`); continue; }
+    const missing = filesOf(hero).filter((file) => !drawn(file));
+    if (!missing.length) { console.log(`${id}  ${filesOf(hero).join('  ')}  already drawn; kept`); continue; }
     let artUrl = null;
     if (hero.art) {
       const art = fs.readFileSync(path.join(repoRoot, ART_DIR, hero.artFile));
@@ -185,12 +186,12 @@ async function draw(H) {
     const size = await fitTitle(page, hero.art ? { width: 250, height: 250 } : { width: 534, height: 220 });
     if (!size) { console.error(`${id}: the title does not fit`); failed += 1; continue; }
     const shot = await page.screenshot({ clip: { x: 0, y: 0, width: HERO_WIDTH, height: HERO_HEIGHT } });
-    if (needStill) {
+    if (missing.includes(hero.file)) {
       const jpg = await sharp(shot).jpeg({ quality: 82, mozjpeg: true }).toBuffer();
       publish(outDir, hero.file, jpg);
       console.log(`${id}  ${hero.file}  ${hero.art ? 'art' : 'no art'}  title ${size}px  ${Math.round(jpg.length / 1024)} KB`);
     }
-    if (needGif) {
+    if (missing.includes(hero.gifFile)) {
       // Frame 0 is the whole picture, as every frame is: the motion only moves over the art.
       const frames = [];
       for (let f = 0; f < MOTION_FRAMES; f += 1) {

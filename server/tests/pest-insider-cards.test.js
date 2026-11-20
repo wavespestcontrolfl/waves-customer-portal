@@ -63,7 +63,7 @@ describe('the reviewed card list', () => {
     expect(months.length).toBeGreaterThan(0);
     for (const [id, card] of Object.entries(CARDS)) {
       if (card.layout !== 'months') { expect([id, card.gifFile, card.gifUrl]).toEqual([id, null, null]); continue; }
-      const { file, url, gifFile, gifUrl, alt, ...shown } = card;
+      const { file: _file, url: _url, gifFile, gifUrl, alt: _alt, ...shown } = card;
       expect(gifFile).toBe(`${id.toLowerCase()}-${hash10({ ...shown, motionDesign: CARD_MOTION_DESIGN })}.gif`);
       expect(shown.design).toBe(CARD_DESIGN);
       expect(gifUrl).toBe(`${CARD_BASE_URL}${gifFile}`);

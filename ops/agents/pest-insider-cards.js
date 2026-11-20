@@ -200,9 +200,11 @@ async function fitText(page, layout) {
   const wanted = Object.entries(CARDS).filter(([id]) => !only || only.has(id));
   const unknown = only ? [...only].filter((id) => !Object.prototype.hasOwnProperty.call(CARDS, id)) : [];
   if (unknown.length) { console.error(`No card for ${unknown.join(', ')}; nothing drawn.`); process.exit(2); }
-  const state = (file) => (fs.existsSync(path.join(outDir, file)) ? 'drawn' : 'would draw');
+  // A card's files: its still, and its GIF when it moves.
+  const filesOf = (card) => [card.file, card.gifFile].filter(Boolean);
+  const drawn = (file) => fs.existsSync(path.join(outDir, file));
   if (!execute) {
-    for (const [id, card] of wanted) console.log(`${id}  ${card.file}  ${state(card.file)}${card.gifFile ? `  ${card.gifFile}  ${state(card.gifFile)}` : ''}`);
+    for (const [id, card] of wanted) console.log(`${id}  ${filesOf(card).map((file) => `${file}  ${drawn(file) ? 'drawn' : 'would draw'}`).join('  ')}`);
     console.log(`Dry run: nothing written. Add --execute to draw into ${outDir}.`);
     return;
   }
@@ -212,9 +214,8 @@ async function fitText(page, layout) {
   const page = await browser.newPage({ viewport: { width: CARD_WIDTH, height: CARD_HEIGHT }, deviceScaleFactor: 2 });
   let failed = 0;
   for (const [id, card] of wanted) {
-    const needStill = !fs.existsSync(path.join(outDir, card.file));
-    const needGif = Boolean(card.gifFile) && !fs.existsSync(path.join(outDir, card.gifFile));
-    if (!needStill && !needGif) { console.log(`${id}  ${card.file}  already drawn; kept`); continue; }
+    const missing = filesOf(card).filter((file) => !drawn(file));
+    if (!missing.length) { console.log(`${id}  ${filesOf(card).join('  ')}  already drawn; kept`); continue; }
     await page.setContent(cardHtml(card, fontCss), { waitUntil: 'networkidle' });
     const fonts = await page.evaluate(fontsLoaded, ['40px Anton', '700 17px Inter']);
     if (!fonts) { console.error(`${id}: Anton or Inter did not load; not drawn`); failed += 1; continue; }
@@ -222,12 +223,12 @@ async function fitText(page, layout) {
     if (!size) { console.error(`${id}: the words do not fit the card; shorten the piece`); failed += 1; continue; }
     // Clear corners: the card keeps its round shape in every mail app, Outlook too.
     const grab = () => page.screenshot({ clip: { x: 0, y: 0, width: CARD_WIDTH, height: CARD_HEIGHT }, omitBackground: true });
-    if (needStill) {
+    if (missing.includes(card.file)) {
       const png = await sharp(await grab()).png({ palette: true, quality: 95, effort: 10, compressionLevel: 9 }).toBuffer();
       publish(outDir, card.file, png);
       console.log(`${id}  ${card.file}  ${card.layout}  big ${size}px  ${Math.round(png.length / 1024)} KB`);
     }
-    if (needGif) {
+    if (missing.includes(card.gifFile)) {
       // The words keep the size fitted above: only which month chips are lit changes.
       const light = (months) => page.evaluate((on) => {
         document.querySelectorAll('.m').forEach((chip, i) => chip.classList.toggle('on', on.includes(i + 1)));
