@@ -1207,7 +1207,10 @@ async function ringMissedCallIfUnanswered(callSid) {
     const customer = row.customer_id
       ? await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone')
       : null;
-    const lineLabel = row.customer_id ? null : (parseMeta(row.metadata).location || null);
+    // The line an unknown caller dialed, after the caller's title; a customer's
+    // bell shows the name instead.
+    const { location: dialedLine } = parseMeta(row.metadata);
+    const line = dialedLine ? ` (${dialedLine})` : '';
     const { triggerNotification } = require('./notification-triggers');
     // Is this call still the missed-call lane's? False once a recording
     // persisted or the voicemail lane claimed it.
@@ -1233,10 +1236,10 @@ async function ringMissedCallIfUnanswered(callSid) {
         // list tells it apart from a real missed call (owner 2026-11-19 "YES BUILD").
         name: row.customer_id
           ? ([customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'Customer')
-          : `${quiet ? 'likely robocall' : 'unknown caller'}${lineLabel ? ` (${lineLabel})` : ''}`,
+          : `${quiet ? 'likely robocall' : 'unknown caller'}${line}`,
         // A quiet call pushes only when no bell row was written (pushGuard), and
         // that lone alert keeps the ordinary caller title (pre-push audit r23).
-        ...(quiet && !row.customer_id ? { pushName: `unknown caller${lineLabel ? ` (${lineLabel})` : ''}` } : {}),
+        ...(quiet && !row.customer_id ? { pushName: `unknown caller${line}` } : {}),
         phone: row.from_phone,
         callLogId: row.id,
         at: row.created_at,
