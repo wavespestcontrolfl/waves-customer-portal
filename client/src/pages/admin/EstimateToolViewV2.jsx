@@ -400,6 +400,19 @@ function commercialSuiteSizeNote(enrichedProfile) {
   return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}${linkNote}`;
 }
 
+// Read-only roof evidence line (owner 2026-11-19): the county's own roof words
+// and the photo's tile-style read, beside the collapsed "TILE roof" above.
+// Nothing here is priced yet. Returns null when the lookup carries neither.
+function roofEvidenceLine(property) {
+  const raw = property?.countyRoofRaw;
+  const county = [raw?.material, raw?.structure].filter(Boolean).join(" ");
+  const style = ["BARREL", "FLAT"].includes(property?.roofTileStyle)
+    ? property.roofTileStyle.toLowerCase()
+    : "";
+  const parts = [county && `Roof: ${county}`, style && `photo: ${style}`].filter(Boolean);
+  return parts.length ? parts.join(" \u00b7 ") : null;
+}
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...options,
@@ -8959,6 +8972,12 @@ export default function EstimateToolViewV2({
                             {E.property?.constructionMaterial} |{" "}
                             {E.property?.foundationType} foundation |{" "}
                             {E.property?.roofType} roof
+                          </>
+                        )}
+                        {roofEvidenceLine(E.property) && (
+                          <>
+                            <br />
+                            {roofEvidenceLine(E.property)}
                           </>
                         )}
                         {E.property?.estimatedValue && (

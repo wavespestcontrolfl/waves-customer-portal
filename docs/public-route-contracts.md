@@ -5203,7 +5203,10 @@ assessed-neighbor sample/range that back the admin estimator's home-size
 estimate for an unassessed vacant parcel) and MINUS the staff-only
 `permitBuildingFacts` block (the home's own building permit number, issue/CO
 dates and plan figures behind the admin estimator's new-construction home-size
-estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
+estimate; `GATE_LOOKUP_PERMIT_FACTS`) and MINUS the staff-only roof-style
+evidence (`countyRoofRaw`, `roofStyleHint`, `roofTileStyle`: the county's own
+roof words and the barrel-vs-flat tile reads, owner 2026-11-19, data only and
+not yet priced), with a story count the permit filled
 (`storiesSource: 'permit'`) returned to the default (`stories: 1`,
 `storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
 the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of

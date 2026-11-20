@@ -4407,6 +4407,7 @@ function parseManateePaoRecord({ address, search, land, buildings, features, par
     propertyType,
     constructionMaterial: normalizeManateeConstruction(primaryBuilding['Const/ExtWall']),
     roofType: normalizeManateeRoof(primaryBuilding.RoofMaterial, primaryBuilding.RoofType),
+    ...countyRoofDetail('manatee', primaryBuilding.RoofMaterial, primaryBuilding.RoofType),
     source,
     confidence: 'high',
     county: 'Manatee',
@@ -4467,6 +4468,7 @@ function parseSarasotaPaoRecord({ address, search, detailHtml, buildingDetailHtm
     propertyType,
     constructionMaterial: normalizeCountyConstruction(`${detailFacts.frame || ''} ${detailFacts.exteriorWalls || ''}`),
     roofType: normalizeCountyRoof(`${detailFacts.roofMaterial || ''} ${detailFacts.roofStructure || ''}`),
+    ...countyRoofDetail('sarasota', detailFacts.roofMaterial, detailFacts.roofStructure),
     source,
     confidence: 'high',
     county: 'Sarasota',
@@ -4548,6 +4550,7 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
     propertyType,
     constructionMaterial: normalizeCountyConstruction(findCharlotteComponentDescription(componentRows, 'Exterior Walls')),
     roofType: normalizeCountyRoof(findCharlotteComponentDescription(componentRows, 'Roofing')),
+    ...countyRoofDetail('charlotte', findCharlotteComponentDescription(componentRows, 'Roofing'), null),
     source,
     confidence: 'high',
     county: 'Charlotte',
@@ -4987,6 +4990,38 @@ function normalizeCountyRoof(value) {
   if (/METAL|STEEL|TIN/.test(text)) return 'METAL';
   if (/FLAT|BUILT|TPO|MEMBRANE/.test(text)) return 'FLAT';
   return raw || null;
+}
+
+// The county's own roof words, kept beside the collapsed roofType (which
+// folds TILE|CLAY|BARREL into 'TILE' for every existing consumer). Evidence
+// only: nothing prices off these yet. Each field is tested on its own so a
+// material of "CONCRETE" and a structure of "FLAT" never read as flat tile.
+const BARREL_ROOF_WORDS = /BARREL|\bS[- ]TILE\b|SPANISH|MISSION/;
+const FLAT_TILE_ROOF_WORDS = /FLAT[\s-]*TILE|CONCRETE[\s-]*FLAT/;
+
+function roofStyleHintFromWords(...words) {
+  const texts = words.map((w) => String(w || '').toUpperCase());
+  const anyMatch = (re) => texts.some((t) => re.test(t));
+  if (anyMatch(BARREL_ROOF_WORDS)) return 'barrel_tile';
+  if (anyMatch(FLAT_TILE_ROOF_WORDS)) return 'flat_tile';
+  if (anyMatch(/CLAY/)) return 'clay_tile';
+  return null;
+}
+
+// The two roof-evidence fields of a record, or {} when it has none.
+function countyRoofWordsOf(record) {
+  if (!record?.countyRoofRaw) return {};
+  return { countyRoofRaw: record.countyRoofRaw, roofStyleHint: record.roofStyleHint ?? null };
+}
+
+function countyRoofDetail(source, material, structure) {
+  const clean = (v) => String(v || '').trim() || null;
+  const words = { material: clean(material), structure: clean(structure) };
+  if (!words.material && !words.structure) return {};
+  return {
+    countyRoofRaw: { ...words, source },
+    roofStyleHint: roofStyleHintFromWords(words.material, words.structure),
+  };
 }
 
 function countCriticalPropertyFields(record) {
@@ -5514,6 +5549,7 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     // actual measurements.
     ...(p._actuals ? { _actuals: p._actuals } : {}),
     ...(Array.isArray(p._buildings) && p._buildings.length ? { _buildings: p._buildings } : {}),
+    ...countyRoofWordsOf(p),
     formattedAddress: p.formattedAddress || address,
     addressLine1: '',
     city: '',
@@ -5648,6 +5684,9 @@ function mergePropertyRecords(records, address) {
   }
   const buildingsRecord = sorted.find((r) => Array.isArray(r._buildings) && r._buildings.length);
   if (buildingsRecord) merged._buildings = buildingsRecord._buildings;
+  // The county's roof words ride the county record; the merge spreads only
+  // the top-scoring record, so carry them from whichever record has them.
+  Object.assign(merged, countyRoofWordsOf(sorted.find((r) => r.countyRoofRaw)));
 
   const providers = [...new Set(sorted.map((r) => r._provider).filter(Boolean))];
   const sources = sorted.flatMap((r) => r._aiSources || (r._aiSourceUrl ? [{ provider: r._provider, url: r._aiSourceUrl }] : []));
@@ -6128,6 +6167,9 @@ module.exports = {
     parcelLooksCommercial,
     extractAuditZip,
     shapeAsPropertyRecord,
+    normalizeCountyRoof,
+    roofStyleHintFromWords,
+    countyRoofDetail,
     shouldQueryManateePAO,
     shouldQuerySarasotaPAO,
     shouldQueryCharlottePAO,
