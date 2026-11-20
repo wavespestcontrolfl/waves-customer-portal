@@ -96,31 +96,27 @@ const KEPT_HEAD = `
           -- by sendEstimateNow ONLY on real handoffs (stampChannels' own
           -- suppression-sentinel line), carried forward by suppressed
           -- later attempts, merged even when a concurrent accept wins the
-          -- send claim. Compared against the SAME post-call boundary as
-          -- sent_at below (uncapped audit on 573ee332e): a delivery that
-          -- predates the promise plus a suppressed later attempt (which
-          -- advances sent_at but not this stamp) must not keep it.
+          -- send claim. Compared against the post-call boundary (uncapped
+          -- audit on 573ee332e): a delivery that predates the promise plus
+          -- a suppressed later attempt (which advances sent_at but not this
+          -- stamp) must not keep it. It stands in for sent_at, compared
+          -- ONCE (codex pre-push P1): a mint's sent_at is the mint stamp,
+          -- which an acceptance during a later staff send keeps, so a quote
+          -- minted before the call and delivered after it keeps the promise.
           -- plan_restart mints share the shape (C4 restart taps publish
           -- without delivery too — codex GH #3671 r8 P1), and so do
           -- plan_start mints (portal pricing card, GATE_PORTAL_PLAN_START).
-          AND (COALESCE(e.source, '') NOT IN ('service_report_cta', 'plan_restart', 'plan_start')
-               OR (COALESCE(e.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
-                   AND ${deliveryInstantSql('e', 'lastDeliveredAt')} > CASE
-                     WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
-                     WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
-                     ELSE c.created_at
-                   END))
-          -- End-of-call boundary (codex r23): bridged rows end at
-          -- bridge-start + duration; late-created rows (recording/status
-          -- callback) already carry post-call created_at — adding
-          -- duration there would overshoot.
           -- End-of-call boundary (codex r23/r41): bridged rows end at
           -- bridge + duration; NORMAL inbound rows are inserted at RING
           -- time (bridged_at null) so their end is created_at + duration —
           -- an estimate sent mid-call must not clear a promise made later
           -- in the same call. Only recovered rows (outbound, created near
-          -- call end by status callbacks) use bare created_at.
-          AND e.sent_at > CASE
+          -- call end by status callbacks) use bare created_at; adding
+          -- duration there would overshoot.
+          AND (CASE WHEN COALESCE(e.source, '') IN ('service_report_cta', 'plan_restart', 'plan_start')
+                 THEN ${deliveryInstantSql('e', 'lastDeliveredAt')}
+                 ELSE e.sent_at
+               END) > CASE
             WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
             WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
             ELSE c.created_at
