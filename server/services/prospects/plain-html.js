@@ -5,17 +5,18 @@
  * reader that splits a page from one known source on its tags.
  *
  * plainPage(html, tags) rebuilds the page from its tokens: each tag as "<name>" or "</name>" (the name in lower case,
- * the attributes dropped), the text between tags as it is, and each comment (a bogus one too), doctype, script, style
- * and title as one space. A reader that splits the rebuilt page on its tags reads the tags and the text a browser reads: a ">" inside
- * a quoted attribute value, a "<td>" inside a comment or a script, or a script closed by "</script >" cannot add,
- * end or hide a cell. In the rebuilt page every "<" followed by a letter or "/" starts a tag, and any other "<" is
- * text. It returns null when it cannot rebuild the page that way:
+ * the attributes dropped); each run of text with its character references decoded, as a browser decodes them, and
+ * then "&", "<" and ">" written back as references; and nothing for a comment (a bogus one too), a doctype, a script,
+ * a style or the title. So in the rebuilt page every "<" starts a tag, and joining two runs of text cannot make a
+ * reference. A reader that splits it on its tags reads the tags and the text a browser reads: a ">" inside a quoted
+ * attribute value, a "<td>" inside a comment or a script, or a script closed by "</script >" cannot add, end or hide
+ * a cell. It returns null when it cannot rebuild the page that way:
  * - a tag whose name is not in `tags`. A template, a textarea, an svg, a noscript or a select changes how a browser
  *   reads what follows it, so a page holding one is refused, never read another way;
  * - a script that holds "<script": after "<!--" in a script, that makes the script run past its first end tag;
  * - a page that ends inside a tag, a comment, a doctype, a script, a style or the title.
  *
- * htmlText(html) is the text a browser shows for a part of such a page.
+ * htmlText(html) is the text a browser shows for a part of a page plainPage rebuilt.
  */
 
 const { decodeHTML } = require('entities');
@@ -95,7 +96,7 @@ function readTag(html, i, tags) {
   if (end < 0) return null;
   if (!endTag && TEXT_ELEMENTS.has(known)) {
     const close = textElementEnd(html, end, known);
-    return close < 0 ? null : { text: ' ', end: close };
+    return close < 0 ? null : { text: '', end: close };
   }
   if (!tags.has(known)) return null;
   return { text: endTag ? `</${known}>` : `<${known}>`, end };
@@ -107,15 +108,19 @@ function readToken(html, i, tags) {
   if (isLetter(next) || (next === '/' && isLetter(html[i + 2]))) return readTag(html, i, tags);
   if (html.startsWith('<!--', i)) {
     const end = commentEnd(html, i);
-    return end < 0 ? null : { text: ' ', end };
+    return end < 0 ? null : { text: '', end };
   }
   if (next === '!' || next === '?' || next === '/') {
     // A doctype, a bogus comment ("<?xml …>", "<![CDATA[…]]>", "</ …>") or "</>": each ends at its first ">".
     const close = html.indexOf('>', i + 2);
-    return close < 0 ? null : { text: ' ', end: close + 1 };
+    return close < 0 ? null : { text: '', end: close + 1 };
   }
-  return { text: '<', end: i + 1 };
+  return { text: '&lt;', end: i + 1 };
 }
+
+// A run of text between tokens, its character references decoded as a browser decodes them (a reference never runs
+// past a "<"), then "&", "<" and ">" written back as references.
+const plainText = (text) => decodeHTML(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function plainPage(html, tags) {
   const page = String(html ?? '');
@@ -124,18 +129,22 @@ function plainPage(html, tags) {
   for (let at = page.indexOf('<'); at >= 0; at = page.indexOf('<', i)) {
     const token = readToken(page, at, tags);
     if (!token) return null;
-    out += page.slice(i, at) + token.text;
+    out += plainText(page.slice(i, at)) + token.text;
     i = token.end;
   }
-  return out + page.slice(i);
+  return out + plainText(page.slice(i));
 }
 
-// Text as a browser shows it: tags out, each a space (in a page plainPage rebuilt, "<" then a letter, "/", "!" or "?"
-// starts a tag, and any other "<" is text: "Observed < 5 roaches" keeps it), every character reference decoded (named
-// or numeric: "&nbsp;", "&#45;", "&#x2D;"), invisible format characters (Unicode Cf: a soft hyphen, a zero-width space)
-// taken out as a browser hides them, and NUL characters and runs of white space made one space.
+// Inline formatting tags: a browser shows the text on both sides of one as one run, so "35A-<b>02</b>-8" reads
+// "35A-02-8". Any other tag (a cell, a row, a paragraph, a line break, an image) parts the text around it.
+const INLINE_TAGS = new Set(['a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'cite', 'code', 'data', 'dfn', 'em', 'font', 'i',
+  'kbd', 'mark', 's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time', 'tt', 'u', 'var', 'wbr']);
+
+// The text a browser shows for a part of a page plainPage rebuilt: an inline tag out with nothing in its place, any
+// other tag a space, the references decoded, invisible format characters (Unicode Cf: a soft hyphen, a zero-width
+// space) taken out as a browser hides them, and NUL characters and runs of white space made one space.
 function htmlText(html) {
-  return decodeHTML(String(html || '').replace(/<[A-Za-z/!?][^>]*>/g, ' '))
+  return decodeHTML(String(html || '').replace(/<\/?([a-z]+)>/g, (tag, name) => (INLINE_TAGS.has(name) ? '' : ' ')))
     .replace(/\p{Cf}/gu, '')
     .replaceAll('\0', ' ')
     .replace(/\s+/g, ' ')
