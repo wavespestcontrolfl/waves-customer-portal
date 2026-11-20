@@ -602,3 +602,14 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('close-gaps measurement failed (boom)'));
   });
 });
+
+describe('schedule blocks', () => {
+  test('loadBlocks drops a block with no valid span; keepInvalid keeps every block, as dispatch reads them', async () => {
+    const rows = [{ id: 1, start_time: '10:00:00', end_time: '10:00:00' }, { id: 2, start_time: '12:00:00', end_time: '13:00:00' }];
+    const query = { where: () => query, whereNot: () => query, select: async () => rows };
+    const conn = () => query;
+    expect(await _internals.loadBlocks(conn, '2026-11-23', 'tech-1')).toEqual([{ startMin: 720, endMin: 780 }]);
+    expect(await _internals.loadBlocks(conn, '2026-11-23', 'tech-1', { keepInvalid: true }))
+      .toEqual([{ startMin: 600, endMin: 600 }, { startMin: 720, endMin: 780 }]);
+  });
+});

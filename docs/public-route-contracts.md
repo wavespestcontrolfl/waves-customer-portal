@@ -492,6 +492,21 @@ render (gate on or off, every service line) — `report-data.js`'s
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
 
+Findings in the dynamic context (2026-11-19; no new key): the AI summary card
+(`dynamicContext.aiSummary`, `ai-summary.js`), the premium cards
+(`dynamicContext.premiumExperience`, `premium-experience.js`), the pressure
+trend (`dynamicContext.pressureTrend` `mainDriver` and counts, this visit and
+the prior ones, `pressure-trend.js`), the since-last-visit lines
+(`since-last-visit.js`, which the staff pre-visit brief also reads) and the
+report writer's prior-visit grounding (`report-copy-context.js`) read a
+visit's `service_findings` rows only through `provenFindingRows`
+(`service-report/finding-provenance.js`), each against that visit's own form
+snapshot: a row with a detail or a recommendation, or one whose title the
+completion form's `structured_notes.formObservations` lists. A bare title (the
+form's free-text observations, a `[Found]` line of the raw technician note
+among them) never prints, as in the report document, the texting prompt and
+the voice relay.
+
 Pest rain outlook (owner 2026-10-24; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
 (`/api/reports/:token/data` and the PDF) the existing `weatherCall.body` (inside
@@ -3006,6 +3021,29 @@ report's own service line (same statuses as `nextAppointment`, no cross-line
 fallback), for the "What's next" line; `stripLiveOnlyScheduleFields` removes it
 from the PDF, static and sms_preview renders like `nextAppointment`. Both keys
 are absent for every other report.
+The gate is also the kill switch for what completion already froze: while it
+is off, a frozen Today's Result card whose body is four-section (`bodyFormat:
+'four_section'`) keeps its headline and carries no `body`, `bodySource`,
+`bodyFormat` or `reconcileConfirmed` (`withoutDarkFourSectionBody`,
+`activity-indicators.js`). The summary rule (`technicianReportDrivesSummary`)
+reads the cards through the same transform for every customer render: this
+payload, the PDF key (`summaryCopySignature`) and the visit notes on the other
+surfaces (`customerSafeVisitNotes`). A record's render depends on the gate
+(`reportDependsOnWriterRules`, `technician-report-copy.js`) when its notes have
+the four-section shape (they print as the summary only while it is on) or a
+card it prints (the primary card or an `auto_send` companion) has a
+four-section body. The PDF key of such a record also ends in `-fson` or
+`-fsoff`, by the gate, so a flip either way re-renders its cached PDF. The
+browser that renders a PDF fetches this payload itself, so in `mode=pdf` the
+payload carries `writerRules: 'on' | 'off'`, the state it was built in (no
+other mode carries the key). The PDF document shows it on its root element
+(`data-writer-rules`), and for such a record both PDF providers print only once
+that root shows the state the render's key was computed under
+(`reportPdfReadySelector` in `server/services/service-report/pdf.js`). A page
+built in the other state (a rolling restart's overlap), or by a page bundle or
+server from before this key, never matches: the render times out and nothing
+is stored. Every other record renders the same in both states and waits for
+the report root alone.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the

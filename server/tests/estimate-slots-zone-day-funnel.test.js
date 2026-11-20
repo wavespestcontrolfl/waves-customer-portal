@@ -29,6 +29,9 @@ const estimateSlotAvailability = require('../services/estimate-slot-availability
 const { getAvailableSlots } = estimateSlotAvailability;
 const {
   applyZoneDayFunnel,
+  getZoneFunnelDays,
+  onZoneDay,
+  perTruckLive,
   funnelOfferPool,
   funnelZoneRows,
   rowInFunnelZones,
@@ -173,6 +176,23 @@ describe('applyZoneDayFunnel (pure)', () => {
   });
 });
 
+// Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19 "build south"; the night run reads it): a zone day belongs to
+// the technician whose stop it is. An unassigned zone stop counts for every technician; no technician counts any stop.
+describe('per truck: onZoneDay', () => {
+  const DAYS = new Set(['2027-05-20', '2027-05-21']);
+  const TECH_DAYS = new Map([['2027-05-20', new Set(['tech-2'])], ['2027-05-21', new Set([null])]]);
+
+  test('a zone day is its stop technician\'s; an unassigned stop or a slot with no technician counts any truck', () => {
+    expect(onZoneDay('2027-05-20', 'tech-2', DAYS, TECH_DAYS)).toBe(true);
+    expect(onZoneDay('2027-05-20', 'tech-1', DAYS, TECH_DAYS)).toBe(false);
+    expect(onZoneDay('2027-05-21', 'tech-1', DAYS, TECH_DAYS)).toBe(true);
+    expect(onZoneDay('2027-05-20', null, DAYS, TECH_DAYS)).toBe(true);
+    expect(onZoneDay('2027-05-19', 'tech-2', DAYS, TECH_DAYS)).toBe(false);
+    // Fleet-wide (techDays null, the gate off): any zone stop that day, whoever drives it.
+    expect(onZoneDay('2027-05-20', 'tech-1', DAYS, null)).toBe(true);
+  });
+});
+
 describe('fallbackCenterZoneName (deep-south coordinate-fallback alias)', () => {
   test('deep-south cities alias to the retained Port Charlotte row, case/whitespace-insensitive', () => {
     for (const city of ['Port Charlotte', 'punta gorda', '  MURDOCK ', 'Rotonda West', 'Placida', 'Boca Grande']) {
@@ -221,10 +241,10 @@ describe('isFunnelZone / zone matching', () => {
     }
   });
 
-  test('zoneStopDates excludes phantom statuses — the shared route-stop classifier, incl. no_show', async () => {
+  test('zoneStopDays excludes phantom statuses — the shared route-stop classifier, incl. no_show', async () => {
     const chain = scheduledServicesChain([zoneStopRow()]);
     const dbc = jest.fn(() => chain);
-    const dates = await funnelInternals.zoneStopDates(dbc, VENICE_ZONE, '2027-05-18', '2027-05-22');
+    const { dates } = await funnelInternals.zoneStopDays(dbc, VENICE_ZONE, '2027-05-18', '2027-05-22');
     expect(dates).toEqual(new Set(['2027-05-20']));
     // The mock chain can't apply the filter, so pin the query arguments to
     // stops-ahead's NOT_A_ROUTE_STOP_STATUSES: a cancelled/rescheduled/
@@ -236,6 +256,50 @@ describe('isFunnelZone / zone matching', () => {
       'scheduled_services.status',
       NOT_A_ROUTE_STOP_STATUSES,
     );
+  });
+
+  test('zoneStopDays: each zone day names the technicians of its stops, null for an unassigned stop', async () => {
+    const rows = [
+      zoneStopRow(),
+      zoneStopRow({ technician_id: null }),
+      zoneStopRow({ scheduled_date: '2027-05-21', technician_id: 'tech-2' }),
+      zoneStopRow({ zone: 'parrish', technician_id: 'tech-3' }),
+    ];
+    const dbc = jest.fn(() => scheduledServicesChain(rows));
+    const { dates, techs } = await funnelInternals.zoneStopDays(dbc, VENICE_ZONE, '2027-05-18', '2027-05-22');
+    expect(dates).toEqual(new Set(['2027-05-20', '2027-05-21']));
+    expect(techs).toEqual(new Map([['2027-05-20', new Set(['tech-1', null])], ['2027-05-21', new Set(['tech-2'])]]));
+  });
+
+  test('getZoneFunnelDays: the per-truck view only with GATE_MULTI_TECH_CONFIRM on, read at call time', async () => {
+    const prev = process.env.GATE_MULTI_TECH_CONFIRM;
+    const dbc = jest.fn(() => scheduledServicesChain([zoneStopRow()]));
+    const read = () => getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' });
+    try {
+      delete process.env.GATE_MULTI_TECH_CONFIRM;
+      expect(await read()).toEqual({ days: new Set(['2027-05-20']), techDays: null, failed: false });
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      expect(await read()).toEqual({
+        days: new Set(['2027-05-20']), techDays: new Map([['2027-05-20', new Set(['tech-1'])]]), failed: false,
+      });
+    } finally {
+      if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
+    }
+  });
+
+  test('a tech-scope read that throws (a partial occupancy or feature-gates mock) reads as off: never a failed lookup', async () => {
+    const occupancy = require('../services/scheduling/occupancy');
+    const spy = jest.spyOn(occupancy, 'techScopedConfirmActive').mockImplementation(() => {
+      throw new TypeError('multiTechConfirmLive is not a function');
+    });
+    try {
+      const dbc = jest.fn(() => scheduledServicesChain([zoneStopRow()]));
+      expect(perTruckLive()).toBe(false);
+      expect(await getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' }))
+        .toEqual({ days: new Set(['2027-05-20']), techDays: null, failed: false });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('rowMatchesZone: zone stamp authoritative (legacy slugs by prefix), city decides unstamped rows only', () => {
@@ -295,6 +359,21 @@ describe('getAvailableSlots — funnel end to end', () => {
     expect(new Set(slots.map((s) => s.date))).toEqual(new Set(['2027-05-20']));
     expect(result.metadata.zoneDayFunnel).toEqual({ mode: 'clustered' });
     expect(result.metadata.firstDayAvailability?.date).toBe('2027-05-20');
+  });
+
+  // GATE_MULTI_TECH_CONFIRM on: the estimate page keeps the fleet's zone days (per truck there is a follow-up), so
+  // another technician's Venice stop still clusters every offer on its date.
+  test.each([undefined, 'true'])('another technician\'s Venice stop clusters the offers, GATE_MULTI_TECH_CONFIRM=%s', async (gate) => {
+    const prev = process.env.GATE_MULTI_TECH_CONFIRM;
+    if (gate) process.env.GATE_MULTI_TECH_CONFIRM = gate; else delete process.env.GATE_MULTI_TECH_CONFIRM;
+    try {
+      mockDb({ scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })] });
+      const result = await getAvailableSlots('est-funnel-1', WINDOW);
+      expect([...(result.primary || []), ...(result.expander || [])].length).toBeGreaterThan(0);
+      expect(result.metadata.zoneDayFunnel).toEqual({ mode: 'clustered' });
+    } finally {
+      if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
+    }
   });
 
   test.each([false, true])('capacity preserves south-zone day filtering (clustered=%s)', async clustered => {
@@ -455,6 +534,24 @@ describe('funnelOfferPool (assessment link pool, same helpers as the estimate pa
     mockDb({ scheduledRows: [] });
     const out = await funnelOfferPool([slot('2027-05-21'), slot('2027-05-19')], { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db });
     expect(out.map((s) => s.date)).toEqual(['2027-05-21']);
+  });
+
+  // /book keeps one technician per date and start before this funnel and the customer route check, so the assessment
+  // link keeps the fleet's zone days also with GATE_MULTI_TECH_CONFIRM on (per truck there needs that builder changed).
+  test('per truck (GATE_MULTI_TECH_CONFIRM on): the assessment pool keeps the fleet\'s zone day, every truck on it', async () => {
+    const prev = process.env.GATE_MULTI_TECH_CONFIRM;
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    try {
+      mockDb({ scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })] });
+      const bookPool = [
+        { date: '2027-05-19', technician_id: 'tech-1' },
+        { date: '2027-05-20', technician_id: 'tech-1' },
+        { date: '2027-05-20', technician_id: 'tech-2' },
+      ];
+      expect(await funnelOfferPool(bookPool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db })).toEqual([bookPool[1], bookPool[2]]);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
+    }
   });
 
   test('a lead outside the funneled zones gets the very same pool, and no zone-stop query runs', async () => {

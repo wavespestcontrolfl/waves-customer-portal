@@ -3056,4 +3056,5 @@ module.exports = {
   itemIsPgr,
   summarizeOrdinanceStatus,
   summarizeTurfProfileCompleteness,
+  normalizeOptionList,
 };

@@ -27,6 +27,7 @@
 const logger = require('./logger');
 const db = require('../models/db');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { linkedinArticleCard } = require('./linkedin-article');
 
 const TOKEN_KEY = 'linkedin.oauth_tokens';
 const AUTH_BASE = 'https://www.linkedin.com/oauth/v2/authorization';
@@ -544,10 +545,8 @@ class LinkedInService {
       lifecycleState: 'PUBLISHED',
       isReshareDisabledByAuthor: false,
     };
-    if (link) {
-      const article = { source: link, title: String(title || '').slice(0, 200) || link };
-      const desc = String(description || '').trim();
-      if (desc) article.description = desc.slice(0, 300);
+    const article = linkedinArticleCard({ link, title, description });
+    if (article) {
       // Best-effort thumbnail: a failed upload logs and posts without a
       // picture rather than dropping the share entirely.
       if (imageUrl) {

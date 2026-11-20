@@ -935,6 +935,16 @@ async function findConflictingVisitsWithTravel({
   return rows.filter((row) => reasonByRow.has(row.id)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row.id) }));
 }
 
+// listOccupiedWindows' hold filter: the offer side's unexpired-hold rule, or
+// (includeClaimedReservations) every visit staff have booked too.
+function occupiedHoldFilter(includeClaimedReservations, column) {
+  if (includeClaimedReservations) return bookedVisitOrLiveHold;
+  return (q) => {
+    q.whereNull(column)
+      .orWhereRaw(`${column} > NOW()`);
+  };
+}
+
 /**
  * Offer builders load rows across [dateFrom, dateTo] for JS-side overlap
  * filtering. They filter by the hold timestamp. Reservation and confirmation
@@ -945,6 +955,10 @@ async function findConflictingVisitsWithTravel({
  * withCoords:true adds the divergence-guarded `lat`/`lng` (customers LEFT
  * JOIN) so offer builders can apply the travel-gap rule; default false keeps
  * the legacy query byte for byte.
+ * includeClaimedReservations:true also counts every visit staff have booked,
+ * one that keeps an old hold timestamp too (bookedVisitOrLiveHold, the commit
+ * side's rule), for a read that must never show booked time as free (the
+ * day-replan route check). Unset keeps the hold-timestamp filter.
  */
 async function listOccupiedWindows({
   db = defaultDb,
@@ -953,6 +967,7 @@ async function listOccupiedWindows({
   excludeServiceIds = [],
   excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
   withCoords = false,
+  includeClaimedReservations,
 } = {}) {
   if (!dateFrom || !dateTo) return [];
   const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
@@ -963,10 +978,7 @@ async function listOccupiedWindows({
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
       .whereNotIn('scheduled_services.status', excludeStatuses)
-      .where((q) => {
-        q.whereNull('scheduled_services.reservation_expires_at')
-          .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-      })
+      .where(occupiedHoldFilter(includeClaimedReservations, 'scheduled_services.reservation_expires_at'))
       .whereNotNull('scheduled_services.window_start');
     if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
     rows = await query.select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db));
@@ -974,10 +986,7 @@ async function listOccupiedWindows({
     const query = db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
       .whereNotIn('status', excludeStatuses)
-      .where((q) => {
-        q.whereNull('reservation_expires_at')
-          .orWhereRaw('reservation_expires_at > NOW()');
-      })
+      .where(occupiedHoldFilter(includeClaimedReservations, 'reservation_expires_at'))
       // Windowless placeholder rows are inert to conflicts (see header).
       .whereNotNull('window_start');
     if (excludeIds.length) query.whereNotIn('id', excludeIds);

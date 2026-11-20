@@ -62,6 +62,31 @@ function trimTrailingUrlNoise(url) {
   return out;
 }
 
+// A URL read from article text. A Markdown link destination ("](https://...)"),
+// an autolink ("<https://...>") or an HTML attribute value ('href="https://..."')
+// is delimited, so it is read exactly as
+// written, up to the destination's own closing ")" (a title after a space is
+// already outside the match). A bare URL also drops a trailing colon, which
+// is the sentence's ("See https://a.org/x: it lists ..."). Live post
+// 2026-11-19: "[article](https://a.org/x/): the indoor ..." was fetched as
+// ".../x/):" and answered 404.
+function bodyUrl(body, match) {
+  const raw = match[0];
+  const before = body.slice(Math.max(0, match.index - 2), match.index);
+  if (before.endsWith('<') || /=["']$/.test(before)) return raw; // an autolink or an HTML attribute value
+  if (before === '](') {
+    let depth = 0;
+    for (let i = 0; i < raw.length; i += 1) {
+      if (raw[i] === '(') depth += 1;
+      else if (raw[i] === ')') { if (depth === 0) return raw.slice(0, i); depth -= 1; }
+    }
+    return raw;
+  }
+  let out = raw;
+  for (let prev = null; out !== prev;) { prev = out; out = trimTrailingUrlNoise(out).replace(/:$/, ''); }
+  return out;
+}
+
 // `evidenceUrls`: sources that support the text but are not published with it —
 // the competitor pages a post may name but never link (owner ruling
 // 2026-09-28; evidenceUrlsFor below). The review still reads them, so a claim
@@ -89,9 +114,13 @@ function sourceUrls(document, brief = {}, evidenceUrls = []) {
   // Parentheses are allowed inside the match (URLs can legitimately contain
   // them); trimTrailingUrlNoise strips only what's unmatched.
   const evidence = (Array.isArray(evidenceUrls) ? evidenceUrls : []).map(evidenceUrl).filter(Boolean);
-  const text = `${fm.parse(document).content}\n${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${evidence.join('\n')}`;
-  return [...new Set((text.match(/https:\/\/[^\s<>"'\]}]+/g) || [])
-    .map(trimTrailingUrlNoise)
+  const URL_RE = /https:\/\/[^\s<>"'\]}]+/g;
+  const body = fm.parse(document).content;
+  const structured = `${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${evidence.join('\n')}`;
+  return [...new Set([
+    ...[...body.matchAll(URL_RE)].map((m) => bodyUrl(body, m)),
+    ...(structured.match(URL_RE) || []).map((url) => trimTrailingUrlNoise(url)),
+  ]
     .filter((url) => {
       try {
         const parsed = new URL(url);

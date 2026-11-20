@@ -656,6 +656,45 @@ it.each([line, "+19412972606"])("keeps recovered sender, reply target, and overr
   expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: line, replyToMessageId: "a", mediaUrls: [attachment.url] });
 });
 
+// The web-only line is on no picker (REPLY_LINE_NUMBERS): a Text back from a
+// call to it must still reply from it, or the conversation splits.
+it("a Text back for a call to the web-only reply line sends from that line", async () => {
+  const webLine = "+19412542617";
+  window.history.replaceState({}, "", `/?phone=%2B19415550100&fromNumber=${encodeURIComponent(webLine)}`);
+  setup(); await tick();
+  const sender = screen.getByRole("combobox", { name: "Send from" });
+  expect(sender).toHaveValue(webLine);
+  expect(sender).toHaveDisplayValue("Main site web-only line");
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Thanks for calling" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: webLine, to: "+19415550100", body: "Thanks for calling" });
+});
+
+it.each([
+  ["keeps the web-only line", null],
+  ["picks another line", line],
+])("after Override the select shows the line Send uses: %s", async (_case, picked) => {
+  const webLine = "+19412542617";
+  window.history.replaceState({}, "", `/?phone=%2B19415550100&fromNumber=${encodeURIComponent(webLine)}`);
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Override" })); await tick();
+  const sender = screen.getByRole("combobox", { name: "Send from" });
+  expect(sender).toBeEnabled();
+  expect(sender).toHaveValue(webLine);
+  expect(sender).toHaveDisplayValue("Main site web-only line");
+  if (picked) {
+    fireEvent.change(sender, { target: { value: picked } }); await tick();
+    expect(sender).toHaveValue(picked);
+    // The web-only line is offered only while it is the line in use.
+    expect(within(sender).queryByRole("option", { name: "Main site web-only line" })).not.toBeInTheDocument();
+  }
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Thanks for calling" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: picked || webLine, to: "+19415550100" });
+});
+
 it.each([23, 24])("checks restored attachment expiry at send time (%s hours old)", async (ageHours) => {
   const owner = `attachment-owner-${ageHours}`;
   const media = { ...attachment, key: `sms-attachments/${Date.now() - ageHours * 60 * 60 * 1000}-fixture-gate.png` };
@@ -1171,4 +1210,316 @@ it("opens the thread that holds the alerted message when the customer texts from
   setup(); await tick();
   expect(scrolled).toEqual(["sms-message-v-b"]);
   expect(logRequests().some(([url]) => String(url).includes("twilioSid="))).toBe(false);
+});
+
+// Owner 2026-11-19 ("Mark Texts Read" A): read a text from the list without opening it.
+const readPosts = (path) => fetch.mock.calls.filter(([url, init]) => String(url).endsWith(path) && init?.method === "POST");
+
+it("Mark read on a row clears the dot at once, writes 5 s later, and Undo takes it back", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false, conversationId: "conv-a" }];
+  setup(); await tick();
+  expect(screen.getByLabelText("Unread")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("Marked read");
+  expect(screen.queryByText("Back")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+  expect(screen.getByLabelText("Unread")).toBeInTheDocument();
+  await tick(6000);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(4900);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  await tick(200);
+  const [[, init]] = readPosts("/messages/read-all");
+  // A timer-sent read outlives a tab that closes while it is in flight.
+  expect(init.keepalive).toBe(true);
+  // The row is one sender: its phone and newest text, so its older texts on pages not loaded are read too.
+  expect(JSON.parse(init.body)).toEqual({ readBefore: "2024-07-01T12:00:00Z", contactPhone: "+19415550100" });
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+it("a second Mark read sends the first one at once", async () => {
+  messages = [
+    { ...inbound("a", "Please check the gate"), isRead: false },
+    { ...inbound("b", "Another request", "+19415550101"), isRead: false },
+  ];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550101 read" }));
+  await tick(0);
+  expect(readPosts("/messages/read-all").map(([, init]) => JSON.parse(init.body).contactPhone)).toEqual(["+19415550100"]);
+  await tick(5000);
+  expect(readPosts("/messages/read-all").map(([, init]) => JSON.parse(init.body).contactPhone)).toEqual(["+19415550100", "+19415550101"]);
+});
+
+it("Mark all read reads every text up to the newest loaded one, and only shows on the whole list", async () => {
+  messages = [
+    { ...inbound("a", "Please check the gate"), isRead: false },
+    { ...inbound("b", "Another request", "+19415550101"), isRead: false, createdAt: "2024-07-02T09:30:00Z" },
+  ];
+  setup(); await tick();
+  fireEvent.change(screen.getByPlaceholderText(/Search all SMS/), { target: { value: "gate" } });
+  expect(screen.queryByRole("button", { name: "Mark all read" })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText(/Search all SMS/), { target: { value: "" } });
+  await tick();
+
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  expect(screen.queryAllByLabelText("Unread")).toHaveLength(0);
+  expect(screen.getByRole("status")).toHaveTextContent("Marked all texts read");
+  await tick(5000);
+  const [[, init]] = readPosts("/messages/read-all");
+  expect(JSON.parse(init.body)).toEqual({ readBefore: "2024-07-02T09:30:00Z" });
+  expect(readPosts("/messages/read")).toHaveLength(0);
+});
+
+it("a failed list read says so and the text stays unread", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read-all") && init?.method === "POST"
+    ? response({ error: "Unavailable" }, 503)
+    : okFetch(url, init)));
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(5000); await tick();
+  expect(screen.getByRole("alert")).toHaveTextContent("The texts were not marked read");
+  expect(screen.getByLabelText("Unread")).toBeInTheDocument();
+});
+
+it("leaving the inbox inside the 5 s sends the read instead of dropping it", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  const view = setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  view.unmount(); await tick(0);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+});
+
+it("Undo ends when the write starts, and the dot stays hidden while the write is out", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  let answer;
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read-all") && init?.method === "POST"
+    ? new Promise((resolve) => { answer = () => resolve(response({ success: true })); })
+    : okFetch(url, init)));
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(5000);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+  await act(async () => { answer(); });
+  await tick(0);
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+});
+
+it("Mark all read leaves a recruiting reply's dot, as the server leaves it unread", async () => {
+  messages = [
+    { ...inbound("a", "Please check the gate"), isRead: false },
+    { ...inbound("j", "I can interview Tuesday", "+19415550109"), isRead: false, messageType: "job_applicant_reply" },
+  ];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(1);
+  await tick(5000);
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(1);
+});
+
+it("Mark all read stays on the whole list when the loaded rows are all read (older unread texts may not be loaded)", async () => {
+  setup(); await tick();
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Mark all read" })).toBeInTheDocument();
+});
+
+it("Mark all read waits for the whole list to load after a search is cleared, so its cutoff never comes from search results", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  fireEvent.change(screen.getByPlaceholderText(/Search all SMS/), { target: { value: "gate" } });
+  await tick();
+  let release;
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).includes("/communications/log?") && !String(url).includes("search=")
+    ? new Promise((resolve) => { release = () => resolve(okFetch(url, init)); })
+    : okFetch(url, init)));
+  fireEvent.change(screen.getByPlaceholderText(/Search all SMS/), { target: { value: "" } });
+  await tick();
+  expect(release).toBeDefined();
+  expect(screen.queryByRole("button", { name: "Mark all read" })).not.toBeInTheDocument();
+  await act(async () => { release(); });
+  await tick(0);
+  expect(screen.getByRole("button", { name: "Mark all read" })).toBeInTheDocument();
+});
+
+it("closing or reloading the tab inside the Undo window sends the waiting read with keepalive", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+  const posts = readPosts("/messages/read-all");
+  expect(posts).toHaveLength(1);
+  expect(posts[0][1]).toMatchObject({ method: "POST", keepalive: true });
+  expect(JSON.parse(posts[0][1].body)).toEqual({ readBefore: "2024-07-01T12:00:00Z", contactPhone: "+19415550100" });
+  await tick(5000);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+});
+
+it("a row's Mark read leaves another sender's dot, and Undo brings the row's dot back", async () => {
+  messages = [
+    { ...inbound("a", "Please check the gate"), isRead: false },
+    { ...inbound("a2", "Also the side door", "+19415550100"), isRead: false, createdAt: "2024-06-30T12:00:00Z" },
+    { ...inbound("b", "Another request", "+19415550101"), isRead: false },
+  ];
+  setup(); await tick();
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "Mark +19415550101 read" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(2);
+});
+
+it("a background refresh that started before the read was confirmed does not bring the dot back", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  await tick(25000);
+  let release;
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).includes("/communications/log?")
+    ? new Promise((resolve) => { release = () => resolve(okFetch(url, init)); })
+    : okFetch(url, init)));
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(4800);
+  expect(release).toBeDefined();
+  await tick(400);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+  await act(async () => { release(); });
+  await tick(0);
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+});
+
+it("a technician gets no Mark all read; its row Mark read sends the row's texts through the scoped id read", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  expect(screen.queryByRole("button", { name: "Mark all read" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(5000);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  const [[, init]] = readPosts("/messages/read");
+  expect(JSON.parse(init.body)).toEqual({ messageIds: ["a"] });
+});
+
+it("a second Mark all read tap during the Undo window is ignored, so Undo still takes the first back", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  expect(screen.getByRole("button", { name: "Mark all read" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  await tick(0);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+  await tick(6000);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  expect(screen.getByLabelText("Unread")).toBeInTheDocument();
+});
+
+it("Mark all read stays disabled while its write is out, so a slow write cannot be tapped twice", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  let answer;
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read-all") && init?.method === "POST"
+    ? new Promise((resolve) => { answer = () => resolve(response({ success: true })); })
+    : okFetch(url, init)));
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  await tick(5000);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "Mark all read" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+  await act(async () => { answer(); });
+  await tick(0);
+  expect(screen.getByRole("button", { name: "Mark all read" })).not.toBeDisabled();
+});
+
+it("a technician's large row read goes out in batches of 200 ids, all started at once", async () => {
+  messages = Array.from({ length: 450 }, (_, i) => ({ ...inbound(`m${i}`, `Text ${i}`), isRead: false, createdAt: new Date(Date.UTC(2024, 6, 1, 12, 0, i)).toISOString() }));
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  // Closing the tab starts every batch at once, so none waits on another.
+  await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+  expect(readPosts("/messages/read").map(([, init]) => JSON.parse(init.body).messageIds.length)).toEqual([200, 200, 50]);
+});
+
+it("a very large technician row read keeps its keepalive bodies under the browser's shared 64 KiB", async () => {
+  // Real ids are UUIDs: 200 of them are about 7.8 KiB of JSON.
+  messages = Array.from({ length: 2000 }, (_, i) => ({ ...inbound(`00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, `Text ${i}`), isRead: false, createdAt: new Date(Date.UTC(2024, 6, 1, 12, 0, 0, i)).toISOString() }));
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+  const posts = readPosts("/messages/read");
+  // Every id is sent; the keepalive ones together stay under the shared budget.
+  expect(posts.reduce((n, [, init]) => n + JSON.parse(init.body).messageIds.length, 0)).toBe(2000);
+  const keepaliveBytes = posts.filter(([, init]) => init.keepalive).reduce((n, [, init]) => n + init.body.length, 0);
+  expect(keepaliveBytes).toBeLessThanOrEqual(64 * 1024);
+  expect(posts.some(([, init]) => !init.keepalive)).toBe(true);
+});
+
+it("a row read with one failed batch waits for every batch, then says the rest failed", async () => {
+  messages = Array.from({ length: 450 }, (_, i) => ({ ...inbound(`m${i}`, `Text ${i}`), isRead: false, createdAt: new Date(Date.UTC(2024, 6, 1, 12, 0, i)).toISOString() }));
+  const okFetch = fetch.getMockImplementation();
+  let readCalls = 0;
+  let answerLast;
+  fetch.mockImplementation(async (url, init) => {
+    if (String(url).endsWith("/messages/read") && init?.method === "POST") {
+      readCalls += 1;
+      if (readCalls === 2) return response({ error: "boom" }, 500);
+      if (readCalls === 3) return new Promise((resolve) => { answerLast = () => resolve(response({ success: true })); });
+    }
+    return okFetch(url, init);
+  });
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(5000); await tick(0); await tick(0);
+  expect(readPosts("/messages/read")).toHaveLength(3);
+  const logCallsAfterReads = () => {
+    const firstRead = fetch.mock.calls.findIndex(([u, init]) => String(u).endsWith("/messages/read") && init?.method === "POST");
+    return fetch.mock.calls.slice(firstRead).filter(([u]) => String(u).includes("/communications/log")).length;
+  };
+  // Batch 2 failed, batch 3 is still out: no error and no refresh yet.
+  expect(logCallsAfterReads()).toBe(0);
+  expect(screen.queryByText("The texts were not marked read. Try again.")).not.toBeInTheDocument();
+  await act(async () => { answerLast(); });
+  await tick(0); await tick(0);
+  expect(screen.getByText("The texts were not marked read. Try again.")).toBeInTheDocument();
+  expect(logCallsAfterReads()).toBeGreaterThan(0);
+});
+
+it("opening a row inside its Undo window sends the waiting read and ends Undo", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  fireEvent.click(screen.getByText("Please check the gate"));
+  await tick(0);
+  // Opening read the text, so Undo could no longer bring it back: it is gone, and the waiting read went out.
+  expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+});
+
+it("opening another row leaves the first row's Undo in place", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }, { ...inbound("b", "Second sender question", "+19415550111"), isRead: false }];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  fireEvent.click(screen.getByText("Second sender question"));
+  await tick(0);
+  expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
 });

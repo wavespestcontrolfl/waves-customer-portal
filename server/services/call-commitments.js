@@ -4443,6 +4443,9 @@ module.exports = {
   terminalNonSpamCallbackSql,
   terminalParentSql,
   obsoleteParentSql,
+  // Shared with call-phone-yes-word.js: a failed read no pass revisits.
+  exhaustedExtractionSql,
+  FIRST_HANDOFF_SQL,
   UNSETTLED_CALLBACK_STATUSES,
   CALLBACK_SPAM,
   renewalBoundaryUnknown,

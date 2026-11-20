@@ -296,6 +296,25 @@ describe('listOccupiedWindows', () => {
     expect(rows[2]).toMatchObject({ date: '2099-01-07', startMin: 480, endMin: 540 });
   });
 
+  test('includeClaimedReservations counts every visit staff have booked; unset keeps the hold-timestamp filter', async () => {
+    const booked = 'scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()';
+    for (const withCoords of [false, true]) {
+      const reads = {};
+      for (const includeClaimedReservations of [false, true]) {
+        const q = makeQuery([]);
+        const fake = jest.fn(() => q);
+        fake.raw = jest.fn((sql) => sql);
+        await listOccupiedWindows({ db: fake, dateFrom: '2099-01-01', dateTo: '2099-01-01', withCoords, includeClaimedReservations });
+        reads[includeClaimedReservations] = q.orWhereRaw.mock.calls.map(([sql]) => sql);
+      }
+      const hold = withCoords ? 'scheduled_services.reservation_expires_at > NOW()' : 'reservation_expires_at > NOW()';
+      expect(reads.false).toContain(hold);
+      expect(reads.false).not.toContain(booked);
+      expect(reads.true).toContain(booked);
+      expect(reads.true).not.toContain(hold);
+    }
+  });
+
   test('excludeServiceIds (the rescheduling row) passes through', async () => {
     const q = makeQuery([]);
     db.mockReturnValue(q);

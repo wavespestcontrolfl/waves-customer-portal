@@ -28,6 +28,12 @@ jest.mock('../services/composer-customer-links', () => ({
   immediateOnlyLinkSendCheck: jest.fn(async () => ({ present: false })),
 }));
 jest.mock('../services/scheduler', () => ({ purposeForScheduledMessageType: (type) => type }));
+// The website-only line check reads sms_log and call_log (website-line-contact-postgres.test.js); here it refuses only
+// the main site's web-only line, as for a person who never called or texted it.
+jest.mock('../services/website-line-contact', () => ({
+  WEBSITE_LINE_REFUSAL: 'WEBSITE_LINE_REFUSAL',
+  websiteLineRefusal: jest.fn(async (from) => (from === '+19412542617' ? 'WEBSITE_LINE_REFUSAL' : null)),
+}));
 
 const db = require('../models/db');
 const { scheduleCustomerSms } = require('../services/scheduled-sms-queue');
@@ -73,6 +79,7 @@ test('the writer refuses in the page\'s order: each fix exposes exactly the next
     [() => { state.input.body = 'A plain synthetic text.'; }, 400, 'invalid scheduledFor'],
     [() => { state.input.scheduledFor = '2001-01-05T10:00'; }, 400, 'scheduledFor must be in the future'],
     [() => { state.input.scheduledFor = FUTURE; }, 400, 'fromNumber must be a Waves Twilio number'],
+    [() => { state.input.fromNumber = '+19412542617'; }, 400, 'WEBSITE_LINE_REFUSAL'],
     [() => { delete state.input.fromNumber; }, 409, 'This Agent Review draft was just handled elsewhere — refresh the thread before scheduling.'],
   ];
 
@@ -83,6 +90,8 @@ test('the writer refuses in the page\'s order: each fix exposes exactly the next
     const out = await answer();
     expect({ status: out.status, error: out.body.error }).toEqual({ status, error });
   }
+  // The website-only line check was asked about the chosen line and the recipient.
+  expect(require('../services/website-line-contact').websiteLineRefusal).toHaveBeenCalledWith('+19412542617', PHONE);
   // The street-level hold also answers with its code (the step above checked its wording).
   state.input.customerId = 'cust-1';
   state.input.linkedVisitIds = ['visit-1'];
