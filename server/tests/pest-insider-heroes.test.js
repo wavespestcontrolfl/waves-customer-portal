@@ -201,6 +201,7 @@ describe('the top picture list', () => {
     ['motion that is not an object', withMotion('rain'), /motion must be an object/],
     ['a kind of motion not on the list', withMotion({ kind: 'spin', color: 'navy', x: 0.7 }), /motion kind must be one of swarm, rise/],
     ['a prototype key as the kind', withMotion({ kind: 'constructor', color: 'navy' }), /motion kind must be one of/],
+    ['a kind given as a list', withMotion({ kind: ['rain'], color: 'white', x: 0.6 }), /motion kind must be one of/],
     ['a color that is not a Waves color', withMotion({ kind: 'rain', color: 'red', x: 0.6 }), /motion color must be one of navy, gold, wavesBlue, white/],
     ['a number the kind needs, missing', withMotion({ kind: 'drop', color: 'navy', x: 0.7, y: 0.2, to: 0.5 }), /drop motion needs size from 1 to 8/],
     ['a number given as text', withMotion({ kind: 'rain', color: 'white', x: '0.6' }), /rain motion needs x from 0.52 to 1/],
@@ -321,15 +322,20 @@ describe('taking new art', () => {
   test('new art drops the motion placed on the old art, and says so; the same art again keeps its motion', async () => {
     expect(HEROES.T03.motion).not.toBeNull();
     fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
+    // the dry run says what the import would drop, and drops nothing
+    const before = state();
+    const preview = run();
+    expect([preview.status, preview.stdout]).toEqual([0, expect.stringContaining('New art would drop the motion of T03: place it again')]);
+    expect(state()).toEqual(before);
     const first = run('--execute');
-    expect([first.status, first.stdout]).toEqual([0, expect.stringContaining('New art drops the motion of T03: place it again')]);
+    expect([first.status, first.stdout]).toEqual([0, expect.stringContaining('New art dropped the motion of T03: place it again')]);
     const raw = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'));
     expect(Object.keys(raw.heroes.T03)).toEqual(['art']);
     // a person places the motion again on the new art; importing that same art keeps it
     raw.heroes.T03.motion = { ...HEROES.T03.motion };
     fs.writeFileSync(path.join(root, MANIFEST), JSON.stringify(raw, null, 2));
     const again = run('--execute');
-    expect([again.status, again.stdout]).toEqual([0, expect.not.stringContaining('drops the motion')]);
+    expect([again.status, again.stdout]).toEqual([0, expect.not.stringContaining('the motion of')]);
     const kept = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8')).heroes.T03;
     expect(kept).toEqual({ art: raw.heroes.T03.art, motion: { ...HEROES.T03.motion } });
     expect(validateHeroes({ heroes: { T03: kept } }).T03.gifFile).toMatch(/^t03-[0-9a-f]{10}\.gif$/);
@@ -342,5 +348,7 @@ describe('taking new art', () => {
     const stopped = run('--execute');
     expect([stopped.status, stopped.stderr]).toEqual([1, expect.stringContaining('Another import holds server/data/pest-insider-heroes-v1.json.lock')]);
     expect(state()).toEqual(before);
+    // T03 moves, but an import that stops drops no motion, so it says nothing of it
+    expect(stopped.stdout).not.toContain('the motion of');
   }, 60000);
 });

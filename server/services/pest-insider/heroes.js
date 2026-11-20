@@ -78,7 +78,8 @@ const MOTION_RANGES = Object.freeze({
 // The motion, checked and in a fixed key order (its hash names the GIF), or a problem.
 function motionOf(motion) {
   if (!motion || typeof motion !== 'object' || Array.isArray(motion)) return { problem: 'motion must be an object' };
-  if (!Object.prototype.hasOwnProperty.call(MOTION_KINDS, motion.kind)) return { problem: `motion kind must be one of ${Object.keys(MOTION_KINDS).join(', ')}` };
+  // The kind is text: a lookup would read a list such as ["rain"] as "rain".
+  if (typeof motion.kind !== 'string' || !Object.prototype.hasOwnProperty.call(MOTION_KINDS, motion.kind)) return { problem: `motion kind must be one of ${Object.keys(MOTION_KINDS).join(', ')}` };
   if (!MOTION_COLORS.includes(motion.color)) return { problem: `motion color must be one of ${MOTION_COLORS.join(', ')}` };
   const names = MOTION_KINDS[motion.kind];
   const extra = Object.keys(motion).filter((key) => !['kind', 'color', ...names].includes(key));

@@ -33,8 +33,9 @@
  *   that is killed leaves at most an art file no fact names (the heroes test
  *   names it) and its lock file (remove it once no import runs).
  * - A fact's motion (heroes.js MOTION_KINDS) is placed on its art: new art
- *   drops it, and the run says so, so a person places it again. The same art
- *   imported again keeps its motion.
+ *   drops it, so a person places it again. The run says so once the new
+ *   heroes file is in place (a dry run says it would). The same art imported
+ *   again keeps its motion.
  *
  * The art: ChatGPT on the owner's plan (owner 2026-11-19: "just use
  * chatgpt"), through Codex on the Mac with Codex's built-in image tool, never
@@ -124,6 +125,10 @@ const motionDropped = (raw, batch) => batch.filter((item) => {
   return current && current.motion !== undefined && current.art !== item.art;
 }).map((item) => item.id);
 
+function noteDropped(verb, ids) {
+  if (ids.length) console.log(`New art ${verb} the motion of ${ids.join(', ')}: place it again on the new art in the heroes file.`);
+}
+
 // Step 1: cut every picture and check the new heroes file. Writes nothing.
 async function stage() {
   const artDir = path.join(root, ART_DIR);
@@ -165,7 +170,8 @@ function removeOldArt(raw, next, batch, artDir) {
 }
 
 // Step 2, under the lock: new art under hash names, then one atomic swap of
-// the heroes file, then the old art of the changed facts is removed.
+// the heroes file, then the old art of the changed facts is removed. Returns
+// the facts whose motion the swapped-in file dropped (read under the lock).
 function publish({ batch, artDir }) {
   fs.mkdirSync(artDir, { recursive: true });
   const lock = `${HEROES_FILE}.lock`;
@@ -199,6 +205,7 @@ function publish({ batch, artDir }) {
     fs.renameSync(tempName(HEROES_FILE, tag), HEROES_FILE);
     swapped = true;
     removeOldArt(raw, next, batch, artDir);
+    return motionDropped(raw, batch);
   } catch (err) {
     if (!swapped) {
       for (const file of added) fs.rmSync(file, { force: true });
@@ -218,10 +225,13 @@ function publish({ batch, artDir }) {
   }
   const staged = await stage();
   for (const item of staged.batch) console.log(`${item.id}  art ${item.art}  ${Math.round(item.webp.length / 1024)} KB`);
-  const dropped = motionDropped(readHeroes(), staged.batch);
-  if (dropped.length) console.log(`New art drops the motion of ${dropped.join(', ')}: place it again on the new art in the heroes file.`);
   if (!staged.batch.length) { console.log(`No <fact>.png in ${dir}; nothing to take.`); return; }
-  if (!execute) { console.log(`Dry run: ${staged.batch.length} art file(s) checked; nothing written. Add --execute.`); return; }
-  publish(staged);
+  if (!execute) {
+    noteDropped('would drop', motionDropped(readHeroes(), staged.batch));
+    console.log(`Dry run: ${staged.batch.length} art file(s) checked; nothing written. Add --execute.`);
+    return;
+  }
+  // Said only once the new heroes file is in place: an import that stops drops nothing.
+  noteDropped('dropped', publish(staged));
   console.log(`${staged.batch.length} art file(s) taken; now draw: node ops/agents/pest-insider-heroes.js --execute`);
 })().catch((e) => { console.error(e); process.exit(1); });
