@@ -765,6 +765,18 @@ visit's own record (`service_records` by the invoice's `service_record_id` and
 `customer_id`). A raw note, a combined-visit invoice (it keeps none) or a
 missing record returns null.
 
+The signed-in customer's `GET /api/billing/balance` uses the same payer
+ownership checks for failed-payment balances, upcoming charges, the next
+charge, the failure banner, unpaid-invoice sum, and Pay now links. The live
+verdict covers stamped payer/statement invoices, visit-level Bill-To, and the
+customer's default payer; statement-accrued invoices never enter the homeowner
+sum. If ownership cannot be verified, the route returns HTTP 503 with
+`BILLING_OWNERSHIP_UNAVAILABLE`, so the existing portal unavailable/retry state
+withholds every amount instead of displaying a wrong zero or third-party debt.
+Malformed legacy failed-payment invoice references are never passed to the
+UUID invoice lookup; valid references still deduplicate, and a real lookup
+failure withholds the unresolved linked attempt amount.
+
 Part payments (billing audit 2026-10-30): `/api/pay/:token` returns
 `invoice.amountPaid`, the money the office already recorded on this
 still-open invoice (`invoices.amount_paid`, GATE_PARTIAL_PAYMENTS), beside
@@ -808,6 +820,72 @@ labeled an account balance — with no sibling tokens and no service names
 (service names ride only the EMAILED invoice PDF, which reaches the
 customer's own saved recipient); gate off ⇒ no sibling read and the PDF
 is unchanged.
+
+An earlier saved-card attempt that requires bank authentication can still
+settle. While that attempt is unverified, the invoice's `/setup`, `/quote`,
+`/update-amount`, and `/finalize` return HTTP 409 with `savedCardPending`.
+Combined checkout omits a held sibling. If the hold appears after selection,
+checkout returns HTTP 409 with `staleBalance` so the page can reload the
+amount. Setup, tender changes, and finalization check the affected invoices
+under lock. Staff and automated saved-card retries also check the hold under
+the invoice lock before recording a new charge attempt. On a held invoice,
+staff credit application returns HTTP 409 and automatic credit application
+skips the invoice. On another invoice for the same customer, staff and
+automatic applications can draw the balance above the earlier attempt's
+unposted credit. The staff credit dialog shows this spendable amount. Manual
+credit deductions and automated debits also preserve the reservation.
+Amount edits to the held invoice wait for the challenge to resolve.
+A cancellation clears the hold only when the original charge worker recorded
+that exact PaymentIntent independently of the webhook. A disagreement between
+the two IDs keeps checkout held. If another checkout already uses credit posted
+to the invoice, failure or cancellation of the original card attempt keeps that
+credit applied so the replacement checkout still quotes the amount due. When
+the worker recorded that it already canceled the checkout shown on the invoice,
+settlement clears that stale reference and returns the attempt's posted credit.
+It also clears references to that canceled checkout from other collectible
+invoices, including when the target invoice has already moved to a new checkout.
+After a customer merge, recovery verifies the invoice's recorded transfer before
+resolving the original customer's saved-card attempt.
+A legacy ID without worker provenance
+keeps checkout on HTTP 409 even if the supplied intent was canceled. After webhook history expires, an operator can
+verify the PaymentIntent directly using the saved-card cancellation command
+in `ops/agents/README.md`. A successful challenge settles the matching card
+payment and any missing portion of its submitted account credit in one invoice
+transaction. If the invoice was already paid, a replay can post the missing
+credit once when the signed capture, a single matching Stripe ledger entry, submitted credit,
+and paid total agree after accounting for surcharge and prior cash. The
+original receipt and paid date stand. A funding shortfall or amount mismatch
+keeps the hold in place for reconciliation. A later dispute can
+reopen a settled invoice after the original authentication hold has cleared.
+If the original create timed out, a signed failure event identifying that submitted
+request can release its reserved credit. Other unproven attempts stay held.
+If the card charge replaced an earlier checkout, settlement can clear the
+old invoice pointer only with that attempt's recorded Stripe cancellation
+for the exact prior PaymentIntent.
+The `/confirm` endpoint can still record money the processor has already accepted.
+
+After a customer merge, the journal must identify this invoice on every
+transfer from its original owner to its current owner.
+
+While verification is pending, full and partial manual postings return HTTP
+409 and annual-prepay coverage stays in place. Staff can record cash or a
+check already received under **Customer 360 → Issue credit → Prepayment
+(money received)**. Apply the credit only if an amount is still owed once
+the card outcome is known. An imported Zelle notice stays in its review
+queue so the office can resolve that same receipt once.
+
+While a saved card can still settle, staff payment posting, credit application,
+annual-prepay removal, and invoice voids recheck the hold under the invoice
+lock. A refused posting preserves the customer's existing checkout. Applying
+credit also rechecks the available balance under the customer lock.
+Schedule issues a paid receipt only when the unallocated visit cash covers
+the amount due. At visit completion, a partial cash posting retires a
+cancelable checkout so the next checkout quotes the remaining balance. If
+the processor is already collecting the payment, staff reconcile the cash
+against the processor outcome. If another administrator holds the visit lock,
+completion returns HTTP 503 with `prepaid_visit_busy`. Retrying the same
+completion posts the available cash once before the customer receives a payment link.
+
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries
 an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,
@@ -6569,6 +6647,32 @@ adjustments do not add up to the handoff amount, every item carries
 never shows prices that disagree with the charge; a failure building them
 returns empty lists, never an error, because the jti is already burned. No
 contact field, address, note or other invoice rides this reply.
+
+A payer statement also establishes Bill-To ownership when the invoice's
+individual payer field is empty. Terminal checks statement ownership before
+handoff, at token validation, and when binding the reader payment. If the
+invoice moves to a payer after this handoff applies homeowner credit, a
+refused mint returns that credit when the invoice is still safe to reverse.
+
+For an invoice with a saved-card payment awaiting bank verification, both
+`POST /api/stripe/terminal/handoff` and `/payment-intent` return HTTP 409
+with `code: payment_charge_in_progress`. Handoff creation checks under the
+invoice lock before applying account credit or issuing the token. It can release
+an expired claim with no sign of submission. An unknown outcome or a payment
+received by Stripe that still needs local posting returns HTTP 409 with
+`code: payment_reconciliation_pending` and `reconciliationRequired: true`.
+Terminal checks again before creating the card-present intent and under the invoice
+lock before returning its client secret. At that final bind it first reserves
+the customer's combined-checkout namespace and, for a shared intent, locks the
+canonical allocation. It checks the hold before canceling either that shared
+checkout or a standalone pay-page intent. A reconciliation hold preserves the
+existing checkout pointer; the attempt/orphan remains the collection fence.
+If the hold appears during creation, the handoff must be reissued and the
+response includes `newHandoffRequired: true`. The post-tap
+`/apply-surcharge` request also checks the hold under lock before the
+device can continue. A surcharge-disabled session that already holds a
+client secret confirms directly with Stripe.
+
 `POST /api/stripe/terminal/validate-save-card-handoff` (machine-to-machine
 burn of the 60s single-use Tap to Pay CARD-SAVE handoff JWT — the token IS the
 auth; no charge ever happens on this surface). Minted by the admin-only,

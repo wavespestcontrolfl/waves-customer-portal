@@ -3,6 +3,11 @@ const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
 const { listPortalPayments } = require('../services/portal-payment-history');
+const {
+  loadLivePayerLinkage,
+  excludeDirectPayerPayments,
+  excludeLiveOwnedPayerPayments,
+} = require('../services/payer-linkage');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
@@ -11,7 +16,14 @@ const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
-const { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral } = require('../services/failed-payments');
+const {
+  UUID_SHAPE,
+  loadFailedPaymentFacts,
+  standaloneFailedRows,
+  standaloneFailedTotal,
+  excludeNeverAttemptedDeferrals,
+  metadataInvoiceId,
+} = require('../services/failed-payments');
 const { isEnabled } = require('../config/feature-gates');
 const { removePaymentMethod } = require('../services/payment-method-removal');
 const {
@@ -33,7 +45,13 @@ router.get('/', async (req, res, next) => {
     if (queryError) {
       return res.status(400).json({ error: 'limit must be 1-100 and cursor must be a non-negative integer' });
     }
-    const { payerLookupFailed: _internalOnly, ...body } = await listPortalPayments(req.customerId, { limit: page.limit, cursor: page.cursor });
+    const { payerLookupFailed: _internalOnly, ...body } = await listPortalPayments(req.customerId, {
+      limit: page.limit,
+      cursor: page.cursor,
+      // Keep bearer recovery links on the intended signed-in Billing surface
+      // and behind the same gate as the account's open-invoice Pay actions.
+      includeRecoveryInvoices: isEnabled('portalPayNow'),
+    });
     res.json(body);
   } catch (err) {
     next(err);
@@ -639,38 +657,28 @@ router.delete('/cards/:id', async (req, res, next) => {
 // =========================================================================
 router.get('/balance', async (req, res, next) => {
   try {
-    const customer = req.customer;
+    // Every amount, ownership verdict and bearer token comes from ONE
+    // PostgreSQL snapshot. Otherwise a payer assignment or invoice insert can
+    // commit between the ownership scan and the later SUM / Pay-now query,
+    // exposing AP-owned debt or a bearer link to the homeowner. Publish only
+    // after the read-only transaction commits.
+    const body = await db.transaction(async (balanceDb) => {
+      const customer = req.customer;
 
     // Third-party Bill-To: a payment against a payer-billed invoice is the
     // payer's, even though the row sits under the homeowner's customer_id. Pull
     // this customer's payer-billed invoice ids once so the failed-balance sum and
     // the "last payment failed" banner can exclude those rows (otherwise an AP
     // payment failure would show as the homeowner's own balance / failure).
-    const payerInvRows = await db('invoices')
-      .where({ customer_id: req.customerId })
-      // …including a WITHDRAWN invoice, whose payer_id stays NULL: without it
-      // a failed Auto Pay attempt on a still-draft packet invoice kept
-      // counting toward the homeowner's balance after the debt moved to AP
-      // (Codex #4311 r36 P1) — drafts are deliberately excluded from
-      // balanceCarryingInvoiceIds, so nothing else filtered it.
-      .where(function payerOwned() {
-        this.whereNotNull('payer_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
-      })
-      .select('id')
-      .catch(() => []);
-    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
-    const metadataInvoiceId = (p) => {
-      try {
-        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        return m && m.invoice_id != null ? String(m.invoice_id) : null;
-      } catch {
-        return null;
-      }
-    };
-    const isPayerPayment = (p) => {
-      const invId = metadataInvoiceId(p);
-      return !!(invId && payerInvoiceIds.has(invId));
-    };
+    const payerLinkage = await loadLivePayerLinkage(req.customerId, balanceDb);
+    const { failed: payerLookupFailed, isPayerLinked, liveOwnedIds = new Set() } = payerLinkage;
+    const unavailable = () => Object.assign(new Error('Billing details are temporarily unavailable. Please try again.'), {
+      isOperational: true,
+      statusCode: 503,
+      code: 'BILLING_OWNERSHIP_UNAVAILABLE',
+    });
+    if (payerLookupFailed) throw unavailable();
+    const liveOwnedInvoiceIds = [...liveOwnedIds].map(String);
 
     // Failed attempts whose retry later collected are superseded — the
     // money arrived on the retry's own paid row, so they must not count
@@ -701,66 +709,78 @@ router.get('/balance', async (req, res, next) => {
     // for it any more, and it is visible debt like any other disarmed row.
     // (isNeverAttemptedDeferral and the canonical unsuperseded-failed query live in services/failed-payments.js — the SMS
     // grounding balance reads the same code; Codex round-35 P1.)
-    const failedFacts = await loadFailedPaymentFacts(req.customerId);
-    const { failedInvoiceIds, balanceCarryingInvoiceIds } = failedFacts;
-    const failedTotal = standaloneFailedTotal(failedFacts, isPayerPayment);
+    const failedFacts = await loadFailedPaymentFacts(req.customerId, balanceDb);
+    // A failed status lookup cannot tell whether an invoice-linked homeowner
+    // attempt is a draft (the attempt carries the debt) or a non-draft (the
+    // invoice carries it). Returning zero in that state would publish
+    // "Account current" while money may still be owed. Payer rows and
+    // never-attempted placeholders are provably not homeowner debt, so they do
+    // not make the response unavailable.
+    const unresolvedHomeownerDebt = failedFacts.invoiceLookupFailed
+      && standaloneFailedRows({ ...failedFacts, unresolvedInvoiceIds: new Set() }, isPayerLinked)
+        .some((row) => {
+          const invoiceId = metadataInvoiceId(row)?.toLowerCase();
+          return invoiceId && failedFacts.unresolvedInvoiceIds.has(invoiceId)
+            && parseFloat(row.amount || 0) > 0;
+        });
+    if (unresolvedHomeownerDebt) throw unavailable();
+    const eligibleFailedRows = standaloneFailedRows(failedFacts, isPayerLinked);
+    const failedTotal = standaloneFailedTotal(failedFacts, isPayerLinked);
 
     // Upcoming (scheduled autopay) rows: exclude payer-linked ones too, so the
     // homeowner's upcomingCharges / nextCharge never show the payer's amount/date.
-    const upcomingRows = await db('payments')
+    const upcomingRows = await balanceDb('payments')
       .where({ customer_id: req.customerId, status: 'upcoming' })
       .orderBy('payment_date', 'asc')
-      .select('amount', 'payment_date', 'description', 'metadata');
-    const visibleUpcoming = upcomingRows.filter((p) => !isPayerPayment(p));
+      .select('amount', 'payment_date', 'description', 'metadata', 'payer_id', 'stripe_payment_intent_id', 'stripe_charge_id');
+    const visibleUpcoming = upcomingRows.filter((p) => !isPayerLinked(p));
     const upcomingTotal = visibleUpcoming.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
     const nextPayment = visibleUpcoming[0] || null;
 
     // Check for unpaid invoices. Third-party Bill-To: a payer-billed invoice is
     // owed by the payer, not the homeowner — exclude it so the logged-in
     // customer never sees the payer's unpaid amount as their own balance.
-    const unpaidInvoices = await db('invoices')
+    const unpaidInvoicesQuery = balanceDb('invoices')
       .where({ customer_id: req.customerId })
       .whereIn('status', ['sent', 'viewed', 'overdue'])
       .whereNull('payer_id')
+      .whereNull('payer_statement_id')
       // A combined-visit invoice WITHDRAWN to a payer keeps payer_id NULL and
       // a collectible status — the move lives only in its stamp (Codex #4311
       // r33 P1) — so a payer_id-only filter showed the homeowner AP-owned
       // debt as their own balance.
       .where(function withdrawnExcluded() {
         this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
-      })
+      });
+    if (liveOwnedInvoiceIds.length) unpaidInvoicesQuery.whereNotIn('id', liveOwnedInvoiceIds);
+    const unpaidInvoices = await unpaidInvoicesQuery
       // Outstanding balance = amount DUE (total − applied account credit − part payments), not the
       // raw total, so the portal balance matches what Stripe/Terminal actually charge.
-      .select(db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0) AS total'))
+      .select(balanceDb.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0) AS total'))
       .first();
 
     // The portal's billing banner flips to "failed" when the most recent
     // completed attempt failed — not when there's any failed row in history.
     // Skip payer-linked attempts so an AP failure doesn't flip the homeowner's
     // banner.
-    // Bounded scan: page in small batches (capped) past payer rows and
-    // never-attempted deferrals so this billing-page load never scales with
-    // the customer's full ledger — the common case still resolves on the
-    // first page.
-    // A never-attempted deferral (see isNeverAttemptedDeferral) is not an
-    // attempt either — it must not raise the "last payment failed" banner.
-    const isRealAttempt = (p) => !isPayerPayment(p) && !isNeverAttemptedDeferral(p);
-    const recentAttemptsQuery = () => db('payments')
-      .where({ customer_id: req.customerId })
-      .whereIn('status', ['paid', 'failed', 'refunded'])
-      .whereNull('superseded_by_payment_id')
-      .orderBy('payment_date', 'desc')
-      .select('status', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at');
-    let mostRecentAttempt = null;
-    {
-      const PAGE = 50;
-      for (let offset = 0; offset < 500; offset += PAGE) {
-        const batch = await recentAttemptsQuery().limit(PAGE).offset(offset);
-        if (!batch.length) break;
-        mostRecentAttempt = batch.find(isRealAttempt) || null;
-        if (mostRecentAttempt || batch.length < PAGE) break;
-      }
-    }
+    // Apply the complete payer/placeholder eligibility filter in SQL BEFORE
+    // ordering and taking one row. This stays one bounded query even when an
+    // account has years of payer-owned attempts or never-attempted deferrals.
+    const recentAttemptsQuery = () => {
+      const query = excludeNeverAttemptedDeferrals(
+        excludeLiveOwnedPayerPayments(excludeDirectPayerPayments(balanceDb('payments')
+          .where({ customer_id: req.customerId })
+          .whereIn('status', ['paid', 'failed', 'refunded'])
+          .whereNull('superseded_by_payment_id')), payerLinkage),
+        'payments',
+      );
+      return query.orderBy('payment_date', 'desc')
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .select('id', 'status')
+        .first();
+    };
+    const mostRecentAttempt = await recentAttemptsQuery();
 
     // Portal "Pay now" (GATE_PORTAL_PAY_NOW, audit S2-1): the customer's own
     // open invoices with their existing tokenized /pay links, oldest first,
@@ -783,15 +803,19 @@ router.get('/balance', async (req, res, next) => {
       // Postgres throw on the cast and 500 the whole Billing tab for that
       // customer (Codex round-6 P2). Shape-filter before querying — a
       // malformed id simply doesn't get a pay link.
-      const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      const failedDraftInvoiceIds = failedInvoiceIds
-        .filter((id) => !balanceCarryingInvoiceIds.has(id))
-        .filter((id) => UUID_SHAPE.test(id));
-      const openRows = await db('invoices')
+      const failedDraftInvoiceIds = [...new Set(eligibleFailedRows
+        .map(metadataInvoiceId)
+        .filter(Boolean)
+        .filter((id) => UUID_SHAPE.test(id)))];
+      const openInvoicesQuery = balanceDb('invoices')
         .where({ customer_id: req.customerId })
         .where(function () {
           this.whereIn('status', ['sent', 'viewed', 'overdue']);
-          if (failedDraftInvoiceIds.length) this.orWhereIn('id', failedDraftInvoiceIds);
+          if (failedDraftInvoiceIds.length) {
+            this.orWhere(function failedDraftOnly() {
+              this.where({ status: 'draft' }).whereIn('id', failedDraftInvoiceIds);
+            });
+          }
         })
         .whereNull('payer_id')
         .whereNull('payer_statement_id')
@@ -799,7 +823,9 @@ router.get('/balance', async (req, res, next) => {
         // hands out a bearer pay link, so it must never carry AP-owned debt.
         .where(function withdrawnExcluded() {
           this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
-        })
+        });
+      if (liveOwnedInvoiceIds.length) openInvoicesQuery.whereNotIn('id', liveOwnedInvoiceIds);
+      const openRows = await openInvoicesQuery
         // Positive balance in SQL, BEFORE the cap — otherwise five old
         // fully-credited invoices would crowd a payable sixth out of the
         // list entirely (Codex P2). Same GREATEST expression as the
@@ -818,20 +844,23 @@ router.get('/balance', async (req, res, next) => {
         .filter((row) => row.amountDue > 0);
     }
 
-    res.json({
-      currentBalance: failedTotal + parseFloat(unpaidInvoices?.total || 0),
-      upcomingCharges: upcomingTotal,
-      monthlyRate: parseFloat(customer.monthly_rate || 0),
-      tier: customer.waveguard_tier,
-      processor: 'stripe',
-      nextCharge: nextPayment ? {
-        amount: parseFloat(nextPayment.amount),
-        date: nextPayment.payment_date,
-        description: nextPayment.description,
-      } : null,
-      lastPaymentFailed: mostRecentAttempt?.status === 'failed',
-      ...(openInvoices ? { openInvoices } : {}),
-    });
+      return {
+        currentBalance: failedTotal + parseFloat(unpaidInvoices?.total || 0),
+        upcomingCharges: upcomingTotal,
+        monthlyRate: parseFloat(customer.monthly_rate || 0),
+        tier: customer.waveguard_tier,
+        processor: 'stripe',
+        nextCharge: nextPayment ? {
+          amount: parseFloat(nextPayment.amount),
+          date: nextPayment.payment_date,
+          description: nextPayment.description,
+        } : null,
+        lastPaymentFailed: mostRecentAttempt?.status === 'failed',
+        lastPaymentAttemptId: mostRecentAttempt?.id || null,
+        ...(openInvoices ? { openInvoices } : {}),
+      };
+    }, { isolationLevel: 'repeatable read', readOnly: true });
+    res.json(body);
   } catch (err) {
     next(err);
   }

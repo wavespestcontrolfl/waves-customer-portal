@@ -146,7 +146,7 @@ async function rejectIfInvoiceCollectionPending(invoice, res, { recordExistingPa
     if (!recordExistingPayment) {
       await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
     }
-    await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
+    await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, db, { checkout: !recordExistingPayment });
     return false;
   } catch (err) {
     if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
@@ -276,10 +276,17 @@ async function invoiceProjectedCreditApplied(invoice, { database = db } = {}) {
   if (!invoice?.customer_id || invoice?.payer_id) return 0;
   const cappedAtDue = (credit) => Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
   const promo = await require('../services/invoice-promo-code').pendingPromoCredit(invoice, database);
-  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return cappedAtDue(promo);
-  const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  if (row?.auto_apply_account_credit !== true) return cappedAtDue(promo);
-  const credit = (Number(row?.account_credits) || 0) + promo;
+  const autoApplyEnabled = require('../config/feature-gates').gates.autoApplyAccountCredit;
+  if (!autoApplyEnabled && !(promo > 0)) return 0;
+  const snapshot = await require('../services/customer-credit').accountCreditSnapshotForInvoice({
+    customerId: invoice.customer_id,
+    invoiceId: invoice.id,
+    balanceAdjustment: promo,
+  }, database);
+  // A promo posts before its capped draw. If older saved-card reservations
+  // exceed today's balance, only the post-promo remainder is actually
+  // spendable. Opted-out customers still draw no more than this promo.
+  const credit = autoApplyEnabled && snapshot.autoApplyEnabled ? snapshot.spendable : Math.min(promo, snapshot.spendable);
   if (!(credit > 0)) return 0;
   return cappedAtDue(credit);
 }
@@ -386,8 +393,7 @@ async function zelleDeniedByChargeReconciliation(invoice, readOnly, database = d
     // writing default would release a stale pre-submit claim / promote a submitted one while the original
     // charge worker can still commit, exposing a second payment rail. The public pay page GET keeps main's
     // behavior (default, writing) — the same call main's own GET makes.
-    if (readOnly) await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true });
-    else await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
+    await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly, checkout: true });
   } catch (err) {
     if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
     return true;
@@ -1210,7 +1216,11 @@ router.post('/:token/update-amount', async (req, res, next) => {
     // allocation drifted under the locked re-verification — same
     // reload-and-retry contract as /setup.
     if (err.statusCode === 409) {
-      return res.status(409).json({ error: err.message, staleBalance: !!err.staleBalance });
+      return res.status(409).json({
+        error: err.message,
+        staleBalance: !!err.staleBalance,
+        ...(err.savedCardPending ? { savedCardPending: true } : {}),
+      });
     }
     logger.error(
       `[pay-v2] Update-amount error `

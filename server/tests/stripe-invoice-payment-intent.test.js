@@ -4,6 +4,8 @@ describe('StripeService.createInvoicePaymentIntent', () => {
   let stripeClient;
   let dbMock;
   let trxMock;
+  let lockedInvoiceQuery;
+  let customersQuery;
   // Configurable per test: the customer's account-credit balance and what
   // applyAccountCreditToInvoice does to the invoice row when the gated auto-apply
   // path runs. Default to no credit so existing cases keep the original lifecycle.
@@ -59,13 +61,18 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       where: jest.fn(() => rootInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
     };
-    const lockedInvoiceQuery = {
+    lockedInvoiceQuery = {
       where: jest.fn(() => lockedInvoiceQuery),
+      whereRaw: jest.fn(() => lockedInvoiceQuery),
+      orderBy: jest.fn(() => lockedInvoiceQuery),
       forUpdate: jest.fn(() => lockedInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
       whereNotIn: jest.fn(() => lockedInvoiceQuery),
       update: updateInvoice,
     };
+    // Canonical allocation locking awaits the query itself when an older PI
+    // is attached, returning the target among every stamped member.
+    lockedInvoiceQuery.then = (resolve, reject) => Promise.resolve([invoiceRow]).then(resolve, reject);
     const paymentsQuery = {
       where: jest.fn(() => paymentsQuery),
       whereNull: jest.fn(() => paymentsQuery),
@@ -74,6 +81,7 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       first: jest.fn().mockResolvedValue(null),
     };
     const chargeAttemptsQuery = {
+      orderByRaw: jest.fn(() => chargeAttemptsQuery),
       where: jest.fn(() => chargeAttemptsQuery),
       whereIn: jest.fn(() => chargeAttemptsQuery),
       whereNull: jest.fn(() => chargeAttemptsQuery),
@@ -87,8 +95,9 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     };
     // Auto-apply resolves the customer's account-credit balance up front; these
     // cases have no credit, so the original PI lifecycle must run untouched.
-    const customersQuery = {
+    customersQuery = {
       where: jest.fn(() => customersQuery),
+      forUpdate: jest.fn(() => customersQuery),
       // opted in to automatic credit application (owner ruling 2026-08-28: default OFF, this harness models a customer who turned the slider on)
       first: jest.fn(async () => ({ account_credits: customerAccountCredits, auto_apply_account_credit: true })),
     };
@@ -121,6 +130,11 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     }));
     jest.doMock('../models/db', () => dbMock);
     jest.doMock('../services/customer-credit', () => ({
+      accountCreditSnapshotForInvoice: jest.fn(async ({ balanceAdjustment = 0 }) => {
+        const balance = (Number(customerAccountCredits) || 0) + Number(balanceAdjustment || 0);
+        return { balance, reserved: 0, spendable: balance, autoApplyEnabled: true };
+      }),
+      spendableAccountCreditForInvoice: jest.fn(async ({ balance }) => Number(balance) || 0),
       applyAccountCreditToInvoice: jest.fn(async () => {
         if (applyCreditSideEffect) applyCreditSideEffect();
       }),
@@ -133,13 +147,13 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     }));
   });
 
-  test('rechecks the saved-card fence while holding the invoice lock', async () => {
+  test.each(['claimed', 'failed'])('refuses a %s saved-card attempt returned by the locked checkout check', async (status) => {
     // A committed claim can still have no Stripe PI; the null stamp must
     // never make the invoice collectible through a second rail.
     invoiceRow.stripe_payment_intent_id = null;
     savedCardAttempt = {
       id: 'attempt-active',
-      status: 'claimed',
+      status,
       idempotency_key: 'attempt-key',
       created_at: new Date().toISOString(),
     };
@@ -195,6 +209,53 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     } finally {
       jest.dontMock('../services/estimate-deposits');
+    }
+  });
+
+  test('hold-for-capture uses $75 available from a $100 balance with $25 reserved elsewhere', async () => {
+    customerAccountCredits = '100.00';
+    invoiceRow.total = '100.00';
+    invoiceRow.stripe_payment_intent_id = null;
+    applyCreditSideEffect = () => { invoiceRow.credit_applied = '75.00'; };
+    const CustomerCredit = require('../services/customer-credit');
+    CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValue({
+      balance: 100,
+      reserved: 25,
+      spendable: 75,
+      autoApplyEnabled: true,
+    });
+
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id, {
+      holdCoverageForCapture: true,
+    });
+
+    expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledWith({
+      customerId: invoiceRow.customer_id,
+      invoiceId: invoiceRow.id,
+      balanceAdjustment: 0,
+    }, trxMock);
+    expect(CustomerCredit.applyAccountCreditToInvoice).toHaveBeenCalledWith({
+      invoiceId: invoiceRow.id,
+    }, trxMock);
+    expect(customersQuery.forUpdate).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(2500);
+    expect(result.covered_by_credit).not.toBe(true);
+  });
+
+  test('credit-disabled setup does not hold the customer row across payment setup', async () => {
+    jest.doMock('../config/feature-gates', () => ({
+      gates: { autoApplyAccountCredit: false, payPromoCode: false },
+      isEnabled: jest.fn(() => false),
+    }));
+    try {
+      const StripeService = require('../services/stripe');
+      await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+      expect(customersQuery.forUpdate).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    } finally {
+      jest.dontMock('../config/feature-gates');
     }
   });
 
@@ -761,6 +822,42 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       expect(result.paymentIntentId).toBe('pi_after_promo');
     });
 
+    test('a promo committed before the invoice lock is read from the locked invoice and lowers the payment', async () => {
+      customerAccountCredits = '0.00';
+      invoiceRow.stripe_payment_intent_id = null;
+      const lockedInvoice = { ...invoiceRow, promo_committed: true };
+      lockedInvoiceQuery.first.mockResolvedValue(lockedInvoice);
+      stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({
+        id: 'pi_after_racing_promo',
+        status: 'requires_payment_method',
+        client_secret: 'pi_after_racing_promo_secret',
+      });
+      const promo = {
+        pendingPromoCredit: jest.fn(async row => (row.promo_committed ? 25 : 0)),
+        redeemAndApplyPromoCode: jest.fn(async (_trx, row) => {
+          row.credit_applied = '25.00';
+          return 25;
+        }),
+      };
+      jest.doMock('../services/invoice-promo-code', () => promo);
+
+      const CustomerCredit = require('../services/customer-credit');
+      const StripeService = require('../services/stripe');
+      const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+      expect(promo.pendingPromoCredit).toHaveBeenCalledWith(lockedInvoice, trxMock);
+      expect(lockedInvoiceQuery.forUpdate.mock.invocationCallOrder[0])
+        .toBeLessThan(promo.pendingPromoCredit.mock.invocationCallOrder[0]);
+      expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledWith({
+        customerId: lockedInvoice.customer_id,
+        invoiceId: lockedInvoice.id,
+        balanceAdjustment: 25,
+      }, trxMock);
+      expect(promo.redeemAndApplyPromoCode).toHaveBeenCalledWith(trxMock, lockedInvoice);
+      expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(5000);
+      expect(result.paymentIntentId).toBe('pi_after_racing_promo');
+    });
+
     test('with automatic credit on, the code is redeemed first and the customer\'s own balance is then drawn as before', async () => {
       customerAccountCredits = '15.00';
       const promo = withPromoWaiting(25);
@@ -775,6 +872,36 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       expect(promo.redeemAndApplyPromoCode.mock.invocationCallOrder[0])
         .toBeLessThan(applyAccountCreditToInvoice.mock.invocationCallOrder[0]);
       expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(3500);
+    });
+
+    test('a legacy reservation that absorbs the pending promo does not overstate available credit', async () => {
+      customerAccountCredits = '0.00';
+      const promo = withPromoWaiting(25);
+      invoiceRow.stripe_payment_intent_id = null;
+      stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({
+        id: 'pi_gross_after_reserved_promo',
+        status: 'requires_payment_method',
+        client_secret: 'pi_gross_after_reserved_promo_secret',
+      });
+      const CustomerCredit = require('../services/customer-credit');
+      CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValueOnce({
+        balance: 25,
+        reserved: 25,
+        spendable: 0,
+        autoApplyEnabled: true,
+      });
+
+      const StripeService = require('../services/stripe');
+      await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+      expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledWith({
+        customerId: invoiceRow.customer_id,
+        invoiceId: invoiceRow.id,
+        balanceAdjustment: 25,
+      }, trxMock);
+      expect(promo.redeemAndApplyPromoCode).not.toHaveBeenCalled();
+      expect(CustomerCredit.applyAccountCreditToInvoice).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(7500);
     });
 
     test('no code waiting: the open payment is left alone and nothing is redeemed or applied', async () => {
@@ -926,7 +1053,7 @@ describe('StripeService.finalizeInvoicePayment saved-card serialization', () => 
     else process.env.JWT_SECRET = originalJwtSecret;
   });
 
-  test('locks the invoice and rejects a saved-card claim before Stripe confirm', async () => {
+  test.each(['claimed', 'failed'])('locks the invoice and rejects the %s saved-card attempt before Stripe confirm', async (status) => {
     const invoice = {
       id: 'inv-finalize',
       invoice_number: 'WPC-FINALIZE',
@@ -947,6 +1074,8 @@ describe('StripeService.finalizeInvoicePayment saved-card serialization', () => 
     };
     const invoiceQuery = {
       where: jest.fn(() => invoiceQuery),
+      whereRaw: jest.fn(() => invoiceQuery),
+      orderBy: jest.fn(() => invoiceQuery),
       forUpdate: jest.fn(() => invoiceQuery),
       // Combined-stamp cleanup (clearPaymentIntentStamps) chains
       // where→whereNotIn→whereNotIn→update on the trx invoices table.
@@ -954,13 +1083,15 @@ describe('StripeService.finalizeInvoicePayment saved-card serialization', () => 
       update: jest.fn().mockResolvedValue(0),
       first: jest.fn().mockResolvedValue(invoice),
     };
+    invoiceQuery.then = (resolve, reject) => Promise.resolve([invoice]).then(resolve, reject);
     const attemptQuery = {
+      orderByRaw: jest.fn(() => attemptQuery),
       where: jest.fn(() => attemptQuery),
       whereIn: jest.fn(() => attemptQuery),
       whereNull: jest.fn(() => attemptQuery),
       first: jest.fn().mockResolvedValue({
         id: 'attempt-race',
-        status: 'claimed',
+        status,
         idempotency_key: 'attempt-key',
         created_at: new Date().toISOString(),
       }),
@@ -1021,6 +1152,7 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
   let originalJwtSecret;
   let invoice;
   let stripeClient;
+  let invoiceQuery;
 
   const quoteTokenFor = () => {
     const payload = JSON.stringify({
@@ -1058,8 +1190,10 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
         confirm: jest.fn().mockResolvedValue({ id: 'pi-public', status: 'succeeded', client_secret: 'pi-public_secret' }),
       },
     };
-    const invoiceQuery = {
+    invoiceQuery = {
       where: jest.fn(() => invoiceQuery),
+      whereRaw: jest.fn(() => invoiceQuery),
+      orderBy: jest.fn(() => invoiceQuery),
       forUpdate: jest.fn(() => invoiceQuery),
       // Combined-stamp cleanup (clearPaymentIntentStamps) chains
       // where→whereNotIn→whereNotIn→update on the trx invoices table.
@@ -1067,7 +1201,9 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
       update: jest.fn().mockResolvedValue(0),
       first: jest.fn().mockResolvedValue(invoice),
     };
+    invoiceQuery.then = (resolve, reject) => Promise.resolve([invoice]).then(resolve, reject);
     const attemptQuery = {
+      orderByRaw: jest.fn(() => attemptQuery),
       where: jest.fn(() => attemptQuery),
       whereIn: jest.fn(() => attemptQuery),
       whereNull: jest.fn(() => attemptQuery),
@@ -1151,6 +1287,28 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     expect(updateOpts).toEqual({ apiVersion: expect.any(String) });
     const [, , confirmOpts] = stripeClient.paymentIntents.confirm.mock.calls[0];
     expect(confirmOpts).toEqual({ apiVersion: expect.any(String) });
+  });
+
+  test('gate-off finalize locks the original stamped allocation in canonical order before stale-sibling cleanup', async () => {
+    const StripeService = require('../services/stripe');
+    const clearStamps = jest.spyOn(require('../services/pay-combined'), 'clearPaymentIntentStamps');
+    try {
+      await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());
+
+      const allocationLock = invoiceQuery.whereRaw.mock.invocationCallOrder[0];
+      expect(invoiceQuery.whereRaw).toHaveBeenCalledWith(
+        'id = ? OR (stripe_payment_intent_id IN (?) AND status NOT IN (?, ?, ?))',
+        [invoice.id, invoice.stripe_payment_intent_id, 'paid', 'processing', 'prepaid'],
+      );
+      expect(invoiceQuery.orderBy).toHaveBeenCalledWith('id', 'asc');
+      expect(allocationLock).toBeLessThan(invoiceQuery.forUpdate.mock.invocationCallOrder[0]);
+      expect(invoiceQuery.forUpdate.mock.invocationCallOrder[0])
+        .toBeLessThan(clearStamps.mock.invocationCallOrder[0]);
+      expect(invoiceQuery.forUpdate.mock.invocationCallOrder[0])
+        .toBeLessThan(stripeClient.paymentIntents.confirm.mock.invocationCallOrder[0]);
+    } finally {
+      clearStamps.mockRestore();
+    }
   });
 
   test('finalize refuses (409, reload) when the live consent stamp differs from the one it would write — never a re-stamp in place', async () => {
@@ -1243,11 +1401,14 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
 
 describe('StripeService.updateInvoicePaymentIntentMethod', () => {
   let invoiceRow;
+  let tenderInvoiceUpdates;
   let stripeClient;
   let dbMock;
+  let checkoutAttempt;
 
   beforeEach(() => {
     jest.resetModules();
+    checkoutAttempt = null;
 
     invoiceRow = {
       id: 'inv_123',
@@ -1283,12 +1444,16 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     };
     // Transaction-scoped invoice query: supports the forUpdate read and the
     // guarded repoint update used by replaceInvoicePaymentIntentForTender.
+    tenderInvoiceUpdates = [];
     const trxInvoiceQuery = {
       where: jest.fn(() => trxInvoiceQuery),
       forUpdate: jest.fn(() => trxInvoiceQuery),
+      whereRaw: jest.fn(() => trxInvoiceQuery),
+      orderBy: jest.fn(() => trxInvoiceQuery),
+      then: (resolve, reject) => Promise.resolve([invoiceRow]).then(resolve, reject),
       whereNotIn: jest.fn(() => trxInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
-      update: jest.fn().mockResolvedValue(1),
+      update: jest.fn(async (patch) => { tenderInvoiceUpdates.push(patch); return 1; }),
     };
     dbMock = jest.fn(table => {
       if (table === 'invoices') return rootInvoiceQuery;
@@ -1297,6 +1462,13 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     dbMock.transaction = jest.fn(async (cb) => {
       const trx = jest.fn(table => {
         if (table === 'invoices') return trxInvoiceQuery;
+        if (['stripe_invoice_charge_attempts', 'stripe_orphan_charges', 'payments'].includes(table)) {
+          const query = {
+            where: () => query, whereNull: () => query, whereRaw: () => query, orderByRaw: () => query,
+            first: async () => table === 'stripe_invoice_charge_attempts' ? checkoutAttempt : null,
+          };
+          return query;
+        }
         throw new Error(`Unexpected trx table: ${table}`);
       });
       return cb(trx);
@@ -1314,6 +1486,19 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       error: jest.fn(),
     }));
     jest.doMock('../models/db', () => dbMock);
+  });
+
+  test('refuses a pending authentication before repricing or minting a tender replacement', async () => {
+    checkoutAttempt = { id: 'attempt-sca', status: 'failed' };
+    const service = require('../services/stripe');
+    await expect(service.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'))
+      .rejects.toMatchObject({ statusCode: 409, savedCardPending: true });
+    await expect(service.replaceInvoicePaymentIntentForTender(invoiceRow.id, 'pi_invoice', {
+      baseCents: 7500, base: 75, paymentMethodTypes: ['card'], metadata: {},
+    })).rejects.toMatchObject({ statusCode: 409, savedCardPending: true });
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
   test('card-family updates keep the PaymentIntent at base amount (surcharge deferred to /finalize)', async () => {
@@ -1584,6 +1769,8 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
 
     const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
 
+    // An anchor-only replacement must not give any stale combined sibling the new PI.
+    expect(tenderInvoiceUpdates).toContainEqual(expect.objectContaining({ processor: null, stripe_payment_intent_id: null }));
     // Fresh PI minted for the selected tender, lock preserved.
     expect(stripeClient.paymentIntents.create).toHaveBeenCalledWith(
       expect.objectContaining({

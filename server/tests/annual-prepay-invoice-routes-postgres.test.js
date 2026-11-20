@@ -68,14 +68,14 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
   afterEach(async () => { if (trx) await trx.rollback(); });
   afterAll(async () => { await database?.destroy(); });
 
-  async function request(method, path, body) {
+  async function request(method, path, body, area = 'invoices') {
     const app = express();
     app.use(express.json());
-    app.use('/admin/invoices', require('../routes/admin-invoices'));
+    app.use(`/admin/${area}`, area === 'schedule' ? require('../routes/admin-schedule') : require('../routes/admin-invoices'));
     app.use((err, _req, res, _next) => res.status(err.statusCode || err.status || 500).json({ error: err.message }));
     const server = app.listen(0);
     try {
-      const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/invoices${path}`, {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/${area}${path}`, {
         method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined,
       });
       return { status: res.status, body: await res.json() };
@@ -102,7 +102,359 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     return id;
   }
 
+  async function payer() {
+    const [row] = await trx('payers').insert({
+      display_name: 'Synthetic Bill-To',
+      payment_terms: 'net30',
+      active: true,
+    }).returning('*');
+    return row;
+  }
+
+  async function payerStatement(payerId) {
+    const [row] = await trx('payer_statements').insert({
+      payer_id: payerId,
+      period_start: '2040-01-01',
+      period_end: '2040-01-31',
+      status: 'open',
+      terms_snapshot: 'net30',
+      token: randomUUID(),
+    }).returning('*');
+    return row;
+  }
+
   const { etDateString } = require('../utils/datetime-et');
+
+  test.each([
+    ['requires_payment_method', 200, 'sent', 0],
+    ['processing', 409, 'sent', 0],
+    [null, 409, 'sent', 0],
+    ['requires_action', 409, 'sent', 20],
+    ['canceled', 409, 'processing', 0],
+  ])('Schedule Charge Now with a recorded prepayment and a standalone checkout (%s / HTTP %i / %s / paid %i)', async (status, expectedHttp, invoiceStatus, amountPaid) => {
+    const customerId = await customer();
+    const visitId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: visitId, customer_id: customerId, scheduled_date: etDateString(), service_type: 'General Pest Control',
+      status: 'confirmed', estimated_price: 100, prepaid_amount: 25, prepaid_method: 'cash', prepaid_at: new Date(),
+    });
+    const piId = `pi_${visitId.replaceAll('-', '')}`;
+    const invoiceId = await invoice(customerId, {
+      scheduled_service_id: visitId, status: invoiceStatus, subtotal: 100, total: 100, amount_paid: amountPaid,
+      stripe_payment_intent_id: piId, processor: 'stripe',
+    });
+    const siblingInvoiceId = await invoice(customerId, {
+      status: 'sent', subtotal: 50, total: 50,
+      stripe_payment_intent_id: piId, processor: 'stripe',
+    });
+    const stripe = require('../services/stripe');
+    stripe.retrievePaymentIntent.mockResolvedValue(status ? { id: piId, status, metadata: {} } : null);
+    const result = await request('POST', `/${visitId}/invoice`, {}, 'schedule');
+    expect({ status: result.status, error: result.status >= 500 ? result.body.error : undefined })
+      .toEqual({ status: expectedHttp, error: undefined });
+    const updated = await trx('invoices').where({ id: invoiceId }).first();
+    const sibling = await trx('invoices').where({ id: siblingInvoiceId }).first();
+    const payments = await trx('payments').where({ customer_id: customerId, status: 'paid' });
+    expect(stripe.retrievePaymentIntent).toHaveBeenCalledTimes(invoiceStatus === 'processing' ? 0 : 1);
+    if (expectedHttp === 200) {
+      expect(stripe.cancelPaymentIntent).toHaveBeenCalledTimes(1);
+      expect(Number(updated.total)).toBe(75);
+      expect(updated.stripe_payment_intent_id).toBeNull();
+      expect(sibling.stripe_payment_intent_id).toBeNull();
+      expect(payments.map((p) => Number(p.amount))).toEqual([25]);
+    } else {
+      expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+      expect(Number(updated.total)).toBe(100);
+      expect(updated.stripe_payment_intent_id).toBe(piId);
+      expect(sibling.stripe_payment_intent_id).toBe(piId);
+      expect(payments).toHaveLength(0);
+    }
+    const visit = await trx('scheduled_services').where({ id: visitId }).first('prepaid_amount');
+    expect(Number(visit.prepaid_amount)).toBe(25);
+  });
+
+  test('Schedule receipt locks and clears every collectible member of its shared checkout before marking the target paid', async () => {
+    const customerId = await customer();
+    const visitId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: visitId, customer_id: customerId, scheduled_date: etDateString(), service_type: 'General Pest Control',
+      status: 'confirmed', estimated_price: 100,
+    });
+    const piId = `pi_${visitId.replaceAll('-', '')}`;
+    const invoiceId = await invoice(customerId, {
+      scheduled_service_id: visitId, status: 'sent', subtotal: 100, total: 100,
+      stripe_payment_intent_id: piId, processor: 'stripe',
+    });
+    const siblingInvoiceId = await invoice(customerId, {
+      status: 'sent', subtotal: 50, total: 50,
+      stripe_payment_intent_id: piId, processor: 'stripe',
+    });
+    const stripe = require('../services/stripe');
+    stripe.retrievePaymentIntent.mockResolvedValue({ id: piId, status: 'requires_payment_method', metadata: {} });
+    const emailSpy = jest.spyOn(require('../services/invoice-email'), 'sendReceiptEmail')
+      .mockResolvedValue({ ok: true });
+    const smsSpy = jest.spyOn(require('../services/invoice'), 'sendReceipt')
+      .mockResolvedValue({ sent: true });
+    try {
+      const result = await request('POST', `/${visitId}/prepaid`, {
+        amount: 100, method: 'cash', emailReceipt: true,
+      }, 'schedule');
+      expect(result.status).toBe(200);
+      expect(result.body.receipt).toMatchObject({ sent: true, invoiceId });
+    } finally {
+      emailSpy.mockRestore();
+      smsSpy.mockRestore();
+    }
+
+    expect(stripe.cancelPaymentIntent).toHaveBeenCalledTimes(1);
+    expect(await trx('invoices').where({ id: invoiceId }).first('status', 'stripe_payment_intent_id'))
+      .toMatchObject({ status: 'paid', stripe_payment_intent_id: null });
+    expect(await trx('invoices').where({ id: siblingInvoiceId }).first('status', 'stripe_payment_intent_id'))
+      .toMatchObject({ status: 'sent', stripe_payment_intent_id: null });
+  });
+
+  test('Schedule Charge Now refuses a checkout whose locked invoice owner differs from the visit customer', async () => {
+    const visitCustomerId = await customer();
+    const invoiceCustomerId = await customer();
+    const visitId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: visitId, customer_id: visitCustomerId, scheduled_date: etDateString(), service_type: 'General Pest Control',
+      status: 'confirmed', estimated_price: 100, prepaid_amount: 25, prepaid_method: 'cash', prepaid_at: new Date(),
+    });
+    const piId = `pi_${visitId.replaceAll('-', '')}`;
+    const invoiceId = await invoice(invoiceCustomerId, {
+      scheduled_service_id: visitId, status: 'sent', subtotal: 100, total: 100,
+      stripe_payment_intent_id: piId, processor: 'stripe',
+    });
+    const siblingInvoiceId = await invoice(invoiceCustomerId, {
+      status: 'sent', subtotal: 50, total: 50,
+      stripe_payment_intent_id: piId, processor: 'stripe',
+    });
+
+    const result = await request('POST', `/${visitId}/invoice`, {}, 'schedule');
+    expect(result.status).toBe(409);
+    expect(result.body.error).toMatch(/existing checkout could not be verified/i);
+    const stripe = require('../services/stripe');
+    expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(await trx('invoices').where({ id: invoiceId }).first('status', 'total', 'stripe_payment_intent_id'))
+      .toMatchObject({ status: 'sent', total: '100.00', stripe_payment_intent_id: piId });
+    expect(await trx('invoices').where({ id: siblingInvoiceId }).first('status', 'stripe_payment_intent_id'))
+      .toMatchObject({ status: 'sent', stripe_payment_intent_id: piId });
+    expect(await trx('payments').whereIn('customer_id', [visitCustomerId, invoiceCustomerId])).toHaveLength(0);
+  });
+
+  test('Schedule Charge Now rechecks every payer-withdrawal marker on the locked invoice before cash or token success', async () => {
+    const billTo = await payer();
+    const statement = await payerStatement(billTo.id);
+    const cases = [
+      ['payer_id', { payer_id: billTo.id }],
+      ['payer_statement_id', { payer_statement_id: statement.id }],
+      ['withdrawn stamp', { scheduled_send_error: `payer_billed:${billTo.id}` }],
+    ];
+    const combined = require('../services/pay-combined');
+    const originalLock = combined.lockCombinedCustomerStable;
+
+    for (const [label, payerPatch] of cases) {
+      const customerId = await customer();
+      const visitId = randomUUID();
+      await trx('scheduled_services').insert({
+        id: visitId, customer_id: customerId, scheduled_date: etDateString(), service_type: 'General Pest Control',
+        status: 'confirmed', estimated_price: 100, prepaid_amount: 25, prepaid_method: 'cash', prepaid_at: new Date(),
+      });
+      const invoiceId = await invoice(customerId, {
+        scheduled_service_id: visitId, status: 'sent', subtotal: 100, total: 100,
+      });
+      const racedAssignment = jest.spyOn(combined, 'lockCombinedCustomerStable').mockImplementationOnce(async (conn, ...args) => {
+        const owner = await originalLock(conn, ...args);
+        await conn('invoices').where({ id: invoiceId }).update(payerPatch);
+        return owner;
+      });
+      try {
+        const result = await request('POST', `/${visitId}/invoice`, {}, 'schedule');
+        expect({ label, status: result.status, error: result.body.error }).toEqual({
+          label,
+          status: 400,
+          error: expect.stringMatching(/third-party payer/i),
+        });
+      } finally {
+        racedAssignment.mockRestore();
+      }
+      expect(await trx('invoices').where({ id: invoiceId }).first('status', 'total', ...Object.keys(payerPatch)))
+        .toMatchObject({ status: 'sent', total: '100.00', ...payerPatch });
+      expect(await trx('payments').where({ customer_id: customerId })).toHaveLength(0);
+    }
+
+    const stripe = require('../services/stripe');
+    expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  test.each(['sent', 'paid'])('Schedule receipt for a %s invoice refuses another owner before closeout or delivery', async (invoiceStatus) => {
+    const visitCustomerId = await customer();
+    const invoiceCustomerId = await customer();
+    const visitId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: visitId, customer_id: visitCustomerId, scheduled_date: etDateString(), service_type: 'General Pest Control',
+      status: 'confirmed', estimated_price: 100,
+    });
+    const piId = `pi_${visitId.replaceAll('-', '')}`;
+    const invoiceId = await invoice(invoiceCustomerId, {
+      scheduled_service_id: visitId, status: invoiceStatus, subtotal: 100, total: 100,
+      stripe_payment_intent_id: piId, processor: 'stripe',
+    });
+    const siblingInvoiceId = await invoice(invoiceCustomerId, {
+      status: 'sent', subtotal: 50, total: 50,
+      stripe_payment_intent_id: piId, processor: 'stripe',
+    });
+    const emailSpy = jest.spyOn(require('../services/invoice-email'), 'sendReceiptEmail')
+      .mockResolvedValue({ ok: true });
+    const smsSpy = jest.spyOn(require('../services/invoice'), 'sendReceipt')
+      .mockResolvedValue({ sent: true });
+    try {
+      const result = await request('POST', `/${visitId}/prepaid`, {
+        amount: 100, method: 'cash', emailReceipt: true,
+      }, 'schedule');
+      expect(result.status).toBe(200);
+      expect(result.body.receipt).toMatchObject({
+        sent: false, reason: 'payment_session_changed', invoiceId,
+      });
+      expect(emailSpy).not.toHaveBeenCalled();
+      expect(smsSpy).not.toHaveBeenCalled();
+    } finally {
+      emailSpy.mockRestore();
+      smsSpy.mockRestore();
+    }
+
+    const stripe = require('../services/stripe');
+    expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(await trx('invoices').where({ id: invoiceId }).first('status', 'total', 'stripe_payment_intent_id'))
+      .toMatchObject({ status: invoiceStatus, total: '100.00', stripe_payment_intent_id: piId });
+    expect(await trx('invoices').where({ id: siblingInvoiceId }).first('status', 'stripe_payment_intent_id'))
+      .toMatchObject({ status: 'sent', stripe_payment_intent_id: piId });
+    expect(await trx('payments').whereIn('customer_id', [visitCustomerId, invoiceCustomerId])).toHaveLength(0);
+    expect(Number((await trx('scheduled_services').where({ id: visitId }).first('prepaid_amount')).prepaid_amount)).toBe(100);
+  });
+
+  test('Charge Now applies only the newly recorded cash after a partial visit prepayment', async () => {
+    const customerId = await customer();
+    const visitId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: visitId, customer_id: customerId, scheduled_date: etDateString(), service_type: 'General Pest Control',
+      status: 'confirmed', estimated_price: 100, prepaid_amount: 60, prepaid_method: 'cash', prepaid_at: new Date(),
+    });
+    const invoiceId = await invoice(customerId, { scheduled_service_id: visitId, status: 'sent', subtotal: 100, total: 100 });
+    const charge = () => request('POST', `/${visitId}/invoice`, {}, 'schedule');
+    expect((await charge()).body).toMatchObject({ invoiceId, prepaidCredit: 60, total: 40 });
+    await trx('scheduled_services').where({ id: visitId }).update({ prepaid_amount: 100 });
+    let visit = await trx('scheduled_services').where({ id: visitId }).first();
+    let invoiceRow = await trx('invoices').where({ id: invoiceId }).first();
+    const BillingLane = require('../services/billing-lane');
+    expect(await BillingLane.remainingVisitPrepaidCents(trx, visit, invoiceId)).toBe(4000);
+    expect(await BillingLane.visitCarriesUnappliedPrepayment({ dbConn: trx, svc: visit, invoice: invoiceRow })).toBe(true);
+    expect((await charge()).body).toMatchObject({ invoiceId, prepaidCredit: 40 });
+    expect(await trx('invoices').where({ id: invoiceId }).first('status', 'total')).toMatchObject({ status: 'paid', total: '0.00' });
+    expect((await trx('payments').where({ customer_id: customerId, status: 'paid' }).pluck('amount')).map(Number).sort()).toEqual([40, 60]);
+    visit = await trx('scheduled_services').where({ id: visitId }).first();
+    invoiceRow = await trx('invoices').where({ id: invoiceId }).first();
+    expect(await BillingLane.remainingVisitPrepaidCents(trx, visit, invoiceId)).toBe(0);
+    expect(await BillingLane.visitCarriesUnappliedPrepayment({ dbConn: trx, svc: visit, invoice: invoiceRow })).toBe(false);
+  });
+
+  test('a visit marker reduced after receipt preflight sets the actual cash available', async () => {
+    const customerId = await customer();
+    const visitId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: visitId, customer_id: customerId, scheduled_date: etDateString(), service_type: 'General Pest Control',
+      status: 'confirmed', estimated_price: 100,
+    });
+    const invoiceId = await invoice(customerId, { scheduled_service_id: visitId, status: 'sent', subtotal: 100, total: 100 });
+    const combined = require('../services/pay-combined');
+    const original = combined.lockCombinedCustomerStable;
+    const onReserve = jest.spyOn(combined, 'lockCombinedCustomerStable').mockImplementationOnce(async (db, ...args) => {
+      const owner = await original(db, ...args);
+      await db('scheduled_services').where({ id: visitId }).update({ prepaid_amount: 35, prepaid_method: 'check' });
+      return owner;
+    });
+    try {
+      const reply = await request('POST', `/${visitId}/prepaid`, { amount: 100, method: 'cash', emailReceipt: true }, 'schedule');
+      expect(reply.status).toBe(200);
+      expect(reply.body.receipt).toMatchObject({ sent: false, reason: 'not_paid_in_full', balance: 65 });
+      expect(await trx('invoices').where({ id: invoiceId }).first('status')).toMatchObject({ status: 'sent' });
+      expect(await trx('payments').where({ customer_id: customerId })).toHaveLength(0);
+    } finally {
+      onReserve.mockRestore();
+    }
+  });
+
+  test('Schedule receipt deducts the same visit allocation made by Charge Now before covering the reduced invoice', async () => {
+    const customerId = await customer();
+    const visitId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: visitId, customer_id: customerId, scheduled_date: etDateString(), service_type: 'General Pest Control',
+      status: 'confirmed', estimated_price: 100, prepaid_amount: 60, prepaid_method: 'cash', prepaid_at: new Date(),
+    });
+    const invoiceId = await invoice(customerId, {
+      scheduled_service_id: visitId, status: 'sent', subtotal: 100, total: 100, amount_paid: 0,
+    });
+
+    const charged = await request('POST', `/${visitId}/invoice`, {}, 'schedule');
+    expect(charged.status).toBe(200);
+    expect(charged.body).toMatchObject({ invoiceId, prepaidCredit: 60, total: 40, alreadyPaid: false });
+
+    // Retrying the paid-receipt action with the unchanged cumulative marker
+    // must not apply that same $60 to the invoice's now-$40 remainder.
+    const retry = await request('POST', `/${visitId}/prepaid`, {
+      amount: 60, method: 'cash', emailReceipt: true,
+    }, 'schedule');
+    expect(retry.status).toBe(200);
+    expect(retry.body.receipt).toMatchObject({ sent: false, reason: 'not_paid_in_full', balance: 40 });
+    expect(await trx('invoices').where({ id: invoiceId }).first('status', 'total'))
+      .toMatchObject({ status: 'sent', total: '40.00' });
+    let allocated = await trx('payments')
+      .where({ customer_id: customerId, status: 'paid' })
+      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [invoiceId])
+      .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [visitId]);
+    expect(allocated.map((row) => Number(row.amount))).toEqual([60]);
+
+    // The marker is cumulative. Raising it to $100 leaves a legitimate $40
+    // unallocated top-up. Unrelated visit/invoice allocations must not reduce
+    // that amount because the receipt deduction is scoped to both identifiers.
+    await trx('payments').insert([
+      {
+        customer_id: customerId, amount: 500, status: 'paid', payment_date: etDateString(),
+        metadata: JSON.stringify({ source: 'scheduled_service_prepaid', invoice_id: randomUUID(), scheduled_service_id: visitId }),
+      },
+      {
+        customer_id: customerId, amount: 500, status: 'paid', payment_date: etDateString(),
+        metadata: JSON.stringify({ source: 'scheduled_service_prepaid', invoice_id: invoiceId, scheduled_service_id: randomUUID() }),
+      },
+    ]);
+    const emailSpy = jest.spyOn(require('../services/invoice-email'), 'sendReceiptEmail')
+      .mockResolvedValue({ ok: true });
+    const smsSpy = jest.spyOn(require('../services/invoice'), 'sendReceipt')
+      .mockResolvedValue({ sent: true });
+    try {
+      const topUp = await request('POST', `/${visitId}/prepaid`, {
+        amount: 100, method: 'cash', emailReceipt: true,
+      }, 'schedule');
+      expect(topUp.status).toBe(200);
+      expect(topUp.body.receipt).toMatchObject({ sent: true, invoiceId });
+    } finally {
+      emailSpy.mockRestore();
+      smsSpy.mockRestore();
+    }
+
+    expect(await trx('invoices').where({ id: invoiceId }).first('status', 'total'))
+      .toMatchObject({ status: 'paid', total: '40.00' });
+    allocated = await trx('payments')
+      .where({ customer_id: customerId, status: 'paid' })
+      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [invoiceId])
+      .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [visitId])
+      .orderBy('created_at');
+    expect(allocated.map((row) => Number(row.amount))).toEqual([60, 40]);
+  });
 
   async function markedPaidPrepay() {
     const customerId = await customer({ billing_mode: null });
@@ -196,10 +548,13 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect((await trx('invoices').where({ id: prepayInvoiceId }).first('stripe_payment_intent_id')).stripe_payment_intent_id).toBe('pi_synthetic_kept');
   });
 
-  test('removing the flag is refused while a submitted saved-card charge awaits reconciliation, even with no payment row or invoice PI', async () => {
+  test.each([
+    ['claimed', /in progress or awaiting reconciliation/],
+    ['ambiguous', /ambiguous Stripe outcome/],
+  ])('removing the flag is refused while a submitted %s saved-card charge awaits reconciliation, even with no payment row or invoice PI', async (attemptStatus, message) => {
     // A saved-card charge can succeed at Stripe while its DB transaction rolls
     // back: no payments row, no stripe_payment_intent_id on the invoice, but
-    // the stripe_invoice_charge_attempts claim is still 'claimed'/submitted
+    // the stripe_invoice_charge_attempts claim is still submitted/unresolved
     // and unresolved. Every other refusal check (invoice status/paid_at,
     // payments table, the pay-page PI triage) sees nothing wrong and would
     // pass, so this proves assertNoInvoiceChargeReconciliationPending itself
@@ -214,19 +569,149 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     const attemptId = randomUUID();
     await trx('stripe_invoice_charge_attempts').insert({
       id: attemptId, invoice_id: prepayInvoiceId, stripe_payment_method_id: 'pm_fixture_removal',
-      idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`, status: 'claimed',
+      idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`, status: attemptStatus,
       submitted_at: new Date(), amount: 400,
     });
 
     const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
     expect(res.status).toBe(409);
-    expect(res.body.error).toMatch(/in progress or awaiting reconciliation/);
+    expect(res.body.error).toMatch(message);
     expect(require('../services/stripe').retrievePaymentIntent).not.toHaveBeenCalled();
     // Nothing moved: the term, invoice flag and the claim itself are untouched.
     expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
     expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(termId);
     expect((await trx('stripe_invoice_charge_attempts').where({ id: attemptId }).first('status', 'resolved_at')))
-      .toEqual({ status: 'claimed', resolved_at: null });
+      .toEqual({ status: attemptStatus, resolved_at: null });
+  });
+
+  test('removing the flag is refused while its authentication-required card attempt can still settle', async () => {
+    const { prepayInvoiceId, term } = await markedPaidPrepay();
+    await trx('invoices').where({ id: prepayInvoiceId }).update({
+      status: 'sent', paid_at: null, stripe_payment_intent_id: null,
+    });
+    await trx('annual_prepay_terms').where({ id: term.id }).update({ status: 'payment_pending' });
+    const coveredVisit = await trx('scheduled_services')
+      .where({ annual_prepay_term_id: term.id })
+      .orderBy('scheduled_date')
+      .first();
+    const attemptId = randomUUID();
+    const paymentIntentId = `pi_auth_${attemptId.replaceAll('-', '')}`;
+    await trx('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: prepayInvoiceId,
+      stripe_payment_method_id: 'pm_fixture_auth_removal',
+      stripe_payment_intent_id: paymentIntentId,
+      worker_payment_intent_id: paymentIntentId,
+      stripe_payment_intent_bound_at: new Date(),
+      idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      submitted_at: new Date(),
+      resolved_at: new Date(),
+      amount: 400,
+    });
+    const before = {
+      term: await trx('annual_prepay_terms').where({ id: term.id })
+        .first('id', 'customer_id', 'prepay_invoice_id', 'status', 'prepay_amount'),
+      invoice: await trx('invoices').where({ id: prepayInvoiceId })
+        .first('id', 'status', 'annual_prepay_term_id', 'stripe_payment_intent_id', 'total'),
+      visit: await trx('scheduled_services').where({ id: coveredVisit.id })
+        .first('id', 'status', 'annual_prepay_term_id', 'prepaid_method', 'prepaid_amount'),
+    };
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/awaiting verification/);
+    expect(require('../services/stripe').retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(await trx('annual_prepay_terms').where({ id: term.id })
+      .first('id', 'customer_id', 'prepay_invoice_id', 'status', 'prepay_amount')).toEqual(before.term);
+    expect(await trx('invoices').where({ id: prepayInvoiceId })
+      .first('id', 'status', 'annual_prepay_term_id', 'stripe_payment_intent_id', 'total')).toEqual(before.invoice);
+    expect(await trx('scheduled_services').where({ id: coveredVisit.id })
+      .first('id', 'status', 'annual_prepay_term_id', 'prepaid_method', 'prepaid_amount')).toEqual(before.visit);
+    expect(await trx('stripe_invoice_charge_attempts').where({ id: attemptId })
+      .first('status', 'decline_code', 'stripe_payment_intent_id', 'authentication_canceled_intent_id')).toEqual({
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: paymentIntentId,
+      authentication_canceled_intent_id: null,
+    });
+  });
+
+  test('a saved-card claim appearing after removal preflight returns 409 before the checkout is retired', async () => {
+    const customerId = await customer({ billing_mode: null });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending', term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const prepayInvoiceId = await invoice(customerId, {
+      status: 'sent',
+      annual_prepay_term_id: termId,
+      stripe_payment_intent_id: 'pi_checkout_kept',
+    });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+
+    const StripeService = require('../services/stripe');
+    const pending = Object.assign(
+      new Error('An earlier card payment is awaiting verification. Please contact us before trying again.'),
+      { code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: 'attempt-raced' },
+    );
+    const fence = jest.spyOn(StripeService, 'assertNoInvoiceChargeReconciliationPending')
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(pending);
+    try {
+      const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/awaiting verification.*resolve it before removing the annual prepay flag/i);
+      expect(fence).toHaveBeenNthCalledWith(1, prepayInvoiceId, expect.anything(), { checkout: true });
+      expect(fence).toHaveBeenNthCalledWith(2, prepayInvoiceId, expect.anything(), { checkout: true });
+      expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+      expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+      expect(await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id', 'stripe_payment_intent_id'))
+        .toEqual({ annual_prepay_term_id: termId, stripe_payment_intent_id: 'pi_checkout_kept' });
+      expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
+    } finally {
+      fence.mockRestore();
+    }
+  });
+
+  test('exact cancellation of the authentication challenge releases annual-prepay removal', async () => {
+    const { prepayInvoiceId, term } = await markedPaidPrepay();
+    await trx('invoices').where({ id: prepayInvoiceId }).update({
+      status: 'sent', paid_at: null, stripe_payment_intent_id: null,
+    });
+    await trx('annual_prepay_terms').where({ id: term.id }).update({ status: 'payment_pending' });
+    const openVisit = await trx('scheduled_services')
+      .where({ annual_prepay_term_id: term.id })
+      .whereNotIn('status', Array.from(require('../services/annual-prepay-renewals').PREPAID_UPDATE_EXCLUDED_STATUSES))
+      .orderBy('scheduled_date')
+      .first();
+    const attemptId = randomUUID();
+    const paymentIntentId = `pi_auth_${attemptId.replaceAll('-', '')}`;
+    await trx('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: prepayInvoiceId,
+      stripe_payment_method_id: 'pm_fixture_auth_cancelled',
+      stripe_payment_intent_id: paymentIntentId,
+      worker_payment_intent_id: paymentIntentId,
+      stripe_payment_intent_bound_at: new Date(),
+      authentication_canceled_intent_id: paymentIntentId,
+      idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      submitted_at: new Date(),
+      resolved_at: new Date(),
+      amount: 400,
+    });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+
+    expect(res.status).toBe(200);
+    expect((await trx('annual_prepay_terms').where({ id: term.id }).first('status')).status).toBe('cancelled');
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBeNull();
+    expect((await trx('scheduled_services').where({ id: openVisit.id }).first('annual_prepay_term_id')).annual_prepay_term_id).toBeNull();
   });
 
   test('removing the flag from an unpaid prepay runs the canonical cancel: prior billing mode back, covered invoice owed again, open visits released', async () => {

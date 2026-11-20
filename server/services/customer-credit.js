@@ -12,6 +12,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { customerHasActiveCollectionHoldChecked } = require('./collections/collection-hold');
+const { whereAwaitingAuthentication } = require('./invoice-payment-authentication');
 
 const VALID_SOURCES = Object.freeze([
   'manual', 'adjustment', 'invoice_application', 'invoice_prepaid', 'referral',
@@ -65,16 +66,19 @@ async function getLedger(customerId, { limit = 100 } = {}) {
  *   delta > 0  → add credit to the balance (issuance, refund, referral)
  *   delta < 0  → consume credit (applied to an invoice)
  *
- * Locks the customer row, recomputes the balance, refuses to let the
- * balance go negative, updates the cache, and writes the ledger row. Pass
- * an existing knex transaction as `trx` to fold this into a larger unit of
- * work (e.g. the invoice prepaid transition); otherwise it opens its own.
+ * Locks the customer row, recomputes the balance, preserves credit reserved
+ * by pending saved-card attempts, updates the cache, and writes the ledger
+ * row. Pass an existing knex transaction as `trx` to fold this into a larger
+ * unit of work (e.g. the invoice prepaid transition); otherwise it opens its
+ * own. A saved-card settlement passes its verified `currentChargeAttemptId`;
+ * the exception applies only when that attempt belongs to `invoiceId`.
  *
  * Returns { balanceAfter, entry }.
  */
 async function postCreditMovement({
   customerId, delta, source, invoiceId = null, referralId = null,
   note = null, createdBy = null, stampInsertOrder = false,
+  currentChargeAttemptId = null,
 }, trx = null) {
   const amount = round2(delta);
   if (!customerId) throw new Error('customerId is required');
@@ -98,16 +102,27 @@ async function postCreditMovement({
     }
     const current = round2(customer.account_credits || 0);
     const balanceAfter = round2(current + amount);
-    if (balanceAfter < 0) {
+    const reserved = amount < 0
+      ? await unpostedSavedCardCredit({
+        customerId,
+        invoiceId,
+        currentChargeAttemptId,
+        includeCurrentInvoice: true,
+      }, t)
+      : 0;
+    if (balanceAfter < reserved) {
       const err = new Error(
         `Insufficient account credit — balance is $${current.toFixed(2)}, `
+        + (reserved > 0
+          ? `$${reserved.toFixed(2)} is reserved for pending card payment, `
+          : '')
         + `cannot apply $${Math.abs(amount).toFixed(2)}`,
       );
       err.statusCode = 400;
       err.isOperational = true;
-      // Typed so callers can tell "the money is genuinely gone" apart from
-      // a transient DB fault — the inspection-credit reversal alerts the
-      // office ONLY on this code (PR #3178 r18 P2).
+      // Typed so callers can tell "the money is unavailable" apart from a
+      // transient DB fault — the inspection-credit reversal alerts the office
+      // ONLY on this code (PR #3178 r18 P2).
       err.code = 'INSUFFICIENT_CREDIT';
       throw err;
     }
@@ -253,7 +268,132 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
   return row?.auto_apply_account_credit === true;
 }
 
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false, applyAtMost = null }, trx = null) {
+// A submitted saved-card attempt can roll its invoice transaction back for
+// authentication while the same PI still owns the reduced charge amount.
+// Until that PI is canceled or settles, leave the attempt's not-yet-posted
+// credit available for its original invoice. Credit-moving callers hold the
+// customer row while reading this; an unlocked affordability preflight is only
+// an early refusal and repeats the calculation under that lock before writing.
+// Sibling invoices are deliberately not locked: every credit consumer
+// serializes on the customer row, and both sides of a claimed -> failed/
+// ambiguous transition match this predicate, so the reservation cannot vanish
+// at that seam.
+function unpostedSavedCardCreditQuery({
+  customerId,
+  invoiceId = null,
+  currentChargeAttemptId = null,
+  includeCurrentInvoice = false,
+}, dbh) {
+  const query = dbh('stripe_invoice_charge_attempts as attempt')
+    .join('invoices as held_invoice', 'held_invoice.id', 'attempt.invoice_id')
+    .where('held_invoice.customer_id', customerId)
+    .whereNotNull('attempt.submitted_at')
+    .where('attempt.credit_applied_delta', '>', 0)
+    .where(function savedCardMaySettle() {
+      this.where(function unresolvedAttempt() {
+        this.whereNull('attempt.resolved_at')
+          .whereIn('attempt.status', ['claimed', 'ambiguous']);
+      }).orWhere(function awaitingAuthentication() {
+        whereAwaitingAuthentication(this, 'attempt');
+      });
+    });
+  if (invoiceId && !includeCurrentInvoice) {
+    query.whereNot('attempt.invoice_id', invoiceId);
+  }
+  // A settlement may spend the reservation made by its own attempt. Match
+  // BOTH identities so a caller cannot name a sibling attempt and consume
+  // credit promised to another invoice.
+  if (invoiceId && currentChargeAttemptId) {
+    query.where(function otherAttemptOrInvoice() {
+      this.whereNot('attempt.id', currentChargeAttemptId)
+        .orWhereNot('attempt.invoice_id', invoiceId);
+    });
+  }
+  return query;
+}
+
+async function unpostedSavedCardCredit({
+  customerId,
+  invoiceId = null,
+  currentChargeAttemptId = null,
+  includeCurrentInvoice = false,
+}, dbh) {
+  const attempts = await unpostedSavedCardCreditQuery({
+    customerId,
+    invoiceId,
+    currentChargeAttemptId,
+    includeCurrentInvoice,
+  }, dbh)
+    .select(
+      'attempt.credit_applied_delta',
+      'attempt.credit_applied_total',
+      'held_invoice.credit_applied',
+    );
+
+  return round2(attempts.reduce((sum, attempt) => {
+    const submittedDelta = Math.max(0, round2(attempt.credit_applied_delta));
+    const submittedTarget = Math.max(0, round2(attempt.credit_applied_total));
+    const alreadyPosted = Math.max(0, round2(attempt.credit_applied));
+    const stillUnposted = Math.max(0, round2(submittedTarget - alreadyPosted));
+    return sum + Math.min(submittedDelta, stillUnposted);
+  }, 0));
+}
+
+async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }, dbh) {
+  return unpostedSavedCardCredit({ customerId, invoiceId }, dbh);
+}
+
+// Checkout pricing needs the balance and sibling reservation from the SAME
+// PostgreSQL statement. Two ordinary READ COMMITTED selects can straddle a
+// sibling settlement (old balance, then vanished reservation) and temporarily
+// promise the same credit twice. This snapshot is intentionally unlocked: the
+// eventual draw still repeats the calculation under its established locks.
+async function accountCreditSnapshotForInvoice({
+  customerId,
+  invoiceId,
+  balanceAdjustment = 0,
+}, dbh = db) {
+  if (!customerId) {
+    return { balance: 0, reserved: 0, spendable: 0, autoApplyEnabled: false };
+  }
+  const reservation = unpostedSavedCardCreditQuery({ customerId, invoiceId }, dbh)
+    .sum({
+      reserved_credit: dbh.raw(
+        'LEAST(GREATEST(COALESCE(??, 0), 0), GREATEST(COALESCE(??, 0) - COALESCE(??, 0), 0))',
+        [
+          'attempt.credit_applied_delta',
+          'attempt.credit_applied_total',
+          'held_invoice.credit_applied',
+        ],
+      ),
+    })
+    .as('credit_reservation');
+  const row = await dbh('customers as credit_customer')
+    .crossJoin(reservation)
+    .where('credit_customer.id', customerId)
+    .first(
+      'credit_customer.account_credits',
+      'credit_customer.auto_apply_account_credit',
+      'credit_reservation.reserved_credit',
+    );
+  const balance = round2((Number(row?.account_credits) || 0) + Number(balanceAdjustment || 0));
+  const reserved = round2(row?.reserved_credit || 0);
+  return {
+    balance,
+    reserved,
+    spendable: Math.max(0, round2(balance - reserved)),
+    autoApplyEnabled: row?.auto_apply_account_credit === true,
+  };
+}
+
+async function spendableAccountCreditForInvoice({ customerId, invoiceId, balance }, dbh) {
+  const accountBalance = round2(balance || 0);
+  if (accountBalance <= 0) return 0;
+  const reserved = await unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }, dbh);
+  return Math.max(0, round2(accountBalance - reserved));
+}
+
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false, currentChargeAttemptId = null, applyAtMost = null }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -417,6 +557,19 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     // completion invoice has no PI; the admin apply-credit route, by contrast,
     // explicitly triages/cancels the PI — auto-apply simply declines.)
     if (invoice.stripe_payment_intent_id) return { applied: 0, skipped: 'has_payment_intent' };
+    // An unstamped card payment can still settle. Check under the invoice
+    // lock, leaving any existing claims in place for their reconciliation.
+    try {
+      await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, t, {
+        readOnly: true,
+        checkout: true,
+        excludeChargeAttemptId: currentChargeAttemptId,
+      });
+    } catch (paymentErr) {
+      // A charge pricing its own credit must stop before it calls Stripe.
+      if (currentChargeAttemptId || paymentErr.savedCardPending !== true) throw paymentErr;
+      return { applied: 0, skipped: 'card_payment_may_settle' };
+    }
     // An active payment plan snapshots total_balance at creation; auto-applying
     // credit now would reduce amount due while the plan keeps collecting the
     // original balance (over-collection + consumed credit). Skip — the operator
@@ -432,6 +585,11 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     if (!customerRequested && customer?.auto_apply_account_credit !== true) {
       return { applied: 0, skipped: 'customer_opt_out' };
     }
+    const spendableBalance = await spendableAccountCreditForInvoice({
+      customerId: invoice.customer_id,
+      invoiceId,
+      balance: customer?.account_credits || 0,
+    }, t);
     // Partial application is now safe: every charge path (Stripe PI / autopay /
     // Terminal) and the webhook amount-verification price from amount due
     // (total − credit_applied − amount_paid) via invoiceAmountDue, so a collectible invoice
@@ -444,7 +602,7 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
       // `applyAtMost` caps the draw: a customer who asked for one credit (a
       // promo code entered on the pay page) has only that much drawn, never
       // the rest of a balance they have not chosen to apply.
-      balance: Math.min(Number(customer?.account_credits) || 0, applyAtMost ?? Infinity),
+      balance: Math.min(spendableBalance, applyAtMost ?? Infinity),
       fullCoverageOnly,
     });
     if (applyAmt <= 0) return { applied: 0, skipped: skipReason || 'nothing_to_apply' };
@@ -456,6 +614,7 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
       invoiceId,
       note: 'Account credit applied to invoice',
       createdBy,
+      currentChargeAttemptId,
     }, t);
 
     const updates = { credit_applied: newCreditApplied, updated_at: t.fn.now() };
@@ -769,6 +928,20 @@ async function reverseAppliedCredit({ invoiceId, amount, createdBy = 'system', n
     }
     const reverse = Math.min(want, round2(inv.credit_applied || 0));
     if (!(reverse > 0)) return { reversed: 0 };
+    // A saved-card PaymentIntent can still settle without being attached to
+    // invoices.stripe_payment_intent_id (most notably authentication_required).
+    // Recheck that durable hold while the invoice row is locked, before moving
+    // either the invoice credit or the customer ledger. Exact PI cancellation
+    // clears the checkout fence and makes the ordinary reversal safe again.
+    const StripeService = require('./stripe');
+    try {
+      await StripeService.assertNoInvoiceChargeReconciliationPending(invoiceId, t, { checkout: true });
+    } catch (paymentErr) {
+      if (StripeService.savedCardChargeSuppressesAlternateCollection(paymentErr)) {
+        return { reversed: 0, skipped: 'payment_in_flight' };
+      }
+      throw paymentErr;
+    }
     await t('invoices').where({ id: invoiceId })
       .update({ credit_applied: round2(round2(inv.credit_applied || 0) - reverse), updated_at: t.fn.now() });
     await postCreditMovement({
@@ -827,6 +1000,9 @@ module.exports = {
   afterCommit,
   outermostTransaction,
   customerAutoApplyEnabled,
+  accountCreditSnapshotForInvoice,
+  unpostedSavedCardCreditForOtherInvoices,
+  spendableAccountCreditForInvoice,
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,
   WAVEGUARD_EXTENSION_CREDIT_BY,

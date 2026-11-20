@@ -9,6 +9,10 @@
 // `database` param (pay-v2 imports it; it no longer re-exports it).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+const mockCreditSnapshot = jest.fn();
+jest.mock('../services/customer-credit', () => ({
+  accountCreditSnapshotForInvoice: (...args) => mockCreditSnapshot(...args),
+}));
 const mockGates = { autoApplyAccountCredit: true };
 const mockEnabled = { payIncludeBalance: true };
 jest.mock('../config/feature-gates', () => ({
@@ -63,6 +67,7 @@ beforeEach(() => {
   mockStopped.mockResolvedValue(new Set());
   mockOpenBalance.mockResolvedValue([sib('s1')]);
   mockReconcile.mockResolvedValue(undefined);
+  mockCreditSnapshot.mockReset();
   // The readOnly member predicate re-reads each sibling's FULL invoice row by
   // id (openBalanceInvoices rows carry no customer/payer columns).
   fullRows = new Map();
@@ -196,13 +201,13 @@ describe('the caller\'s database handle reaches the payer resolve', () => {
     expect(mockStopped).toHaveBeenCalledWith(['s1'], { database: handle });
     // Default callers (the pay page, money seams) keep the writing fence: the
     // very same two-argument call they always made.
-    expect(mockReconcile.mock.calls).toEqual([['s1', handle]]);
+    expect(mockReconcile.mock.calls).toEqual([['s1', handle, { checkout: true }]]);
   });
 
   test('readOnly reaches the sibling reconciliation fence', async () => {
     const handle = jest.fn(serveFullRow);
     await PayCombined.combinedEligibleSiblings(anchor(), { database: handle, readOnly: true });
-    expect(mockReconcile).toHaveBeenCalledWith('s1', handle, { readOnly: true });
+    expect(mockReconcile).toHaveBeenCalledWith('s1', handle, { readOnly: true, checkout: true });
   });
 
   test('with no handle the default pool handle is passed explicitly', async () => {
@@ -212,28 +217,37 @@ describe('the caller\'s database handle reaches the payer resolve', () => {
 });
 
 describe('invoiceCreditWouldFullyCover (lives in pay-combined)', () => {
-  const invoice = { customer_id: 'cust-1', total: 100, credit_applied: 0 };
-  const dbReturning = (row) => {
-    const handle = jest.fn(() => ({ where: () => ({ first: jest.fn(async () => row) }) }));
-    return handle;
-  };
-
+  const invoice = { id: 'inv-1', customer_id: 'cust-1', total: 100, credit_applied: 0 };
   test('reads through the handle it is given, never the pool', async () => {
-    const handle = dbReturning({ account_credits: 150, auto_apply_account_credit: true });
+    const handle = jest.fn();
+    mockCreditSnapshot.mockResolvedValue({ spendable: 150, autoApplyEnabled: true });
     await expect(PayCombined.invoiceCreditWouldFullyCover(invoice, { database: handle })).resolves.toBe(true);
-    expect(handle).toHaveBeenCalledWith('customers');
+    expect(mockCreditSnapshot).toHaveBeenCalledWith({ customerId: invoice.customer_id, invoiceId: invoice.id }, handle);
     expect(db).not.toHaveBeenCalled();
   });
 
+  test('a sibling saved-card reservation reduces gross credit before the full-coverage verdict', async () => {
+    const handle = jest.fn();
+    mockCreditSnapshot.mockResolvedValueOnce({ spendable: 75, autoApplyEnabled: true });
+
+    await expect(PayCombined.invoiceCreditWouldFullyCover(invoice, { database: handle }))
+      .resolves.toBe(false);
+    expect(mockCreditSnapshot).toHaveBeenCalledWith({
+      customerId: 'cust-1',
+      invoiceId: 'inv-1',
+    }, handle);
+  });
+
   test('the same verdicts as before: partial, opted out, payer-billed, gate off', async () => {
-    await expect(PayCombined.invoiceCreditWouldFullyCover(invoice, { database: dbReturning({ account_credits: 40, auto_apply_account_credit: true }) })).resolves.toBe(false);
-    await expect(PayCombined.invoiceCreditWouldFullyCover(invoice, { database: dbReturning({ account_credits: 150, auto_apply_account_credit: false }) })).resolves.toBe(false);
-    const untouched = dbReturning({ account_credits: 150, auto_apply_account_credit: true });
-    await expect(PayCombined.invoiceCreditWouldFullyCover({ ...invoice, payer_id: 'payer-1' }, { database: untouched })).resolves.toBe(false);
-    expect(untouched).not.toHaveBeenCalled();
+    mockCreditSnapshot.mockResolvedValueOnce({ spendable: 40, autoApplyEnabled: true });
+    await expect(PayCombined.invoiceCreditWouldFullyCover(invoice)).resolves.toBe(false);
+    mockCreditSnapshot.mockResolvedValueOnce({ spendable: 150, autoApplyEnabled: false });
+    await expect(PayCombined.invoiceCreditWouldFullyCover(invoice)).resolves.toBe(false);
+    mockCreditSnapshot.mockClear();
+    await expect(PayCombined.invoiceCreditWouldFullyCover({ ...invoice, payer_id: 'payer-1' })).resolves.toBe(false);
     mockGates.autoApplyAccountCredit = false;
-    await expect(PayCombined.invoiceCreditWouldFullyCover(invoice, { database: untouched })).resolves.toBe(false);
-    expect(untouched).not.toHaveBeenCalled();
+    await expect(PayCombined.invoiceCreditWouldFullyCover(invoice)).resolves.toBe(false);
+    expect(mockCreditSnapshot).not.toHaveBeenCalled();
   });
 });
 

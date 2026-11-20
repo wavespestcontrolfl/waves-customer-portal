@@ -6457,6 +6457,59 @@ function BillingChannelSelect({ field, channels, usable, saving, onChange }) {
   );
 }
 
+const PAYMENT_VERIFICATION_STATES = new Set(['authentication_pending', 'authentication_unknown']);
+const PAYMENT_RECOVERY_BLOCKING_STATES = new Set([
+  ...PAYMENT_VERIFICATION_STATES,
+  'recovery_unavailable',
+  'recovery_unchecked',
+]);
+
+function paymentNeedsVerification(payment) {
+  return payment?.status === 'failed' && PAYMENT_VERIFICATION_STATES.has(payment?.recoveryState);
+}
+
+function paymentBlocksRecoveryShortcut(payment) {
+  return payment?.status === 'failed' && PAYMENT_RECOVERY_BLOCKING_STATES.has(payment?.recoveryState);
+}
+
+function failedPaymentBannerCopy({
+  paymentVerificationRequired,
+  recoveryShortcutsBlocked,
+  cancelledAccount,
+  primaryOpenInvoice,
+}) {
+  if (paymentVerificationRequired) {
+    return {
+      badge: 'Status check needed',
+      title: 'Payment needs verification',
+      detail: 'Contact us to confirm the payment status before trying again.',
+    };
+  }
+  if (recoveryShortcutsBlocked) {
+    return {
+      badge: 'Action needed',
+      title: 'Payment failed',
+      detail: 'Contact us to review the failed payment before trying again.',
+    };
+  }
+  if (cancelledAccount) {
+    return {
+      badge: 'Action needed',
+      title: 'Payment failed',
+      detail: primaryOpenInvoice
+        ? 'Your last payment could not be processed. Review your open invoices above.'
+        : 'Your last payment could not be processed. Contact us to review your balance.',
+    };
+  }
+  return {
+    badge: 'Action needed',
+    title: 'Payment failed',
+    detail: primaryOpenInvoice
+      ? 'Your last payment could not be processed. Review and pay your open invoices above. Update your saved payment method below for future payments.'
+      : 'Your last payment could not be processed. Contact us to review the failed payment. Update your saved payment method below for future payments.',
+  };
+}
+
 function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
@@ -7112,11 +7165,25 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // the Auto Pay-off banner can point at the Pay now button when one renders.
   const openInvoices = Array.isArray(balance?.openInvoices) ? balance.openInvoices : [];
   const primaryOpenInvoice = openInvoices[0] || null;
+  // Balance and history can refresh independently. Base the banner on the
+  // attempt that triggered it. Each history row has its own recovery action.
+  const currentFailure = balance?.lastPaymentAttemptId
+    ? payments.find((p) => p.id === balance.lastPaymentAttemptId && p.status === 'failed')
+    : payments.find((p) => p.status === 'failed' && p.recoveryState !== 'recovery_inactive');
+  const paymentVerificationRequired = paymentNeedsVerification(currentFailure);
+  const recoveryShortcutsBlocked = paymentBlocksRecoveryShortcut(currentFailure)
+    || (balance?.lastPaymentAttemptId && (!currentFailure || currentFailure.recoveryState === 'recovery_inactive'));
+  const failedBannerCopy = failedPaymentBannerCopy({
+    paymentVerificationRequired,
+    recoveryShortcutsBlocked,
+    cancelledAccount,
+    primaryOpenInvoice,
+  });
   const bannerConfig = {
     failed: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
-      badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
-      title: 'Payment failed - update your payment method',
+      titleColor: B.red, subtitleColor: B.grayDark,
+      ...failedBannerCopy,
       // No interruption claim: a balance never withholds service (nothing
       // reads service_paused_at to block a visit). No retry promise either —
       // billing-cron only retries rows it armed with next_retry_at, which
@@ -7129,9 +7196,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       // skips and no card update clears (there is no resume path today), and
       // it renders with Auto Pay off. Both actions are stated plainly and
       // nothing is guaranteed about what happens next.
-      detail: primaryOpenInvoice
-        ? `Your last payment could not be processed. Pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above, and update your saved card below.`
-        : 'Your last payment could not be processed. Update your saved card below.',
     },
     expired: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
@@ -7451,7 +7515,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           </div>
           {/* Glass, not a gold tint: 9% gold over the blue scene read as a
               muddy green wash. The Pay button carries the gold. */}
-          <div data-glass="soft" style={{
+          <div id="billing-open-invoices" data-glass="soft" style={{
             minWidth: compact ? '100%' : 190,
             padding: '14px 16px',
             borderRadius: 8,
@@ -7572,10 +7636,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 3, lineHeight: 1.45 }}>
             {bannerConfig.detail}
           </div>
-          {bannerState === 'failed' && primaryOpenInvoice && (
+          {bannerState === 'failed' && primaryOpenInvoice && !recoveryShortcutsBlocked && (
             <div style={{ marginTop: 10 }}>
-              <a href={primaryOpenInvoice.payUrl} style={payNowButtonStyle} data-glass-accent="">
-                Pay {money(primaryOpenInvoice.amountDue)} now
+              <a href="#billing-open-invoices" style={payNowButtonStyle} data-glass-accent="">
+                View open invoices
               </a>
             </div>
           )}
@@ -8037,13 +8101,25 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                     bank payment never reads "Card ending in …". */}
                 {p.lastFour && ` - ${isBankMethod(p.methodType) ? (p.bankName || 'Bank account') : cardBrandLabel(p.cardBrand)} ending in ${p.lastFour}`}
               </div>
-              {p.status === 'failed' && (
+              {p.status === 'failed' && p.recoveryState !== 'recovery_inactive' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {primaryOpenInvoice && (
-                    <a data-glass-accent="" href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
-                      Pay {money(primaryOpenInvoice.amountDue)} now
+                  {paymentNeedsVerification(p) ? (
+                    <span role="status" style={{ color: B.red, fontSize: 14, fontWeight: 700, lineHeight: 1.4 }}>
+                      Payment needs verification. Contact us to confirm the payment status before trying again.
+                    </span>
+                  ) : paymentBlocksRecoveryShortcut(p) ? (
+                    <span role="status" style={{ color: B.red, fontSize: 14, fontWeight: 700, lineHeight: 1.4 }}>
+                      Contact us to review this payment before trying again.
+                    </span>
+                  ) : p.recoveryInvoice ? (
+                    <a data-glass-accent="" href={p.recoveryInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
+                      Review invoice
                     </a>
-                  )}
+                  ) : primaryOpenInvoice ? (
+                    <a data-glass-accent="" href="#billing-open-invoices" style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
+                      View open invoices
+                    </a>
+                  ) : null}
                   {/* Cancelled accounts have no card management: the setup-
                       intent route is not on the cancelled allowlist, so this
                       second entry point must hide with the section (the pay

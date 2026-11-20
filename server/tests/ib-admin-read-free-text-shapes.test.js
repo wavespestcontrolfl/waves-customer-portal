@@ -270,11 +270,11 @@ const SHAPES = {
     body: { attachments: [{ id: UUID, invoice_id: UUID, file_name: 'photo.jpg', mime_type: 'image/jpeg', file_size_bytes: 1200, created_at: '2026-10-01T00:00:00Z' }] },
     kept: { 'attachments.0.file_name': 'photo.jpg', 'attachments.0.mime_type': 'image/jpeg' },
   },
-  // admin-invoices.js:2696-2703 customer_id, invoice_number, total, credit_applied, amount_due, balance.
+  // The staff invoice credit preview includes the amount available after saved-card reservations.
   '/admin/invoices/:id/credit-context': {
     params: { id: UUID },
-    body: { customer_id: UUID, invoice_number: 'INV-1001', total: 100, credit_applied: 0, amount_due: 100, balance: 25 },
-    kept: { invoice_number: 'INV-1001', balance: 25 },
+    body: { customer_id: UUID, invoice_number: 'INV-1001', total: 100, credit_applied: 0, amount_due: 100, balance: 25, spendable: 10 },
+    kept: { invoice_number: 'INV-1001', balance: 25, spendable: 10 },
   },
   // invoice-address.js:5,67-70 ADDRESS_FIELDS only, returned as { address }.
   '/admin/invoices/:id/receipt-address': {

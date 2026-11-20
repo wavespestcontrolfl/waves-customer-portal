@@ -300,8 +300,8 @@ test('every production caller of postCreditMovement that locks an invoice first 
     {
       file: 'routes/admin-invoices.js', label: 'POST /:id/apply-credit',
       anchor: "outcome = await db.transaction(async (trx) => {",
-      customerLock: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
-      invoiceLock: "const locked = await trx('invoices').where({ id }).forUpdate().first();",
+      customerLock: "const lockedCustomer = await trx('customers').where({ id: invoice.customer_id })",
+      invoiceLock: 'const locked = await InvoiceService.lockInvoicePaymentIntentAllocation(trx, {',
     },
     {
       file: 'routes/admin-invoices.js', label: 'POST /:id/reverse-prepaid',
@@ -316,10 +316,10 @@ test('every production caller of postCreditMovement that locks an invoice first 
       invoiceLock: "const locked = await trx('invoices').where({ id: claimedInvoice.id }).forUpdate().first();",
     },
     {
-      file: 'services/stripe.js', label: 'resolveFailedInvoiceSavedCardChargeAttempt',
-      anchor: "await trx('customers').where({ id: customerId }).forUpdate().first('id');\n    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
+      file: 'services/stripe.js', label: 'all saved-card terminal failure paths',
+      anchor: 'async function resolveFailedInvoiceSavedCardChargeAttempt(',
       customerLock: "await trx('customers').where({ id: customerId }).forUpdate().first('id');",
-      invoiceLock: "const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
+      invoiceLock: 'const invoice = await lockInvoicePaymentIntentAllocation(trx, {',
     },
     {
       file: 'services/stripe.js', label: 'persistSavedCardChargeCreditDelta',
@@ -328,10 +328,16 @@ test('every production caller of postCreditMovement that locks an invoice first 
       invoiceLock: "const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();",
     },
     {
-      file: 'routes/stripe-webhook.js', label: 'succeeded-PI fallback handler',
-      anchor: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = await trx('invoices')",
-      customerLock: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
-      invoiceLock: "const lockedInvoice = await trx('invoices')",
+      file: 'routes/stripe-webhook.js', label: 'authenticated succeeded-PI fallback handler',
+      anchor: 'async function lockFallbackSettlementInvoice(',
+      customerLock: "if (customerId) await trx('customers').where({ id: customerId }).forUpdate().first('id');",
+      invoiceLock: 'return lockInvoicePaymentIntentAllocation(trx, {',
+    },
+    {
+      file: 'routes/stripe-webhook.js', label: 'ordinary succeeded-PI fallback handler',
+      anchor: 'async function lockFallbackSettlementInvoice(',
+      customerLock: "if (customerId) await trx('customers').where({ id: customerId }).forUpdate().first('id');",
+      invoiceLock: "if (!authenticatingAttempt) return trx('invoices').where({ id: invoice.id }).forUpdate().first();",
     },
     {
       file: 'routes/stripe-webhook.js', label: 'ACH processing handler',
@@ -344,7 +350,7 @@ test('every production caller of postCreditMovement that locks an invoice first 
   for (const { file, label, anchor, customerLock, invoiceLock } of cases) {
     const source = read(file);
     expect(source.includes(anchor)).toBe(true);
-    const customerAt = source.indexOf(customerLock);
+    const customerAt = source.indexOf(customerLock, source.indexOf(anchor));
     const invoiceAt = source.indexOf(invoiceLock, customerAt);
     if (customerAt === -1) throw new Error(`${file} (${label}): customer lock string not found`);
     if (!(invoiceAt > customerAt)) throw new Error(`${file} (${label}): invoice lock not found after customer lock`);
@@ -411,15 +417,13 @@ test('the two stripe-webhook.js reorders left unguarded still source every downs
   const path = require('path');
   const source = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
 
-  const customerIdWrites = (lockAnchor, fnLabel) => {
-    // Start AFTER the upfront customer-lock line itself — that line
-    // legitimately reads the stale `invoice.customer_id` (it is only
-    // choosing which row to lock, not writing anything) — so the "never
-    // the stale read" assertion below is not tripped by its own lock.
-    const lockAt = source.indexOf(lockAnchor);
-    if (lockAt === -1) throw new Error(`stripe-webhook.js: lock anchor for ${fnLabel} not found`);
-    const bodyStart = lockAt + lockAnchor.length;
-    const body = source.slice(bodyStart, bodyStart + 8000);
+  const customerIdWrites = (anchor, fnLabel, endMarker) => {
+    const start = source.indexOf(anchor);
+    if (start === -1) throw new Error(`stripe-webhook.js: anchor for ${fnLabel} not found`);
+    const bodyStart = start + anchor.length;
+    const bodyEnd = source.indexOf(endMarker, bodyStart);
+    expect(bodyEnd).toBeGreaterThan(bodyStart);
+    const body = source.slice(bodyStart, bodyEnd);
     // Both the payments insert (customer_id: lockedInvoice.customer_id) and
     // postCreditMovement's argument (customerId: lockedInvoice.customer_id)
     // key off the post-wait re-read.
@@ -427,13 +431,18 @@ test('the two stripe-webhook.js reorders left unguarded still source every downs
     expect(body).not.toMatch(/customer_?[Ii]d:\s*invoice\.customer_id/);
   };
 
-  customerIdWrites(
-    "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n      const lockedInvoice = await trx('invoices')",
-    'succeeded-PI fallback handler',
-  );
+  // The customer read before the lock can differ from the final invoice
+  // owner. Follow the locked row through to both downstream money writes.
+  const fallback = source.slice(source.indexOf('const fallbackOutcome ='), source.indexOf('if (fallbackOutcome ==='));
+  expect(fallback).toContain('const lockedInvoice = await lockFallbackSettlementInvoice(');
+  expect(fallback).toContain('saveFallbackPayment(trx, capture, invoice, lockedInvoice, existing)');
+  expect(fallback).toContain('applySavedCardCreditAdjustment(trx, lockedInvoice, creditAttempt,');
+  customerIdWrites('function capturedFallbackPayment(', 'succeeded payment row', 'async function saveFallbackPayment(');
+  customerIdWrites('async function applySavedCardCreditAdjustment(', 'saved-card credit draw', 'function paidInvoiceFields(');
   customerIdWrites(
     "if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');\n    const lockedInvoice = await trx('invoices')",
     'ACH processing handler',
+    'if (processingOutcome ===',
   );
 });
 

@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
   const makeChain = (table) => {
     const state = { whereObj: null, idIn: null };
     const chain = {};
-    for (const m of ['whereNotIn', 'whereRaw', 'orderBy', 'forUpdate', 'whereNull', 'orWhereIn']) chain[m] = jest.fn(() => chain);
+    for (const m of ['whereNotIn', 'whereRaw', 'orderBy', 'forUpdate', 'forNoKeyUpdate', 'whereNull', 'orWhereIn']) chain[m] = jest.fn(() => chain);
     chain.whereNot = jest.fn((col, val) => { if (col === 'id') state.notId = String(val); return chain; });
     chain.where = jest.fn((arg) => {
       if (arg && typeof arg === 'object') state.whereObj = { ...(state.whereObj || {}), ...arg };
@@ -77,6 +77,9 @@ const mockChargeFence = jest.fn(async () => {});
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: jest.fn(), cancelPaymentIntent: jest.fn(),
   assertNoInvoiceChargeReconciliationPending: (...a) => mockChargeFence(...a),
+  savedCardChargeSuppressesAlternateCollection: (err) => [
+    'STRIPE_CHARGED_DB_FAILED', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGE_IN_PROGRESS', 'DEPOSIT_RECONCILIATION_REQUIRED',
+  ].includes(err?.code),
 }));
 
 const mockFence = jest.fn(async () => {});
@@ -96,6 +99,7 @@ beforeEach(() => {
   mockLockedOverride = {};
   mockOtherRows = {};
   mockUpdates.length = 0;
+  mockChargeFence.mockReset().mockResolvedValue(undefined);
   mockFence.mockReset();
   mockFence.mockResolvedValue(undefined);
   jest.spyOn(InvoiceService, 'restoreRodentSetupObligationForReversedInvoice').mockResolvedValue(undefined);
@@ -110,6 +114,23 @@ test('the preview pins each invoice with total, account credit and deposit credi
   const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
   expect([...voided]).toEqual(preview.map((p) => p.id));
   expect(mockReverse).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', createdBy: 'system:inspection_credit_cancellation_void_hook' });
+});
+
+test('the preview suppresses an unstamped authentication hold through the read-only checkout fence', async () => {
+  mockInvoiceRows = [INV_B];
+  mockChargeFence.mockRejectedValue(Object.assign(new Error('saved-card authentication pending'), {
+    code: 'STRIPE_CHARGE_IN_PROGRESS',
+    chargeAttemptId: 'attempt-auth',
+  }));
+
+  await expect(InvoiceService.previewInvoiceVoidForCancelledService('svc-1')).resolves.toEqual([]);
+
+  expect(mockChargeFence).toHaveBeenCalledWith(
+    'inv-b',
+    db,
+    { readOnly: true, checkout: true },
+  );
+  expect(require('../services/stripe').retrievePaymentIntent).not.toHaveBeenCalled();
 });
 
 test('a pinned sweep voids only the pinned invoices — one created after the card stays open', async () => {
@@ -244,6 +265,21 @@ describe('pinned sweep and an approved PaymentIntent', () => {
     expect([...voided]).toEqual(['inv-b']);
     expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
   });
+
+  test('a saved-card hold blocks Schedule/Dispatch before it retrieves or cancels the attached checkout', async () => {
+    withPi();
+    mockChargeFence.mockRejectedValue(Object.assign(new Error('saved-card authentication pending'), {
+      code: 'STRIPE_CHARGE_IN_PROGRESS',
+      chargeAttemptId: 'attempt-1',
+    }));
+
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
+
+    expect([...voided]).toEqual([]);
+    expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(voidedIds()).toEqual([]);
+  });
 });
 
 // A PaymentIntent that also covers another invoice (a combined payment) is never cancelled by a card-confirmed cancel:
@@ -351,11 +387,11 @@ describe('pinned sweep takes the combined-payment lock', () => {
     expect(db.__lockTrx.commit).toHaveBeenCalledTimes(1);
   });
 
-  test('Dispatch\'s unpinned sweep takes no combined-payment lock', async () => {
+  test('Dispatch\'s unpinned sweep takes the combined-payment lock before retiring a stamped PI', async () => {
     mockInvoiceRows = [{ ...INV_A, customer_id: 'cust-1', stripe_payment_intent_id: 'pi_test' }];
     stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
     await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
-    expect(lockCalls()).toHaveLength(0);
+    expect(lockCalls()).toHaveLength(1);
   });
 });
 
@@ -396,8 +432,8 @@ describe('pinned void rechecks downstream billing effects under the invoice lock
     const voided = [...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned }))];
     expect(voided).toEqual([]);
     expect(voidedIds()).toEqual([]);
-    // Read-only, on the void transaction, for this invoice.
-    expect(mockChargeFence).toHaveBeenCalledWith('inv-b', expect.anything(), { readOnly: true });
+    // Writable checkout fence, under the void transaction's invoice lock.
+    expect(mockChargeFence).toHaveBeenCalledWith('inv-b', expect.anything(), { checkout: true });
   });
 
   // The bar's void_invoice rules, run on the locked row by the shared classifier (invoice-void-classifier.js): an invoice that
@@ -431,12 +467,14 @@ describe('pinned void rechecks downstream billing effects under the invoice lock
     expect(voidedIds()).toEqual([]);
   });
 
-  test("Dispatch's unpinned sweep does not run the charge fence (unchanged)", async () => {
+  test("Dispatch's unpinned sweep also refuses an unresolved saved-card charge under the invoice lock", async () => {
     mockInvoiceRows = [INV_B];
     mockChargeFence.mockRejectedValue(Object.assign(new Error('charge pending'), { code: 'STRIPE_AMBIGUOUS_OUTCOME', reconciliationRequired: true }));
-    expect([...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1'))]).toEqual(['inv-b']);
-    expect(mockChargeFence).not.toHaveBeenCalled();
-    mockChargeFence.mockReset().mockResolvedValue(undefined);
+    expect([...(await InvoiceService.voidOpenInvoicesForCancelledService('svc-1'))]).toEqual([]);
+    expect(mockChargeFence).toHaveBeenCalledWith('inv-b', expect.anything(), { checkout: true });
+    expect(voidedIds()).toEqual([]);
+    expect(require('../services/estimate-deposits').restoreDepositCreditForVoidedInvoice).not.toHaveBeenCalled();
+    expect(require('../services/customer-credit').restoreAccountCreditForVoidedInvoice).not.toHaveBeenCalled();
   });
 
   test('an unchanged plain invoice is still voided', async () => {

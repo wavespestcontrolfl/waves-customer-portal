@@ -65,6 +65,10 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   scheduleReceiptDeliveryDrain: jest.fn(),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
+jest.mock('../services/invoice-payment-authentication', () => ({
+  ...jest.requireActual('../services/invoice-payment-authentication'),
+  recordAuthenticationSettlement: jest.fn(),
+}));
 jest.mock('../services/estimate-deposits', () => ({
   handleDepositChargeReversed: jest.fn(async () => ({ handled: false })),
   handleDepositIntentSucceeded: jest.fn(async () => {}),
@@ -105,6 +109,11 @@ function resetMockState() {
     settleReadThrows: false,
     // A payments row the fallback's FOR UPDATE read finds (null = none).
     fallbackPayment: null,
+    // Saved-card attempt snapshots: preflight, then each transactional
+    // FOR UPDATE recheck. A sequence models the worker binding another PI
+    // between those reads.
+    preLockAttempt: null,
+    lockedAttempts: [],
     updates: [],
   });
 }
@@ -139,7 +148,12 @@ function mockMakeBuilder(table, { inTrx } = {}) {
     // there is never a pre-existing row — that is the path under test.
     if (table === 'payments') {
       if (inTrx && b._forUpdate && mockState.fallbackPayment) return mockState.fallbackPayment;
+      if (b._wheres.some((where) => where.status === 'disputed')) return null;
       return (!inTrx && mockState.processingPaymentsUpdated > 0) ? { id: 'pay-processing' } : null;
+    }
+    if (table === 'stripe_invoice_charge_attempts') {
+      if (inTrx && b._forUpdate && mockState.lockedAttempts.length) return mockState.lockedAttempts.shift();
+      return mockState.preLockAttempt;
     }
     return null;
   };
@@ -196,6 +210,22 @@ function succeededPI(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   resetMockState();
+});
+
+test.each([0, 1])('saved-card settlement closes its authentication attempt in the invoice transaction (%i existing payments)', async (existing) => {
+  mockState.processingPaymentsUpdated = existing;
+  const finish = require('../services/invoice-payment-authentication').recordAuthenticationSettlement;
+  const pi = succeededPI({ status: 'succeeded', metadata: { source: 'admin_card_on_file', base_amount: '100' } });
+  finish.mockImplementationOnce((_intent, trx) => {
+    expect(trx).not.toBe(require('../models/db'));
+    expect(trx).toHaveBeenCalledWith('invoices');
+    expect(mockState.updates).toContainEqual(expect.objectContaining({
+      table: 'invoices', inTrx: true, payload: expect.objectContaining({ status: 'paid' }),
+    }));
+  });
+  await handlePaymentIntentSucceeded(pi);
+  expect(finish).toHaveBeenCalledTimes(1);
+  expect(finish).toHaveBeenCalledWith(pi, expect.any(Function));
 });
 
 describe('payment settlement takes ownership from the LOCKED invoice row', () => {
@@ -340,6 +370,54 @@ describe('the withdrawal is re-read under the settlement lock', () => {
     expect(lockAt).toBeGreaterThanOrEqual(0);
     expect(mockState.updates[lockAt].payload).toContain(WINNER);
     expect(flipAt).toBeGreaterThan(lockAt);
+  });
+});
+
+describe('saved-card worker identity is rechecked before existing-payment settlement', () => {
+  const attempt = (workerPaymentIntentId = null) => ({
+    id: 'attempt-1', invoice_id: 'inv-1', status: 'ambiguous', resolved_at: null,
+    stripe_payment_method_id: 'pm-saved', stripe_payment_intent_id: 'pi_test_1',
+    worker_payment_intent_id: workerPaymentIntentId,
+  });
+  const savedCardPi = () => succeededPI({
+    payment_method: 'pm-saved',
+    payment_method_types: ['us_bank_account'],
+    metadata: {
+      source: 'admin_card_on_file', saved_card_attempt_id: 'attempt-1',
+      waves_invoice_id: 'inv-1', waves_customer_id: WINNER,
+      base_amount: '100', card_surcharge: '0',
+    },
+  });
+
+  test('a processing row is not flipped after the worker binds a different PI', async () => {
+    mockState.processingPaymentsUpdated = 1;
+    mockState.preLockAttempt = attempt();
+    mockState.lockedAttempts = [attempt('pi_worker_returned')];
+    mockState.settleReadInvoice = { ...mockState.preLockInvoice, customer_id: LOSER };
+
+    await handlePaymentIntentSucceeded(savedCardPi());
+
+    expect(mockState.updates.filter((u) => u.table === 'payments')).toHaveLength(0);
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toMatchObject({
+      inTrx: true, payload: { invoice_id: 'inv-1', customer_id: LOSER },
+    });
+    expect(mockState.updates.find((u) => u.table === 'invoices' && u.payload?.status === 'paid')).toBeFalsy();
+  });
+
+  test('the fallback existing-row path repeats the same locked worker check', async () => {
+    mockState.fallbackPayment = { id: 'pay-existing', status: 'failed', metadata: {} };
+    mockState.preLockAttempt = attempt();
+    // First locked read is the direct processing-flip transaction; the worker
+    // binds its different PI before the fallback transaction rechecks.
+    mockState.lockedAttempts = [attempt(), attempt('pi_worker_returned')];
+
+    await handlePaymentIntentSucceeded(savedCardPi());
+
+    // Only the direct processing UPDATE (which matched zero) ran. The fallback
+    // did not mutate the existing failed row after seeing the conflict.
+    expect(mockState.updates.filter((u) => u.table === 'payments')).toHaveLength(1);
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toMatchObject({ inTrx: true });
+    expect(mockState.updates.find((u) => u.table === 'invoices' && u.payload?.status === 'paid')).toBeFalsy();
   });
 });
 

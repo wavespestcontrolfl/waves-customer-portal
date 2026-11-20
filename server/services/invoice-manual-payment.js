@@ -101,7 +101,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const InvoiceService = require('./invoice');
 const PaymentPlans = require('./payment-plans');
-const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
+const { guardOpenPaymentIntentForPrepaid, neutralizeOpenPaymentIntent } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceDepositCreditCents, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
@@ -150,15 +150,55 @@ function refusal(statusCode, message, extra = {}) {
 // P1: no parallel retire logic here). This wrapper only maps its verdict to
 // the { status, error } the routes send as-is; null means clear. Shared by
 // apply-credit (route) and recordManualPayment.
-async function retireOpenPaymentIntentBeforeSettlement(invoice, { action }) {
+async function retireOpenPaymentIntentBeforeSettlement(invoice, { action, connection = null }) {
   const openPiId = invoice.stripe_payment_intent_id || null;
   if (!openPiId) return null;
-  const verdict = await guardOpenPaymentIntentForPrepaid(invoice);
+  // Locked callers supply their transaction so combined sibling stamps are
+  // cleared on the same connector as the paid/prepaid transition. The older
+  // unlocked wrapper keeps the shared guard's default pool behavior.
+  const verdict = connection
+    ? await neutralizeOpenPaymentIntent(openPiId)
+    : await guardOpenPaymentIntentForPrepaid(invoice);
   if (verdict.ok) return null;
   if (verdict.reason === 'payment_in_flight') {
     return { status: 409, error: `A payment is already in flight (${verdict.piStatus}); wait for it to settle or refund it before ${action}` };
   }
   return { status: 409, error: `Open payment session ${openPiId} could not be verified (${verdict.detail || 'payment service unavailable'}); resolve it before ${action}` };
+}
+
+// Call only after the caller holds the combined-customer reservation and the
+// invoice row lock, and after its saved-card/eligibility checks have passed.
+// The shared prepaid guard handles standalone AND combined provider sessions
+// and preserves its exact verdicts (including ACH microdeposit handling).
+// Provider neutralization runs exactly once; sibling stamp cleanup then stays
+// on the caller transaction with the paid/prepaid transition.
+async function retireLockedPaymentSessionsBeforeSettlement(trx, invoice, { action, retiredCheckout }) {
+  const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action, connection: trx });
+  if (openPi) return openPi;
+  if (invoice.stripe_payment_intent_id) {
+    if (retiredCheckout) retiredCheckout.id = invoice.stripe_payment_intent_id;
+    // The invoice writer clears its own stamp. Clear any combined siblings on
+    // this transaction so their view cannot escape a rolled-back settlement.
+    await require('./pay-combined').clearPaymentIntentStamps(
+      trx,
+      invoice.stripe_payment_intent_id,
+      { keepInvoiceIds: [String(invoice.id)] },
+    );
+  }
+  return null;
+}
+
+// Provider cancellation survives a database rollback. Only clear collectible
+// rows that still point at the exact intent already verified by this request.
+async function rethrowAfterSettlementRollback(database, retiredCheckout, originalError) {
+  if (retiredCheckout.id) {
+    try {
+      await require('./pay-combined').clearPaymentIntentStamps(database, retiredCheckout.id);
+    } catch (cleanupError) {
+      logger.error(`[invoice-manual-payment] Cleanup for canceled checkout ${retiredCheckout.id} failed: ${cleanupError.message}`);
+    }
+  }
+  throw originalError;
 }
 
 // Why this invoice cannot take a part payment right now, or null. `conn` is the pool (before the lock) or the transaction holding the invoice
@@ -196,6 +236,18 @@ async function partPaymentRefusal(conn, invoice) {
 
 function owedChangedMessage(nowCents) {
   return `The amount owed on this invoice changed to $${(nowCents / 100).toFixed(2)} since the page loaded (another payment or an edit). Reload the invoice and check it before you record a payment. Nothing was recorded.`;
+}
+
+async function manualPaymentHold(invoiceId, connection) {
+  try {
+    await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, connection, { checkout: true });
+    return null;
+  } catch (err) {
+    if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code)) {
+      return `${err.message} — resolve it before recording another payment`;
+    }
+    throw err;
+  }
 }
 
 // Whether a checkout tender is the invoice's only money (see checkoutTender above), read on the LOCKED row and in the settlement
@@ -330,18 +382,13 @@ async function recordManualPayment(id, {
   // cleanup; anything in flight refuses (the collectible guard above
   // already blocks 'processing' invoices, this covers seam races).
 
-  // Standalone pay-page PaymentIntent (codex #3610 P1): the combined-session
-  // release inside the transaction below leaves a NON-combined PI untouched,
-  // yet the pay page mints one on load and steers customers to Zelle beside
-  // it. Cancel it before the paid flip so a still-open tab can't confirm it
-  // after the transfer is recorded; refuse while money is in flight. Runs
-  // pre-lock (Stripe call), same as apply-credit; the trx's collectible
-  // guard covers the seam.
-  // Zelle-caller predicates FIRST, on the pre-lock read: a stale or raced
-  // automated match must refuse here, BEFORE the customer's live Stripe
-  // session is retired below — never cancel a valid checkout for a
-  // settlement that then records nothing. The under-lock re-checks below
-  // remain the race fences.
+  // Standalone pay-page PaymentIntent (codex #3610 P1): the pay page mints
+  // one on load and steers customers to Zelle beside it. Cancel it before the
+  // paid flip so a still-open tab cannot confirm after the transfer records;
+  // refuse while money is in flight. Provider retirement now runs under the
+  // combined reservation + invoice row lock, after the saved-card fence.
+  // Zelle-caller predicates still run first on the unlocked read and again on
+  // the locked row, so a stale match never cancels a valid checkout.
   // Whole-balance match only: a partially paid invoice (amount_paid > 0) must not auto-match a notice (the partial-payment writer enforces it).
   if (expectedAmountCents != null) {
     const actualCents = Math.round(invoiceAmountDue(invoice) * 100);
@@ -358,9 +405,12 @@ async function recordManualPayment(id, {
   if (settlementFence && !(await settlementFence(db))) {
     throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed, or the bank changed or withdrew the payment) — nothing was recorded');
   }
-  const triagedPiId = invoice.stripe_payment_intent_id || null;
-  const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });
-  if (openPi) throw refusal(openPi.status, openPi.error);
+  const observedPiId = invoice.stripe_payment_intent_id || null;
+  if (observedPiId) {
+    // Keep the customer's open Stripe session intact while an earlier card can settle.
+    const hold = await manualPaymentHold(id, db);
+    if (hold) throw refusal(409, hold);
+  }
 
   // Atomic transition. Two concurrent double-clicks both pass the
   // precheck above, but Postgres serializes UPDATEs against the same
@@ -378,25 +428,34 @@ async function recordManualPayment(id, {
   // The cash this call booked (the part, or the remainder of a part-paid invoice): the paid flip resets amount_paid, so the row read after it
   // no longer says what was owed.
   let settledAmount = null;
+  const retiredCheckout = {};
   const updatedInvoice = await db.transaction(async (trx) => {
-    // Combined-session reservation INSIDE the collection transaction
-    // (codex #3427 r30 P0, serialized r31 P0): the helper takes the
-    // per-customer combined lock, re-reads the invoice under it, and
-    // releases any combined session — the lock holds through this
-    // commit, so /setup cannot stamp a confirmable combined PI between
-    // the check and the paid flip. Throws are 409-shaped; the caller
-    // surfaces them.
-    await require('./pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'recording a manual payment' });
-    // Seam re-check under the row lock (codex #3610 r2 P1, mirrors
-    // apply-credit): /setup could have minted a NEW standalone PI between
-    // the pre-lock triage above and this lock. The combined release only
-    // handles combined PIs, so a fresh standalone stamp means a live client
-    // secret we never retired — refuse; the operator retries and the new PI
-    // gets triaged. A cleared stamp (null) is fine: nothing is live.
-    const locked = await trx('invoices').where({ id }).forUpdate().first();
+    // Standard collection lock order: reserve combined setup for the stable
+    // owner before taking the invoice row. The advisory lock stays held to
+    // commit, so /setup cannot stamp a confirmable standalone or combined PI
+    // after the locked fence and before the paid flip.
+    const PayCombined = require('./pay-combined');
+    await PayCombined.lockCombinedCustomerStable(trx, id, invoice.customer_id);
+    // Saved-card charging locks the invoice before its customer.
+    const locked = await InvoiceService.lockInvoicePaymentIntentAllocation(trx, {
+      id,
+      piId: observedPiId,
+      customerId: invoice.customer_id,
+      combinedCustomerLocked: true,
+      targetForUpdate: true,
+    });
     if (!locked) return null;
+    // Credit draws may already own the customer before they need this invoice.
+    // Refuse contention before any provider or ledger write and release the
+    // allocation with the transaction, so either lock order can finish.
+    const lockedCustomer = await trx('customers').where({ id: invoice.customer_id })
+      .forUpdate().noWait().first('id', 'payer_id').catch((err) => {
+        if (err.code === '55P03') throw refusal(409, 'The customer balance is changing. Retry recording this payment.');
+        throw err;
+      });
+    if (!lockedCustomer || locked.customer_id !== invoice.customer_id) return { ownerChanged: true };
     const lockedPiId = locked.stripe_payment_intent_id || null;
-    if (lockedPiId && lockedPiId !== triagedPiId) return { racedNewPaymentIntent: lockedPiId };
+    if (lockedPiId && lockedPiId !== observedPiId) return { racedNewPaymentIntent: lockedPiId };
     // The collectibility gate re-run UNDER THE LOCK (audit P0): the unlocked
     // read at the top of this function can be overtaken by a Bill-To
     // assignment that stamps the withdrawal, and only `status` is re-checked
@@ -419,15 +478,11 @@ async function recordManualPayment(id, {
     // into stripe_orphan_charges when the webhook lands, once by
     // cash/check/Zelle/credit). Run under the SAME row lock as the paid
     // flip so a claim that lands between the pre-lock read and here is
-    // still caught.
-    try {
-      await require('./stripe').assertNoInvoiceChargeReconciliationPending(id, trx);
-    } catch (err) {
-      if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code)) {
-        return { chargeReconciliationPending: err.message };
-      }
-      throw err;
-    }
+    // still caught. Checkout mode also fences a resolved
+    // authentication_required attempt: its saved-card PI can still settle
+    // until cancellation of that exact PI has been verified.
+    const hold = await manualPaymentHold(id, trx);
+    if (hold) return { chargeReconciliationPending: hold };
     // Amount fence under the same lock as the paid flip: the caller settles
     // a specific sum; the ledger row below records invoiceAmountDue(row), so
     // the two must agree NOW, not when the caller last looked.
@@ -451,11 +506,10 @@ async function recordManualPayment(id, {
       // The visit lock is NOWAIT (Codex #3882 r4 P2): this is the first
       // visit acquisition on the self-pay path, so a blocking wait here
       // would recreate the invoice↔visit cycle the fence below avoids.
-      const cust = await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id', 'payer_id');
       const visit = locked.scheduled_service_id
         ? await lockVisitForSettlement(trx, locked.scheduled_service_id, ['id', 'payer_id'])
         : null;
-      const payerIds = [...new Set([cust?.payer_id, visit?.payer_id].filter(Boolean))];
+      const payerIds = [...new Set([lockedCustomer.payer_id, visit?.payer_id].filter(Boolean))];
       if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id', 'asc').forUpdate().select('id');
       const { rowIsSelfPayDue } = require('./open-balance');
       const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked, { database: trx });
@@ -481,6 +535,15 @@ async function recordManualPayment(id, {
       if (neverRan) return { visitNeverRan: neverRan };
     }
     if (settlementFence && !(await settlementFence(trx, locked))) return { fenceLost: true };
+    // Provider retirement is the LAST pre-mutation step. In particular, a
+    // saved-card claim that appeared after the pool preflight is now observed
+    // under the invoice lock before any customer checkout is canceled.
+    const openPi = await retireLockedPaymentSessionsBeforeSettlement(
+      trx,
+      locked,
+      { action: 'recording a manual payment', retiredCheckout },
+    );
+    if (openPi) throw refusal(openPi.status, openPi.error);
     if (partCents != null) {
       const partAmount = partCents / 100;
       const [partRow] = await trx('invoices')
@@ -635,10 +698,13 @@ async function recordManualPayment(id, {
       receiptQueued = Boolean(automated) || enqueued?.enqueued === true;
     }
     return row;
-  });
+  }).catch((err) => rethrowAfterSettlementRollback(db, retiredCheckout, err));
 
   if (updatedInvoice?.racedNewPaymentIntent) {
     throw refusal(409, 'A new payment session started for this invoice — retry recording the payment');
+  }
+  if (updatedInvoice?.ownerChanged) {
+    throw refusal(409, 'This invoice\'s owner changed — retry recording the payment', { drift: true });
   }
   if (updatedInvoice?.amountMismatch) {
     const { expectedCents, actualCents } = updatedInvoice.amountMismatch;
@@ -663,7 +729,7 @@ async function recordManualPayment(id, {
     throw refusal(409, `${updatedInvoice.noLongerCollectible} — nothing was recorded`);
   }
   if (updatedInvoice?.chargeReconciliationPending) {
-    throw refusal(409, `${updatedInvoice.chargeReconciliationPending} — resolve it before recording another payment`);
+    throw refusal(409, updatedInvoice.chargeReconciliationPending);
   }
   if (updatedInvoice?.notSelfPay) {
     throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded', { drift: true });
@@ -877,4 +943,6 @@ module.exports = {
   recordManualPayment,
   partPaymentRefusal,
   retireOpenPaymentIntentBeforeSettlement,
+  retireLockedPaymentSessionsBeforeSettlement,
+  rethrowAfterSettlementRollback,
 };

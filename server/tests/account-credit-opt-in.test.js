@@ -18,7 +18,13 @@ const { applyAccountCreditToInvoice, customerAutoApplyEnabled } = require('../se
 
 function chain(rowsFor, calls) {
   const q = {};
-  ['where', 'whereIn', 'forUpdate', 'orderBy'].forEach((m) => { q[m] = jest.fn((...a) => { calls.push([m, ...a]); return q; }); });
+  ['join', 'where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderBy', 'orderByRaw'].forEach((m) => {
+    q[m] = jest.fn((...a) => {
+      calls.push([m, ...a]);
+      if (['where', 'orWhere'].includes(m) && typeof a[0] === 'function') a[0].call(q, q);
+      return q;
+    });
+  });
   q.first = jest.fn(async (...a) => { calls.push(['first', ...a]); const rows = typeof rowsFor === 'function' ? rowsFor() : rowsFor; return rows[0] || null; });
   q.update = jest.fn(async (patch) => { calls.push(['update', patch]); return 1; });
   q.insert = jest.fn((row) => { calls.push(['insert', row]); return { returning: jest.fn(async () => [{ id: 'ledger-1', ...row }]) }; });
@@ -26,11 +32,15 @@ function chain(rowsFor, calls) {
   return q;
 }
 const INVOICE = { id: 'inv-1', customer_id: 'c1', status: 'sent', total: '120.00', credit_applied: 0, payer_id: null, stripe_payment_intent_id: null };
-function world({ optIn, balance = '500.00' }) {
-  const calls = { invoices: [], customers: [], plans: [], ledger: [] };
+function world({ optIn, balance = '500.00', authHold = null, siblingHolds = [] }) {
+  const calls = { invoices: [], customers: [], attempts: [], orphans: [], payments: [], plans: [], ledger: [] };
   db.mockImplementation((table) => {
     if (table === 'invoices') return chain([INVOICE], calls.invoices);
     if (table === 'customers') return chain([{ id: 'c1', account_credits: balance, auto_apply_account_credit: optIn }], calls.customers);
+    if (table === 'stripe_invoice_charge_attempts') return chain(authHold ? [authHold] : [], calls.attempts);
+    if (table === 'stripe_invoice_charge_attempts as attempt') return chain(siblingHolds, calls.attempts);
+    if (table === 'stripe_orphan_charges') return chain([], calls.orphans);
+    if (table === 'payments') return chain([], calls.payments);
     if (table === 'payment_plans') return chain([], calls.plans);
     if (table === 'customer_credit_ledger') return chain([], calls.ledger);
     throw new Error(`unexpected table ${table}`);
@@ -70,13 +80,42 @@ describe('applyAccountCreditToInvoice — customer opt-in gate', () => {
     expect(calls.customers.find((c) => c[0] === 'first' && c[1] === 'auto_apply_account_credit')).toBeUndefined();
   });
 
+  test.each([[10, 10], [50, 35]])('a requested $%i credit draws at most $%i with $25 already reserved', async (cap, applied) => {
+    const calls = world({ optIn: false, balance: 60,
+      siblingHolds: [{ credit_applied_delta: 25, credit_applied_total: 25, credit_applied: 0 }] });
+    await expect(applyAccountCreditToInvoice({ invoiceId: INVOICE.id, customerRequested: true, applyAtMost: cap }))
+      .resolves.toMatchObject({ applied });
+    expect(calls.ledger).toContainEqual(['insert', expect.objectContaining({ delta: -applied })]);
+  });
+
+  test('a potentially settling authentication-required card payment skips before any credit movement', async () => {
+    const calls = world({
+      optIn: true,
+      authHold: { id: 'attempt-auth-1', status: 'failed', decline_code: 'authentication_required' },
+    });
+
+    await expect(applyAccountCreditToInvoice({ invoiceId: 'inv-1' }))
+      .resolves.toEqual({ applied: 0, skipped: 'card_payment_may_settle' });
+
+    expect(calls.attempts).toEqual(expect.arrayContaining([
+      ['where', { invoice_id: 'inv-1' }],
+      ['where', { 'stripe_invoice_charge_attempts.status': 'failed' }],
+    ]));
+    expect(calls.attempts.some(([method]) => method === 'first')).toBe(true);
+    expect(calls.ledger).toEqual([]);
+    expect(calls.invoices.find((c) => c[0] === 'update')).toBeUndefined();
+  });
+
   test('the opt-in is re-asserted on the LOCKED balance row — a flip that lands between the gate and the movement consumes nothing', async () => {
     let reads = 0;
-    const calls = { invoices: [], customers: [], plans: [], ledger: [] };
+    const calls = { invoices: [], customers: [], attempts: [], orphans: [], payments: [], plans: [], ledger: [] };
     db.mockImplementation((table) => {
       if (table === 'invoices') return chain([INVOICE], calls.invoices);
       // first read (gate) says ON, the locked balance read says OFF
       if (table === 'customers') return chain(() => [{ id: 'c1', account_credits: '500.00', auto_apply_account_credit: (reads++ === 0) }], calls.customers);
+      if (table === 'stripe_invoice_charge_attempts') return chain([], calls.attempts);
+      if (table === 'stripe_orphan_charges') return chain([], calls.orphans);
+      if (table === 'payments') return chain([], calls.payments);
       if (table === 'payment_plans') return chain([], calls.plans);
       if (table === 'customer_credit_ledger') return chain([], calls.ledger);
       throw new Error(`unexpected table ${table}`);

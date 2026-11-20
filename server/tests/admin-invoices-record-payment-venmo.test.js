@@ -25,10 +25,12 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 jest.mock('../services/stripe', () => ({
+  assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
   retrievePaymentIntent: jest.fn(),
   cancelPaymentIntent: jest.fn(async () => ({ status: 'canceled' })),
 }));
 jest.mock('../services/pay-combined', () => ({
+  lockCombinedCustomerStable: jest.fn(async () => undefined),
   clearPaymentIntentStamps: jest.fn(async () => undefined),
   releaseCombinedSessionBeforeCollection: jest.fn(async () => undefined),
 }));
@@ -41,7 +43,7 @@ const router = require('../routes/admin-invoices');
 
 function makeRecorder(overrides = {}) {
   const qb = {};
-  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate'].forEach((m) => {
+  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate', 'whereRaw', 'noWait'].forEach((m) => {
     qb[m] = jest.fn(() => qb);
   });
   qb.first = jest.fn(async () => null);
@@ -109,7 +111,11 @@ describe('record-payment retires an open pay-page PaymentIntent first (codex #36
     invoice_number: 'WPC-2026-0001', payer_id: null, payer_statement_id: null,
     stripe_payment_intent_id: 'pi_open_1', notes: null,
   };
-  const SENTINEL = 'stop-before-trx';
+  const SENTINEL = 'stop-at-paid-update';
+  let trx;
+  let lockedInvoices;
+  let lockedInvoice;
+
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -117,9 +123,18 @@ describe('record-payment retires an open pay-page PaymentIntent first (codex #36
       if (table === 'invoices') return makeRecorder({ first: jest.fn(async () => ({ ...OPEN_INVOICE })) });
       throw new Error(`unexpected table ${table}`);
     });
-    // The guard runs BEFORE the transaction; stop there so this suite pins
-    // the guard alone (the paid-flip path is covered by the payment-plan suite).
-    db.transaction.mockImplementation(async () => { throw new Error(SENTINEL); });
+    lockedInvoice = { ...OPEN_INVOICE };
+    lockedInvoices = makeRecorder({ update: jest.fn(() => { throw new Error(SENTINEL); }) });
+    // Allocation locks every invoice sharing this intent before it returns the target.
+    lockedInvoices.then = (resolve) => resolve([lockedInvoice]);
+    trx = jest.fn((table) => {
+      if (table === 'invoices') return lockedInvoices;
+      if (table === 'customers') return makeRecorder({ first: jest.fn(async () => ({ id: OPEN_INVOICE.customer_id })) });
+      throw new Error(`unexpected trx table ${table}`);
+    });
+    trx.fn = db.fn;
+    trx.raw = db.raw;
+    db.transaction.mockImplementation(async (work) => work(trx));
   });
 
   test('an unconfirmed PI is canceled and unstamped before the paid flip', async () => {
@@ -133,7 +148,9 @@ describe('record-payment retires an open pay-page PaymentIntent first (codex #36
       expect((await res.json()).error).toBe(SENTINEL);
     });
     expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_open_1', { cancellation_reason: 'abandoned' });
-    expect(PayCombined.clearPaymentIntentStamps).toHaveBeenCalledWith(db, 'pi_open_1', { keepInvoiceIds: ['inv-1'] });
+    expect(PayCombined.clearPaymentIntentStamps).toHaveBeenCalledWith(trx, 'pi_open_1', { keepInvoiceIds: ['inv-1'] });
+    expect(lockedInvoices.forUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(StripeService.cancelPaymentIntent.mock.invocationCallOrder[0]);
     expect(db.transaction).toHaveBeenCalled();
   });
 
@@ -148,21 +165,12 @@ describe('record-payment retires an open pay-page PaymentIntent first (codex #36
       expect((await res.json()).error).toMatch(/already in flight/);
     });
     expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(lockedInvoices.update).not.toHaveBeenCalled();
   });
 
   test('a NEW PI stamped between the pre-lock triage and the row lock refuses with 409 (codex r2 P1)', async () => {
     StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_open_1', status: 'requires_payment_method' });
-    const trxInvoices = makeRecorder({
-      // Under the lock the invoice now carries a DIFFERENT PI — /setup won the seam.
-      first: jest.fn(async () => ({ ...OPEN_INVOICE, stripe_payment_intent_id: 'pi_new_2' })),
-    });
-    const trx = jest.fn((table) => {
-      if (table === 'invoices') return trxInvoices;
-      throw new Error(`unexpected trx table ${table}`);
-    });
-    trx.fn = { now: jest.fn(() => 'NOW()') };
-    db.transaction.mockImplementation(async (cb) => cb(trx));
+    lockedInvoice = { ...OPEN_INVOICE, stripe_payment_intent_id: 'pi_new_2' };
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/record-payment`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -171,8 +179,9 @@ describe('record-payment retires an open pay-page PaymentIntent first (codex #36
       expect(res.status).toBe(409);
       expect((await res.json()).error).toMatch(/new payment session/);
     });
-    expect(trxInvoices.forUpdate).toHaveBeenCalled();
-    expect(trxInvoices.update).not.toHaveBeenCalled();
+    expect(lockedInvoices.forUpdate).toHaveBeenCalled();
+    expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(lockedInvoices.update).not.toHaveBeenCalled();
   });
 
   test('an unverifiable PI (Stripe unreachable) fails closed with 409', async () => {
@@ -185,6 +194,6 @@ describe('record-payment retires an open pay-page PaymentIntent first (codex #36
       expect(res.status).toBe(409);
       expect((await res.json()).error).toMatch(/could not be verified/);
     });
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(lockedInvoices.update).not.toHaveBeenCalled();
   });
 });

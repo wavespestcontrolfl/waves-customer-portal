@@ -98,7 +98,11 @@ describe('source contracts', () => {
     const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const fn = schedule.slice(schedule.indexOf('async function generatePrepaidReceiptForService('), schedule.indexOf('// POST /api/admin/schedule/:id/prepaid'));
     expect(fn).toMatch(/closeOutVisitForIssuedInvoice\(\{ invoiceId: invoice\.id, trigger: 'paid', actorTechnicianId, actorRole \}\)/);
-    expect(fn).toMatch(/if \(\['paid', 'prepaid'\]\.includes\(invoice\.status\)\) \{\s*\n\s*await closeOutOnPaid\(\);/);
+    // The already-paid decision is made from the invoice row locked inside the
+    // transaction. Both that path and the newly-paid path then converge on the
+    // one post-commit closeout below; no closeout runs for outcome.reason.
+    expect(fn).toMatch(/if \(\['paid', 'prepaid'\]\.includes\(locked\.status\)\) return \{ invoice: locked, alreadyPaid: true \};/);
+    expect(fn).toMatch(/if \(outcome\.reason\) \{[\s\S]{0,500}return \{[\s\S]{0,500}\};\s*\}[\s\S]{0,1200}await closeOutOnPaid\(\);/);
     expect(fn).toMatch(/await closeOutOnPaid\(\);\s*\n\s*\n\s*return sendPrepaidReceiptForInvoice\(outcome\.invoice/);
     // The route hands the operator through, WITH its authenticated staff
     // role (GitHub r7 P2 #4127) — a technician (requireTechOrAdmin admits

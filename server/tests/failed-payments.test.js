@@ -6,6 +6,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { loadFailedPaymentFacts, standaloneFailedTotal } = require('../services/failed-payments');
+const INVOICE_A = '11111111-1111-4111-8111-111111111111';
+const INVOICE_B = '22222222-2222-4222-8222-222222222222';
 
 // A recording query builder: every chained call is captured; awaiting resolves with `result` (or rejects if it is an Error).
 function fakeDb({ payments = [], invoices = [], invoiceError = null } = {}) {
@@ -25,18 +27,45 @@ function fakeDb({ payments = [], invoices = [], invoiceError = null } = {}) {
 const row = (over = {}) => ({ id: 'p1', amount: 50, metadata: null, stripe_payment_intent_id: 'pi_1', retry_count: 1, next_retry_at: null, ...over });
 const names = (dbh, table, method) => dbh.calls[table].filter(([m]) => m === method).map(([, a]) => a);
 
-describe('loadFailedPaymentFacts — default (the /balance route): query shape unchanged', () => {
-  test('failed only, no payer_id filter, original columns (+ id)', async () => {
+describe('loadFailedPaymentFacts for the portal balance', () => {
+  test('reads failed rows with the fields that identify their payer', async () => {
     const dbh = fakeDb({ payments: [row()] });
     await loadFailedPaymentFacts('c1', dbh);
     expect(names(dbh, 'payments', 'where')).toEqual([[{ customer_id: 'c1', status: 'failed' }]]);
     expect(names(dbh, 'payments', 'whereNull')).toEqual([['superseded_by_payment_id']]);
-    expect(names(dbh, 'payments', 'select')[0]).toEqual(['id', 'amount', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at']);
+    expect(names(dbh, 'payments', 'select')[0]).toEqual([
+      'id', 'amount', 'metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id', 'retry_count', 'next_retry_at',
+    ]);
   });
-  test('a failing non-draft-invoice lookup still reads as "no carrying invoices" (the route swallowed it before)', async () => {
-    const dbh = fakeDb({ payments: [row({ metadata: { invoice_id: 'inv-1' } })], invoiceError: new Error('boom') });
+  test('a failing non-draft-invoice lookup withholds valid linked amounts instead of treating them as standalone debt', async () => {
+    const dbh = fakeDb({
+      payments: [
+        row({ metadata: { invoice_id: INVOICE_A }, amount: 40 }),
+        row({ id: 'legacy', metadata: { invoice_id: 'legacy-invoice' }, amount: 20 }),
+        row({ id: 'own', metadata: null, amount: 15 }),
+      ],
+      invoiceError: new Error('boom'),
+    });
     const facts = await loadFailedPaymentFacts('c1', dbh);
     expect([...facts.balanceCarryingInvoiceIds]).toEqual([]);
+    expect([...facts.unresolvedInvoiceIds]).toEqual([INVOICE_A]);
+    expect(facts.invoiceLookupFailed).toBe(true);
+    // Valid linked amount is unknown and withheld; malformed legacy metadata
+    // cannot name an invoices.id UUID, and the truly standalone row remains.
+    expect(standaloneFailedTotal(facts)).toBe(35);
+  });
+
+  test('malformed legacy metadata is omitted from the UUID lookup without disabling valid invoice deduplication', async () => {
+    const dbh = fakeDb({
+      payments: [
+        row({ metadata: { invoice_id: 'not-a-uuid' }, amount: 15 }),
+        row({ id: 'valid', metadata: { invoice_id: INVOICE_A.toUpperCase() }, amount: 40 }),
+      ],
+      invoices: [{ id: INVOICE_A }],
+    });
+    const facts = await loadFailedPaymentFacts('c1', dbh);
+    expect(names(dbh, 'invoices', 'whereIn')).toEqual([['id', [INVOICE_A]]]);
+    expect(standaloneFailedTotal(facts)).toBe(15);
   });
 });
 
@@ -58,12 +87,16 @@ describe('loadFailedPaymentFacts — strict (SMS grounding)', () => {
     const facts = { rows: [viaCharge, viaDescription, own], balanceCarryingInvoiceIds: new Set() };
     expect(standaloneFailedTotal(facts, (p) => linkage.isPayerLinked(p))).toBe(25);
   });
+  test('SMS withholds a failed payment amount when a legacy reference cannot identify the invoice', async () => {
+    const dbh = fakeDb({ payments: [row({ metadata: { invoice_id: 'legacy-reference' }, stripe_payment_intent_id: 'pi_invoice' })] });
+    await expect(loadFailedPaymentFacts('c1', dbh, { strict: true })).rejects.toThrow('unresolved invoice reference');
+  });
   test('a failing invoice lookup THROWS (the aggregator marks billing unavailable) instead of becoming an empty set', async () => {
-    const dbh = fakeDb({ payments: [row({ metadata: { invoice_id: 'inv-1' } })], invoiceError: new Error('boom') });
+    const dbh = fakeDb({ payments: [row({ metadata: { invoice_id: INVOICE_A } })], invoiceError: new Error('boom') });
     await expect(loadFailedPaymentFacts('c1', dbh, { strict: true })).rejects.toThrow('boom');
   });
   test('a non-draft invoice that carries the debt keeps its failed row out of the total', async () => {
-    const dbh = fakeDb({ payments: [row({ metadata: { invoice_id: 'inv-1' }, amount: 40 }), row({ id: 'q', amount: 15 })], invoices: [{ id: 'inv-1' }] });
+    const dbh = fakeDb({ payments: [row({ metadata: { invoice_id: INVOICE_B }, amount: 40 }), row({ id: 'q', amount: 15 })], invoices: [{ id: INVOICE_B }] });
     const facts = await loadFailedPaymentFacts('c1', dbh, { strict: true });
     expect(standaloneFailedTotal(facts)).toBe(15);
   });

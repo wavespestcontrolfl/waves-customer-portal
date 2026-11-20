@@ -190,8 +190,11 @@ function claimDb({ insertError = null, blocking = null } = {}) {
   const makeQuery = (table, { root = false } = {}) => {
     calls.push(`${root ? 'root' : 'trx'}:${table}`);
     const query = {};
-    ['where', 'whereIn', 'whereNull', 'forUpdate'].forEach((method) => {
-      query[method] = jest.fn(() => query);
+    ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderByRaw'].forEach((method) => {
+      query[method] = jest.fn((arg) => {
+        if (['where', 'orWhere'].includes(method) && typeof arg === 'function') arg.call(query, query);
+        return query;
+      });
     });
     query.insert = jest.fn((payload) => {
       insertedAttempt = payload;
@@ -233,8 +236,11 @@ describe('saved-card charge claim', () => {
       stripe_payment_method_id: 'pm-stripe-1',
       idempotency_key: 'inv_card_on_file_inv-1_attempt-new',
     });
-    expect(database.calls.slice(0, 2)).toEqual([
+    expect(database.calls.slice(0, 5)).toEqual([
       'trx:invoices',
+      'trx:stripe_invoice_charge_attempts',
+      'trx:stripe_orphan_charges',
+      'trx:payments',
       'trx:stripe_invoice_charge_attempts',
     ]);
   });
@@ -308,6 +314,99 @@ describe('saved-card charge claim', () => {
 });
 
 describe('saved-card attempt state updates', () => {
+  test('atomically records worker provenance with a create-returned PaymentIntent', async () => {
+    const updates = [];
+    const query = {};
+    query.where = jest.fn(() => query);
+    query.whereIn = jest.fn(() => query);
+    query.whereNull = jest.fn(() => query);
+    query.update = jest.fn(async (payload) => {
+      updates.push(payload);
+      return 1;
+    });
+    const database = jest.fn(() => query);
+
+    await markInvoiceSavedCardChargeAttempt(
+      'attempt-worker',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi-worker', resolved_at: null },
+      database,
+    );
+
+    expect(updates).toEqual([expect.objectContaining({
+      status: 'ambiguous',
+      stripe_payment_intent_id: 'pi-worker',
+      stripe_payment_intent_bound_at: expect.any(Date),
+    })]);
+  });
+
+  test('adds only worker provenance when an exact failure webhook wins the ordering race', async () => {
+    const queries = [];
+    const updateResults = [0, 1];
+    const database = jest.fn(() => {
+      const query = {};
+      ['where', 'whereIn', 'whereNull', 'whereNotNull'].forEach((method) => {
+        query[method] = jest.fn(() => query);
+      });
+      query.update = jest.fn(async (payload) => {
+        query.payload = payload;
+        return updateResults.shift();
+      });
+      queries.push(query);
+      return query;
+    });
+
+    await expect(markInvoiceSavedCardChargeAttempt(
+      'attempt-webhook-first',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi-failed-first', resolved_at: null },
+      database,
+    )).resolves.toBeUndefined();
+
+    expect(queries).toHaveLength(2);
+    expect(queries[1].where).toHaveBeenCalledWith({
+      id: 'attempt-webhook-first', stripe_payment_intent_id: 'pi-failed-first',
+    });
+    expect(queries[1].whereNotNull).toHaveBeenCalledWith('resolved_at');
+    expect(queries[1].payload).toEqual({
+      worker_payment_intent_id: 'pi-failed-first',
+      stripe_payment_intent_bound_at: expect.any(Date),
+      updated_at: expect.any(Date),
+    });
+  });
+
+  test('preserves worker provenance when a different PI already settled the attempt', async () => {
+    const queries = [];
+    const updateResults = [0, 0, 1];
+    const database = jest.fn(() => {
+      const query = {};
+      ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot'].forEach((method) => {
+        query[method] = jest.fn(() => query);
+      });
+      query.update = jest.fn(async (payload) => {
+        query.payload = payload;
+        return updateResults.shift();
+      });
+      queries.push(query);
+      return query;
+    });
+
+    await expect(markInvoiceSavedCardChargeAttempt(
+      'attempt-succeeded-first',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi_worker_returned', resolved_at: null },
+      database,
+    )).rejects.toMatchObject({ code: 'STRIPE_CHARGE_ATTEMPT_FENCE_LOST' });
+
+    expect(queries).toHaveLength(3);
+    expect(queries[2].where).toHaveBeenCalledWith({ id: 'attempt-succeeded-first' });
+    expect(queries[2].where).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+    expect(queries[2].whereNotNull).toHaveBeenCalledWith('stripe_payment_intent_id');
+    expect(queries[2].whereNot).toHaveBeenCalledWith('stripe_payment_intent_id', 'pi_worker_returned');
+    expect(queries[2].payload).toEqual(expect.objectContaining({
+      worker_payment_intent_id: 'pi_worker_returned',
+      stripe_payment_intent_bound_at: expect.any(Date),
+      error_message: 'Conflicting saved-card PaymentIntents require reconciliation',
+    }));
+  });
+
   test('guards bookkeeping writes so a final webhook cannot be reopened', async () => {
     const query = {};
     query.where = jest.fn(() => query);
@@ -345,6 +444,7 @@ describe('saved-card attempt state updates', () => {
       amount: 42.5,
       creditAppliedDelta: 10,
       creditAppliedTotal: 10,
+      canceledCheckoutPaymentIntentId: 'pi_checkout_old',
       database,
     });
 
@@ -353,6 +453,7 @@ describe('saved-card attempt state updates', () => {
       amount: 42.5,
       credit_applied_delta: 10,
       credit_applied_total: 10,
+      canceled_checkout_payment_intent_id: 'pi_checkout_old',
       submitted_at: expect.any(Date),
     }));
   });
@@ -435,18 +536,19 @@ describe('saved-card succeeded-webhook attempt repair', () => {
   });
 });
 
-function failedAttemptDb({ invoiceStatus = 'processing' } = {}) {
+function failedAttemptDb({ invoiceStatus = 'processing', invoicePaymentIntentId = null } = {}) {
   const state = {
     invoice: {
       id: 'inv-1',
       customer_id: 'cust-1',
       status: invoiceStatus,
-      stripe_payment_intent_id: null,
+      stripe_payment_intent_id: invoicePaymentIntentId,
       credit_applied: 25,
       due_date: '2099-01-01',
     },
     attempt: {
       id: 'attempt-1',
+      worker_payment_intent_id: 'pi-failed',
       credit_applied_delta: 15,
       credit_applied_total: 25,
     },
@@ -456,7 +558,7 @@ function failedAttemptDb({ invoiceStatus = 'processing' } = {}) {
   };
   const trx = jest.fn((table) => {
     const query = {};
-    ['where', 'whereIn', 'whereNull', 'forUpdate'].forEach((method) => {
+    ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orderBy', 'forUpdate'].forEach((method) => {
       query[method] = jest.fn(() => query);
     });
     query.first = jest.fn(async () => {
@@ -476,8 +578,11 @@ function failedAttemptDb({ invoiceStatus = 'processing' } = {}) {
       return query;
     });
     query.returning = jest.fn(async () => [state.ledger.at(-1)]);
+    query.then = (resolve, reject) => Promise.resolve(table === 'invoices' ? [state.invoice] : [])
+      .then(resolve, reject);
     return query;
   });
+  trx.raw = jest.fn(async () => ({ rows: [] }));
   trx.fn = { now: jest.fn(() => 'NOW') };
   return {
     database: { transaction: jest.fn(async (callback) => callback(trx)) },
@@ -516,6 +621,8 @@ describe('saved-card failed-webhook attempt repair', () => {
         stripe_payment_intent_id: 'pi-failed',
       }),
     }));
+    const attemptUpdate = state.updates.find((entry) => entry.table === 'stripe_invoice_charge_attempts');
+    expect(attemptUpdate.payload).not.toHaveProperty('stripe_payment_intent_bound_at');
     expect(state.updates).toContainEqual(expect.objectContaining({
       table: 'stripe_orphan_charges',
       payload: expect.objectContaining({
@@ -523,6 +630,82 @@ describe('saved-card failed-webhook attempt repair', () => {
         resolution_notes: expect.stringContaining('final payment failure'),
       }),
     }));
+  });
+
+  test('withholds invoice and credit writes until the original worker binds a webhook-first failure', async () => {
+    const { database, state } = failedAttemptDb();
+    state.attempt.worker_payment_intent_id = null;
+    state.attempt.submitted_at = new Date();
+    state.attempt.status = 'ambiguous'; // a concurrent checkout promoted the claim while the worker is still waiting
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
+    })).rejects.toMatchObject({ code: 'SAVED_CARD_WORKER_INTENT_PENDING' });
+    expect(state.ledger).toEqual([]);
+    expect(state.updates).toEqual([]);
+    state.attempt.submitted_at = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
+    })).resolves.toBe(false);
+    expect(state.updates).toEqual([]);
+  });
+
+  test('a completed create timeout stays held without independent request proof, even if processing stamped the invoice', async () => {
+    const { database, state } = failedAttemptDb();
+    Object.assign(state.attempt, { status: 'ambiguous', worker_payment_intent_id: null, worker_create_timed_out_at: new Date(), submitted_at: new Date(), idempotency_key: 'original-create' });
+    state.invoice.stripe_payment_intent_id = 'pi-failed';
+    const failure = { attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database };
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({ ...failure, requestIdempotencyKey: 'other-create' })).resolves.toBe(false);
+    expect(state.updates).toEqual([]);
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({ ...failure, requestIdempotencyKey: 'original-create' })).resolves.toBe(true);
+    expect(state.customer.account_credits).toBe(25);
+  });
+
+  test('an exact failure leaves a different customer checkout attached to a collectible invoice', async () => {
+    const { database, state } = failedAttemptDb({ invoiceStatus: 'sent' });
+    state.invoice.stripe_payment_intent_id = 'pi_customer_checkout';
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
+    })).resolves.toBe(true);
+    expect(state.invoice.stripe_payment_intent_id).toBe('pi_customer_checkout');
+    expect(state.invoice.credit_applied).toBe(25);
+    expect(state.customer.account_credits).toBe(10);
+    expect(state.ledger).toEqual([]);
+  });
+
+  test('an exact failure releases credit and stale stamps for the checkout this worker canceled', async () => {
+    const { database, state } = failedAttemptDb({
+      invoiceStatus: 'sent', invoicePaymentIntentId: 'pi_canceled_checkout',
+    });
+    state.attempt.canceled_checkout_payment_intent_id = 'pi_canceled_checkout';
+
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1',
+      stripePaymentIntentId: 'pi-failed', database,
+    })).resolves.toBe(true);
+
+    expect(state.invoice).toEqual(expect.objectContaining({
+      stripe_payment_intent_id: null,
+      credit_applied: 10,
+    }));
+    expect(state.customer.account_credits).toBe(25);
+    expect(state.ledger).toContainEqual(expect.objectContaining({ delta: 15 }));
+  });
+
+  test('a parked target still releases credit for its worker-recorded canceled checkout', async () => {
+    const { database, state } = failedAttemptDb({ invoiceStatus: 'sent' });
+    state.attempt.canceled_checkout_payment_intent_id = 'pi_canceled_combined_checkout';
+
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1',
+      stripePaymentIntentId: 'pi-failed', database,
+    })).resolves.toBe(true);
+
+    expect(state.invoice).toEqual(expect.objectContaining({
+      stripe_payment_intent_id: null,
+      credit_applied: 10,
+    }));
+    expect(state.customer.account_credits).toBe(25);
+    expect(state.ledger).toContainEqual(expect.objectContaining({ delta: 15 }));
   });
 
   test('does not release a fence beside a terminal invoice', async () => {
@@ -536,6 +719,28 @@ describe('saved-card failed-webhook attempt repair', () => {
       database,
     })).resolves.toBe(false);
     expect(state.updates).toHaveLength(0);
+  });
+
+  test('preserves a different pay-page PI on a still-collectible invoice', async () => {
+    const { database, state } = failedAttemptDb({
+      invoiceStatus: 'sent', invoicePaymentIntentId: 'pi_pay_page',
+    });
+    state.attempt.worker_payment_intent_id = 'pi_failed_saved_card';
+
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1',
+      invoiceId: 'inv-1',
+      customerId: 'cust-1',
+      stripePaymentIntentId: 'pi_failed_saved_card',
+      database,
+    })).resolves.toBe(true);
+
+    expect(state.invoice.stripe_payment_intent_id).toBe('pi_pay_page');
+    expect(state.invoice.credit_applied).toBe(25);
+    expect(state.customer.account_credits).toBe(10);
+    expect(state.ledger).toEqual([]);
+    expect(state.updates.find(({ table }) => table === 'invoices').payload)
+      .not.toHaveProperty('stripe_payment_intent_id');
   });
 });
 
@@ -573,6 +778,22 @@ function preChargeFailureDb({ attemptStatus = 'ambiguous', paymentIntentId = nul
 }
 
 describe('saved-card pre-charge failure release', () => {
+  test('records charge-worker provenance with an authentication-required PI', async () => {
+    const { database, state } = preChargeFailureDb({ attemptStatus: 'claimed' });
+    await expect(resolveNoFundsSavedCardChargeAttempt({
+      attemptId: 'attempt-1',
+      invoiceId: 'inv-1',
+      failureMessage: 'authentication required',
+      declineCode: 'authentication_required',
+      authenticationIntentId: 'pi_authentication',
+      database,
+    })).resolves.toEqual({ resolved: true, reopened: false });
+    expect(state.attempt).toEqual(expect.objectContaining({
+      stripe_payment_intent_id: 'pi_authentication',
+      stripe_payment_intent_bound_at: expect.any(Date),
+    }));
+  });
+
   test('reopens a parked invoice when the stale ambiguous owner proves no charge was submitted', async () => {
     const { database, state } = preChargeFailureDb();
     await expect(resolveNoFundsSavedCardChargeAttempt({
@@ -696,11 +917,22 @@ describe('saved-card invoice parking', () => {
 });
 
 function creditPersistenceDb({ creditApplied = 10, accountCredits = 25, unresolvedAttempt = true, invoiceCustomerId = 'cust-1' } = {}) {
-  const state = { creditApplied, accountCredits, ledger: [] };
+  const state = {
+    creditApplied,
+    accountCredits,
+    ledger: [],
+    reservationReads: 0,
+  };
   const trx = jest.fn((table) => {
     const query = {};
-    ['where', 'whereIn', 'whereNull', 'forUpdate'].forEach((method) => {
-      query[method] = jest.fn(() => query);
+    [
+      'join', 'where', 'whereIn', 'whereNull', 'whereNot', 'whereNotNull', 'whereRaw',
+      'orWhere', 'orWhereNot', 'orWhereNull', 'orWhereColumn', 'forUpdate',
+    ].forEach((method) => {
+      query[method] = jest.fn((arg) => {
+        if (['where', 'orWhere'].includes(method) && typeof arg === 'function') arg.call(query);
+        return query;
+      });
     });
     query.first = jest.fn(async () => {
       if (table === 'invoices') return { id: 'inv-1', customer_id: invoiceCustomerId, credit_applied: state.creditApplied };
@@ -718,6 +950,13 @@ function creditPersistenceDb({ creditApplied = 10, accountCredits = 25, unresolv
       return query;
     });
     query.returning = jest.fn(async () => [state.ledger.at(-1)]);
+    query.select = jest.fn(async () => {
+      if (table === 'stripe_invoice_charge_attempts as attempt') {
+        state.reservationReads += 1;
+        return [];
+      }
+      return [];
+    });
     return query;
   });
   trx.fn = { now: jest.fn(() => 'now') };
@@ -748,6 +987,7 @@ describe('saved-card ambiguity credit persistence', () => {
     const args = {
       invoiceId: 'inv-1',
       customerId: 'cust-1',
+      attemptId: 'attempt-1',
       originalCreditApplied: 10,
       creditDelta: 15,
       reference: 'attempt attempt-1',
@@ -760,6 +1000,7 @@ describe('saved-card ambiguity credit persistence', () => {
     expect(state.creditApplied).toBe(25);
     expect(state.accountCredits).toBe(10);
     expect(state.ledger).toHaveLength(1);
+    expect(state.reservationReads).toBe(1);
     expect(state.ledger[0]).toEqual(expect.objectContaining({
       customer_id: 'cust-1',
       delta: -15,

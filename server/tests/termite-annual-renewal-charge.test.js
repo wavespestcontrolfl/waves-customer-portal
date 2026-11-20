@@ -3130,7 +3130,9 @@ describe('termite annual renewal charge', () => {
       // resolveLapseVoidEligibility's own transaction (against `trx`, not
       // the outer `conn`) — folded into the SAME atomic re-check as the
       // settlement/status check, all under one lock.
-      expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('succ-invoice-1', trx);
+      expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('succ-invoice-1', trx, {
+        checkout: true,
+      });
       expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
         termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse',
@@ -3618,6 +3620,49 @@ describe('termite annual renewal charge', () => {
       }));
     });
 
+    test('P0: an unresolved authentication_required PI is checked in checkout mode and blocks void, retrieval, and lapse', async () => {
+      mockCommon();
+      const authPending = Object.assign(new Error('An earlier card payment is awaiting verification.'), {
+        code: 'STRIPE_CHARGE_IN_PROGRESS',
+        chargeAttemptId: 'attempt-auth-1',
+      });
+      const {
+        voidInvoice, raiseTermiteRetrievalTask, recordDecision, assertNoInvoiceChargeReconciliationPending,
+      } = mockLapseDeps({
+        // The shared fence exposes resolved authentication declines only in
+        // checkout mode. This implementation intentionally succeeds for the
+        // old/default call shape so the regression test proves the options.
+        assertNoInvoiceChargeReconciliationPendingImpl: async (_invoiceId, _trx, options) => {
+          if (options?.checkout) throw authPending;
+        },
+      });
+      jest.doMock('../services/notification-service', () => ({
+        notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
+      }));
+      const {
+        conn, trx, completedUpdate, deferredUpdate,
+      } = makeLapseConn({
+        freshSuccessor: { status: 'payment_pending', prepay_invoice_id: 'succ-invoice-1' },
+        freshInvoice: { status: 'sent', paid_at: null },
+      });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const outcome = await _private.processGraceLapseForTerm({
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1',
+        renewed_from_term_id: 'parent-1', prepay_amount: 249,
+      }, conn);
+
+      expect(outcome).toBe('deferred');
+      expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('succ-invoice-1', trx, {
+        checkout: true,
+      });
+      expect(voidInvoice).not.toHaveBeenCalled();
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(recordDecision).not.toHaveBeenCalled();
+      expect(completedUpdate).not.toHaveBeenCalled();
+      expect(deferredUpdate).toHaveBeenCalledWith({ renewal_sweep_deferred_at: expect.any(Date) });
+    });
+
     // Codex #4971 round-4 (post-merge audit) P1: a PARTIAL account credit
     // landing on the invoice between the eligibility re-check and the void
     // itself (invoice.js's assertInvoiceGenuinelyUnsettledLocked, at the
@@ -4063,7 +4108,9 @@ describe('termite annual renewal charge', () => {
 
       expect(counts.lapseEffectsScanned).toBe(1);
       expect(counts.lapseEffectsReconciled).toBe(1);
-      expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('succ-invoice-1', trx);
+      expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('succ-invoice-1', trx, {
+        checkout: true,
+      });
       expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
         termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse',

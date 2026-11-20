@@ -22,7 +22,7 @@ function connection(rows = {}) {
     const q = {};
     const chain = () => q;
     for (const m of ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereNotNull',
-      'orWhereIn', 'andWhere', 'select', 'orderBy', 'limit', 'offset', 'leftJoin', 'join', 'forUpdate', 'forShare', 'noWait', 'modify', 'clone', 'distinct', 'groupBy', 'max', 'sum', 'count', 'pluck']) q[m] = jest.fn(chain);
+      'orWhereIn', 'andWhere', 'select', 'orderBy', 'orderByRaw', 'limit', 'offset', 'leftJoin', 'join', 'crossJoin', 'as', 'forUpdate', 'forShare', 'noWait', 'modify', 'clone', 'distinct', 'groupBy', 'max', 'sum', 'count', 'pluck']) q[m] = jest.fn(chain);
     q.first = jest.fn(async () => (rows[name] || [])[0]);
     q.then = (res, rej) => Promise.resolve(rows[name] || []).then(res, rej);
     q.catch = (h) => Promise.resolve(rows[name] || []).catch(h);

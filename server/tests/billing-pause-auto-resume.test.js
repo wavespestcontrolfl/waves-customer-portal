@@ -468,8 +468,18 @@ describe('stripe-webhook wiring', () => {
     // Parameterized, never interpolated.
     expect(flip).toContain('to_jsonb(?::text)');
 
-    const insertIdx = src.indexOf("payment_state: 'paid',");
-    const insert = src.slice(insertIdx, insertIdx + 600);
-    expect(insert).toContain('settled_event_at: eventCreated');
+    const buildAt = src.indexOf('function capturedFallbackPayment(');
+    const writeAt = src.indexOf('async function saveFallbackPayment(');
+    expect(buildAt).toBeGreaterThan(-1);
+    expect(writeAt).toBeGreaterThan(buildAt);
+    const insert = src.slice(buildAt, writeAt);
+    const writer = src.slice(writeAt, src.indexOf('async function closeFallbackPaymentAttempt(', writeAt));
+    // A replay of a row that is already paid must retain the first settlement
+    // stamp; a newly settled row derives the stamp from Stripe's event clock.
+    expect(writer).toContain("const previousSettlementTime = existingPayment?.status === 'paid' && existingPayment.metadata?.settled_event_at");
+    expect(writer).toContain('capturedFallbackPayment(capture, invoice, lockedInvoice, previousSettlementTime)');
+    expect(insert).toContain("payment_state: 'paid'");
+    expect(insert).toContain('settled_event_at: previousSettlementTime');
+    expect(insert).toContain('eventCreated ? new Date(eventCreated * 1000).toISOString() : null');
   });
 });

@@ -22,10 +22,14 @@ jest.mock('../services/stripe', () => ({
   assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
 }));
 jest.mock('../services/pay-combined', () => ({
+  lockCombinedCustomerStable: jest.fn(async () => undefined),
   clearPaymentIntentStamps: jest.fn(async () => undefined),
   releaseCombinedSessionBeforeCollection: jest.fn(async () => undefined),
 }));
-jest.mock('../services/invoice', () => ({ sendReceipt: jest.fn(async () => ({ sent: true })) }));
+jest.mock('../services/invoice', () => ({
+  ...jest.requireActual('../services/invoice-payment-intent-allocation'),
+  sendReceipt: jest.fn(async () => ({ sent: true })),
+}));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../services/billing-pause', () => ({ maybeResumeBillingPauseOnPayment: jest.fn(async () => undefined) }));

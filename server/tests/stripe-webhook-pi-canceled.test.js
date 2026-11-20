@@ -38,7 +38,11 @@ jest.mock('../services/stripe-invoice-state', () => ({
 }));
 jest.mock('../services/stripe-pricing', () => ({ computeChargeAmount: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gates: {} }));
-jest.mock('../services/invoice-helpers', () => ({ INVOICE_UNCOLLECTIBLE_STATUSES: ['void'], invoiceAmountDue: jest.fn() }));
+jest.mock('../services/invoice-helpers', () => ({
+  INVOICE_UNCOLLECTIBLE_STATUSES: ['void'],
+  invoiceAmountDue: jest.fn(),
+  isInvoiceCollectibleStatus: jest.fn((status) => ['sent', 'overdue', 'partial'].includes(status)),
+}));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({}));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
@@ -77,10 +81,13 @@ function resetMockState() {
     linkedInvoice: null, // invoices row bound to the PI
     customer: { first_name: 'Pat', last_name: 'Doe' },
     updates: [], // { table, wheres, patch }
+    locks: [], // invoice FOR SHARE reads used by cancellation evidence writers
+    reads: [],
   });
 }
 
 function mockMakeBuilder(table) {
+  mockState.reads.push(table);
   const b = { _wheres: [] };
   ['where', 'andWhere', 'whereIn', 'whereNotIn', 'whereNot', 'whereRaw', 'orderBy', 'select'].forEach((name) => {
     b[name] = (...args) => {
@@ -91,7 +98,9 @@ function mockMakeBuilder(table) {
   });
   b.whereNull = (col) => { b._wheres.push({ whereNull: col }); return b; };
   b.whereNotNull = (col) => { b._wheres.push({ whereNotNull: col }); return b; };
+  b.forShare = () => { b._forShare = true; return b; };
   b.first = async () => {
+    if (b._forShare) mockState.locks.push({ table, wheres: b._wheres });
     if (table === 'stripe_invoice_charge_attempts') return mockState.attemptRow;
     if (table === 'payments') return mockState.processingRow;
     if (table === 'invoices') return mockState.linkedInvoice;
@@ -111,11 +120,20 @@ jest.mock('../models/db', () => {
   const db = jest.fn((table) => mockMakeBuilder(table));
   db.raw = jest.fn(async () => ({ rowCount: 0 }));
   db.fn = { now: jest.fn(() => 'NOW()') };
-  db.transaction = jest.fn(async (fn) => fn(db));
+  db.transaction = jest.fn(async (fn) => {
+    const trx = jest.fn((table) => mockMakeBuilder(table));
+    trx.isTransaction = true;
+    trx.raw = db.raw;
+    trx.fn = db.fn;
+    return fn(trx);
+  });
   return db;
 });
 
-const { _handlePaymentIntentCanceled: handleCanceled } = require('../routes/stripe-webhook');
+const {
+  _handlePaymentIntentCanceled: handleCanceled,
+  _resolveMetadataCanceledSavedCardAttempt: resolveMetadataCanceledSavedCardAttempt,
+} = require('../routes/stripe-webhook');
 const { isCombinedPiMetadata, clearPaymentIntentStamps } = require('../services/pay-combined');
 const { resolveFailedInvoiceSavedCardChargeAttempt } = require('../services/stripe');
 const { savedCardAttemptMatchesPaymentIntent } = require('../routes/stripe-webhook-helpers');
@@ -124,6 +142,9 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const STAMPED = {
   id: 'inv-1', customer_id: 'cust-1', status: 'processing', stripe_payment_intent_id: 'pi_ach_1', ach_processing_notified_at: new Date(),
 };
+const METADATA_CUSTOMER_ID = '11111111-1111-4111-8111-111111111111';
+const METADATA_INVOICE_ID = '22222222-2222-4222-8222-222222222222';
+const METADATA_ATTEMPT_ID = '33333333-3333-4333-8333-333333333333';
 
 const invoiceReverts = () => mockState.updates.filter((u) => u.table === 'invoices' && u.patch.stripe_payment_intent_id === null);
 const paymentUpdates = () => mockState.updates.filter((u) => u.table === 'payments');
@@ -134,6 +155,22 @@ beforeEach(() => {
   isCombinedPiMetadata.mockReturnValue(false);
   savedCardAttemptMatchesPaymentIntent.mockReturnValue(false);
   resolveFailedInvoiceSavedCardChargeAttempt.mockResolvedValue(true);
+});
+
+test('a saved-card cancellation records its exact attempt even when the invoice has no PI stamp', async () => {
+  const { randomUUID } = require('node:crypto');
+  const metadata = {
+    source: 'admin_card_on_file', waves_invoice_id: randomUUID(), waves_customer_id: randomUUID(), saved_card_attempt_id: randomUUID(),
+  };
+  mockState.linkedInvoice = { id: metadata.waves_invoice_id, customer_id: metadata.waves_customer_id };
+  await handleCanceled({ id: 'pi_auth', status: 'canceled', metadata, payment_method: 'pm_auth' });
+  expect(mockState.locks).toEqual([{ table: 'invoices', wheres: [{ id: metadata.waves_invoice_id }] }]);
+  const evidence = mockState.updates.filter((entry) => entry.table === 'stripe_invoice_charge_attempts');
+  expect(evidence).toHaveLength(1);
+  expect(evidence[0].wheres).toContainEqual({ id: metadata.saved_card_attempt_id, invoice_id: metadata.waves_invoice_id });
+  expect(evidence[0].patch).toEqual({ authentication_canceled_intent_id: 'pi_auth' });
+  expect(invoiceReverts()).toHaveLength(0);
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
 
 // B16: billing-cron cancels the live intent of an autopay charge parked on card authentication.
@@ -210,7 +247,7 @@ test('saved-card PI canceled after processing: the attempt claim is released (cr
   expect(paymentUpdates()).toHaveLength(1);
 });
 
-test('saved-card PI whose attempt was already resolved falls through to the generic reopen', async () => {
+test('saved-card PI whose recognized attempt changed before resolution preserves the processing hold', async () => {
   mockState.stampedInvoices = [{ ...STAMPED }];
   mockState.attemptRow = { id: 'att-1', invoice_id: 'inv-1', status: 'claimed', resolved_at: null, stripe_payment_intent_id: 'pi_ach_1' };
   savedCardAttemptMatchesPaymentIntent.mockReturnValue(true);
@@ -218,7 +255,174 @@ test('saved-card PI whose attempt was already resolved falls through to the gene
 
   await handleCanceled({ id: 'pi_ach_1', metadata: { source: 'admin_card_on_file', saved_card_attempt_id: 'att-1' } });
 
-  expect(invoiceReverts()).toHaveLength(1);
+  expect(invoiceReverts()).toHaveLength(0);
+});
+
+test('saved-card-labeled cancellation with no proven matching attempt never uses the generic reopen', async () => {
+  mockState.stampedInvoices = [{ ...STAMPED }];
+  mockState.attemptRow = { id: 'att-wrong', invoice_id: 'inv-1', status: 'claimed', resolved_at: null };
+  savedCardAttemptMatchesPaymentIntent.mockReturnValue(false);
+
+  await handleCanceled({
+    id: 'pi_ach_1', payment_method: 'pm_event',
+    metadata: {
+      source: 'admin_card_on_file', saved_card_attempt_id: 'att-event',
+      waves_invoice_id: 'inv-1', waves_customer_id: 'cust-1',
+    },
+  });
+
+  expect(resolveFailedInvoiceSavedCardChargeAttempt).not.toHaveBeenCalled();
+  expect(invoiceReverts()).toHaveLength(0);
+});
+
+test('metadata-only cancellation releases an exact worker-bound saved-card park once', async () => {
+  const intent = {
+    id: 'pi_saved_card_canceled', status: 'canceled', payment_method: 'pm_saved',
+    metadata: {
+      source: 'admin_card_on_file', saved_card_attempt_id: METADATA_ATTEMPT_ID,
+      waves_invoice_id: METADATA_INVOICE_ID, waves_customer_id: METADATA_CUSTOMER_ID,
+    },
+  };
+  mockState.linkedInvoice = {
+    id: METADATA_INVOICE_ID, customer_id: METADATA_CUSTOMER_ID, status: 'processing', stripe_payment_intent_id: null,
+  };
+  mockState.attemptRow = {
+    id: METADATA_ATTEMPT_ID, invoice_id: METADATA_INVOICE_ID, status: 'ambiguous', resolved_at: null,
+    stripe_payment_method_id: 'pm_saved', stripe_payment_intent_id: intent.id,
+    worker_payment_intent_id: intent.id,
+  };
+  savedCardAttemptMatchesPaymentIntent.mockReturnValue(true);
+
+  await handleCanceled(intent);
+
+  expect(savedCardAttemptMatchesPaymentIntent).toHaveBeenCalledWith(expect.objectContaining({
+    attempt: expect.objectContaining({ id: METADATA_ATTEMPT_ID, worker_payment_intent_id: intent.id }),
+    invoice: expect.objectContaining({ id: METADATA_INVOICE_ID, stripe_payment_intent_id: null }),
+    paymentIntent: intent,
+    allowVerifiedCancellationWithoutMethod: true,
+  }));
+  expect(resolveFailedInvoiceSavedCardChargeAttempt).toHaveBeenCalledTimes(1);
+  expect(resolveFailedInvoiceSavedCardChargeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+    attemptId: METADATA_ATTEMPT_ID, invoiceId: METADATA_INVOICE_ID, customerId: METADATA_CUSTOMER_ID,
+    originalCustomerId: METADATA_CUSTOMER_ID,
+    stripePaymentIntentId: intent.id,
+  }));
+  expect(invoiceReverts()).toHaveLength(0);
+
+  // Model the resolver's committed state before Stripe repeats the webhook.
+  mockState.linkedInvoice.status = 'sent';
+  mockState.attemptRow.status = 'failed';
+  mockState.attemptRow.resolved_at = new Date();
+  savedCardAttemptMatchesPaymentIntent.mockReturnValue(false);
+  await handleCanceled(intent);
+  expect(resolveFailedInvoiceSavedCardChargeAttempt).toHaveBeenCalledTimes(1);
+  expect(invoiceReverts()).toHaveLength(0);
+});
+
+test.each([
+  ['legacy attempt without worker proof', null],
+  ['attempt bound by another worker PI', 'pi_other_worker'],
+])('metadata-only cancellation keeps the processing hold for %s', async (_label, workerPaymentIntentId) => {
+  const intent = {
+    id: 'pi_unproven', status: 'canceled', payment_method: 'pm_saved',
+    metadata: {
+      source: 'admin_card_on_file', saved_card_attempt_id: METADATA_ATTEMPT_ID,
+      waves_invoice_id: METADATA_INVOICE_ID, waves_customer_id: METADATA_CUSTOMER_ID,
+    },
+  };
+  mockState.linkedInvoice = {
+    id: METADATA_INVOICE_ID, customer_id: METADATA_CUSTOMER_ID, status: 'processing', stripe_payment_intent_id: null,
+  };
+  mockState.attemptRow = {
+    id: METADATA_ATTEMPT_ID, invoice_id: METADATA_INVOICE_ID, status: 'ambiguous', resolved_at: null,
+    stripe_payment_method_id: 'pm_saved', stripe_payment_intent_id: intent.id,
+    worker_payment_intent_id: workerPaymentIntentId,
+  };
+  savedCardAttemptMatchesPaymentIntent.mockReturnValue(false);
+
+  await handleCanceled(intent);
+
+  expect(resolveFailedInvoiceSavedCardChargeAttempt).not.toHaveBeenCalled();
+  expect(invoiceReverts()).toHaveLength(0);
+  expect(mockState.linkedInvoice.status).toBe('processing');
+});
+
+test('metadata cancellation resolves the exact worker attempt while preserving a collectible invoice\'s live checkout', async () => {
+  mockState.linkedInvoice = {
+    id: METADATA_INVOICE_ID, customer_id: METADATA_CUSTOMER_ID, status: 'sent',
+    stripe_payment_intent_id: 'pi_live_pay_page',
+  };
+  mockState.attemptRow = {
+    id: METADATA_ATTEMPT_ID, invoice_id: METADATA_INVOICE_ID, status: 'ambiguous', resolved_at: null,
+    stripe_payment_method_id: 'pm_saved', stripe_payment_intent_id: 'pi_saved_card_old',
+    worker_payment_intent_id: 'pi_saved_card_old',
+  };
+  savedCardAttemptMatchesPaymentIntent.mockReturnValue(true);
+
+  await handleCanceled({
+    id: 'pi_saved_card_old', status: 'canceled', payment_method: 'pm_saved',
+    metadata: {
+      source: 'admin_card_on_file', saved_card_attempt_id: METADATA_ATTEMPT_ID,
+      waves_invoice_id: METADATA_INVOICE_ID, waves_customer_id: METADATA_CUSTOMER_ID,
+    },
+  });
+
+  expect(resolveFailedInvoiceSavedCardChargeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+    attemptId: METADATA_ATTEMPT_ID,
+    invoiceId: METADATA_INVOICE_ID,
+    customerId: METADATA_CUSTOMER_ID,
+    originalCustomerId: METADATA_CUSTOMER_ID,
+    stripePaymentIntentId: 'pi_saved_card_old',
+  }));
+  expect(invoiceReverts()).toHaveLength(0);
+  expect(mockState.linkedInvoice.stripe_payment_intent_id).toBe('pi_live_pay_page');
+});
+
+test.each([
+  ['invoice', { waves_invoice_id: 'not-a-uuid' }],
+  ['attempt', { saved_card_attempt_id: 'not-a-uuid' }],
+  ['customer', { waves_customer_id: 'not-a-uuid' }],
+])('metadata cancellation rejects a malformed %s UUID before any invoice lookup', async (_label, metadataPatch) => {
+  const intent = {
+    id: 'pi_malformed_metadata', status: 'canceled', payment_method: 'pm_saved',
+    metadata: {
+      source: 'admin_card_on_file', saved_card_attempt_id: METADATA_ATTEMPT_ID,
+      waves_invoice_id: METADATA_INVOICE_ID, waves_customer_id: METADATA_CUSTOMER_ID,
+      ...metadataPatch,
+    },
+  };
+
+  await expect(resolveMetadataCanceledSavedCardAttempt(intent)).resolves.toBe(false);
+  expect(mockState.reads).not.toContain('invoices');
+  expect(savedCardAttemptMatchesPaymentIntent).not.toHaveBeenCalled();
+  expect(resolveFailedInvoiceSavedCardChargeAttempt).not.toHaveBeenCalled();
+});
+
+test('a matching cancellation propagates the locked resolver retry while original-worker proof is pending', async () => {
+  const intent = {
+    id: 'pi_worker_pending', status: 'canceled', payment_method: 'pm_saved',
+    metadata: {
+      source: 'admin_card_on_file', saved_card_attempt_id: METADATA_ATTEMPT_ID,
+      waves_invoice_id: METADATA_INVOICE_ID, waves_customer_id: METADATA_CUSTOMER_ID,
+    },
+  };
+  mockState.linkedInvoice = {
+    id: METADATA_INVOICE_ID, customer_id: METADATA_CUSTOMER_ID,
+    status: 'processing', stripe_payment_intent_id: null,
+  };
+  mockState.attemptRow = {
+    id: METADATA_ATTEMPT_ID, invoice_id: METADATA_INVOICE_ID, status: 'ambiguous', resolved_at: null,
+    stripe_payment_method_id: 'pm_saved', stripe_payment_intent_id: intent.id,
+    worker_payment_intent_id: null,
+  };
+  savedCardAttemptMatchesPaymentIntent.mockReturnValue(true);
+  resolveFailedInvoiceSavedCardChargeAttempt.mockRejectedValueOnce(Object.assign(
+    new Error('worker pending'), { code: 'SAVED_CARD_WORKER_INTENT_PENDING' },
+  ));
+
+  await expect(resolveMetadataCanceledSavedCardAttempt(intent)).rejects.toMatchObject({
+    code: 'SAVED_CARD_WORKER_INTENT_PENDING',
+  });
 });
 
 // Billing audit 2026-10-30, finding 2: monthly dues have no invoice, and the canceled flip takes a

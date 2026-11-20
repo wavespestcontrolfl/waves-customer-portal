@@ -56,6 +56,10 @@ jest.mock('../services/open-balance', () => ({
 jest.mock('../services/completion-balance-sweep', () => ({
   dunningStoppedInvoiceIds: jest.fn(async () => new Set()),
 }));
+const mockCreditSnapshot = jest.fn();
+jest.mock('../services/customer-credit', () => ({
+  accountCreditSnapshotForInvoice: (...args) => mockCreditSnapshot(...args),
+}));
 
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
@@ -126,6 +130,10 @@ const ENV_KEYS = ['ZELLE_RECIPIENT', 'VENMO_HANDLE', 'PAYPAL_ME_HANDLE']; // leg
 const saved = {};
 beforeEach(() => {
   ENV_KEYS.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+  mockCreditSnapshot.mockReset().mockImplementation(async ({ customerId, balanceAdjustment = 0 }, database) => {
+    const row = await database('customers').where({ id: customerId }).first('account_credits', 'auto_apply_account_credit');
+    return { spendable: Number(row?.account_credits || 0) + balanceAdjustment, autoApplyEnabled: row?.auto_apply_account_credit === true };
+  });
 });
 afterEach(() => {
   ENV_KEYS.forEach((k) => {
@@ -239,7 +247,7 @@ describe('GET /pay/:token manualPayOptions', () => {
     );
     const { body } = await getPayPage(invoiceData({ status: 'overdue' }));
     expect(body).not.toHaveProperty('manualPayOptions');
-    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1');
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1', expect.anything(), { readOnly: false, checkout: true });
   });
 
   test('env set ⇒ key absent when the attached PaymentIntent already collected (codex r6 P1)', async () => {
@@ -438,6 +446,29 @@ describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
     });
     const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
     expect(result).toEqual({ visible: false, reason: 'credit_pending', projectedCredit: 20 });
+  });
+
+  test('$100 gross credit projects only $75 while $25 is reserved for another invoice', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    require('../config/feature-gates').gates.autoApplyAccountCredit = true;
+    mockCreditSnapshot.mockResolvedValue({ spendable: 75, autoApplyEnabled: true });
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: { billing_mode: null, monthly_rate: null, account_credits: 100, auto_apply_account_credit: true },
+        });
+      }
+      return chain({ first: null });
+    });
+
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue', total: 100 }) });
+
+    expect(result).toEqual({ visible: false, reason: 'credit_pending', projectedCredit: 75 });
+    expect(mockCreditSnapshot).toHaveBeenLastCalledWith({
+      customerId: 'cust-1',
+      invoiceId: 'inv-1',
+      balanceAdjustment: 0,
+    }, db);
   });
 
   test('a LIVE-resolved payer denies visibility (round 5 finding 3)', async () => {
@@ -798,7 +829,7 @@ describe('the final pass: active collection and full coverage', () => {
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(Object.assign(new Error('charge in progress'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }));
     await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
-    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenLastCalledWith(inv.id, expect.anything(), { readOnly: true });
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenLastCalledWith(inv.id, expect.anything(), { readOnly: true, checkout: true });
   });
   test('the attached PaymentIntent moved to processing after the first pass => withheld', async () => {
     const StripeService = require('../services/stripe');

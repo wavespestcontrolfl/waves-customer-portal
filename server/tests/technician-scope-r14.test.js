@@ -175,7 +175,7 @@ describe('finding 3: handoff mint re-validates assignment under a row lock', () 
     const src = read('routes/stripe-terminal.js');
     const handler = src.slice(src.indexOf("router.post('/handoff'"), src.indexOf("router.post('/validate-handoff'"));
     const txn = handler.indexOf('await db.transaction(async (trx) => {');
-    const lock = handler.indexOf('await technicianMayCollectInvoiceLocked(trx, req, invoice)');
+    const lock = handler.indexOf('await technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)');
     const advisory = handler.indexOf('pg_advisory_xact_lock');
     const tokenRow = handler.indexOf("trx('terminal_handoff_tokens').insert(");
     const sign = handler.indexOf('jwt.sign(');
@@ -187,8 +187,13 @@ describe('finding 3: handoff mint re-validates assignment under a row lock', () 
     expect(miss).toBeGreaterThan(txn);
     expect(miss).toBeLessThan(sign);
     const missBlock = handler.slice(miss, handler.indexOf('if (rateLimited) {'));
-    expect(missBlock).toMatch(/reverseAppliedCredit\(\{ invoiceId: invoice_id, amount: handoffCreditResult\.applied, createdBy: 'system:handoff_not_assigned' \}\)/);
+    expect(missBlock).toMatch(/reverseRefusedHandoffCredit\(\s*invoice_id,\s*handoffCreditResult\?\.applied,\s*'system:handoff_not_assigned'/);
     expect(missBlock).toMatch(/res\.status\(404\)\.json\(\{ error: 'Invoice not found' \}\)/);
+    const helper = src.slice(
+      src.indexOf('async function reverseRefusedHandoffCredit('),
+      src.indexOf("router.post('/handoff'"),
+    );
+    expect(helper).toMatch(/await reverseAppliedCredit\(\{ invoiceId, amount, createdBy \}\)/);
   });
 });
 
@@ -215,7 +220,7 @@ describe('codex #5568 r15', () => {
 
   test('the handoff locks ownership and applies credit in one transaction, before the prepaid exit (superseded by r16)', () => {
     const s = src('routes/stripe-terminal.js');
-    const lock = s.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;');
+    const lock = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)');
     const apply = s.indexOf('autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true })', lock);
     const prepaidExit = s.indexOf("if (invoice.status === 'prepaid') {", apply);
     expect(lock).toBeGreaterThan(-1);
@@ -241,13 +246,15 @@ describe('codex #5568 r16', () => {
 
     test('the locked ownership check runs first inside the transaction, and credit only after it passes', () => {
       const h = handler();
-      const txn = h.indexOf('const ownershipHeld = await db.transaction(async (trx) => {');
-      const lock = h.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;');
+      const txn = h.indexOf('const handoffRefusal = await db.transaction(async (trx) => {');
+      const lock = h.indexOf('technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)');
+      const denied = h.indexOf("return { status: 404, body: { error: 'Invoice not found' } };", lock);
       const apply = h.indexOf('autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true })');
-      const miss = h.indexOf("if (!ownershipHeld) return res.status(404).json({ error: 'Invoice not found' });");
+      const miss = h.indexOf('if (handoffRefusal) return res.status(handoffRefusal.status).json(handoffRefusal.body);');
       expect(txn).toBeGreaterThan(0);
       expect(lock).toBeGreaterThan(txn);
-      expect(apply).toBeGreaterThan(lock);
+      expect(denied).toBeGreaterThan(lock);
+      expect(apply).toBeGreaterThan(denied);
       expect(miss).toBeGreaterThan(apply);
     });
 
@@ -262,7 +269,7 @@ describe('codex #5568 r16', () => {
 
     test('deferred full-coverage side effects run after commit, the invoice is re-read, then the prepaid exit', () => {
       const h = handler();
-      const commit = h.indexOf("if (!ownershipHeld) return res.status(404)");
+      const commit = h.indexOf('if (handoffRefusal) return res.status(handoffRefusal.status)');
       const effects = h.indexOf('await runPostFullCoverageSideEffects(invoice_id);');
       const reread = h.indexOf("invoice = (await db('invoices').where({ id: invoice_id }).first()) || invoice;");
       const prepaid = h.indexOf("if (invoice.status === 'prepaid') {");
@@ -275,7 +282,7 @@ describe('codex #5568 r16', () => {
       const s = src('routes/stripe-terminal.js');
       expect(s).toMatch(/system:handoff_mint_failed/);
       expect(s).toMatch(/system:handoff_not_assigned/);
-      expect(handler()).toMatch(/technicianMayCollectInvoiceLocked\(trx, req, invoice\)\)\) \{\s*ownershipLostAtMint = true;/);
+      expect(handler()).toMatch(/technicianMayCollectInvoiceLocked\(trx, req, lockedInvoice\)\)\) \{\s*ownershipLostAtMint = true;/);
     });
   });
 
@@ -386,10 +393,10 @@ describe('codex #5568 r16', () => {
 describe('handoff lock order (pre-push P1)', () => {
   test('invoice then customer are locked before the visit ownership check', () => {
     const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
-    const trxAt = s.indexOf('const ownershipHeld = await db.transaction(async (trx) => {');
-    const inv = s.indexOf("await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');", trxAt);
-    const cust = s.indexOf("await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');", trxAt);
-    const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, invoice)', trxAt);
+    const trxAt = s.indexOf('const handoffRefusal = await db.transaction(async (trx) => {');
+    const inv = s.indexOf("await trx('invoices').where({ id: invoice_id }).forUpdate().first();", trxAt);
+    const cust = s.indexOf("await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');", trxAt);
+    const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)', trxAt);
     expect(trxAt).toBeGreaterThan(-1);
     expect(inv).toBeGreaterThan(trxAt);
     expect(cust).toBeGreaterThan(inv);
@@ -401,13 +408,59 @@ describe('mint transaction lock order (pre-push P1)', () => {
   test('a technician mint locks invoice then customer before the visit re-check', () => {
     const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
     const at = s.indexOf('let ownershipLostAtMint = false;');
-    const inv = s.indexOf("await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');", at);
-    const cust = s.indexOf("await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');", at);
-    const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, invoice)', at);
+    const inv = s.indexOf("await trx('invoices').where({ id: invoice_id }).forUpdate().first();", at);
+    const cust = s.indexOf("await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');", at);
+    const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)', at);
     expect(at).toBeGreaterThan(-1);
     expect(inv).toBeGreaterThan(at);
     expect(cust).toBeGreaterThan(inv);
     expect(visit).toBeGreaterThan(cust);
+  });
+});
+
+describe('Terminal checkout bind lock order', () => {
+  test('the handoff lock, combined reservation and canonical allocation locks precede the hold and every checkout retirement', () => {
+    const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
+    const handler = s.slice(s.indexOf("router.post('/payment-intent'"), s.indexOf("router.post('/apply-surcharge'"));
+    const bind = handler.indexOf('bound = await db.transaction(async (trx) => {');
+    const lockStart = s.indexOf('async function lockTerminalPreviousCheckout(');
+    const lockEnd = s.indexOf('return { ok: true, locked, PayCombined };', lockStart);
+    const lock = s.slice(lockStart, lockEnd);
+    const reservation = lock.indexOf('await PayCombined.lockCombinedCustomerStable(');
+    const allocationLocks = lock.indexOf("whereIn('id', allocationIds).orderBy('id', 'asc').forUpdate()");
+    const memberFences = lock.indexOf('await terminalAllocationChargeFence(trx, allocationRows)');
+    expect(lockStart).toBeGreaterThan(-1);
+    expect(lockEnd).toBeGreaterThan(lockStart);
+    expect(reservation).toBeGreaterThan(-1);
+    expect(allocationLocks).toBeGreaterThan(reservation);
+    expect(memberFences).toBeGreaterThan(allocationLocks);
+    const handoffLock = handler.indexOf("await trx('terminal_handoff_tokens').where({ jti }).forUpdate().first();", bind);
+    const previous = handler.indexOf('await lockTerminalPreviousCheckout(trx, invoice, pi.id);', handoffLock);
+    const hold = handler.indexOf('await assertNoInvoiceChargeReconciliationPending(invoice.id, trx, { checkout: true });', previous);
+    const sharedRetirement = handler.indexOf('await PayCombined.releaseCombinedSessionBeforeCollection(trx, locked,', hold);
+    const standaloneRetirement = handler.indexOf('guardOpenPaymentIntentForPrepaid(locked', sharedRetirement);
+    const conditionalBind = handler.indexOf(".whereNull('stripe_payment_intent_id')", standaloneRetirement);
+    expect(bind).toBeGreaterThan(-1);
+    expect(handoffLock).toBeGreaterThan(bind);
+    expect(previous).toBeGreaterThan(handoffLock);
+    expect(hold).toBeGreaterThan(previous);
+    expect(sharedRetirement).toBeGreaterThan(hold);
+    expect(standaloneRetirement).toBeGreaterThan(sharedRetirement);
+    expect(conditionalBind).toBeGreaterThan(standaloneRetirement);
+  });
+
+  test('refusal cleanup invalidates only an unbound handoff before canceling the idempotent Terminal PI', () => {
+    const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
+    const helperStart = s.indexOf('async function invalidateTerminalHandoffIfUnbound(jti)');
+    const helperEnd = s.indexOf('// Accepts both regular admin JWTs', helperStart);
+    const helper = s.slice(helperStart, helperEnd);
+    expect(helper).toContain("where({ jti }).forUpdate().first()");
+    expect(helper).toContain(".whereNull('stripe_payment_intent_id')");
+    const handler = s.slice(s.indexOf("router.post('/payment-intent'"), s.indexOf("router.post('/apply-surcharge'"));
+    const invalidate = handler.indexOf('invalidation = await invalidateTerminalHandoffIfUnbound(jti);');
+    const cancel = handler.indexOf('.cancel(pi.id, { cancellation_reason:', invalidate);
+    expect(invalidate).toBeGreaterThan(-1);
+    expect(cancel).toBeGreaterThan(invalidate);
   });
 });
 

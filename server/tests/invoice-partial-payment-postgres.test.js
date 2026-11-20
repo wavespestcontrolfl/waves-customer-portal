@@ -19,6 +19,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const { randomUUID } = require('node:crypto');
+const { recordAuthenticationCancellation } = require('../services/invoice-payment-authentication');
 
 // The first test cold-loads the whole payment writer (invoice, Stripe, follow-up services).
 jest.setTimeout(60000);
@@ -58,6 +59,7 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     const ids = customerIds.splice(0);
     if (!ids.length) return;
     const invoiceIds = (await database('invoices').whereIn('customer_id', ids).pluck('id'));
+    await database('stripe_invoice_charge_attempts').whereIn('invoice_id', invoiceIds).del();
     await database('audit_log').whereIn('resource_id', [...invoiceIds, ...ids]).del();
     await database('receipt_delivery_jobs').whereIn('invoice_id', invoiceIds).del();
     await database('invoice_followup_sequences').whereIn('invoice_id', invoiceIds).del();
@@ -120,18 +122,74 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     invoice_id: invoice.id, customer_id: invoice.customer_id, status: 'active', step_index: 1, touches_sent: 1, next_touch_at: new Date(Date.now() + 3600 * 1000),
   });
 
-  it('the same part payment submitted twice at once records once: the second meets $60 owed, not the $100 the page showed', async () => {
+  it('concurrent $40 submissions record one payment and a retry sees the $60 still owed', async () => {
     const invoice = await makeInvoice();
-    const results = await Promise.allSettled([
-      record(invoice.id, { amountCents: 4000, owedCentsSeen: 10000 }),
-      record(invoice.id, { amountCents: 4000, owedCentsSeen: 10000 }),
-    ]);
+    const submit = () => record(invoice.id, { amountCents: 4000, owedCentsSeen: 10000 });
+    const results = await Promise.allSettled([submit(), submit()]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const refused = results.find((r) => r.status === 'rejected');
     expect(refused.reason).toMatchObject({ statusCode: 409 });
-    expect(refused.reason.message).toMatch(/changed to \$60\.00/);
+    expect(refused.reason.message).toMatch(/changed to \$60\.00|The customer balance is changing/);
+    await expect(submit()).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('changed to $60.00') });
     expect(Number((await row(invoice.id)).amount_paid)).toBe(40);
     expect(await database('payments').where({ customer_id: invoice.customer_id })).toHaveLength(1);
+  });
+
+  it.each([
+    ['full', {}, 100, 'paid', 0],
+    ['partial', { amountCents: 4000 }, 40, 'viewed', 40],
+  ])('a resolved authentication_required attempt blocks %s manual posting until its exact PI cancellation is recorded', async (_kind, paymentOptions, ledgerAmount, finalStatus, finalAmountPaid) => {
+    const invoice = await makeInvoice();
+    const attemptId = randomUUID();
+    const suffix = attemptId.replaceAll('-', '');
+    const intentId = `pi_auth_${suffix}`;
+    const wrongIntentId = `pi_wrong_${suffix}`;
+    const stripePaymentMethodId = `pm_auth_${suffix}`;
+    const intent = {
+      id: intentId,
+      status: 'canceled',
+      payment_method: stripePaymentMethodId,
+      metadata: {
+        source: 'admin_card_on_file',
+        saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoice.id,
+        waves_customer_id: invoice.customer_id,
+      },
+    };
+    await database('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: invoice.id,
+      stripe_payment_method_id: stripePaymentMethodId,
+      idempotency_key: `synthetic-auth-${attemptId}`,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: intentId,
+      worker_payment_intent_id: intentId,
+      stripe_payment_intent_bound_at: new Date(),
+      authentication_canceled_intent_id: wrongIntentId,
+      resolved_at: new Date(),
+    });
+    expect((await row(invoice.id)).stripe_payment_intent_id).toBeNull();
+
+    const blocked = await refusalOf(record(invoice.id, paymentOptions));
+    expect(blocked).toMatchObject({ statusCode: 409 });
+    expect(blocked.message).toMatch(/awaiting verification/);
+    expect(await row(invoice.id)).toMatchObject({ status: 'viewed' });
+    expect(Number((await row(invoice.id)).amount_paid)).toBe(0);
+    expect(await database('payments').where({ customer_id: invoice.customer_id })).toHaveLength(0);
+
+    await recordAuthenticationCancellation(intent, database);
+    expect(await database('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ status: 'failed', decline_code: 'authentication_required', authentication_canceled_intent_id: intentId });
+
+    await record(invoice.id, paymentOptions);
+    const posted = await row(invoice.id);
+    expect(posted.status).toBe(finalStatus);
+    expect(Number(posted.amount_paid)).toBe(finalAmountPaid);
+    const payments = await database('payments').where({ customer_id: invoice.customer_id });
+    expect(payments).toHaveLength(1);
+    expect(payments[0].status).toBe('paid');
+    expect(Number(payments[0].amount)).toBe(ledgerAmount);
   });
 
   it('Undo of a part waits while a saved-card charge for the rest is unresolved (a crash can roll the invoice back but keep the claim)', async () => {
@@ -149,6 +207,39 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     } finally {
       await database('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id }).del();
     }
+  });
+
+  it('keeps a recorded part while the card priced for the remainder awaits authentication', async () => {
+    const invoice = await makeInvoice();
+    await record(invoice.id, { amountCents: 4000 });
+    const postedId = await shownPaymentId(invoice.id);
+    const attemptId = randomUUID();
+    const intent = {
+      id: `pi_rest_${attemptId}`, status: 'canceled', payment_method: 'pm_synthetic_rest',
+      metadata: {
+        source: 'admin_card_on_file', saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoice.id, waves_customer_id: invoice.customer_id,
+      },
+    };
+    await database('stripe_invoice_charge_attempts').insert({
+      id: attemptId, invoice_id: invoice.id, idempotency_key: `synthetic-rest-${attemptId}`,
+      stripe_payment_method_id: intent.payment_method, stripe_payment_intent_id: intent.id,
+      worker_payment_intent_id: intent.id,
+      stripe_payment_intent_bound_at: new Date(),
+      status: 'failed', decline_code: 'authentication_required', resolved_at: new Date(),
+    });
+
+    await recordAuthenticationCancellation({ ...intent, id: `pi_other_${attemptId}` }, database);
+    expect((await describeManualPaymentUndo(invoice.id)).code).toBe('card_charge_pending');
+    expect(await refusalOf(undo(invoice.id, { paymentId: postedId })))
+      .toMatchObject({ statusCode: 409, code: 'card_charge_pending' });
+    expect(Number((await row(invoice.id)).amount_paid)).toBe(40);
+    expect((await database('payments').where({ id: postedId }).first()).status).toBe('paid');
+
+    await recordAuthenticationCancellation(intent, database);
+    await undo(invoice.id, { paymentId: postedId });
+    expect(Number((await row(invoice.id)).amount_paid)).toBe(0);
+    expect((await database('payments').where({ id: postedId }).first()).status).toBe('canceled');
   });
 
   it('a part payment waits while a card dispute on the invoice is undecided, and is taken once the dispute is decided', async () => {

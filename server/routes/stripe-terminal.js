@@ -22,11 +22,13 @@ const {
   planCardPresentSurcharge,
   SURCHARGE_API_VERSION,
 } = require('../services/stripe-pricing');
-const { invoiceAmountDue, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+const {
+  INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus,
+} = require('../services/invoice-helpers');
 const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
 const {
   assertNoInvoiceChargeReconciliationPending,
-  parkInvoiceForSavedCardReconciliation,
+  savedCardChargeSuppressesAlternateCollection,
 } = require('../services/stripe');
 
 function terminalChargeFenceResponse(err) {
@@ -44,10 +46,187 @@ function terminalChargeFenceResponse(err) {
   };
 }
 
+function terminalSavedCardReconciliationNeedsPark(err) {
+  return err?.reconciliationRequired === true
+    && ['STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err?.code);
+}
+
+// The Terminal route must keep status-only collection rails (notably automatic
+// account credit) behind an ambiguous/orphaned saved-card charge. Park only an
+// unstamped collectible invoice, and never copy the conflicting charge's PI id
+// onto it: an existing pay-page pointer belongs to that payable checkout and
+// remains authoritative until reconciliation retires or settles it.
+async function parkTerminalSavedCardReconciliationLocked(trx, invoice, err) {
+  if (!invoice || !terminalSavedCardReconciliationNeedsPark(err)
+    || invoice.stripe_payment_intent_id
+    || !isInvoiceCollectibleStatus(invoice.status)) {
+    return false;
+  }
+  const parked = await trx('invoices')
+    .where({ id: invoice.id })
+    .whereNull('stripe_payment_intent_id')
+    .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
+    .update({ status: 'processing', updated_at: trx.fn.now() });
+  if (parked > 0) invoice.status = 'processing';
+  return parked > 0;
+}
+
+// An unlocked preflight can observe evidence that a webhook resolves before
+// we act on it. Re-read the evidence while holding the invoice row, then park
+// only if that same reconciliation-required condition still exists. The
+// request remains refused even if it cleared; the device can retry from a
+// fresh invoice snapshot without this request minting against stale facts.
+async function terminalPreflightChargeFence(invoiceId, initialErr) {
+  if (!terminalSavedCardReconciliationNeedsPark(initialErr)) {
+    return terminalChargeFenceResponse(initialErr);
+  }
+  return db.transaction(async (trx) => {
+    const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!locked) return terminalChargeFenceResponse(initialErr);
+    try {
+      await assertNoInvoiceChargeReconciliationPending(invoiceId, trx, { readOnly: true, checkout: true });
+      return terminalChargeFenceResponse(initialErr);
+    } catch (lockedErr) {
+      if (!savedCardChargeSuppressesAlternateCollection(lockedErr)) throw lockedErr;
+      await parkTerminalSavedCardReconciliationLocked(trx, locked, lockedErr);
+      return terminalChargeFenceResponse(lockedErr);
+    }
+  });
+}
+
+async function terminalProcessingRefusal(invoice, database, ordinaryResponse) {
+  if (invoice?.status !== 'processing') return null;
+  try {
+    await assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true, checkout: true });
+    return ordinaryResponse;
+  } catch (err) {
+    if (!savedCardChargeSuppressesAlternateCollection(err)) throw err;
+    return terminalChargeFenceResponse(err);
+  }
+}
+
+async function terminalPaymentIntentStatusRefusal(invoice, database) {
+  if (invoice?.status === 'processing') {
+    return terminalProcessingRefusal(invoice, database, { error: 'Invoice is processing', code: 'invoice_status_changed' });
+  }
+  if (!invoice || !isInvoiceCollectibleStatus(invoice.status)) {
+    return {
+      error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
+      code: 'invoice_status_changed',
+    };
+  }
+  return null;
+}
+
+function terminalCombinedReleaseRefusal(err) {
+  if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
+    return { ok: false, chargeFence: terminalChargeFenceResponse(err) };
+  }
+  if (err.statusCode === 409) return { ok: false, combinedReleaseError: err };
+  return null;
+}
+
+async function terminalAllocationChargeFence(database, rows) {
+  for (const row of rows) {
+    try {
+      await assertInvoiceDepositSettlementReady(database, row);
+      await assertNoInvoiceChargeReconciliationPending(row.id, database, { checkout: true });
+    } catch (err) {
+      if (err.code !== 'DEPOSIT_RECONCILIATION_REQUIRED'
+        && !savedCardChargeSuppressesAlternateCollection(err)) throw err;
+      await parkTerminalSavedCardReconciliationLocked(database, row, err);
+      return terminalChargeFenceResponse(err);
+    }
+  }
+  return null;
+}
+
+async function lockTerminalPreviousCheckout(trx, invoice, terminalPaymentIntentId) {
+  const PayCombined = require('../services/pay-combined');
+  await PayCombined.lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id);
+  const reserved = await trx('invoices').where({ id: invoice.id }).first();
+  let locked = null;
+  if (reserved?.stripe_payment_intent_id
+    && String(reserved.stripe_payment_intent_id) !== String(terminalPaymentIntentId)) {
+    let openIntent;
+    try {
+      openIntent = await require('../services/stripe').retrievePaymentIntent(reserved.stripe_payment_intent_id);
+    } catch (retrieveErr) {
+      return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: retrieveErr.message } };
+    }
+    if (!openIntent) return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'payment service unavailable' } };
+    if (PayCombined.isCombinedPiMetadata(openIntent.metadata)) {
+      let allocation;
+      try {
+        allocation = PayCombined.parseCombinedAllocation(openIntent.metadata);
+      } catch (allocationErr) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: allocationErr.message } };
+      }
+      if (!allocation.some((entry) => String(entry.invoiceId) === String(invoice.id))) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation does not own invoice' } };
+      }
+      const allocationIds = [...new Set(allocation.map((entry) => String(entry.invoiceId)))].sort();
+      const allocationRows = await trx('invoices').whereIn('id', allocationIds).orderBy('id', 'asc').forUpdate();
+      if (allocationRows.length !== allocationIds.length) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation member missing' } };
+      }
+      locked = allocationRows.find((row) => String(row.id) === String(invoice.id)) || null;
+      if (!locked || String(locked.stripe_payment_intent_id || '') !== String(openIntent.id)) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation anchor changed' } };
+      }
+      if (allocationRows.some((row) => String(row.customer_id) !== String(locked.customer_id))) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation owner changed' } };
+      }
+      const chargeFence = await terminalAllocationChargeFence(trx, allocationRows);
+      if (chargeFence) return { ok: false, chargeFence };
+      if (openIntent.status !== 'canceled') {
+        // Terminal collects only the anchor. Original siblings remain locked
+        // and fenced, even if they now owe a different amount or stopped dunning.
+        const anchor = { invoiceId: locked.id, cents: Math.round(invoiceAmountDue(locked) * 100) };
+        const verifiedRows = await PayCombined.verifyAllocationLocked(trx, [anchor], {
+          anchorInvoiceId: invoice.id,
+          expectPaymentIntentId: reserved.stripe_payment_intent_id,
+        });
+        locked = verifiedRows.find((row) => String(row.id) === String(invoice.id)) || null;
+      }
+    }
+  }
+  if (!locked) locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+  return { ok: true, locked, PayCombined };
+}
+
+function terminalAlreadyCreated(paymentIntentId) {
+  return { error: 'Payment intent already created for this handoff', code: 'payment_intent_already_created', paymentIntentId };
+}
+
 function terminalHandoffNeedsReissue(handoff) {
   const usedAt = new Date(handoff?.used_at || '').getTime();
   const expiresAt = new Date(handoff?.expires_at || '').getTime();
   return Number.isFinite(usedAt) && Number.isFinite(expiresAt) && expiresAt <= usedAt;
+}
+
+// A refusal may cancel the idempotent Terminal PI only after this transaction
+// proves the handoff is still unbound and wins its durable invalidation. A
+// concurrent successful bind takes the same row lock and publishes its PI;
+// cleanup then observes that binding and must leave the shared PI alive.
+async function invalidateTerminalHandoffIfUnbound(jti) {
+  return db.transaction(async (trx) => {
+    const handoff = await trx('terminal_handoff_tokens').where({ jti }).forUpdate().first();
+    if (!handoff) return { invalidated: false, missing: true };
+    if (handoff.stripe_payment_intent_id) {
+      return { invalidated: false, boundPaymentIntentId: handoff.stripe_payment_intent_id };
+    }
+    if (terminalHandoffNeedsReissue(handoff)) {
+      return { invalidated: false, alreadyInvalidated: true };
+    }
+    if (!handoff.used_at) return { invalidated: false, notValidated: true };
+    const invalidated = await trx('terminal_handoff_tokens')
+      .where({ jti })
+      .whereNull('stripe_payment_intent_id')
+      .where('expires_at', '>', handoff.used_at)
+      .update({ expires_at: handoff.used_at });
+    return { invalidated: invalidated > 0 };
+  });
 }
 
 // Accepts both regular admin JWTs and terminal-scoped JWTs (minted by
@@ -249,6 +428,39 @@ async function technicianMayCollectInvoiceLocked(trx, req, invoice) {
   return !!assigned;
 }
 
+async function lockedHandoffInvoiceStateRefusal(invoice, database) {
+  if (invoice.status === 'paid') return { status: 400, body: { error: 'Invoice already paid' } };
+  if (invoice.status === 'prepaid') return { status: 400, body: { error: 'Invoice is already prepaid' } };
+  const processingRefusal = await terminalProcessingRefusal(
+    invoice, database, { error: 'Bank payment is already processing' },
+  );
+  if (processingRefusal) return { status: 409, body: processingRefusal };
+  if (!isInvoiceCollectibleStatus(invoice.status)) {
+    return { status: 409, body: { error: `Invoice is ${invoice.status}`, code: 'invoice_status_changed' } };
+  }
+  if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
+    return {
+      status: 400,
+      body: { error: 'Invoice is billed to a third-party payer — do not collect in person' },
+    };
+  }
+  return null;
+}
+
+// Return only the credit this handoff request applied when minting ultimately
+// refuses. reverseAppliedCredit re-locks the invoice and skips a reversal once
+// another payment has entered flight or settled, so a late saved-card winner is
+// never undone by this cleanup.
+async function reverseRefusedHandoffCredit(invoiceId, amount, createdBy, context) {
+  if (!(Number(amount) > 0)) return;
+  try {
+    const { reverseAppliedCredit } = require('../services/customer-credit');
+    await reverseAppliedCredit({ invoiceId, amount, createdBy });
+  } catch (err) {
+    logger.warn(`[stripe-terminal] credit reversal after ${context} skipped for ${invoiceId}: ${err.message}`);
+  }
+}
+
 router.post('/handoff', adminAuthenticate, async (req, res) => {
   // Hoisted so the generic catch below can reverse seam-applied credit when no
   // handoff token ends up minted (any abort after the credit-apply).
@@ -266,6 +478,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
 
     let invoice = await db('invoices').where({ id: invoice_id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const handoffCustomerId = invoice.customer_id;
     // Technician scope (codex #5568 r1 P1): a technician mints a Tap to Pay
     // handoff only for a customer on their current/recent route; an admin is
     // unscoped. 404 so an invoice id observed elsewhere does not confirm
@@ -277,11 +490,15 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // touch a terminal invoice) only to then reject the in-person collection.
     if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
     if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
-    if (invoice.status === 'processing') return res.status(409).json({ error: 'Bank payment is already processing' });
+    const processingRefusal = await terminalProcessingRefusal(
+      invoice, db, { error: 'Bank payment is already processing' },
+    );
+    if (processingRefusal) return res.status(409).json(processingRefusal);
+    if (!isInvoiceCollectibleStatus(invoice.status)) return res.status(409).json({ error: `Invoice is ${invoice.status}`, code: 'invoice_status_changed' });
     // Third-party Bill-To: never mint an in-person collection handoff for a
     // payer-billed invoice — the tech must not collect the AP's invoice from the
     // service recipient. AR routes to the payer AP inbox.
-    if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) {
+    if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
       // A WITHDRAWN combined-visit invoice keeps payer_id NULL and a
       // collectible status — the Bill-To move is recorded only in its stamp
       // (Codex #4311 r31 P1) — so a payer_id-only guard let a technician mint
@@ -307,18 +524,39 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // annual-prepay term sync) are deferred and run after commit.
     const { autoApplyAccountCreditIfEnabled, runPostFullCoverageSideEffects } = require('../services/customer-credit');
     let handoffCreditResult = null;
-    const ownershipHeld = await db.transaction(async (trx) => {
+    const handoffRefusal = await db.transaction(async (trx) => {
       // Billing lock order (invoice → customer → visit), the order the credit
       // apply and saved-card collection take, so a concurrent collection
       // cannot deadlock against this ownership check (pre-push P1). The
       // credit apply below re-locks the same rows within this transaction.
-      await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
-      if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;
+      const lockedInvoice = await trx('invoices').where({ id: invoice_id }).forUpdate().first();
+      if (!lockedInvoice) return { status: 404, body: { error: 'Invoice not found' } };
+      if (lockedInvoice.customer_id) {
+        await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');
+      }
+      if (String(lockedInvoice.customer_id || '') !== String(handoffCustomerId || '')
+        || !(await technicianMayCollectInvoiceLocked(trx, req, lockedInvoice))) {
+        return { status: 404, body: { error: 'Invoice not found' } };
+      }
+      const lockedStateRefusal = await lockedHandoffInvoiceStateRefusal(lockedInvoice, trx);
+      if (lockedStateRefusal) return lockedStateRefusal;
+      // This is intentionally the writing checkout fence under the invoice
+      // lock. A saved-card owner must cross the same lock before it can mark a
+      // claim submitted, so an expired pre-submit claim is safe to release.
+      // Keep an established conflict inside this transaction so a stale
+      // submitted claim's promotion to ambiguous commits, but never reach the
+      // credit draw when any competing-payment evidence remains.
+      try {
+        await assertNoInvoiceChargeReconciliationPending(invoice_id, trx, { checkout: true });
+      } catch (err) {
+        if (!savedCardChargeSuppressesAlternateCollection(err)) throw err;
+        await parkTerminalSavedCardReconciliationLocked(trx, lockedInvoice, err);
+        return { status: 409, body: terminalChargeFenceResponse(err) };
+      }
       handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true });
-      return true;
+      return null;
     });
-    if (!ownershipHeld) return res.status(404).json({ error: 'Invoice not found' });
+    if (handoffRefusal) return res.status(handoffRefusal.status).json(handoffRefusal.body);
     handoffAppliedCredit = handoffCreditResult?.applied || 0;
     if (handoffCreditResult?.fullyCovered) {
       try {
@@ -332,11 +570,9 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       return res.status(400).json({ error: 'Invoice is now covered by account credit — no in-person collection needed' });
     }
 
-    // Collect the amount DUE (total − applied account credit), not raw total.
-    const amount_cents = Math.round(invoiceAmountDue(invoice) * 100);
-    if (!amount_cents || amount_cents < 50) {
-      return res.status(400).json({ error: 'Invalid invoice amount' });
-    }
+    // Priced again from the locked row in the mint transaction below. The
+    // unlocked re-read is useful only for the full-credit exit above.
+    let amount_cents = null;
 
     let rateLimited = false;
     let rateLimitedCount = 0;
@@ -344,17 +580,46 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     let mintedJti = null;
     let mintedExpiresAt = null;
     let ownershipLostAtMint = false;
+    let mintInvoiceRefusal = null;
+    let mintChargeRefusal = null;
 
     await db.transaction(async (trx) => {
-      // Locked re-validation of the technician's assignment BEFORE anything
-      // else in the mint (no token row, no rate-limit write on a miss), in
-      // the billing lock order invoice → customer → visit (pre-push P1).
-      if (req.techRole === 'technician') {
-        await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
-        if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      }
-      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) {
+      // Every role takes the invoice lock in the transaction that actually
+      // inserts the handoff. The earlier credit transaction has committed, so
+      // a saved-card owner could otherwise claim this invoice in that seam.
+      // For technicians, continue through the billing lock order invoice →
+      // customer → visit before any rate-limit or token work.
+      const lockedInvoice = await trx('invoices').where({ id: invoice_id }).forUpdate().first();
+      if (!lockedInvoice) {
         ownershipLostAtMint = true;
+        return;
+      }
+      if (lockedInvoice.customer_id) {
+        await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');
+      }
+      if (String(lockedInvoice.customer_id || '') !== String(handoffCustomerId || '')
+        || !(await technicianMayCollectInvoiceLocked(trx, req, lockedInvoice))) {
+        ownershipLostAtMint = true;
+        return;
+      }
+      mintInvoiceRefusal = await lockedHandoffInvoiceStateRefusal(lockedInvoice, trx);
+      if (mintInvoiceRefusal) return;
+      try {
+        await assertNoInvoiceChargeReconciliationPending(invoice_id, trx, { checkout: true });
+      } catch (err) {
+        if (!savedCardChargeSuppressesAlternateCollection(err)) throw err;
+        // A stale submitted claim may have been promoted to ambiguous here.
+        // Return from the callback so the promotion commits before the 409.
+        await parkTerminalSavedCardReconciliationLocked(trx, lockedInvoice, err);
+        mintChargeRefusal = err;
+        return;
+      }
+
+      // Collect the amount DUE (total − applied account credit), not raw
+      // total, and bind the token to the row we just authorized under lock.
+      amount_cents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
+      if (!amount_cents || amount_cents < 50) {
+        mintInvoiceRefusal = { status: 400, body: { error: 'Invalid invoice amount' } };
         return;
       }
 
@@ -415,7 +680,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       await trx('terminal_handoff_tokens').insert({
         jti,
         tech_user_id: req.technicianId,
-        invoice_id: invoice.id,
+        invoice_id: lockedInvoice.id,
         amount_cents,
         expires_at,
         // Two-step proof of the minting session (GATE_ADMIN_MFA); this row is
@@ -427,19 +692,41 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       mintedExpiresAt = expires_at;
     });
 
+    // A competing card may already be priced from the applied credit. Ask the
+    // common reversal primitive to return this request's credit; its locked
+    // payment-in-flight/settled fence safely skips the reversal when that card
+    // has won the race.
+    if (mintChargeRefusal) {
+      await reverseRefusedHandoffCredit(
+        invoice_id,
+        handoffCreditResult?.applied,
+        'system:handoff_charge_refused',
+        'competing-payment handoff refusal',
+      );
+      return res.status(409).json(terminalChargeFenceResponse(mintChargeRefusal));
+    }
+
     if (ownershipLostAtMint) {
       // Same refusal as the pre-check above. Reverse the credit this seam
       // applied so the customer's credit is not consumed (and the invoice not
       // edit-locked) for a collection the technician is no longer assigned to.
-      if (handoffCreditResult?.applied > 0) {
-        try {
-          const { reverseAppliedCredit } = require('../services/customer-credit');
-          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy: 'system:handoff_not_assigned' });
-        } catch (e) {
-          logger.warn(`[stripe-terminal] credit reversal after unassigned handoff skipped for ${invoice_id}: ${e.message}`);
-        }
-      }
+      await reverseRefusedHandoffCredit(
+        invoice_id,
+        handoffCreditResult?.applied,
+        'system:handoff_not_assigned',
+        'unassigned handoff',
+      );
       return res.status(404).json({ error: 'Invoice not found' });
+    }
+
+    if (mintInvoiceRefusal) {
+      await reverseRefusedHandoffCredit(
+        invoice_id,
+        handoffCreditResult?.applied,
+        'system:handoff_invoice_refused',
+        'invoice-state handoff refusal',
+      );
+      return res.status(mintInvoiceRefusal.status).json(mintInvoiceRefusal.body);
     }
 
     if (rateLimited) {
@@ -454,14 +741,12 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       // Mint was rate-limited — no handoff/deep link issued. Reverse any credit
       // this seam applied above so we don't consume the customer's credit and
       // edit-lock an invoice the tech couldn't actually collect on.
-      if (handoffCreditResult?.applied > 0) {
-        try {
-          const { reverseAppliedCredit } = require('../services/customer-credit');
-          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy: 'system:handoff_rate_limited' });
-        } catch (e) {
-          logger.warn(`[stripe-terminal] credit reversal after rate-limited handoff skipped for ${invoice_id}: ${e.message}`);
-        }
-      }
+      await reverseRefusedHandoffCredit(
+        invoice_id,
+        handoffCreditResult?.applied,
+        'system:handoff_rate_limited',
+        'rate-limited handoff',
+      );
       res.setHeader('Retry-After', String(rateLimitedRetryAfter));
       return res.status(429).json({
         error: 'Too many handoff mints. Try again in an hour.',
@@ -508,17 +793,20 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       expires_at: mintedExpiresAt.toISOString(),
     });
   } catch (err) {
-    logger.error(`[stripe-terminal] handoff mint failed: ${err.message}`);
     // No handoff token was minted but we already applied credit above — return it
     // so an aborted mint doesn't strand the customer's credit + edit-lock the invoice.
-    if (!handoffTokenMinted && handoffAppliedCredit > 0) {
-      try {
-        const { reverseAppliedCredit } = require('../services/customer-credit');
-        await reverseAppliedCredit({ invoiceId: req.body?.invoice_id, amount: handoffAppliedCredit, createdBy: 'system:handoff_mint_failed' });
-      } catch (e) {
-        logger.warn(`[stripe-terminal] credit reversal after failed handoff mint skipped: ${e.message}`);
-      }
+    if (!handoffTokenMinted) {
+      await reverseRefusedHandoffCredit(
+        req.body?.invoice_id,
+        handoffAppliedCredit,
+        'system:handoff_mint_failed',
+        'failed handoff mint',
+      );
     }
+    if (savedCardChargeSuppressesAlternateCollection(err)) {
+      return res.status(409).json(terminalChargeFenceResponse(err));
+    }
+    logger.error(`[stripe-terminal] handoff mint failed: ${err.message}`);
     res.status(500).json({ error: 'Handoff mint failed' });
   }
 });
@@ -682,8 +970,8 @@ router.post('/validate-handoff', async (req, res) => {
     const invoice = await db('invoices').where({ id: handoffRow.invoice_id }).first();
     // A Bill-To move committed between the mint and this validation is the
     // same refusal as a status change (r31 P1): the stamp is the only record.
-    if (!invoice || invoiceWithdrawnFromCustomer(invoice)
-      || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
+    if (!invoice || invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)
+      || !isInvoiceCollectibleStatus(invoice.status)) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: handoffRow.invoice_id || null,
@@ -1358,11 +1646,7 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       // Clean "your iOS app already created a PI for this jti — use that
       // clientSecret" path. iOS should be retrieving the existing PI via
       // the Stripe API using the ID we return here, not re-creating.
-      return res.status(409).json({
-        error: 'Payment intent already created for this handoff',
-        code: 'payment_intent_already_created',
-        paymentIntentId: handoff.stripe_payment_intent_id,
-      });
+      return res.status(409).json(terminalAlreadyCreated(handoff.stripe_payment_intent_id));
     }
 
     // Prevent tech-cross-use: if tech A's validated jti somehow ends up in
@@ -1383,13 +1667,9 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     // office, or adjusted. These checks run against the current invoice
     // state and the mint-time snapshot in handoff.amount_cents.
     const invoice = await db('invoices').where({ id: handoff.invoice_id }).first();
-    if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
-      return res.status(409).json({
-        error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
-        code: 'invoice_status_changed',
-      });
-    }
-    if (invoiceWithdrawnFromCustomer(invoice)) {
+    const statusRefusal = await terminalPaymentIntentStatusRefusal(invoice, db);
+    if (statusRefusal) return res.status(409).json(statusRefusal);
+    if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
       return res.status(409).json({
         error: 'Invoice is billed to a third-party payer — do not collect in person',
         code: 'invoice_withdrawn_from_customer',
@@ -1403,16 +1683,12 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       });
     }
     try {
-      await assertNoInvoiceChargeReconciliationPending(invoice.id);
+      await assertNoInvoiceChargeReconciliationPending(invoice.id, db, { checkout: true });
       await assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
     } catch (fenceErr) {
-      if (fenceErr.code !== 'DEPOSIT_RECONCILIATION_REQUIRED'
-        && fenceErr.code !== 'STRIPE_CHARGE_IN_PROGRESS'
-        && fenceErr.code !== 'STRIPE_AMBIGUOUS_OUTCOME') throw fenceErr;
-      if (fenceErr.reconciliationRequired) {
-        await parkInvoiceForSavedCardReconciliation({ invoiceId: invoice.id, error: fenceErr });
-      }
-      return res.status(409).json(terminalChargeFenceResponse(fenceErr));
+      if (!savedCardChargeSuppressesAlternateCollection(fenceErr)) throw fenceErr;
+      const chargeFence = await terminalPreflightChargeFence(invoice.id, fenceErr);
+      return res.status(409).json(chargeFence);
     }
     const tech = await db('technicians').where({ id: handoff.tech_user_id }).first();
     if (!tech || tech.active === false) {
@@ -1455,20 +1731,35 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     let bound;
     try {
       bound = await db.transaction(async (trx) => {
-      // Combined-session reservation INSIDE the bind transaction (codex
-      // #3427 r30 P0, serialized r31 P0): the helper takes the
-      // per-customer combined lock, re-reads the invoice under it, and
-      // releases any combined session — held through the stamp write
-      // below, so /setup cannot stamp a confirmable combined PI in the
-      // gap before Terminal binds its card-present PI.
-      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'collecting at the terminal' });
-      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
-      if (!locked || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(locked.status)) {
-        return { ok: false, status: locked ? locked.status : null };
+      // The handoff row is the one-jti serialization point for successful
+      // bind versus refusal cleanup. Hold it through checkout retirement and
+      // invoice publication so invalidation cannot win and cancel this same
+      // idempotent PI after it has been bound for the device.
+      const lockedHandoff = await trx('terminal_handoff_tokens').where({ jti }).forUpdate().first();
+      if (!lockedHandoff) return { ok: false, handoffMissing: true };
+      if (terminalHandoffNeedsReissue(lockedHandoff)) return { ok: false, handoffInvalidated: true };
+      if (lockedHandoff.stripe_payment_intent_id) {
+        return { ok: false, boundPaymentIntentId: lockedHandoff.stripe_payment_intent_id };
       }
+      // Reserve the customer's combined-checkout namespace BEFORE any row
+      // lock, matching /setup. Read the live binding under that reservation;
+      // if it is shared, take the canonical sorted allocation locks before
+      // checking the saved-card hold. A racing saved-card claim takes one of
+      // these same invoice locks, so one side must commit before the other can
+      // decide whether any checkout may be retired.
+      const previousCheckout = await lockTerminalPreviousCheckout(trx, invoice, pi.id);
+      if (!previousCheckout.ok) return previousCheckout;
+      let { locked } = previousCheckout;
+      const { PayCombined } = previousCheckout;
+      if (locked?.status === 'processing') {
+        const chargeFence = await terminalProcessingRefusal(locked, trx, null);
+        if (chargeFence) return { ok: false, chargeFence };
+        return { ok: false, status: locked.status };
+      }
+      if (!locked || !isInvoiceCollectibleStatus(locked.status)) return { ok: false, status: locked?.status };
       // The withdrawal re-read UNDER THE LOCK, like every other money seam:
       // a Bill-To assignment can commit while this transaction waits here.
-      if (invoiceWithdrawnFromCustomer(locked)) {
+      if (locked.payer_id || locked.payer_statement_id || invoiceWithdrawnFromCustomer(locked)) {
         return { ok: false, withdrawn: true, status: locked.status };
       }
       // Amount agreement under the lock. Partial account credit can land between
@@ -1492,21 +1783,25 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       }
       try {
         // Close the race between the unlocked pre-create fence check and PI
-        // creation. If a saved-card owner claimed the invoice meanwhile, do
-        // not bind or return this PI; the caller cancels it below.
-        await assertNoInvoiceChargeReconciliationPending(invoice.id, trx);
+        // creation. This check runs while the combined reservation and every
+        // allocation lock are held, and before either the shared checkout or
+        // a standalone checkout can be retired below.
+        await assertNoInvoiceChargeReconciliationPending(invoice.id, trx, { checkout: true });
       } catch (fenceErr) {
-        if (fenceErr.reconciliationRequired) {
-          // The invoice row is already locked by this transaction. Park it on
-          // the same connection so status-only collection paths cannot race the
-          // ambiguous saved-card owner while the new terminal PI is canceled.
-          await trx('invoices').where({ id: invoice.id }).update({
-            status: 'processing',
-            stripe_payment_intent_id: fenceErr.stripePaymentIntentId || null,
-            updated_at: trx.fn.now(),
-          });
-        }
+        if (!savedCardChargeSuppressesAlternateCollection(fenceErr)) throw fenceErr;
+        // This evidence was read while the invoice row is locked. An
+        // unstamped ambiguous/orphaned charge must park status-only collection
+        // rails, while a live checkout pointer remains untouched.
+        await parkTerminalSavedCardReconciliationLocked(trx, locked, fenceErr);
         return { ok: false, chargeFence: terminalChargeFenceResponse(fenceErr) };
+      }
+      // Only now may Terminal retire a checkout. The helper re-reads under the
+      // reservation and cancels/unstamps a shared PI; a standalone PI remains
+      // for the prepaid guard immediately below.
+      if (locked.stripe_payment_intent_id
+        && String(locked.stripe_payment_intent_id) !== String(pi.id)) {
+        await PayCombined.releaseCombinedSessionBeforeCollection(trx, locked, { context: 'collecting at the terminal' });
+        locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
       }
       // Retire any OTHER open PaymentIntent the invoice still points at — the
       // /pay page mints one on load, and the bind below overwrites the pointer,
@@ -1521,16 +1816,17 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       // PI in between this check and the bind. The invoice's own card-present PI
       // (pointer already equals pi.id) is never retired.
       if (locked.stripe_payment_intent_id && String(locked.stripe_payment_intent_id) !== String(pi.id)) {
-        const piGuard = await require('../services/prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(locked);
+        const piGuard = await require('../services/prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(locked, { database: trx });
         if (!piGuard.ok) return { ok: false, piGuard };
       }
       // SET only if still NULL — two concurrent /payment-intent calls for the
       // same jti share an idempotency key and get the same PI back; first
       // UPDATE wins, second is a no-op.
-      await trx('terminal_handoff_tokens')
+      const handoffBound = await trx('terminal_handoff_tokens')
         .where({ jti })
         .whereNull('stripe_payment_intent_id')
         .update({ stripe_payment_intent_id: pi.id });
+      if (handoffBound !== 1) return { ok: false, handoffBindLost: true };
       // Backfill the invoice row for admin-portal consistency (handoff row is
       // the source of truth for the terminal flow).
       await trx('invoices').where({ id: invoice.id }).update({ stripe_payment_intent_id: pi.id });
@@ -1538,13 +1834,14 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     });
     } catch (releaseErr) {
       // 409-shaped combined-session refusals from the in-transaction
-      // reservation surface as retryable conflicts.
-      if (releaseErr.statusCode === 409) {
-        return res.status(409).json({ error: releaseErr.message, code: 'combined_session_release_failed' });
-      }
-      throw releaseErr;
+      // reservation surface are retryable conflicts. Route them through the
+      // common refusal cleanup below so the just-created Terminal PI is
+      // canceled and this handoff cannot replay it.
+      bound = terminalCombinedReleaseRefusal(releaseErr);
+      if (!bound) throw releaseErr;
     }
 
+    if (bound.boundPaymentIntentId) return res.status(409).json(terminalAlreadyCreated(bound.boundPaymentIntentId));
     if (!bound.ok) {
       // PI was minted but the invoice changed under the lock (went terminal, or
       // account credit reduced the amount due) — cancel it so the card can't be
@@ -1553,23 +1850,31 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       // retry would otherwise replay the canceled PI and return its unusable
       // client secret. expires_at <= used_at is the durable reissue marker; a
       // naturally expired but otherwise valid handoff remains distinguishable.
-      let handoffInvalidated = false;
+      let invalidation;
       try {
-        const invalidated = await db('terminal_handoff_tokens')
-          .where({ jti })
-          .update({ expires_at: handoff.used_at });
-        handoffInvalidated = invalidated > 0;
+        invalidation = await invalidateTerminalHandoffIfUnbound(jti);
       } catch (invalidateErr) {
         logger.error(`[stripe-terminal] failed to invalidate canceled handoff ${jti}: ${invalidateErr.message}`);
+        throw new Error('Payment handoff could not be invalidated; start a new handoff');
+      }
+      if (invalidation.boundPaymentIntentId) {
+        // Another request bound and is publishing this idempotent PI while this
+        // request was unwinding. It owns the live PI; never cancel it.
+        return res.status(409).json(terminalAlreadyCreated(invalidation.boundPaymentIntentId));
+      }
+      if (invalidation.alreadyInvalidated) {
+        // A parallel refusal already won invalidation and owns the one cancel.
+        return res.status(409).json({
+          error: 'This payment handoff was canceled. Start a new handoff and try again.',
+          code: 'handoff_reissue_required',
+        });
+      }
+      if (!invalidation.invalidated) {
+        throw new Error('Payment handoff could not be invalidated; start a new handoff');
       }
       await stripe.paymentIntents
         .cancel(pi.id, { cancellation_reason: 'abandoned' })
         .catch((e) => logger.warn(`[stripe-terminal] failed to cancel orphaned PI ${pi.id}: ${e.message}`));
-      if (!handoffInvalidated) {
-        // Fail closed. A retry will replay the same Stripe PI, reach this branch,
-        // and retry the durable invalidation before any client secret is exposed.
-        throw new Error('Payment handoff could not be invalidated; start a new handoff');
-      }
       if (bound.amountChanged) {
         return res.status(409).json({
           error: 'Invoice amount changed since handoff',
@@ -1578,6 +1883,13 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       }
       if (bound.chargeFence) {
         return res.status(409).json({ ...bound.chargeFence, newHandoffRequired: true });
+      }
+      if (bound.combinedReleaseError) {
+        return res.status(409).json({
+          error: bound.combinedReleaseError.message,
+          code: 'combined_session_release_failed',
+          newHandoffRequired: true,
+        });
       }
       if (bound.withdrawn) {
         return res.status(409).json({
@@ -1689,7 +2001,7 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
     // Terminal PI was minted but before the technician confirms it.
     return await db.transaction(async (trx) => {
       const invoice = await trx('invoices').where({ id: handoff.invoice_id }).forUpdate().first();
-      if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
+      if (!invoice || !isInvoiceCollectibleStatus(invoice.status)) {
         return res.status(409).json({
           error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
           code: 'invoice_status_changed',
@@ -1700,6 +2012,9 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
         return res.status(409).json({ error: 'Invoice amount changed since handoff', code: 'invoice_amount_changed' });
       }
       await assertInvoiceDepositSettlementReady(trx, invoice);
+      // With surcharging enabled, iOS calls this after the card is read and
+      // before confirming its bound PI. Recheck even for earlier handoffs.
+      await assertNoInvoiceChargeReconciliationPending(invoice.id, trx, { readOnly: true, checkout: true });
 
       // Feature off → no surcharge write. Still fence the last server step
       // before this already-created PI can be confirmed by the device.
@@ -1809,7 +2124,8 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
       }
     });
   } catch (err) {
-    if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
+    if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED'
+      || savedCardChargeSuppressesAlternateCollection(err)) {
       return res.status(409).json(terminalChargeFenceResponse(err));
     }
     logger.error(`[stripe-terminal] apply-surcharge failed: ${err.message}`);

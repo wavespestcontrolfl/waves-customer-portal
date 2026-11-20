@@ -86,6 +86,9 @@ async function abandonedSiblingPaymentIntent(inv, { database = db } = {}) {
     if (!pi) return null;
     if (!paymentIntentOwnsInvoice(pi.metadata, inv.id)) return null;
     if (pi.status === 'canceled') return pi;
+    // A saved-card challenge can still settle after a customer closes the
+    // page. Inactivity only establishes abandonment of a checkout session.
+    if (pi.metadata?.source === 'admin_card_on_file') return null;
     if (!UNCONFIRMED_PI_STATUSES.includes(pi.status)) return null;
     if (pi.status === 'requires_action' && pi.next_action?.type === 'verify_with_microdeposits') return null;
     const createdMs = Number(pi.created) * 1000;
@@ -122,10 +125,11 @@ async function invoiceCreditWouldFullyCover(invoice, { database = db } = {}) {
   // owner ruling 2026-08-28): an opted-out balance reads as zero there, so
   // it must read as zero here too — otherwise the capture step / combined
   // preview would show a coverage the setup path will never apply.
-  const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  if (row?.auto_apply_account_credit !== true) return false;
-  const credit = Number(row?.account_credits) || 0;
-  return credit > 0 && credit >= invoiceAmountDue(invoice);
+  const { autoApplyEnabled, spendable } = await require('./customer-credit').accountCreditSnapshotForInvoice({
+    customerId: invoice.customer_id,
+    invoiceId: invoice.id,
+  }, database);
+  return autoApplyEnabled === true && spendable > 0 && spendable >= invoiceAmountDue(invoice);
 }
 
 // Why combinedEligibleSiblings returned null (the optional onDegrade
@@ -321,7 +325,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     const StripeService = require('./stripe');
     const fenceOne = readOnly
       ? (inv) => memberCollectionPending(inv, { database, customerId: anchorInvoice.customer_id })
-      : (inv) => StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database).then(() => ({ row: inv }));
+      : (inv) => StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database, { checkout: true }).then(() => ({ row: inv }));
     const cleared = [];
     for (const inv of eligible) {
       let verdict;
@@ -442,7 +446,11 @@ const isCombinedPiMetadata = (piMetadata) => !!piMetadata?.combined_allocation;
  * claim from a read path). tests/customer-dunning-member-fence-parity.test.js
  * pins this list against the verifier's own source.
  */
-async function memberCollectionPending(inv, { database = db, customerId = null } = {}) {
+async function memberCollectionPending(inv, {
+  database = db,
+  customerId = null,
+  allowStandaloneServiceRecordVisit = false,
+} = {}) {
   const { isCollectionPendingFenceError } = require('./invoice-helpers');
   if (!inv?.id) return { reason: 'not_collectible' };
   // Always vet the FULL, current invoice row: sibling rows from
@@ -460,12 +468,23 @@ async function memberCollectionPending(inv, { database = db, customerId = null }
   if (inv.payer_id || inv.payer_statement_id) return { reason: 'payer_billed' };
   if (invoiceWithdrawnFromCustomer(inv)) return { reason: 'withdrawn' };
   // LIVE payer re-resolution, fail closed (a lookup failure throws).
+  // Failed-payment recovery can reach a post-completion invoice through only
+  // service_record_id. Resolve that visit only for the standalone checkout:
+  // with combined-balance collection on, its setup seam still resolves the
+  // raw scheduled_service_id and would reject this same link as payer-owned.
+  // Keeping this opt-in both preserves every reminder/checkout caller and
+  // withholds a recovery action the eventual checkout could not complete.
+  let scheduledServiceId = inv.scheduled_service_id || null;
+  if (allowStandaloneServiceRecordVisit && !isEnabled('payIncludeBalance')
+    && !scheduledServiceId && inv.service_record_id) {
+    scheduledServiceId = await require('./invoice').linkedScheduledServiceId(inv, database);
+  }
   {
     let resolved;
     try {
       resolved = await require('./payer').resolveForInvoice({
         customerId: String(inv.customer_id),
-        ...(inv.scheduled_service_id ? { scheduledServiceId: String(inv.scheduled_service_id) } : {}),
+        ...(scheduledServiceId ? { scheduledServiceId: String(scheduledServiceId) } : {}),
         throwOnError: true,
         database,
       });
@@ -482,7 +501,7 @@ async function memberCollectionPending(inv, { database = db, customerId = null }
     throw err;
   }
   try {
-    await require('./stripe').assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly: true });
+    await require('./stripe').assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly: true, checkout: true });
   } catch (err) {
     if (isCollectionPendingFenceError(err)) return { reason: 'charge_reconciliation', code: err.code };
     throw err;
@@ -569,7 +588,7 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     // route/setup preflights cover the anchor.
     if (!isAnchor) {
       try {
-        await require('./stripe').assertNoInvoiceChargeReconciliationPending(row.id, trx);
+        await require('./stripe').assertNoInvoiceChargeReconciliationPending(row.id, trx, { checkout: true });
       } catch (fenceErr) {
         logger.warn(`[pay-combined] sibling ${row.invoice_number} failed the reconciliation fence during locked verification: ${fenceErr.message}`);
         throw staleErr(`invoice ${row.invoice_number} has a pending payment reconciliation`);

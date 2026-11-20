@@ -83,7 +83,7 @@ async function moneyRefusal(invoice, conn = db, { skip = [] } = {}) {
 async function chargeReconciliationRefusal(invoice, conn) {
   const at = invoice.id;
   try {
-    await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, conn, { readOnly: true });
+    await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, conn, { readOnly: true, checkout: true });
   } catch (err) {
     if (err?.reconciliationRequired || /^STRIPE_/.test(String(err?.code || ''))) {
       return ownerRule(`Invoice ${invoice.invoice_number} has a saved-card charge in progress or unresolved.`, 'charge_in_progress', at);

@@ -201,6 +201,8 @@ describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
     });
 
     expect(StripeService[serviceMethod]).not.toHaveBeenCalled();
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending)
+      .toHaveBeenCalledWith('inv-1', expect.anything(), { checkout: route !== 'confirm' });
   });
 
   test('returns the distinct saved-card state when the final serialized check loses', async () => {

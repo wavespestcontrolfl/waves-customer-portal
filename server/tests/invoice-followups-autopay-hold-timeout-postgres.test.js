@@ -59,7 +59,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid NOT NULL, status text, decline_code text, error_message text, created_at timestamptz DEFAULT now())`);
     await mockPg.raw(`CREATE TABLE payments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, status text, next_retry_at timestamptz,
-      description text, metadata jsonb, processor text, stripe_charge_id text, stripe_payment_intent_id text, created_at timestamptz DEFAULT now())`);
+      amount numeric, description text, metadata jsonb, processor text, stripe_charge_id text, stripe_payment_intent_id text, created_at timestamptz DEFAULT now())`);
     // The columns the visit-bill verdict (completion-charge-verdict.js) and the facts fingerprint read.
     await mockPg.raw(`CREATE TABLE customers (id uuid PRIMARY KEY, first_name text, last_name text, billing_mode text, monthly_rate numeric,
       per_application_fee numeric, payer_id uuid, autopay_enabled boolean, autopay_paused_until date, autopay_payment_method_id uuid, ach_status text)`);
@@ -851,7 +851,7 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
       test('P0: a prepayment the completion route applied to THIS invoice (paid scheduled_service_prepaid marker) is not unapplied: charged', async () => {
         const h = await heldBound({ visitFields: prepaid });
         await mockPg('payments').insert({
-          customer_id: h.customerId, status: 'paid', created_at: new Date(Date.now() - 30 * DAY),
+          customer_id: h.customerId, amount: 40, status: 'paid', created_at: new Date(Date.now() - 30 * DAY),
           metadata: JSON.stringify({ source: 'scheduled_service_prepaid', invoice_id: h.invoiceId, scheduled_service_id: h.visitId }),
         });
         expect(await sweep()).toMatchObject({ charged: 1, review: 0 });
@@ -875,11 +875,11 @@ postgres('releaseStaleAutopayHolds on PostgreSQL', () => {
         // Unchanged facts (the stamp was read into the fingerprint only at the next evaluation): the failed attempt holds it out.
         // The office applies the prepayment: the invoice total drops and the marker payment exists.
         await mockPg('payments').insert({
-          customer_id: h.customerId, status: 'paid', created_at: new Date(Date.now() + 1000),
+          customer_id: h.customerId, amount: 40, status: 'paid', created_at: new Date(Date.now() + 1000),
           metadata: JSON.stringify({ source: 'scheduled_service_prepaid', invoice_id: h.invoiceId, scheduled_service_id: h.visitId }),
         });
-        await changeBill(h, { total: 80 });
-        quote.mockResolvedValue({ base: 80, surcharge: 2.47, total: 82.47 });
+        await changeBill(h, { total: 60 });
+        quote.mockResolvedValue({ base: 60, surcharge: 1.85, total: 61.85 });
         // The applied-marker payment since the hold is this customer's, for THIS invoice: it blocks the candidate rule
         // (a settled payment for the invoice), so the hold waits for the payment sweep to close it. Keep it older.
         await mockPg('payments').update({ created_at: new Date(Date.now() - 30 * DAY) });

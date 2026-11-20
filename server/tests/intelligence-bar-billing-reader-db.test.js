@@ -24,11 +24,21 @@ const REFERENCE = new Date();
 const RECEIPT_SENT = `${etDateString(REFERENCE)} ${formatETTime(REFERENCE)} ET`;
 
 const databaseUrl = process.env.IB_TEST_DATABASE_URL;
+const originalEnv = { ...process.env };
+// The registry cold-loads every reviewed Intelligence Bar domain. Keep that module initialization outside the timed
+// database-fixture hook so the hook's 60-second budget measures only the PostgreSQL setup it is meant to bound.
+let registry = null;
+if (databaseUrl) {
+  const parsed = new URL(databaseUrl);
+  const ciDatabase = process.env.CI === 'true' && parsed.hostname === 'localhost' && parsed.pathname === '/waves_test';
+  if (!ciDatabase && !/^\/waves_ib_platform_[a-z0-9_]+$/.test(parsed.pathname)) throw new Error('An isolated IB development database is required');
+  Object.assign(process.env, { DATABASE_URL: databaseUrl, NODE_ENV: 'test', JWT_SECRET: crypto.randomBytes(32).toString('hex'), GATE_IB_PLATFORM: 'true' });
+  registry = require('../services/intelligence-bar/action-registry');
+}
 const suite = databaseUrl ? describe : describe.skip;
 
 suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
-  let db; let registry; let execute;
-  const originalEnv = { ...process.env };
+  let db; let execute;
   const uid = () => crypto.randomUUID();
   const digits = () => String(Math.floor(Math.random() * 1e6)).padStart(6, '0');
   const day = (offset) => etDateString(addETDays(REFERENCE, offset));
@@ -80,12 +90,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   }
 
   beforeAll(async () => {
-    const parsed = new URL(databaseUrl);
-    const ciDatabase = process.env.CI === 'true' && parsed.hostname === 'localhost' && parsed.pathname === '/waves_test';
-    if (!ciDatabase && !/^\/waves_ib_platform_[a-z0-9_]+$/.test(parsed.pathname)) throw new Error('An isolated IB development database is required');
-    Object.assign(process.env, { DATABASE_URL: databaseUrl, NODE_ENV: 'test', JWT_SECRET: crypto.randomBytes(32).toString('hex'), GATE_IB_PLATFORM: 'true' });
     db = require('../models/db');
-    registry = require('../services/intelligence-bar/action-registry');
     execute = (name, input, scope) => registry.execute(name, input, { role: scope.role, context: scope.context, actionContext: scope.actionContext });
 
     A = await customer(`Thessaly${run}`, SURNAME, { account_credits: 25 });
@@ -362,7 +367,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       // Fence passes -> collectible, even for the invoice the real fence holds.
       const list = await read('get_customer_invoices', { customer_id: A, limit: 50 });
       expect(by(list, 'amb')).toMatchObject({ collectible: true, balance_due: 45 });
-      expect(spy).toHaveBeenCalledWith(inv.amb.id, expect.anything(), { readOnly: true });
+      expect(spy).toHaveBeenCalledWith(inv.amb.id, expect.anything(), { readOnly: true, checkout: true });
       // ... on the call's snapshot connection, not the pool.
       expect(spy.mock.calls.find(([id]) => id === inv.amb.id)[1]).not.toBe(db);
       // An attached PaymentIntent still holds it: Stripe does not confirm that it moved no money (the suite's guard mock).

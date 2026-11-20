@@ -726,6 +726,7 @@ describe('committed completion failures survive closing and reopening', () => {
   it.each([
     'terminal_invoice_lookup_failed', 'historic_setup_fee_alert_failed', 'unminted_setup_fee_lookup_failed',
     'terminal_invoice_manual_billing_alert_failed', 'unminted_setup_fee_alert_failed',
+    'prepaid_visit_busy',
   ])('%s preserves the exact request and key for one retry', async (code) => {
     const failedSubmit = vi.fn().mockRejectedValue(Object.assign(new Error('Closeout saved; retry the remaining step'), { status: 503, code }));
     const first = await mount(failedSubmit);

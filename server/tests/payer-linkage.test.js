@@ -9,8 +9,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 // the LIVE linkage (loadLivePayerLinkage — round-41/42) also asks the shared live-ownership verdict; these cases have no live-owned invoices
 jest.mock('../services/invoice-payer-ownership', () => ({ liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })) }));
-const { buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage } = require('../services/payer-linkage');
+jest.mock('../services/visit-completion-packets', () => ({ liveThirdPartyPayerForPacket: jest.fn(async () => null) }));
+const {
+  buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage, excludeLiveOwnedPayerPayments,
+} = require('../services/payer-linkage');
 const { liveInvoiceOwnership } = require('../services/invoice-payer-ownership');
+const { liveThirdPartyPayerForPacket } = require('../services/visit-completion-packets');
 
 const PAYER_INV = { id: '11111111-1111-4111-8111-111111111111', stripe_payment_intent_id: 'pi_ap', stripe_charge_id: 'ch_ap', invoice_number: 'WPC-2026-0500' };
 const linkage = buildPayerLinkage([PAYER_INV]);
@@ -37,6 +41,40 @@ describe('isPayerLinked recognizes every linkage', () => {
   });
   test('no payer invoices => nothing is payer-linked', () => {
     expect(buildPayerLinkage([]).isPayerLinked({ metadata: { invoice_id: PAYER_INV.id }, stripe_payment_intent_id: 'pi_ap' })).toBe(false);
+  });
+  test('UUID comparison is case-insensitive and every conflicting invoice alias is checked', () => {
+    const payerId = 'ab36f51e-4441-4cc8-bbf7-c41ffad50152';
+    const ownId = 'de27b36a-3054-4c64-93e4-0d15b785bb34';
+    const payer = buildPayerLinkage([{ id: payerId }]);
+
+    expect(payer.isPayerLinked({ metadata: { invoice_id: payerId.toUpperCase() } })).toBe(true);
+    expect(payer.isPayerLinked({
+      metadata: {
+        invoice_id: ownId,
+        dispute_invoice_id: payerId.toUpperCase(),
+        waves_invoice_id: '70a2c70d-bbd9-451a-a258-14e73473db08',
+      },
+    })).toBe(true);
+  });
+});
+
+describe('payer-linked SQL exclusion matches the in-memory linkage', () => {
+  test('filters every invoice alias, processor id and invoice-number description before a row cap', () => {
+    const calls = [];
+    const qb = { whereRaw: (...args) => { calls.push(args); return qb; } };
+
+    expect(excludeLiveOwnedPayerPayments(qb, linkage)).toBe(qb);
+
+    const sql = calls.map(([text]) => text).join('\n');
+    expect(sql).toContain(")->>'invoice_id'");
+    expect(sql).toContain(")->>'dispute_invoice_id'");
+    expect(sql).toContain(")->>'waves_invoice_id'");
+    expect(sql).toContain('stripe_payment_intent_id <> ALL');
+    expect(sql).toContain('stripe_charge_id <> ALL');
+    expect(sql).toContain("substring(payments.description from '^Invoice\\s+([A-Za-z0-9-]+)\\s+—')");
+    expect(calls.flatMap(([, bindings]) => bindings).flat()).toEqual(expect.arrayContaining([
+      PAYER_INV.id, 'pi_ap', 'ch_ap', PAYER_INV.invoice_number,
+    ]));
   });
 });
 
@@ -96,7 +134,10 @@ describe('loadLivePayerLinkage is bounded', () => {
     return q;
   };
   const invoices = (n) => Array.from({ length: n }, (_, i) => ({ id: `i${i}`, customer_id: 'c1', scheduled_service_id: `s${i}`, invoice_number: `WPC-2026-${1000 + i}` }));
-  beforeEach(() => liveInvoiceOwnership.mockClear());
+  beforeEach(() => {
+    liveInvoiceOwnership.mockClear();
+    liveThirdPartyPayerForPacket.mockClear();
+  });
 
   test('reads at most 1000 candidate invoices (limit 1001); more history than that is UNVERIFIABLE (failed) and makes no resolver lookup', async () => {
     const scan = chain([invoices(1001)]);
@@ -126,6 +167,7 @@ describe('loadLivePayerLinkage is bounded', () => {
     expect(scan.whereRaw).toHaveBeenCalledWith(LIVE_CANDIDATE_PAYER_SQL);
     expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/customers c WHERE c\.id = invoices\.customer_id AND c\.payer_id IS NOT NULL/);
     expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/ss\.id = invoices\.scheduled_service_id AND ss\.customer_id = invoices\.customer_id AND ss\.payer_id IS NOT NULL/);
+    expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/invoices\.visit_completion_packet_id IS NOT NULL/);
   });
   // Codex round-76 P2: a payer assigned later must not take the customer's settled self-pay history with it
   test('the live scan re-resolves only UNSETTLED invoices', async () => {
@@ -142,6 +184,74 @@ describe('loadLivePayerLinkage is bounded', () => {
     const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([invoices(5)]));
     const out = await loadLivePayerLinkage('c1', dbh);
     expect(out.failed).toBe(false);
+  });
+
+  test('a nonrepresentative billed packet member can make the invoice payer-owned through the canonical packet reader', async () => {
+    const packetId = '00000000-0000-4000-8000-000000000101';
+    const row = { ...invoices(1)[0], visit_completion_packet_id: packetId };
+    const scan = chain([[row]]);
+    const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(scan);
+    liveThirdPartyPayerForPacket.mockResolvedValueOnce('payer-from-second-billed-member');
+
+    const out = await loadLivePayerLinkage('c1', dbh);
+
+    expect(scan.select).toHaveBeenCalledWith(expect.stringMatching(/^id$/), expect.anything(), expect.anything(), expect.anything(),
+      'visit_completion_packet_id', expect.anything(), expect.anything(), expect.anything(), expect.anything());
+    expect(liveThirdPartyPayerForPacket).toHaveBeenCalledWith(packetId, dbh);
+    expect(out.failed).toBe(false);
+    expect(out.liveOwnedIds).toEqual(new Set([row.id]));
+    expect(out.isPayerLinked({ metadata: { invoice_id: row.id } })).toBe(true);
+  });
+
+  test('an inverse-linked annual prepay invoice ignores a visit-only payer', async () => {
+    const row = { ...invoices(1)[0], service_record_id: 'record-with-payer', annual_prepay_linked: true };
+    const scan = chain([[row]]);
+    const dbh = jest.fn()
+      .mockReturnValueOnce(chain([[]]))
+      .mockReturnValueOnce(scan);
+    liveInvoiceOwnership.mockImplementationOnce(async (_customerId, judgedRows) => ({
+      ownedIds: new Set(judgedRows.filter((invoice) => invoice.scheduled_service_id || invoice.service_record_id).map((invoice) => String(invoice.id))),
+      unverifiable: false,
+    }));
+
+    const out = await loadLivePayerLinkage('c1', dbh);
+
+    const { LIVE_ANNUAL_PREPAY_MARKER_SQL } = require('../services/payer-linkage');
+    expect(scan.select).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.anything(), expect.anything(),
+      expect.anything(), expect.anything(), expect.anything(), expect.anything(), LIVE_ANNUAL_PREPAY_MARKER_SQL);
+    expect(liveInvoiceOwnership).toHaveBeenCalledWith('c1', [expect.objectContaining({
+      id: row.id, scheduled_service_id: null, service_record_id: null,
+    })], dbh, { maxResolutions: 30, byCandidatePayer: true });
+    expect(out.failed).toBe(false);
+    expect(out.liveOwnedIds).toEqual(new Set());
+  });
+
+  test('a directly linked annual invoice resolves the account payer despite its self-pay visit', async () => {
+    const row = { ...invoices(1)[0], scheduled_service_id: 'self-pay-visit', annual_prepay_linked: true };
+    const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([[row]]));
+    liveInvoiceOwnership.mockImplementationOnce(async (_customerId, rows) => ({
+      ownedIds: new Set(rows.filter((invoice) => !invoice.scheduled_service_id).map((invoice) => invoice.id)),
+      unverifiable: false,
+    }));
+    const { LIVE_ANNUAL_PREPAY_MARKER_SQL } = require('../services/payer-linkage');
+    expect(LIVE_ANNUAL_PREPAY_MARKER_SQL).toContain('invoices.annual_prepay_term_id IS NOT NULL OR EXISTS');
+    const result = await loadLivePayerLinkage('c1', dbh);
+    expect(result.failed).toBe(false);
+    expect(result.isPayerLinked({ metadata: { invoice_id: row.id } })).toBe(true);
+  });
+
+  test('packet ownership lookup errors and an over-bound packet set fail closed', async () => {
+    const one = { ...invoices(1)[0], visit_completion_packet_id: 'packet-error' };
+    let dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([[one]]));
+    liveThirdPartyPayerForPacket.mockRejectedValueOnce(new Error('packet read unavailable'));
+    await expect(loadLivePayerLinkage('c1', dbh)).resolves.toMatchObject({ failed: true });
+
+    const overBound = invoices(31).map((row, index) => ({ ...row, visit_completion_packet_id: `packet-${index}` }));
+    dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([overBound]));
+    const before = liveThirdPartyPayerForPacket.mock.calls.length;
+    const out = await loadLivePayerLinkage('c1', dbh);
+    expect(out.failed).toBe(true);
+    expect(liveThirdPartyPayerForPacket.mock.calls).toHaveLength(before);
   });
 });
 

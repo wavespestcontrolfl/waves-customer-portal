@@ -112,6 +112,33 @@ jest.mock('../config/feature-gates', () => ({
       t.timestamp('paid_at');
       t.timestamp('updated_at', { useTz: true });
     });
+    await schema.createTable('stripe_invoice_charge_attempts', (t) => {
+      id(t);
+      t.uuid('invoice_id');
+      t.string('status');
+      t.string('decline_code');
+      t.string('stripe_payment_intent_id');
+      t.string('authentication_canceled_intent_id');
+      t.string('worker_payment_intent_id');
+      t.string('idempotency_key');
+      t.decimal('credit_applied_delta', 12, 2).defaultTo(0);
+      t.decimal('credit_applied_total', 12, 2).defaultTo(0);
+      t.timestamp('created_at');
+      t.timestamp('submitted_at');
+      t.timestamp('resolved_at');
+    });
+    await schema.createTable('stripe_orphan_charges', (t) => {
+      t.uuid('invoice_id');
+      t.boolean('resolved');
+      t.string('stripe_payment_intent_id');
+    });
+    await schema.createTable('payments', (t) => {
+      id(t);
+      t.string('status');
+      t.string('stripe_payment_intent_id');
+      t.jsonb('metadata');
+      t.uuid('superseded_by_payment_id');
+    });
     await schema.createTable('payment_plans', (t) => {
       id(t);
       t.uuid('invoice_id');
@@ -365,6 +392,24 @@ jest.mock('../config/feature-gates', () => ({
       return pay.redeemAndApplyPromoCode(trx, locked);
     });
     const fresh = (inv) => db('invoices').where({ id: inv.id }).first();
+
+    test('a pending card challenge keeps the promo code available until the bank decision', async () => {
+      const cust = await customer();
+      const inv = await invoice({ customer_id: cust.id });
+      const disc = await discount();
+      await enterOn(inv, disc.promo_code);
+      await db('stripe_invoice_charge_attempts').insert({
+        invoice_id: inv.id, status: 'failed', decline_code: 'authentication_required',
+        stripe_payment_intent_id: 'pi_promo_auth', worker_payment_intent_id: 'pi_promo_auth', submitted_at: new Date(), resolved_at: new Date(),
+      });
+      expect(await setup(inv)).toBe(0);
+      expect(await usesOf(disc.id)).toBe(0);
+      expect(await ledgerOf(cust.id)).toHaveLength(0);
+      await db('stripe_invoice_charge_attempts').where({ invoice_id: inv.id })
+        .update({ authentication_canceled_intent_id: 'pi_promo_auth' });
+      expect(await setup(inv)).toBe(25);
+      expect(await usesOf(disc.id)).toBe(1);
+    });
 
     test('entering a code only saves it; the setup that follows posts the credit once and lowers what is due by exactly that', async () => {
       const cust = await customer();
