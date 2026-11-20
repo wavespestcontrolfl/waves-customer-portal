@@ -30,7 +30,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { formatETTime } = require('../utils/datetime-et');
 const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
-const { redactOfferLinks, offerLinkTokens } = require('../utils/offer-link-redaction');
+const { redactOfferLinks, redactOfferLinksTogether, offerLinkTokens } = require('../utils/offer-link-redaction');
 const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -342,6 +342,9 @@ async function settleEmailRow(messageRow, sendAttemptToken, patch, conn = db) {
 }
 
 async function insertEmailLedgerRow({ app, to, subject, html, text, templateKey, sendAttemptToken }) {
+  // One email is one record: a token found on an offer path in any part is hidden in every part, so a copy of it in
+  // the subject (the editor takes a custom subject) goes when its link is only in the body.
+  const [subjectSnapshot, htmlSnapshot, textSnapshot] = redactOfferLinksTogether([subject, html, text]);
   const rows = await db('email_messages').insert({
     provider: 'sendgrid',
     send_attempt_token: sendAttemptToken,
@@ -352,10 +355,9 @@ async function insertEmailLedgerRow({ app, to, subject, html, text, templateKey,
     from_name_snapshot: FROM_NAME,
     from_email_snapshot: FROM_EMAIL,
     reply_to_snapshot: CONTACT_EMAIL,
-    // The editor takes a custom subject, so it is staff text like the body: an offer link in it is hidden too.
-    subject_snapshot: redactOfferLinks(subject),
-    html_snapshot: redactOfferLinks(html),
-    text_snapshot: redactOfferLinks(text),
+    subject_snapshot: subjectSnapshot,
+    html_snapshot: htmlSnapshot,
+    text_snapshot: textSnapshot,
     categories: JSON.stringify([templateKey]),
     status: 'queued',
     queued_at: new Date(),
@@ -1140,9 +1142,11 @@ async function runEmailLeg(ctx) {
     logger.error(`[recruiting-comms] email leg threw (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
     sendRes = { outcome: 'failed', code: `threw:${errorSummary(err)}` };
   }
+  // The history keeps the subject and the text; the html is part of the same email, so its findings count too.
+  const [body] = redactOfferLinksTogether([`${subject}\n\n${text}`, html]);
   entries.push(historyEntry({
     stage, channel: 'email', to: contact.email, outcome: sendRes.outcome, code: sendRes.code,
-    body: `${subject}\n\n${text}`, by,
+    body, by,
   }));
   return sendRes.outcome;
 }

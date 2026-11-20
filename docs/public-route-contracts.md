@@ -8633,7 +8633,9 @@ every SPA path, and never the page; no offer token has a dot. The page itself op
 64 lowercase hex and no percent-encoding in the path (any letter case of `/careers/offer/` is fine). Any other spelling
 shows the not-valid state with no API read. Stored messages hide the token in every spelling of the link
 (`utils/offer-link-redaction.js`): the comms history, the email ledger row (its subject too, since the editor takes a
-custom subject), the deferred queue row, and the SMS log and messages rows. The text is read in units, each what a browser takes as one link: a quoted HTML
+custom subject), the deferred queue row, and the SMS log and messages rows. An email's subject, html and text are read
+as one record (`redactOfferLinksTogether`): a token found on an offer path in any part, and a part past the decoding
+budget, count for every part, in the ledger row and in the history entry. The text is read in units, each what a browser takes as one link: a quoted HTML
 attribute value or an unbroken run of text. The link as sent keeps its host with the token hidden. Each other unit is
 read as a browser reads it (as typed and with its HTML character references decoded: tabs and line breaks dropped,
 backslashes as slashes, the path cut at the first `?` or `#`, dot segments resolved also when written with `%2e`, an

@@ -39,9 +39,13 @@
  * - A unit still encoded after four decoding passes (it may hide a route word or a token): the text fails closed. That
  *   unit is replaced as a whole by the bare marker, and so is every unit that a run of 64 or more hex touches in the
  *   joined reading, split as above.
+ * - Texts stored together as one record (an email's subject, html and text: redactOfferLinksTogether): the tokens
+ *   found on an offer path in any of them, and a unit past the decoding budget in any of them, count for all of them,
+ *   so a copy of a token in the subject is hidden when its link is only in the body.
  * An /careers/interview/ link is not on that path and is left alone. Out of reach: a token mixed with characters a
  * reader sees (a dash every few letters), or split by text the email hides by style; a person has to edit such a text,
- * or craft it, to use the token.
+ * or craft it, to use the token. A bare 64-hex word in a message that holds no link to it in any part is not known to
+ * be a token, so it stays.
  */
 
 const { decodeHTML } = require('entities');
@@ -292,18 +296,28 @@ function storedUnit(u, mark, linked, tokens) {
   return quoted ? `${quoted[0]}${hidden}${quoted[1]}` : hidden;
 }
 
-// First the tokens on an offer path anywhere in the text, unit by unit and in the joined views. Then one pass, unit by
-// unit, so each hidden link and its token keep the same order for redaction and for pinning.
-function scan(text) {
-  const units = unitsOf(text);
-  const views = joinedViews(units);
+// What a text holds that makes copies hidden: the tokens on an offer path anywhere in it, unit by unit and in the
+// joined views, and whether any unit is past the decoding budget.
+function findingsOf(units, views) {
   const linked = new Set();
   for (const u of units) {
     for (const match of u.text.matchAll(SENT_LINK_RE)) linked.add(match[2].toLowerCase());
     for (const token of offerTokensOf(u.text, u.seen)) linked.add(token);
   }
   for (const view of views) for (const token of joinedTokens(view)) linked.add(token);
-  const undecided = units.some((u) => u.undecided);
+  return { linked, undecided: units.some((u) => u.undecided) };
+}
+
+const NO_FINDINGS = { linked: new Set(), undecided: false };
+
+// First the findings: the text's own and, for a text stored with others (`shared`), theirs. Then one pass, unit by
+// unit, so each hidden link and its token keep the same order for redaction and for pinning.
+function scan(text, shared = NO_FINDINGS) {
+  const units = unitsOf(text);
+  const views = joinedViews(units);
+  const own = findingsOf(units, views);
+  const linked = new Set([...own.linked, ...shared.linked]);
+  const undecided = own.undecided || shared.undecided;
   if (!linked.size && !undecided) return { redacted: text, tokens: [] };
   const marks = splitMarks(views, linked);
   // A unit still encoded past the decoding budget may hide a route word, so such a text fails closed: that unit is
@@ -334,4 +348,20 @@ function offerLinkTokens(text) {
   return scan(text).tokens;
 }
 
-module.exports = { redactOfferLinks, offerLinkTokens, OFFER_LINK_HIDDEN: HIDDEN };
+// Texts stored together as one record, each redacted with the findings of all of them (see the header): an email's
+// subject, html and text, so a copy of a token in one part is hidden when its link is in another. Returns the texts in
+// the same order; a part that is not a non-empty string comes back as it is.
+function redactOfferLinksTogether(texts) {
+  const parts = texts.map((t) => (typeof t === 'string' && t ? t : null));
+  const shared = { linked: new Set(), undecided: false };
+  for (const part of parts) {
+    if (part === null) continue;
+    const units = unitsOf(part);
+    const found = findingsOf(units, joinedViews(units));
+    for (const token of found.linked) shared.linked.add(token);
+    shared.undecided = shared.undecided || found.undecided;
+  }
+  return texts.map((t, i) => (parts[i] === null ? t : scan(parts[i], shared).redacted));
+}
+
+module.exports = { redactOfferLinks, redactOfferLinksTogether, offerLinkTokens, OFFER_LINK_HIDDEN: HIDDEN };

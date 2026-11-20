@@ -14,7 +14,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { createHash } = require('crypto');
 const { decodeHTML } = require('entities');
-const { redactOfferLinks, offerLinkTokens, OFFER_LINK_HIDDEN } = require('../utils/offer-link-redaction');
+const { redactOfferLinks, redactOfferLinksTogether, offerLinkTokens, OFFER_LINK_HIDDEN } = require('../utils/offer-link-redaction');
 const { portalUrl } = require('../utils/portal-url');
 
 const TOKEN = 'cd'.repeat(32);
@@ -303,6 +303,36 @@ describe('past the decoding budget the text fails closed', () => {
   });
 });
 
+// Codex P0 (round 28): the email ledger redacted its subject, html and text one by one, so a copy of a token in a
+// custom subject stayed readable when the link was only in the body.
+describe('texts stored together are read as one record', () => {
+  const token = createHash('sha256').update('stored together').digest('hex');
+  const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+  const hiddenLink = portalUrl('/careers/offer/[link hidden]');
+
+  test('a copy of a token in one part is hidden when its link is only in another part', () => {
+    const parts = [`Your offer code ${token}`, `<p>Hi Jane,</p><a href="${link}">Read your offer</a>`, 'Read it on your phone.'];
+    expect(redactOfferLinks(parts[0])).toBe(parts[0]); // alone, a bare 64-hex word is not a link
+    expect(redactOfferLinksTogether(parts)).toEqual([
+      'Your offer code [link hidden]',
+      `<p>Hi Jane,</p><a href="${hiddenLink}">Read your offer</a>`,
+      'Read it on your phone.',
+    ]);
+  });
+
+  test('a part past the decoding budget makes every part fail closed', () => {
+    const layered5 = `https://portal.wavespestcontrol.com/careers/%${'25'.repeat(4)}6Fffer/${token}`;
+    expect(redactOfferLinks(`Or copy ${token} into the page`)).toBe(`Or copy ${token} into the page`);
+    expect(redactOfferLinksTogether([`Your offer ${layered5}`, `Or copy ${token} into the page`]))
+      .toEqual(['Your offer [link hidden]', 'Or copy [link hidden] into the page']);
+  });
+
+  test('parts with no offer link come back unchanged, and a part that is not a string comes back as it is', () => {
+    const parts = [`Build ${token} shipped`, '<p>See you Monday</p>', '', null, undefined];
+    expect(redactOfferLinksTogether(parts)).toEqual(parts);
+  });
+});
+
 describe('malformed markup', () => {
   const token = createHash('sha256').update('malformed markup').digest('hex');
   test.each([
@@ -431,14 +461,15 @@ describe('offerLinkTokens', () => {
 describe('every writer of a stored message body redacts the offer link (source guard)', () => {
   const fs = require('fs');
   const path = require('path');
-  const count = (file) => (fs.readFileSync(path.join(__dirname, '..', file), 'utf8').match(/redactOfferLinks\(/g) || []).length;
+  const count = (file) => (fs.readFileSync(path.join(__dirname, '..', file), 'utf8').match(/redactOfferLinks(?:Together)?\(/g) || []).length;
 
   test.each([
     ['services/twilio.js', 2], // the sms_log row and the unified messages row
     ['services/messaging/audit.js', 1], // the audit preview
     ['services/sms-suggest-mode.js', 2], // the reply-holding reservation row, written and renewed
-    ['services/recruiting-comms.js', 4], // history masking, the email ledger html + text, the deferred queue row
-  ])('%s calls redactOfferLinks at least %i time(s)', (file, minimum) => {
+    // history masking, the email history and the email ledger (each email's parts together), the deferred queue row
+    ['services/recruiting-comms.js', 4],
+  ])('%s calls redactOfferLinks (or its together form) at least %i time(s)', (file, minimum) => {
     expect(count(file)).toBeGreaterThanOrEqual(minimum);
   });
 });
