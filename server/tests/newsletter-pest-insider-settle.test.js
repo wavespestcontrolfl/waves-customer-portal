@@ -35,7 +35,8 @@ const AUTO_QUEUED = {
 // readers a Resume would still mail (left: outstandingEligibleDeliveries, the joined query), and
 // for a planned issue the rows that query lists (rows: the subscriber, its address and customers).
 const CHAIN = ['where', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereExists', 'whereNotExists', 'withMaterialized', 'join', 'joinRaw', 'select', 'forUpdate'];
-function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, left: 0 } } = {}) {
+// `bells`: admin notification rows by their dedupeKey (the alert a worker wrote).
+function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, left: 0 }, bells = [] } = {}) {
   const writes = [];
   const reads = [];
   // The order of the outcome's writes, its commit, and its alert.
@@ -43,13 +44,13 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
   const matches = (row, conds) => conds.every((cond) => Object.entries(cond).every(([k, v]) => row[k] === v));
   const told = (row) => Boolean(row.diagnostics && row.diagnostics.outcomeToldAt);
   db.mockImplementation((table) => {
-    const q = { conds: [], raws: [], calls: new Set() };
+    const q = { conds: [], raws: [], rawBindings: [], calls: new Set() };
     CHAIN.forEach((m) => {
       q[m] = jest.fn((...args) => {
         q.calls.add(m);
         if (m === 'where' && args[0] && typeof args[0] === 'object') q.conds.push(args[0]);
         if (m === 'whereIn') q.statusIn = args[1];
-        if (m === 'whereRaw') q.raws.push(String(args[0]));
+        if (m === 'whereRaw') { q.raws.push(String(args[0])); q.rawBindings.push(...(args[1] || [])); }
         return q;
       });
     });
@@ -62,6 +63,7 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
         if (q.calls.has('whereNotIn')) return { c: counts.left };
         return { c: counts.got + counts.left };
       }
+      if (table === 'notifications') return bells.find((bell) => q.rawBindings.includes(bell.dedupeKey));
       const rows = table === 'newsletter_sends' ? sends : issues;
       return rows.find((row) => matches(row, q.conds));
     });
@@ -192,6 +194,16 @@ test('a failed issue whose send recovered to sent (its delivery confirmations ca
     },
     toldMark('issue-1', 'sent'),
   ]);
+});
+
+test('a worker that delivered the failure alert but stopped before marking the row told: its keyed bell row still gets the correction', async () => {
+  const failed = { ...ISSUE, status: 'failed', reason: 'did not go out: its send failed after 40 of 85 readers got it; Resume in Newsletter → History sends it to the rest' };
+  const bells = [{ dedupeKey: 'pest-insider-outcome:issue-1', created_at: new Date('2026-12-03T12:30:00Z') }];
+  const { writes } = fakeDb({ issues: [failed], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 }, bells });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.anything(), { dedupeKey: 'pest-insider-recovered:issue-1' });
+  expect(writes[0].patch.diagnostics.bindings).toEqual([JSON.stringify({ failureToldAt: '2026-12-03T12:30:00.000Z' })]);
 });
 
 test('a failed issue nobody was told about, whose send recovered to sent, becomes sent quietly', async () => {

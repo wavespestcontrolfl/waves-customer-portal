@@ -2144,7 +2144,7 @@ async function plannedSendOutcome(issue, send, now, trx) {
  * recovered to 'sent' with every planned reader done (delivery confirmations that came after the
  * send was marked failed, as after a lost SendGrid response; the webhook's
  * reconcileNewsletterSendStatus then sets it 'sent') becomes 'sent': quietly if nobody was told it
- * failed, else with one correction (alert 'recovered'). Otherwise what nobody was told yet: a
+ * failed (failureAlertAt), else with one correction (alert 'recovered'). Otherwise what nobody was told yet: a
  * 'failed' one (its reason), or a 'sent' one whose finished send has readers a Resume would still
  * mail (a provider block after SendGrid accepted the batch resets a reader's delivery), which
  * stays 'sent'. Null when there is nothing to change or tell.
@@ -2154,13 +2154,14 @@ async function settledOutcome(issue, send, trx) {
   if (issue.status === 'failed' && send?.status === 'sent') {
     const { got, left } = await ledgerProgress(trx, send);
     if (got > 0 && left === 0) {
-      if (!diagnostics.outcomeToldAt) return { status: 'sent', reason: null };
+      const failureToldAt = await failureAlertAt(trx, issue.id, diagnostics);
+      if (!failureToldAt) return { status: 'sent', reason: null };
       return {
         status: 'sent',
         reason: `went out after all: all ${got} readers got it, but their delivery confirmations came after the alert that said it did not go out; there is nothing to resume`,
         alert: 'recovered',
         // The failure was told; this correction is not yet.
-        failureToldAt: diagnostics.outcomeToldAt,
+        failureToldAt,
       };
     }
   }
@@ -2173,6 +2174,18 @@ async function settledOutcome(issue, send, trx) {
   return left > 0
     ? { status: 'sent', reason: `went out to ${got} readers, but ${left} readers' mail servers refused it after SendGrid accepted it; Resume in Newsletter → History sends it to them`, alert: 'outcome' }
     : null;
+}
+
+/**
+ * When the owner was told a planned issue did not go out, or null: its told mark, or, for a worker
+ * that delivered the alert and stopped before it wrote that mark, the alert's own keyed bell row.
+ */
+async function failureAlertAt(trx, issueId, diagnostics) {
+  if (diagnostics.outcomeToldAt) return diagnostics.outcomeToldAt;
+  const bell = await trx('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [`pest-insider-outcome:${issueId}`])
+    .first('created_at');
+  return bell ? new Date(bell.created_at).toISOString() : null;
 }
 
 /**

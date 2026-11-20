@@ -124,6 +124,7 @@ function wireDb({ sends, subscribers, calendar, issues } = {}) {
     if (table === 'pest_insider_issues') return issuesChain;
     return subsChain;
   });
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   // A transaction reaches the same tables; a throw inside it rejects, as knex's does.
   db.transaction = jest.fn(async (work) => {
     const trx = (table) => db(table);
@@ -873,6 +874,14 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     authentication_results: null,
   };
 
+  // The write that records an address a copy of the FYI goes to, with its row, before the copy goes out.
+  const recordedFyi = (address) => ({
+    diagnostics: {
+      sql: "coalesce(diagnostics, '{}'::jsonb) || jsonb_build_object('fyiTo', coalesce(diagnostics->'fyiTo', '{}'::jsonb) || jsonb_build_object(?::text, true))",
+      bindings: [address],
+    },
+  });
+
   beforeEach(() => { process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true'; });
   afterAll(() => { delete process.env.GATE_PEST_INSIDER_AUTO_SEND; });
 
@@ -886,10 +895,9 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(queue).toEqual(expect.objectContaining({ status: 'scheduled', scheduled_for: ISSUE_SEND_AT, proof_approval_email_id: null }));
     expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted']);
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
-    // The address the copy went to is recorded with the row: it may HOLD the issue.
-    expect(issuesChain.update).toHaveBeenCalledWith({
-      diagnostics: { sql: "coalesce(diagnostics, '{}'::jsonb) || ?::jsonb", bindings: [JSON.stringify({ fyiTo: 'contact@wavespestcontrol.com' })] },
-    });
+    // The address the copy goes to is recorded with the row before it goes out: it may HOLD the issue.
+    expect(issuesChain.update).toHaveBeenCalledWith(recordedFyi('contact@wavespestcontrol.com'));
+    expect(issuesChain.update.mock.invocationCallOrder[0]).toBeLessThan(mockSendOne.mock.invocationCallOrder[0]);
     // The send and its issue row are queued in one transaction.
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(calendarChain.update).not.toHaveBeenCalled();
@@ -916,6 +924,16 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(r.reason).toBe('proof_send_failed');
     const release = sendsChain.update.mock.calls.at(-1)[0];
     expect(release).toEqual({ proof_sent_at: null, updated_at: expect.any(Date) });
+  });
+
+  test('a recipient record that fails sends nothing: the claim is released, its token kept', async () => {
+    const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
+    issuesChain.update.mockImplementationOnce(async () => { throw new Error('connection reset'); });
+    const r = await sendNewsletterProof('send-1');
+
+    expect(r.reason).toBe('proof_send_failed');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    expect(sendsChain.update.mock.calls.at(-1)[0]).toEqual({ proof_sent_at: null, updated_at: expect.any(Date) });
   });
 
   test('its retry sends the token the failed attempt kept, so every copy of its FYI carries one token', async () => {
@@ -990,7 +1008,7 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(await sendNewsletterProof('send-1')).toEqual(expect.objectContaining({ sent: true, queued: true }));
     expect(mockSendOne.mock.calls[0][0].to).toBe('proofs@wavespestcontrol.com');
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
-    expect(issuesChain.update).toHaveBeenCalledWith({ diagnostics: expect.objectContaining({ bindings: [JSON.stringify({ fyiTo: 'proofs@wavespestcontrol.com' })] }) });
+    expect(issuesChain.update).toHaveBeenCalledWith(recordedFyi('proofs@wavespestcontrol.com'));
   });
 
   test('HOLD before its queueing landed holds the planned row, and a send queued in between goes back to draft', async () => {
@@ -1064,6 +1082,36 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
       authentication_results: 'mx.google.com; dkim=pass header.i=@example.com header.s=s1 header.b=abc',
     })).toBe(true);
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
+  });
+
+  test('an FYI address outside the approvers may HOLD the issue when Gmail verifies it, and is warned when not; its APPROVED stays ignored', async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    const recorded = { ...ISSUE, status: 'scheduled', diagnostics: { fyiTo: { 'proofs@wavespestcontrol.com': true } } };
+    const fromFyi = { ...HOLD, from_address: 'proofs@wavespestcontrol.com', label_ids: ['INBOX'] };
+    const signed = 'mx.google.com; dkim=pass header.i=@wavespestcontrol.com header.s=s1 header.b=abc';
+
+    let { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: recorded } });
+    expect(await maybeHandleProofApproval({ ...fromFyi, authentication_results: signed })).toBe(true);
+    expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
+
+    ({ issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: recorded } }));
+    expect(await maybeHandleProofApproval({ ...fromFyi, authentication_results: null })).toBe(true);
+    expect(issuesChain.update).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({ outcome: true }), { dedupeKey: 'pest-insider-unverified-hold:send-1' });
+
+    ({ issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: recorded } }));
+    expect(await maybeHandleProofApproval({ ...fromFyi, body_text: 'approved', authentication_results: signed })).toBe(false);
+    expect(issuesChain.update).not.toHaveBeenCalled();
+  });
+
+  test('a HOLD from someone who may not hold it (a reader the copy was forwarded to) is ignored, with no warning', async () => {
+    const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
+    expect(await maybeHandleProofApproval({
+      ...HOLD, from_address: 'neighbor@example.com', label_ids: ['INBOX'],
+      authentication_results: 'mx.google.com; dkim=pass header.i=@example.com header.s=s1 header.b=abc',
+    })).toBe(false);
+    expect(issuesChain.update).not.toHaveBeenCalled();
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('HOLD holds the queued issue and its planned row, in one transaction', async () => {
@@ -1143,13 +1191,14 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     expect(await holdReplyOnRecord(SEND)).toBe(true);
   });
 
-  test('the address its FYI copy went to may HOLD it, as recorded with the issue, also after the proof address changed', async () => {
+  test.each(['proofs@wavespestcontrol.com', 'office@wavespestcontrol.com'])('every address a copy of its FYI went to may HOLD it, as recorded with the issue, also after the proof address changed: %s', async (address) => {
     process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
-    process.env.NEWSLETTER_PROOF_EMAIL = 'office@wavespestcontrol.com';
-    const issue = { diagnostics: { fyiTo: 'proofs@wavespestcontrol.com' } };
-    wireMailbox({ searched: [received('proofs@wavespestcontrol.com', signedBy('wavespestcontrol.com'))] });
+    process.env.NEWSLETTER_PROOF_EMAIL = 'new-proofs@wavespestcontrol.com';
+    // Its first copy went to proofs@; the retry, after the proof address changed, to office@.
+    const issue = { diagnostics: { fyiTo: { 'proofs@wavespestcontrol.com': true, 'office@wavespestcontrol.com': true } } };
+    wireMailbox({ searched: [received(address, signedBy('wavespestcontrol.com'))] });
     expect(await holdReplyOnRecord(SEND, issue)).toBe(true);
-    // With no recorded address, the current proof address is the one that may HOLD.
+    // With no recorded address, only the current proof address may HOLD.
     expect(await holdReplyOnRecord(SEND, null)).toBe(false);
   });
 
