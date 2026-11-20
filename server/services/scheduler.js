@@ -5817,6 +5817,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 9AM — "Call today" estimate banner. Owner 2026-11-19 (plan page "Lead to Customer
+  // Plan", phase 1): ONE phone banner says how many estimates are on the Estimates page's own Call
+  // today list, and opens it. Push only, admin phones only, nothing when the list
+  // is empty. runExclusive stops two instances running together; the send takes a per-ET-day
+  // sms_send_claims row, so a deploy overlap or a restart cannot send a second banner. Sends
+  // nothing to a customer.
+  // =========================================================================
+  cron.schedule('0 9 * * *', async () => {
+    try {
+      // runEstimateCallTodayPush logs its own one line with the count and never throws; it reports a failed count, claim
+      // or delivery in an `error` field (a fixed code). Throw that inside the callback so job health records the run
+      // as failed. A skip (nothing on the list, already sent, no device) stays a success.
+      await runExclusive('estimate-call-today-push', async () => {
+        const result = await require('./estimate-call-today-push').runEstimateCallTodayPush();
+        if (result?.error) throw new Error(`estimate call-today push: ${result.error}`);
+        return result;
+      });
+    } catch (err) {
+      logger.error(`Estimate call-today push failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 7:23AM — Unbilled visits. Owner 2026-10-25 (Air Jobs Plan step 3): one standing
   // Billing bell lists the visits done in the last 30 days with no invoice,
   // read from the Billing recovery page's own list, so the bell and the page
