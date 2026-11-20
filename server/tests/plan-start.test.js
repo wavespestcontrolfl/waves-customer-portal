@@ -1011,10 +1011,11 @@ describe('assertPlanStartAcceptEligible', () => {
 });
 
 describe('readers that skip undelivered self-serve mints include plan_start', () => {
-  test('the pipeline derives no "Follow up" from a plan_start mint (the plan_restart contract)', () => {
+  test('the pipeline derives no "Follow up" from an undelivered plan_start mint (the plan_restart contract)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-pipeline.js'), 'utf8');
-    // Pipeline reads the shared self-serve source list (self-serve-estimates.js), which holds both sources.
-    expect(src).toContain(".orWhereNotIn('estimates.source', require('../services/self-serve-estimates').SELF_SERVE_ESTIMATE_SOURCES)");
-    expect(require('../services/self-serve-estimates').SELF_SERVE_ESTIMATE_SOURCES).toEqual(['plan_restart', 'plan_start']);
+    // Pipeline reads the shared rule (self-serve-estimates.js), whose source list holds plan_start; the
+    // Postgres suite self-serve-estimates-ib-tools-postgres proves the board's rows.
+    expect(src).toContain(".where(require('../services/self-serve-estimates').whereNotUndeliveredSelfServe('estimates'))");
+    expect(require('../services/self-serve-estimates').SELF_SERVE_ESTIMATE_SOURCES).toContain('plan_start');
   });
 });
