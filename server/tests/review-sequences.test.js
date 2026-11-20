@@ -8590,7 +8590,7 @@ describe('resolveSequencePlanForEnrollment results-visit rule (GATE_REVIEW_ASK_R
     expect(plan.error).toBeUndefined();
     expect(plan.skip).toBeUndefined();
     expect(plan.plan).toHaveLength(1);
-    expect(logger.warn.mock.calls.some((c) => String(c[0]).includes('results-visit count failed'))).toBe(true);
+    expect(logger.warn.mock.calls.some((c) => String(c[0]).includes('results-visit check failed'))).toBe(true);
   });
 
   test('one-time history rows never advance the count', async () => {
@@ -8709,6 +8709,55 @@ describe('resolveSequencePlanForEnrollment results-visit rule (GATE_REVIEW_ASK_R
     db.mockImplementation(mock);
     await ReviewService.enrollPostService({ customerId: 'cu', scheduledServiceId: 'cu-1', delayMinutes: 120, customerRequested: asked });
     expect(mock.__state.rows.review_requests).toHaveLength(1);
+  });
+
+  test('a sendable multi-treatment first plan passes the same verdict (booked follow-up, first lawn visit)', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    const rows = [
+      visit('mt-1', 'mt', 'Lawn Care Program', 0),
+      { id: 'mt-2', customer_id: 'mt', service_id: 'svc-mt-2', service_type: 'Lawn Care Program', status: 'scheduled', scheduled_date: new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10), followup_source_service_id: 'mt-1', is_recurring: true, service_key: 'recurring_visit' },
+    ];
+    db.mockImplementation(makeMock({ scheduled_services: rows }));
+    expect((await resolve('mt', 'mt-1')).skip).toBe('results_not_yet');
+    // Gate off: the existing first-treatment plan is untouched.
+    mockGates.reviewAskResultsVisit = false;
+    expect((await resolve('mt', 'mt-1')).plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
+  test('the current visit counts only when its own treatment was performed', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    const prior = [visit('ci-1', 'ci', 'Lawn Care Program', 60), visit('ci-2', 'ci', 'Lawn Care Program', 30)];
+    const rec = (outcome) => ({ id: 'r-ci-3', scheduled_service_id: 'ci-3', structured_notes: { visitOutcome: outcome } });
+    db.mockImplementation(makeMock({ scheduled_services: [...prior, visit('ci-3', 'ci', 'Lawn Care Program', 0)], service_records: [rec('inspection_only')] }));
+    expect((await resolve('ci', 'ci-3')).skip).toBe('results_not_yet');
+    db.mockImplementation(makeMock({ scheduled_services: [...prior, visit('ci-3', 'ci', 'Lawn Care Program', 0)], service_records: [rec('completed')] }));
+    expect((await resolve('ci', 'ci-3')).skip).toBeUndefined();
+  });
+
+  test('a single mixed lawn and pest row keeps pest eligibility and asks on its first visit', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    db.mockImplementation(makeMock({ scheduled_services: [visit('lp-1', 'lp', 'Lawn and Pest Control', 0)] }));
+    expect((await resolve('lp', 'lp-1')).skip).toBeUndefined();
+  });
+
+  test('a failed packet, history or catalog read logs and asks; nothing is substituted', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    const logger = require('../services/logger');
+    const rows = [visit('fr-1', 'fr', 'Lawn Care Program', 0)];
+    const items = [{ packet_id: 'pf', scheduled_service_id: 'fr-1' }, { packet_id: 'pf', scheduled_service_id: 'fr-2' }];
+    for (const table of ['visit_completion_packet_items', 'service_records']) {
+      logger.warn.mockClear();
+      db.mockImplementation(makeMock({ scheduled_services: rows, visit_completion_packet_items: items }, { throwSelectWhen: (q) => q.table === table }));
+      const plan = await resolve('fr', 'fr-1');
+      expect(plan.skip).toBeUndefined();
+      expect(plan.plan).toHaveLength(1);
+      expect(logger.warn.mock.calls.some((c) => String(c[0]).includes('results-visit check failed'))).toBe(true);
+    }
+    // The member read (catalog join) fails too.
+    logger.warn.mockClear();
+    db.mockImplementation(makeMock({ scheduled_services: rows }, { throwSelectWhen: (q) => q.table === 'scheduled_services' && q.selected?.some((c) => String(c) === 'sv.name as service_name') && q.ins.length > 0 }));
+    expect((await resolve('fr', 'fr-1')).skip).toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
   });
 
   describe('the legacy single ask and the completion-text link follow the same rule', () => {
