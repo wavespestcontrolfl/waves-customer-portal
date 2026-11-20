@@ -5422,7 +5422,11 @@ function wholeHomeSealFields(options, home) {
 function roofStyleFields(options) {
   const style = typeof options.exclRoofStyle === 'string' ? options.exclRoofStyle : '';
   if (!style) return {};
-  return { roofStyle: style, ...(style === 'barrel_tile' ? { barrelEaveFt: Number(options.exclBarrelEaveFt) || 0 } : {}) };
+  if (style !== 'barrel_tile') return { roofStyle: style };
+  const { parseBarrelEaveFt, invalidBarrelEaveFtError } = require('../services/estimate-roof-style-replay');
+  const barrelEaveFt = parseBarrelEaveFt(options.exclBarrelEaveFt);
+  if (barrelEaveFt === null) throw invalidBarrelEaveFtError();
+  return { roofStyle: style, barrelEaveFt };
 }
 
 function translateV2CallToV1Input(profile, selectedServices, options) {

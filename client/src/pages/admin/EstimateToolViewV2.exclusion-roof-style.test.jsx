@@ -184,3 +184,56 @@ describe("A different customer or lead link clears the roof style, even with the
     expect(screen.getByRole("textbox", { name: "Service address" })).toHaveValue(ADDRESS);
   }, 30000);
 });
+
+describe("Deep-link prefill and the scope answer", () => {
+  const ADDRESS = "1 Synthetic Way";
+
+  async function mountWithPick(props) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url) => {
+        const path = String(url);
+        if (path.includes("/admin/pricing-config/rodent_waveguard")) return jsonResponse({ data: {}, exclusionRoofStyle: true });
+        if (path.includes("/admin/discounts")) return jsonResponse([]);
+        return jsonResponse({});
+      }),
+    );
+    const tree = (next) => (
+      <MemoryRouter>
+        <EstimateToolViewV2 {...next} />
+      </MemoryRouter>
+    );
+    const view = render(tree(props));
+    fireEvent.click(findCheckboxByLabel(view.container, /Rodent Exclusion Service/));
+    await waitFor(() => expect(view.container.querySelector("#estimate-exclRoofStyle")).toBeTruthy());
+    fireEvent.change(view.container.querySelector("#estimate-exclRoofStyle"), { target: { value: "barrel_tile" } });
+    fireEvent.change(view.container.querySelector("#estimate-exclBarrelEaveFt"), { target: { value: "40" } });
+    return { view, tree };
+  }
+
+  it("a new incoming customer id with the same address clears the pick and the feet", async () => {
+    const { view, tree } = await mountWithPick({ initialAddress: ADDRESS, initialCustomerId: "customer-a" });
+    expect(view.container.querySelector("#estimate-exclBarrelEaveFt").value).toBe("40");
+    view.rerender(tree({ initialAddress: ADDRESS, initialCustomerId: "customer-b" }));
+    await waitFor(() => expect(view.container.querySelector("#estimate-exclRoofStyle").value).toBe(""));
+    expect(view.container.querySelector("#estimate-exclBarrelEaveFt")).toBeNull();
+  }, 30000);
+
+  it("a new incoming lead id with no address clears the pick and the feet", async () => {
+    const { view, tree } = await mountWithPick({ initialLeadId: "lead-a" });
+    view.rerender(tree({ initialLeadId: "lead-b" }));
+    await waitFor(() => expect(view.container.querySelector("#estimate-exclRoofStyle").value).toBe(""));
+    expect(view.container.querySelector("#estimate-exclBarrelEaveFt")).toBeNull();
+  }, 30000);
+
+  it("the scope answer keeps the roof style but never restores the eave feet", () => {
+    const source = fs.readFileSync("src/pages/admin/EstimateToolViewV2.jsx", "utf8");
+    const answer = source.slice(source.indexOf("function answerScope("));
+    const block = answer.slice(0, answer.indexOf("_homeSqFtEdited: false"));
+    expect(block).toContain("...clearedPropertyFields()");
+    expect(block).toContain("exclRoofStyle: f.exclRoofStyle");
+    expect(block).not.toContain("exclBarrelEaveFt");
+    // clearedPropertyFields empties the feet.
+    expect(roofStyleReset().exclBarrelEaveFt).toBe("");
+  });
+});

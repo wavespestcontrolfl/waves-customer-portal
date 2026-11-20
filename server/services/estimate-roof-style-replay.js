@@ -42,4 +42,24 @@ function roofStyleReplaySignal(estData) {
   return null;
 }
 
-module.exports = { roofStyleReplaySignal, roofStyleRowFields };
+// The measured eave feet of a Barrel tile pick, validated BEFORE any coercion: a finite number >= 0 or a numeric string;
+// empty, null or undefined = 0. Anything else (boolean, object, 'abc', negative, Infinity) is null = invalid.
+function parseBarrelEaveFt(value) {
+  if (value === undefined || value === null || value === '') return 0;
+  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
+  if (typeof value === 'string') return /^\s*\d+(\.\d+)?\s*$/.test(value) ? Number(value) : null;
+  return null;
+}
+
+// The fail-closed 400 for eave feet that are not a measurement (the route and the engine share it).
+function invalidBarrelEaveFtError() {
+  const err = new Error('The barrel eave feet must be a number of feet, 0 or more.');
+  err.status = 400;
+  err.statusCode = 400;
+  err.code = 'EXCLUSION_ROOF_STYLE_INVALID';
+  err.failClosed = true;
+  err.isOperational = true;
+  return err;
+}
+
+module.exports = { roofStyleReplaySignal, roofStyleRowFields, parseBarrelEaveFt, invalidBarrelEaveFtError };

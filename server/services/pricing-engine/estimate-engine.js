@@ -932,13 +932,17 @@ function roofStyleInputs(exclusion, input) {
   if (!ROOF_STYLES.includes(style)) {
     throw wholeHomeInputError('The roof style must be shingle, flat tile, barrel tile, metal or other.', 'EXCLUSION_ROOF_STYLE_INVALID');
   }
-  if (style === 'barrel_tile' && Number(exclusion.barrelEaveFt) > 0 && !pricesV2Work(exclusion)) {
+  // Barrel feet are validated before any coercion (the route runs the same check); other styles carry none.
+  const { parseBarrelEaveFt, invalidBarrelEaveFtError } = require('../estimate-roof-style-replay');
+  const barrelEaveFt = style === 'barrel_tile' ? parseBarrelEaveFt(exclusion.barrelEaveFt) : 0;
+  if (barrelEaveFt === null) throw invalidBarrelEaveFtError();
+  if (barrelEaveFt > 0 && !pricesV2Work(exclusion)) {
     throw wholeHomeInputError('Count the entry points, or choose Whole home, before adding the barrel eave closure.', 'EXCLUSION_ROOF_STYLE_NEEDS_COUNTS');
   }
   const frozen = replay ? input.roofStyleReplay : null;
   return {
     roofStyle: style,
-    barrelEaveFt: exclusion.barrelEaveFt,
+    barrelEaveFt,
     ...(frozen ? { frozenTileMultiplier: frozen.multiplier, frozenBarrelPerFt: frozen.perFt, frozenBarrelMinimum: frozen.minimum } : {}),
   };
 }
@@ -2327,8 +2331,8 @@ function generateEstimate(input) {
   let rodentExclusionV2Summary = null;
   const wholeHomeSeal = wholeHomeSealInputs(services.exclusion || {}, property, input);
   const roofStyle = roofStyleInputs(services.exclusion || {}, input);
-  // The technician's confirmed roof style beats the lookup's roof type for the rodent guarantee tier (whole-home renewal,
-  // separate guarantee, guarantee combo). The legacy exclusion pricers keep reading the lookup, as before.
+  // The technician's confirmed roof style beats the lookup's roof type for the rodent guarantee tier (whole-home renewal and
+  // the separate guarantee line only). The legacy exclusion pricers and the guarantee combo keep reading the lookup, as before.
   const exclusionRoofType = (lookupRoofType) => effectiveExclusionRoofType(lookupRoofType, roofStyle?.roofStyle);
   if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control', {
     // Only the V2 shape is unit-scoped (per point + per LF, no home-sqft
@@ -2579,7 +2583,7 @@ function generateEstimate(input) {
     const result = calculateRodentGuaranteeCombo({
       sqft: services.rodentGuaranteeCombo.sqft || property.footprint,
       stories: services.rodentGuaranteeCombo.stories || property.stories,
-      roofType: exclusionRoofType(services.rodentGuaranteeCombo.roofType || property.roofType),
+      roofType: services.rodentGuaranteeCombo.roofType || property.roofType,
       entryPointsFound: services.rodentGuaranteeCombo.entryPointsFound,
       includesScreening: services.rodentGuaranteeCombo.includesScreening,
       constructionType: services.rodentGuaranteeCombo.constructionType || property.constructionMaterial,

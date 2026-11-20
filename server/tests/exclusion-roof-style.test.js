@@ -483,7 +483,6 @@ describe('the closure row on the customer estimate', () => {
 describe('the confirmed roof style prices only the V2 model; legacy pricers read the lookup as before', () => {
   const lookupShingle = { roofType: 'shingle' };
   const pick = (roofStyle) => ({ roofStyle });
-  const sum = (items) => items.reduce((total, li) => total + li.price, 0);
 
   test('legacy exclusion pricer: a tile (or any) pick prices the line byte-identical to no pick, for either lookup roof type', () => {
     gateOn(() => {
@@ -499,7 +498,7 @@ describe('the confirmed roof style prices only the V2 model; legacy pricers read
     });
   });
 
-  test('exclusionV2 (sqft-tiered) reads the lookup as before; the guarantee combo follows the confirmed style', () => {
+  test('exclusionV2 (sqft-tiered) and the guarantee combo read the lookup as before, whatever the pick', () => {
     gateOn(() => {
       const run = (key, roofStyle) => generateEstimate(baseInput({
         ...lookupShingle,
@@ -511,11 +510,50 @@ describe('the confirmed roof style prices only the V2 model; legacy pricers read
       const v2 = run('exclusionV2');
       expect(v2.length).toBeGreaterThan(0);
       expect(run('exclusionV2', 'flat_tile')).toEqual(v2);
+      // The combo prices its own exclusion from the lookup roof type and has no roof-based tier: a pick changes nothing.
       const combo = run('rodentGuaranteeCombo');
       expect(combo.length).toBeGreaterThan(0);
-      expect(sum(run('rodentGuaranteeCombo', 'flat_tile'))).not.toBe(sum(combo));
-      expect(sum(run('rodentGuaranteeCombo', 'shingle'))).toBe(sum(combo));
+      for (const style of ['flat_tile', 'barrel_tile', 'metal', 'shingle']) expect(run('rodentGuaranteeCombo', style)).toEqual(combo);
     });
+  });
+});
+
+describe('barrel eave feet are validated before any coercion', () => {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const profile = { homeSqFt: 2000, stories: 1, lotSqFt: 9000, propertyType: 'single_family' };
+  const route = (exclBarrelEaveFt) => translateV2CallToV1Input(profile, ['EXCLUSION'], {
+    exclAdvancedWireMesh: 1, exclRoofStyle: 'barrel_tile', exclBarrelEaveFt,
+  }).services.exclusion.barrelEaveFt;
+  const direct = (barrelEaveFt) => gateOn(() => generateEstimate(baseInput({
+    services: { exclusion: { pricingVersion: 'v2', advancedWireMeshPoints: 1, waiveInspection: true, roofStyle: 'barrel_tile', barrelEaveFt } },
+  })));
+  const BAD = [true, false, 'abc', '4 0', '1e3', -1, '-1', Infinity, NaN, {}, [], [40]];
+
+  test('the route accepts a finite number >= 0 or a numeric string, and empty = 0', () => {
+    expect([40, '40', ' 40 ', '12.5', 0, '0', '', null, undefined].map(route)).toEqual([40, 40, 40, 12.5, 0, 0, 0, 0, 0]);
+  });
+
+  test('the route refuses anything else with EXCLUSION_ROOF_STYLE_INVALID (400)', () => {
+    for (const value of BAD) {
+      let error;
+      try { route(value); } catch (err) { error = err; }
+      expect([value, error && [error.statusCode, error.code, error.failClosed]]).toEqual([value, [400, 'EXCLUSION_ROOF_STYLE_INVALID', true]]);
+    }
+  });
+
+  test('the engine runs the same check on direct inputs', () => {
+    for (const value of BAD) {
+      let error;
+      try { direct(value); } catch (err) { error = err; }
+      expect([value, error && error.code]).toEqual([value, 'EXCLUSION_ROOF_STYLE_INVALID']);
+    }
+    expect(rowsOf(direct('40')).find((li) => li.component === 'barrel_eave_closure').price).toBe(480);
+    expect(rowsOf(direct('')).some((li) => li.component === 'barrel_eave_closure')).toBe(false);
+  });
+
+  test('a non-barrel style carries no feet and validates none', () => {
+    const flat = translateV2CallToV1Input(profile, ['EXCLUSION'], { exclAdvancedWireMesh: 1, exclRoofStyle: 'flat_tile', exclBarrelEaveFt: true });
+    expect(flat.services.exclusion.barrelEaveFt).toBeUndefined();
   });
 });
 

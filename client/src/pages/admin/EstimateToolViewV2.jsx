@@ -2067,7 +2067,7 @@ export default function EstimateToolViewV2({
         }
       }
       if (initialAddress && initialAddress !== f.address) Object.assign(next, clearedPropertyFields());
-      else if (prefillIdentityChanged) next.measuredTurfSf = "";
+      else if (prefillIdentityChanged) Object.assign(next, { measuredTurfSf: "", ...roofStyleReset() });
       return next;
     });
   }, [
@@ -4053,8 +4053,9 @@ export default function EstimateToolViewV2({
       propertyId: f.propertyId,
       exclSealScope: f.exclSealScope,
       exclusionChecklist: f.exclusionChecklist,
+      // The roof style stays; the eave feet were measured for the old scope and must be measured again
+      // (clearedPropertyFields above already emptied them).
       exclRoofStyle: f.exclRoofStyle,
-      exclBarrelEaveFt: f.exclBarrelEaveFt,
       _homeSqFtEdited: false,
       _lotSqFtEdited: false,
       _storiesEdited: false,
