@@ -78,15 +78,19 @@ describe('renderIssue', () => {
     for (const factId of Object.keys(POSTS)) expect(imgSrcs(renderIssue({ ...BASE, lead: titledLead(factId) }).html_body)[0]).toBe(heroFor(factId).url);
   });
 
-  test('a picture that moves comes with its still: classic Outlook gets the still, every other mail app the GIF, and the still comes first for the Waves website feed', () => {
+  test('a picture that moves comes with its still: classic Outlook and a reader who asked for less motion get the still, every other mail app the GIF, and the still comes first for the Waves website feed', () => {
     const hero = heroFor('T03');
     const card = cardFor('T03');
     expect(hero.gifUrl).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/pest-insider\/heroes\/t03-[0-9a-f]{10}\.gif$/);
     expect(card.gifUrl).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/pest-insider\/cards\/t03-[0-9a-f]{10}\.gif$/);
     const r = renderIssue({ ...BASE, lead: titledLead('T03') });
     const img = (src, alt, height) => `<img src="${src}" alt="${escapeHtml(alt)}" width="582" height="${height}" style="width:100%;max-width:582px;height:auto;border:0;border-radius:12px;display:block;" />`;
-    expect(r.html_body).toContain(`<a href="${postUrl('T03')}" style="text-decoration:none;"><!--[if mso]>${img(hero.url, hero.alt, 326)}<![endif]--><!--[if !mso]><!-->${img(hero.gifUrl, hero.alt, 326)}<!--<![endif]--></a>`);
-    expect(r.html_body).toContain(`<!--[if mso]>${img(card.url, card.alt, 300)}<![endif]--><!--[if !mso]><!-->${img(card.gifUrl, card.alt, 300)}<!--<![endif]-->`);
+    // the GIF sits in a <picture> whose <source> is the still, for a reader who asked for less motion
+    const moving = (still, gif, alt, height) => `<picture style="display:block;"><source srcset="${still}" media="(prefers-reduced-motion: reduce)" />${img(gif, alt, height)}</picture>`;
+    expect(r.html_body).toContain(`<a href="${postUrl('T03')}" style="text-decoration:none;"><!--[if mso]>${img(hero.url, hero.alt, 326)}<![endif]--><!--[if !mso]><!-->${moving(hero.url, hero.gifUrl, hero.alt, 326)}<!--<![endif]--></a>`);
+    expect(r.html_body).toContain(`<!--[if mso]>${img(card.url, card.alt, 300)}<![endif]--><!--[if !mso]><!-->${moving(card.url, card.gifUrl, card.alt, 300)}<!--<![endif]-->`);
+    // only a reduced-motion setting picks a still: no other <source> and no other media query
+    expect([...r.html_body.matchAll(/<source [^>]*>/g)].map((m) => m[0])).toEqual([hero.url, card.url].map((still) => `<source srcset="${still}" media="(prefers-reduced-motion: reduce)" />`));
     // a mail app that reads no Outlook comment shows only the GIFs
     expect(imgSrcs(r.html_body.replace(/<!--[\s\S]*?-->/g, ''))).toEqual([hero.gifUrl, card.gifUrl, DIVIDER]);
     // classic Outlook shows what [if mso] holds and skips what [if !mso] holds: the stills

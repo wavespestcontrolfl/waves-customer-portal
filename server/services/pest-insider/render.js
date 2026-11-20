@@ -154,12 +154,17 @@ const SIGNOFF_TEXT = `${SIGNOFF_LINE}\n${SIGNOFF_NAME}\n`;
 // wrapNewsletter's card), with its size in the tag. A picture that moves
 // comes with its still: classic Outlook for Windows plays no GIF, so it gets
 // the still; every other mail app gets the GIF, whose first frame is the
-// whole picture. The still comes first in the HTML, so the Waves website's
-// newsletter feed (newsletter-feed.js extractCardImage, which skips GIFs)
-// keeps the still as the issue's picture.
+// whole picture. A reader who asked for less motion gets the still: a mail
+// app that reads that setting (Apple Mail does) picks the <source>, and one
+// that does not know <picture> shows its <img>, the GIF. The still comes
+// first in the HTML, so the Waves website's newsletter feed
+// (newsletter-feed.js extractCardImage, which reads <img> tags only and
+// skips GIFs) keeps the still as the issue's picture.
 function pictureHtml({ url, gifUrl, alt, width, height }) {
   const img = (src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" width="${width}" height="${height}" style="width:100%;max-width:${width}px;height:auto;border:0;border-radius:12px;display:block;" />`;
-  return gifUrl ? `<!--[if mso]>${img(url)}<![endif]--><!--[if !mso]><!-->${img(gifUrl)}<!--<![endif]-->` : img(url);
+  if (!gifUrl) return img(url);
+  const moving = `<picture style="display:block;"><source srcset="${escapeHtml(url)}" media="(prefers-reduced-motion: reduce)" />${img(gifUrl)}</picture>`;
+  return `<!--[if mso]>${img(url)}<![endif]--><!--[if !mso]><!-->${moving}<!--<![endif]-->`;
 }
 
 // The lead fact's top picture (heroes.js), linked to the post: the fact's
