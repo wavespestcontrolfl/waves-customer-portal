@@ -560,58 +560,114 @@ postgres('payroll review bonus import', () => {
       expect(locked.map((row) => row.id)).toEqual([...ids].sort());
     });
 
-    it('two policy PATCHes on separate connections serialize and keep both fields', async () => {
-      // Two real top-level transactions on separate connections. The first reads the policy and then
-      // waits before it writes; the second must wait on the per-key lock, then see the first's field.
-      // Without the lock the second would finish first and the first would overwrite its field.
-      const other = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
-      const key = POLICY_ROW.key;
-      const backup = await other('system_settings').where({ key }).first();
-      let release = () => {};
+    // The two-connection tests below commit for real, so they use a throwaway settings key (never the
+    // real policy row) and the service takes it as an internal option. Each test deletes its key in its
+    // finally (not in an afterEach: that would wait behind the test transaction's table locks).
+    const throwawayKey = () => `review_incentives.policy.test.${Math.random().toString(36).slice(2, 10)}`;
+    // A connection whose transactions pause (until `release`) at the first statement `pauseWhen` accepts.
+    const pausingConn = (other, pauseWhen) => {
+      let release;
+      const released = new Promise((resolve) => { release = resolve; });
+      let reached;
+      const reachedPause = new Promise((resolve) => { reached = resolve; });
+      // Wraps a query builder (and what its chained calls return) so awaiting it waits for `released`.
+      const gate = (target, seen = new WeakMap()) => {
+        if (seen.has(target)) return seen.get(target);
+        const proxy = new Proxy(target, {
+          get(object, prop) {
+            if (prop === 'then') return (resolve, reject) => { reached(); return released.then(() => object.then(resolve, reject)); };
+            const value = object[prop];
+            if (typeof value !== 'function') return value;
+            return (...args) => {
+              const result = value.apply(object, args);
+              return result && typeof result === 'object' ? gate(result, seen) : result;
+            };
+          },
+        });
+        seen.set(target, proxy);
+        return proxy;
+      };
+      const conn = {
+        transaction: (fn) => other.transaction((real) => {
+          let paused = false;
+          const wrapped = new Proxy((...args) => {
+            const builder = real(...args);
+            if (paused || !pauseWhen(args[0])) return builder;
+            paused = true;
+            return gate(builder);
+          }, { get: (_target, prop) => (typeof real[prop] === 'function' ? real[prop].bind(real) : real[prop]) });
+          return fn(wrapped);
+        }),
+      };
+      return { conn, release, reachedPause };
+    };
+    const newOther = () => require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
+
+    it('a policy save waits for an open payment transaction (shared settings lock), then applies', async () => {
+      const other = newOther();
+      const key = throwawayKey();
+      const pause = pausingConn(other, (table) => table === 'review_incentive_payouts');
       const running = [];
       try {
+        // The payment takes the shared settings lock, reads the policy, then waits before it touches payouts.
+        const payment = markPaid([randomUUID()], { conn: pause.conn, policyKey: key });
+        running.push(payment);
+        await pause.reachedPause;
+        let saved = false;
+        const save = savePolicy({ monthlyCapCount: 15 }, other, { key }).then((value) => { saved = true; return value; });
+        running.push(save);
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
+        expect(saved).toBe(false);
+        pause.release();
+        await Promise.all([payment, save]);
+        expect((await getPolicyStrict(other, key)).monthlyCapCount).toBe(15);
+      } finally {
+        // Release the held transaction first, so a failed assertion cannot leave it open.
+        pause.release();
+        await Promise.allSettled(running);
         await other('system_settings').where({ key }).del();
-        const released = new Promise((resolve) => { release = resolve; });
-        let paused;
-        const reachedWrite = new Promise((resolve) => { paused = resolve; });
-        const gatedConn = {
-          transaction: (fn) => other.transaction((real) => {
-            let calls = 0;
-            const gated = new Proxy((...args) => {
-              const builder = real(...args);
-              calls += 1;
-              if (args[0] !== 'system_settings' || calls !== 2) return builder;
-              // The second system_settings statement is the write: hold it until released.
-              return {
-                insert: (row) => ({
-                  onConflict: (column) => ({
-                    merge: (patch) => ({
-                      then: (resolve, reject) => { paused(); return released.then(() => builder.insert(row).onConflict(column).merge(patch)).then(resolve, reject); },
-                    }),
-                  }),
-                }),
-              };
-            }, { get: (_target, prop) => (typeof real[prop] === 'function' ? real[prop].bind(real) : real[prop]) });
-            return fn(gated);
-          }),
-        };
-        const first = savePolicy({ monthlyCapCount: 15 }, gatedConn);
+        await other.destroy();
+      }
+    });
+
+    it('a payment that starts after a save sees the saved policy; the save never waits on a finished payment', async () => {
+      const other = newOther();
+      const key = throwawayKey();
+      try {
+        await savePolicy({ monthlyCapCount: 7 }, other, { key });
+        expect(await markPaid([randomUUID()], { conn: other, policyKey: key })).toEqual({ updated: 0, skippedOverCap: 0 });
+        expect((await getPolicyStrict(other, key)).monthlyCapCount).toBe(7);
+      } finally {
+        await other('system_settings').where({ key }).del();
+        await other.destroy();
+      }
+    });
+
+    it('two policy PATCHes on separate connections serialize and keep both fields', async () => {
+      // Two top-level transactions on separate connections. The first reads the policy and then waits
+      // before it writes; the second must wait on the exclusive settings lock, then see the first's field.
+      // Without the lock the second finishes first and the first overwrites its field.
+      const other = newOther();
+      const key = throwawayKey();
+      let calls = 0;
+      const pause = pausingConn(other, (table) => table === 'system_settings' && (calls += 1) === 2);
+      const running = [];
+      try {
+        const first = savePolicy({ monthlyCapCount: 15 }, pause.conn, { key });
         running.push(first);
-        await reachedWrite;
+        await pause.reachedPause;
         let secondDone = false;
-        const second = savePolicy({ amountCents: 1500 }, other).then((value) => { secondDone = true; return value; });
+        const second = savePolicy({ amountCents: 1500 }, other, { key }).then((value) => { secondDone = true; return value; });
         running.push(second);
         await new Promise((resolve) => { setTimeout(resolve, 400); });
         expect(secondDone).toBe(false);
-        release();
+        pause.release();
         await Promise.all([first, second]);
-        expect(await getPolicyStrict(other)).toMatchObject({ monthlyCapCount: 15, amountCents: 1500 });
+        expect(await getPolicyStrict(other, key)).toMatchObject({ monthlyCapCount: 15, amountCents: 1500 });
       } finally {
-        // Release the held transaction first, so a failed assertion cannot leave it open.
-        release();
+        pause.release();
         await Promise.allSettled(running);
         await other('system_settings').where({ key }).del();
-        if (backup) await other('system_settings').insert(backup);
         await other.destroy();
       }
     });

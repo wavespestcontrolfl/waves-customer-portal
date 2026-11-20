@@ -24,7 +24,7 @@ const { STAFF_TIME_ZONE, staffWeekStartForWorkDate } = require('../utils/staff-t
 // Only the sources the Reviews page shows and pays ('google_review'); legacy review_request
 // payouts stay out of payroll as they stay out of the Reviews page's mark-paid.
 const {
-  PAYOUT_ELIGIBLE_SOURCES, getPolicyStrict, overCapPayoutIds, lockPayoutRows, lockTechnicianCap,
+  PAYOUT_ELIGIBLE_SOURCES, getPolicyForPayment, overCapPayoutIds, lockPayoutRows, lockTechnicianCap,
 } = require('./review-incentives');
 
 const SOURCE_TYPE = 'review_incentive_payout';
@@ -143,10 +143,15 @@ async function addMissingLines(trx, candidates, overCap) {
 async function syncReviewBonusLines(trx, { weekEnd, lock = false, actorId = null } = {}) {
   if (!payLinesOn()) return { removed: 0, added: 0 };
   const importing = importOn();
+  // Lock order everywhere (owner 2026-11-20 D4): the settings lock with the strict policy read first,
+  // then the pay lines and payout rows, then the technician locks. The cap policy is read only when
+  // this sync can add lines (with the import off payroll never reads it); a failed read stops the sync,
+  // it must never read as "no cap".
+  const cap = importing ? (await getPolicyForPayment(trx)).monthlyCapCount : null;
   const lines = await readOpenLines(trx, lock);
-  // One lock order on every path (owner 2026-11-20 D4): the full id set (the lines' payouts and the
-  // candidates), locked in ONE statement ordered by id, before any technician lock. A candidate that
-  // lands after this read is not in the snapshot and waits for the next sync.
+  // The full id set (the lines' payouts and the candidates), locked in ONE statement ordered by id,
+  // before any technician lock. A candidate that lands after this read is not in the snapshot and
+  // waits for the next sync.
   let snapshotIds = null;
   if (lock) {
     const seen = importing ? await readCandidates(trx, weekEnd) : [];
@@ -156,9 +161,6 @@ async function syncReviewBonusLines(trx, { weekEnd, lock = false, actorId = null
   const candidates = importing
     ? (await readCandidates(trx, weekEnd)).filter((payout) => !snapshotIds || snapshotIds.has(payout.id))
     : [];
-  // The cap policy is read only when this sync can add lines. A failed read stops the sync: it must
-  // never read as "no cap" (owner 2026-11-20 D4). With the import off, payroll never reads it.
-  const cap = importing ? (await getPolicyStrict(trx)).monthlyCapCount : null;
   const overCap = importing ? await decideOverCap(trx, cap, { lines, linePayouts, candidates }) : new Set();
   const removedIds = await dropStaleLines(trx, { lines, payouts: linePayouts, dropAll: !importing, overCap });
   const addedIds = importing ? await addMissingLines(trx, candidates, overCap) : [];
@@ -180,8 +182,8 @@ async function syncReviewBonusLines(trx, { weekEnd, lock = false, actorId = null
  * rows, then each technician's cap lock, and refuse the finalize if one of the payouts is over the cap.
  */
 async function guardMonthlyCap(trx, ids, technicianIds, changedError) {
+  const { monthlyCapCount: cap } = await getPolicyForPayment(trx);
   await lockPayoutRows(trx, ids);
-  const { monthlyCapCount: cap } = await getPolicyStrict(trx);
   if (!cap) return;
   await lockTechnicianCap(trx, technicianIds);
   const overCap = await overCapPayoutIds(trx, { cap, technicianIds });

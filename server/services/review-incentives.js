@@ -190,8 +190,8 @@ async function getPolicy(conn = db) {
  * read must stop the payment, never read as "no cap". Only a missing row, or a valid legacy object
  * without monthlyCapCount, is uncapped.
  */
-async function getPolicyStrict(conn = db) {
-  const row = await conn('system_settings').where({ key: POLICY_KEY }).first();
+async function getPolicyStrict(conn = db, key = POLICY_KEY) {
+  const row = await conn('system_settings').where({ key }).first();
   if (!row) return { ...DEFAULT_POLICY };
   let decoded = row.value;
   try {
@@ -203,6 +203,23 @@ async function getPolicyStrict(conn = db) {
     throw operationalError('The review bonus policy is stored in a form that cannot be read', 500, 'review_policy_malformed');
   }
   return parsePolicy(decoded);
+}
+
+/**
+ * The settings lock of a policy key: one advisory lock both sides take (owner 2026-11-20 D4). A save takes
+ * it exclusive; every payment decision takes it SHARED, before it reads the policy, held to commit. So a
+ * save waits for open payments, and a payment that starts after a save sees the saved policy. Lock order
+ * everywhere: this lock first, then the payout rows (lockPayoutRows), then the technician locks.
+ */
+async function lockPolicy(conn, { key = POLICY_KEY, shared = false } = {}) {
+  const fn = shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock';
+  await conn.raw(`select ${fn}(hashtext(?))`, [`system_settings:${key}`]);
+}
+
+/** The policy for a payment decision: the shared settings lock first, then the strict read. */
+async function getPolicyForPayment(trx, key = POLICY_KEY) {
+  await lockPolicy(trx, { key, shared: true });
+  return getPolicyStrict(trx, key);
 }
 
 /**
@@ -234,7 +251,7 @@ async function lockTechnicianCap(conn, technicianIds) {
 // Every policy field a full replacement must carry (eligibleSources is fixed by the code).
 const REPLACEMENT_FIELDS = Object.keys(DEFAULT_POLICY).filter((key) => key !== 'eligibleSources');
 
-async function savePolicy(rawPatch = {}, conn = db) {
+async function savePolicy(rawPatch = {}, conn = db, { key = POLICY_KEY } = {}) {
   // Read, merge and upsert in one transaction under a lock per settings key, taken BEFORE the read so
   // it also works when the row is absent: two PATCHes cannot overwrite each other's fields (owner
   // 2026-11-20 D4). A failed read must not overwrite a stored cap with the defaults. While the stored
@@ -242,10 +259,10 @@ async function savePolicy(rawPatch = {}, conn = db) {
   // with every field) overwrites it.
   const { replace = false, ...policyPatch } = rawPatch || {};
   return conn.transaction(async (trx) => {
-    await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`system_settings:${POLICY_KEY}`]);
+    await lockPolicy(trx, { key });
     let current;
     try {
-      current = await getPolicyStrict(trx);
+      current = await getPolicyStrict(trx, key);
     } catch (err) {
       if (err.code !== 'review_policy_malformed') throw err;
       if (replace !== true) {
@@ -264,7 +281,7 @@ async function savePolicy(rawPatch = {}, conn = db) {
     const now = new Date();
     await trx('system_settings')
       .insert({
-        key: POLICY_KEY,
+        key,
         value: JSON.stringify(policy),
         category: 'reviews',
         description: 'Technician review incentive automation policy',
@@ -1837,12 +1854,13 @@ async function markPaid(ids = [], options = {}) {
   // One transaction (owner 2026-11-20 D4): lock the rows, then each technician's cap lock, rank, and
   // update only the rows that rank inside the cap under the technician they were ranked under.
   return conn.transaction(async (trx) => {
+    // Lock order: the settings lock (with the strict policy read), the payout rows, the technician locks.
+    const { monthlyCapCount } = await getPolicyForPayment(trx, options.policyKey);
     const rows = (await lockPayoutRows(trx, cleanIds))
       .filter((row) => row.source === 'google_review' && row.status !== 'paid');
     if (!rows.length) return { updated: 0, skippedOverCap: 0 };
     const technicianIds = [...new Set(rows.map((row) => row.technician_id).filter(Boolean))];
     await lockTechnicianCap(trx, technicianIds);
-    const { monthlyCapCount } = await getPolicyStrict(trx);
     const overCap = await overCapPayoutIds(trx, { cap: monthlyCapCount, technicianIds });
     const patch = {
       status: 'paid', paid_at: new Date(), paid_by: options.paidBy || null, updated_at: new Date(),
@@ -1914,6 +1932,8 @@ module.exports = {
   withMonthRank,
   isOverMonthlyCap,
   getPolicyStrict,
+  getPolicyForPayment,
+  lockPolicy,
   lockPayoutRows,
   lockTechnicianCap,
   toCsv,
