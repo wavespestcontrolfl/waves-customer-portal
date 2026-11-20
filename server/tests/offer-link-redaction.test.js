@@ -68,6 +68,15 @@ describe('redactOfferLinks', () => {
     }
   });
 
+  // A run of text ends at a tag, so an email keeps the markup around a link stored as the standard hidden link.
+  test('keeps the tags around a link it replaces as a whole', () => {
+    const link = `HTTPS://PORTAL.WAVESPESTCONTROL.COM/CAREERS/OFFER/${TOKEN}`;
+    const html = `<p style="margin:0 0 12px">${link}</p><p>Questions? Reply here.</p>`;
+    expect(redactOfferLinks(html)).toBe(`<p style="margin:0 0 12px">${HIDDEN_LINK}</p><p>Questions? Reply here.</p>`);
+    expect(offerLinkTokens(html)).toEqual([TOKEN]);
+    expect(redactOfferLinks(`<td><b>${link}</b>.</td>`)).toBe(`<td><b>${HIDDEN_LINK}</b>.</td>`);
+  });
+
   test('keeps the host and the words around the link as it is sent; a capital token is still that token', () => {
     expect(redactOfferLinks(`x.test/careers/offer/${TOKEN}`)).toBe(`x.test/careers/offer/${OFFER_LINK_HIDDEN}`);
     expect(redactOfferLinks(`<a href="https://x.test/careers/offer/${TOKEN}">Read</a>`)).toBe(`<a href="https://x.test/careers/offer/${OFFER_LINK_HIDDEN}">Read</a>`);

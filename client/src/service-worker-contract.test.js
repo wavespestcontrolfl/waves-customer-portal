@@ -271,11 +271,11 @@ describe('customer service-worker update contract', () => {
   it('activates by sweeping only stale Waves buckets and preserving current, badge, and unrelated caches', async () => {
     const worker = loadWorker(fakeCache(), { cacheNames: [
       'waves-v10-admin-activation-stable', 'waves-customer-v11-shell-atomic',
-      'waves-customer-v12-shell-pruned', 'waves-badge-state', 'another-app-cache',
+      'waves-customer-v12-shell-pruned', 'waves-customer-v13-private-links', 'waves-badge-state', 'another-app-cache',
     ] });
     await worker.dispatchActivate();
     expect([...worker.cacheNames].sort()).toEqual([
-      'another-app-cache', 'waves-badge-state', 'waves-customer-v12-shell-pruned',
+      'another-app-cache', 'waves-badge-state', 'waves-customer-v13-private-links',
     ]);
     expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
   });
@@ -392,7 +392,10 @@ describe('service-worker private link pages', () => {
   // request keeps its URL), and no offline shell served in its place (that
   // shell carries another page's headers, without no-referrer).
   const token = 'a'.repeat(64);
-  const offerPaths = [`/careers/offer/${token}`, `/Careers/Offer/${token}/`, `/careers/%6Fffer/${token}`, `/careers/offer/${token}//`];
+  const offerPaths = [
+    `/careers/offer/${token}`, `/Careers/Offer/${token}/`, `/careers/%6Fffer/${token}`, `/careers/offer/${token}//`,
+    `/login?next=%2Fcareers%2Foffer%2F${token}`, `/welcome#/careers/offer/${token}`,
+  ];
 
   it('leaves a job-offer URL to the browser in every request mode, online and offline', async () => {
     const cache = fakeCache();
@@ -417,25 +420,10 @@ describe('service-worker private link pages', () => {
     expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(false);
   });
 
-  it('drops job-offer URLs an older worker stored when this worker activates, and keeps everything else', async () => {
-    const cache = fakeCache();
-    const asset = fakeResponse('asset');
-    for (const key of [...offerPaths, '/manifest.json', '/assets/index-AAA.js', '/careers/offers']) await cache.put(key, asset);
-    const worker = loadWorker(cache);
-    await worker.dispatchActivate();
-    expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
-    await tick(); // the purge runs beside activation, not in it
-    expect([...cache.store.keys()].map(url => url.replace('https://portal.test', '')).sort())
-      .toEqual(['/__waves/install-commit', '/assets/index-AAA.js', '/careers/offers', '/manifest.json']);
-  });
-
   // The server routes /API/ as /api/, so an offer read in another letter case
-  // returns the applicant's offer, with the token in its URL. An older worker
-  // skipped only a lowercase /api/ and stored such a read like any file.
-  it('leaves an API call in any letter case to the browser, and drops API responses an older worker stored', async () => {
+  // returns the applicant's offer, with the token in its URL.
+  it('leaves an API call in any letter case to the browser', async () => {
     const cache = fakeCache();
-    const stored = fakeResponse('{"state":"open"}');
-    for (const key of [`/API/public/careers/offer/${token}`, `/Api/public/careers/offer/${token}/text-consent`, '/API/customer/me', '/manifest.json']) await cache.put(key, stored);
     const worker = loadWorker(cache);
     worker.setFetch(async () => fakeResponse('{"state":"open"}'));
     for (const path of [`/API/public/careers/offer/${token}`, `/aPi/public/careers/offer/${token}`, `/api/public/careers/offer/${token}`]) {
@@ -444,81 +432,74 @@ describe('service-worker private link pages', () => {
         expect(response).toBeUndefined(); // no respondWith: the browser fetches it
       }
     }
+    expect([...cache.store.keys()]).toEqual([]);
+  });
+
+  // The worker on main stores each page it opens as the shell, and any other
+  // same-origin GET under its URL, so its bucket can hold the link. This
+  // worker's bucket has a new name, so the activate sweep drops that bucket
+  // whole, before this worker claims a page.
+  it('drops the bucket an older worker filled, offer links and all, before it claims a page', async () => {
+    const older = fakeCache();
+    for (const key of ['/', ...offerPaths, `/API/public/careers/offer/${token}`, '/manifest.json']) {
+      await older.put(key, new FakeResponse('stored', { url: `https://portal.test/careers/offer/${token}` }));
+    }
+    const worker = loadWorker(fakeCache(), {
+      cachesByName: { 'waves-customer-v12-shell-pruned': older },
+      cacheNames: ['waves-customer-v13-private-links', 'waves-badge-state'],
+    });
+    let namesAtClaim = null;
+    worker.workerClients.claim.mockImplementation(async () => { namesAtClaim = [...worker.cacheNames].sort(); });
     await worker.dispatchActivate();
-    await tick(); // the purge runs beside activation, not in it
-    expect([...cache.store.keys()].map(url => url.replace('https://portal.test', '')).sort())
-      .toEqual(['/__waves/install-commit', '/manifest.json']);
+    expect(namesAtClaim).toEqual(['waves-badge-state', 'waves-customer-v13-private-links']);
   });
 
-  // The older worker stores every page it opens as the shell, and the stored
-  // response keeps that page's URL. One it opens while this worker installs
-  // began after the install mark, so that mark does not stop it.
-  it("stores the shell again without its URL when an older worker stored a job-offer page as the shell, and that worker's later refreshes cannot store it again", async () => {
-    const cache = fakeCache();
-    const locks = fakeLocks();
-    let clock = 1000;
-    const assets = ['/assets/index-BBB.js'];
-    const serve = serveBuild(assets);
-    const offerUrl = `https://portal.test/careers/offer/${token}`;
-    const offerPage = () => new FakeResponse(shellHtml(assets), { url: offerUrl });
-    const older = loadWorker(cache, { locks, now: () => clock });
-    const next = loadWorker(cache, { locks, now: () => clock });
-    for (const worker of [older, next]) worker.setFetch(async request => (request.url === '/' ? fakeResponse(shellHtml(assets)) : serve(request)));
-    await next.dispatchInstall(); // install mark: 1000
-    clock = 2000;
-    await older.cacheCompleteShellResponse(offerPage(), undefined, { startedAt: 2000 });
-    expect((await cache.match('/')).url).toBe(offerUrl); // the case to clean up
-    clock = 3000;
-    await next.dispatchActivate();
-    expect(next.workerClients.claim).toHaveBeenCalledTimes(1);
-    await tick();
-    const shell = await cache.match('/');
-    expect(shell.url).toBe('');
-    expect(await shell.text()).toBe(shellHtml(assets));
-    // An offer page the older worker opened before this worker took over, whose refresh lands only now.
-    await expect(older.cacheCompleteShellResponse(offerPage(), undefined, { startedAt: 2500 })).rejects.toThrow(/superseded/);
-    expect((await cache.match('/')).url).toBe('');
-    expect([...cache.store.values()].some(response => /careers/i.test(response.url))).toBe(false);
-    // The takeover mark never holds back this worker's own refreshes.
-    clock = 4000;
-    next.setFetch(serveBuild(['/assets/index-CCC.js']));
-    await next.dispatchFetch('/dashboard', { mode: 'navigate' });
-    expect(await (await cache.match('/')).text()).toContain('index-CCC');
-  });
-
-  it("moves the install mark up to the takeover, never back over a newer install's mark", async () => {
-    const markOf = async (cache) => (await cache.match('/__waves/install-commit')).headers.get('x-waves-install-started');
-    const cache = fakeCache();
-    const worker = loadWorker(cache, { now: () => 5000 });
-    await worker.dispatchActivate();
-    await tick();
-    expect(await markOf(cache)).toBe('5000');
-    const newer = fakeCache();
-    await newer.put('/__waves/install-commit', new FakeResponse('', { headers: { 'x-waves-install-started': '9000' } }));
-    await loadWorker(newer, { now: () => 5000 }).dispatchActivate();
-    await tick();
-    expect(await markOf(newer)).toBe('9000');
-  });
-
-  it('tries the purge again on the next page load when it fails at activate, without holding up the claim', async () => {
-    const cache = fakeCache();
-    await cache.put(offerPaths[0], fakeResponse('asset'));
-    const realDelete = cache.delete.bind(cache);
-    let failures = 1;
-    cache.delete = async (key) => {
-      if (failures > 0) { failures -= 1; throw new Error('Cache Storage error'); }
-      return realDelete(key);
-    };
-    const worker = loadWorker(cache);
+  // A sweep can fail, and an older worker's last shell refresh, in flight at
+  // the takeover, can open its bucket again after the sweep. Each page load
+  // drops such a bucket, and never this worker's or a newer installer's.
+  it('drops an older bucket a page load finds, an offer page included, and keeps its own and newer ones', async () => {
+    const worker = loadWorker(fakeCache(), { cacheNames: ['waves-customer-v13-private-links', 'waves-badge-state'] });
     worker.setFetch(serveBuild(['/assets/index-AAA.js']));
     await worker.dispatchActivate();
-    expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
-    await tick();
-    expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(true);
-    // The applicant may visit only the offer: that visit retries it too, and is still left to the browser.
+    worker.cacheNames.add('waves-customer-v12-shell-pruned');
+    worker.cacheNames.add('waves-customer-v14-next'); // a newer worker installing
     const { response } = await worker.dispatchFetch(offerPaths[1], { mode: 'navigate' });
-    expect(response).toBeUndefined();
-    expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(false);
+    expect(response).toBeUndefined(); // still left to the browser
+    expect([...worker.cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v13-private-links', 'waves-customer-v14-next']);
+    worker.cacheNames.add('waves-v10-admin-activation-stable');
+    worker.cacheNames.add('waves-customer-v9-old');
+    await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+    expect([...worker.cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v13-private-links', 'waves-customer-v14-next']);
+  });
+
+  // A stored response keeps the URL it came from, and a followed redirect can
+  // end on an offer link under any other key. Every write checks the final URL.
+  it('stores no response whose final URL is a job-offer link or an API call, whatever URL asked for it', async () => {
+    const cache = fakeCache();
+    const worker = loadWorker(cache);
+    const privateUrls = [
+      `https://portal.test/careers/offer/${token}`, `https://portal.test/Careers/Offer/${token}/`,
+      `https://portal.test/careers/%6Fffer/${token}`, `https://portal.test/API/public/careers/offer/${token}`,
+      `https://www.portal.test/careers/offer/${token}`, `https://portal.test/login?next=%2FCareers%2Foffer%2F${token}`,
+    ];
+    for (const [i, finalUrl] of privateUrls.entries()) {
+      worker.setFetch(async () => new FakeResponse('body', { url: finalUrl }));
+      const { response } = await worker.dispatchFetch(`/go/${i}`, { mode: 'cors' });
+      expect(response.url).toBe(finalUrl); // still served to the page
+      const { response: asset } = await worker.dispatchFetch(`/assets/chunk-${i}.js`, { mode: 'cors' });
+      expect(asset.url).toBe(finalUrl);
+      worker.setFetch(async (request) => (String(request.url).includes('/assets/')
+        ? fakeResponse('asset')
+        : new FakeResponse(shellHtml(['/assets/index-AAA.js']), { url: finalUrl })));
+      await worker.dispatchFetch('/dashboard', { mode: 'navigate' });
+    }
+    await tick();
+    expect([...cache.store.keys()]).toEqual([]);
+    // Any other final URL is stored as before.
+    worker.setFetch(async () => new FakeResponse('{}', { url: 'https://portal.test/manifest.json' }));
+    await worker.dispatchFetch('/manifest.json', { mode: 'cors' });
+    await tick();
+    expect([...cache.store.keys()]).toEqual(['https://portal.test/manifest.json']);
   });
 
   it('still serves and refreshes the shell for every other page', async () => {
@@ -1198,7 +1179,7 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
 
     await dispatchInstall();
 
-    expect([...cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v11-shell-atomic', 'waves-customer-v12-shell-pruned', 'waves-v10-admin-activation-stable']);
+    expect([...cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v11-shell-atomic', 'waves-customer-v13-private-links', 'waves-v10-admin-activation-stable']);
     expect([...v11.store.keys()].map(u => new URL(u).pathname).sort()).toEqual(['/', '/assets/index-OLD.js', '/waves-logo.png']);
     expect([...v10.store.keys()].map(u => new URL(u).pathname).sort()).toEqual(['/', '/assets/index-V10.js']);
     expect(await cache.match('/')).toBeTruthy();

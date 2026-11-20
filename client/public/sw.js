@@ -4,7 +4,14 @@ const APP_CACHE_PREFIX = 'waves-customer-';
 // caches.open() after a cold start — an 11 s blank screen). Bumping the
 // name drops that bucket once via the activate sweep; pruneStaleAssets
 // keeps the new one bounded to the current build.
-const CACHE_NAME = 'waves-customer-v12-shell-pruned';
+// v13: a v12 worker stores each page it opens as the shell, and any other
+// same-origin GET under its URL, so its bucket can hold a job-offer link,
+// the applicant's signing credential. Bumping the name drops that bucket
+// whole in the activate sweep, before this worker claims a page.
+const CACHE_NAME = 'waves-customer-v13-private-links';
+// A bucket of a lower version is an older worker's, never a newer
+// installer's, so a page load may drop it at any time (sweepOlderCaches).
+const CACHE_VERSION = Number(/^waves-customer-v(\d+)-/.exec(CACHE_NAME)[1]);
 // Pre-prefix buckets (e.g. 'waves-v10-admin-activation-stable') that the
 // APP_CACHE_PREFIX sweep never matched and so outlived every update.
 const LEGACY_CACHE_PATTERN = /^waves-v\d+-/;
@@ -58,9 +65,7 @@ const BUILD_HEADER = 'x-waves-build';
 // An installing worker and the active one share the cache but not their
 // navigation order (module state is per instance). The installer records
 // when its precache began; an active navigation that began earlier must
-// not commit its (older) shell over the installer's. The private-link purge
-// moves the mark up to the moment this worker took over, so no older
-// worker's navigation can commit after that either (see takeoverAt).
+// not commit its (older) shell over the installer's.
 const INSTALL_MARK_URL = '/__waves/install-commit';
 const INSTALL_STARTED_HEADER = 'x-waves-install-started';
 // Equality counts as superseding. Date.now() has coarse resolution (and
@@ -348,6 +353,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   // is never superseded: the worker needs a shell.
   if (await isSuperseded()) throw new Error('Shell refresh superseded by a newer navigation');
   if (!shellResponse.ok) throw new Error(`Shell request failed (${shellResponse.status})`);
+  if (!storable(shellResponse)) throw new Error('Shell not stored: its URL is an API call or a job-offer link');
 
   const html = await shellResponse.clone().text();
   const assets = shellAssetUrls(html);
@@ -360,6 +366,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   const assetResponses = await Promise.all(assets.map(async assetUrl => {
     const response = await fetch(new Request(assetUrl, { cache: 'reload' }));
     if (!response.ok) throw new Error(`Shell asset failed (${response.status}): ${assetUrl}`);
+    if (!storable(response)) throw new Error(`Shell asset not stored: it ended on an API call or a job-offer link: ${assetUrl}`);
     return [assetUrl, response];
   }));
   // Fetched with the assets, not after the commit: a later deploy would
@@ -599,51 +606,25 @@ self.addEventListener('install', event => {
   event.waitUntil(precacheCompleteShell().then(() => self.skipWaiting()));
 });
 
-// When this worker took over, in the lifetime that ran activate. Every page
-// an older worker opened began before it, and every page this worker opens
-// begins after it, so an install mark set to it supersedes the older
-// worker's refreshes still in flight, never this worker's own.
-let takeoverAt = null;
+// A bucket an older worker filled: a pre-prefix legacy one, or this prefix
+// at a lower version. Never the current bucket, nor a newer installer's.
+function isOlderCacheName(k) {
+  if (LEGACY_CACHE_PATTERN.test(k)) return true;
+  const version = /^waves-customer-v(\d+)-/.exec(k);
+  return Boolean(version) && Number(version[1]) < CACHE_VERSION;
+}
 
-// An older worker stored any same-origin GET in its catch-all branch, and
-// the response of each page it opened as the shell, so a request key or the
-// shell's response URL can hold a job-offer link; it skipped only a
-// lowercase /api/, so it could also hold an offer API response under a
-// mixed-case /API/ key. Under the shell-refresh
-// lock, so no refresh is part-way through its commit: move the install mark
-// up to takeoverAt (never back: a newer install's mark stays), so no older
-// worker's refresh can store the shell again; then store the shell again
-// without its URL when that URL is a job-offer link, and drop job-offer
-// and API request keys. Not part of activation: the lock can wait on an older
-// worker's refresh, and page requests wait for activation. Until one purge
-// has finished, each navigation tries again, so a Cache Storage error cannot
-// leave them behind (a restarted worker checks once more; the list is cheap).
-let privateLinksPurged = false;
-async function purgePrivateLinkEntries() {
-  await withShellRefresh(async () => {
-    const cache = await caches.open(CACHE_NAME);
-    if (takeoverAt !== null && !(await installCommittedAfter(cache, takeoverAt))) {
-      await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(takeoverAt) } }));
-    }
-    const shell = await cache.match(OFFLINE_URL);
-    if (shell && shell.url && isPrivateLinkPage(new URL(shell.url).pathname)) {
-      const html = await shell.text();
-      const assets = shellAssetUrls(html);
-      await putShell(cache, new Response(html, { status: shell.status, statusText: shell.statusText, headers: shell.headers }), assets.length ? buildIdOf(assets) : null);
-    }
-    const requests = await cache.keys();
-    await Promise.all(requests.filter(request => {
-      const { pathname } = new URL(request.url);
-      return isPrivateLinkPage(pathname) || isApiPath(pathname);
-    }).map(request => cache.delete(request)));
-  });
-  privateLinksPurged = true;
+// The activate sweep drops every older bucket before this worker claims a
+// page. A page load drops any it finds again: one the sweep failed to drop,
+// or one an older worker opened again after the sweep (its last shell
+// refresh, still in flight at the takeover). A whole bucket needs no lock.
+async function sweepOlderCaches() {
+  const keys = await caches.keys();
+  await Promise.all(keys.filter(isOlderCacheName).map(k => caches.delete(k)));
 }
 
 self.addEventListener('activate', event => {
-  takeoverAt = Date.now();
   event.waitUntil(sweepStaleCaches().then(() => self.clients.claim()));
-  purgePrivateLinkEntries().catch(() => {});
 });
 
 // An API call, in any letter case (the server routes /API/ as /api/).
@@ -651,15 +632,40 @@ function isApiPath(pathname) {
   return pathname.toLowerCase().startsWith('/api/');
 }
 
-// A job-offer link page: its URL is the applicant's private signing link.
-// The page router matches each percent-decoded segment in any case, with any
-// trailing slashes, so this does too (as isCareersOfferPath on the server).
-function isPrivateLinkPage(pathname) {
-  let decoded = pathname;
+// A URL that is, or carries, a job-offer link (the applicant's private
+// signing link): its text, percent-decoded (repeatedly) and in any letter
+// case, holds "careers/offer/" anywhere: path, query or fragment. The page
+// router matches each percent-decoded segment in any case, so every spelling
+// of the page it opens is caught, and so is a link carried in a query.
+function carriesOfferLink(url) {
+  let text = `${url.pathname}${url.search}${url.hash}`;
+  for (let pass = 0; pass < 4; pass += 1) {
+    let next;
+    try {
+      next = decodeURIComponent(text);
+    } catch {
+      next = text.replace(/%([0-9a-f]{2})/gi, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
+    }
+    if (next === text) break;
+    text = next;
+  }
+  return text.toLowerCase().includes('careers/offer/');
+}
+
+// The one rule for every response this worker stores from the network. A
+// stored response keeps the URL it came from, and a followed redirect can
+// end on another page than the one it is stored under. So its final URL, on
+// any origin, must be neither an API call nor a URL that carries a job-offer
+// link. A response the worker builds itself has no URL.
+function storable(response) {
+  if (!response || !response.ok) return false;
+  if (!response.url) return true;
   try {
-    decoded = pathname.split('/').map(segment => decodeURIComponent(segment).replace(/\//g, '%2F')).join('/');
-  } catch { /* a malformed path is matched as written, as the router does */ }
-  return /^\/careers\/offer\/[^/]+\/*$/i.test(decoded);
+    const url = new URL(response.url);
+    return !isApiPath(url.pathname) && !carriesOfferLink(url);
+  } catch {
+    return false;
+  }
 }
 
 self.addEventListener('fetch', event => {
@@ -670,15 +676,16 @@ self.addEventListener('fetch', event => {
   if (url.origin !== self.location.origin) return;
   if (isApiPath(url.pathname)) return;
   if (url.pathname.startsWith('/ws/')) return;
-  // A purge that failed is tried again on every page load, an offer's included.
-  if (!privateLinksPurged && (event.request.mode === 'navigate' || event.request.destination === 'document')) {
-    event.waitUntil(purgePrivateLinkEntries().catch(() => {}));
+  // Each page load, an offer page's included, drops any older bucket it finds.
+  if (event.request.mode === 'navigate' || event.request.destination === 'document') {
+    event.waitUntil(sweepOlderCaches().catch(() => {}));
   }
-  // Nor a job-offer link, in any request mode. A stored response or request
-  // keeps its URL, so the link would sit in Cache Storage; and an offline
-  // shell served in its place would carry another page's headers, without
-  // no-referrer. The browser fetches it, with the server's privacy headers.
-  if (isPrivateLinkPage(url.pathname)) return;
+  // Nor a URL that carries a job-offer link, in any request mode. A stored
+  // response or request keeps its URL, so the link would sit in Cache
+  // Storage; and an offline shell served in its place would carry another
+  // page's headers, without no-referrer. The browser fetches it, with the
+  // server's privacy headers.
+  if (carriesOfferLink(url)) return;
 
   // HTML navigation requests: network-first with offline fallback.
   // ALWAYS return a Response (never undefined) so iOS standalone PWAs
@@ -748,7 +755,7 @@ self.addEventListener('fetch', event => {
           return cached;
         }
         return fetch(event.request).then(response => {
-          if (response.ok) {
+          if (storable(response)) {
             const clone = response.clone();
             // Tag the chunk with the build it was loaded for, so the prune
             // keeps it with that build's shell instead of guessing from HTML.
@@ -779,7 +786,7 @@ self.addEventListener('fetch', event => {
   // Everything else (manifest, icons, etc.) — network first, cache fallback
   event.respondWith(
     fetch(event.request).then(response => {
-      if (response.ok) {
+      if (storable(response)) {
         const clone = response.clone();
         caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
       }

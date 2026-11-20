@@ -9,7 +9,8 @@
  * held text (an owner reply that pastes a link) by the offers its links were pinned to when it was queued.
  *
  * The text is read in units, each what a browser takes as one link: a quoted HTML attribute value (a browser drops
- * tabs and line breaks inside the URL it holds), or an unbroken run of text elsewhere. Two kinds of spelling are hidden:
+ * tabs and line breaks inside the URL it holds), or an unbroken run of text elsewhere, which ends at a tag, so the
+ * markup around a hidden link stays. Two kinds of spelling are hidden:
  * - The link as it is sent (/careers/offer/<token>): only the token is hidden, so the host and the words around it stay.
  * - Any other spelling a browser or a reader can turn back into the link. Each unit is read three ways. Twice as a
  *   browser reads it, as typed and with its HTML character references decoded once: tabs and line breaks dropped,
@@ -33,7 +34,7 @@ const SENT_LINK_RE = /(\/careers\/offer\/)([0-9a-fA-F]{64})/g;
 const TOKEN_SEGMENT_RE = /^([0-9a-f]{64})(?![0-9a-f])/;
 // The route word, also after punctuation that opens the unit ("(careers", url=careers); a host such as x.careers is not.
 const CAREERS_SEGMENT_RE = /(?:^|[^a-z0-9.-])careers$/;
-const UNIT_RE = /=\s*(?:"[^"]*"|'[^']*')|(?:(?!=\s*["'])\S)+/g;
+const UNIT_RE = /=\s*(?:"[^"]*"|'[^']*')|(?:(?!=\s*["'])[^\s<>])+/g;
 
 function percentDecode(seq) {
   try {

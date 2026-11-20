@@ -8643,11 +8643,13 @@ is stored as the standard link with the token hidden, once per such token in sou
 that Node's WHATWG URL parser opens as the signing page across a grid of dot segments, empty segments, encoded
 delimiters and backslashes. The same scan pins only those tokens (a 64-hex query value beside them is not pinned),
 so a held text replays each one as the standard link. The service worker never handles an offer URL, in any
-request mode (`client/public/sw.js` `isPrivateLinkPage`), nor an API call in any letter case (`isApiPath`: the server
-routes `/API/` as `/api/`): it stores nothing, because a stored response or request keeps its URL; after it takes
-over, it drops any offer URL or API call an older worker stored, as a request key or as the shell's response URL (the
-purge first moves the install mark up to the takeover time, so that worker's refreshes still in flight cannot store it
-again), and it never serves its offline shell in the page's place, so the browser always fetches the page with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
+request mode, nor any URL that carries one in its query or fragment (`client/public/sw.js` `carriesOfferLink`: the
+URL's text, percent-decoded, holds `careers/offer/` in any letter case), nor an API call in any letter case (`isApiPath`: the server
+routes `/API/` as `/api/`): it stores nothing, because a stored response or request keeps its URL. It stores a
+network response only when its final URL, after any redirect, carries no offer link and is no API call (`storable`). Its
+cache has a new name (`waves-customer-v13-private-links`), so activation drops the older worker's bucket whole, offer
+links included, before the worker claims a page, and each page load drops any older bucket found again
+(`sweepOlderCaches`). It never serves its offline shell in the page's place, so the browser always fetches the page with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
 behind the gates. GET returns `{state:'open'|'signed'|'declined'|'date_requested', firstName, jobTitle, startDate,
 hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{name,title,sentOn}, expiresAt,
 textConsent, version, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
