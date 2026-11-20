@@ -8764,6 +8764,11 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   const debounceRef = useRef(null);
   const pendingRef = useRef({});
   const lastSavedRef = useRef(null);
+  // The home stamp of the data this screen shows: irrigation_home_changed_at as the load returned it. This tab loads
+  // once per mount ("Try Again" runs only before any data shows), so every edit queued here was made against it.
+  // Every save sends it as `confirmed_as_of`, through flushes and retries: never a newer stamp a later save response
+  // reported, because the customer has not seen that home's settings (pre-push audit on #8107).
+  const screenStampRef = useRef(null);
   const saveQueueRef = useRef(Promise.resolve());
   // Identity these edits belong to. The whole portal tree remounts on any
   // property/customer change, so capturing once at mount is sufficient.
@@ -8789,6 +8794,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
       .then(d => {
         setPrefs(d.preferences);
         lastSavedRef.current = d.preferences;
+        screenStampRef.current = d.preferences?.irrigationHomeChangedAt ?? null;
         // Server-side lawn eligibility (tier / turf type OR recurring lawn
         // service evidence) — the same test the PUT applies to Weekly
         // Inches, so the field never renders and then drops on save.
@@ -8844,9 +8850,10 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // sprinkler field for the weekly watering plan only when this save
         // was rendered against the CURRENT home — a queued pre-move autosave
         // draining after an address change must not re-confirm the former
-        // home's settings. lastSavedRef tracks the server's latest view
-        // (load + every save response).
-        toSave.confirmed_as_of = lastSavedRef.current?.irrigationHomeChangedAt ?? null;
+        // home's settings. The stamp is the one this screen loaded with
+        // (screenStampRef), not the newest a save returned: a save that
+        // reports a move does not show the customer the new home's settings.
+        toSave.confirmed_as_of = screenStampRef.current;
         const savingIrrigationRevision = irrigationEditRevision.current;
         const savingAwayWatchRevision = awayWatchPairRevision.current;
         try {

@@ -14,7 +14,9 @@
 //     LATER edit to a DIFFERENT field saves cleanly and does not carry the
 //     dead field along;
 //   - a genuine transport/5xx failure (no per-field detail from the server)
-//     still re-queues the whole batch untouched, unchanged from before.
+//     still re-queues the whole batch untouched, unchanged from before;
+//   - every save, a retry included, sends the home stamp the screen loaded
+//     with (`confirmed_as_of`), never a newer one a save response reported.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -237,5 +239,58 @@ describe('PropertyTab — a fully rejected batch queues nothing', () => {
     await flushNow();
     await flushNow();
     expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The freshness stamp (gh-r43) names the home the customer SAW: the server checks a sprinkler confirmation, and a
+// sprinkler timer, against it. A save response that reports a move (staff changed the address while this screen was
+// open) must not lend its newer stamp to the edits that follow on the same, older screen (pre-push audit on #8107).
+describe('PropertyTab — every save sends the home stamp the screen loaded with', () => {
+  const LOADED = '2026-09-01T12:00:00.000Z';
+  const MOVED = '2026-11-10T15:00:00.000Z';
+
+  it('a save that reports a move does not change the stamp the next edits send', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { irrigationHomeChangedAt: LOADED } });
+    api.updatePropertyPreferences.mockResolvedValue({ preferences: { irrigationHomeChangedAt: MOVED } });
+
+    render(<PropertyTab customer={customer} />);
+    fireEvent.change(await screen.findByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch' } });
+    await flushNow();
+    fireEvent.change(await screen.findByPlaceholderText(/Park in driveway/), { target: { value: 'Street parking' } });
+    await flushNow();
+
+    expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2);
+    expect(api.updatePropertyPreferences.mock.calls.map(([payload]) => payload.confirmed_as_of)).toEqual([LOADED, LOADED]);
+  });
+
+  it('a failed save retries with that stamp too', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { irrigationHomeChangedAt: LOADED } });
+    let call = 0;
+    api.updatePropertyPreferences.mockImplementation(async () => {
+      call += 1;
+      if (call === 2) throw new Error('Failed to fetch');
+      return { preferences: { irrigationHomeChangedAt: MOVED } };
+    });
+
+    render(<PropertyTab customer={customer} />);
+    fireEvent.change(await screen.findByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch' } });
+    await flushNow();
+    fireEvent.change(await screen.findByPlaceholderText(/Park in driveway/), { target: { value: 'Street parking' } });
+    await flushNow();
+    await flushNow(); // the retry of the failed batch
+
+    expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(3);
+    expect(api.updatePropertyPreferences.mock.calls[2][0]).toMatchObject({ parkingNotes: 'Street parking', confirmed_as_of: LOADED });
+  });
+
+  it('a screen loaded after the move sends the new stamp', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { irrigationHomeChangedAt: MOVED } });
+    api.updatePropertyPreferences.mockResolvedValue({ preferences: { irrigationHomeChangedAt: MOVED } });
+
+    render(<PropertyTab customer={customer} />);
+    fireEvent.change(await screen.findByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch' } });
+    await flushNow();
+
+    expect(api.updatePropertyPreferences.mock.calls[0][0].confirmed_as_of).toBe(MOVED);
   });
 });
