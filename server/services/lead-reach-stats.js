@@ -325,6 +325,11 @@ const DELIVERIES_SQL = "(CASE WHEN jsonb_typeof(e.estimate_data #> '{deliverySta
 // resend. With the evidence estimate-draft-retire.js accepts for such legacy rows (sent_at on a sent,
 // non-draft row that is not a website quote or a publish-without-delivery mint), it is read too.
 const FIRST_DELIVERY_STAMP_SINCE = '2026-08-15T00:00:00-04:00';
+// deliveryState.deliveredAt (admin-estimates.js) lists every real handoff, oldest first, since #3811 began
+// writing it (merged 2026-09-04 19:48 ET; this cutoff gives its deploy the evening), and drops the oldest
+// entries past DELIVERY_HISTORY_MAX (the same constant there).
+const DELIVERY_HISTORY_SINCE = '2026-09-05T00:00:00-04:00';
+const DELIVERY_HISTORY_MAX = 25;
 const LEGACY_SENT_SQL = `(e.created_at < ?::timestamptz AND e.sent_at IS NOT NULL AND e.status <> 'draft'
   AND COALESCE(e.source, '') NOT IN ('quote_wizard', 'service_report_cta', 'plan_restart', 'plan_start'))`;
 
@@ -341,6 +346,20 @@ function personSendsOf(attempts) {
     const completedAt = asMs(attempt?.completedAt);
     return handedOff && startedAt != null && completedAt != null && completedAt >= startedAt ? [{ startedAt, completedAt }] : [];
   });
+}
+
+// An estimate's delivery history read against its first stamp: { resendAt, lastAt }. resendAt is the second
+// real delivery in time (with the first automated, the earliest a person could have sent one); lastAt the
+// newest. The history holds the first delivery when the first came after the history began and the history
+// never filled: its oldest entry is then the first delivery, though a separate now() call stamps it a
+// moment after firstDeliveredAt, so the two need not match. An oldest entry at or before the first stamp is
+// the first delivery too. Otherwise older entries may be missing, and the second delivery may be any time
+// after the first.
+function deliveryHistory(first, deliveredAt) {
+  const times = (Array.isArray(deliveredAt) ? deliveredAt : []).map(asMs).filter((t) => t != null).sort((a, b) => a - b);
+  const whole = first >= Date.parse(DELIVERY_HISTORY_SINCE) && times.length < DELIVERY_HISTORY_MAX;
+  const complete = first != null && times.length > 0 && (whole || times[0] <= first);
+  return { resendAt: complete ? (times[1] ?? null) : first, lastAt: times.length ? times[times.length - 1] : first };
 }
 
 async function estimateSends(conn, cohort) {
@@ -370,20 +389,14 @@ async function estimateSends(conn, cohort) {
       if (named && !named.estimate_id && leadMatchesEstimateContact(named, row)) leadId = String(named.id);
     }
     if (!leadId || !byId.has(leadId)) return [];
-    // The second real delivery in time: with the first automated, it is the earliest a person could have
-    // sent one. deliveredAt keeps only the newest entries (DELIVERY_HISTORY_MAX in admin-estimates.js):
-    // when its oldest entry is not the first delivery, older ones were dropped, and the second delivery
-    // may be any time after the first.
     const first = asMs(row.at);
-    const times = (Array.isArray(row.delivered_at) ? row.delivered_at : []).map(asMs).filter((t) => t != null).sort((a, b) => a - b);
-    const complete = first != null && times.length > 0 && times[0] <= first;
+    const history = deliveryHistory(first, row.delivered_at);
     const created = asMs(row.created_at);
-    const sends = [asMs(row.sent_at), first, times[times.length - 1]].filter((t) => t != null);
+    const sends = [asMs(row.sent_at), first, history.lastAt].filter((t) => t != null);
     return [{
       leadId, at: first, automated: !!row.automated, autoUnresolved: !!row.auto_unresolved, groupAutomated: !!row.group_automated,
       deliveries: Number(row.deliveries) || 0, autoDeliveries: Number(row.auto_deliveries) || 0,
-      resendAt: complete ? (times[1] ?? null) : first,
-      lastAt: times.length ? times[times.length - 1] : first,
+      ...history,
       personSends: personSendsOf(row.manual_attempts),
       // Created before the stamp existed: when it last went out (or was last tried), and when it was made.
       legacy: created != null && created < Date.parse(FIRST_DELIVERY_STAMP_SINCE)

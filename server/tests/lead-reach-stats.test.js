@@ -558,6 +558,32 @@ describe('loadLeadReachStats', () => {
     expect(await run(history(30))).toMatchObject({ cohort: 0, notJudged: 1 });
   });
 
+  // GitHub Codex #8138 round 3 (P2): admin-estimates.js stamps firstDeliveredAt and the history's first entry
+  // with separate now() calls, so the entry can be a moment after the stamp.
+  test('a history that began before the first delivery and never filled holds it, whatever its first stamp says', async () => {
+    const run = (first, deliveredAt) => {
+      const mine = lead(1, { first_contact_at: new Date(first - 2 * 60000).toISOString() });
+      return loadLeadReachStats([mine], {
+        conn: fakeConn({
+          sms_log: [{ peer: mine.phone.replace('+1', ''), customer_id: null, at: new Date(first + 18 * 60000) }],
+          estimates: [{ id: 'e1', linked_lead_id: 1, at: new Date(first).toISOString(), automated: true, auto_deliveries: 1, deliveries: 2, delivered_at: deliveredAt.map((t) => new Date(t).toISOString()) }],
+        }),
+      });
+    };
+    // Automated at minute 2, its entry 1 ms later, resent at minute 30: the staff text at minute 20 is the first contact.
+    expect(await run(at(2), [at(2) + 1, at(30)])).toMatchObject({ reachedLater: 1, notJudged: 0 });
+    // A first delivery before the history began (2026-09-05): a person may have resent it before the oldest entry.
+    const before = Date.parse('2026-09-01T15:02:00Z');
+    expect(await run(before, [before + 1, before + 28 * 60000])).toMatchObject({ cohort: 0, notJudged: 1 });
+  });
+
+  test('the delivery history cap matches the one admin-estimates.js trims at', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const cap = (file) => Number(fs.readFileSync(path.join(__dirname, '..', file), 'utf8').match(/const DELIVERY_HISTORY_MAX = (\d+);/)[1]);
+    expect(cap('services/lead-reach-stats.js')).toBe(cap('routes/admin-estimates.js'));
+  });
+
   // Round 5, finding 4: a call that rang before first contact can reach the person after it.
   test('the phone call read keeps calls that ended after first contact, not only ones that started after it', async () => {
     const { callEndedAtSql, callStartedAtSql } = require('../services/sms-pending-conversations');
