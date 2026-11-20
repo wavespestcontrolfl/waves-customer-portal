@@ -690,9 +690,12 @@ Phone-yes card bell (owner 2026-11-18 "ok go", phone-yes step 1, page v4; under 
 `server/services/call-phone-yes-bell.js`, run by the phone-yes sweep (every 10 minutes while the gate is on, after its filing and its
 moot close), rings the bell once for each `call_phone_yes` card when it is filed, and once more while the card is open and time runs
 short: an open estimate on the card expires within 24 hours, or the soonest visit to come that keeps the card open (a pest visit the
-call booked, on the calendar and not linked to an estimate) starts within 48 hours. Only a card with status `open` whose check
-finished in that run rings or is rewritten (the moot pass reads each card's yes again; a card whose check failed may hold a yes the
-caller took back, and a failed pass rings nothing); a claimed card (`in_progress`) keeps its row until it closes. Category `estimate` with
+call booked, on the calendar and not linked to an estimate) starts within 48 hours. Only a card with status `open` whose evidence
+still matches it rings or is rewritten: the pass reads the card's state again under the lock (`cardState`), and a card with a
+change not yet written (an estimate accepted, a yes taken back) or whose read fails rings nothing until a later run writes it. A
+claimed card (`in_progress`) keeps its row until it closes. Nothing rings while every active admin has the type's Bell switch off in
+Push Settings (no row, so no banner either; open rows are still rewritten and closed), as `triggerNotification` decides a shared
+bell row; a card that rang nothing meanwhile rings once the switch is on again, if it is still open. Category `estimate` with
 `bell: true`, headline "Estimates — accept <who>'s estimate" for a card with the caller's yes ("check <who>'s estimate" when no yes
 was heard or the yes is being read again; "check <who>'s booked visit" once an estimate on the card was accepted and the visit is not
 linked), subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
@@ -707,8 +710,8 @@ caller's words (headline, why, detail or metadata), as the SMS reader's review b
 can hold a gate code or a card number, no screen catches every form, and the why reaches a phone's lock screen. The why says the
 caller said yes to pay per application and names the visit day; `detail` holds the card's summary and points to the card in
 Triage, which shows the words. Each card rings in a transaction of its own that holds its call's
-triage lock (`lockTriageCall`, which every card writer takes first) and reads the card again there, so a card the tap accepts or
-a person claims while the pass runs rings nothing. Each ring sends a phone banner with the New lead sound
+triage lock (`lockTriageCall`, which every card writer takes first) and reads the card and its evidence again there, so a card the
+tap accepts, a person claims or a customer's accept changes while the pass runs rings nothing. Each ring sends a phone banner with the New lead sound
 (`bell-banners.js` kind `call_phone_yes`, 7:00 AM to 9:00 PM Eastern; the 8 AM banner counts a ring at night). The same pass closes
 the rows of every card that is no longer open, listed again after the rings: accepted by the tap, resolved or dismissed by a
 person, or closed as moot. With the

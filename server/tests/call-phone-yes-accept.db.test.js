@@ -113,6 +113,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     process.env[GATE] = 'true';
     trx = await database.transaction();
     mockConn = trx;
+    // An active admin with no Push Settings row for the bell's type: its Bell switch reads on (call-phone-yes-bell.js).
+    await trx('technicians').insert({ id: randomUUID(), name: 'Sample Admin', role: 'admin', active: true });
   });
   afterEach(async () => { await trx.rollback(); });
 

@@ -681,24 +681,21 @@ async function applyCardState(card, state) {
   });
 }
 
-// Each open card, read again: closed when it stopped being true, its yes rewritten when it changed. Returns the number
-// closed and the ids of the cards whose check finished (`checked`): only those ring in this run (ringOpenCards).
+// Each open card, read again: closed when it stopped being true, its yes rewritten when it changed.
 async function closeMootCards() {
   const open = await db('triage_items').where({ reason_code: REASON_CODE, status: 'open' })
     .select('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload');
   let closed = 0;
-  const checked = new Set();
   for (const card of open) {
     try {
       const state = await cardState(card);
       if (state && await applyCardState(card, state)) closed += 1;
-      checked.add(String(card.id));
     } catch (e) {
       // A failed read keeps the card as it is (read again next run).
       logger.warn(`[call-phone-yes] card check skipped for card ${card.id}: ${e.code || e.name || 'error'}`);
     }
   }
-  return { closed, checked };
+  return closed;
 }
 
 /**
@@ -723,46 +720,47 @@ async function runCallPhoneYesSweep({ now = new Date(), pageSize = SCAN_LIMIT } 
     if (calls.length < pageSize) break;
     after = calls[calls.length - 1];
   }
-  // No card counts as checked until the moot pass checks it, so a failed pass rings nothing.
-  let moot = { closed: 0, checked: new Set() };
+  let closed = 0;
   try {
-    moot = await closeMootCards();
+    closed = await closeMootCards();
   } catch (e) {
     logger.warn(`[call-phone-yes] moot close pass failed: ${e.code || e.name || 'error'}`);
   }
   try {
-    await ringOpenCards(now, moot.checked);
+    await ringOpenCards(now);
   } catch (e) {
     logger.warn(`[call-phone-yes] bell pass failed: ${e.code || e.name || 'error'}`);
   }
-  return { scanned, filed, closed: moot.closed };
+  return { scanned, filed, closed };
 }
 
 // The bell pass (call-phone-yes-bell.js), after the filing and the moot close: each open card rings what it owes (once
-// when filed, once more when time runs short), then the rows of cards no longer open close. Only a card with status
-// open rings or is rewritten: the sweep keeps only those current (applyCardState), so the bell never says more than the
-// card. `checked`: the cards whose check finished in this run (closeMootCards); only those ring or are rewritten, since
-// a card whose yes could not be read again may still say "accept" after the caller took it back. Each card is read again
-// under its call's triage lock just before it rings, so a card the tap accepts or a person claims while the pass runs
-// rings nothing. A claimed card (in_progress) keeps its row until it closes, as does a card left unchecked or whose
-// times cannot be read: the closes run for every card.
-async function ringOpenCards(now, checked) {
+// when filed, once more when time runs short), then the rows of cards no longer open close. A card rings or is
+// rewritten only when, read again under its call's triage lock just before, it is still open and its evidence matches
+// it (cardState finds nothing to write): the sweep keeps only open cards current (applyCardState), so the bell never
+// says more than the card. A card the tap accepts or a person claims while the pass runs, a card whose estimate was
+// accepted or whose yes was taken back since the moot pass, and a card whose check fails ring nothing; the next run
+// writes the change first. A claimed card (in_progress) keeps its row until it closes, as does a card that rings
+// nothing in a run: the closes run for every card.
+async function ringOpenCards(now) {
   const Bell = require('./call-phone-yes-bell');
   return Bell.runBellPass({
     listCards: () => db('triage_items').where({ reason_code: REASON_CODE }).whereIn('status', Bell.OPEN_CARD_STATES)
       .select('id', 'status', 'call_log_id'),
-    readCard: (trx, listed) => (checked.has(String(listed.id)) ? openCardNow(trx, listed, now) : null),
+    readCard: (trx, listed) => openCardNow(trx, listed, now),
     now,
   });
 }
 
 // An open card read again under its call's triage lock (the lock every card writer takes first), with the times that
-// make it urgent; null once it is no longer open (the tap accepted it, or a person claimed, resolved or dismissed it).
+// make it urgent. Null once it is no longer open (the tap accepted it, or a person claimed, resolved or dismissed it),
+// and while its evidence says something the card does not show yet (cardState: a close or a refresh the next run writes).
 async function openCardNow(trx, listed, now) {
   await lockTriageCall(trx, listed.call_log_id);
   const card = await trx('triage_items').where({ id: listed.id, reason_code: REASON_CODE, status: 'open' })
     .first('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload', 'summary');
-  return card ? { card, ...(await cardTimes(trx, card, now)) } : null;
+  if (!card || await cardState(card, trx)) return null;
+  return { card, ...(await cardTimes(trx, card, now)) };
 }
 
 // The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and the
@@ -1305,7 +1303,7 @@ module.exports = {
     // The tap's two steps inside the accept, driven directly.
     linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, notesKeyOfForTest: notesKeyOf, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
     lockCustomerEstimatesForTest: lockCustomerEstimates, PEST_CADENCE_PLANS, planTermsOfForTest: planTermsOf,
-    // The sweep's bell pass alone (call-phone-yes-bell.db.test.js).
-    ringOpenCardsForTest: ringOpenCards,
+    // The sweep's bell pass alone, and its moot pass for one card (call-phone-yes-bell.db.test.js).
+    ringOpenCardsForTest: ringOpenCards, cardStateForTest: cardState,
   },
 };

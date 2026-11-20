@@ -2,9 +2,9 @@
  * The phone-yes bell through PostgreSQL (call-phone-yes-bell.js; GATE_CALL_PHONE_YES_ACCEPT, owner 2026-11-18 "ok go",
  * step 1: the office's phone alert). The sweep's bell pass rings each open card once when it is filed, and once more
  * when time runs short (an open estimate on the card expires within 24 hours, or its visit starts within 48), then
- * closes the rows of cards that are no longer open. The notification service is real; the phone banner is stubbed at
- * bell-banners.js. Runs inside a rolled-back transaction. Synthetic names, numbers and addresses only. Skips without
- * DATABASE_URL.
+ * closes the rows of cards that are no longer open. Each card says what its calls and estimates say, as the sweep's moot
+ * pass keeps it. The notification service is real; the phone banner is stubbed at bell-banners.js. Runs inside a
+ * rolled-back transaction. Synthetic names, numbers and addresses only. Skips without DATABASE_URL.
  */
 const SKIP = !process.env.DATABASE_URL;
 
@@ -30,12 +30,23 @@ const Compose = require('../services/admin-alert-compose');
 const Bell = require('../services/call-phone-yes-bell');
 const NotificationService = require('../services/notification-service');
 const { etDateString, formatETDayDate, parseETDateTime } = require('../utils/datetime-et');
-const { _private: { ringOpenCardsForTest } } = require('../services/call-phone-yes-accept');
+const { _private: { ringOpenCardsForTest, cardStateForTest, applyCardStateForTest } } = require('../services/call-phone-yes-accept');
 
 const describeDb = SKIP ? describe.skip : describe;
 const DAY = 86400000;
 const HOUR = 3600000;
 const WORDS = "Let's do the quarterly plan, just bill me each time you come out.";
+// A call's V2 extraction and labeled transcript (as in call-phone-yes-accept.db.test.js): the caller picks pay per
+// application in WORDS, or makes no choice; `intent` is the call's ask (a cancel takes an earlier yes back).
+const extractionWith = (choice, intent = null) => ({
+  meta: { call_summary: 'Caller asked about the quarterly plan.' },
+  service_request: { primary_service_category: 'pest_general', ...(choice ? { billing_choice: choice } : {}), ...(intent ? { service_intent: intent } : {}) },
+  scheduling: { status: 'confirmed' },
+  evidence: choice ? [{ field_path: '/service_request/billing_choice', quote: WORDS, speaker: 'caller', transcript_offset_ms: 1200 }] : [],
+});
+const transcriptWith = (choice) => (choice
+  ? `Agent: Thanks for calling Waves, how can I help?\nCaller: ${WORDS}\nAgent: You can bill each time. You are all set.`
+  : 'Agent: Thanks for calling Waves, how can I help?\nCaller: I need someone out for the bugs.\nAgent: You are all set.');
 
 describeDb('phone-yes bell (PostgreSQL)', () => {
   let database; let trx;
@@ -48,10 +59,14 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
   });
   afterAll(async () => { await database.destroy(); });
+  let admin;
   beforeEach(async () => {
     jest.clearAllMocks();
     trx = await database.transaction();
     mockConn = trx;
+    // An active admin with no Push Settings row for the type: the Bell switch reads on.
+    admin = randomUUID();
+    await trx('technicians').insert({ id: admin, name: 'Sample Admin', role: 'admin', active: true });
   });
   afterEach(async () => { await trx.rollback(); });
 
@@ -71,12 +86,34 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     return id;
   }
 
-  // One open phone-yes card as the sweep files it: a customer, the estimates it names (each { hours } until it expires,
-  // and its status), the booking call and the pest visit it booked (`visitDays` from today). One estimate is the card's
-  // own; two or more are a card that names several. A call that booked several visits files its card with no visit of
-  // its own (`cardVisit` false); `moreVisits` are the call's other visits.
+  // A call of the customer's, read and final, `hoursAgo` hours ago: `choice` is the caller's plan choice (null for
+  // none), `intent` the call's ask.
+  async function call(customerId, { choice = null, intent = null, hoursAgo = 0 } = {}) {
+    const id = randomUUID();
+    await trx('call_log').insert({
+      id, customer_id: customerId, twilio_call_sid: `CA${id.replace(/-/g, '')}`, from_phone: '+19415550101', answered_by: 'human',
+      processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify(extractionWith(choice, intent)),
+      transcription: transcriptWith(choice), direction: 'inbound', created_at: new Date(Date.now() - hoursAgo * HOUR),
+    });
+    return id;
+  }
+
+  // The sweep's moot pass for one card (cardState, then applyCardState): the card says what its calls and estimates
+  // say. The bell rings an open card only while nothing is left to write.
+  async function keepCurrent(cardId) {
+    const card = await trx('triage_items').where({ id: cardId })
+      .first('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload');
+    const state = await cardStateForTest(card);
+    if (state) await applyCardStateForTest(card, state);
+  }
+
+  // One open phone-yes card as the sweep files and keeps it: a customer, the estimates it names (each { hours } until it
+  // expires, and its status), the call with the yes a day ago (`yes`; none when false), the booking call two hours ago
+  // and the pest visit it booked (`visitDays` from today). One estimate is the card's own; two or more are a card that
+  // names several. A call that booked several visits files its card with no visit of its own (`cardVisit` false);
+  // `moreVisits` are the call's other visits.
   async function phoneYesCard({
-    estimates = [{ hours: 5 * 24 }], visitDays = 5, cardVisit = true, moreVisits = [], payload = { yes_heard: true, caller_words: WORDS }, status = 'open',
+    estimates = [{ hours: 5 * 24 }], visitDays = 5, cardVisit = true, moreVisits = [], yes = true,
   } = {}) {
     seq += 1;
     const customerId = randomUUID();
@@ -92,24 +129,24 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       }).returning('id');
       estimateIds.push(String(row.id || row));
     }
-    const callLogId = randomUUID();
-    await trx('call_log').insert({ id: callLogId, customer_id: customerId, twilio_call_sid: `CA${callLogId.replace(/-/g, '')}`, from_phone: '+19415550101', direction: 'inbound' });
+    if (yes) await call(customerId, { choice: 'per_application', hoursAgo: 24 });
+    const callLogId = await call(customerId, { hoursAgo: 2 });
     const visitId = await addVisit({ customerId, callLogId }, { days: visitDays });
     for (const more of moreVisits) await addVisit({ customerId, callLogId }, more);
     const cardVisitId = cardVisit ? visitId : null;
     const id = randomUUID();
     await trx('triage_items').insert({
-      id, call_log_id: callLogId, category: 'billing_review', reason_code: 'call_phone_yes', severity: 'advisory', status,
-      summary: 'Caller said yes to pay per application on the call. The estimate is not accepted yet.',
-      payload: JSON.stringify({ flag: 'call_phone_yes', estimate_ids: estimateIds, scheduled_service_id: cardVisitId, ...payload }),
+      id, call_log_id: callLogId, category: 'billing_review', reason_code: 'call_phone_yes', severity: 'advisory', status: 'open',
+      summary: 'Filed.', payload: JSON.stringify({ flag: 'call_phone_yes', estimate_ids: estimateIds, scheduled_service_id: cardVisitId }),
       related_customer_id: customerId, related_estimate_id: estimateIds.length === 1 ? estimateIds[0] : null, related_scheduled_service_id: cardVisitId,
     });
+    await keepCurrent(id);
+    expect(await trx('triage_items').where({ id }).first('status')).toEqual({ status: 'open' });
     return { id, customerId, callLogId, visitId, estimateIds };
   }
 
-  // The bell pass as the sweep runs it, after a moot pass whose check finished for every card.
-  const pass = async () => ringOpenCardsForTest(new Date(),
-    new Set((await trx('triage_items').where({ reason_code: 'call_phone_yes' }).pluck('id')).map(String)));
+  // The sweep's bell pass (its moot pass is keepCurrent).
+  const pass = () => ringOpenCardsForTest(new Date());
   const filedKey = (cardId) => `call-phone-yes:${cardId}`;
   const dueKey = (cardId) => `call-phone-yes-due:${cardId}`;
   // The card's bell rows by key: { filed, due } (undefined when that key never rang).
@@ -198,7 +235,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
   });
 
   test('a card that names several estimates: only an open one counts, and the why says one of them', async () => {
-    const card = await phoneYesCard({ estimates: [{ hours: 5 * 24 }, { hours: 20, status: 'declined' }] });
+    const card = await phoneYesCard({ estimates: [{ hours: 5 * 24 }, { hours: 6 * 24 }, { hours: 20, status: 'declined' }] });
     await pass();
     // The declined estimate's expiry is not short time: the filed bell rings.
     expect(await bellsOf(card.id)).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
@@ -212,7 +249,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
 
   test("the rows of a card no longer open close; an in-progress card's row stays", async () => {
     const resolved = await phoneYesCard();
-    const working = await phoneYesCard({ payload: { yes_heard: false } });
+    const working = await phoneYesCard({ yes: false });
     await pass();
     expect((await bellsOf(working.id)).filed.title).toBe("Estimates — check Pat Sampleton's estimate");
 
@@ -290,11 +327,11 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     await pass();
     const readAt = new Date(Date.now() - 60000);
     await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [filedKey(card.id)]).update({ read_at: readAt });
-    // The sweep rewrites the card when a later call takes the yes back (cardState in call-phone-yes-accept.js).
-    await trx('triage_items').where({ id: card.id }).update({
-      summary: 'A call booked a pest visit while an estimate is open. No yes heard on the call. The estimate is not accepted yet.',
-      payload: JSON.stringify({ flag: 'call_phone_yes', estimate_ids: card.estimateIds, scheduled_service_id: card.visitId, yes_heard: false }),
-    });
+    // A later call takes the yes back. Until the sweep writes that on the card, the bell says nothing new.
+    await call(card.customerId, { intent: 'cancellation_request' });
+    await pass();
+    expect((await bellsOf(card.id)).filed.title).toBe("Estimates — accept Pat Sampleton's estimate");
+    await keepCurrent(card.id);
     await pass();
 
     const { filed, count } = await bellsOf(card.id);
@@ -368,5 +405,60 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(bells.filed.done_at).not.toBeNull();
     expect(bells.filed.metadata).toEqual(expect.objectContaining({ autoCleared: true, autoClearedReason: 'phone_yes_time_short' }));
     expect(bannersFor(card.id)).toBe(2);
+  });
+
+  test('an estimate accepted since the sweep last read the card rings nothing until the sweep writes it', async () => {
+    const card = await phoneYesCard();
+    await pass();
+    // Time runs short, and the customer accepts the estimate after the sweep's moot pass read the card.
+    await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1) });
+    await trx('estimates').where({ id: card.estimateIds[0] }).update({ status: 'accepted', accepted_at: new Date() });
+    await pass();
+    // No alert to accept an accepted estimate, and the time-short key is not spent on one.
+    let bells = await bellsOf(card.id);
+    expect(bells).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
+    expect(bells.filed.title).toBe("Estimates — accept Pat Sampleton's estimate");
+    expect(bannersFor(card.id)).toBe(1);
+
+    // The next run writes the accept on the card; then the time-short bell says what the card says.
+    await keepCurrent(card.id);
+    await pass();
+    bells = await bellsOf(card.id);
+    expect(bells.due).toEqual(expect.objectContaining({
+      title: "Estimates — check Pat Sampleton's booked visit",
+      body: `The visit the call booked is ${dayWords(1)}, and its card in Triage is still open.`, done_at: null,
+    }));
+    expect(bannersFor(card.id)).toBe(2);
+  });
+
+  test("with the type's Bell switch off for every admin nothing rings and no banner goes; rows stay current and close", async () => {
+    const rung = await phoneYesCard();
+    await pass();
+    // Every active admin, a second one too, turns the type's Bell switch off in Push Settings.
+    await trx('technicians').insert({ id: randomUUID(), name: 'Sample Admin Two', role: 'admin', active: true });
+    const admins = await trx('technicians').where({ active: true, role: 'admin' }).pluck('id');
+    await trx('notification_preferences')
+      .insert(admins.map((id) => ({ admin_user_id: id, trigger_key: 'call_phone_yes', bell_enabled: false })))
+      .onConflict(['admin_user_id', 'trigger_key']).merge(['bell_enabled']);
+    const quiet = await phoneYesCard();
+    await trx('scheduled_services').where({ id: rung.visitId }).update({ scheduled_date: etDay(1) });
+    await pass();
+
+    // The new card rings nothing. The rung card's time-short bell waits; its open row says the time is short, quietly.
+    expect((await bellsOf(quiet.id)).count).toBe(0);
+    const bells = await bellsOf(rung.id);
+    expect(bells).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
+    expect(bells.filed.body).toBe(`The visit the call booked is ${dayWords(1)}, and its card in Triage is still open.`);
+    expect(bannersFor(rung.id) + bannersFor(quiet.id)).toBe(1);
+    // A closed card's row still closes.
+    await trx('triage_items').where({ id: rung.id }).update({ status: 'resolved', resolved_at: new Date() });
+    await pass();
+    expect((await bellsOf(rung.id)).filed.metadata).toEqual(expect.objectContaining({ autoCleared: true, autoClearedReason: 'phone_yes_card_closed' }));
+
+    // One admin with the switch on is enough, the other's still off: the card still open rings.
+    await trx('notification_preferences').where({ admin_user_id: admin, trigger_key: 'call_phone_yes' }).update({ bell_enabled: true });
+    await pass();
+    expect((await bellsOf(quiet.id)).filed.done_at).toBeNull();
+    expect(bannersFor(quiet.id)).toBe(1);
   });
 });
