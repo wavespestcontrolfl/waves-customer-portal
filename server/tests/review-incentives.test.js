@@ -444,6 +444,28 @@ describe('review incentives', () => {
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
   });
 
+  test('a date-only program cutoff is the start of that Eastern day for payout creation (owner 2026-11-20 D4)', async () => {
+    const { parsePolicy } = ReviewIncentives.__private;
+    // A stored '2026-06-01' reads as 2026-06-01 00:00 Eastern, the same moment everywhere it is read.
+    const dateOnly = parsePolicy({ ...policy, programStartsAt: '2026-06-01' });
+    expect(dateOnly.programStartsAt).toBe('2026-06-01T04:00:00.000Z');
+    const withReview = (reviewCreatedAt) => createDbMock({
+      service_records: [{ id: 'service-1', customer_id: 'customer-1', technician_id: 'tech-1', service_date: '2026-05-27' }],
+      google_reviews: [{
+        id: 'google-1', customer_id: 'customer-1', reviewer_name: 'Customer One', star_rating: 5,
+        review_created_at: reviewCreatedAt, location_id: 'sarasota', google_review_id: 'accounts/1/locations/2/reviews/abc',
+      }],
+    });
+    // 10 p.m. Eastern on May 31 is before the cutoff: not eligible.
+    const early = withReview('2026-06-01T02:00:00.000Z');
+    expect(await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn: early, policy: dateOnly }))
+      .toMatchObject({ created: false, skipped: true, reason: 'before_program_start' });
+    // 12:30 a.m. Eastern on June 1 is after it: eligible.
+    const late = withReview('2026-06-01T04:30:00.000Z');
+    expect(await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn: late, policy: dateOnly }))
+      .toMatchObject({ created: true });
+  });
+
   test('lists the review matcher\'s open decisions with the customer they name, outside the period and the program window (owner 2026-10-31)', async () => {
     const conn = createDbMock({
       customers: [

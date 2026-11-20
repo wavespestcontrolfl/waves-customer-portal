@@ -46,11 +46,6 @@ function validDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function normalizedIsoDate(value) {
-  const d = validDate(value);
-  return d ? d.toISOString() : null;
-}
-
 function dateOnly(date) {
   return asDate(date).toISOString().slice(0, 10);
 }
@@ -104,7 +99,7 @@ function parsePolicy(value) {
       amountCents: Math.max(0, toInt(parsed.amountCents, DEFAULT_POLICY.amountCents)),
       minRating: Math.max(1, Math.min(5, toInt(parsed.minRating, DEFAULT_POLICY.minRating))),
       eligibleSources: PAYOUT_ELIGIBLE_SOURCES,
-      programStartsAt: normalizedIsoDate(parsed.programStartsAt) || null,
+      programStartsAt: parseProgramCutoff(parsed.programStartsAt),
       monthlyCapCount: normalizeMonthlyCap(parsed.monthlyCapCount),
     };
   } catch {
@@ -116,8 +111,11 @@ function reviewEarnedAt(review) {
   return validDate(review?.review_created_at || review?.created_at) || new Date();
 }
 
+// The ONE cutoff reader (owner 2026-11-20 D4): payout creation, sync, the dashboard and payments all
+// read programStartsAt through parseProgramCutoff, so a date-only value is the start of that Eastern day.
 function programStart(policy) {
-  return validDate(policy?.programStartsAt);
+  const iso = parseProgramCutoff(policy?.programStartsAt);
+  return iso ? new Date(iso) : null;
 }
 
 function reviewWithinProgramWindow(review, policy) {
