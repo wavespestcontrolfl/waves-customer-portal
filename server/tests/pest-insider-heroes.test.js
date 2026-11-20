@@ -172,6 +172,10 @@ describe('taking new art', () => {
     fs.rmSync(path.join(input, 't02.png'));
     const missing = run('--execute', '--only', 'T03,R01');
     expect([missing.status, missing.stderr]).toEqual([1, expect.stringContaining('No picture for R01')]);
+    // a picture named any other way stops the batch instead of being skipped
+    fs.writeFileSync(path.join(input, 'R01.png'), await t03png(false));
+    const misnamed = run('--execute');
+    expect([misnamed.status, misnamed.stderr]).toEqual([1, expect.stringContaining('Misnamed pictures: R01.png')]);
     expect(state()).toEqual(before);
   }, 60000);
 

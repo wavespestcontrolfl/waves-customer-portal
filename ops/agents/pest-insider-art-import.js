@@ -112,7 +112,10 @@ function merged(raw, batch) {
 async function stage() {
   const artDir = path.join(root, ART_DIR);
   const batch = [];
-  for (const name of fs.readdirSync(dir).filter((f) => /^[a-z]\d\d\.png$/.test(f)).sort()) {
+  const pngs = fs.readdirSync(dir).filter((f) => /\.png$/i.test(f)).sort();
+  const misnamed = pngs.filter((f) => !/^[a-z]\d\d\.png$/.test(f));
+  if (misnamed.length) throw new Error(`Misnamed pictures: ${misnamed.join(', ')} (name each <fact>.png in lower case, such as t03.png); nothing taken.`);
+  for (const name of pngs) {
     const id = name.slice(0, 3).toUpperCase();
     if (only && !only.has(id)) continue;
     const webp = await sharp(path.join(dir, name))
