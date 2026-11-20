@@ -125,8 +125,7 @@ export function resolutionDate(estimate) {
 // None of the three follow-up buckets lists a self-serve quote nobody delivered
 // (undeliveredSelfServe, from the server: plan restart, plan start, report
 // card): the customer opened it from the portal, and it carries a
-// zero-follow-up contract. The server sends a delivered one as the send it is
-// (callTodayFields), so these checks need no case of their own for it.
+// zero-follow-up contract.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   if (estimate?.undeliveredSelfServe) return false;
   if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {

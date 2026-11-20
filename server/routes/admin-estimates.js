@@ -4457,7 +4457,6 @@ router.get('/', async (req, res, next) => {
     // Call list: the newest outbound call to each VIEWED row's phone, one batched read.
     // A failed read costs only the field (lastCalledAt stays null).
     const { lastCalledAtByEstimateId, callTodayFields } = require('../services/estimate-call-list');
-    const { isUndeliveredSelfServe, selfServeDeliveredAt } = require('../services/self-serve-estimates');
     let lastCalledById = new Map();
     try {
       lastCalledById = await lastCalledAtByEstimateId(db, estimates);
@@ -4528,13 +4527,12 @@ router.get('/', async (req, res, next) => {
           createdAt: e.created_at,
           // The follow-up fields (status, phone, archivedAt, sentAt, views, click, follow-up, newest answered
           // call): one mapping shared with the 9 AM push (services/estimate-call-list.js callTodayFields).
-          // undeliveredSelfServe also keeps the quote out of Going cold and Follow-up overdue, and a
-          // delivered self-serve quote reads as the send it is (selfServeDeliveredAt).
+          // undeliveredSelfServe also keeps the quote out of Going cold and Follow-up overdue, and its
+          // mint stamp out of sentAt.
           ...callTodayFields(e, {
             lastClickedAt: clickStats.get(e.id)?.last_clicked_at,
             lastCalledAt: lastCalledById.get(e.id),
-            undeliveredSelfServe: isUndeliveredSelfServe(e.source, estData),
-            selfServeDeliveredAt: selfServeDeliveredAt(e.source, estData),
+            undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
           }),
           source: e.source || 'manual',
           serviceInterest,

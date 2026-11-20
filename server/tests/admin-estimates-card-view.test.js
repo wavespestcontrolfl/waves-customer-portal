@@ -388,7 +388,7 @@ describe('GET /admin/estimates list shape', () => {
     expect(queries.filter((q) => q.table === 'call_log' && q.m === 'whereIn')).toHaveLength(1);
   });
 
-  test('undeliveredSelfServe marks a portal quote nobody delivered, so no follow-up bucket lists it (codex pre-push P1)', async () => {
+  test('undeliveredSelfServe marks a portal quote nobody delivered: no follow-up bucket lists it, and its row shows no send (codex pre-push P1)', async () => {
     const delivered = { deliveryState: { firstDeliveredAt: '2026-10-02T15:00:00Z' } };
     tableDb({
       estimates: [
@@ -411,13 +411,12 @@ describe('GET /admin/estimates list shape', () => {
         // Unreadable data carries no delivery proof.
         'e-garbled': true,
       });
-      // The delivered one reads as the send it is (codex pre-push P1): dated by its first
-      // delivery, and sent, not viewed, until the customer opens it after that.
-      const byId = Object.fromEntries(estimates.map((e) => [e.id, e]));
-      expect(byId['e-start-sent']).toMatchObject({ status: 'sent', sentAt: '2026-10-02T15:00:00.000Z', viewedAt: null });
-      for (const id of ['e-start', 'e-restart', 'e-staff', 'e-legacy', 'e-garbled']) {
-        expect(byId[id]).toMatchObject({ status: 'viewed', sentAt: '2026-10-01T00:00:00Z' });
-      }
+      // Its sent_at is the mint stamp, not a send. A delivered one keeps its send, as any estimate does.
+      const sent = '2026-10-01T00:00:00Z';
+      expect(Object.fromEntries(estimates.map((e) => [e.id, e.sentAt ?? null]))).toEqual({
+        'e-start': null, 'e-restart': null, 'e-start-sent': sent, 'e-staff': sent, 'e-legacy': sent, 'e-garbled': null,
+      });
+      expect(estimates.find((e) => e.id === 'e-start-sent').status).toBe('viewed');
     });
   });
 

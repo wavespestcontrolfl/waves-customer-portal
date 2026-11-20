@@ -122,26 +122,21 @@ function estimateListQuery(database, { status, sentOnly = false, sources = null,
  * The follow-up fields of an estimates row, in the shape the list API sends: what the "Call today" rule
  * (shared/estimate-call-today.cjs) and the page's other follow-up checks read. ONE mapping for the list route
  * and the 9 AM push, so the page and the push judge the same row. viewedAt and lastViewedAt stay null on a
- * row that was never sent (the list's own rule).
- *
- * A delivered self-serve quote reads as the send it is (codex pre-push P1): the customer opened it in the
- * portal before staff sent it, and that look is no response to the send. It is dated by its first delivery
- * (selfServeDeliveredAt, which a later resend never moves), its views and taps count from then on, and with
- * no view since it reads as sent, not viewed. Its first view since is the earliest such stamp the row keeps
- * (viewed_at, else last_viewed_at). viewCount (the list route's) still counts every open.
+ * row that was never sent (the list's own rule). sentAt stays null on a self-serve quote nobody delivered:
+ * its sent_at is the mint stamp, not a send (codex pre-push P1). Once staff deliver one, it reads as
+ * stored, as any estimate does.
  *
  * @param {object} row  estimates row (snake_case columns)
- * @param {{lastClickedAt?: *, lastCalledAt?: *, undeliveredSelfServe?: boolean, selfServeDeliveredAt?: *}} [extra]
- *   the two values read in batches (short_codes, call_log), and the self-serve rule's answers for the row
- *   (services/self-serve-estimates.js: isUndeliveredSelfServe, selfServeDeliveredAt)
+ * @param {{lastClickedAt?: *, lastCalledAt?: *, undeliveredSelfServe?: boolean}} [extra]  the two values read in
+ *   batches (short_codes, call_log), and the self-serve rule's answer for the row (services/self-serve-estimates.js)
  */
-function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, undeliveredSelfServe = false, selfServeDeliveredAt = null } = {}) {
+function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, undeliveredSelfServe = false } = {}) {
   const hasBeenSent = !!row.sent_at;
-  const fields = {
+  return {
     status: row.status,
     customerPhone: row.customer_phone,
     archivedAt: row.archived_at,
-    sentAt: row.sent_at,
+    sentAt: undeliveredSelfServe ? null : row.sent_at,
     viewedAt: hasBeenSent ? row.viewed_at : null,
     lastViewedAt: hasBeenSent ? row.last_viewed_at : null,
     lastClickedAt: lastClickedAt || null,
@@ -149,20 +144,8 @@ function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, undel
     lastCalledAt: lastCalledAt || null,
     // A self-serve quote nobody delivered (plan restart, plan start, report card) never makes the
     // list: the zero-follow-up contract (services/self-serve-estimates.js). The caller passes the
-    // rule's answers.
+    // rule's answer.
     undeliveredSelfServe: Boolean(undeliveredSelfServe),
-  };
-  if (!selfServeDeliveredAt) return fields;
-  const from = new Date(selfServeDeliveredAt).getTime();
-  const since = (at) => (at && new Date(at).getTime() >= from ? at : null);
-  const viewedAt = since(fields.viewedAt) || since(fields.lastViewedAt);
-  return {
-    ...fields,
-    status: fields.status === 'viewed' && !viewedAt ? 'sent' : fields.status,
-    sentAt: selfServeDeliveredAt,
-    viewedAt,
-    lastViewedAt: since(fields.lastViewedAt),
-    lastClickedAt: since(fields.lastClickedAt),
   };
 }
 
