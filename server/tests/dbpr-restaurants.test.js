@@ -16,6 +16,15 @@ const path = require('path');
 const logger = require('../services/logger');
 const svc = require('../services/prospects/dbpr-restaurants');
 
+const fixture = (name) => fs.readFileSync(path.join(__dirname, 'fixtures', 'dbpr-restaurants', name), 'utf8');
+// The violations table's head row, as the real pages have it: Violation, a spacer, Observation.
+const VIOLATIONS_HEAD = '<tr><td><u><b>Violation</b></u></td><td>&nbsp;&nbsp;</td><td><u><b>Observation</b></u></td></tr>';
+// A whole report page: the inspection table (its date the visit's), the violations table with the given rows, and
+// the state office footer.
+const reportPage = (rows, date = '11/16/2026') => '<p>Inspection Information</p><table><tr><td>Inspection Type</td>'
+  + `<td>Inspection Date</td><td>Result</td></tr><tr><td>Routine - Food</td><td>${date}</td><td>Warning Issued</td></tr></table>`
+  + `<table>${VIOLATIONS_HEAD}${rows}</table><p>2601 Blair Stone Road</p>`;
+
 const csvLine = (cells) => cells.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',');
 
 // Inspection extract: leading-space headers like the real file, 58 violation columns.
@@ -209,6 +218,220 @@ describe('parseLicenseRows and the phone rule', () => {
     expect(svc.pickPhone({ 'Secondary Phone Number': '041-555-0101', 'Mailing County Code': '(813) 555-0110' })).toBe('8135550110');
     expect(svc.pickPhone({ 'Secondary Phone Number': '123456789012345', 'Primary Phone Number': '9415550177' })).toBe('9415550177');
     expect(svc.pickPhone({ 'Secondary Phone Number': '1-041-555-0101' })).toBeNull();
+  });
+});
+
+describe('parseInspectionReport', () => {
+  test('a 35A finding is pest evidence; an entry takes the cells after its code in the same row', () => {
+    // The fixture's script holds "35A-99-9" and its footer "12-34-5": neither starts an entry.
+    expect(svc.parseInspectionReport(fixture('report-35a.html'))).toEqual({
+      pestEvidence: true,
+      findings: [
+        { code: '35A-02-8', text: 'High Priority - Live, small flying insects found. Observed 10 small flying insects at the bar & landing on tap spouts.' },
+        { code: '35A-01-8', text: 'High Priority - Rodent droppings in dry storage. **Repeat Violation**' },
+      ],
+    });
+  });
+
+  test('35B only is not pest evidence, and the page footer never lands in a finding', () => {
+    expect(svc.parseInspectionReport(fixture('report-35b.html'), { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    const lastIs35A = svc.parseInspectionReport(fixture('report-35a.html').replace('08A-05-6', '35A-07-1'));
+    expect(JSON.stringify(lastIs35A)).not.toMatch(/Blair Stone|850-555/);
+  });
+
+  test('a 35A code quoted in a 35B note, or in an HTML comment, is not pest evidence', () => {
+    const quoted = fixture('report-35b.html').replace('back door propped open.', 'back door propped open; see 35A-02-8 at the last visit.');
+    expect(svc.parseInspectionReport(quoted, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    const commented = fixture('report-35b.html').replace('<table>', '<table><!-- <tr><td>35A-02-8</td><td>old row</td></tr> -->');
+    expect(svc.parseInspectionReport(commented, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+  });
+
+  test('a page with no inspection section is a failed read, not "no pests"', () => {
+    expect(svc.parseInspectionReport('<html><body>Service temporarily unavailable</body></html>')).toBeNull();
+    expect(svc.parseInspectionReport('')).toBeNull();
+  });
+
+  test('a page cut short, or one that lists no violation 35, is a failed read, not "no pests"', () => {
+    const whole = fixture('report-35b.html');
+    // Only the heading arrived.
+    expect(svc.parseInspectionReport('<html><body><p>Inspection Information</p></body></html>')).toBeNull();
+    // The page stops before the footer that closes every report.
+    expect(svc.parseInspectionReport(whole.slice(0, whole.indexOf('2601 Blair Stone Road')))).toBeNull();
+    // A whole page, but the violation 35 the file counted is not on it.
+    expect(svc.parseInspectionReport(whole.replace('35B-03-4', '08A-05-6'))).toBeNull();
+  });
+
+  test('finding text is capped, and a NUL character never reaches it', () => {
+    const page = (note) => reportPage(`<tr><td>35A-02-8</td><td>${note}</td></tr>`);
+    expect(svc.parseInspectionReport(page('x'.repeat(2000))).findings[0].text).toHaveLength(400);
+    expect(svc.parseInspectionReport(page('ROACH\0ES')).findings[0].text).toBe('ROACH ES');
+    // A 35 row with no observation text cannot answer: a code alone is not a finding.
+    expect(svc.parseInspectionReport(page('&nbsp;'), { cited35: 1 })).toBeNull();
+    expect(svc.parseInspectionReport(reportPage('<tr><td>35B-03-4</td><td></td></tr>'), { cited35: 1 })).toBeNull();
+    // The cap cuts between characters: an emoji across it is kept whole or left out, never cut in half.
+    const emoji = svc.parseInspectionReport(page(`${'x'.repeat(399)}\u{1FAB3}yy`)).findings[0].text;
+    expect(emoji).toBe(`${'x'.repeat(399)}\u{1FAB3}`);
+    expect(emoji.isWellFormed()).toBe(true);
+  });
+
+  test('a code counts only inside the violations table: a lone 35A code in another table or the footer is no answer, never pests', () => {
+    const b = fixture('report-35b.html');
+    const reference = b.replace('<p>2601 Blair Stone Road', '<table><tr><td>Code</td><td>Meaning</td></tr><tr><td>35A-02-8</td><td>Pests</td></tr></table><p>2601 Blair Stone Road');
+    expect(svc.parseInspectionReport(reference, { cited35: 1 })).toBeNull();
+    const footer = b.replace('<p>2601 Blair Stone Road, Tallahassee FL 32399</p>', '<table><tr><td>35A-02-8</td><td>2601 Blair Stone Road</td></tr></table>');
+    expect(footer).toContain('<td>35A-02-8</td><td>2601 Blair Stone Road');
+    expect(svc.parseInspectionReport(footer, { cited35: 1 })).toBeNull();
+    // A violations table without its head row is not the table either: no answer.
+    expect(svc.parseInspectionReport(b.replace(/<tr><td><font><u><b>Violation[\s\S]*?<\/tr>\n/, ''), { cited35: 1 })).toBeNull();
+    // The page as it is still answers.
+    expect(svc.parseInspectionReport(b, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+  });
+
+  test('on a follow-up report only the first visit\'s own 35 rows meet the file\'s count; a later visit gets no answer', () => {
+    const row = (code, notes) => `<tr><td>${code}</td><td>&nbsp;</td><td>${notes}</td></tr>`;
+    const door = row('35B-01-4', 'Basic - - From initial inspection : Basic - Gap under the back door. '
+      + '- From follow-up inspection 2026-09-03: **Time Extended**');
+    const read = (rows, cited35) => svc.parseInspectionReport(reportPage(rows, '08/28/2026'), { cited35, visitDate: '2026-08-28', visitNumber: 1 });
+    // The first visit cited the door: no pests.
+    expect(read(door, 1)).toEqual({ pestEvidence: false, findings: [] });
+    // Two counted, one of the first visit's: the other could be 35A. A row first cited at a follow-up is not its.
+    const screen = row('35B-03-4', 'Basic - From follow-up inspection 2026-09-03: Screen torn.');
+    expect(read(`${door}${screen}`, 2)).toBeNull();
+    // A 35A row first cited at a follow-up does not block the first visit's answer.
+    const flies = row('35A-02-8', 'High Priority - From follow-up inspection 2026-09-03: Live flies.');
+    expect(read(`${door}${flies}`, 1)).toEqual({ pestEvidence: false, findings: [] });
+    // A later visit gets no answer, even on its own page with its 35B row still open.
+    expect(svc.parseInspectionReport(reportPage(door, '09/03/2026'), { cited35: 1, visitDate: '2026-09-03', visitNumber: 2 })).toBeNull();
+  });
+
+  test('a page that lists fewer violation-35 rows than the file counted cannot answer: the missing one could be 35A', () => {
+    const b = fixture('report-35b.html');
+    expect(svc.parseInspectionReport(b, { cited35: 2 })).toBeNull();
+    expect(svc.parseInspectionReport(b, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    // A follow-up report may list more than the visit counted (earlier visits' rows).
+    expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: 1 })).toMatchObject({ pestEvidence: true });
+    // A row stored before the count was kept has none: a 35A row still answers, but "no pests" needs the count.
+    expect(svc.parseInspectionReport(b, { cited35: null })).toBeNull();
+    expect(svc.parseInspectionReport(b)).toBeNull();
+    expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: null })).toMatchObject({ pestEvidence: true });
+  });
+
+  test('each violations row is read whole: a code alone in the Observation cell is text; an unreadable code cell is no answer', () => {
+    // A row added at the end of the violations table, the page's last table.
+    const last = (html, tr) => html.replace(/<\/table>(?![\s\S]*<\/table>)/, `${tr}\n</table>`);
+    // A 35B row whose observation is a 35A code alone: text, not a second finding.
+    expect(svc.parseInspectionReport(reportPage('<tr><td>35B-03-4</td><td>&nbsp;</td><td>35A-02-8</td></tr>'), { cited35: 1 }))
+      .toEqual({ pestEvidence: false, findings: [] });
+    // A row whose code cannot be read beside a readable 35B row: no answer, never "no pests".
+    const b = fixture('report-35b.html');
+    const starred = last(b, '<tr><td><u>35A-02-8*</u></td><td>&nbsp;&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>');
+    expect(starred).toContain('35A-02-8*');
+    expect(svc.parseInspectionReport(starred, { cited35: 1 })).toBeNull();
+    // A row whose code cell is blank, its observation a 35A code alone: cells keep their places, so no answer.
+    const blankCode = last(b, '<tr><td></td><td>&nbsp;&nbsp;</td><td>35A-02-8</td></tr>');
+    expect(blankCode).toContain('<td></td><td>&nbsp;&nbsp;</td><td>35A-02-8</td>');
+    expect(svc.parseInspectionReport(blankCode, { cited35: 1 })).toBeNull();
+    // A row with an observation and no code cell: no answer either.
+    expect(svc.parseInspectionReport(last(b, '<tr><td>High Priority - Live flies at the bar.</td></tr>'), { cited35: 1 })).toBeNull();
+    // A row of blank cells is skipped.
+    expect(svc.parseInspectionReport(last(b, '<tr><td>&nbsp;</td><td> </td></tr>'), { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+  });
+
+  test('a cell or a row without its end tag still counts, so a 35A code cell without </td> is never read as "no pests"', () => {
+    const whole = svc.parseInspectionReport(fixture('report-35a.html'));
+    // The two 35A code cells lose </td> (HTML allows it); the 35B cell keeps it.
+    const open = fixture('report-35a.html').replace('<u>35A-02-8</u></a></td>', '<u>35A-02-8</u></a>').replace('<u>35A-01-8</u></a></td>', '<u>35A-01-8</u></a>');
+    expect(open).not.toContain('35A-02-8</u></a></td>');
+    expect(svc.parseInspectionReport(open)).toEqual(whole);
+    // No </td> and no </tr> anywhere: each row still ends at the next one, so the 35B note never joins the 35A entry.
+    const bare = '<p>Inspection Information</p><table><tr><td>Violation<td>&nbsp;<td>Observation'
+      + '<tr><td>35A-02-8<td>High Priority - Live flies at the bar.'
+      + '<tr><td>35B-03-4<td>Basic - Back door propped open.</table><p>2601 Blair Stone Road</p>';
+    expect(svc.parseInspectionReport(bare)).toEqual({ pestEvidence: true, findings: [{ code: '35A-02-8', text: 'High Priority - Live flies at the bar.' }] });
+    // A header cell (th) is a cell too.
+    expect(svc.parseInspectionReport(bare.replaceAll('<td>', '<th>')).findings).toHaveLength(1);
+  });
+
+  test('a follow-up report puts the initial note first, so the cap never drops the first visit\'s citation', () => {
+    const page = (note, date) => reportPage(`<tr><td>35A-02-8</td><td>${note}</td></tr>`, date);
+    const note = 'High Priority - - From initial inspection : High Priority - Live, small flying insects found. '
+      + `- From follow-up inspection 2026-09-01: ${'Observed 2 live flies at the bar. '.repeat(15)}**Admin Complaint** `
+      + '- From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage.';
+    // Read for the first visit (the citation): its note first, then the others newest first.
+    const { text } = svc.parseInspectionReport(page(note, '08/28/2026'), { visitDate: '2026-08-28', visitNumber: 1 }).findings[0];
+    expect(text).toHaveLength(400);
+    expect(text.startsWith('High Priority - From initial inspection : High Priority - Live, small flying insects found. '
+      + '- From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage. '
+      + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar.')).toBe(true);
+    // One note (a routine report, or a first citation) is unchanged.
+    const one = 'High Priority - - From initial inspection : High Priority - Rodent droppings in dry storage.';
+    expect(svc.parseInspectionReport(page(one, '09/01/2026'), { visitDate: '2026-09-01', visitNumber: 1 }).findings[0].text).toBe(one);
+  });
+
+  test('on a follow-up report a 35A row is pests only for the first visit, as its citation; a later note never is', () => {
+    // The real layout: each row lists every visit's note, labelled, oldest first.
+    const flies = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : High Priority - Live flies at the bar. '
+      + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
+      + '- From follow-up inspection 2026-09-03: **Time Extended**</td></tr>';
+    const door = '<tr><td>35B-01-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Gap under the back door. '
+      + '- From follow-up inspection 2026-09-03: **Time Extended**</td></tr>';
+    const page = reportPage(`${flies}\n${door}`, '08/28/2026');
+    const read = (visitDate, visitNumber, html = page) => svc.parseInspectionReport(html, { cited35: 1, visitDate, visitNumber });
+    // The first visit cited it: pests, its own note first.
+    expect(read('2026-08-28', 1)).toMatchObject({ pestEvidence: true, findings: [{ code: '35A-02-8' }] });
+    expect(read('2026-08-28', 1).findings[0].text).toMatch(/^High Priority - From initial inspection : High Priority - Live flies at the bar\. /);
+    // A later visit's notes are free text that may clear it ("No flies observed"): no answer for a later visit, even
+    // on its own page and when its note reads as a sighting, and none without the visit number.
+    for (const [visitDate, visitNumber] of [['2026-09-01', 2], ['2026-09-03', 3], ['2026-08-28', null]]) {
+      const own = reportPage(`${flies}\n${door}`, `${visitDate.slice(5, 7)}/${visitDate.slice(8)}/${visitDate.slice(0, 4)}`);
+      expect(read(visitDate, visitNumber, own)).toBeNull();
+    }
+    // For the first visit only the rows it cited count: one first cited at a follow-up stays out of the findings.
+    const later = '<tr><td>35A-09-4</td><td>&nbsp;</td><td>High Priority - From follow-up inspection 2026-09-03: Dead roaches in dry storage.</td></tr>';
+    expect(read('2026-08-28', 1, reportPage(`${flies}\n${later}\n${door}`, '08/28/2026')).findings.map((f) => f.code)).toEqual(['35A-02-8']);
+    // A label without its leading hyphen is still a label; one that does not read leaves the page with no answer.
+    const bare = reportPage('<tr><td>35A-02-8</td><td>&nbsp;</td><td>From initial inspection: Flies at the bar.</td></tr>', '08/28/2026');
+    expect(read('2026-08-28', 1, bare)).toMatchObject({ pestEvidence: true });
+    expect(read('2026-09-01', 2, bare)).toBeNull();
+    for (const label of ['From follow-up inspection 09/03/2026:', 'From Follow-Up Inspection 2026-09-03:', 'From follow up inspection 2026-09-03:']) {
+      const odd = reportPage(`<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : Flies. - ${label} Flies.</td></tr>`, '08/28/2026');
+      expect(read('2026-08-28', 1, odd)).toBeNull();
+    }
+    // On a follow-up report an unlabelled 35 row cannot be tied to a visit, whichever row carries the labels.
+    const plain = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
+    expect(read('2026-08-28', 1, reportPage(`${plain}\n${door}`, '08/28/2026'))).toBeNull();
+    const other = '<tr><td>22-11-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Soiled shelf.</td></tr>';
+    expect(read('2026-08-28', 1, reportPage(`${plain}\n${other}`, '08/28/2026'))).toBeNull();
+    // A routine report (no visit labels) is the read visit's own, whichever visit it is.
+    expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: 1, visitDate: '2026-10-20', visitNumber: 2 }))
+      .toMatchObject({ pestEvidence: true });
+  });
+
+  test('a page answers only for the visit whose date its inspection table gives', () => {
+    const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
+    const read = (html, visitDate) => svc.parseInspectionReport(html, { cited35: 1, visitDate, visitNumber: 1 });
+    expect(read(reportPage(rows, '10/20/2026'), '2026-10-20')).toMatchObject({ pestEvidence: true });
+    // Another visit's page: no answer.
+    expect(read(reportPage(rows, '10/20/2026'), '2026-11-16')).toBeNull();
+    // No inspection table, a date that does not read, or two dates: no answer.
+    expect(read(reportPage(rows, '10/20/2026').replace(/<table><tr><td>Inspection Type[\s\S]*?<\/table>/, ''), '2026-10-20')).toBeNull();
+    expect(read(reportPage(rows, '2026-10-20'), '2026-10-20')).toBeNull();
+    const twice = reportPage(rows, '10/20/2026').replace('<table><tr><td><u><b>Violation',
+      '<table><tr><td>Inspection Date</td></tr><tr><td>11/16/2026</td></tr></table><table><tr><td><u><b>Violation');
+    expect(twice.indexOf('10/20/2026')).toBeLessThan(twice.indexOf('11/16/2026'));
+    expect(read(twice, '2026-10-20')).toBeNull();
+    // The fixtures carry the real layout.
+    expect(svc.parseInspectionReport(fixture('report-35a.html'), { visitDate: '2026-10-20' })).toMatchObject({ pestEvidence: true });
+    expect(svc.parseInspectionReport(fixture('report-35b.html'), { cited35: 1, visitDate: '2026-10-21' })).toEqual({ pestEvidence: false, findings: [] });
+  });
+});
+
+describe('reportUrl', () => {
+  test('builds the report address only from digit-only ids', () => {
+    expect(svc.reportUrl('9000001', '5001')).toBe('https://www.myfloridalicense.com/inspectionDetail.asp?InspVisitID=9000001&id=5001');
+    expect(svc.reportUrl('1&x=2', '5001')).toBeNull();
+    expect(svc.reportUrl('1', '../5001')).toBeNull();
+    expect(svc.reportUrl('1', null)).toBeNull();
   });
 });
 

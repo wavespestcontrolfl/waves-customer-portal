@@ -68,6 +68,8 @@ const REQUIRED_COLUMNS = {
 const KEY_MAX = 40;
 
 const FILE_TIMEOUT_MS = 60 * 1000;
+const REPORT_BASE = 'https://www.myfloridalicense.com/inspectionDetail.asp';
+const FINDING_TEXT_MAX = 400;
 const REPORT_MAX_ATTEMPTS = 3;
 const UPSERT_CHUNK = 500;
 
@@ -128,8 +130,7 @@ function pickPhone(row) {
 // insert batch).
 const wholeNumber = (v) => (/^\d{1,9}$/.test(String(v || '').trim()) ? Number(String(v).trim()) : null);
 
-// The public report page's address is built from these two ids only (the page reads are the next change), so both
-// must be digits.
+// The public report page's address is built from these two ids only (reportUrl), so both must be digits.
 const ID_RE = /^\d{1,12}$/;
 
 // csv-parse keeps a row cut short, with only the cells it has. Such a row is skipped and counted: stored, it would
@@ -242,6 +243,166 @@ function parseLicenseRows(rows, kind, counts = {}, today = null) {
     });
   }
   return out;
+}
+
+// ── Report page (pure) ──────────────────────────────────────────
+
+const ENTITIES = { '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+// The state office's street address closes every whole page.
+const PAGE_FOOTER_RE = /2601 Blair Stone Road/;
+const VIOLATION_CODE_RE = /^\d\d[A-Z]?-\d\d-\d$/;
+// A cell (td or th; group 1), or a row or table tag (group 2 names it). HTML lets a page leave out </td> and </tr>,
+// and the state's pages do, so a cell runs to the next table tag (a cell, a row or a table, start or end), as a
+// browser closes it, and any row or table tag ends the row. A cell that holds a table gives only its text before it.
+const CELL_OR_ROW_END_RE = /<t[dh]\b[^>]*>((?:(?!<\/?(?:t[dhr]|table|tbody|thead|tfoot)\b)[\s\S])*)|<\/?(tr|table|tbody|thead|tfoot)\b[^>]*>/gi;
+// The row that heads the violations table names two columns, "Violation" and "Observation", with blank spacer cells
+// around them. Returns the Violation column's position in the row, or -1 for any other row.
+function violationsColumn(cells) {
+  const named = cells.filter(Boolean);
+  if (named.length !== 2 || !/^violation$/i.test(named[0]) || !/^observation$/i.test(named[1])) return -1;
+  return cells.findIndex((cell) => /^violation$/i.test(cell));
+}
+
+// Tags out, the six entities the pages use decoded, NUL characters and runs of white space made one space.
+function htmlText(html) {
+  return String(html || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(?:nbsp|amp|lt|gt|quot|#39);/g, (entity) => ENTITIES[entity])
+    .replaceAll('\0', ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// A follow-up report lists each violation of the inspection with every visit's note, labelled, oldest first:
+// "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
+const VISIT_NOTE_RE = /(?:-\s*)?From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
+// Any mention of a visit label, read by VISIT_NOTE_RE or not.
+const VISIT_LABEL_RE = /\bfrom\s+(?:initial|follow[\s-]?up|call[\s-]?back|re-?)\s*inspection/gi;
+
+// How a row's text names its visits: { routine: true } without labels (all of it the read visit's own), { label,
+// notes } with labels (a note's date is null for the initial visit), or { unreadable: true } when a label does not
+// read (another date form, other case): such a row cannot be tied to a visit.
+function visitNotes(text) {
+  const marks = [...text.matchAll(VISIT_NOTE_RE)];
+  if ((text.match(VISIT_LABEL_RE) || []).length !== marks.length) return { unreadable: true };
+  if (!marks.length) return { routine: true };
+  const notes = marks.map((mark, i) => ({
+    date: mark[1] || null,
+    text: text.slice(mark.index, i + 1 < marks.length ? marks[i + 1].index : undefined).replace(/^-\s*/, '').trim(),
+  }));
+  return { label: text.slice(0, marks[0].index).trim(), notes };
+}
+
+// The initial note first (the first visit's citation, the visit a follow-up report answers for), then the later
+// notes newest first, each with its label, so the cap never drops it. A routine row, or one with a single note, is
+// unchanged.
+function initialNoteFirst(row) {
+  if (row.notes.routine || row.notes.notes.length < 2) return row.text;
+  const rank = (note) => (note.date === null ? 0 : 1);
+  const day = (note) => note.date || '';
+  // A stable sort keeps the page order within a rank and a day.
+  const notes = [...row.notes.notes].sort((a, b) => rank(a) - rank(b) || (day(a) === day(b) ? 0 : day(a) > day(b) ? -1 : 1));
+  return [row.notes.label, notes.map((note) => note.text).join(' - ')].filter(Boolean).join(' ');
+}
+
+// At most FINDING_TEXT_MAX characters, cut between characters (code points): half an emoji is not valid text, and
+// PostgreSQL refuses it in a JSON column.
+const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
+
+// The report page's tables, row by row: the violations entries (each code with its observation cells), whether a row
+// could not be read, and each date the inspection table gives. A row ends at a row or table tag, or at the page end.
+// In the violations table (from its "Violation" / "Observation" head row to the next table tag) a row with anything
+// in it must hold a code alone in the Violation column and nothing before it; anywhere else no cell may be a code.
+// The inspection table is a head row naming "Inspection Date", then a row giving it in that column.
+function readReportTables(page) {
+  const entries = [];
+  const dates = [];
+  let unreadable = false;
+  let codeColumn = -1; // the Violation column's position while in the violations table, else -1
+  let dateColumn = -1; // the Inspection Date column's position after its head row, until a row gives the date
+  let row = []; // the cell texts of the row being read, blank cells kept so each keeps its position
+  const endRow = () => {
+    if (codeColumn >= 0 && row.some(Boolean)) {
+      const code = row[codeColumn] || '';
+      if (VIOLATION_CODE_RE.test(code) && !row.slice(0, codeColumn).some(Boolean)) {
+        entries.push({ code, parts: row.slice(codeColumn + 1).filter(Boolean) });
+      } else {
+        unreadable = true;
+      }
+    } else if (row.some((cell) => VIOLATION_CODE_RE.test(cell))) {
+      unreadable = true;
+    }
+    if (dateColumn >= 0 && row.some(Boolean)) {
+      dates.push(row[dateColumn] || '');
+      dateColumn = -1;
+    } else if (row.includes('Inspection Date')) {
+      dateColumn = row.indexOf('Inspection Date');
+    }
+  };
+  for (const match of page.matchAll(CELL_OR_ROW_END_RE)) {
+    if (match[1] !== undefined) {
+      row.push(htmlText(match[1]));
+      continue;
+    }
+    endRow();
+    const column = violationsColumn(row);
+    if (column >= 0) codeColumn = column;
+    if (/^table$/i.test(match[2])) {
+      codeColumn = -1;
+      dateColumn = -1;
+    }
+    row = [];
+  }
+  endRow();
+  return { entries, unreadable, dates };
+}
+
+/**
+ * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. No answer is
+ * a failed read, retried later, never "no pests". The page answers only when:
+ * - it is whole (the state office footer closes it): an error page or a page cut short gives no answer;
+ * - it is the read visit's: its inspection table gives one date, visitDate (checked when given);
+ * - its violations table reads cleanly: the rows after the "Violation" / "Observation" head, up to the next table
+ *   tag, each read whole by cell position (the cell in the Violation column is the code, the cells after it are the
+ *   observation), so a code quoted in a note, a comment or a script never starts an entry. A row whose Violation cell
+ *   is not a code alone (blank, or 35A-02-8*), or a code cell outside that table (another table, the footer), means
+ *   the page is not laid out as expected;
+ * - each 35 row has observation text, and every visit label on them reads. A follow-up report (any violations row
+ *   labelled with its visit) answers only for the first visit (visitNumber 1), whose initial notes are its
+ *   citations, and each 35 row on it must be labelled. A later visit's notes are free text ("No flies observed",
+ *   "door repaired"), so a later visit gets no answer either way;
+ * - it lists at least as many 35A or 35B rows of the read visit as the file counted for it (cited35): the missing
+ *   one could be 35A. Without the count only a 35A row answers.
+ * findings holds the visit's 35A rows, each with its initial note first, cut at FINDING_TEXT_MAX.
+ */
+function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNumber = null } = {}) {
+  const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
+  const whole = htmlText(page);
+  if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
+  const { entries, unreadable, dates } = readReportTables(page);
+  // A page of another visit, or one whose date does not read, cannot answer for this one.
+  if (visitDate && (dates.length !== 1 || parseUsDate(dates[0]) !== visitDate)) return null;
+  const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => {
+    const text = entry.parts.join(' ');
+    return { code: entry.code, text, notes: visitNotes(text) };
+  });
+  // A follow-up report (any violations row labelled with its visit) ties each row to a visit, so an unlabelled 35 row
+  // on it cannot be tied to one. A 35 row with no observation text cannot answer either.
+  const followUp = entries.some((entry) => !visitNotes(entry.parts.join(' ')).routine);
+  if (unreadable || rows35.some((row) => row.notes.unreadable || !row.text || (followUp && row.notes.routine))) return null;
+  // A follow-up report answers only for the first visit, whose initial notes are its citations. A later visit's notes
+  // are free text ("**Time Extended**", "No flies observed", "door repaired"), so it gets no answer either way:
+  // the list shows pests only, so that costs a later visit nothing but its retries.
+  if (followUp && visitNumber !== 1) return null;
+  // The read visit's own 35 rows: every row of a routine report; on a follow-up report, those with the initial note.
+  const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => note.date === null));
+  if (!ofVisit.length) return null;
+  const rows35A = ofVisit.filter((row) => /^35A-/.test(row.code));
+  // Fewer of the visit's 35 rows than the file counted: the missing one could be 35A. Without the count (a row stored
+  // before it was kept), only a 35A row answers: "no pests" needs the count.
+  if (Number.isInteger(cited35) ? ofVisit.length < cited35 : !rows35A.length) return null;
+  const findings = rows35A.map((row) => ({ code: row.code, text: capText(initialNoteFirst(row)) }));
+  return { pestEvidence: findings.length > 0, findings };
 }
 
 // ── Store ───────────────────────────────────────────────────────
@@ -480,6 +641,12 @@ async function syncFiles(deps, result) {
   }
 }
 
+// The public report page of one inspection visit, or null when either id is not digits only.
+function reportUrl(visitId, licenseId) {
+  if (!ID_RE.test(String(visitId)) || !ID_RE.test(String(licenseId))) return null;
+  return `${REPORT_BASE}?InspVisitID=${visitId}&id=${licenseId}`;
+}
+
 /**
  * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
  * { fetchText, store, now }.
@@ -505,7 +672,9 @@ module.exports = {
   parseUsDate,
   parseInspectionRows,
   parseLicenseRows,
+  parseInspectionReport,
   pickPhone,
+  reportUrl,
   upsertRecords,
   pendingInspections,
   saveReport,
