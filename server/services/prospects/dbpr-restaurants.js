@@ -24,7 +24,8 @@
  * elapsed time only, never a business name, address or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true
  * or on); the scheduler checks it before the run starts, so job_health keeps the last real outcome. A read with under
  * 90% of the rows of the fullest complete read of the same file and fiscal year is short (a download that stopped
- * early): its rows are written and the run fails (isShort). That measure is kept in system_settings.
+ * early): its rows are written and the run fails (isShort). That measure is kept in system_settings. A copy of an
+ * older fiscal year than one already read is stale and fails the same way.
  */
 
 const db = require('../../models/db');
@@ -284,7 +285,9 @@ async function lastRead(kind) {
   const row = await db('system_settings').where({ key: readSettingKey(kind) }).first('value');
   try {
     const value = JSON.parse(row && row.value);
-    return value && typeof value.fiscalYear === 'string' && Number.isInteger(value.rows) ? value : null;
+    // Anything else is no measure: a damaged year would make every later read look stale.
+    const valid = value && /^\d{4}-07-01$/.test(value.fiscalYear) && Number.isInteger(value.rows) && value.rows >= 0;
+    return valid ? { fiscalYear: value.fiscalYear, rows: value.rows } : null;
   } catch {
     return null;
   }
@@ -311,7 +314,7 @@ const ROW_WIDTHS = { inspection: [0], new_license: [-2, 0], owner_change: [-2, 0
 // one fiscal year.
 const DATE_COLUMN = { inspection: 'Inspection Date', new_license: 'Application Approval Date', owner_change: 'Application Approval Date' };
 
-async function loadFile(kind, fetchText, now) {
+async function loadFile(kind, fetchText, now, last) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
   const counts = { malformed: 0, valid: 0 };
   const records = [];
@@ -336,8 +339,13 @@ async function loadFile(kind, fetchText, now) {
   if (REQUIRED_COLUMNS[kind].some((column) => !header.includes(column))) throw new Error('unexpected file layout');
   // A header with no rows is a download cut short, not a quiet week, so the file fails. The files start over on
   // July 1, so in the first week of July (Eastern date; it spans the July 4 holiday) a header alone is a new year
-  // with nothing in it yet. A file whose rows all fall outside the area is fine.
-  if (!rowsRead && !/-07-0[1-7]$/.test(etDateString(now))) throw new Error('empty file');
+  // with nothing in it yet, until a read of the new year has held a row. A file whose rows all fall outside the area
+  // is fine.
+  if (!rowsRead) {
+    const today = etDateString(now);
+    const newYearHasRows = Boolean(last && last.fiscalYear === fiscalYearOf(today) && last.rows > 0);
+    if (!/-07-0[1-7]$/.test(today) || newYearHasRows) throw new Error('empty file');
+  }
   // Malformed rows and not one good row in the area mean a changed format (a new date format, say), not a quiet
   // week: the file fails. A file whose rows all fall outside the area, or whose good rows cite nothing, succeeds.
   if (!counts.valid && counts.malformed) throw new Error('no good row in the area');
@@ -371,12 +379,18 @@ function isShort(last, read) {
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
-      const { records, malformed, rowsRead, fiscalYear } = await loadFile(kind, deps.fetchText, deps.now);
+      const last = await deps.store.lastRead(kind);
+      const { records, malformed, rowsRead, fiscalYear } = await loadFile(kind, deps.fetchText, deps.now, last);
       const unique = dedupeByKey(records);
       const read = { fiscalYear, rows: rowsRead };
-      const last = await deps.store.lastRead(kind);
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
-      if (isShort(last, read)) {
+      // A file of an older fiscal year than one already read is a stale copy (a cache, say): it fails, and the newer
+      // year's measure stays for the next read. Its rows are whole and valid, so they are written.
+      if (last && fiscalYear && fiscalYear < last.fiscalYear) {
+        result.failures += 1;
+        result.files[kind].stale = true;
+        logger.warn(`[dbpr-prospects] ${kind} file is stale: rows of the fiscal year from ${fiscalYear} after a read of ${last.fiscalYear}`);
+      } else if (isShort(last, read)) {
         result.failures += 1;
         result.files[kind].short = true;
         logger.warn(`[dbpr-prospects] ${kind} file is short: ${read.rows} rows, the fullest complete read had ${last.rows}`);

@@ -425,6 +425,30 @@ describe('syncRestaurantProspects', () => {
     expect(store.saveRead).toHaveBeenCalledWith('new_license', { fiscalYear: '2026-07-01', rows: 1 });
   });
 
+  test('in July a header alone fails once a read of the new year held a row; an older year\'s copy is stale', async () => {
+    store = makeStore();
+    // July 3, 2030: a read of the new year already held 100 rows, so a header alone is a cut download.
+    reads.inspection = { fiscalYear: '2030-07-01', rows: 100 };
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]) });
+    const now = new Date('2030-07-03T14:36:00Z');
+    expect((await svc.syncRestaurantProspects({ fetchText, store, now })).files.inspection).toEqual({ failed: true });
+    // Only last year's measure: the header is the new year starting.
+    reads.inspection = { fiscalYear: '2029-07-01', rows: 6700 };
+    expect((await svc.syncRestaurantProspects({ fetchText, store, now })).failures).toBe(0);
+    // August: last year's copy after a read of the new year is stale. Its rows go in; the new year's measure stays.
+    reads.inspection = { fiscalYear: '2030-07-01', rows: 50 };
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(20, '06/28/2030') });
+    const stale = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2030-08-05T14:36:00Z') });
+    expect(stale.files.inspection).toEqual({ kept: 20, malformed: 0, upserted: 20, stale: true });
+    expect(stale.failures).toBe(1);
+    expect(reads.inspection).toEqual({ fiscalYear: '2030-07-01', rows: 50 });
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is stale: rows of the fiscal year from 2029-07-01 after a read of 2030-07-01');
+    // A cut copy of this year is still measured against the 50 rows.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(10, '07/20/2030') });
+    const cut = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2030-08-12T14:36:00Z') });
+    expect(cut.files.inspection.short).toBe(true);
+  });
+
   test('a license row with a cell added or lost is malformed; the usual 36 cells and a full 38 load', async () => {
     store = makeStore();
     // 37 cells: an extra cell before Secondary Phone Number would move the phone and the license number.

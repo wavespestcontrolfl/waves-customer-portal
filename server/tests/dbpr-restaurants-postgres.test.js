@@ -46,6 +46,8 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
       // A value that is not a read is no measure.
       await settings().update({ value: 'not json' });
       expect(await svc.lastRead(kind)).toBeNull();
+      await settings().update({ value: JSON.stringify({ fiscalYear: 'later', rows: 5 }) });
+      expect(await svc.lastRead(kind)).toBeNull();
     } finally {
       await settings().del();
     }
