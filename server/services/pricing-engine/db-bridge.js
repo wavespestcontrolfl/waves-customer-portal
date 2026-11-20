@@ -14,7 +14,7 @@ const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c =
 // removes from the DB row reverts to the code default on the NEXT sync
 // instead of lingering until a process restart.
 const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.PEST.pestInitialRoach.display));
-// Pristine in-code values for recurringPestPriceIsFromRows (below), read
+// Pristine in-code values for pestOnlyRecurringPriceIsFromRows (below), read
 // before any sync changes the constants: the value of the one optional pest
 // field, the property types and the tiers the engine knows, and the service
 // count that earns each tier.
@@ -788,7 +788,7 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 // in-code default on a cold start, an earlier value on a warm process (two
 // processes can then hold different prices). That is the answer every
 // surface a person reads shows. A price that nobody watches must come from
-// the rows, so that caller asks recurringPestPriceIsFromRows() (same idea as
+// the rows, so that caller asks pestOnlyRecurringPriceIsFromRows() (same idea as
 // mistingRefillPriceIsFromRow).
 //
 // The rows are every pricing_config row the recurring pest price reads: the
@@ -814,6 +814,13 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 // (a silver threshold of 1: the engine quotes one pest service at bronze, the
 // converter starts it at silver). Such a row does not state the price the
 // engine quotes, so the answer is no for it.
+// The answer is about a quote of pest control ALONE, for a home with no
+// other service: one qualifying service, so the bronze tier. A bundle reads
+// more rows than these: the other service's own rows, and the rodent rows
+// that say whether rodent bait counts toward the tier (rodent_waveguard, or
+// rodent_rules). Those decide the tier discount the pest line of a bundle
+// gets, and this answer does not judge them. A caller that prices a bundle,
+// or a home that already has a service, must not use it.
 // The answer is a function of the rows of that ONE sync. It does not depend
 // on what an earlier sync of the process loaded, so a process that just
 // started and a warm one answer the same for the same rows.
@@ -887,7 +894,7 @@ function rowsStateRecurringPestPrice(config) {
     && (floorSwitch == null || typeof floorSwitch === 'boolean');
 }
 let _pestPriceIsFromRows = false; // the answer of the last successful sync
-function recurringPestPriceIsFromRows() {
+function pestOnlyRecurringPriceIsFromRows() {
   return _pestPriceIsFromRows && !isSyncInFlight();
 }
 
@@ -1367,7 +1374,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // carried it). It rebases to its in-code value on EVERY sync, like the
     // flag above: a process that took a value from a row must not keep it
     // after the row loses the field, and then price differently from a
-    // process that just started (recurringPestPriceIsFromRows).
+    // process that just started (pestOnlyRecurringPriceIsFromRows).
     constants.PEST.additionalAdjustments.attachedGarage = PEST_ATTACHED_GARAGE_DEFAULT;
     if (config.pest_features) {
       const f = config.pest_features;
@@ -2463,7 +2470,7 @@ module.exports = {
   readRodentAdditionalCheckPriceFromCatalog,
   needsSync,
   invalidatePricingConfigCache,
-  recurringPestPriceIsFromRows,
+  pestOnlyRecurringPriceIsFromRows,
   validatePestPricingConfig,
   assertValidPestPricingConfig,
 };
