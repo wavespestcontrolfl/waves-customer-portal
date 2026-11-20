@@ -718,6 +718,11 @@ describe('mergeSingletonPrefRow', () => {
       }
     });
 
+    it('two rows fold at the same PO box: a mailing address, not a home, so the loser\'s timer is dropped', async () => {
+      const PO_BOX = { address_line1: 'PO Box 42', city: 'Bradenton', zip: '34205' };
+      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }], { winnerAddr: PO_BOX, loserAddr: PO_BOX })).toEqual({ [DROPPED]: X2_TEXT });
+    });
+
     it('two rows fold at the same home: a timer entered on the loser\'s row after the card is adopted, and that changes the pin', async () => {
       expect(await rewrites([{ customer_id: 'L', ...NONE }, { customer_id: 'W', ...NONE }], { loserAddr: SAME })).toEqual({});
       expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }], { loserAddr: SAME })).toEqual({ [ADOPTED]: X2_TEXT });
@@ -2021,6 +2026,13 @@ describe('executeMerge', () => {
         expect(result.repointed['property_preferences.new_sod_cleared']).toBe(1);
       });
 
+      it('the same PO box is a mailing address, not a home: the timer is cleared', async () => {
+        const PO_BOX = { address_line1: 'PO Box 42', city: 'Bradenton', zip: '34205' };
+        const { prefUpdates, recorded } = await merge(PO_BOX, { timer: X2, winnerAddr: PO_BOX });
+        expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
+        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: false, home_changed_at: null });
+      });
+
       it('the kept customer has another unit of the same street: different homes, the timer is cleared', async () => {
         const { prefUpdates, recorded } = await merge(
           { address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' },
@@ -2065,6 +2077,8 @@ describe('executeMerge', () => {
             [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, {}, { loserFollows: false, winnerStays: true }],
             // An addressless kept customer takes the loser's whole address: a first address, a move for an address edit.
             [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { winnerAddr: { address_line1: null, city: null, zip: null } }, { loserFollows: true, winnerStays: false }],
+            // The same PO box: a shared mailing address, not a home.
+            [{ address_line1: 'P.O. Box 42', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: 'P.O. Box 42', city: 'Bradenton', zip: '34205' } }, { loserFollows: false, winnerStays: true }],
           ]) {
             fold.mockClear();
             const { recorded } = await merge(loserAddr, { ...options, collide: true, timer: X2 });

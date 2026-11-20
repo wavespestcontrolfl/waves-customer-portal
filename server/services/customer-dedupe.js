@@ -1531,8 +1531,9 @@ function newSodBeforeImage(row) {
 // The sprinkler timer's premises for one merge, read from the kept customer's address AS THE MERGE LEAVES IT (their
 // own plus the address backfill predictWinnerBackfills applies). (The new-sod record keeps sodFollowsMerge.)
 // - loserFollows: the loser's home is that home. A street-only kept customer that takes the loser's unit, or an
-//   addressless one that takes the loser's whole address, has the loser's home after the merge. An addressless
-//   loser is unknown: false.
+//   addressless one that takes the loser's whole address, has the loser's home after the merge. A loser with no
+//   street address (no address, or one without a house number: a PO box, a bare street name; normalizeStreetKey,
+//   the household matcher's rule) is unknown: false. Two customers can share a mailing address and not a home.
 // - winnerStays: the kept customer's own home is unchanged, by the test an address edit uses (homesDiffer, as in
 //   propagateCustomerAddressChange). A backfilled unit or a first address changes it, so their own timer is
 //   settled as an address edit would settle it (cleared), never kept on a home it was not entered for.
@@ -1540,7 +1541,7 @@ function timerPremiseOf(winner, loser) {
   const fanout = require('./customer-address-fanout');
   const after = { ...winner, ...predictWinnerBackfills(winner, loser).backfills };
   return {
-    loserFollows: !!fanout.addressMatchKey(loser?.address_line1) && !fanout.homesDiffer(after, loser),
+    loserFollows: !!normalizeStreetKey(loser?.address_line1) && !fanout.homesDiffer(after, loser),
     winnerStays: !fanout.homesDiffer(winner, after),
   };
 }
