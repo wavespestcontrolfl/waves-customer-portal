@@ -294,11 +294,12 @@ import { lazy, Suspense } from 'react';
 // work first, as the Reload bar does (components/PortalUpdate.jsx), and
 // becomes "Reload anyway". When the tab was used on this page since the last
 // page move, it asks once about the page too, as the bar does after a use.
-function ChunkLoadFallback({ newVersion = false }) {
-  // A staff page in view or at the address (staffTab: Back changes the
-  // address before the routes render), or a /tech URL. Both are read as the
-  // routes match them (routerPath): /ADMIN/... is a staff page too.
-  const operatorPath = staffTab() || /^\/tech(\/|$)/.test(routerPath(window.location.pathname));
+function ChunkLoadFallback({ newVersion = false, staff = false }) {
+  // A page asked for on a staff tab (`staff`, MissingPageCode), a staff page
+  // in view or at the address (staffTab: Back changes the address before the
+  // routes render), or a /tech URL. Paths are read as the routes match them
+  // (routerPath): /ADMIN/... is a staff page too.
+  const operatorPath = staff || staffTab() || /^\/tech(\/|$)/.test(routerPath(window.location.pathname));
   const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(null, clearChunkReloadFlag);
   // The staff layout can stay around this screen, the Ask Waves draft
   // included: a use of the page clears what the button named, so it asks
@@ -364,15 +365,18 @@ function RouteFallback({ label = 'Loading...' }) {
   );
 }
 
-// A staff page whose code the live build no longer serves: the stale-chunk
-// handler leaves its import to fail (lib/staleChunkReload.js), so this page
-// decides while it is mounted. It waits for open work, as a page move does,
-// then reloads once. When work still holds the tab, the tab was used on this
-// page meanwhile, or the one reload for a missing chunk already ran, it
-// shows the retry screen. It says the portal has a new version only when
-// the server names a newer build (missingCodeIsNewVersion): after the one
-// reload, offline, or with no newer build named, the code may be out of
-// reach rather than replaced, so the screen asks to check the connection.
+// A page asked for on a staff tab, whose code the live build no longer
+// serves: the stale-chunk handler leaves its import to fail
+// (lib/staleChunkReload.js), so this page decides while it is mounted, by the
+// staff rules, also once the move that asked for it, such as Back, opened a
+// customer page. Its retry screen is the staff one, whose button asks the
+// holds first. It waits for open work, as a page move does, then reloads
+// once. When work still holds the tab, the tab was used on this page
+// meanwhile, or the one reload for a missing chunk already ran, it shows the
+// retry screen. It says the portal has a new version only when the server
+// names a newer build (missingCodeIsNewVersion): after the one reload,
+// offline, or with no newer build named, the code may be out of reach rather
+// than replaced, so the screen asks to check the connection.
 function MissingPageCode() {
   const [blocker, setBlocker] = useState(null);
   const newVersion = missingCodeIsNewVersion(useNewerBuild(), useBrowserOffline());
@@ -387,7 +391,7 @@ function MissingPageCode() {
     return () => { current = false; };
   }, [pathname]);
   if (!blocker) return <RouteFallback label={newVersion ? 'Loading the new version...' : 'Loading...'} />;
-  return <ChunkLoadFallback newVersion={newVersion} />;
+  return <ChunkLoadFallback newVersion={newVersion} staff />;
 }
 
 export function lazyWithRetry(factory) {

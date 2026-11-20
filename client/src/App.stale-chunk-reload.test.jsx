@@ -807,6 +807,51 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  // Back from a field page to a customer page whose code was asked for while
+  // the field page was in view: that page keeps the staff rules through its
+  // recovery, so the move from the field page still bars its reload.
+  test('Back from Today to a customer page whose code is missing: asked for while Today was in view, it gets the staff retry screen and no reload', async () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
+    let failReport;
+    const move = renderGate(['/report/abc', '/admin/today'], {
+      transitions: true,
+      pages: { '/report/:token': lazyWithRetry(() => new Promise((_, reject) => { failReport = reject; })) },
+    });
+    expect(screen.getByText('/admin/today')).toBeInTheDocument();
+    vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+    move(-1);
+    expect(screen.getByText('/admin/today')).toBeInTheDocument();
+    await act(async () => { failReport(new TypeError('Failed to fetch dynamically imported module: /assets/Report-old.js')); });
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByText('/admin/today')).not.toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  });
+
+  // Open work still holds such a page after the wait for it runs out.
+  test('a customer page asked for while a staff page was in view waits for open work, and work still open after the wait keeps the tab', async () => {
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const read = target.fetch('/api/admin/dashboard');
+      notePageInView(null, '/admin/dashboard');
+      notePageInView('/admin/dashboard', '/report/abc');
+      vi.stubGlobal('location', { ...window.location, pathname: '/report/abc', reload });
+      let t = 0;
+      await expect(reloadForMissingCode({ pathname: '/report/abc', reload, now: () => (t += 20000) })).resolves.toBe('request');
+      expect(reload).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+      // The wait that ran out marked the request stalled. That state ends at
+      // the next look once no work is open, so later tests start clean.
+      pending[0]({ headers: new Headers() });
+      await read;
+      await waitForWork();
+    } finally {
+      uninstall();
+    }
+  });
+
   // The router keeps a link's path as written, while the browser encodes the
   // address: the move the gate rendered is found under either spelling.
   test('a move from a field page bars the reload of the page it opens, also at an address the browser encoded', async () => {
