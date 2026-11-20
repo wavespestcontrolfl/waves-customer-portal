@@ -15,15 +15,16 @@ const sentExpiry = (offer) => (offer?.status === "sent" ? offer.expiresAt : null
  */
 export function useRenderAtExpiry(data, sent = null) {
   const [tick, setTick] = useState(0);
-  const readAt = sentExpiry(data?.current);
-  const sentAt = sentExpiry(sent?.offer);
+  // The next expiry by this render's clock, the one that showed the offer as sent (NaN: none still ahead).
+  const now = Date.now();
+  const ahead = [sentExpiry(data?.current), sentExpiry(sent?.offer)].map((at) => Date.parse(at)).filter((at) => at >= now);
+  const next = ahead.length ? Math.min(...ahead) : NaN;
   useEffect(() => {
-    const now = Date.now();
-    const ahead = [readAt, sentAt].map((at) => Date.parse(at)).filter((at) => at >= now);
-    if (!ahead.length) return undefined; // no expiry ahead: none, or already past
-    const timer = setTimeout(() => setTick((n) => n + 1), Math.min(Math.min(...ahead) - now + 1, MAX_TIMER_MS));
+    if (Number.isNaN(next)) return undefined;
+    // An expiry that passed after the render, before this effect ran, renders again at once.
+    const timer = setTimeout(() => setTick((n) => n + 1), Math.min(Math.max(next - Date.now() + 1, 0), MAX_TIMER_MS));
     return () => clearTimeout(timer);
-  }, [readAt, sentAt, tick]);
+  }, [next, tick]);
 }
 
 /**

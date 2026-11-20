@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import React, { useLayoutEffect } from "react";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import useOfferFlow from "./useOfferFlow";
+import useOfferFlow, { useRenderAtExpiry } from "./useOfferFlow";
 import { fetchOffer } from "./offerApi";
 
 vi.mock("./offerApi", () => ({ fetchOffer: vi.fn() }));
@@ -64,5 +65,36 @@ describe("useOfferFlow", () => {
     await expect(olderRead).resolves.toBeNull();
     expect(result.current.data.current.draftHash).toBe("hash-1");
     expect(result.current.refreshError).toBeTruthy();
+  });
+});
+
+describe("useRenderAtExpiry", () => {
+  // A render shows the offer as sent while its expiry is still ahead; the effect that arms the timer runs after it. An
+  // expiry that passes in between still renders again at once. Here a layout effect, which runs after the render and
+  // before the timer's effect, moves the frozen clock past the expiry.
+  it("an expiry that passes between the render and the timer setup still renders the caller again", async () => {
+    const at = Date.parse("2026-11-26T15:00:00Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at - 1);
+    try {
+      let renders = 0;
+      const sent = { offer: { id: "offer-1", status: "sent", expiresAt: new Date(at).toISOString() } };
+      function Watcher() {
+        useRenderAtExpiry({ current: null }, sent);
+        renders += 1;
+        return null;
+      }
+      function ClockMoves() {
+        useLayoutEffect(() => {
+          vi.setSystemTime(at + 5);
+        }, []);
+        return <Watcher />;
+      }
+      render(<ClockMoves />);
+      expect(renders).toBe(1);
+      await waitFor(() => expect(renders).toBe(2));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
