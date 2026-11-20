@@ -557,37 +557,36 @@ function classifyReplyMode(grounding) {
 }
 
 // Owner 2026-11-19: the app is always "the Waves app". Two parts:
-// - wavesApp rewrites each mention whose article is known: "the/our/your
+// - wavesApp rewrites each bare mention whose article is known: "the/our/your
 //   [Waves [Pest Control]] [mobile] app" becomes "the Waves app" ("The" at the
 //   start of a sentence or a line). That is the common slip, and a rewrite
-//   costs no extra attempt.
-// - offAppName finds any other use of the word "app" ("a new Waves app",
-//   "our customer app", "an app"). The verifier rejects it (app_name) and the
-//   model writes the reply again: the right words cannot be guessed from the
-//   words around "app", and in a reply to a Waves review an app is the Waves
-//   app. No exceptions: every form of the word ("apps", "app-based", "App
-//   Store") is rejected too, and the model writes the reply without it. Only
-//   other words pass ("apply", "application").
-const APP_MENTION_RE = /\b(?:(?:the|our|your)\s+)?(?:waves\s+(?:pest\s+control\s+)?)?(?:mobile\s+)?apps?\b(?:-[\w-]*)?/gi;
-const OWN_APP_RE = /^(?:the|our|your)\s/i;
+//   costs no extra attempt. It leaves every other form to the verifier.
+// - offAppName allows one name and rejects the rest, instead of listing wrong
+//   phrasings (audit rounds found a new wrong phrasing each time). It blanks
+//   each exact "the Waves app" ("The Waves app" at the start of a sentence or
+//   a line; "app's" is the name too), then any word "app" or "apps" left is
+//   off the name: "a new Waves app", "our apps", "an app", "the Waves
+//   app-based reminders", "the Waves app store". The verifier rejects it
+//   (app_name) and the model writes the reply again; in a reply to a Waves
+//   review an app is the Waves app. Other words ("apply", "application")
+//   pass. The span is that one word, so no other reply text is stored.
+const OWN_APP_RE = /\b(?:the|our|your)\s+(?:waves\s+(?:pest\s+control\s+)?)?(?:mobile\s+)?app\b/gi;
+const WAVES_APP_RE = /\b[Tt]he Waves app\b/g;
+const APP_WORD_RE = /\bapps?\b/i;
 const SENTENCE_START_RE = /(?:^|[.!?]["')\]\u2019\u201d]*\s+|\n\s*)$/;
-// The rewrite touches only a bare "app" and leaves what it cannot read to the
-// verifier: "apps", "app-based", and "app store" (the App Store, or the verb
-// in "let our app store your notes").
-const STORE_NEXT_RE = /^\s+store\b/i;
+// Not the bare name when the word goes on: "app-based", "app-to-app", or
+// "app store" (the App Store, or the verb in "let our app store your notes").
+const NAME_GOES_ON_RE = /^(?:[-\w]|\s+store\b)/i;
+const nameAt = (s, at) => (SENTENCE_START_RE.test(s.slice(0, at)) ? 'The Waves app' : 'the Waves app');
 function wavesApp(text) {
-  return String(text || '').replace(APP_MENTION_RE, (m, at, s) => {
-    if (!OWN_APP_RE.test(m) || !/app$/i.test(m) || STORE_NEXT_RE.test(s.slice(at + m.length))) return m;
-    return SENTENCE_START_RE.test(s.slice(0, at)) ? 'The Waves app' : 'the Waves app';
-  });
+  return String(text || '').replace(OWN_APP_RE, (m, at, s) => (NAME_GOES_ON_RE.test(s.slice(at + m.length)) ? m : nameAt(s, at)));
 }
 // Exact, case and spacing included: an Agent Ops draft reaches Google as written.
 function offAppName(text) {
   const s = String(text || '');
-  for (const m of s.matchAll(APP_MENTION_RE)) {
-    if (m[0] !== (SENTENCE_START_RE.test(s.slice(0, m.index)) ? 'The Waves app' : 'the Waves app')) return m[0];
-  }
-  return null;
+  const rest = s.replace(WAVES_APP_RE, (m, at) => (m === nameAt(s, at) && !NAME_GOES_ON_RE.test(s.slice(at + m.length)) ? ' '.repeat(m.length) : m));
+  const hit = rest.match(APP_WORD_RE);
+  return hit ? hit[0] : null;
 }
 
 /**

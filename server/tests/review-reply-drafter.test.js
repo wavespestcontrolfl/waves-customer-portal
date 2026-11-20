@@ -911,36 +911,42 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     // No known article: the rewrite does not guess one (the verifier rejects these).
     const unsure = 'Glad your family finds Waves app helpful, a new Waves Pest Control app is coming, and an app is fine.';
     expect(w(unsure)).toBe(unsure);
-    const same = 'Happy to apply the apps and our application, the App Store and the app-based tools.';
+    const same = 'Happy to apply the apps and our application, the App Store, the app-to-app transfer and the app-based tools.';
     expect(w(same)).toBe(same);
   });
   test('the verifier rejects every "app" that is not part of exactly "the Waves app"', () => {
     const g = grounding({ text: appReview });
     const verdict = (said) => Drafter.verifyReplyDetailed(good(`Hi Dana,\n\nThank you for the kind words about ${said} and Marcus.`), g);
-    expect(verdict('Waves app')).toEqual({ code: 'app_name', span: 'Waves app' });
+    expect(verdict('Waves app')).toEqual({ code: 'app_name', span: 'app' });
     for (const said of ['the new Waves app', 'our app', 'the mobile app', 'the Waves Pest Control app', 'a Waves mobile app', 'an app', 'our customer app', 'the Waves customer app']) {
       expect(verdict(said)).toMatchObject({ code: 'app_name' });
     }
     expect(verdict('the Waves app')).toBeNull();
     // Exact, case and spacing included: an Agent Ops draft reaches Google as written.
-    expect(verdict('the waves app')).toEqual({ code: 'app_name', span: 'the waves app' });
-    expect(verdict('the  Waves app')).toEqual({ code: 'app_name', span: 'the  Waves app' });
+    expect(verdict('the waves app')).toEqual({ code: 'app_name', span: 'app' });
+    expect(verdict('the  Waves app')).toEqual({ code: 'app_name', span: 'app' });
     expect(Drafter.offAppName('Glad it helps. The Waves app is new, and the Waves app is free.')).toBeNull();
-    expect(Drafter.offAppName('Thanks for using The Waves app.')).toBe('The Waves app');
-    expect(Drafter.offAppName('Glad it helps. the Waves app is new.')).toBe('the Waves app');
+    expect(Drafter.offAppName('Thanks for using The Waves app.')).toBe('app');
+    expect(Drafter.offAppName('Glad it helps. the Waves app is new.')).toBe('app');
     // "apply" and "application" are other words; "the app stores" and the possessive are the app.
     expect(Drafter.offAppName('Happy to apply our application.')).toBeNull();
     expect(Drafter.offAppName('Glad the Waves app’s alerts help.')).toBeNull();
-    expect(Drafter.offAppName('Good news: the app stores your service notes.')).toBe('the app');
+    expect(Drafter.offAppName('Good news: the app stores your service notes.')).toBe('app');
     // No exceptions: every form of the word is rejected too ("apps", "app-based", every "App Store"), so the model writes the reply without it.
-    expect(Drafter.offAppName('Thanks for trying our apps.')).toBe('our apps');
-    expect(Drafter.offAppName('Thanks for trying the Waves apps.')).toBe('the Waves apps');
-    expect(Drafter.offAppName('Thanks for letting our app store your service notes.')).toBe('our app');
-    expect(Drafter.offAppName('Find the Waves app in the app store.')).toBe('the app');
-    expect(Drafter.offAppName('Find the Waves app in the App Store.')).toBe('the App');
-    expect(Drafter.offAppName('Find us in the Waves Pest Control App Store.')).toBe('the Waves Pest Control App');
-    expect(Drafter.offAppName('Thanks for trying the app-based reminders.')).toBe('the app-based');
-    expect(Drafter.offAppName('Thanks for trying the Waves app-based reminders.')).toBe('the Waves app-based');
+    expect(Drafter.offAppName('Thanks for trying our apps.')).toBe('apps');
+    expect(Drafter.offAppName('Thanks for trying the Waves apps.')).toBe('apps');
+    expect(Drafter.offAppName('Thanks for letting our app store your service notes.')).toBe('app');
+    expect(Drafter.offAppName('Find the Waves app in the app store.')).toBe('app');
+    expect(Drafter.offAppName('Find the Waves app in the App Store.')).toBe('App');
+    expect(Drafter.offAppName('Find us in the Waves Pest Control App Store.')).toBe('App');
+    expect(Drafter.offAppName('Thanks for trying the app-based reminders.')).toBe('app');
+    expect(Drafter.offAppName('Thanks for trying the Waves app-based reminders.')).toBe('app');
+    // The exact name followed by more of a word or by "store" is not the name: "the Waves app store", "the Waves App Store".
+    expect(Drafter.offAppName('Find us in the Waves app store.')).toBe('app');
+    expect(Drafter.offAppName('Find us in the Waves app Store.')).toBe('app');
+    expect(Drafter.offAppName('Glad it helps. Find us in the Waves App Store.')).toBe('App');
+    // The span is the word alone: a hyphenated phone number after it never reaches the stored rejection details.
+    expect(Drafter.offAppName('Text the Waves app-941-555-0100 line.')).toBe('app');
   });
   test('a draft that says "the app" is stored as "the Waves app" on the first attempt', async () => {
     const g = grounding({ text: appReview });
@@ -962,7 +968,7 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
       .mockResolvedValueOnce({ ok: true, text: good('Hi Dana,\n\nThank you for the kind words about the Waves app and Marcus.') });
     const r = await Drafter.draftReviewReply({ grounding: g, recentReplies: [] });
     expect(r).toMatchObject({ ok: true, attempts: 2, rejections: ['app_name'], version: 'reply-v3' });
-    expect(r.rejectionDetails).toEqual([{ attempt: 1, code: 'app_name', span: 'Waves app' }]);
+    expect(r.rejectionDetails).toEqual([{ attempt: 1, code: 'app_name', span: 'app' }]);
     expect(r.text).toContain('words about the Waves app and Marcus');
     expect(mockDispatch.mock.calls[1][1].text).toContain('named the app wrong: write "the Waves app" word for word');
   });
