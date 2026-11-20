@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 const devContext = createRequire(import.meta.url)('../scripts/dev/context.js');
 const coverageFloorFiles = createRequire(import.meta.url)('./coverage-floor-files.json');
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://localhost:3001';
 
@@ -43,6 +44,22 @@ export default defineConfig({
       this.emitFile({ type: 'asset', fileName: 'build-assets.json', source: JSON.stringify(assets) });
     },
   }, fieldViewAssetsPlugin(), {
+    // Every production build names itself in index.html: a short hash of the
+    // page as built, which lists the hashed entry files, so any code change
+    // moves it. The server stamps the live name on each staff API answer
+    // (server/middleware/portal-build-header.js), and an open staff tab
+    // compares it with its own (src/lib/portalVersion.js).
+    // After the Field view step, so its asset list is part of the hash.
+    name: 'waves-portal-build',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler(html) {
+        const build = createHash('sha256').update(html).digest('hex').slice(0, 12);
+        return html.replace(/<\/head>/i, `  <meta name="portal-build" content="${build}">\n  </head>`);
+      },
+    },
+  }, {
     name: 'waves-preview-checkout',
     apply: 'serve',
     configureServer(server) {
