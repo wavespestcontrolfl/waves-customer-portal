@@ -342,6 +342,7 @@ describe('refuses any record that is not empty, naming what it found and pointin
     ['an irrigation weekly email identity (non-FK)', () => mockNonFkMergeRewrites.mockResolvedValue({ 'email_messages.trigger_event_id': 2 }), 'Calls, texts, emails', /2 email_messages\.trigger_event_id/],
     ['an unstamped visit address (non-FK)', () => mockNonFkMergeRewrites.mockResolvedValue({ 'scheduled_services.service_address_stamp': 1 }), 'Visits', /1 scheduled_services\.service_address_stamp/],
     ['a non-FK count that could not be read (fail closed)', () => mockNonFkMergeRewrites.mockResolvedValue({ 'call_log.customer_link_override': 'unknown' }), 'Calls, texts, emails', /could not be checked/],
+    ['a sprinkler timer on its own preferences row (non-FK)', () => mockNonFkMergeRewrites.mockResolvedValue({ 'property_preferences.merged_away_sprinkler_timer_dropped': 1 }), 'Other linked records', /1 property_preferences\.merged_away_sprinkler_timer_dropped/],
     // Finding 2 (account ownership): a primary profile with other live members.
     ['an account primary profile with other live members', () => { db.__state.stub = { ...baseStub(), account_id: 'acct-1', is_primary_profile: true }; db.__state.sibling = { id: 'sibling-1' }; }, 'Other live members of its account', /other live members in its account/],
     ['a count that could not be read (fail closed)', moving({ sms_log: 'unknown' }), 'Calls, texts, emails', /sms_log \(could not be checked\)/],
@@ -377,6 +378,14 @@ describe('refuses any record that is not empty, naming what it found and pointin
   });
   test('the sprinkler home-changed stamp is a premise about two addresses, not history', async () => {
     mockNonFkMergeRewrites.mockResolvedValue({ 'property_preferences.irrigation_home_changed_at': 'stamped' });
+    expect((await preview()).preview).toBe(true);
+  });
+
+  test('the kept customer\'s own sprinkler timer, which a merge would clear, is not the duplicate\'s history', async () => {
+    mockNonFkMergeRewrites.mockResolvedValue({
+      'property_preferences.irrigation_home_changed_at': 'stamped',
+      'property_preferences.kept_customer_sprinkler_timer_cleared': 1,
+    });
     expect((await preview()).preview).toBe(true);
   });
 
