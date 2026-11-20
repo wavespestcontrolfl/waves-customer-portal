@@ -35,8 +35,8 @@ describeDb('weekly price scan: booked spend through PostgreSQL', () => {
     await knex('job_costs').insert([
       visit(-3, [line(ids.used, 5), line(ids.notAsked, 9), line(ids.zero, 0, { source: 'inventory_movement', stock_after: 0 })]),
       visit(-40, [line(ids.used, 2.5), line(ids.second, 0.38), line(ids.second, 2.01)]),
-      visit(-SPEND_WINDOW_DAYS, [line(ids.used, 1)]), // the first day of the window counts
-      visit(-SPEND_WINDOW_DAYS - 1, [line(ids.used, 50), line(ids.old, 70)]), // the day before it does not
+      visit(1 - SPEND_WINDOW_DAYS, [line(ids.used, 1)]), // the first of the window's 365 days counts
+      visit(-SPEND_WINDOW_DAYS, [line(ids.used, 50), line(ids.old, 70)]), // the day before it does not
       visit(0, [line(ids.second, 1)]), // today counts
       visit(1, [line(ids.used, 40), line(ids.old, 30)]), // a visit dated after today does not
       visit(-5, [line(ids.used, '12.00'), { qty: 1, line: 7 }, 'not a line']), // no number, no product, not an object

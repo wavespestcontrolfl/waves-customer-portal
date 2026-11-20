@@ -171,8 +171,8 @@ function toScanSpec(row, vendors = [], urlByVendorId = null, spend = 0) {
   return { product, vendors: vlist, spend: Number(spend) || 0 };
 }
 
-// Each product's booked material cost over the last 12 months (ET calendar days, today
-// included; a visit dated after today is not booked use yet): the product lines job costing
+// Each product's booked material cost over the last 12 months (the 365 ET calendar days
+// ending today; a visit dated after today is not booked use yet): the product lines job costing
 // wrote on each visit's job_costs row (job-costing.js calcProductsCost -> products_used
 // [{ product_id, line, ... }]). Reading the booked lines keeps job costing's rules in one
 // place: an inventory movement's cost first, else the application priced per unit, and no
@@ -181,7 +181,7 @@ function toScanSpec(row, vendors = [], urlByVendorId = null, spend = 0) {
 async function bookedSpendByProduct(db, productIds, { now = new Date() } = {}) {
   const spend = new Map();
   if (!productIds || !productIds.length) return spend;
-  const since = etDateString(addETDays(now, -SPEND_WINDOW_DAYS));
+  const since = etDateString(addETDays(now, 1 - SPEND_WINDOW_DAYS));
   const today = etDateString(now);
   const productOf = "line.value ->> 'product_id'";
   const rows = await db('job_costs as jc')
