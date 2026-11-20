@@ -404,9 +404,19 @@ function compatibleWorkerIntent(query, id) {
   });
 }
 
+function matchesRecordedIntent(recordedIntentId, expectedIntentId) {
+  return !recordedIntentId || recordedIntentId === expectedIntentId;
+}
+
+function workerIntentBinding(intentId, recordedAt = new Date()) {
+  if (!intentId) return {};
+  return { worker_payment_intent_id: intentId, stripe_payment_intent_bound_at: recordedAt };
+}
+
 async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = db) {
   const workerPaymentIntentId = updates.stripe_payment_intent_id || null;
   const updatedAt = new Date();
+  const binding = workerIntentBinding(workerPaymentIntentId, updatedAt);
   const active = compatibleWorkerIntent(database('stripe_invoice_charge_attempts'), workerPaymentIntentId)
     .where({ id: attemptId }).whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at');
   if (workerPaymentIntentId) {
@@ -420,7 +430,7 @@ async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = 
       // provenance in the same write that attaches a PI returned by create;
       // webhook resolvers deliberately write the ID through their own paths
       // and must never manufacture this evidence.
-      ...(workerPaymentIntentId ? { worker_payment_intent_id: workerPaymentIntentId, stripe_payment_intent_bound_at: updatedAt } : {}),
+      ...binding,
       updated_at: updatedAt,
     });
   if (!updated && workerPaymentIntentId) {
@@ -431,7 +441,7 @@ async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = 
     const provenanceStamped = await compatibleWorkerIntent(database('stripe_invoice_charge_attempts'), workerPaymentIntentId)
       .where({ id: attemptId, stripe_payment_intent_id: workerPaymentIntentId })
       .whereNotNull('resolved_at')
-      .update({ worker_payment_intent_id: workerPaymentIntentId, stripe_payment_intent_bound_at: updatedAt, updated_at: updatedAt });
+      .update({ ...binding, updated_at: updatedAt });
     if (provenanceStamped) return;
     // Preserve both identities if an older writer completed a different PI.
     // The submitted charge can still settle. Refuse every new collection.
@@ -443,7 +453,7 @@ async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = 
       .where({ id: attemptId })
       .whereNotNull('stripe_payment_intent_id')
       .whereNot('stripe_payment_intent_id', workerPaymentIntentId)
-      .update({ worker_payment_intent_id: workerPaymentIntentId, stripe_payment_intent_bound_at: updatedAt,
+      .update({ ...binding,
         error_message: 'Conflicting saved-card PaymentIntents require reconciliation', updated_at: updatedAt });
   }
   if (!updated) {
@@ -596,42 +606,36 @@ async function resolveNoFundsSavedCardChargeAttempt({
       // A signed failure can resolve this claim while the create request is
       // still returning. Only the original worker has that response's PI.
       if (declineCode !== 'authentication_required') return false;
-      if (!authenticationIntentId) {
-        // A worker can report authentication without returning the intent. Its
-        // decline still fences collection, but supplies no cancellation proof.
-        const held = await trx('stripe_invoice_charge_attempts')
-          .where({ id: attemptId, invoice_id: invoiceId, status: 'failed' })
-          .whereNotNull('resolved_at')
-          .update({ decline_code: declineCode, updated_at: new Date() });
-        return held ? { resolved: true, reopened: false } : false;
-      }
       const recordedAt = new Date();
-      const bound = await compatibleWorkerIntent(trx('stripe_invoice_charge_attempts'), authenticationIntentId)
+      const binding = workerIntentBinding(authenticationIntentId, recordedAt);
+      // A decline without an intent still fences the invoice. If the worker
+      // returned an intent, bind it while preserving any PI seen by a webhook.
+      let recorded = await compatibleWorkerIntent(trx('stripe_invoice_charge_attempts'), authenticationIntentId)
         .where({ id: attemptId, invoice_id: invoiceId, status: 'failed' })
         .whereNotNull('resolved_at')
         .update({
-          worker_payment_intent_id: authenticationIntentId,
-          stripe_payment_intent_bound_at: recordedAt,
-          // Preserve a different webhook PI. A release requires the worker,
-          // the observed PI, and the verified cancellation all to agree.
-          stripe_payment_intent_id: trx.raw('COALESCE(stripe_payment_intent_id, ?)', [authenticationIntentId]),
-          decline_code: 'authentication_required',
+          ...binding,
+          ...(authenticationIntentId ? {
+            stripe_payment_intent_id: trx.raw('COALESCE(stripe_payment_intent_id, ?)', [authenticationIntentId]),
+          } : {}),
+          decline_code: declineCode,
           updated_at: recordedAt,
         });
-      if (bound) return { resolved: true, reopened: false };
-      // Keep a successful webhook's settlement. A different original worker
-      // intent can still charge, so retain both identities for reconciliation.
-      const conflict = await compatibleWorkerIntent(trx('stripe_invoice_charge_attempts'), authenticationIntentId)
-        .where({ id: attemptId, invoice_id: invoiceId, status: 'succeeded' })
-        .whereNotNull('resolved_at')
-        .whereNot('stripe_payment_intent_id', authenticationIntentId)
-        .update({ worker_payment_intent_id: authenticationIntentId, stripe_payment_intent_bound_at: recordedAt, updated_at: recordedAt });
-      return conflict ? { resolved: true, reopened: false } : false;
+      if (!recorded && authenticationIntentId) {
+        // Keep a successful webhook's settlement. A different original worker
+        // intent can still charge, so retain both identities for reconciliation.
+        recorded = await compatibleWorkerIntent(trx('stripe_invoice_charge_attempts'), authenticationIntentId)
+          .where({ id: attemptId, invoice_id: invoiceId, status: 'succeeded' })
+          .whereNotNull('resolved_at')
+          .whereNot('stripe_payment_intent_id', authenticationIntentId)
+          .update({ ...binding, updated_at: recordedAt });
+      }
+      return recorded ? { resolved: true, reopened: false } : false;
     }
-    if (authenticationIntentId && attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== authenticationIntentId) return false;
-    if (authenticationIntentId && attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== authenticationIntentId) {
+    if (authenticationIntentId && !matchesRecordedIntent(attempt.worker_payment_intent_id, authenticationIntentId)) return false;
+    if (authenticationIntentId && !matchesRecordedIntent(attempt.stripe_payment_intent_id, authenticationIntentId)) {
       await trx('stripe_invoice_charge_attempts').where({ id: attempt.id }).update({
-        worker_payment_intent_id: authenticationIntentId, stripe_payment_intent_bound_at: new Date(),
+        ...workerIntentBinding(authenticationIntentId),
         status: 'ambiguous', error_message: 'Conflicting saved-card PaymentIntents require reconciliation', updated_at: new Date(),
       });
       return { resolved: false, reopened: false };
@@ -641,10 +645,10 @@ async function resolveNoFundsSavedCardChargeAttempt({
     // while the original is still blocked in Stripe. Once that owner proves no
     // funds can move (pre-create failure or definitive decline), restore
     // collection only while its ambiguous no-PI attempt still owns the park.
-    let reopened = false;
-    if (attempt.status === 'ambiguous'
-      && String(invoice.status || '').toLowerCase() === 'processing'
-      && !invoice.stripe_payment_intent_id) {
+    const reopened = attempt.status === 'ambiguous'
+      && String(invoice.status).toLowerCase() === 'processing'
+      && !invoice.stripe_payment_intent_id;
+    if (reopened) {
       await trx('invoices').where({ id: invoiceId }).update({
         status: nextInvoiceStatusAfterFailedPayment(invoice),
         stripe_payment_intent_id: null,
@@ -652,7 +656,6 @@ async function resolveNoFundsSavedCardChargeAttempt({
         ach_processing_notified_at: null,
         updated_at: new Date(),
       });
-      reopened = true;
     }
 
     const resolved = await trx('stripe_invoice_charge_attempts')
@@ -663,11 +666,8 @@ async function resolveNoFundsSavedCardChargeAttempt({
         status: 'failed',
         error_message: String(failureMessage || 'Pre-charge setup failed').slice(0, 1000),
         decline_code: declineCode,
-        ...(authenticationIntentId ? {
-          stripe_payment_intent_id: authenticationIntentId,
-          worker_payment_intent_id: authenticationIntentId,
-          stripe_payment_intent_bound_at: new Date(),
-        } : {}),
+        ...(authenticationIntentId ? { stripe_payment_intent_id: authenticationIntentId } : {}),
+        ...workerIntentBinding(authenticationIntentId),
         resolved_at: new Date(),
         updated_at: new Date(),
       });
@@ -768,10 +768,6 @@ function failedSavedCardCanceledCheckoutId(attempt) {
   return attempt?.canceled_checkout_payment_intent_id
     ? String(attempt.canceled_checkout_payment_intent_id)
     : null;
-}
-
-function matchesRecordedIntent(recordedIntentId, expectedIntentId) {
-  return !recordedIntentId || recordedIntentId === expectedIntentId;
 }
 
 async function resolveFailedInvoiceSavedCardChargeAttempt({

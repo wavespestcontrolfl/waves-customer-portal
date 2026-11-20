@@ -45,55 +45,53 @@ function classifyExistingWebhookEvent(existing, { now = Date.now(), staleWindowM
   return 'inflight';
 }
 
+function optionalId(value) {
+  return String(value || '');
+}
+
+function savedCardMethodMatches(storedMethodId, paymentIntent, verifiedCancellation) {
+  if (!storedMethodId) return false;
+  const method = paymentIntent.payment_method || paymentIntent.last_payment_error?.payment_method;
+  const methodId = typeof method === 'string' ? method : method?.id;
+  return String(storedMethodId) === optionalId(methodId) || Boolean(!methodId && verifiedCancellation);
+}
+
+function savedCardPaymentEvidenceMatches(attempt, paymentIntent, metadataAttemptId, options) {
+  const paymentIntentId = optionalId(paymentIntent.id);
+  const namedAttemptId = optionalId(metadataAttemptId);
+  const attachedId = optionalId(attempt.stripe_payment_intent_id);
+  const workerId = attempt.worker_payment_intent_id || '';
+  const workerMatches = workerId === paymentIntentId;
+  if (workerId && !workerMatches) return false;
+  if (attachedId && attachedId !== paymentIntentId) return false;
+  // Without an attempt ID in metadata, only an exact recorded attachment binds
+  // a legacy event. One invoice and card may be used for multiple attempts.
+  if (namedAttemptId ? namedAttemptId !== String(attempt.id) : !attachedId) return false;
+  if (options.requireWorkerPaymentIntent && (!namedAttemptId || !workerMatches)) return false;
+
+  // The recorded IDs above are now either absent or agree with this event.
+  // After the worker responds, both its ID and the attachment must be present.
+  const verifiedCancellation = options.allowVerifiedCancellationWithoutMethod
+    && Boolean(namedAttemptId && paymentIntentId) && paymentIntent.status === 'canceled'
+    && attempt.authentication_canceled_intent_id === paymentIntentId
+    && (workerId ? Boolean(attachedId) : options.allowCancellationAwaitingWorker);
+  return savedCardMethodMatches(attempt.stripe_payment_method_id, paymentIntent, verifiedCancellation);
+}
+
 function savedCardAttemptMatchesPaymentIntent({
-  attempt,
-  invoice,
-  paymentIntent,
-  allowResolvedSucceeded = false,
-  requireWorkerPaymentIntent = false,
-  allowVerifiedCancellationWithoutMethod = false,
-  allowCancellationAwaitingWorker = false,
-  provenInvoiceOwner = false,
+  attempt, invoice, paymentIntent, allowResolvedSucceeded = false, provenInvoiceOwner, ...options
 }) {
   if (!attempt || !invoice || !paymentIntent) return false;
   const metadata = paymentIntent.metadata || {};
-  const method = paymentIntent.payment_method || paymentIntent.last_payment_error?.payment_method;
-  const paymentMethodId = typeof method === 'string' ? method : method?.id;
-  const metadataAttemptId = metadata.saved_card_attempt_id
-    ? String(metadata.saved_card_attempt_id)
-    : '';
-  const attachedPaymentIntentId = attempt.stripe_payment_intent_id
-    ? String(attempt.stripe_payment_intent_id)
-    : '';
-  const workerPaymentIntentId = attempt.worker_payment_intent_id
-    ? String(attempt.worker_payment_intent_id)
-    : '';
-  const paymentIntentId = String(paymentIntent.id || '');
-  // A customer can reuse the same saved card for multiple attempts on the same
-  // invoice. Method/customer matching alone would let a late event from an old
-  // PI consume the current fence. New PIs carry the immutable attempt id; the
-  // exact PI recorded on a legacy/in-flight attempt is the only safe fallback.
-  const exactAttemptBinding = metadataAttemptId
-    ? metadataAttemptId === String(attempt.id)
-    : Boolean(attachedPaymentIntentId && attachedPaymentIntentId === paymentIntentId);
-  const verifiedCancellation = allowVerifiedCancellationWithoutMethod && !paymentMethodId
-    && paymentIntent.status === 'canceled' && Boolean(paymentIntentId) && Boolean(metadataAttemptId)
-    && attempt.authentication_canceled_intent_id === paymentIntentId
-    && ((attempt.worker_payment_intent_id === paymentIntentId && attachedPaymentIntentId === paymentIntentId)
-      || (allowCancellationAwaitingWorker && !attempt.worker_payment_intent_id));
+  const invoiceId = String(invoice.id);
   const activeAttempt = ['claimed', 'ambiguous'].includes(attempt.status) && !attempt.resolved_at;
   const settledAttempt = allowResolvedSucceeded && attempt.status === 'succeeded' && attempt.resolved_at;
   return (activeAttempt || settledAttempt)
-    && exactAttemptBinding
-    && (!requireWorkerPaymentIntent || (Boolean(metadataAttemptId) && workerPaymentIntentId === paymentIntentId))
-    && (!attempt.worker_payment_intent_id || attempt.worker_payment_intent_id === paymentIntentId)
-    && (!attachedPaymentIntentId || attachedPaymentIntentId === paymentIntentId)
-    && String(attempt.invoice_id) === String(invoice.id)
+    && String(attempt.invoice_id) === invoiceId
     && metadata.source === 'admin_card_on_file'
-    && String(metadata.waves_invoice_id || '') === String(invoice.id)
-    && (provenInvoiceOwner || String(metadata.waves_customer_id || '') === String(invoice.customer_id))
-    && Boolean(attempt.stripe_payment_method_id)
-    && (verifiedCancellation || String(attempt.stripe_payment_method_id) === String(paymentMethodId || ''));
+    && optionalId(metadata.waves_invoice_id) === invoiceId
+    && (provenInvoiceOwner || optionalId(metadata.waves_customer_id) === String(invoice.customer_id))
+    && savedCardPaymentEvidenceMatches(attempt, paymentIntent, metadata.saved_card_attempt_id, options);
 }
 
 function savedCardCreditAdjustment({ attempt, invoice }) {
