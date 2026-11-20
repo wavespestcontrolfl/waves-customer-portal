@@ -773,6 +773,10 @@ describe('test records and junk leads (owner 2026-11-19)', () => {
     expect(junk.bindings).toEqual(JUNK_LEAD_STATUSES);
     // ...before the limit: the filter is part of the same query the limit caps.
     expect(chain.whereRaw.mock.invocationCallOrder[raws.indexOf(junk)]).toBeLessThan(chain.limit.mock.invocationCallOrder[0]);
+    // A won repeat of an already-won deal is dropped by the shared second-win rule, also before the limit.
+    const secondWin = raws.find((r) => r.sql === require('../services/lead-statuses').secondWinSql('l'));
+    expect(secondWin).toBeDefined();
+    expect(chain.whereRaw.mock.invocationCallOrder[raws.indexOf(secondWin)]).toBeLessThan(chain.limit.mock.invocationCallOrder[0]);
   });
 
   test('an internal test record is skipped as internal_test (owner cell, test name, linked test customer)', () => {

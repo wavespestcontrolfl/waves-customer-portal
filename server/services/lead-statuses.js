@@ -194,6 +194,8 @@ module.exports = {
   isOpenLeadRow,
   scopeToProspects,
   PROSPECT_SCOPE_SQL,
+  // The second-win rule alone, over an aliased leads query (ad conversion uploads).
+  secondWinSql,
   // exported for tests
   SECOND_WIN_SQL,
   WON_DESCENDANT_SQL,

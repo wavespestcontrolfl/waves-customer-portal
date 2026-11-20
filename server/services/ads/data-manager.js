@@ -17,7 +17,7 @@ const { runExclusive } = require('../../utils/cron-lock');
 const { loadMarketingSuppression, normPhone: consentNormPhone } = require('./ad-audience-consent');
 const matchFields = require('./ad-match-fields');
 const { isInternalTestContact } = require('../internal-test-customers');
-const { NON_ENGAGED_LEAD_STATUSES } = require('../lead-statuses');
+const { NON_ENGAGED_LEAD_STATUSES, secondWinSql } = require('../lead-statuses');
 
 let _googleapis;
 function getGoogle() {
@@ -583,6 +583,12 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
     // matches above. It is dropped here, before the limit, so junk never takes
     // an upload slot from an older real lead.
     .whereRaw(`LOWER(TRIM(COALESCE(l.status, ''))) NOT IN (${JUNK_LEAD_STATUSES.map(() => '?').join(', ')})`, JUNK_LEAD_STATUSES)
+    // A won quote-wizard repeat whose original lead is also won on the same
+    // deal (same customer, same estimate) is one sale counted twice: the shared
+    // second-win rule (lead-statuses.js) drops the repeat and keeps the
+    // original, which carries the first click. A repeat won on another
+    // estimate is another sale and stays.
+    .whereRaw(secondWinSql('l'))
     .select(
       'l.id',
       'l.estimate_id',

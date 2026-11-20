@@ -109,6 +109,23 @@ jest.setTimeout(30000);
     expect((await qualified()).map((x) => x.leadId)).toEqual([real.id]);
   });
 
+  test('a won quote-wizard repeat of a won lead is one conversion on the same estimate, and two on another estimate', async () => {
+    const repeatOf = (root, fields) => lead(null, {
+      lead_type: 'quote_wizard', status: 'won', extracted_data: JSON.stringify({ duplicate_of_lead_id: root.id }), ...fields,
+    });
+    // One sale: the original and its repeat are both won on one estimate.
+    const c = await customer();
+    const estimate = randomUUID();
+    const original = await lead(c, { status: 'won', estimate_id: estimate });
+    await repeatOf(original, { customer_id: c.id, estimate_id: estimate });
+    // Two sales: the repeat was won on a different estimate.
+    const c2 = await customer({ email: 'pat.two@example.com', phone: '+19415550111' });
+    const contact2 = { email: 'pat.two@example.com', phone: '+19415550111' };
+    const original2 = await lead(c2, { status: 'won', estimate_id: randomUUID(), ...contact2 });
+    const repeat2 = await repeatOf(original2, { customer_id: c2.id, estimate_id: randomUUID(), ...contact2 });
+    expect((await qualified()).map((x) => x.leadId).sort()).toEqual([original.id, original2.id, repeat2.id].sort());
+  });
+
   // The row order of a job's leads is the plan's, so the owner-cell lead goes in first and last.
   test.each([['first'], ['last']])('completed jobs: the limit counts jobs, so every lead of a picked job is read and a test-record lead (inserted %s) is never cut', async (position) => {
     const c = await customer({ member_since: '2026-01-01' });
