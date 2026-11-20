@@ -96,6 +96,22 @@ function countBodyReads(response) {
   }
 }
 
+// A wait that belongs to a request still on its way, such as the pause before
+// a retry after a 429 answer (utils/admin-fetch.js), counts as that request,
+// and as a write when the request writes, until it settles. A request the
+// watch does not count (another origin, outside /api) is not counted here
+// either.
+export function countRequestWait(wait, input, init) {
+  let request = { api: false, write: false };
+  try { request = apiRequest(input, init); } catch { /* never breaks the caller's request */ }
+  if (request.write) writes += 1;
+  if (request.api) requests += 1;
+  return Promise.resolve(wait).finally(() => {
+    if (request.write) writes -= 1;
+    if (request.api) requests -= 1;
+  });
+}
+
 export function subscribePortalVersion(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);

@@ -6,6 +6,7 @@
 // its way not counted (the reload must wait for it).
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
+  countRequestWait,
   heardFromServerWithin,
   installPortalVersionWatch,
   newerBuild,
@@ -172,6 +173,21 @@ describe('installPortalVersionWatch', () => {
     const assetRead = asset.json();
     expect(requestsInFlight()).toBe(0);
     await assetRead;
+  });
+
+  test('a wait that belongs to a request counts as it, a write as a write, until it settles, failed or not; other requests are not counted', async () => {
+    let endRetryWait;
+    const retryWait = countRequestWait(new Promise((resolve) => { endRetryWait = resolve; }), '/api/admin/dispatch/1/status', { method: 'POST' });
+    expect([requestsInFlight(), writesInFlight()]).toEqual([1, 1]);
+    const readWait = countRequestWait(Promise.reject(new Error('stopped')), '/api/admin/dashboard');
+    expect([requestsInFlight(), writesInFlight()]).toEqual([2, 1]);
+    await expect(readWait).rejects.toThrow('stopped');
+    expect([requestsInFlight(), writesInFlight()]).toEqual([1, 1]);
+    endRetryWait();
+    await retryWait;
+    expect([requestsInFlight(), writesInFlight()]).toEqual([0, 0]);
+    await countRequestWait(Promise.resolve(), 'https://elsewhere.example/api/x', { method: 'POST' });
+    expect([requestsInFlight(), writesInFlight()]).toEqual([0, 0]);
   });
 
   test('returns the same answer and removes itself only while it is outermost', async () => {

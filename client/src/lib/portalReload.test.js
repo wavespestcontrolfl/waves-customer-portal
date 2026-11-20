@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 // When an out-of-date staff tab reloads by itself (owner 2026-11-19, option A):
-// at a page move, on staff pages in a browser, once per live build, only after
-// a recent answer from the new server, and never while work holds it.
+// at a page move, on staff pages in a browser, once per live build (up to two
+// more tries when a reload came back on the old page), only after a recent
+// answer from the new server, and never while work holds it.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const platform = vi.hoisted(() => ({ wavesAdmin: false }));
@@ -11,6 +12,7 @@ import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests
 import { registerReloadHold } from './reloadHolds';
 import { countDeviceWrite } from './deviceWrites';
 import { RECENT_ANSWER_MS, WRITE_WAIT_MS, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from './portalReload';
+import { adminFetch } from '../utils/admin-fetch';
 
 const NOW = 1_000_000;
 let holding = false;
@@ -192,6 +194,36 @@ describe('reloadForNewBuild', () => {
       expect(reload).toHaveBeenCalledTimes(1);
     } finally {
       uninstall();
+    }
+  });
+
+  test('waits through the pause before a retry after a 429 answer, as adminFetch counts it as the write still on its way, then reloads', async () => {
+    vi.useFakeTimers();
+    const answers = [
+      new Response(null, { status: 429, headers: { 'Retry-After': '1' } }),
+      new Response('{"ok":true}', { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    ];
+    const network = vi.fn(async () => answers.shift());
+    vi.stubGlobal('fetch', network);
+    const uninstall = installPortalVersionWatch();
+    try {
+      liveBuild('bbb222bbb222', Date.now());
+      const save = adminFetch('/admin/dispatch/1/status', { method: 'POST', body: '{}' });
+      const reload = vi.fn();
+      const done = reloadForNewBuild({ reload });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(network).toHaveBeenCalledTimes(1);
+      expect(reloadBlockers()).toEqual(['saving']);
+      expect(reload).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      await expect(save).resolves.toEqual({ ok: true });
+      expect(network).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(400);
+      await expect(done).resolves.toBeNull();
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      uninstall();
+      vi.unstubAllGlobals();
     }
   });
 
