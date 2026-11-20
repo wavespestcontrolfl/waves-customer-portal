@@ -4,7 +4,7 @@
 // handling (lib/pest-default-mix.js): Codex r3 P1 on #5049 — the seed
 // (now also live on one-time pest) ignored visitOutcome entirely, so
 // picking inspection_only / customer_declined after it fired left Taurus
-// SC / Atticus Talak 7.9 F / LESCO 90/10 Nonionic Surfactant selected, and
+// SC / LESCO Crosscheck Plus / LESCO 90/10 Nonionic Surfactant selected, and
 // submit would record applied products, compliance rows, and inventory
 // deductions for a visit declared not performed. This mirrors
 // SchedulePage.protocol-completion-defaults.test.jsx's own outcome-gating
@@ -15,7 +15,7 @@ import { CompletionPanel } from './SchedulePage';
 
 const pestCatalog = [
   { id: 'p1', name: 'Taurus SC', category: 'Insecticide' },
-  { id: 'p2', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  { id: 'p2', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
   { id: 'p3', name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant' },
 ];
 
@@ -47,6 +47,8 @@ function stubFetch() {
           serviceId: 'pest-visit-1', programKey: 'pest',
           matchedVisit: { visit: 1, reason: 'pest_general', matched: true },
           source: 'none', products: [], unresolved: [],
+          // Room under the yearly Taurus label limit, so the house mix keeps Taurus.
+          taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 },
         }),
       };
     }
@@ -67,7 +69,7 @@ afterEach(() => {
   localStorage.clear();
 });
 
-it('seeds Taurus SC + Atticus Talak 7.9 F + LESCO 90/10 Nonionic Surfactant on a completed general-pest visit', async () => {
+it('seeds Taurus SC + LESCO Crosscheck Plus + LESCO 90/10 Nonionic Surfactant on a completed general-pest visit', async () => {
   stubFetch();
   await act(async () => {
     render(
@@ -80,7 +82,7 @@ it('seeds Taurus SC + Atticus Talak 7.9 F + LESCO 90/10 Nonionic Surfactant on a
     );
   });
   await screen.findByText('Taurus SC');
-  expect(screen.getByText('Atticus Talak 7.9 F')).toBeTruthy();
+  expect(screen.getByText('LESCO Crosscheck Plus')).toBeTruthy();
   expect(screen.getByText('LESCO 90/10 Nonionic Surfactant')).toBeTruthy();
 });
 
@@ -101,12 +103,12 @@ it('clears the seeded pest-mix rows on customer_declined, then reseeds once the 
   const outcomeSelect = screen.getByDisplayValue('Completed');
   fireEvent.change(outcomeSelect, { target: { value: 'customer_declined' } });
   await waitFor(() => expect(screen.queryByText('Taurus SC')).toBeNull());
-  expect(screen.queryByText('Atticus Talak 7.9 F')).toBeNull();
+  expect(screen.queryByText('LESCO Crosscheck Plus')).toBeNull();
   expect(screen.queryByText('LESCO 90/10 Nonionic Surfactant')).toBeNull();
 
   fireEvent.change(outcomeSelect, { target: { value: 'completed' } });
   await waitFor(() => expect(screen.queryByText('Taurus SC')).not.toBeNull());
-  expect(screen.getByText('Atticus Talak 7.9 F')).toBeTruthy();
+  expect(screen.getByText('LESCO Crosscheck Plus')).toBeTruthy();
   expect(screen.getByText('LESCO 90/10 Nonionic Surfactant')).toBeTruthy();
 });
 
@@ -127,7 +129,7 @@ it('clears the seeded pest-mix rows on inspection_only too', async () => {
   const outcomeSelect = screen.getByDisplayValue('Completed');
   fireEvent.change(outcomeSelect, { target: { value: 'inspection_only' } });
   await waitFor(() => expect(screen.queryByText('Taurus SC')).toBeNull());
-  expect(screen.queryByText('Atticus Talak 7.9 F')).toBeNull();
+  expect(screen.queryByText('LESCO Crosscheck Plus')).toBeNull();
   expect(screen.queryByText('LESCO 90/10 Nonionic Surfactant')).toBeNull();
 });
 
@@ -164,13 +166,13 @@ it('a hand-removed pest-mix row stays removed across declined → completed (pre
       />,
     );
   });
-  await screen.findByText('Atticus Talak 7.9 F');
-  const talakRow = screen.getByText('Atticus Talak 7.9 F').closest('[data-selected-product], li, tr, div');
+  await screen.findByText('LESCO Crosscheck Plus');
+  const crosscheckRow = screen.getByText('LESCO Crosscheck Plus').closest('[data-selected-product], li, tr, div');
   const removeButtons = screen.getAllByRole('button', { name: 'Remove product' });
-  // Remove Talak specifically (the tech's own edit).
-  const talakIndex = removeButtons.findIndex((btn) => talakRow && talakRow.contains(btn));
-  fireEvent.click(removeButtons[talakIndex >= 0 ? talakIndex : 1]);
-  await waitFor(() => expect(screen.queryByText('Atticus Talak 7.9 F')).toBeNull());
+  // Remove Crosscheck specifically (the tech's own edit).
+  const crosscheckIndex = removeButtons.findIndex((btn) => crosscheckRow && crosscheckRow.contains(btn));
+  fireEvent.click(removeButtons[crosscheckIndex >= 0 ? crosscheckIndex : 1]);
+  await waitFor(() => expect(screen.queryByText('LESCO Crosscheck Plus')).toBeNull());
 
   const outcomeSelect = screen.getByDisplayValue('Completed');
   fireEvent.change(outcomeSelect, { target: { value: 'customer_declined' } });
@@ -179,7 +181,7 @@ it('a hand-removed pest-mix row stays removed across declined → completed (pre
   await screen.findByText('Taurus SC');
   await screen.findByText('LESCO 90/10 Nonionic Surfactant');
   // The deliberate removal survives the outcome round-trip.
-  expect(screen.queryByText('Atticus Talak 7.9 F')).toBeNull();
+  expect(screen.queryByText('LESCO Crosscheck Plus')).toBeNull();
 });
 
 it('applies the same mix and the same outcome gating to a one-time pest visit scheduled under the bare label (Codex r3 P1+P2, PR #5049)', async () => {

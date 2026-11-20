@@ -19,7 +19,13 @@ const {
   splitFrontmatter,
 } = require('./editorial-review-inventory');
 const { fetchSources } = require('./editorial-review-sources');
-const { validatePlanJson, validateReviewJson } = require('./editorial-review-validation');
+
+// The Mac job (CONTENT_EDITORIAL_REVIEW_RUNNER=mac) answers these calls with
+// `claude -p`, which needs far more than the server's LIMITS.timeoutMs for one
+// review of a long post (a live test aborted at 60 s). Read at call time.
+const MAC_RUNNER_TIMEOUT_MS = 15 * 60 * 1000;
+const modelTimeoutMs = () => (process.env.CONTENT_EDITORIAL_REVIEW_RUNNER === 'mac' ? MAC_RUNNER_TIMEOUT_MS : LIMITS.timeoutMs);
+const { validatePlanJson, validateReviewJson, holdUnsourcedFigures } = require('./editorial-review-validation');
 
 function firstPassage(document, title) {
   const body = splitFrontmatter(document).body;
@@ -31,7 +37,9 @@ function finding(passage, detail, action, extra = {}) {
   return { passage, detail, action, sourceIndexes: [], sourceQuote: '', ...extra };
 }
 
-function errorResult(document, title, detail, action, sources = [], reviewedAt = new Date().toISOString()) {
+// `transient`: the review could not run (sources, the model, its answer), so the same document may pass
+// a retry; false for a document the review refuses as input (prepareReview).
+function errorResult(document, title, detail, action, sources = [], reviewedAt = new Date().toISOString(), transient = true) {
   const passage = firstPassage(document, title);
   return {
     pass: false,
@@ -39,8 +47,12 @@ function errorResult(document, title, detail, action, sources = [], reviewedAt =
     sources,
     model: null,
     reviewedAt,
+    transient,
   };
 }
+
+// The dispatcher marks a leg whose answer the caller's validator refused (llm/call.js legFailure).
+const validatorRejected = (response) => (response?.failures || []).some((failure) => failure?.validator === true);
 
 function boundedJson(value, maxChars) {
   if (value == null) return '(none supplied)';
@@ -75,7 +87,7 @@ Output consistency rules:
 - sectionCoverage statuses evaluate ONLY answer_first, not sourcing or overall section quality. Every failed section requires answer_first=fail and a finding whose passage is its COMPLETE supplied lead (or exact heading when the lead is empty).
 - passageCoverage statuses evaluate ONLY standalone_passages. Every failed paragraph requires standalone_passages=fail and a finding whose passage is the COMPLETE supplied paragraph text.
 - Every unsupported claim, including model-added claims, requires source_support=fail and a separate finding with exactly the same passage as that claim. Do not collapse differently worded claims into one finding.
-- For non_external claims set verdict="non_external", claimKind="non_external", sourceSuitability="not_applicable", sourceIndex=-1, sourceQuote="". Unsupported claims also use sourceIndex=-1 and sourceQuote="". Preserve each supplied C-item passage exactly; add model: claims only for material claims the C-items miss. Attributed quotations use claimKind="expert_quote" even when they include numbers; otherwise claims containing numeric figures use claimKind="quantitative".
+- For non_external claims set verdict="non_external", claimKind="non_external", sourceSuitability="not_applicable", sourceIndex=-1, sourceQuote="". Unsupported claims also use sourceIndex=-1 and sourceQuote="". Preserve each supplied C-item passage exactly; add model: claims only for material claims the C-items miss. Attributed quotations use claimKind="expert_quote" even when they include numbers; otherwise claims containing numeric figures use claimKind="quantitative". A passage with a numeric figure is never non_external, link text included (digits in a link address or in a UF/IFAS publication number such as EENY-514 are not figures); the only exception is the visible "Last updated: Month Year" line. A number in an instruction ("Check 2 containers", "Look for larvae that hatch in 3 days") is a claim too. Mark every other numeric passage supported or unsupported.
 
 Every failing finding must quote an exact contiguous passage from the document (or the exact supplied title), explain the defect, and give a concrete edit action. A pass check has no findings; a fail check has at least one. Source indexes are zero-based. sourceQuote must be copied exactly from that source excerpt and must be empty when no source is cited. Return all five checks exactly once and cover every supplied section, paragraph, and C-item exactly once.`;
 }
@@ -122,7 +134,7 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
   document = typeof document === 'string' ? document : '';
   title = typeof title === 'string' ? title.trim() : '';
   const prepared = prepareReview(document, title);
-  if (prepared.error) return errorResult(document, title, prepared.error[0], prepared.error[1], [], reviewedAt);
+  if (prepared.error) return errorResult(document, title, prepared.error[0], prepared.error[1], [], reviewedAt, false);
   const { analysis } = prepared;
 
   let evidence;
@@ -139,25 +151,32 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
   let response;
   try {
     response = await createDeepMessage(null, payload, {
-      jsonSchema: REVIEW_SCHEMA, timeoutMs: LIMITS.timeoutMs, promptVersion: 'editorial-review-v1',
-      validate: (json) => validateReviewJson(json, analysis, document, title, evidence.records),
+      jsonSchema: REVIEW_SCHEMA, timeoutMs: modelTimeoutMs(), promptVersion: 'editorial-review-v1',
+      validate: (json) => validateReviewJson(holdUnsourcedFigures(json), analysis, document, title, evidence.records),
     });
   } catch (err) {
     return errorResult(document, title, `Editorial model dispatch failed: ${err.message}`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt);
   }
   if (!response?.ok || !response.json || !String(response.model || '').trim()) {
-    return errorResult(document, title, `Editorial model did not return a complete valid review (${response?.reason || 'invalid response'}).`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt);
+    return errorResult(document, title, `Editorial model did not return a complete valid review (${response?.reason || 'invalid response'}).`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt, !validatorRejected(response));
   }
-  const validationError = validateReviewJson(response.json, analysis, document, title, evidence.records);
-  if (validationError) return errorResult(document, title, `Editorial response failed validation: ${validationError}.`, 'Retry the complete editorial review; do not publish from partial coverage.', evidence.records, reviewedAt);
+  const reviewed = holdUnsourcedFigures(response.json);
+  const validationError = validateReviewJson(reviewed, analysis, document, title, evidence.records);
+  if (validationError) return errorResult(document, title, `Editorial response failed validation: ${validationError}.`, 'Retry the complete editorial review; do not publish from partial coverage.', evidence.records, reviewedAt, false);
 
-  const checks = addOperationalFindings(response.json.checks, analysis, evidence.errors, document, title);
+  const checks = addOperationalFindings(reviewed.checks, analysis, evidence.errors, document, title);
+  // Another check that failed (a template token, a model finding outside source support) is a verdict a
+  // source retry cannot change, so the result is an outage only when source support alone blocks it.
+  // Source support itself is left out: with the sources down, its "unsupported" verdicts follow from the outage.
+  const onlySourceErrors = checks.every((check) => check.name === 'source_support' || check.status === 'pass');
   return {
     pass: checks.every((check) => check.status === 'pass'),
     checks,
     sources: evidence.records,
     model: response.model || null,
     reviewedAt: new Date().toISOString(),
+    // Only source errors make a reviewed result an outage; transient when every one may pass a retry.
+    ...(evidence.errors.length ? { transient: evidence.transient === true && onlySourceErrors } : {}),
   };
 }
 
@@ -203,10 +222,14 @@ async function repair({ document, findings = [], sources = [], title = '', domai
     system: repairSystemPrompt(),
     messages: [{ role: 'user', content: text }],
   }, {
-    jsonSchema: REPAIR_SCHEMA, timeoutMs: LIMITS.timeoutMs, promptVersion: 'editorial-repair-v1',
+    jsonSchema: REPAIR_SCHEMA, timeoutMs: modelTimeoutMs(), promptVersion: 'editorial-repair-v1',
     validate: (json) => repairViolation(split.body, json?.body),
   });
-  if (!response?.ok || !response.json) throw new Error(`editorial repair failed: ${response?.reason || 'invalid response'}`);
+  if (!response?.ok || !response.json) {
+    // The model did not answer (a timeout, a limit): the same findings may repair on a retry. A repair
+    // the validator rejected was an answer, so it is not an outage.
+    throw Object.assign(new Error(`editorial repair failed: ${response?.reason || 'invalid response'}`), { transient: !validatorRejected(response) });
+  }
   const violation = repairViolation(split.body, response.json.body);
   if (violation) throw new Error(`editorial repair rejected: ${violation}`);
   return composeRepairDocument(split.frontmatter, response.json.body, document);
@@ -245,17 +268,20 @@ async function reviewPlan({ sections, title = '' } = {}) {
       max_tokens: 5000,
       system,
       messages: [{ role: 'user', content: `TITLE:\n${String(title).trim()}\n\nSECTION-ANSWER PLAN:\n${JSON.stringify(normalized)}` }],
-    }, { jsonSchema: PLAN_SCHEMA, timeoutMs: LIMITS.timeoutMs, promptVersion: 'editorial-plan-review-v1',
+    }, { jsonSchema: PLAN_SCHEMA, timeoutMs: modelTimeoutMs(), promptVersion: 'editorial-plan-review-v1',
       validate: (json) => validatePlanJson(json, normalized) });
   } catch (err) {
     response = { ok: false, reason: err.message || 'dispatch_error' };
   }
+  // invalidResponse: the model answered, but its review of this plan failed validation. Unlike an
+  // outage, a retry of the same plan may fail the same way.
   if (!response?.ok || !response.json || !String(response.model || '').trim()) {
     return {
       pass: false,
       findings: [{ sectionIndex: 0, passage: normalized[0].answer, detail: `Plan review failed closed (${response?.reason || 'invalid response'}).`, action: 'Retry the complete semantic plan review before drafting prose.' }],
       model: null,
       reviewedAt,
+      ...(validatorRejected(response) ? { invalidResponse: true } : {}),
     };
   }
   const validationError = validatePlanJson(response.json, normalized);
@@ -265,6 +291,7 @@ async function reviewPlan({ sections, title = '' } = {}) {
       findings: [{ sectionIndex: 0, passage: normalized[0].answer, detail: `Plan review response failed validation: ${validationError}.`, action: 'Retry the complete semantic plan review before drafting prose.' }],
       model: null,
       reviewedAt,
+      invalidResponse: true,
     };
   }
   return { pass: response.json.pass, findings: response.json.findings, model: response.model || null, reviewedAt };
@@ -276,4 +303,5 @@ module.exports = {
   reviewPlan,
   CHECK_NAMES,
   LIMITS,
+  MAC_RUNNER_TIMEOUT_MS,
 };

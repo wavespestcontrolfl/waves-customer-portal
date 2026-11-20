@@ -143,6 +143,8 @@ describe('editorial review', () => {
     expect(result.checks.every((check) => check.status === 'error')).toBe(true);
     expect(result.checks[0].findings[0].detail).toContain('frontmatter is invalid');
     expect(mockDispatch).not.toHaveBeenCalled();
+    // A document the review refuses as input is not an outage: a retry of the same text fails the same way.
+    expect(result.transient).toBe(false);
   });
 
   test('fails closed when dispatch is unavailable', async () => {
@@ -151,6 +153,7 @@ describe('editorial review', () => {
     expect(result.pass).toBe(false);
     expect(result.checks).toHaveLength(5);
     expect(result.checks.every((check) => check.status === 'error')).toBe(true);
+    expect(result.transient).toBe(true);
   });
 
   test('rejects a supported claim whose quote is not exact fetched evidence', async () => {
@@ -173,6 +176,21 @@ describe('editorial review', () => {
     expect(check.findings.some((item) => item.detail.includes('could not be safely retrieved'))).toBe(true);
     await expect(editorial.repair({ document: DOCUMENT, findings: check.findings })).rejects.toThrow(/require retry/);
     expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a source outage is transient only while nothing else blocks the review', async () => {
+    mockFetchPage.mockResolvedValue({ status: 503, finalUrl: null, blocked: false, html: null, error: 'http_503' });
+    const sourceUrls = ['https://health.example.gov/mosquitoes'];
+    mockDispatch.mockResolvedValue({ ok: true, json: modelReview(DOCUMENT, { sources: false }), model: 'test-model' });
+    const alone = await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding', sourceUrls });
+    expect(alone.checks.filter((check) => check.status !== 'pass').map((check) => check.name)).toEqual(['source_support']);
+    expect(alone.transient).toBe(true);
+    // An unknown template token fails editorial_quality on its own: a source retry cannot change that.
+    const tokenDocument = `${DOCUMENT}\n\nAsk {{mysteryOffice}} for details.`;
+    mockDispatch.mockResolvedValue({ ok: true, json: modelReview(tokenDocument, { sources: false }), model: 'test-model' });
+    const withToken = await editorial.review({ document: tokenDocument, title: 'Stop Mosquito Breeding', sourceUrls });
+    expect(withToken.checks.find((check) => check.name === 'editorial_quality').status).toBe('fail');
+    expect(withToken.transient).toBe(false);
   });
 
   test('rejects unknown unresolved domain tokens while allowing known caller tokens', async () => {
@@ -204,6 +222,24 @@ describe('editorial review', () => {
     const result = await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding' });
     expect(result.pass).toBe(false);
     expect(result.checks.find((check) => check.name === 'source_support').status).toBe('fail');
+  });
+
+  // Mac test 2026-11-19: one figure labeled non_external rejected a complete answer. It is now an
+  // unsupported claim the repair step can fix, and the review still fails.
+  test('holds a figure labeled non_external as unsupported instead of rejecting the answer', async () => {
+    const reply = modelReview();
+    const dated = reply.claims.find((claim) => /June 5, 2026/.test(claim.passage));
+    Object.assign(dated, { verdict: 'non_external', claimKind: 'non_external', sourceSuitability: 'not_applicable', sourceIndex: -1, sourceQuote: '' });
+    mockDispatch.mockResolvedValue({ ok: true, json: reply, model: 'test-model' });
+    const result = await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding', sourceUrls: ['https://health.example.gov/mosquitoes'] });
+    expect(result.pass).toBe(false);
+    expect(result.model).toBe('test-model');
+    const sourceCheck = result.checks.find((check) => check.name === 'source_support');
+    expect(sourceCheck.status).toBe('fail');
+    expect(sourceCheck.findings).toEqual([expect.objectContaining({ passage: dated.passage, action: expect.stringContaining('Cite a fetched source') })]);
+    expect(result.checks.filter((check) => check.name !== 'source_support').every((check) => check.status === 'pass')).toBe(true);
+    const validate = mockDispatch.mock.calls[0][2].validate;
+    expect(validate(reply)).toBeNull();
   });
 
   test('requires primary or authoritative evidence for quantitative claims', async () => {
@@ -262,6 +298,30 @@ Vague filler about {{brandName}}.
     await expect(editorial.repair({ document: repairDocument, findings: [] })).rejects.toThrow(/editorial repair rejected/);
   });
 
+  test('a repair the model did not answer is transient; one the validator refused is not', async () => {
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'anthropic_timeout' }] });
+    await expect(editorial.repair({ document: repairDocument, findings: [] })).rejects.toMatchObject({ message: expect.stringMatching(/editorial repair failed/), transient: true });
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'component_removed', validator: true }, { provider: 'openai', reason: 'openai_403' }] });
+    await expect(editorial.repair({ document: repairDocument, findings: [] })).rejects.toMatchObject({ transient: false });
+  });
+
+  test('a plan review the validator refused is an invalid response, not an outage', async () => {
+    const sections = [{ heading: 'Why mosquitoes breed', question: 'Where do they breed?', answer: 'In standing water around the yard.' }];
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'section_coverage', validator: true }] });
+    expect(await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections })).toMatchObject({ pass: false, model: null, invalidResponse: true });
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'anthropic_timeout' }] });
+    const outage = await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections });
+    expect(outage).toMatchObject({ pass: false, model: null });
+    expect(outage.invalidResponse).toBeUndefined();
+  });
+
+  test('a review the validator refused is not transient; a model that did not answer is', async () => {
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'claim_kind_mismatch:C1', validator: true }] });
+    expect(await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding' })).toMatchObject({ pass: false, transient: false });
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'anthropic_timeout' }] });
+    expect(await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding' })).toMatchObject({ pass: false, transient: true });
+  });
+
   test('preserves original source indexes after rejecting invalid repair evidence', async () => {
     const body = inventory.splitFrontmatter(repairDocument).body;
     const excerpt = 'Empty standing water from containers once a week.';
@@ -311,6 +371,45 @@ describe('editorial section-answer plan review', () => {
       expect.objectContaining({ laneId: 'editorial_plan_review', max_tokens: 5000 }),
       expect.objectContaining({ jsonSchema: expect.any(Object), validate: expect.any(Function) }),
     );
+  });
+
+  test('the model call times out at 60 s on the server and 15 min in the Mac job (CONTENT_EDITORIAL_REVIEW_RUNNER=mac)', async () => {
+    const saved = process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      model: 'test-deep-model',
+      json: { pass: true, findings: [], sectionCoverage: sections.map((_, sectionIndex) => ({ sectionIndex, status: 'pass' })) },
+    });
+    try {
+      for (const [runner, expected] of [[undefined, 60000], ['true', 60000], ['mac', 900000]]) {
+        if (runner === undefined) delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER; else process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = runner;
+        mockDispatch.mockClear();
+        await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections });
+        expect(mockDispatch.mock.calls[0][2].timeoutMs).toBe(expected);
+      }
+      expect(editorial.LIMITS.timeoutMs).toBe(60000);
+    } finally {
+      if (saved === undefined) delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER; else process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = saved;
+    }
+  });
+
+  test('the terminal writer\'s plan-shape check agrees with the local checks reviewPlan makes before it calls a model', async () => {
+    const { planSectionsProblem } = require('../services/content/editorial-plan-shape');
+    const ok = { heading: 'H', question: 'Q?', answer: 'A.' };
+    const cases = [
+      [ok], [ok, ok], [], [{}], [null], ['x'], [{ ...ok, heading: '  ' }], [{ ...ok, question: '' }], [{ ...ok, answer: undefined }],
+      [{ ...ok, heading: 'h'.repeat(500) }], [{ ...ok, heading: 'h'.repeat(501) }],
+      [{ ...ok, question: 'q'.repeat(1000) }], [{ ...ok, question: 'q'.repeat(1001) }],
+      [{ ...ok, answer: 'a'.repeat(4000) }], [{ ...ok, answer: 'a'.repeat(4001) }],
+      Array.from({ length: editorial.LIMITS.sections }, () => ok), Array.from({ length: editorial.LIMITS.sections + 1 }, () => ok),
+      'not a list', undefined,
+    ];
+    for (const plan of cases) {
+      mockDispatch.mockReset();
+      mockDispatch.mockResolvedValue({ ok: false, reason: 'stop here' });
+      await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections: plan });
+      expect(mockDispatch.mock.calls.length > 0).toBe(planSectionsProblem(plan) === null);
+    }
   });
 
   test('fails closed on missing coverage or provider failure', async () => {

@@ -145,6 +145,9 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
  *   the companion validator requires beyond the base
  *   REQUIRED_FINDINGS_FIELDS).
  * @property {string} [notes]
+ * @property {'insect'|'rotation'|'insect_live'|'insect_preventive'} [pesticideComplianceWhen]
+ *   Generated typed pesticide facts only: the served-schema predicate that
+ *   makes this field applicable on both primary and companion forms.
  * @property {string} [qualifiedBy] - on a measurement fact, the key of the
  *   fact on the same line that holds its unit (a value without its unit is
  *   not interpretable).
@@ -186,6 +189,7 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
 
 const COMPLETE_SERVICE = 'server/services/complete-scheduled-service.js';
 const SCHEDULE_PAGE = 'client/src/pages/admin/SchedulePage.jsx'; // full Complete Service form (CompletionPanel)
+const TREE_SHRUB_PEST_CHECK_CLIENT = 'client/src/lib/tree-shrub-pest-check.js';
 const FAST_COMPLETE_SHEET = 'client/src/components/tech/FastCompleteSheet.jsx';
 // The typed forms the Fast Complete sheet records (GATE_TYPED_VOICE_FILL;
 // services/visit-typed-facts.js VOICE_TYPES less SHEET_PENDING_TYPES, pinned
@@ -225,6 +229,7 @@ const REENTRY = 'server/services/service-report/reentry.js';
 const ACTIVITY_SCORES_STORE = 'server/services/service-report/activity-scores-store.js';
 const METRICS_BAND = 'server/services/service-report/metrics-band.js';
 const TREE_SHRUB_CLOSEOUT = 'server/services/tree-shrub-closeout.js';
+const TREE_SHRUB_PEST_CHECK = 'server/services/tree-shrub-pest-check.js';
 const ADMIN_DISPATCH = 'server/routes/admin-dispatch.js';
 const INTERIOR_REENTRY_BACKFILL = 'server/scripts/backfill-interior-reentry-advisory.js';
 const TRACE_ELIGIBILITY = 'server/services/service-report/trace-eligibility.js';
@@ -855,10 +860,10 @@ function requiredTypedKeys(typedForm) {
  * The findingsFields of a typed form that are visit facts: every
  * non-internal field (the report shows it), plus an internal field the
  * completion validator unconditionally requires (voice fill must still write
- * it), plus an internal `pesticideOnly` field — CONDITIONALLY required
- * whenever the visit's products include an insecticide/other pesticide
- * (validateTreeShrubTypedCompliance in tree-shrub-closeout.js, mirrored
- * pre-submit by the client's own `f.pesticideOnly` gate), which
+ * it), plus an internal `pesticideOnly` field — CONDITIONALLY required by
+ * its pesticideComplianceWhen product/evidence branch
+ * (validateTreeShrubTypedCompliance in tree-shrub-closeout.js, mirrored by
+ * the client's shared primary/companion applicability and pre-submit gate), which
  * REQUIRED_FINDINGS_FIELDS has no way to express since it names only
  * unconditionally-required keys (codex follow-up on #5190: pollinator_status
  * / irac_frac_logged were silently dropped here, losing their real
@@ -925,6 +930,7 @@ function typedFormFacts(typedForm, overrides = {}) {
       label: field.label,
       typedForm,
       fieldType: field.type,
+      ...(field.pesticideComplianceWhen ? { pesticideComplianceWhen: field.pesticideComplianceWhen } : {}),
       // companionOnly fields are legal ONLY on a companion submission
       // (activity-indicators.js validateTypedFindings rejects one on a
       // primary submission as unknown); every other field is legal on
@@ -934,19 +940,36 @@ function typedFormFacts(typedForm, overrides = {}) {
       capture: tapOnlyReason ? ['tap'] : ['voice', 'tap'],
       ...(tapOnlyReason ? { tapOnly: true, reason: tapOnlyReason } : {}),
       readers,
+      ...(field.pesticideComplianceWhen ? { pesticideComplianceWhen: field.pesticideComplianceWhen } : {}),
       ...placement,
       ...(notes.length ? { notes: notes.join(' ') } : {}),
     };
   });
 }
 
-/** When tree-shrub-closeout.js requires each pesticideOnly field. The
- * client's pre-submit gate is broader: it requires every pesticideOnly field
- * once any pesticide product is recorded. */
+/** When tree-shrub-closeout.js requires each pesticideOnly field. */
 const PESTICIDE_COMPLIANCE_CONDITIONS = Object.freeze({
   pollinator_status: 'required when an insect-family product (insecticide, miticide, IGR) is recorded (hasInsectProduct)',
   irac_frac_logged: 'required when any insecticide, fungicide or herbicide, or a product with an IRAC/FRAC/HRAC group, is recorded (needsIracFracLog)',
+  insect_target: 'required when an insect-family product is recorded and live insects were found (hasInsectProduct)',
+  insect_life_stage: 'required when an insect-family product is recorded and live insects were found (hasInsectProduct)',
+  insect_preventive_reason: 'required when an insect-family product is recorded without a live target (hasInsectProduct)',
 });
+
+/** The matching client predicate, shared by rendering and primary/companion
+ * pre-submit. An unknown/blank product family conservatively requires the
+ * rotation check; it becomes an insect treatment only after the tech chooses
+ * or enters one of the mutually exclusive evidence paths. */
+const CLIENT_PESTICIDE_COMPLIANCE_CONDITIONS = Object.freeze({
+  insect: 'known insect product, or an unknown product after an insect evidence path is chosen',
+  rotation: 'known insecticide, fungicide or herbicide, plus unknown/blank product families',
+  insect_live: 'the live-evidence branch only; requires current target and stage and hides/clears preventive evidence',
+  insect_preventive: 'the preventive branch only; requires a documented label-supported reason and hides/clears live evidence',
+});
+
+const DELEGATED_PEST_EVIDENCE_FIELDS = new Set([
+  'insect_target', 'insect_life_stage', 'insect_preventive_reason',
+]);
 
 /** Every reader edge for one typed field: the generic findings list, the
  * areas-treated reader, its TYPED_REPORT_BUILDERS entry (if any), the
@@ -964,14 +987,33 @@ function typedFieldReaders(field, builder, extraReaders) {
     readers.push({ file: builder.file, section: builder.sections[field.key] || builder.defaultSection });
   }
   if (field.pesticideOnly) {
+    const delegatedEvidence = DELEGATED_PEST_EVIDENCE_FIELDS.has(field.key);
+    const clientWhen = field.pesticideComplianceWhen || 'pesticide';
     readers.push({
-      file: TREE_SHRUB_CLOSEOUT,
+      file: delegatedEvidence ? TREE_SHRUB_PEST_CHECK : TREE_SHRUB_CLOSEOUT,
       section: `Pesticide compliance gate (validateTreeShrubTypedCompliance) — ${PESTICIDE_COMPLIANCE_CONDITIONS[field.key] || 'conditionally required'}`,
+    });
+    if (delegatedEvidence) {
+      readers.push({
+        file: TREE_SHRUB_CLOSEOUT,
+        section: 'Typed closeout delegates live-target / preventive evidence to validatePestTreatmentEvidence',
+        readerSymbol: 'validatePestTreatmentEvidence',
+      });
+    }
+    readers.push({
+      file: ACTIVITY_INDICATORS,
+      section: `Served typed schema projects pesticideComplianceWhen=${clientWhen} for primary and companion forms${delegatedEvidence ? '; GATE_TS_PEST_CHECK off omits this evidence field in both contexts' : ''}`,
+      readerSymbol: 'pesticideComplianceWhen',
+    });
+    readers.push({
+      file: TREE_SHRUB_PEST_CHECK_CLIENT,
+      section: `Shared client applicability gate (pesticideComplianceWhen=${clientWhen}) — ${CLIENT_PESTICIDE_COMPLIANCE_CONDITIONS[clientWhen] || 'conditionally required'}`,
+      readerSymbol: 'typedPesticideFieldApplies',
     });
     readers.push({
       file: SCHEDULE_PAGE,
-      section: 'Client pre-submit pesticide gate — shows and requires every pesticideOnly field once any pesticide product is recorded (broader than the server condition)',
-      readerSymbol: 'pesticideOnly',
+      section: 'Primary and companion pre-submit both call the shared pesticide compliance gate; insect evidence requires exactly one branch',
+      readerSymbol: 'missingTypedPesticideCompliance',
     });
   }
   readers.push(...(extraReaders[field.key] || []));
@@ -990,7 +1032,8 @@ function typedFieldNotes(field, extraNotes, required) {
     if (required.has(field.key)) {
       notes.push('Internal field (never shown on the report); registered because REQUIRED_FINDINGS_FIELDS requires it.');
     } else if (field.pesticideOnly) {
-      notes.push(`Internal field (never shown on the report); CONDITIONALLY required: the server ${PESTICIDE_COMPLIANCE_CONDITIONS[field.key] || 'requires it for pesticide applications'} (validateTreeShrubTypedCompliance), while the client pre-submit gate requires it once any pesticide product is recorded. Not in REQUIRED_FINDINGS_FIELDS (which names only unconditional requirements), so whenMissing below reflects only the unconditional (never-required) case.`);
+      const clientWhen = field.pesticideComplianceWhen || 'pesticide';
+      notes.push(`Internal field (never shown on the report); CONDITIONALLY required: the server ${PESTICIDE_COMPLIANCE_CONDITIONS[field.key] || 'requires it for pesticide applications'} (validateTreeShrubTypedCompliance). The shared primary/companion client gate applies pesticideComplianceWhen=${clientWhen}: ${CLIENT_PESTICIDE_COMPLIANCE_CONDITIONS[clientWhen] || 'conditionally required'}. Not in REQUIRED_FINDINGS_FIELDS (which names only unconditional requirements), so whenMissing below reflects only the unconditional (never-required) case.`);
     }
   }
   if (field.companionOnly) notes.push('companionOnly: this value is only ever recorded when the form runs as a COMPANION section (service_data.companionReportSnapshots[]) beside a different primary type; a primary submission of this form carrying it is rejected as an unknown field.');
@@ -1202,8 +1245,8 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   waveguardCalibrationAdvisory: 'WaveGuard equipment/compliance bookkeeping.',
   waveguardInventoryAdvisory: 'WaveGuard equipment/compliance bookkeeping.',
   waveguardTankCleanout: 'WaveGuard equipment/compliance bookkeeping.',
-  treeShrubCloseout: 'Tree & shrub required-photos gate audit summary; the photos/captions themselves are the registered facts (completion_photos / completion_photo_caption).',
-  treeShrubCloseoutWarnings: 'Tree & shrub required-photos gate audit warnings, paired with treeShrubCloseout.',
+  treeShrubCloseout: 'Staff audit of the Tree & Shrub closeout, including NutriRoot application basis and soil-test reference. Photos and captions are registered as completion_photos and completion_photo_caption.',
+  treeShrubCloseoutWarnings: 'Staff audit warnings from Tree & Shrub closeout validation, including already-applied NutriRoot flagged for office review.',
   inventoryDeductions: 'Inventory ledger bookkeeping, not a customer report fact.',
   completionTelemetry: 'Opaque client-side completion-form timing, persisted for budget analysis only.',
   typedReportDelivery: 'Delivery-posture bookkeeping (auto_send vs disabled), frozen so a later profile graduation can\'t retroactively expose a report that was never sent — not itself a report claim.',

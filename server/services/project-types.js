@@ -29,6 +29,8 @@ const {
 // palm-type table, so the two lists cannot drift. multi_select stores a
 // comma-joined string, so no option may contain a comma.
 const TREE_SHRUB_PALM_TYPE_OPTIONS = require('../config/tree-shrub-field-guide.json').palmTypes.rows.map((row) => row.name);
+const TREE_SHRUB_FERTILIZER_EVIDENCE = require('../../shared/tree-shrub-fertilizer-evidence.json');
+const TREE_SHRUB_PEST_EVIDENCE = require('../../shared/tree-shrub-pest-check.json');
 
 const WDO_TARGET_OPTIONS = [
   'Subterranean termites',
@@ -956,10 +958,23 @@ const PROJECT_TYPES = {
       // validateTreeShrubTypedCompliance): pollinator status gates
       // bee-sensitive insect applications, IRAC/FRAC confirms resistance
       // rotation was checked for pesticide products.
-      { key: 'pollinator_status', label: 'Flowering / pollinator status', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: [
+      { key: 'pollinator_status', label: 'Flowering / pollinator status', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect', options: [
         'No blooms or no bees', 'Blooming — no bees active', 'Blooming — bees active', 'No insecticide applied',
       ] },
-      { key: 'irac_frac_logged', label: 'IRAC / FRAC rotation checked & logged', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: ['Yes', 'No'] },
+      { key: 'irac_frac_logged', label: 'IRAC / FRAC rotation checked & logged', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'rotation', options: ['Yes', 'No'] },
+      { key: 'insect_target', label: 'Current live insect target', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect_live', options: TREE_SHRUB_PEST_EVIDENCE.insectTypes.map((item) => item.label) },
+      { key: 'insect_life_stage', label: 'Current live insect stage', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect_live', options: TREE_SHRUB_PEST_EVIDENCE.lifeStages.map((item) => item.label) },
+      { key: 'insect_preventive_reason', label: 'Documented label-supported preventive reason', type: 'text', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect_preventive', placeholder: 'Label use plus site or documented history reason' },
+      // NutriRoot is 2-2-3 with all-soluble nitrogen. Ordinary use is not
+      // valid in Sarasota/North Port; Manatee use needs a P-deficient soil
+      // test and must be outside the N/P blackout. The second option exists
+      // only so an application that already happened is recorded truthfully
+      // and routed for office review instead of being erased from the ledger.
+      { key: 'nutriroot_application_basis', label: 'NutriRoot application basis (only if applied)', type: 'select', section: 'Compliance', internal: true, options: [
+        TREE_SHRUB_FERTILIZER_EVIDENCE.nutriRoot.soilTestBasis,
+        TREE_SHRUB_FERTILIZER_EVIDENCE.nutriRoot.alreadyAppliedBasis,
+      ] },
+      { key: 'nutriroot_soil_test_reference', label: 'NutriRoot soil-test report date / file reference', type: 'text', section: 'Compliance', internal: true, placeholder: 'e.g. UF report 2026-10-14, customer file' },
       { key: 'customer_recommendations', label: 'Customer recommendations', type: 'multi_select', section: 'Recommendations', options: [
         'Adjust irrigation', 'Avoid over-pruning', 'Remove dead plant material',
         'Trim away from structure', 'Keep mulch off trunks / stems', 'Monitor decline',
@@ -1156,7 +1171,7 @@ const PROJECT_TYPES = {
       { key: 'treatment_time', label: 'Time of treatment', type: 'time', section: 'Application 1 — product & chemistry' },
       { key: 'treatment_method', label: 'Method of treatment', type: 'select', section: 'Application 1 — product & chemistry', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system'] },
       { key: 'wdo_target', label: 'Wood-destroying organism treated for', type: 'multi_select', section: 'Application 1 — product & chemistry', options: WDO_TARGET_OPTIONS },
-      { key: 'product_name', label: 'Product used', type: 'product_search', section: 'Application 1 — product & chemistry', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care'] },
+      { key: 'product_name', label: 'Product used', type: 'product_search', section: 'Application 1 — product & chemistry', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'LESCO Crosscheck Plus', 'Premise 2', 'Trelona ATBB', 'Bora-Care'] },
       { key: 'epa_registration', label: 'EPA registration #', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 7969-210', disableDictation: true },
       { key: 'active_ingredient', label: 'Active ingredient', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. fipronil', disableDictation: true },
       { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 0.060', disableDictation: true },
@@ -1182,7 +1197,7 @@ const PROJECT_TYPES = {
         description: 'Applications planned on the scheduled service load here automatically. Add a row only for an extra product applied in the field.',
         fields: [
           { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system'] },
-          { key: 'product_name', label: 'Product used', type: 'product_search', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care'] },
+          { key: 'product_name', label: 'Product used', type: 'product_search', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'LESCO Crosscheck Plus', 'Premise 2', 'Trelona ATBB', 'Bora-Care'] },
           { key: 'epa_registration', label: 'EPA registration #', type: 'text', placeholder: 'e.g. 7969-210', disableDictation: true },
           { key: 'active_ingredient', label: 'Active ingredient', type: 'text', placeholder: 'e.g. fipronil', disableDictation: true },
           { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', placeholder: 'e.g. 0.060', disableDictation: true },

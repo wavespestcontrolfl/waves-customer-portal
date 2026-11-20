@@ -43,7 +43,8 @@ const V13_SUMMARY = {
 };
 const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
-const NOTE = "Chinch bugs mapped here: Tetrino at the label's high rate, 0.735 fl oz per 1,000 sq ft.";
+const NOTE = "High current chinch pressure plus mapped history: Tetrino at the label's high rate, 0.735 fl oz per 1,000 sq ft.";
+const HIGH_SCOUT = { selectedConditionalProductNames: TET, tetrinoTarget: 'chinch', tetrinoCurrentObservations: '12 counted at the damaged edge', tetrinoPressure: 'high' };
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_CHINCH_TETRINO_RATE'];
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
@@ -65,7 +66,7 @@ async function lawnMix(query) {
   return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
 }
 
-const sheet = (extra = {}) => lawnMix({ month: '5', scheduledServiceId: VISIT, ...extra });
+const sheet = (extra = {}) => lawnMix({ month: '5', scheduledServiceId: VISIT, ...HIGH_SCOUT, ...extra });
 const tetrino = (body) => body.items.find((item) => item.product?.name === TET);
 // The last rate the limit reader was asked to judge for Tetrino (the plan's own read, after the raise decision's).
 const limitRates = () => mockCheckLimits.mock.calls.filter((call) => call[1] === 'tet').map((call) => call[4]?.proposed?.ratePer1000);
@@ -120,10 +121,10 @@ describe('chinch mapped, gate on', () => {
     expect(first[4]).toMatchObject({ proposed: { ratePer1000: 0.735, unit: 'fl oz' }, proposal: true, excludeScheduledServiceId: VISIT, propertyId: PROPERTY });
   });
 
-  test('the text staff read agrees: the line and the visit primary state 0.735, none still says 0.367', async () => {
+  test('the text staff read agrees: the selected line and visit secondary state 0.735, none still says 0.367', async () => {
     const body = await sheet();
-    expect(tetrino(body).raw).toMatch(/^Tetrino Insecticide — 0\.735 fl oz per 1,000 sq ft, sunny turf only.*, chinch bugs mapped$/);
-    expect(body.visit.primary).toMatch(/^Tetrino Insecticide — 0\.735 fl oz per 1,000 sq ft/);
+    expect(tetrino(body).raw).toMatch(/^Tetrino Insecticide — 0\.735 fl oz per 1,000 sq ft, .*high current chinch pressure plus mapped history$/);
+    expect(body.visit.secondary).toMatch(/^Tetrino Insecticide — 0\.735 fl oz per 1,000 sq ft/);
     expect(JSON.stringify([body.items, body.visit])).not.toContain('0.367 fl oz per 1,000');
   });
 });
@@ -154,7 +155,7 @@ describe('no raise', () => {
   });
 
   test('the reference sheet (no visit) keeps 0.367 and reads no area', async () => {
-    const body = await lawnMix({ month: '5' });
+    const body = await lawnMix({ month: '5', ...HIGH_SCOUT });
     expect(tetrino(body).jobMix.ratePer1000).toBe(0.367);
     expect(mockHasArea).not.toHaveBeenCalled();
   });

@@ -3762,6 +3762,7 @@ async function createSelfBooking(payload = {}) {
       // pass their check and commit an overlapping visit on top of it. Taken
       // before the customer/tech/zone/day-cap locks below so every writer in
       // the family acquires the same rungs in the same order.
+      const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
       const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
       await acquireOccupancyLock(trx, slotDateStr);
       await trx.raw(
@@ -4329,10 +4330,7 @@ async function createSelfBooking(payload = {}) {
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .where('scheduled_services.scheduled_date', slotDateStr)
         .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-        .where((q) => {
-          q.whereNull('scheduled_services.reservation_expires_at')
-            .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-        })
+        .where(bookedVisitOrLiveHold)
         // COALESCE the nullable window_end (admin edits can leave a start
         // with no end) — same predicate as slot-reservation/rebooker.
         .whereRaw(

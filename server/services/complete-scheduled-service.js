@@ -67,7 +67,8 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
-const { buildPlanForService, isDateInWindow, resolveOrdinanceJurisdiction } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
+const { getApplicableOrdinances, resolveOrdinanceJurisdiction } = require('../services/fertilizer-jurisdiction');
 const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -121,7 +122,7 @@ const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-repo
 const { correctedMethod: correctedGranularMethod } = require('./service-report/report-cleanup-1020');
 const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { freezePestCheck } = require('./tree-shrub-pest-check');
-const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments, dropSprayGallonsWithoutLiquidApplication } = require('../services/tree-shrub-closeout');
+const { inferTreeShrubOrdinanceZone, validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments, dropSprayGallonsWithoutLiquidApplication } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
@@ -139,6 +140,7 @@ const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../service
 const areaAddOnGovernedRate = require('./area-addon-governed-rate');
 const areaAddOnLimits = require('./area-addon-limits');
 const tsOrnamental = require('./tree-shrub-ornamental-fertilizer-limits');
+const tsFertilizerEvidence = require('./tree-shrub-fertilizer-evidence');
 
 const { COMPLETION_ACCESS_CODE_RE } = require('./completion-access-code');
 
@@ -1378,24 +1380,8 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
   // Same jurisdiction resolution as the plan (stamped visit address outranks
   // the profile; a county-less profile falls back to the treated address's
   // county via address-county).
-  const { county, city } = resolveOrdinanceJurisdiction(profile, {
-    stampedCity: svc.service_address_city,
-    stampedZip: svc.service_address_zip,
-    customerCity: svc.city,
-    customerZip: svc.customer_zip,
-  });
-  if (!county && !city) return [];
-
-  const ordinances = await failSoftRead(database, (k) => k('municipality_ordinances')
-    .where({ active: true })
-    .where(function () {
-      if (county) this.orWhere(function () {
-        this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
-      });
-      if (city) this.orWhere(function () {
-        this.where({ jurisdiction_type: 'city' }).whereILike('city', city);
-      });
-    }), []);
+  const jurisdiction = resolveOrdinanceJurisdiction(svc, profile);
+  const ordinances = await failSoftRead(database, (k) => getApplicableOrdinances(k, jurisdiction), []);
   if (!ordinances.length) return [];
 
   const productById = new Map(catalogProducts.map((product) => [String(product.id), product]));
@@ -2342,6 +2328,7 @@ const limitFigure = (finding) => {
   if (finding.limitType === tsOrnamental.RATE_LIMIT_TYPE) return `${finding.current} lb per 1,000 sq ft, county limit ${finding.max}`;
   if (finding.limitType === tsOrnamental.HISTORY_LIMIT_TYPE) return finding.reason;
   if (tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType)) return tsOrnamental.uncheckedClause(finding.reason);
+  if (finding.limitType === tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE) return finding.reason;
   return `${finding.current} of ${finding.max} already used`;
 };
 
@@ -2360,6 +2347,7 @@ const FINDING_WHY = {
   [tsOrnamental.UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
+  [tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE]: () => 'A technician reported an earlier NutriRoot application that needs an ordinance review.',
   [areaAddOnLimits.YEARLY_LIMIT_TYPE]: (name, f) => `${name} is over its add-on yearly limit: ${f.current} before it in 12 months, limit ${f.max}.`,
 };
 // The long form (the "Show full text" detail) of the same.
@@ -2376,6 +2364,7 @@ const tsUncheckedDetail = (fullName, f, svc) => (f.reason === 'history_unavailab
 FINDING_DETAIL[tsOrnamental.UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
 FINDING_DETAIL[tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
 FINDING_DETAIL[tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was submitted on a ${svc.service_type || 'tree & shrub'} visit, but its ${tsOrnamental.uncheckedClause(f.reason)}: the record's products could not be read back. Check the 13-0-13 amount, treated area and history on the application record and report it if needed.`;
+FINDING_DETAIL[tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded as already applied on a ${svc.service_type || 'tree & shrub'} visit. ${f.reason}. Review the application with the technician.`;
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
@@ -2388,6 +2377,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
     try {
       const over = finding.code === 'application_limit_exceeded';
       const unchecked = tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType);
+      const nutriRootReview = finding.limitType === tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE;
       const fullName = finding.productName || 'a product';
       // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
@@ -2399,7 +2389,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : over ? `review ${name} over its limit` : 'review product limits not checked',
+        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
         why,
         severity: 'needs-you',
         who: 'person',
@@ -3729,7 +3719,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
-        'customers.city', 'customers.zip as customer_zip', 'customers.property_type',
+        'customers.address_line1 as customer_address_line1', 'customers.city', 'customers.zip as customer_zip', 'customers.property_type',
         // Report application-conditions (weather) capture at the TREATED
         // parcel: stamped visit coords first, the primary home only for
         // non-divergent stamps (codex round-10 P2).
@@ -5871,6 +5861,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         products: products || [],
         productRows: typedProductRows,
         completionPhotos,
+        treeShrubReview: completionInput.body?.treeShrubReview,
       });
       if (!typedCompliance.ok) {
         const complianceErr = new Error('tree_shrub_typed_compliance');
@@ -5899,6 +5890,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // ledger never records actuals for a visit nobody attested.
     const lawnLedgerVisit = lawnActualsLedgerEnabled() && detectServiceLine(svc?.service_type) === 'lawn' && !issuedInvoiceCloseout;
     const waveguardCloseout = !isIncompleteVisit && isWaveGuardLawnCompletion(svc) && !issuedInvoiceCloseout;
+    const normalizedTetrinoScout = require('./lawn-fast-complete').normalizedTetrinoScout(lawnFast?.tetrinoScout);
+    const hasTetrinoScoutInput = normalizedTetrinoScout.tetrinoApplied
+      || ['tetrinoTarget', 'tetrinoCurrentObservations', 'tetrinoPressure', 'grubTimingEvidence']
+        .some((key) => normalizedTetrinoScout[key]);
+    const tetrinoPlannerOptions = hasTetrinoScoutInput ? {
+      ...normalizedTetrinoScout,
+      ...(normalizedTetrinoScout.tetrinoApplied ? { selectedConditionalProductNames: ['Tetrino Insecticide'] } : {}),
+    } : {};
     if (claim.action === 'proceed' && (waveguardCloseout || lawnLedgerVisit)) {
       try {
         // Under a packet closeout `db` is the packet's outer transaction: a
@@ -5932,6 +5931,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // P2), and the lane recheck under the customer lock compares the
           // same column under the same probe (a failed probe aborted above).
           billingModeColumnExists: billingModeColumnsExist,
+          ...tetrinoPlannerOptions,
         }));
       } catch (planErr) {
         if (waveguardCloseout) throw planErr;
@@ -6332,6 +6332,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      treeShrubCloseoutSummary = resumedStructuredNotes.treeShrubCloseout || null;
       servicePhotoVisit = resumedStructuredNotes.servicePhotoVisit || null;
       // An authorized correction can land after the packet committed its
       // records but before an effects replay. Its durable revision and notes
@@ -7465,6 +7466,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
             // from the lawnFast echo and frozen here; no customer or public path reads it.
             ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { products }),
+            // May Tetrino is never inferred from sunlight or an old map. Keep
+            // the technician's named target and current field evidence with
+            // the closeout that used (or deliberately skipped) it.
+            ...require('./lawn-fast-complete').tetrinoScoutFreeze(lawnFast),
             // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
             // is not an area), so the card never states a whole-lawn fallback as the spot.
             ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),
@@ -10073,6 +10078,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // hand-added row as well as the suggestion.
     if (!issuedInvoiceCloseout) {
       applicationLimitAdvisory = await tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames, submittedProductIds: payloadProductIds(products) });
+      applicationLimitAdvisory = await tsFertilizerEvidence.flagNutriRootApplication({
+        svc,
+        record,
+        database: db,
+        advisory: applicationLimitAdvisory,
+        notify: notifyOfficeOfLimitFindings,
+        basis: treeShrubCloseoutSummary?.[tsFertilizerEvidence.NUTRIROOT_FIELD]
+          || treeShrubComplianceValues?.[tsFertilizerEvidence.NUTRIROOT_FIELD],
+        zone: inferTreeShrubOrdinanceZone(svc),
+        submittedProductNames,
+      });
     }
 
     // The add-on's OWN yearly limit (maxPerYear / minDaysApart, the place-based history the booking used; the add-ons carry no

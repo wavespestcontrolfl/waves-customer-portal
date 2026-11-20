@@ -2,6 +2,9 @@ const {
   buildOutline,
   currentMonthNumber,
   normalizeTurfType,
+  resolveJurisdictionId,
+  resolveOutlineJurisdictionId,
+  estimateSnapshot,
   validateContent,
 } = require('../services/lawn-service-outline');
 
@@ -119,6 +122,78 @@ describe('lawn service outline composer', () => {
     expect(currentMonthNumber(new Date('2026-06-01T04:30:00.000Z'))).toBe(6);
   });
 
+  test('resolves North Port to its city overlay without changing nearby Sarasota or Charlotte addresses', () => {
+    expect(resolveJurisdictionId('100 Test Way, North Port, FL 34286')).toBe('north_port_fl');
+    expect(resolveJurisdictionId('100 Test Way, Sarasota, FL 34240')).toBe('sarasota_county_fl');
+    expect(resolveJurisdictionId('100 Test Way, Port Charlotte, FL 33948')).toBe('charlotte_county_fl');
+    expect(resolveJurisdictionId('100 North Port Drive, Venice, FL 34285')).toBe('sarasota_county_fl');
+    expect(resolveJurisdictionId('100 North Port Drive')).toBe('generic_swfl');
+    expect(resolveJurisdictionId({ city: 'North Port', county: 'Sarasota' })).toBe('north_port_fl');
+    expect(resolveJurisdictionId({ city: 'Venice', address: '100 North Port Drive, Venice, FL 34285' })).toBe('sarasota_county_fl');
+    expect(resolveJurisdictionId({ resolvedJurisdictionId: 'north_port_fl', city: 'Venice' })).toBe('north_port_fl');
+    for (const address of ['100 Test Way, North Port', '100 Test Way, North Port FL 34286', '100 Test Way North Port FL 34286']) {
+      expect(resolveJurisdictionId({ county: 'Sarasota', address })).toBe('north_port_fl');
+    }
+    expect(resolveJurisdictionId({ county: 'Sarasota', address: '100 North Port Drive, FL 34286' })).toBe('generic_swfl');
+    expect(resolveJurisdictionId({ county: 'Sarasota', address: 'North Port Drive, FL 34286' })).toBe('generic_swfl');
+    expect(resolveJurisdictionId({ county: 'Charlotte', address: 'Englewood, FL 34223' })).toBe('charlotte_county_fl');
+    expect(resolveJurisdictionId('North Port, FL')).toBe('north_port_fl');
+    expect(resolveJurisdictionId('100 Test Way, North Port, NY 10001')).toBe('generic_swfl');
+  });
+
+  test('an ambiguous service address asks for city or county confirmation instead of guessing a date', async () => {
+    const result = await buildOutline({
+      db: makeDb(),
+      estimate: {
+        id: 'estimate-ambiguous',
+        customer_name: 'Test Customer',
+        address: '100 North Port Drive',
+        service_interest: 'Lawn care',
+        estimate_data: JSON.stringify({ turfType: 'St. Augustine' }),
+      },
+      input: { month: 5, includeProductCards: false },
+      now: new Date('2026-05-30T12:00:00Z'),
+    });
+
+    expect(result.inputSnapshot.jurisdictionId).toBe('generic_swfl');
+    expect(result.content.localRule).toMatchObject({
+      jurisdictionId: 'generic_swfl',
+      jurisdictionName: 'Confirm city or county',
+      summary: 'Confirm the service property\'s city or county before relying on fertilizer dates.',
+    });
+    expect(result.validation).toMatchObject({
+      status: 'warning',
+      warnings: ['Confirm the service property\'s city or county before relying on fertilizer dates.'],
+    });
+  });
+
+  test.each([
+    ['Englewood', '34223', 'Charlotte County', 'charlotte_county_fl'],
+    ['Sarasota', '34243', 'Manatee', 'manatee_county_fl'],
+    ['Lakewood Ranch', '', 'Sarasota', 'sarasota_county_fl'],
+    ['Englewood', '34223', '', 'generic_swfl'],
+    ['Sarasota', '34243', '', 'generic_swfl'],
+    ['Lakewood Ranch', '', '', 'generic_swfl'],
+    ['Rotonda West', '', '', 'charlotte_county_fl'],
+  ])('resolves %s %s with county "%s" to %s', (city, zip, county, rule) => {
+    expect(resolveJurisdictionId({ city, zip, county })).toBe(rule);
+  });
+
+  test.each([
+    [{ enabled: true, provenance: { source: 'proposal-editor' } }, 'north_port_fl'],
+    [{ enabled: true, buildings: [{ name: 'Building A' }] }, 'north_port_fl'],
+    [{ enabled: true, correctiveWork: [{ description: 'One-time service' }] }, 'north_port_fl'],
+    [{ enabled: true }, 'sarasota_county_fl'],
+    [{ enabled: false, scaffold: true, buildings: [{}] }, 'sarasota_county_fl'],
+  ])('uses the effective commercial property for both the rule and snapshot', (proposal, rule) => {
+    const corrected = '101 Test Way, North Port, FL 34286';
+    const address = '100 Test Way, Venice, FL 34285';
+    const data = { property: { city: 'Venice', county: 'Sarasota' }, proposal: { ...proposal, propertyAddress: corrected } };
+    const estimate = { address, service_address_city: 'Venice', estimate_data: data };
+    expect(resolveOutlineJurisdictionId({}, estimate, data)).toBe(rule);
+    expect(estimateSnapshot(estimate, data).address).toBe(rule === 'north_port_fl' ? corrected : address);
+  });
+
   test('builds May St. Augustine outline with spring focus and conditional protocol language', async () => {
     const db = makeDb();
     const outline = await buildOutline({
@@ -126,7 +201,7 @@ describe('lawn service outline composer', () => {
       estimate: {
         id: 'estimate-1',
         customer_name: 'Jane Client',
-        address: '123 Main St, Sarasota, FL',
+        address: '123 Main St, Sarasota, FL 34240',
         service_interest: 'Lawn care',
         waveguard_tier: 'Premium',
         token: 'estimate-token',

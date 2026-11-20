@@ -344,6 +344,39 @@ describe('sendStageComms', () => {
     expect(stored.comms_history[0]).toMatchObject({ channel: 'sms', outcome: 'sent', to: '(941) ***-0142' });
   });
 
+  test('job offer text and email: the real link goes out, the comms history any admin reads keeps "[offer link]"', async () => {
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${'d'.repeat(64)}`;
+    mockIsEnabled.mockImplementation((gate) => gate === 'jobOffers');
+    mockRenderSmsTemplate.mockResolvedValue(`Hi Jane, it's Adam with Waves. Your job offer is ready to read and sign: ${link} It stays open until Fri, Dec 18. Reply STOP to opt out.`);
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+
+    const result = await RecruitingComms.sendStageComms(app, 'offer_sent', {
+      sms: true, email: true, by: 'staff-1',
+      vars: { offer_link: link, expires_on: 'Fri, Dec 18', job_title: 'Pest Control Technician', sender_name: 'Test Owner' },
+    });
+
+    expect(result.sms).toBe('sent');
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain(link);
+    expect(mockSendOne.mock.calls[0][0].text).toContain(link);
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    expect(history.length).toBeGreaterThanOrEqual(2);
+    for (const entry of history) {
+      expect(entry.body).not.toMatch(/careers\/offer\/[0-9a-f]{64}/);
+      expect(entry.stage).toBe('offer_sent');
+    }
+    expect(history.find((e) => e.channel === 'sms').body).toContain('/careers/offer/[link hidden]');
+    expect(history.find((e) => e.channel === 'email').body).toContain('/careers/offer/[link hidden]');
+    // the email ledger row keeps the link hidden too, while the provider got the real one
+    const ledger = (mockDb.__tables.email_messages || [])[0];
+    expect(ledger.text_snapshot).toContain('/careers/offer/[link hidden]');
+    expect(ledger.text_snapshot).not.toContain('d'.repeat(64));
+    expect(ledger.html_snapshot).not.toContain('d'.repeat(64));
+    expect(RecruitingComms.maskOfferLink(`see ${link} now`)).toBe('see https://portal.wavespestcontrol.com/careers/offer/[link hidden] now');
+    expect(RecruitingComms.maskOfferLink(null)).toBe('');
+  });
+
   test('SMS blocked -> outcome blocked, history records the block code', async () => {
     mockRenderSmsTemplate.mockResolvedValue('Hi Jane.');
     mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SMS_OPTED_OUT' });
@@ -597,6 +630,62 @@ describe('sendStageComms — send-window hold', () => {
     expect(JSON.parse(queued.metadata)).toMatchObject({ audience: 'applicant', purpose: 'application_received', job_application_id: 'app-1', consent_basis: { status: 'transactional_allowed' } });
     const stored = mockDb.__tables.job_applications.find((r) => r.id === 'app-1');
     expect(stored.comms_history[0]).toMatchObject({ outcome: 'deferred', scheduled_for: '2027-03-17T12:00:00.000Z' });
+  });
+});
+
+describe('sendStageComms — a held job-offer text', () => {
+  test('is queued with the link token hidden and pins its offer, so the replay can rebuild the real link', async () => {
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${'d'.repeat(64)}`;
+    mockIsEnabled.mockImplementation((gate) => gate === 'jobOffers');
+    mockRenderSmsTemplate.mockResolvedValue(`Hi Jane, your job offer: ${link} It stays open until Fri, Dec 18. Reply STOP to opt out.`);
+    mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.sms_log = [];
+    const result = await RecruitingComms.sendStageComms(app, 'offer_sent', {
+      sms: true, email: false, by: 'staff-1', offerId: 'offer-1', offerToken: 'd'.repeat(64),
+      vars: { offer_link: link, expires_on: 'Fri, Dec 18', job_title: 'Pest Control Technician', sender_name: 'Test Owner' },
+    });
+    expect(result.sms).toBe('deferred');
+    // the provider was handed the real link; the stored queue row was not
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('d'.repeat(64));
+    const queued = (mockDb.__tables.sms_log || []).find((r) => r.status === 'scheduled');
+    expect(queued.message_body).toContain('/careers/offer/[link hidden]');
+    expect(JSON.stringify(queued)).not.toContain('d'.repeat(64).slice(0, 40)); // no token anywhere on the row, metadata included
+    expect(queued.message_type).toBe('job_offer_sent');
+    expect(JSON.parse(queued.metadata)).toMatchObject({ stage: 'offer_sent', purpose: 'offer_sent', job_offer_id: 'offer-1', audience: 'applicant', offer_token_hash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+  });
+});
+
+describe('sendStageComms — a held owner reply that pastes an offer link', () => {
+  const TOKEN = 'b'.repeat(64);
+  const LINK = `https://portal.wavespestcontrol.com/careers/offer/${TOKEN}`;
+  // Any retryable hold the pipeline returns; the queued row must still be able to send the real link later.
+  const HOLD = { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' };
+  const sha256 = (text) => require('crypto').createHash('sha256').update(text).digest('hex');
+
+  function holdReply(offers) {
+    mockSendCustomerMessage.mockResolvedValue(HOLD);
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.sms_log = [];
+    mockDb.__tables.job_offers = offers;
+    return RecruitingComms.sendStageComms(app, 'owner_reply', { sms: true, email: false, by: 'staff-1', smsBody: `Here is your offer again: ${LINK}` });
+  }
+
+  test('is queued with the link hidden and pins it to its offer, so the replay can put the real link back', async () => {
+    const result = await holdReply([{ id: 'offer-7', token: TOKEN }]);
+    expect(result.sms).toBe('deferred');
+    const queued = mockDb.__tables.sms_log.find((r) => r.status === 'scheduled');
+    expect(queued.message_body).toBe('Here is your offer again: https://portal.wavespestcontrol.com/careers/offer/[link hidden]');
+    expect(JSON.stringify(queued)).not.toContain(TOKEN.slice(0, 40)); // no token anywhere on the row, metadata included
+    expect(JSON.parse(queued.metadata).offer_links).toEqual([{ job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }]);
+  });
+
+  test('a pasted link that matches no offer is not queued, so it never waits with a link it cannot send', async () => {
+    const result = await holdReply([]);
+    expect(result.sms).toBe('blocked');
+    expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(0);
   });
 });
 
