@@ -82,6 +82,32 @@ export function tomorrowET(now = new Date()) {
   return etDateString(addETDays(now, 1));
 }
 
+const filled = (value) => typeof value === 'string' && value.trim() !== '';
+
+// A rate the page shows exactly, by the same rule the server signs by
+// (job-offers.js `centsFact`): a number of whole cents, at least one cent, that
+// money() writes as it is (no rounding, no exponent). The server sends rates as
+// numbers, so a rate sent as text, or one that would read "$0.00", is not one.
+function exactAmount(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0.01) return false;
+  const shown = value.toFixed(2);
+  return /^\d+\.\d{2}$/.test(shown) && Number(shown) === value;
+}
+
+// True when an offer read carries every term the page shows, exactly as the
+// page shows it: the job, a real start date, an hourly rate, the week, who they
+// report to and pay day. The pay step is in every read: no raise is both step
+// fields sent as null, and a raise needs both its rate and its date (a read
+// that leaves them out, or a date alone, would drop a dated raise from the
+// page). The page signs only such an offer, so no one signs a blank start date,
+// a "$0.00 an hour" or an offer missing its raise.
+export function hasOfferFacts(data) {
+  const noStep = data.stepRate === null && data.stepEffectiveOn === null;
+  return filled(data.jobTitle) && filled(data.hoursLine) && filled(data.reportTo) && filled(data.payDayLine)
+    && weekdayOf(data.startDate) !== null && exactAmount(data.hourlyRate)
+    && (noStep || (exactAmount(data.stepRate) && weekdayOf(data.stepEffectiveOn) !== null));
+}
+
 // null when valid, else the message to show.
 export function dateRequestProblem(value) {
   if (!value) return 'Pick a date.';

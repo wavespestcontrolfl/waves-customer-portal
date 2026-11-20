@@ -2,6 +2,7 @@ const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
 const { hash } = require('./staff-document-source');
 const { recordAuditEvent } = require('./audit-log');
+const { getPolicyStrict, withMonthRank, isOverMonthlyCap } = require('./review-incentives');
 const { resolveServiceRecord, parseJsonObject } = require('./job-costing');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { etDateString, parseETDateTime, addETDays, etWeekStart } = require('../utils/datetime-et');
@@ -390,6 +391,21 @@ function outcomeWithCoverage(kind, evidence, rule, today, missing, level) {
   return { ...outcome, status: 'unresolved', amount_cents: null, rate: null, missing_evidence: missing.length, reason: `${missing.length} performed services still need evidence. They have not been treated as successful handoffs or rework-free services.` };
 }
 
+// The technician's review payouts for the month, from the existing review program. A payout over the
+// monthly cap (owner 2026-11-20 D4) is flagged, so the page never adds it to what is payable. The policy
+// read is strict and the ranks come in the same statement as the rows: a failed read fails the request.
+async function reviewPayouts(conn, technicianId, range) {
+  const { monthlyCapCount: cap } = await getPolicyStrict(conn);
+  const query = conn('review_incentive_payouts as p').where('p.technician_id', technicianId)
+    .where('p.earned_at', '>=', parseETDateTime(`${range.start}T00:00`)).where('p.earned_at', '<', parseETDateTime(`${range.end}T00:00`))
+    .select('p.id', 'p.amount_cents', 'p.currency', 'p.status', 'p.earned_at', 'p.exported_at', 'p.paid_at').orderBy('p.earned_at', 'desc');
+  const rows = await (cap ? withMonthRank(conn, query) : query);
+  return rows.map((row) => {
+    const { month_rank: _monthRank, ...shown } = row;
+    return { ...shown, over_monthly_cap: isOverMonthlyCap(row, cap) };
+  });
+}
+
 async function loadOverview(conn, technicianId, selectedMonth) {
   const person = await employee(conn, technicianId);
   const range = monthRange(selectedMonth);
@@ -402,9 +418,7 @@ async function loadOverview(conn, technicianId, selectedMonth) {
       .where('a.technician_id', technicianId).select('a.*', 'assessor.name as assessor_name').orderBy('a.assessed_date', 'desc').orderBy('a.created_at', 'desc').limit(100).then(rows => rows.map(row => calendarRow(row, ['assessed_date']))),
     currentOnly(conn('field_business_evidence as b').where('b.technician_id', technicianId)
       .where('b.accepted_date', '>=', range.start).where('b.accepted_date', '<', range.end).select('b.*'), 'field_business_evidence', 'b').orderBy('b.accepted_date', 'desc').orderBy('b.estimate_id').limit(5001),
-    conn('review_incentive_payouts').where({ technician_id: technicianId })
-      .where('earned_at', '>=', parseETDateTime(`${range.start}T00:00`)).where('earned_at', '<', parseETDateTime(`${range.end}T00:00`))
-      .select('id', 'amount_cents', 'currency', 'status', 'earned_at', 'exported_at', 'paid_at').orderBy('earned_at', 'desc'),
+    reviewPayouts(conn, technicianId, range),
     conn('field_simulation_statements').where({ technician_id: technicianId, month: selectedMonth }).select('id', 'created_at', 'statement').orderBy('created_at', 'desc').limit(20),
   ]);
   if (businesses.length > 5000) reject('Too many new-business records to calculate this period.', 409);
@@ -536,4 +550,4 @@ async function score(serviceId, actor) {
   return { program: PROGRAM, entries: rows, service_id: serviceId, can_manage: actor.role === 'admin' };
 }
 
-module.exports = { saveRule, saveLevel, saveAllocation, saveServiceEvidence, saveBusinessEvidence, saveAssessment, overview, saveStatement, setup, visitOptions, evidenceDetail, estimateOptions, score };
+module.exports = { reviewPayouts, saveRule, saveLevel, saveAllocation, saveServiceEvidence, saveBusinessEvidence, saveAssessment, overview, saveStatement, setup, visitOptions, evidenceDetail, estimateOptions, score };

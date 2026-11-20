@@ -1,5 +1,5 @@
 /**
- * /api/admin/prospects: staff-only, read-only Builders list. Input is checked before the service runs.
+ * /api/admin/prospects: staff-only, read-only Builders and Restaurants lists. Input is checked before the service runs.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -7,6 +7,7 @@ jest.setTimeout(30000);
 let mockRole = 'admin';
 const mockList = jest.fn();
 const mockPermits = jest.fn();
+const mockRestaurants = jest.fn();
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => {
@@ -27,6 +28,10 @@ jest.mock('../services/prospects/builder-list', () => ({
   listBuilders: (...args) => mockList(...args),
   builderPermits: (...args) => mockPermits(...args),
 }));
+jest.mock('../services/prospects/restaurant-list', () => ({
+  PERIODS: [30, 90],
+  listRestaurants: (...args) => mockRestaurants(...args),
+}));
 
 const express = require('express');
 const logger = require('../services/logger');
@@ -43,7 +48,7 @@ beforeAll((done) => {
   });
 });
 afterAll((done) => { server.close(done); });
-beforeEach(() => { mockRole = 'admin'; mockList.mockReset(); mockPermits.mockReset(); });
+beforeEach(() => { mockRole = 'admin'; mockList.mockReset(); mockPermits.mockReset(); mockRestaurants.mockReset(); });
 
 async function get(path) {
   const res = await fetch(`${baseUrl}${path}`);
@@ -111,5 +116,43 @@ describe('GET /builders/permits', () => {
     const res = await get(`/api/admin/prospects/builders/permits?${query}`);
     expect(res.status).toBe(400);
     expect(mockPermits).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /restaurants', () => {
+  test('defaults to 30 days and returns the service answer', async () => {
+    mockRestaurants.mockResolvedValue({ days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null, counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [] });
+    const res = await get('/api/admin/prospects/restaurants');
+    expect(res.status).toBe(200);
+    expect(mockRestaurants).toHaveBeenCalledWith({ days: 30 });
+    expect(res.body.through).toBe('2026-11-19');
+  });
+
+  test('passes days=90 through as a number', async () => {
+    mockRestaurants.mockResolvedValue({ days: 90, rows: [] });
+    await get('/api/admin/prospects/restaurants?days=90');
+    expect(mockRestaurants).toHaveBeenCalledWith({ days: 90 });
+  });
+
+  test.each(['days=7', 'days=abc', 'days=30.5', 'days=30&extra=1'])('%s is a 400 and the service never runs', async (query) => {
+    const res = await get(`/api/admin/prospects/restaurants?${query}`);
+    expect(res.status).toBe(400);
+    expect(mockRestaurants).not.toHaveBeenCalled();
+  });
+
+  test('a service failure is a 500 with a plain sentence; the log carries the error code, not the error text', async () => {
+    logger.error.mockClear();
+    mockRestaurants.mockRejectedValue(Object.assign(new Error('select ... - relation does not exist'), { code: '42P01' }));
+    const res = await get('/api/admin/prospects/restaurants');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Could not load the restaurants list.');
+    expect(logger.error).toHaveBeenCalledWith('[admin-prospects] restaurants list failed (42P01)');
+  });
+
+  test('a technician who is not an admin is refused', async () => {
+    mockRole = 'technician';
+    const res = await get('/api/admin/prospects/restaurants');
+    expect(res.status).toBe(403);
+    expect(mockRestaurants).not.toHaveBeenCalled();
   });
 });

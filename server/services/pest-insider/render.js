@@ -31,7 +31,10 @@
  * gold button and a sign-off. Body text is 16px (customer design brief).
  * Every picture and link is reviewed data or a fixed asset: the top
  * picture, the card, source names and band emoji come by the lead's fact id,
- * the latin name and verdict from the species entry. No word inside
+ * the latin name and verdict from the species entry. When the lead fact or
+ * the species names a part a reader can look for, its part picture follows
+ * (parts.js: a real photo with the part circled and labeled in the text's
+ * own words) with the photo's credit line. No word inside
  * a reviewed sentence is restyled; a whole sentence may be. The fixed lines
  * below state no pest fact; the send check reads them with the rest. Every
  * mention of the newsletter, blog or website says Waves (owner 2026-11-19,
@@ -52,6 +55,7 @@ const { SITE, POST_URLS, postUrl } = require('./posts');
 const { factById } = require('./facts');
 const { cardFor, sourceLine, CARD_WIDTH, CARD_HEIGHT } = require('./cards');
 const { heroFor, HERO_WIDTH, HERO_HEIGHT } = require('./heroes');
+const { partPictureForFact, partPictureForSpecies, PART_WIDTH, PART_HEIGHT } = require('./parts');
 const { SERVICE_EMOJI } = require('./claim-check');
 const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
 
@@ -150,16 +154,55 @@ const SIGNOFF_HTML = `<div class="dm-text">
 </div>`;
 const SIGNOFF_TEXT = `${SIGNOFF_LINE}\n${SIGNOFF_NAME}\n`;
 
+// A Waves picture as wide as the column on a desktop screen (582px in
+// wrapNewsletter's card), with its size in the tag. A picture that moves
+// comes with its still: classic Outlook for Windows plays no GIF, so it gets
+// the still; every other mail app gets the GIF, whose first frame is the
+// whole picture. A reader who asked for less motion gets the still: a mail
+// app that reads that setting (Apple Mail does) picks the <source>, and one
+// that does not know <picture> shows its <img>, the GIF. The still comes
+// first in the HTML, so the Waves website's newsletter feed
+// (newsletter-feed.js extractCardImage, which reads <img> tags only and
+// skips GIFs) keeps the still as the issue's picture.
+function pictureHtml({ url, gifUrl, alt, width, height }) {
+  const img = (src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" width="${width}" height="${height}" style="width:100%;max-width:${width}px;height:auto;border:0;border-radius:12px;display:block;" />`;
+  if (!gifUrl) return img(url);
+  const moving = `<picture style="display:block;"><source srcset="${escapeHtml(url)}" media="(prefers-reduced-motion: reduce)" />${img(gifUrl)}</picture>`;
+  return `<!--[if mso]>${img(url)}<![endif]--><!--[if !mso]><!-->${moving}<!--<![endif]-->`;
+}
+
+// The credit line under a photo picture: each photo's author, linked to
+// its page, and its license, linked to its terms; the site; and that Waves
+// changed it. CC BY asks for each of these. A diagram has no photo and no line.
+function creditHtml(credits) {
+  const palette = newsletterPalette();
+  const a = (href, text) => `<a href="${escapeHtml(href)}" style="color:${palette.muted};text-decoration:underline;">${escapeHtml(text)}</a>`;
+  const one = (c) => `${a(c.source, c.license === 'CC BY 4.0' ? `© ${c.author}` : c.author || 'photo')} (${c.licenseUrl ? a(c.licenseUrl, c.license) : escapeHtml(c.license)})`;
+  const list = credits.length === 1 ? one(credits[0]) : credits.map((c) => `${escapeHtml(c.subject)}, ${one(c)}`).join('; ');
+  const sites = [...new Set(credits.map((c) => c.site))].join(' and ');
+  return `<p class="dm-muted" style="margin:0 0 14px 0;font-size:11px;line-height:1.5;color:${palette.muted};">Photo${credits.length > 1 ? 's' : ''} via ${escapeHtml(sites)}: ${list}. Cropped and labeled by Waves.</p>`;
+}
+
+// A part picture (parts.js) and its credit line, or nothing. The JPEG's
+// frame is square: the email rounds it where the mail app can.
+function partHtml(picture) {
+  if (!picture) return [];
+  return [
+    `<div style="margin:4px 0 6px 0;">${pictureHtml({ url: picture.url, alt: picture.alt, width: PART_WIDTH, height: PART_HEIGHT })}</div>`,
+    ...(picture.credits.length ? [creditHtml(picture.credits)] : []),
+  ];
+}
+
 // The lead fact's top picture (heroes.js), linked to the post: the fact's
-// title in big gold letters on a navy panel beside its art. A JPEG as wide
-// as the column on a desktop screen (582px in wrapNewsletter's card), with
-// its size in the tag, so every Outlook shows it. Its words are the fact's
-// title, so it shows only over that headline.
+// title in big gold letters on a navy panel beside its art, a JPEG, or a GIF
+// with its JPEG when the art moves. Its words are the fact's title, so it
+// shows only over that headline.
 function heroHtml(lead) {
   const fact = leadFact(lead);
   const hero = fact ? heroFor(fact.id) : null;
   if (!hero || lead.headline !== hero.title) return '';
-  return `<div style="margin:0 0 18px 0;"><a href="${escapeHtml(lead.postUrl)}" style="text-decoration:none;"><img src="${escapeHtml(hero.url)}" alt="${escapeHtml(hero.alt)}" width="${HERO_WIDTH}" height="${HERO_HEIGHT}" style="width:100%;max-width:${HERO_WIDTH}px;height:auto;border:0;border-radius:12px;display:block;" /></a></div>`;
+  const picture = pictureHtml({ url: hero.url, gifUrl: hero.gifUrl, alt: hero.alt, width: HERO_WIDTH, height: HERO_HEIGHT });
+  return `<div style="margin:0 0 18px 0;"><a href="${escapeHtml(lead.postUrl)}" style="text-decoration:none;">${picture}</a></div>`;
 }
 
 // About 220 words a minute, never under one.
@@ -205,9 +248,11 @@ function leadBlock({ lead }) {
     `<p class="dm-ink" style="margin:0 0 10px 0;font-size:17px;line-height:1.55;font-weight:600;">${escapeHtml(first)}</p>`,
     ...(rest.length ? [paragraph(escapeHtml(rest.join(' ')))] : []),
     // The fact's card, as a recap after its sentences (its words repeat the
-    // title or a sentence, so it does not sit right under them). A PNG, so
-    // every Outlook shows it; its alt text is its words.
-    ...(card ? [`<div style="margin:4px 0 16px 0;"><img src="${escapeHtml(card.url)}" alt="${escapeHtml(card.alt)}" width="${CARD_WIDTH}" height="${CARD_HEIGHT}" style="width:100%;max-width:${CARD_WIDTH}px;height:auto;border:0;border-radius:12px;display:block;" /></div>`] : []),
+    // title or a sentence, so it does not sit right under them). A PNG, or a
+    // GIF with its PNG for a months card; its alt text is its words.
+    ...(card ? [`<div style="margin:4px 0 16px 0;">${pictureHtml({ url: card.url, gifUrl: card.gifUrl, alt: card.alt, width: CARD_WIDTH, height: CARD_HEIGHT })}</div>`] : []),
+    // The part the lead names, circled on a real photo, after the card.
+    ...partHtml(fact ? partPictureForFact(fact.id) : null),
     metaBox([
       ...(source ? [`📚 <em>${escapeHtml(source)}</em>`] : []),
       `🔗 ${link(lead.postUrl, POST_LINK_TEXT)}`,
@@ -237,6 +282,8 @@ function speciesCardHtml(species, factText, page) {
     `<td valign="middle" style="vertical-align:middle;font-size:15px;line-height:1.9;">${tags.join('<br/>\n')}</td>`,
     '</tr></table>',
     `<p style="margin:0 0 8px 0;font-size:16px;line-height:1.6;">${escapeHtml(factText)}</p>`,
+    // The part the species fact names, circled on a real photo.
+    ...partHtml(partPictureForSpecies(species.slug)),
     ...(page ? [`<p style="margin:0;font-size:15px;line-height:1.6;">🔗 ${link(page, `See the ${species.name} page on the Waves website`)}</p>`] : []),
     '</div>',
   ].join('\n');

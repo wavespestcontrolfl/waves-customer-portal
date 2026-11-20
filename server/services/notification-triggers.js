@@ -1098,6 +1098,23 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/estimates',
     }),
   },
+  // The phone banner for a phone-yes card (owner 2026-11-18 "ok go", phone-yes step 1; under GATE_CALL_PHONE_YES_ACCEPT):
+  // a call booked a visit while the customer's estimate was open, so its card waits for the office, or time runs short
+  // on an open card. call-phone-yes-bell.js writes the bell row and names this kind with notifyAdmin's bannerKind;
+  // `build` takes the row's own words. The sweep closes the row once the card closes. Admin-only.
+  call_phone_yes: {
+    label: 'A call booked a visit on an open estimate',
+    category: 'estimate',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'phone_yes_card_closed', closedBy: 'server/services/call-phone-yes-bell.js' },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'Estimates — check a call on an open estimate',
+      body: p.alertBody || 'A call booked a visit while the estimate was open.',
+      link: p.alertLink || '/admin/communications#tab=triage',
+    }),
+  },
   bundle_quote_requested: {
     label: 'Bundle quote requested',
     category: 'estimate',
@@ -1499,6 +1516,12 @@ function pushTagFor(triggerKey, payload = {}) {
 // A push that is true for one ET day only expires with that day (push-notifications.js webPushTtl, apns.js, fcm.js): a
 // phone that reconnects days later never shows an old "Call today" count. The end of the day is the next ET midnight.
 function pushExpiryFor(triggerKey, payload = {}) {
+  // The lead reminders' push (lead-reminder-sweep.js): the reminder's close that day, or the bell's late window, whichever
+  // is first, so a phone that comes online later never shows a stale "call this lead".
+  if (triggerKey === 'lead_call_reminder') {
+    const at = Date.parse(payload.expiresAt || '');
+    return Number.isFinite(at) ? { expiresAt: new Date(at).toISOString() } : {};
+  }
   if (triggerKey !== 'estimate_call_today' || !validCalendarDate(payload.day)) return {};
   const nextDay = etDateString(addETDays(parseETDateTime(`${payload.day}T12:00`), 1));
   return { expiresAt: parseETDateTime(`${nextDay}T00:00`).toISOString() };
@@ -1543,7 +1566,7 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, beforeHandoff = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1631,7 +1654,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
 
     const prefsByUser = new Map(prefs.map((p) => [p.admin_user_id, p]));
     // No row = the trigger's default (on, or off for quietByDefault triggers).
-    const anyBellEnabled = activeAdmins.some((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).bell_enabled !== false);
+    const anyBellEnabled = bellWanted(trigger, activeAdmins, prefs);
     const pushEnabledIds = activeAdmins
       .filter((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).push_enabled !== false)
       .map((u) => u.id);
@@ -1911,10 +1934,14 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               ...pushExpiryFor(triggerKey, payload),
             };
           },
-          { beforeDispatch, ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
+          // beforeHandoff (optional): the push service's own check before EACH device's handoff (push-notifications.js).
+          // A false answer, or a throw, skips that device and every later one, so a change made while an earlier
+          // device's request runs still stops the rest.
+          { beforeDispatch, ...(typeof beforeHandoff === 'function' ? { beforeHandoff } : {}), ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
         );
         if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
-        if (stats.push?.superseded) stats.push = { sent: 0, skipped: 'superseded_before_push' };
+        // Stopped before any device: nothing went. A fan-out beforeHandoff stopped part way keeps its count.
+        if (stats.push?.superseded && !stats.push.sent) stats.push = { sent: 0, skipped: 'superseded_before_push' };
       }
     } catch (e) {
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
@@ -1938,6 +1965,14 @@ function defaultPreference(trigger) {
   return { bell_enabled: on, push_enabled: on, sound_enabled: on };
 }
 
+// Whether the trigger's shared bell row is wanted: some recipient has its Bell switch on (Push Settings), an admin with
+// no preference row getting the trigger's default. `prefs`: the trigger's notification_preferences rows. Used by
+// triggerNotification for its bell write, and by call-phone-yes-bell.js, which writes its own rows.
+function bellWanted(trigger, recipients, prefs) {
+  const byUser = new Map(prefs.map((p) => [String(p.admin_user_id), p]));
+  return recipients.some((u) => (byUser.get(String(u.id)) || defaultPreference(trigger)).bell_enabled !== false);
+}
+
 function listTriggers() {
   return Object.entries(TRIGGER_REGISTRY).map(([key, t]) => ({
     key, label: t.label, group: t.group, priority: t.priority, quietByDefault: t.quietByDefault === true,
@@ -1948,6 +1983,7 @@ module.exports = {
   triggerNotification,
   listTriggers,
   defaultPreference,
+  bellWanted,
   TRIGGER_REGISTRY,
   technicianCopy,
   technicianRowCopy,

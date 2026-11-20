@@ -8,7 +8,11 @@
  *    residential draft is priced for it;
  *  - the answers ride on extracted_data.quiz (kept when the AI triage
  *    replaces extracted_data, and never replaced by a model-returned key),
- *    both Customer 360 notes, the unverified hold and the new-lead bell.
+ *    both Customer 360 notes, the unverified hold and the new-lead bell;
+ *  - a quiz page that asked to continue on a price page gets an attach-only
+ *    token for the lead that request inserted (quizHandoffFor). The route's
+ *    own rule (a hand-off or the draft estimate, never both) runs on real
+ *    rows in lead-quiz-handoff-postgres.test.js.
  */
 
 jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(); return db; });
@@ -19,7 +23,12 @@ const path = require('path');
 const { _test } = require('../routes/lead-webhook');
 const { evaluateLeadEstimateAutomationReadiness } = require('../services/lead-estimate-automation');
 
-const { buildLeadWebhookIntake, commercialLeadFields, TRIAGE_REPLACE_EXTRACTED_SQL, triageExtractedForWrite } = _test;
+const { verifyLeadAttachToken, verifyLeadPrefillToken, ATTACH_TTL_SECONDS } = require('../utils/lead-prefill-token');
+
+const {
+  buildLeadWebhookIntake, commercialLeadFields, TRIAGE_REPLACE_EXTRACTED_SQL, triageExtractedForWrite, quizHandoffFor,
+  submitsServiceKey, normalizeLeadServiceKey,
+} = _test;
 
 const quizBody = (extra = {}) => ({
   name: 'Pat Sample',
@@ -150,3 +159,79 @@ describe('the unverified hold keeps the quiz answers', () => {
     expect(stage.slice(0, stage.indexOf('\n  };'))).toMatch(/\.\.\.\(intake\.quiz \? \{ quiz: intake\.quiz \} : \{\}\),/);
   });
 });
+
+describe('submitsServiceKey: a submission that names a service key never asks for a hand-off', () => {
+  test('any nonblank value in either field counts, also one the key reader drops or a blank alias masks', () => {
+    expect(submitsServiceKey({ serviceKey: 'pest_quarterly' })).toBe(true);
+    expect(submitsServiceKey({ service_key: 'pest_quarterly' })).toBe(true);
+    const malformed = { serviceKey: 'not a key!' };
+    const masked = { serviceKey: '', service_key: 'pest_quarterly' };
+    expect([normalizeLeadServiceKey(malformed), normalizeLeadServiceKey(masked)]).toEqual([null, null]);
+    expect([submitsServiceKey(malformed), submitsServiceKey(masked)]).toEqual([true, true]);
+  });
+
+  test('a value that is not a string counts too, and is never coerced', () => {
+    // JSON.parse output: an object whose toString is not a function throws when coerced to a string.
+    const hostile = JSON.parse('{"toString":1,"valueOf":1}');
+    for (const value of [[], {}, 0, false, ['pest_quarterly'], hostile]) {
+      expect(submitsServiceKey({ serviceKey: '', service_key: value })).toBe(true);
+      expect(submitsServiceKey({ serviceKey: value })).toBe(true);
+    }
+  });
+
+  test('absent or blank fields name none', () => {
+    for (const body of [{}, undefined, { serviceKey: null }, { serviceKey: '', service_key: '   ' }, { service_key: undefined }]) {
+      expect(submitsServiceKey(body)).toBe(false);
+    }
+  });
+});
+
+describe('quizHandoffFor: the price page hand-off in the response', () => {
+  const LEAD = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
+  const prevSecret = process.env.LEAD_PREFILL_SECRET;
+  beforeEach(() => { process.env.LEAD_PREFILL_SECRET = 'test-prefill-secret'; });
+  afterEach(() => {
+    if (prevSecret === undefined) delete process.env.LEAD_PREFILL_SECRET;
+    else process.env.LEAD_PREFILL_SECRET = prevSecret;
+  });
+  const homeLead = { id: LEAD, is_commercial: false, is_residential: true };
+  const handoff = (over = {}) => quizHandoffFor({ priceAsk: true, createdLead: true, lead: homeLead, ...over });
+
+  test('the lead this request inserted gets an attach-only token for that lead', () => {
+    const out = handoff();
+    expect(out).toEqual({ lead_id: LEAD, token: expect.stringMatching(/^\d+\.[A-Za-z0-9_-]+$/), expires_in: ATTACH_TTL_SECONDS });
+    expect(verifyLeadAttachToken(LEAD, out.token)).toBe(true);
+    // It can never be exchanged for the lead's contact fields at /lead-prefill.
+    expect(verifyLeadPrefillToken(LEAD, out.token)).toBe(false);
+  });
+
+  test('none unless the page asked and the answers end on a price page', () => {
+    expect(handoff({ priceAsk: false })).toBeNull();
+    expect(handoff({ priceAsk: undefined })).toBeNull();
+    expect(handoff({ priceAsk: 'true' })).toBeNull();
+  });
+
+  test('none for a row the readiness gate marked commercial, whatever the quiz said', () => {
+    expect(handoff({ lead: { id: LEAD, is_commercial: true, is_residential: false } })).toBeNull();
+  });
+
+  test('none for an attached lead or a missing lead row', () => {
+    expect(handoff({ createdLead: false })).toBeNull();
+    expect(handoff({ createdLead: 'yes' })).toBeNull();
+    expect(handoff({ lead: null })).toBeNull();
+    expect(handoff({ lead: {} })).toBeNull();
+    expect(quizHandoffFor()).toBeNull();
+  });
+
+  test('fails closed with no signing secret', () => {
+    const prevJwt = process.env.JWT_SECRET;
+    delete process.env.LEAD_PREFILL_SECRET;
+    delete process.env.JWT_SECRET;
+    try {
+      expect(handoff()).toBeNull();
+    } finally {
+      if (prevJwt !== undefined) process.env.JWT_SECRET = prevJwt;
+    }
+  });
+});
+

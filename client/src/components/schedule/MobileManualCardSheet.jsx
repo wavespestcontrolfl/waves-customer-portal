@@ -23,6 +23,7 @@ import { useEffect, useRef, useState } from 'react';
 import { getStripe } from '../../lib/stripeLoader';
 import SaveCardConsent from '../billing/SaveCardConsent';
 import { consentAttestation } from '../../lib/paymentMethodConsentText';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -211,6 +212,12 @@ export default function MobileManualCardSheet({
     }
   }
 
+  // A charge can wait on Stripe's card check (3-D Secure) with no portal
+  // request open, and a page move does not stop it. A reload would end the
+  // check before /confirm, so each step holds an out-of-date tab's reload
+  // until it settles (lib/reloadHolds.js).
+  const chargeWhileHeld = () => holdReloadWhileSending('card-payment', handleCharge);
+
   const canCharge = ready && complete && !processing && !initError;
   const displayedTotal = quoteData?.total ?? amount;
 
@@ -281,7 +288,7 @@ export default function MobileManualCardSheet({
         {/* Charge */}
         <button
           type="button"
-          onClick={handleCharge}
+          onClick={chargeWhileHeld}
           disabled={!canCharge}
           className="w-full rounded-full u-focus-ring"
           style={{

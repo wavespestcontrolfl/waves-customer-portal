@@ -9,6 +9,14 @@
 // next sweep re-runs the touch with fresh copy.
 const ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY = 'estimate_followup_monthly_average';
 
+// Category stamped on EVERY estimate follow-up email (estimate-follow-up.js sendDualChannel,
+// the stage cron and the engagement engine). Whether the nudge may still go out is judged by
+// the sender at its own provider boundary (followupMayStillSend: estimate still open, deadline
+// not passed, customer not mid-checkout). A stored copy re-sent later would skip that proof, so
+// neither stored-copy rail re-sends it: a blocked or bounced follow-up settles as not sent, and
+// the next stage comes anyway.
+const ESTIMATE_FOLLOWUP_CATEGORY = 'estimate_followup';
+
 // Category stamped on a reschedule or cancellation email (GATE_MOVE_NOTICE_EMAIL,
 // appointment-email.js). Its copy is true only while the visit stays as it says
 // (still at the quoted slot, or still cancelled under the same notice), which the
@@ -34,6 +42,7 @@ const MULTI_HOME_DISCOUNT_CATEGORY = 'multi_home_discount_on';
 // provider retry records.
 const NO_STORED_COPY_REPLAY = new Map([
   [ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, 'Not re-sent from stored copy (monthly average may be stale).'],
+  [ESTIMATE_FOLLOWUP_CATEGORY, 'Not re-sent from stored copy (the estimate may have been accepted, expired or extended since).'],
   [MOVE_NOTICE_CATEGORY, 'Not re-sent from stored copy (the visit may have changed since).'],
   [CARBON_COPY_CATEGORY, 'Not re-sent from stored copy (it was copied to a second address).'],
   [MULTI_HOME_DISCOUNT_CATEGORY, 'Not re-sent from stored copy (the family discount is checked again before any re-send).'],
@@ -46,6 +55,6 @@ function staleStoredCopyReason(categories) {
 }
 
 module.exports = {
-  ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY, MULTI_HOME_DISCOUNT_CATEGORY,
+  ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, ESTIMATE_FOLLOWUP_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY, MULTI_HOME_DISCOUNT_CATEGORY,
   NO_STORED_COPY_REPLAY, staleStoredCopyReason,
 };

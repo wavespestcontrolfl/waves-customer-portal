@@ -212,6 +212,17 @@ jest.setTimeout(60000);
     expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
+  test('saveTechCount merges flags in one statement and writes the count only when sent', async () => {
+    const first = await svc.runRoofEntryRead(home());
+    const id = first.read.id;
+    expect((await svc.saveTechCount(id, { flags: { gable_vents: 'unsure' } })).tech_final_flags).toEqual({ gable_vents: 'unsure' });
+    await svc.saveTechCount(id, { count: 3 });
+    const merged = await svc.saveTechCount(id, { flags: { chimney_or_flue: 'yes', gable_vents: 'no' } });
+    expect(merged).toEqual(expect.objectContaining({ tech_final_count: 3, tech_final_flags: { gable_vents: 'no', chimney_or_flue: 'yes' } }));
+    const [stored] = await rows();
+    expect(stored.tech_final_flags).toEqual({ gable_vents: 'no', chimney_or_flue: 'yes' });
+  });
+
   test('a customer retired by a duplicate merge (deleted_at + merged- phone) is refused; an archived one is not', async () => {
     const [survivor, loser, archived] = [await insertId('customers'), await insertId('customers'), await insertId('customers')];
     await svc.runRoofEntryRead(home());

@@ -92,13 +92,21 @@ async function threadSendReachesCustomer(conn, row, customerId, asOf) {
   return !others;
 }
 
-async function resolveEmailCustomerLink(conn, row, { asOf } = {}) {
+// The linkage with its reason: { customerId, namesNoCustomer }. customerId is
+// the one customer the send links to, else null. namesNoCustomer is true only
+// when the send provably names no customer: its Cc and Bcc were captured, no
+// customer wrote in its thread, and no recipient is an active customer's
+// email. Every other null is a send the linkage cannot settle (Cc or Bcc never
+// captured, a mixed thread, a thread customer the send does not provably
+// reach, recipients naming two customers), never "nobody's".
+async function emailCustomerLink(conn, row, { asOf } = {}) {
+  const unsettled = { customerId: null, namesNoCustomer: false };
   // A send may name its customer only in Cc or Bcc (an empty To).
-  if (!row?.gmail_thread_id && !row?.to_address && !row?.cc_address && !row?.bcc_address) return null;
+  if (!row?.gmail_thread_id && !row?.to_address && !row?.cc_address && !row?.bcc_address) return unsettled;
   // Cc/Bcc never captured (a row synced before capture existed, or a caller
   // that did not select them): who else the send reached is unknown, so it
   // never links to a customer. A captured "no Cc/Bcc" is '', not NULL.
-  if (row.cc_address == null || row.bcc_address == null) return null;
+  if (row.cc_address == null || row.bcc_address == null) return unsettled;
   if (row.gmail_thread_id) {
     const threadCustomers = await conn('emails')
       .where({ gmail_thread_id: row.gmail_thread_id })
@@ -106,20 +114,22 @@ async function resolveEmailCustomerLink(conn, row, { asOf } = {}) {
       .modify(storedBefore(asOf))
       .modify((q) => { if (row.id) q.whereNot('id', row.id); })
       .distinct('customer_id').pluck('customer_id');
-    if (threadCustomers.length > 1) return null; // a mixed thread never guesses
+    if (threadCustomers.length > 1) return unsettled; // a mixed thread never guesses
     if (threadCustomers.length === 1) {
-      return (await threadSendReachesCustomer(conn, row, threadCustomers[0], asOf)) ? threadCustomers[0] : null;
+      return (await threadSendReachesCustomer(conn, row, threadCustomers[0], asOf))
+        ? { customerId: threadCustomers[0], namesNoCustomer: false } : unsettled;
     }
   }
   const recipients = recipientAddresses(row);
-  if (!recipients.length) return null;
+  if (!recipients.length) return unsettled;
   // Multiple recipients: resolve only when the addresses collectively name
   // exactly one distinct active customer — never "the first one," and
   // never guess between two different customers on the same send.
   const matches = await conn('customers').whereNull('deleted_at').whereNotNull('email')
     .whereIn(conn.raw('LOWER(TRIM(email))'), recipients).pluck('id');
   const distinct = [...new Set(matches)];
-  return distinct.length === 1 ? distinct[0] : null;
+  if (distinct.length === 1) return { customerId: distinct[0], namesNoCustomer: false };
+  return { customerId: null, namesNoCustomer: distinct.length === 0 };
 }
 
-module.exports = { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses };
+module.exports = { personSentFilter, emailCustomerLink, extractEmailAddresses };

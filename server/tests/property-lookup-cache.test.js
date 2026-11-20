@@ -323,6 +323,33 @@ describe('getCachedLookup', () => {
     expect(await getVerifiedOverrides('100 Main St')).toBeNull();
   });
 
+  // strict: for a caller that prices with nobody watching (the plan start
+  // offer). To it, a failed read must not look like "no row" or "no
+  // corrections": a cached home served without its corrections prices on
+  // sizes staff already fixed.
+  it('strict reads throw on a db error, with a code and no row text', async () => {
+    // A PG error can quote the failing row, and a cache row holds a street address.
+    mockDbHandler = () => { throw Object.assign(new Error('could not read row "100 Main St, Venice"'), { code: '57P01' }); };
+    for (const read of [getCachedLookup, getVerifiedOverrides]) {
+      const error = await read('100 Main St', { strict: true }).catch((err) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.code).toBe('LOOKUP_CACHE_READ_FAILED');
+      expect(error.causeCode).toBe('57P01');
+      expect(error.message).not.toMatch(/Main St|Venice/);
+    }
+  });
+
+  it('strict reads answer as the default reads do when the db answers', async () => {
+    const overrides = { lotSize: { value: 9 } };
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, verified_overrides: overrides } });
+    expect(await getCachedLookup('100 Main St', { strict: true })).toBeTruthy();
+    expect(await getVerifiedOverrides('100 Main St', { strict: true })).toEqual(overrides);
+    // No row and no corrections are answers, not failures.
+    mockDbHandler = () => fakeTable({ row: null });
+    expect(await getCachedLookup('100 Main St', { strict: true })).toBeNull();
+    expect(await getVerifiedOverrides('100 Main St', { strict: true })).toBeNull();
+  });
+
   it('stale-imagery-conflict rows age out on the SHORT TTL despite a long stored expiry', async () => {
     // The 33 prod rows poisoned before the guard shipped carry the 180-day
     // expires_at — the read-side short TTL is what actually refreshes them.

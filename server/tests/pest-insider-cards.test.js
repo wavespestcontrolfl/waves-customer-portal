@@ -2,8 +2,9 @@
 // fact, every lead fact has one, and its picture ships with the portal.
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const {
-  CARDS, CARD_DIR, CARD_BASE_URL, LAYOUTS, TAGS, WAVES_COLORS, SCHEMES, cardFor, validateCards, pieceText, sourceLine, monthsNamed,
+  CARDS, CARD_DIR, CARD_BASE_URL, CARD_DESIGN, CARD_MOTION_DESIGN, LAYOUTS, TAGS, WAVES_COLORS, SCHEMES, cardFor, validateCards, pieceText, sourceLine, monthsNamed,
 } = require('../services/pest-insider/cards');
 const { HERO_BASE_URL, HERO_DIR } = require('../services/pest-insider/heroes');
 const { newsletterPalette } = require('../services/email-template');
@@ -40,8 +41,8 @@ describe('the reviewed card list', () => {
     const dir = path.join(__dirname, '../..', CARD_DIR);
     const files = fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
     expect(Object.values(CARDS).map((c) => c.file).filter((f) => !files.includes(f))).toEqual([]);
-    // every file is a card picture by name (<fact>-<hash>.png); a retired fact's pictures may stay
-    expect(files.filter((f) => !/^[a-z]\d\d-[0-9a-f]{10}\.png$/.test(f))).toEqual([]);
+    // every file is a card picture by name (<fact>-<hash>.png, or .gif for a moving card); a retired fact's pictures may stay
+    expect(files.filter((f) => !/^[a-z]\d\d-[0-9a-f]{10}\.(?:png|gif)$/.test(f))).toEqual([]);
     for (const [id, card] of Object.entries(CARDS)) {
       expect(card.file).toMatch(new RegExp(`^${id.toLowerCase()}-[0-9a-f]{10}\\.png$`));
       expect(card.url).toBe(`${CARD_BASE_URL}${card.file}`);
@@ -53,6 +54,34 @@ describe('the reviewed card list', () => {
       await expect(sharp(png).raw().toBuffer()).resolves.toBeInstanceOf(Buffer);
     }
   });
+
+  test('a months card also moves: a whole GIF that starts and ends on the whole card, lights its months one by one, and plays 3 times', async () => {
+    const sharp = require('sharp');
+    const dir = path.join(__dirname, '../..', CARD_DIR);
+    const hash10 = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 10);
+    const months = Object.entries(CARDS).filter(([, c]) => c.layout === 'months');
+    expect(months.length).toBeGreaterThan(0);
+    for (const [id, card] of Object.entries(CARDS)) {
+      if (card.layout !== 'months') { expect([id, card.gifFile, card.gifUrl]).toEqual([id, null, null]); continue; }
+      const { file: _file, url: _url, gifFile, gifUrl, alt: _alt, ...shown } = card;
+      expect(gifFile).toBe(`${id.toLowerCase()}-${hash10({ ...shown, motionDesign: CARD_MOTION_DESIGN })}.gif`);
+      expect(shown.design).toBe(CARD_DESIGN);
+      expect(gifUrl).toBe(`${CARD_BASE_URL}${gifFile}`);
+      const gif = fs.readFileSync(path.join(dir, gifFile));
+      expect(gif.subarray(0, 6).toString('latin1')).toBe('GIF89a');
+      expect({ id, kb: Math.ceil(gif.length / 1024) <= 100 }).toEqual({ id, kb: true });
+      // the whole card, a blink with no month lit, one frame per lit month, the whole card held
+      const [first, last] = card.months;
+      const lit = ((last - first + 12) % 12) + 1;
+      const meta = await sharp(gif, { animated: true }).metadata();
+      expect({ id, size: [meta.width, meta.pageHeight], frames: meta.pages, loop: meta.loop, delay: meta.delay })
+        .toEqual({ id, size: [1164, 600], frames: lit + 2, loop: 3, delay: [1800, 350, ...Array(lit - 1).fill(300), 2600] });
+      // the first and last frames are the same whole card; every frame decodes
+      const [a, b] = await Promise.all([0, lit + 1].map((page) => sharp(gif, { page }).raw().toBuffer()));
+      expect(a.equals(b)).toBe(true);
+      await expect(sharp(gif, { animated: true }).raw().toBuffer()).resolves.toBeInstanceOf(Buffer);
+    }
+  }, 60000);
 
   test('a change to any drawn word gives the card a new file name', () => {
     const base = validateCards({ cards: { A01 } }).A01;
@@ -156,7 +185,7 @@ describe('Waves colors only', () => {
   });
 
   test('the drawing scripts write no color of their own: every color comes from WAVES_COLORS', () => {
-    for (const file of ['ops/agents/pest-insider-cards.js', 'ops/agents/pest-insider-heroes.js']) {
+    for (const file of ['ops/agents/pest-insider-cards.js', 'ops/agents/pest-insider-heroes.js', 'ops/agents/pest-insider-motion.js', 'ops/agents/pest-insider-parts.js']) {
       const src = fs.readFileSync(path.join(__dirname, '../..', file), 'utf8');
       expect({ file, colors: src.match(/#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(\s*[\d.]/gi) }).toEqual({ file, colors: null });
     }

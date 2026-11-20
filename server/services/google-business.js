@@ -2741,8 +2741,13 @@ class GoogleBusinessService {
             });
 
             if (match && gbpRev.name) {
-              await db('google_reviews').where({ id: match.id }).update({ gbp_review_name: gbpRev.name });
-              logger.info(`[gbp] Resolved GBP resource name for ${gbpName}: ${gbpRev.name}`);
+              // Compare-and-set on the empty slot, as the publisher's match
+              // save is (review-reply/publisher.js resolveGbpReviewName): the
+              // rows were read before Google's list, so a name the publisher
+              // saved meanwhile (and may be posting to) is never replaced.
+              // Retract finds the reply by the name on the row.
+              const saved = await db('google_reviews').where({ id: match.id }).whereNull('gbp_review_name').update({ gbp_review_name: gbpRev.name });
+              if (saved) logger.info(`[gbp] Resolved GBP resource name for review ${match.id}: ${gbpRev.name}`);
             }
           }
         } catch (err) {

@@ -657,6 +657,16 @@ async function processDueBatch(now = new Date()) {
         await markJob(job.id, 'skipped', 'customer-replied');
         continue;
       }
+      // Signing up right now (a live visit-time hold, or the card step touched
+      // in the last 20 minutes): hold the email and look again. Applies to the
+      // engaged-moment rules too, whose point is a customer who is reading but
+      // has not decided; a customer who is booking has. Once they accept, the
+      // estimate-inactive check above ends the job; if they walk away, the
+      // email goes after the hold lapses.
+      if (await followupShared.estimateMidCheckout(est.id, { groupId: est.estimate_group_id })) {
+        await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000), 'mid-checkout');
+        continue;
+      }
       // Sibling budget: an engine send from the same dedupe group already
       // covered this concept (the atomic claim re-checks this too).
       const siblings = dedupeGroup(rule.rule_key).filter((k) => k !== rule.rule_key);
@@ -821,7 +831,7 @@ async function processDueBatch(now = new Date()) {
       let consultationUrl = '';
       if (consultationContext) {
         const minted = await mintGoneQuietConsultationUrl(consultationContext);
-        const { current, prefs, offerStillValid } = await db.transaction(async (trx) => ({
+        const { current, prefs, offerStillValid, midCheckout } = await db.transaction(async (trx) => ({
           current: await trx('estimates').where({ id: est.id }).first(),
           prefs: est.customer_id
             ? await trx('notification_prefs').where({ customer_id: est.customer_id }).first('email_enabled')
@@ -829,10 +839,14 @@ async function processDueBatch(now = new Date()) {
           offerStillValid: minted
             ? await goneQuietConsultationStillValid(consultationContext, est.customer_email, trx)
             : false,
+          // Checkout is judged from the same snapshot as the rest: a hold or
+          // card step committed after it cannot be seen, and one committed
+          // before it cannot be missed.
+          midCheckout: await followupShared.estimateMidCheckout(est.id, { conn: trx, groupId: est.estimate_group_id }),
         }), FINAL_CHECK_SNAPSHOT);
         const changed = !current || Object.keys(current).some((col) => !IGNORED_ESTIMATE_COLUMNS.has(col)
           && JSON.stringify(current[col]) !== JSON.stringify(est[col]));
-        if (changed || prefs?.email_enabled === false) {
+        if (changed || prefs?.email_enabled === false || midCheckout) {
           await followupShared.releaseFollowupSend(est.id, rule.rule_key);
           claimed = false;
           await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
@@ -840,6 +854,20 @@ async function processDueBatch(now = new Date()) {
         }
         consultationUrl = offerStillValid ? minted : '';
       }
+      // Last look before dispatch: the customer can reserve a visit time or
+      // open the card step while the claim is held and the links are minted,
+      // and neither write touches the estimate row the snapshot compares.
+      // The consultation path already read it inside that snapshot (nothing
+      // awaits after it but the send); every other path looks here. Give the
+      // claim back and look again later, as the checks above do.
+      if (!consultationContext
+        && await followupShared.estimateMidCheckout(est.id, { groupId: est.estimate_group_id })) {
+        await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+        claimed = false;
+        await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
+        continue;
+      }
+      const sendOutcome = {};
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,
@@ -861,7 +889,7 @@ async function processDueBatch(now = new Date()) {
             } : {}),
           }),
         },
-      });
+      }, sendOutcome);
       if (ok) {
         // The email is SENT — the ledger row must survive any bookkeeping
         // failure below (codex 2736 r4: releasing it would let a retry
@@ -871,6 +899,20 @@ async function processDueBatch(now = new Date()) {
         await followupShared.bumpFollowupCounters(est.id, rule.rule_key);
         await markJob(job.id, 'done', null);
         sent++;
+      } else if (sendOutcome.finalReason) {
+        // The final-send predicate said no at the provider boundary: the estimate
+        // was accepted, archived, expired or its deadline moved while the email
+        // was prepared. Nothing was sent; give the claim back and end the job.
+        await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+        claimed = false;
+        await markJob(job.id, 'skipped', `boundary:${sendOutcome.finalReason}`);
+      } else if (sendOutcome.midCheckout) {
+        // The customer started checkout while the email was being prepared;
+        // the provider-boundary check refused before any request. Not a failed
+        // send: give the claim back and look again later, uncounted.
+        await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+        claimed = false;
+        await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
       } else {
         await followupShared.releaseFollowupSend(est.id, rule.rule_key);
         claimed = false;

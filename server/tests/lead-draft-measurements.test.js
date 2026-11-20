@@ -212,7 +212,7 @@ describe('the lead webhook reads the cache before its lock and schedules the ste
     const src = fs.readFileSync(path.join(__dirname, '../routes/lead-webhook.js'), 'utf8');
     expect(src.split('scheduleLeadDraftPropertyLookup({').length - 1).toBe(1);
     const lock = src.indexOf('await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {');
-    const lockEnd = src.indexOf('\n      });\n', lock);
+    const lockEnd = src.indexOf('\n        });\n', lock);
     const schedule = src.indexOf('scheduleLeadDraftPropertyLookup({');
     const caught = src.indexOf('} catch (estErr) {', lock);
     expect(lock).toBeGreaterThan(-1);

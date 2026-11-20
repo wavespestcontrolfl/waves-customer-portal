@@ -45,6 +45,7 @@ const acceptance = require('../services/estimate-manual-acceptance');
 const { sendMembershipStarted } = require('../services/account-membership-email');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { notifyAdmin } = require('../services/notification-service');
+const Word = require('../services/call-phone-yes-word');
 const {
   runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS, ACCEPT_SOURCE, TAP_REFUSALS, acceptPhoneYesCard, FEE_NOTE, _private: PhoneYesPrivate,
 } = require('../services/call-phone-yes-accept');
@@ -112,6 +113,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     process.env[GATE] = 'true';
     trx = await database.transaction();
     mockConn = trx;
+    // An active admin with no Push Settings row for the bell's type: its Bell switch reads on (call-phone-yes-bell.js).
+    await trx('technicians').insert({ id: randomUUID(), name: 'Sample Admin', role: 'admin', active: true });
   });
   afterEach(async () => { await trx.rollback(); });
 
@@ -192,10 +195,31 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(await trx('scheduled_services').where({ id: visitId }).first()).toEqual(before);
     expect(sendMembershipStarted).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(notifyAdmin).not.toHaveBeenCalled();
+    // The office's bell rings for the new card, once (call-phone-yes-bell.js; its rows: call-phone-yes-bell.db.test.js).
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith('estimate', "Estimates — check Pat Sampleton's estimate", expect.any(String),
+      expect.objectContaining({ bell: true, bannerKind: 'call_phone_yes', dedupeKey: `call-phone-yes:${card.id}` }));
     // One card per call, ever.
     await expect(sweep()).resolves.toMatchObject({ filed: 0, closed: 0 });
     spy.mockRestore();
+  });
+
+  test('a card whose check fails in a run rings nothing in that run, and rings once a check passes', async () => {
+    await phoneYes();
+    await sweep();
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    // The notification service is a stub here, so no bell row stands: every run whose check passes rings again.
+    notifyAdmin.mockClear();
+    const read = jest.spyOn(Word, 'callerWord').mockRejectedValue(Object.assign(new Error('read failed'), { code: 'ETEST' }));
+    try {
+      await sweep();
+    } finally {
+      read.mockRestore();
+    }
+    // A yes that could not be read again may have been taken back: nothing rings and the row is not rewritten.
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    await sweep();
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test.each([
@@ -890,15 +914,19 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: true });
   });
 
-  // The close is read again under the lock: evidence that changed after the first read keeps the card.
-  test('a close whose evidence changed before the write keeps the card open', async () => {
-    const { bookingCallId } = await phoneYes();
+  // The close is read again under the lock: evidence that changed after the first read keeps the card, and what the
+  // re-read found is written, so the card (and the bell that rings from it) never keeps a yes the re-read no longer backs.
+  test('a close whose evidence changed before the write keeps the card open, with what the re-read found', async () => {
+    const { bookingCallId, customerId } = await phoneYes();
     await sweep();
     const [card] = await cards(bookingCallId);
+    // A later call takes the yes back: the re-read finds no close, but a yes that no longer holds.
+    await call(customerId, null, { created_at: new Date() }, 'cancellation_request');
     const { applyCardStateForTest } = require('../services/call-phone-yes-accept')._private;
     await expect(applyCardStateForTest(card, { close: 'No longer applies: test.' })).resolves.toBe(false);
     const [after] = await cards(bookingCallId);
     expect(after.status).toBe('open');
+    expect(payloadOf(after)).toMatchObject({ yes_heard: false, no_yes_reason: 'caller_took_back' });
   });
 
   // A resend claims 'sending', then restores the status: a sweep in between keeps the card and its link.

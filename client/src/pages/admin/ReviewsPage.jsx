@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Award,
   Building2,
+  CalendarDays,
   MessageSquareText,
   CheckCircle2,
   Download,
@@ -823,6 +824,29 @@ function fmtDateTime(value) {
     return "";
   }
 }
+// Owner 2026-11-20 D4: the monthly cap on paid reviews per technician (null = none).
+function monthlyCapLabel(policy) {
+  return policy.monthlyCapCount
+    ? `${policy.monthlyCapCount} reviews a month`
+    : "No monthly cap";
+}
+// Owner 2026-11-20 D4: say so when the server skipped payouts over the monthly cap.
+function paidNoticeFor(result) {
+  if (!(result?.skippedOverCap > 0)) return null;
+  return `Marked ${result.updated || 0} paid; ${result.skippedOverCap} skipped (over the monthly cap)`;
+}
+function PaidNotice({ text }) {
+  if (!text) return null;
+  return (
+    <Card className="p-[12px] mb-[14px] text-ui-body text-zinc-900" role="status">
+      {text}
+    </Card>
+  );
+}
+function payoutStatusLabel(p) {
+  if (p.status === "paid") return "Paid";
+  return p.overMonthlyCap ? "Over monthly cap — not paid" : "Pending";
+}
 function PolicyInfoCard({ Icon, label, value, sub, color }) {
   return (
     <Card className="p-[14px] grid grid-cols-[20px_minmax(0,1fr)] items-start gap-[10px]">
@@ -1014,6 +1038,7 @@ function ReviewIncentivesPanel() {
   const [markingPaid, setMarkingPaid] = useState(false);
   const [readError, setReadError] = useState(null);
   const [actionError, setActionError] = useState(null);
+  const [paidNotice, setPaidNotice] = useState(null);
   const [queue, setQueue] = useState([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [activeRepairId, setActiveRepairId] = useState(null);
@@ -1085,20 +1110,21 @@ function ReviewIncentivesPanel() {
     }
   };
   const markPendingPaid = async () => {
-    const ids = (data?.payouts || [])
-      .filter((p) => p.status !== "paid")
-      .map((p) => p.id);
+    // The same list that enabled the button: over-cap rows never go in (owner 2026-11-20 D4).
+    const ids = pendingIds;
     if (!ids.length) return;
     loadGen.current += 1;
     setLoading(false);
     setQueueLoading(false);
     setMarkingPaid(true);
     setActionError(null);
+    setPaidNotice(null);
     try {
-      await adminFetch("/admin/reviews/incentives/mark-paid", {
+      const result = await adminFetch("/admin/reviews/incentives/mark-paid", {
         method: "POST",
         body: JSON.stringify({ ids }),
       });
+      setPaidNotice(paidNoticeFor(result));
       load();
     } catch (e) {
       setActionError(e.message);
@@ -1235,9 +1261,10 @@ function ReviewIncentivesPanel() {
   const summary = data?.summary || {};
   const payouts = data?.payouts || [];
   const pendingIds = payouts
-    .filter((p) => p.status !== "paid")
+    .filter((p) => p.status !== "paid" && !p.overMonthlyCap)
     .map((p) => p.id);
   const policy = data?.policy || {};
+
   const needsAttributionCount = queueLoading
     ? "..."
     : queue.length ||
@@ -1317,6 +1344,7 @@ function ReviewIncentivesPanel() {
           {actionError}
         </Card>
       )}
+      <PaidNotice text={paidNotice} />
 
       {loading ? (
         <div className="text-ink-secondary p-[48px] text-center">
@@ -1324,7 +1352,7 @@ function ReviewIncentivesPanel() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-[10px] mb-[14px]">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-[10px] mb-[14px]">
             <PolicyInfoCard
               Icon={Award}
               label="Program active since"
@@ -1337,6 +1365,12 @@ function ReviewIncentivesPanel() {
               value="Confirmed public Google reviews after activation"
               sub="A bonus row is created only after the review is synced from Google and matched to a technician."
               color="text-green-700"
+            />
+            <PolicyInfoCard
+              Icon={CalendarDays}
+              label="Monthly cap"
+              value={monthlyCapLabel(policy)}
+              sub="Per technician, by Eastern calendar month. Reviews past the cap are not paid."
             />
             <PolicyInfoCard
               Icon={Search}
@@ -1670,7 +1704,7 @@ function ReviewIncentivesPanel() {
                       <div className="text-ui-body font-medium">
                         {/* The summary calls unpaid bonuses "Pending Payroll";
                             keep the ledger vocab aligned (status is 'earned'). */}
-                        {p.status === "paid" ? "Paid" : "Pending"}
+                        {payoutStatusLabel(p)}
                       </div>
                       <div className="font-medium">{money(p.amountCents)}</div>
                     </Card>

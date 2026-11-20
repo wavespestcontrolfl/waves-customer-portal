@@ -732,4 +732,142 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.getByText(/Rex/)).toBeInTheDocument();
     expect(screen.getByText(/Kept in the garage/)).toBeInTheDocument();
   });
+
+  it('shows the sprinkler timer on file, and a new brand saves with its old model and app answer cleared', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        bodies.push(JSON.parse(options.body));
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({ irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    const row = (label) => screen.getByText(label).parentElement;
+    expect(row('Timer Brand')).toHaveTextContent('Hunter');
+    expect(row('Timer Model')).toHaveTextContent('X2');
+    expect(row('Runs From Phone App')).toHaveTextContent('Yes');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const select = (label) => screen.getByText(label).closest('label').querySelector('select');
+    expect(select('Timer Model').value).toBe('x2');
+    fireEvent.change(select('Timer Brand'), { target: { value: 'rain_bird' } });
+    // Only a Hunter has a model on the list.
+    expect(screen.queryByText('Timer Model')).not.toBeInTheDocument();
+    expect(select('Runs From Phone App').value).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    // The timer is a fact about one home, so the save carries the form's home stamp (none on this row), and the timer
+    // the form opened with: the server sets the timer only over that one.
+    expect(bodies[0]).toEqual({
+      irrigationControllerBrand: 'rain_bird', irrigationControllerModel: null, irrigationControllerApp: null, confirmedAsOf: null,
+      controllerTimerSeen: ['hunter|x2|yes'],
+    });
+  });
+
+  it('the timer saves as one record: an answer travels with its brand and model, and a new model clears the old answer', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        bodies.push(JSON.parse(options.body));
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({
+          irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes',
+          irrigation_home_changed_at: '2026-11-10T15:00:00.000Z',
+        }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const select = (label) => screen.getByText(label).closest('label').querySelector('select');
+    fireEvent.change(select('Runs From Phone App'), { target: { value: 'no' } });
+    // A Pro-C is a different box: the answer given for the X2 does not carry over.
+    fireEvent.change(select('Timer Model'), { target: { value: 'pro_c' } });
+    expect(select('Runs From Phone App').value).toBe('');
+    // An X-Core has no phone app, so the customer card asks nothing and neither does this form.
+    fireEvent.change(select('Timer Model'), { target: { value: 'x_core' } });
+    expect(screen.queryByText('Runs From Phone App')).not.toBeInTheDocument();
+    fireEvent.change(select('Timer Model'), { target: { value: 'x2' } });
+    fireEvent.change(select('Runs From Phone App'), { target: { value: 'no' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    // Only the answer changed, and all three are sent, with the home stamp the form was rendered against and the timer
+    // it opened with.
+    expect(bodies[0]).toEqual({
+      irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'no',
+      confirmedAsOf: '2026-11-10T15:00:00.000Z', controllerTimerSeen: ['hunter|x2|yes'],
+    });
+  });
+
+  it('after a save that got no answer, the timer goes with the next save naming both timers, until the server answers one', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        bodies.push(JSON.parse(options.body));
+        if (bodies.length === 1) return Promise.reject(new TypeError('Failed to fetch'));
+        // The second save stores the timer and refuses the note, so the editor stays open.
+        const rejected = bodies.length === 2 ? [{ field: 'accessNotes', message: 'Access notes are too long.' }] : undefined;
+        return response({ success: true, saved: true, preferences: BASE_PREFS, rejected });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({ irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const select = (label) => screen.getByText(label).closest('label').querySelector('select');
+    const save = async (count) => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(bodies).toHaveLength(count));
+    };
+    const editorStaysOpen = () => waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
+    fireEvent.change(select('Runs From Phone App'), { target: { value: 'no' } });
+    await save(1);
+    await editorStaysOpen();
+    expect(bodies[0].controllerTimerSeen).toEqual(['hunter|x2|yes']);
+
+    // Back to the opening answer: the lost No may be on file, so the timer still goes, naming both timers.
+    fireEvent.change(select('Runs From Phone App'), { target: { value: 'yes' } });
+    fireEvent.change(screen.getByText('Access Notes').closest('label').querySelector('textarea'), { target: { value: 'x'.repeat(20) } });
+    await save(2);
+    await editorStaysOpen();
+    expect(bodies[1]).toMatchObject({
+      irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes',
+      controllerTimerSeen: ['hunter|x2|yes', 'hunter|x2|no'],
+    });
+
+    // The server answered that save: the lost No is no longer named.
+    fireEvent.change(select('Runs From Phone App'), { target: { value: 'unknown' } });
+    await save(3);
+    expect(bodies[2]).toMatchObject({ irrigationControllerApp: 'unknown', controllerTimerSeen: ['hunter|x2|yes'] });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).toBeNull());
+  });
 });

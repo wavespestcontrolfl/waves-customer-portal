@@ -3,7 +3,8 @@
  *
  *   POST  /api/admin/roof-entry-read                run, or reuse (same property within 90 days), a read
  *         body { lat, lng, county, estimate_id?, customer_id? }; county is Manatee, Sarasota or Charlotte
- *         -> { status: 'ok' | 'in_progress' | 'no_image' | 'model_failed', cached, read }; read is null unless status is 'ok'.
+ *         -> { status: 'ok' | 'in_progress' | 'no_image' | 'model_failed', cached, read, image_url? }; read is null unless status
+ *         is 'ok', and then image_url is the county export URL of the crop the pins sit on.
  *         200 for every status except 202 'in_progress': another request holds this roof's claim, no image fetch or
  *         model call was made, ask again shortly. estimate_id / customer_id are stored and compared lower-case.
  *         400 { error: 'reference_mismatch' } when both ids are given and the estimate belongs to a different customer.
