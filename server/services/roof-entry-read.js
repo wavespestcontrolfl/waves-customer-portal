@@ -205,7 +205,10 @@ async function fetchAerial(lat, lng, county) {
   try {
     const res = await fetch(exportRequestUrl(src, lat, lng), { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     // ArcGIS answers an out-of-range or failed export with a 200 and a JSON body, so the type is checked too.
-    if (!res.ok || !String(res.headers.get('content-type') || '').startsWith('image/')) return null;
+    if (!res.ok || !String(res.headers.get('content-type') || '').startsWith('image/')) {
+      await res.body?.cancel?.();
+      return null;
+    }
     const buffer = await readCapped(res);
     if (!buffer) return null;
     return { data: buffer.toString('base64'), mimeType: 'image/jpeg', source: src.source, year: src.year };
@@ -293,13 +296,26 @@ function publicRead(row) {
 }
 
 /**
- * The immutable context of a row: lower-case estimate id, '|', lower-case customer id (either may be empty), written once
- * at insert on EVERY row (paid, claim and copy). Matching and copy dedupe use this, never the estimate_id / customer_id
- * foreign keys, which ON DELETE SET NULL can change after the fact. At most 73 characters (varchar(80)).
+ * The context of a row, written once at insert on EVERY row (paid, claim and copy): 'e:<estimate id>' when an estimate is
+ * given (estimate ids never change, and a customer merge repoints only the customer), else 'c:<customer id>' (empty when
+ * neither is given). Matching and copy dedupe use this, never the nullable estimate_id / customer_id foreign keys that
+ * ON DELETE SET NULL can change; an estimate-keyed row stays distinct from a customer-only row after its estimate is
+ * deleted. At most 38 characters (varchar(80)). Migration 20261119160000 back-filled the legacy '<est>|<cust>' format; no
+ * rows exist from before this format (the table is dark behind GATE_ROOF_ENTRY_READ), so it is never read back.
  */
-const contextKey = ({ estimateId, customerId }) => `${estimateId || ''}|${customerId || ''}`.toLowerCase();
+const contextKey = ({ estimateId, customerId }) => (estimateId ? `e:${estimateId}` : `c:${customerId || ''}`).toLowerCase();
 const sameContext = (row, ctx) => row.context_key === contextKey(ctx);
+/**
+ * Does this row answer this context? By key, and, for a customer-only lookup, also a row whose CURRENT customer is this
+ * customer, with no estimate and a customer-only key: the customer-dedupe merge repoints customer_id (and not the key),
+ * so a merged customer still finds the read made under the old customer.
+ */
+const matchesContext = (row, ctx) => sameContext(row, ctx)
+  || (!ctx.estimateId && !!ctx.customerId && !row.estimate_id && String(row.customer_id || '').toLowerCase() === ctx.customerId
+    && String(row.context_key).startsWith('c:'));
 const timeOf = (row) => new Date(row.created_at).getTime();
+/** The oldest candidate that answers the context. */
+const findForContext = (candidates, ctx) => candidates.filter((r) => matchesContext(r, ctx)).sort((a, b) => timeOf(a) - timeOf(b))[0];
 
 /**
  * The reusable reads of one crop, or null. The window is counted from the original PAID read: the anchor is the
@@ -327,8 +343,8 @@ async function reuseCandidates(key) {
  * insert does nothing and both return the winning row. Only copies carry a source_id, so no paid row is in that index.
  */
 async function answerFor(source, ctx) {
-  if (sameContext(source, ctx)) return publicRead(source);
-  const [inserted] = await db(TABLE).insert({
+  if (matchesContext(source, ctx)) return publicRead(source);
+  const [inserted] = await writeOwned(ctx, (conn) => conn(TABLE).insert({
     source_id: source.id,
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
@@ -342,25 +358,41 @@ async function answerFor(source, ctx) {
     ai_tier: source.ai_tier,
     status: STATUS_DONE,
     cost_estimate_cents: 0,
-  }).onConflict().ignore().returning('*');
+  }).onConflict().ignore().returning('*'));
   const row = inserted || await db(TABLE).where({ source_id: source.id, context_key: contextKey(ctx) }).first();
   return publicRead(row);
 }
 
+const referenceError = (code, message) => Object.assign(new Error(message), { code });
+// The estimate belongs to a customer other than the one supplied (ids compared lower-case).
+const ownerMismatch = (estimateCustomerId, ctx) => !!(ctx.customerId && estimateCustomerId && String(estimateCustomerId).toLowerCase() !== ctx.customerId);
+
 /**
  * Before any claim, copy, image fetch or model call: a supplied estimate and customer must exist (code
  * 'unknown_reference'), and when both are given and the estimate belongs to a customer, that customer must be the
- * one supplied (code 'reference_mismatch', compared case-insensitively). One estimate's read can never be filed under
- * another customer.
+ * one supplied (code 'reference_mismatch'). One estimate's read can never be filed under another customer.
  */
 async function assertReferencesExist({ estimateId, customerId }) {
-  const missing = (table) => Object.assign(new Error(`unknown ${table} reference`), { code: 'unknown_reference' });
   const estimate = estimateId ? await db('estimates').where({ id: estimateId }).first('id', 'customer_id') : null;
-  if (estimateId && !estimate) throw missing('estimates');
-  if (customerId && !(await db('customers').where({ id: customerId }).first('id'))) throw missing('customers');
-  if (estimate && customerId && estimate.customer_id && String(estimate.customer_id).toLowerCase() !== customerId) {
-    throw Object.assign(new Error('the estimate belongs to another customer'), { code: 'reference_mismatch' });
-  }
+  if (estimateId && !estimate) throw referenceError('unknown_reference', 'unknown estimates reference');
+  if (customerId && !(await db('customers').where({ id: customerId }).first('id'))) throw referenceError('unknown_reference', 'unknown customers reference');
+  if (estimate && ownerMismatch(estimate.customer_id, { customerId })) throw referenceError('reference_mismatch', 'the estimate belongs to another customer');
+}
+
+/**
+ * Runs `write(conn)` that inserts a row for this context. When the context names both an estimate and a customer, the
+ * write runs in a SHORT transaction that first locks the estimate row (FOR SHARE: a customer merge cannot change it
+ * until we commit), rechecks that its customer is still the one supplied, writes, and commits. The check and the insert
+ * are therefore atomic. This is the only transaction in the flow, and it holds no lock during any network I/O.
+ */
+async function writeOwned(ctx, write) {
+  if (!(ctx.estimateId && ctx.customerId)) return write(db);
+  return db.transaction(async (trx) => {
+    const estimate = await trx('estimates').where({ id: ctx.estimateId }).forShare().first('customer_id');
+    if (!estimate) throw referenceError('unknown_reference', 'unknown estimates reference');
+    if (ownerMismatch(estimate.customer_id, ctx)) throw referenceError('reference_mismatch', 'the estimate belongs to another customer');
+    return write(trx);
+  });
 }
 
 async function callModel(image) {
@@ -409,7 +441,7 @@ function settleOutcome(outcome) {
 // to every other request before the image fetch starts, and no connection stays open afterwards.
 async function insertClaim(key, county, ctx) {
   const src = IMAGE_SOURCES[county];
-  const rows = await db(TABLE).insert({
+  const rows = await writeOwned(ctx, (conn) => conn(TABLE).insert({
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
     context_key: contextKey(ctx),
@@ -423,7 +455,7 @@ async function insertClaim(key, county, ctx) {
     cost_estimate_cents: 0,
     status: STATUS_PENDING,
     claimed_at: db.fn.now(),
-  }).onConflict().ignore().returning('*');
+  }).onConflict().ignore().returning('*'));
   return rows[0] || null;
 }
 
@@ -512,7 +544,7 @@ async function payForRead({ claim, key, ctx, lat, lng, county, prices }) {
 
 // The answer for a reusable read, for this request's context (a copy row when the context differs).
 async function reuseAnswer(hit, ctx) {
-  const source = hit.candidates.find((r) => sameContext(r, ctx)) || hit.anchor;
+  const source = findForContext(hit.candidates, ctx) || hit.anchor;
   return { status: 'ok', cached: true, read: await answerFor(source, ctx) };
 }
 
@@ -563,7 +595,7 @@ async function runRoofEntryRead(input) {
   await assertReferencesExist(ctx);
   const key = lookupKey({ source: IMAGE_SOURCES[county].source, lat: input.lat, lng: input.lng });
   const hit = await reuseCandidates(key);
-  const same = hit && hit.candidates.find((r) => sameContext(r, ctx));
+  const same = hit && findForContext(hit.candidates, ctx);
   if (same) return { status: 'ok', cached: true, read: publicRead(same) };
   if (hit) return reuseAnswer(hit, ctx);
   const flightKey = `${key}|${ctx.estimateId}|${ctx.customerId}`;

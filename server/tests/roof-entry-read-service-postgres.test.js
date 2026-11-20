@@ -72,7 +72,7 @@ jest.setTimeout(60000);
     const all = await rows();
     expect(all).toHaveLength(1);
     // 'done' proves the completion's `claimed_at = <renewed value>` matched the stored (ms-truncated) timestamp.
-    expect(all[0]).toEqual(expect.objectContaining({ status: 'done', ai_tier: 'med', model: PRIMARY_MODEL, county: 'manatee', image_source: 'manatee_2025_rgb', context_key: '|', source_id: null }));
+    expect(all[0]).toEqual(expect.objectContaining({ status: 'done', ai_tier: 'med', model: PRIMARY_MODEL, county: 'manatee', image_source: 'manatee_2025_rgb', context_key: 'c:', source_id: null }));
     expect(all[0].cost_estimate_cents).toBe(1);
     expect(all[0].claimed_at).toBeInstanceOf(Date);
     expect(all[0].ai_flags).toEqual(flags());
@@ -89,7 +89,7 @@ jest.setTimeout(60000);
     expect(copy.read.id).not.toBe(first.read.id);
     const all = await rows();
     expect(all).toHaveLength(2);
-    expect(all.find((r) => r.id === copy.read.id)).toEqual(expect.objectContaining({ source_id: first.read.id, cost_estimate_cents: 0, status: 'done', context_key: `${est}|${cust}` }));
+    expect(all.find((r) => r.id === copy.read.id)).toEqual(expect.objectContaining({ source_id: first.read.id, cost_estimate_cents: 0, status: 'done', context_key: `e:${est}` }));
     expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
@@ -112,7 +112,7 @@ jest.setTimeout(60000);
   test('a pending claim blocks a second request (in_progress, no fetch, no call); a stale one is taken over', async () => {
     await database('roof_entry_reads').insert({
       lookup_key: svc.lookupKey({ source: 'manatee_2025_rgb', lat: 27.46, lng: -82.57 }), county: 'manatee', image_source: 'manatee_2025_rgb', image_year: 2025,
-      model: 'm', ai_flags: '{}', ai_tier: 'pending', status: 'pending', context_key: '|', cost_estimate_cents: 5, claimed_at: database.fn.now(),
+      model: 'm', ai_flags: '{}', ai_tier: 'pending', status: 'pending', context_key: 'c:', cost_estimate_cents: 5, claimed_at: database.fn.now(),
     });
     const blocked = await svc.runRoofEntryRead(home());
     expect(blocked).toEqual({ status: 'in_progress', cached: false, read: null });
@@ -161,11 +161,48 @@ jest.setTimeout(60000);
     await expect(svc.runRoofEntryRead(home({ estimateId: lead, customerId: custB }))).resolves.toBeTruthy();
   });
 
+  test('a customer merge repoints customer_id on the rows and the estimates: the copy is still found, its technician count kept', async () => {
+    const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+    const est = await insertId('estimates', { customer_id: custA });
+    await svc.runRoofEntryRead(home());
+    const estimateCopy = await svc.runRoofEntryRead(home({ estimateId: est, customerId: custA }));
+    const customerCopy = await svc.runRoofEntryRead(home({ customerId: custA }));
+    await database('roof_entry_reads').where({ id: estimateCopy.read.id }).update({ tech_final_count: 4 });
+    // What customer-dedupe does: repoint the customer, never the context key.
+    await database('roof_entry_reads').where({ customer_id: custA }).update({ customer_id: custB });
+    await database('estimates').where({ customer_id: custA }).update({ customer_id: custB });
+    const before = (await rows()).length;
+    const again = await svc.runRoofEntryRead(home({ estimateId: est, customerId: custB }));
+    expect(again.read).toEqual(expect.objectContaining({ id: estimateCopy.read.id, tech_final_count: 4, customer_id: custB }));
+    const customerAgain = await svc.runRoofEntryRead(home({ customerId: custB }));
+    expect(customerAgain.read.id).toBe(customerCopy.read.id);
+    expect(await rows()).toHaveLength(before);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a merge that lands between the first check and the insert is caught by the lock on the estimate: reference_mismatch, no row', async () => {
+    const [custA, custB] = [await insertId('customers'), await insertId('customers')];
+    const est = await insertId('estimates', { customer_id: custA });
+    // The merge transaction holds the estimate row, uncommitted. The request's first check (no lock) still sees custA, then
+    // its claim insert (FOR SHARE on that row) waits for the merge to commit and rechecks.
+    const merge = await database.transaction();
+    await merge('estimates').where({ id: est }).update({ customer_id: custB });
+    const pending = svc.runRoofEntryRead(home({ estimateId: est, customerId: custA }));
+    const settled = pending.then((v) => ({ v }), (e) => ({ e }));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await merge.commit();
+    const outcome = await settled;
+    expect(outcome.e).toMatchObject({ code: 'reference_mismatch' });
+    expect(await rows()).toHaveLength(0);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
   test('deleting an estimate keeps the paid row and its copies (foreign key set null)', async () => {
     const est = await insertId('estimates');
     const paid = await svc.runRoofEntryRead(home({ estimateId: est }));
     await database('estimates').where({ id: est }).del();
     const [row] = await rows();
-    expect(row).toEqual(expect.objectContaining({ id: paid.read.id, estimate_id: null, status: 'done', context_key: `${est}|` }));
+    expect(row).toEqual(expect.objectContaining({ id: paid.read.id, estimate_id: null, status: 'done', context_key: `e:${est}` }));
   });
 });

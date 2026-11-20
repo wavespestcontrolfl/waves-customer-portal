@@ -22,6 +22,8 @@ let mockEvents;
 let mockOnConflict;
 let mockOnClaimed;
 let mockSelectError;
+let mockOnTransaction;
+const mockForShare = jest.fn();
 jest.mock('../models/db', () => {
   const table = (name) => {
     let where = {};
@@ -48,6 +50,7 @@ jest.mock('../models/db', () => {
         return b;
       },
       orderBy() { return b; },
+      forShare() { mockForShare(); return b; },
       async first() { return match()[0]; },
       async select() {
         if (mockSelectError && name === 'roof_entry_reads') { const err = mockSelectError; mockSelectError = null; throw err; }
@@ -106,7 +109,15 @@ jest.mock('../models/db', () => {
   const db = jest.fn((name) => { mockDbCalls.push(name); return table(name); });
   db.fn = { now: () => 'NOW' };
   db.raw = (sql) => ({ raw: sql });
-  db.transaction = jest.fn();
+  // A short transaction runs on the same rows: 'tx' / 'tx-end' bracket it in mockEvents, so a test can prove the fetch and the
+  // model call happen outside it. mockOnTransaction simulates something changing right after the first check.
+  db.transaction = jest.fn(async (fn) => {
+    mockEvents.push('tx');
+    if (mockOnTransaction) mockOnTransaction();
+    const out = await fn(db);
+    mockEvents.push('tx-end');
+    return out;
+  });
   return db;
 });
 
@@ -184,6 +195,9 @@ beforeEach(() => {
   mockOnConflict = null;
   mockOnClaimed = null;
   mockSelectError = null;
+  mockOnTransaction = null;
+  mockForShare.mockClear();
+  require('../models/db').transaction.mockClear();
   mockAuth.mockClear();
   logger.info.mockClear();
   logger.warn.mockClear();
@@ -705,18 +719,18 @@ describe('cleanup after the claim', () => {
 });
 
 describe('context key', () => {
-  it('is lower(estimate) | lower(customer), either side may be empty, and fits varchar(80)', () => {
-    expect(svc.contextKey({ estimateId: EST.toUpperCase(), customerId: CUST })).toBe(`${EST}|${CUST}`);
-    expect(svc.contextKey({ estimateId: null, customerId: CUST })).toBe(`|${CUST}`);
-    expect(svc.contextKey({ estimateId: EST, customerId: null })).toBe(`${EST}|`);
-    expect(svc.contextKey({ estimateId: null, customerId: null })).toBe('|');
+  it('is e:<estimate> when an estimate is given, else c:<customer>, lower-case, and fits varchar(80)', () => {
+    expect(svc.contextKey({ estimateId: EST.toUpperCase(), customerId: CUST })).toBe(`e:${EST}`);
+    expect(svc.contextKey({ estimateId: EST, customerId: null })).toBe(`e:${EST}`);
+    expect(svc.contextKey({ estimateId: null, customerId: CUST.toUpperCase() })).toBe(`c:${CUST}`);
+    expect(svc.contextKey({ estimateId: null, customerId: null })).toBe('c:');
     expect(svc.contextKey({ estimateId: EST, customerId: CUST }).length).toBeLessThanOrEqual(80);
   });
 
   it('is written on every row: the paid row, and each copy', async () => {
     await post(home({ estimate_id: EST }));
     await post(home({ customer_id: CUST }));
-    expect(mockRows.map((r) => r.context_key)).toEqual([`${EST}|`, `|${CUST}`]);
+    expect(mockRows.map((r) => r.context_key)).toEqual([`e:${EST}`, `c:${CUST}`]);
   });
 
   it('keeps matching by context after a foreign key is set null, and a new copy no longer collides', async () => {
@@ -745,6 +759,116 @@ describe('context key', () => {
     const again = await svc.runRoofEntryRead({ lat: 27.46, lng: -82.57, county: 'Manatee', estimateId: EST });
     expect(again.read.id).toBe(copy.json.read.id);
     expect(mockRows).toHaveLength(2);
+  });
+});
+
+describe('customer merge and the context key', () => {
+  const CUST2 = '77777777-7777-4777-8777-777777777777';
+  // What customer-dedupe does: repoint the customer on the read rows and on the estimates, never the context key.
+  const merge = (from, to) => {
+    mockRows.forEach((r) => { if (r.customer_id === from) r.customer_id = to; });
+    mockRefs.estimates.forEach((e) => { if (e.customer_id === from) e.customer_id = to; });
+    mockRefs.customers.push({ id: to });
+  };
+
+  it('finds an estimate-keyed copy after its customer was repointed, and keeps the technician count', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }, { id: EST2, customer_id: null }];
+    await post(home());
+    const copy = await post(home({ estimate_id: EST, customer_id: CUST }));
+    expect((await call('PATCH', `/${copy.json.read.id}/tech-count`, { body: { count: 4 } })).status).toBe(200);
+    merge(CUST, CUST2);
+    const again = await post(home({ estimate_id: EST, customer_id: CUST2 }));
+    expect(again.json.read.id).toBe(copy.json.read.id);
+    expect(again.json.read.tech_final_count).toBe(4);
+    expect(again.json.read.customer_id).toBe(CUST2);
+    expect(mockRows).toHaveLength(2);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('finds a customer-only copy after its customer was repointed, choosing the oldest match', async () => {
+    await post(home());
+    const copy = await post(home({ customer_id: CUST }));
+    merge(CUST, CUST2);
+    const again = await post(home({ customer_id: CUST2 }));
+    expect(again.json.read.id).toBe(copy.json.read.id);
+    expect(mockRows).toHaveLength(2);
+    // A second repointed customer-only row (for another merged customer) is newer: the oldest still wins.
+    mockRows.push(crop({ id: 'newer-merged', status: 'done', ai_tier: 'med', source_id: mockRows[0].id, context_key: 'c:55555555-5555-4555-8555-000000000000', customer_id: CUST2, cost_estimate_cents: 0, claimed_at: null, created_at: new Date(Date.now() + 5000).toISOString() }));
+    expect((await post(home({ customer_id: CUST2 }))).json.read.id).toBe(copy.json.read.id);
+  });
+
+  it('does not hand a customer-only lookup an estimate-keyed row, even one whose estimate was deleted', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    await post(home());
+    const estimateCopy = await post(home({ estimate_id: EST, customer_id: CUST }));
+    const customerCopy = await post(home({ customer_id: CUST }));
+    mockRows.find((r) => r.id === estimateCopy.json.read.id).estimate_id = null; // ON DELETE SET NULL
+    expect((await post(home({ customer_id: CUST }))).json.read.id).toBe(customerCopy.json.read.id);
+    expect(estimateCopy.json.read.id).not.toBe(customerCopy.json.read.id);
+  });
+});
+
+describe('ownership check atomic with the insert', () => {
+  const OTHER_CUST = '66666666-6666-4666-8666-666666666666';
+
+  it('inserts the claim in a short transaction that locks the estimate first, and holds nothing during the fetch or the call', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    await post(home({ estimate_id: EST, customer_id: CUST }));
+    expect(mockEvents).toEqual(['prices', 'tx', 'claim', 'tx-end', 'image', 'renew', 'model', 'update:done']);
+    expect(mockForShare).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers reference_mismatch with no row when the estimate\'s customer changes between the first check and the insert', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    mockRefs.customers = [{ id: CUST }, { id: OTHER_CUST }];
+    mockOnTransaction = () => { mockRefs.estimates[0].customer_id = OTHER_CUST; }; // a merge lands after the first check
+    const res = await post(home({ estimate_id: EST, customer_id: CUST }));
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'reference_mismatch' });
+    expect(mockRows).toHaveLength(0);
+    expect(mockEvents).not.toContain('claim');
+    expect(mockEvents).not.toContain('tx-end');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it('checks again before writing a copy too', async () => {
+    mockRefs.estimates = [{ id: EST, customer_id: CUST }];
+    mockRefs.customers = [{ id: CUST }, { id: OTHER_CUST }];
+    await post(home());
+    mockOnTransaction = () => { mockRefs.estimates[0].customer_id = OTHER_CUST; };
+    expect((await post(home({ estimate_id: EST, customer_id: CUST }))).status).toBe(400);
+    expect(mockRows).toHaveLength(1);
+  });
+
+  it('does not open a transaction when only one id (or none) is given', async () => {
+    await post(home({ estimate_id: EST }));
+    await post(home({ customer_id: CUST }));
+    await post(home());
+    expect(require('../models/db').transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('the HTTP error and ArcGIS JSON error responses are cancelled too', () => {
+  const withCancel = (over) => {
+    const cancel = jest.fn(async () => {});
+    return { cancel, res: { ok: true, headers: { get: (n) => (n === 'content-type' ? 'image/jpeg' : null) }, body: Object.assign((async function* none() {}()), { cancel }), ...over } };
+  };
+
+  it('cancels the body of an HTTP error response', async () => {
+    const { cancel, res } = withCancel({ ok: false });
+    fetchSpy.mockResolvedValue(res);
+    expect((await post(home())).json.status).toBe('no_image');
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it('cancels the body of a 200 that carries an ArcGIS JSON error', async () => {
+    const { cancel, res } = withCancel({ headers: { get: (n) => (n === 'content-type' ? 'application/json' : null) } });
+    fetchSpy.mockResolvedValue(res);
+    expect((await post(home())).json.status).toBe('no_image');
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
 
