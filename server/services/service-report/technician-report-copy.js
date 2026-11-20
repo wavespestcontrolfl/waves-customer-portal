@@ -592,11 +592,13 @@ function renderWriterRulesState() {
 // note as it prints, the one the key's `-tr` part names, so a page built from
 // another read of the record (the note or the signing name changed between
 // the two reads) never matches either. 'withheld' when it is not (a refused
-// note, a typed visit, another line). A page bundle or server from before
-// the note reader never shows it, so the render times out and nothing is
-// stored. null on every other record, which renders the same either way.
+// note, a typed visit, another line). 'none' on every other record: its page
+// shows that state too, so a record that gained a note after the caller read
+// it never prints under the caller's key. A page bundle or server from before
+// the note reader shows no state at all, so it never matches any of the three:
+// the render times out and nothing is stored (pre-push audit round 29).
 function reportNoteRenderState(service, payload) {
-  if (!carriesReportNote(service?.structured_notes)) return null;
+  if (!carriesReportNote(service?.structured_notes)) return 'none';
   return payload?.summaryIsOwnNote === true ? `shown:${printedSummaryDigest(payload.summary)}` : 'withheld';
 }
 

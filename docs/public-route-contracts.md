@@ -3069,11 +3069,12 @@ it prints when the summary is the note (`summaryIsOwnNote`; the digest the
 key's `-tr` part names), else `withheld`. The PDF document shows it on its root
 (`data-report-note`), and both providers print only once that root shows the
 state of the caller's own build. A page built from another read of the record
-(the note or the signing name changed between the two reads) never matches. No
-other record, and no other mode, carries the key, so a record with no note
-waits for a root that shows no note state (`:not([data-report-note])`): a
-record that gained a note after the caller's read never prints under the
-caller's key either.
+(the note or the signing name changed between the two reads) never matches.
+Every other `mode=pdf` payload carries `reportNote: 'none'`, and a record with
+no note waits for a root that shows it (`[data-report-note="none"]`): a record
+that gained a note after the caller's read never prints under the caller's
+key, and neither does a page bundle from before the note reader, which shows
+no note state at all (pre-push audit round 29). No other mode carries the key.
 
 The technician's own note (owner 2026-11-19, the report speed plan; reader
 `visitReportCustomerCopy`, `technician-report-copy.js`): a completed visit may

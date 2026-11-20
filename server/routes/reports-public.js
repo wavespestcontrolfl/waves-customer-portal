@@ -2537,12 +2537,11 @@ router.get('/:token/data', async (req, res, next) => {
       // shows it on its root, and the renderer prints only once it matches
       // the state the PDF key was computed under (pdf.js
       // reportPdfReadySelector). PDF mode only. The note state the same way,
-      // on a record that carries the technician's own note only
+      // on every record: 'none' on one without the technician's own note
       // (technician-report-copy reportNoteRenderState).
       if (mode === 'pdf') {
         v1Data.writerRules = renderWriterRulesState();
-        const reportNote = reportNoteRenderState(service, v1Data);
-        if (reportNote) v1Data.reportNote = reportNote;
+        v1Data.reportNote = reportNoteRenderState(service, v1Data);
       }
       return res.json(v1Data);
     }

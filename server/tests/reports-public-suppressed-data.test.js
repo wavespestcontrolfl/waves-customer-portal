@@ -272,7 +272,7 @@ describe('GET /reports/:token/data: the writer-rules state of a PDF payload', ()
   });
 
   // The note state, the same way (technician-report-copy reportNoteRenderState).
-  test("a PDF payload of a record that carries the technician's own note names its note state; any other payload names none", async () => {
+  test("a PDF payload names the record's note state ('none' without the technician's own note); a live payload names none", async () => {
     const notes = { reportNote: { v: 1, text: 'I treated the perimeter.', source: 'cleaned' } };
     const payload = { typedReport: null, pestPressure: null, pdfUrl: `/api/reports/${VALID_TOKEN}` };
     const signed = 'I treated the perimeter. — Jordan';
@@ -293,12 +293,15 @@ describe('GET /reports/:token/data: the writer-rules state of a PDF payload', ()
       expect(res.status).toBe(200);
       expect((await res.json()).reportNote).toBeUndefined();
     });
+    // Without a note, 'none': the PDF wait never accepts a page that shows
+    // no state (a page bundle from before the note reader; pre-push audit
+    // round 29).
     buildReportV1Data.mockResolvedValue(payload);
     mockDb({ deliveryMode: 'auto_send' });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=pdf`);
       expect(res.status).toBe(200);
-      expect((await res.json()).reportNote).toBeUndefined();
+      expect((await res.json()).reportNote).toBe('none');
     });
   });
 });

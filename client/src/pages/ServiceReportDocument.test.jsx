@@ -2265,11 +2265,12 @@ describe('the PDF document root shows the payload writer-rules state', () => {
   });
 });
 
-// A record that carries the technician's own note waits, in the same way, for
-// the root showing the note state of the render's own build (server
-// reportNoteRenderState: `[data-report-note="shown"|"withheld"]`).
+// Every PDF waits, in the same way, for the root showing the note state of
+// the render's own build (server reportNoteRenderState:
+// `[data-report-note="shown:<digest>"|"withheld"|"none"]`; 'none' on a record
+// without the technician's own note).
 describe("the PDF document root shows the payload's own-note state", () => {
-  it.each(['shown', 'withheld'])('matches the PDF ready selector for %s', (state) => {
+  it.each(['shown:1a2b3c4d', 'withheld', 'none'])('matches the PDF ready selector for %s', (state) => {
     const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, writerRules: 'on', reportNote: state }} token="tok" />);
     expect(container.querySelector(`.service-report-v1[data-writer-rules="on"][data-report-note="${state}"]`)).not.toBeNull();
   });

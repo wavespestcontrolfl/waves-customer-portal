@@ -53,17 +53,19 @@ function assertPdfBuffer(buf, provider) {
 // report-copy reportDependsOnWriterRules) waits for its root showing the
 // state this render's key is computed under (renderWriterRulesState; /data
 // names it in PDF mode). Every other record renders the same in both states,
-// so it does not check that state, also in a restart overlap. A record that
-// carries the technician's own note also waits for the root showing the note
-// state of the caller's build (technician-report-copy reportNoteRenderState),
-// and every other record for a root that shows no note state: a record that
-// gained a note after the caller read it never prints under the caller's key
-// (pre-push audit on 685c3266d4).
+// so it does not check that state, also in a restart overlap. Every record
+// also waits for the root showing the note state of the caller's build
+// (technician-report-copy reportNoteRenderState): 'none' on a record without
+// the technician's own note. A record that gained a note after the caller read
+// it never prints under the caller's key (pre-push audit on 685c3266d4), and a
+// page bundle from before the note reader shows no state, so it never prints
+// one either (pre-push audit round 29: the wait no longer accepts a root that
+// shows no state). Unknown = 'none': the strict wait.
 function reportPdfReadySelector(dependsOnWriterRules = true, reportNoteState = null) {
   const root = dependsOnWriterRules
     ? `.service-report-v1[data-writer-rules="${require('./technician-report-copy').renderWriterRulesState()}"]`
     : '.service-report-v1';
-  return `${root}${reportNoteState ? `[data-report-note="${reportNoteState}"]` : ':not([data-report-note])'}`;
+  return `${root}[data-report-note="${reportNoteState || 'none'}"]`;
 }
 
 async function renderReportPdfWithCloudflare(url, { serviceRecordId, readySelector = '.service-report-v1' } = {}) {
@@ -182,7 +184,8 @@ async function renderServiceReportV1Pdf(data, {
   // render on. Unknown = true: the strict wait.
   dependsOnWriterRules = true,
   // reportNoteRenderState(service, data), from the same row and the caller's
-  // own build: null on a record without the technician's own note.
+  // own build: 'none' on a record without the technician's own note.
+  // Unknown = 'none' (reportPdfReadySelector): the strict wait.
   reportNoteState = null,
 } = {}) {
   const reportToken = token || data.token;
