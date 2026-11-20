@@ -299,31 +299,26 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
   });
 
   test.each([
-    ['no address keys', undefined],
-    ['address keys that are not an object', ['k1', 'k2']],
-  ])('a planned issue with %s mails nobody', async (_label, addressKeys) => {
-    buildDb({
-      send: {
+    ['no address keys', { subscriber_ids: [1, 2] }],
+    ['address keys that are not an object', { subscriber_ids: [1, 2], address_keys: ['k1', 'k2'] }],
+    ['no address key for one reader', { subscriber_ids: [1, 2], address_keys: { 1: PLANNED_KEYS[1] } }],
+    ['an empty reader list', { subscriber_ids: [], address_keys: PLANNED_KEYS }],
+    ['no reader list', { address_keys: PLANNED_KEYS }],
+  ])('a planned issue with %s is refused before any claim work, so it never ends sent to nobody', async (_label, plan) => {
+    const queues = {
+      newsletter_sends: [chain({ first: {
         id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
-        from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
-        segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider', address_keys: addressKeys }, subject_b: null,
-      },
-      subscribers: [
-        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
-        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: KEPT_CUSTOMER },
-      ],
-      deliveries: [
-        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
-        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
-      ],
-      eligibleAtDispatch: [{ id: 1 }, { id: 2, customer_id: KEPT_CUSTOMER }],
-      skipUpdated: 2,
+        segment_filter: { holdout: 'pest-insider', ...plan }, subject_b: null,
+      } })], // the fetch, and nothing else: a claim would read the queue and throw
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
     });
 
-    const result = await sendCampaign('send-1');
-
+    await expect(sendCampaign('send-1')).rejects.toMatchObject({ code: 'INCOMPLETE_PLAN', audienceRefusal: true });
     expect(mockSendBroadcast).not.toHaveBeenCalled();
-    expect(result.skipped_ineligible).toBe(2);
   });
 
   test('a holdout name this server does not know stops a first send before anything is sent', async () => {
@@ -1504,8 +1499,6 @@ describe('resumeCampaign — preconditions', () => {
   });
 
   test.each([
-    ['an empty list', [], []],
-    ['no list', undefined, []],
     ['a list without the second reader', [1], ['a@example.com']],
   ])('resume: a planned issue whose subscriber_ids is %s mails only the readers that list holds', async (_label, subscriberIds, mailed) => {
     let skipUpdate = null;
@@ -1578,6 +1571,9 @@ describe('resumeCampaign — preconditions', () => {
   test.each([
     ['names a holdout this server does not know', { segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider-v2' } }, 'UNKNOWN_HOLDOUT'],
     ['is a Waves Pest Insider issue with no plan', { newsletter_type: 'pest-insider-monthly', segment_filter: null }, 'UNPLANNED_AUDIENCE'],
+    ['has a plan with no address keys', { segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider' } }, 'INCOMPLETE_PLAN'],
+    ['has a plan with an empty reader list', { segment_filter: { subscriber_ids: [], holdout: 'pest-insider', address_keys: PLANNED_KEYS } }, 'INCOMPLETE_PLAN'],
+    ['has a plan with no reader list', { segment_filter: { holdout: 'pest-insider', address_keys: PLANNED_KEYS } }, 'INCOMPLETE_PLAN'],
     // A stale claim is not released to 'failed' either: the row stays as it is.
     ['is a stale sending Waves Pest Insider issue with no plan', {
       status: 'sending', updated_at: new Date('2026-01-01T00:00:00Z'), newsletter_type: 'pest-insider-monthly', segment_filter: null,

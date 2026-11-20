@@ -512,21 +512,34 @@ function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerId, add
   return addresses.every((address) => keys[id] === plan.addressKey(address));
 }
 
-// Why this send must not go out to its audience, or null. Read before any
-// claim work, on a first send and on a resume (a resume reads its retryable
-// rows from the ledger and never runs buildSubscriberQuery):
+// Why this send must not go out to its audience (an Error marked
+// audienceRefusal), or null. Read before any claim work, on a first send and
+// on a resume (a resume reads its retryable rows from the ledger and never
+// runs buildSubscriberQuery), so the row stays as it is and can be repaired:
 // - a holdout name this server does not know;
 // - a Waves Pest Insider issue with no planned audience (its planner sets
 //   one): without it the issue would go to every subscriber, the holdout and
-//   readers who never open Waves mail included.
+//   readers who never open Waves mail included;
+// - a planned audience without a usable reader list or without an address
+//   key for every reader on it: the batches would skip everyone, and the
+//   issue would end 'sent' to nobody.
 function audienceRefusal(send) {
   const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
   const filter = send.segment_filter;
+  const refused = (code, message) => Object.assign(new Error(message), { code, audienceRefusal: true });
   if (filter?.holdout != null && !sendHoldout(filter)) {
-    return { code: 'UNKNOWN_HOLDOUT', message: 'the segment filter names a holdout this server does not know' };
+    return refused('UNKNOWN_HOLDOUT', 'the segment filter names a holdout this server does not know');
   }
   if (send.newsletter_type === PEST_INSIDER_TYPE && filter?.holdout !== 'pest-insider') {
-    return { code: 'UNPLANNED_AUDIENCE', message: 'a Waves Pest Insider issue goes only to its planned readers, and this one has no plan' };
+    return refused('UNPLANNED_AUDIENCE', 'a Waves Pest Insider issue goes only to its planned readers, and this one has no plan');
+  }
+  if (filter?.holdout != null) {
+    const { subscriber_ids: ids, address_keys: keys } = filter;
+    const keyed = Boolean(keys) && typeof keys === 'object' && !Array.isArray(keys);
+    if (!usableIdList(ids) || !keyed
+      || !ids.every((id) => Object.hasOwn(keys, String(id)) && typeof keys[String(id)] === 'string')) {
+      return refused('INCOMPLETE_PLAN', 'the planned audience needs a reader list and an address key for every reader on it');
+    }
   }
   return null;
 }
@@ -563,12 +576,14 @@ function segmentForLog(filter) {
 //   refuse must not abort the count. One array binding, so a long list cannot
 //   hit Postgres's bind-parameter limit.
 const PG_INTEGER_MAX = 2147483647;
+function usableIdList(ids) {
+  return Array.isArray(ids) && ids.length > 0
+    && ids.every((id) => Number.isInteger(id) && id > 0 && id <= PG_INTEGER_MAX);
+}
 function narrowToPlannedAudience(q, { subscriber_ids: ids, holdout }) {
   if (holdout != null && !Object.hasOwn(SEND_HOLDOUTS, holdout)) return q.whereRaw('1 = 0');
   if (ids == null) return holdout != null ? q.whereRaw('1 = 0') : q;
-  const usable = Array.isArray(ids) && ids.length > 0
-    && ids.every((id) => Number.isInteger(id) && id > 0 && id <= PG_INTEGER_MAX);
-  return usable ? q.whereRaw('newsletter_subscribers.id = ANY(?::int[])', [ids]) : q.whereRaw('1 = 0');
+  return usableIdList(ids) ? q.whereRaw('newsletter_subscribers.id = ANY(?::int[])', [ids]) : q.whereRaw('1 = 0');
 }
 
 function assignAbVariant() {
@@ -787,7 +802,7 @@ async function sendCampaign(sendId, opts = {}) {
   // A send whose audience this server cannot honor stops here on every path,
   // before any claim work (audienceRefusal).
   const refusal = audienceRefusal(send);
-  if (refusal) throw Object.assign(new Error(refusal.message), { code: refusal.code });
+  if (refusal) throw refusal;
 
   // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
   // A TRUE PARTIAL resume — preclaimed AND constrained to the existing
@@ -1492,7 +1507,7 @@ async function prepareResumeCampaign(sendId) {
   // reset to draft, the release of a stale claim, the resume claim): a send
   // whose audience this server cannot honor (audienceRefusal).
   const refusal = audienceRefusal(send);
-  if (refusal) throw Object.assign(new Error(refusal.message), { code: refusal.code });
+  if (refusal) throw refusal;
   // A resume mails the rest of the list from what is stored NOW. A campaign
   // persisted before a stricter claim scan shipped, or one edited after its
   // first attempt failed, must pass the same validation the manual and
@@ -1810,8 +1825,7 @@ async function processScheduledSends() {
         logger.info(`[newsletter-scheduler] send ${row.id} changed after this tick validated it — not dispatching this version`);
         continue;
       }
-      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID'
-        || err.code === 'UNKNOWN_HOLDOUT' || err.code === 'UNPLANNED_AUDIENCE') {
+      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID' || err.audienceRefusal) {
         // sendCampaign's own pre-claim gates re-run the lineup checks and
         // can newly fail even though the tick's gate just passed (the
         // recheck fetches live pages). A generic 'failed' flip would

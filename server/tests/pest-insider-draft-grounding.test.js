@@ -38,6 +38,7 @@ describe('Pest Insider draft grounding', () => {
     await expect(createNewsletterDraft({
       prompt: 'Monthly Pest Insider for September.',
       newsletterType: 'pest-insider-monthly',
+      persist: false,
     })).rejects.toBe(STOP);
 
     expect(mockFactsBlock).toHaveBeenCalledTimes(1);
@@ -74,8 +75,19 @@ describe('Pest Insider draft grounding', () => {
     await expect(createNewsletterDraft({
       prompt: 'Monthly Pest Insider for September.',
       newsletterType: 'pest-insider-monthly',
+      persist: false,
     })).rejects.toThrow(/fact register is empty/);
 
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('a Pest Insider draft that would be saved is refused before any facts load or paid writer call', async () => {
+    await expect(createNewsletterDraft({
+      prompt: 'Monthly Pest Insider for September.',
+      newsletterType: 'pest-insider-monthly',
+    })).rejects.toThrow(/planned audience/);
+
+    expect(mockFactsBlock).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 

@@ -1711,6 +1711,9 @@ const NEWSLETTER_WRITE_TIMEOUT_MS = 10 * 60 * 1000;
  *   No caller passes it since the admin composer was removed.
  * @returns {Promise<{send: Object, draft: Object}>}
  */
+// persistNewsletterDraft refuses a Waves Pest Insider issue: it saves no audience plan.
+const PEST_INSIDER_UNSAVED = 'a Waves Pest Insider issue needs its planned audience, which this draft writer does not save';
+
 async function createNewsletterDraft({
   prompt,
   eventIds,
@@ -1730,6 +1733,9 @@ async function createNewsletterDraft({
   effort,
   timeoutMs = NEWSLETTER_WRITE_TIMEOUT_MS,
 }) {
+  // Refused before any paid generation: the save at the end would refuse it.
+  // persist=false still writes the copy.
+  if (persist && newsletterType === 'pest-insider-monthly') throw new Error(PEST_INSIDER_UNSAVED);
   const knex = trx || db;
   // The issue's Tuesday (not "now") anchors both the seasonal-month framing
   // and every event-policy window — cross-provider dispatch happens below.
@@ -2042,9 +2048,7 @@ async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db
   // This writer saves no audience plan, and a Waves Pest Insider send goes
   // out only with one (audienceRefusal in newsletter-sender.js): it refuses
   // the type rather than save an issue that could never be sent.
-  if (newsletterType === 'pest-insider-monthly') {
-    throw new Error('a Waves Pest Insider issue needs its planned audience, which this draft writer does not save');
-  }
+  if (newsletterType === 'pest-insider-monthly') throw new Error(PEST_INSIDER_UNSAVED);
   // Generate slug only at persistence time. This lets callers do paid/network
   // generation before opening a short advisory-locked DB transaction.
   const slug = generateSlug(draft.subject);
