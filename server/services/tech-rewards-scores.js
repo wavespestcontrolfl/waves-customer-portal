@@ -37,7 +37,7 @@
 const db = require('../models/db');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const calc = require('./tech-rewards-calc');
-const { callbackCreditByTechnician } = require('./callback-credit');
+const { callbackCreditByTechnician, PERFORMED_OUTCOME_SQL, VISIT_IS_CALLBACK_SQL } = require('./callback-credit');
 const { deliveryEvidenceForRecords } = require('./completion-record-invariants');
 
 const { DEFAULT_WEIGHTS, DEFAULT_CUT_LINES, seasonWindow, weightedScore, scoreBand } = calc;
@@ -249,12 +249,14 @@ async function readCallbacks(rawTechnicianId, window, conn = db) {
   const technicianId = requireTechnician(rawTechnicianId);
   const { from, to } = requireWindow(window);
   // A visit is ONE scheduled service even when the recap and dispatch rails left sibling records for it
-  // (an unlinked record is its own visit). A customer_declined visit performed no service.
+  // (an unlinked record is its own visit); a visit with any callback sibling is a callback visit, not a
+  // regular one. A visit that performed no application (the shared list in visit-outcomes.js) is no visit.
   const visitRow = (await conn.raw(
-    `SELECT COUNT(DISTINCT COALESCE(scheduled_service_id::text, id::text)) AS visits FROM service_records
-      WHERE technician_id = ? AND status = 'completed' AND is_callback IS NOT TRUE
-        AND COALESCE(structured_notes->>'visitOutcome', '') <> 'customer_declined'
-        AND service_date >= ?::date AND service_date <= ?::date`,
+    `SELECT COUNT(DISTINCT COALESCE(sr.scheduled_service_id::text, sr.id::text)) AS visits FROM service_records sr
+      WHERE sr.technician_id = ? AND sr.status = 'completed'
+        AND NOT ${VISIT_IS_CALLBACK_SQL('sr')}
+        AND ${PERFORMED_OUTCOME_SQL('sr')}
+        AND sr.service_date >= ?::date AND sr.service_date <= ?::date`,
     [technicianId, from, to],
   )).rows[0];
   const visits = toCount(visitRow?.visits);

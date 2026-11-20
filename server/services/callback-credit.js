@@ -20,8 +20,15 @@
  * work; only the callback count moves.
  */
 const { classifyServiceCategory } = require('./auto-dispatch/service-category');
+const { NON_PERFORMED_VISIT_OUTCOMES } = require('./visit-outcomes');
 
 const LOOKBACK_DAYS = 60;
+
+// SQL for 'this record's visit outcome performed no application' - the shared list (visit-outcomes.js).
+const PERFORMED_OUTCOME_SQL = (alias) => `COALESCE(${alias}.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map((o) => `'${o}'`).join(', ')})`;
+// SQL for 'some sibling record of this visit is flagged a callback' (a visit is a callback if any sibling is).
+const VISIT_IS_CALLBACK_SQL = (alias) => `(${alias}.is_callback IS TRUE OR (${alias}.scheduled_service_id IS NOT NULL AND EXISTS (
+         SELECT 1 FROM service_records vcb WHERE vcb.scheduled_service_id = ${alias}.scheduled_service_id AND vcb.is_callback IS TRUE)))`;
 
 /**
  * Callback counts by credited technician for callbacks dated start..endDate
@@ -42,16 +49,17 @@ async function callbackCreditByTechnician(conn, { start, endDate, distinctVisits
       LEFT JOIN service_records sr
         ON sr.customer_id = cb.customer_id
        AND sr.id <> cb.id
-       AND sr.is_callback IS NOT TRUE
+       AND sr.is_callback IS NOT TRUE${distinctVisits ? `
+       AND NOT ${VISIT_IS_CALLBACK_SQL('sr')}` : ''}
        AND sr.technician_id IS NOT NULL${performedSourcesOnly ? `
        AND sr.status = 'completed'
-       AND COALESCE(sr.structured_notes->>'visitOutcome', '') <> 'customer_declined'` : ''}
+       AND ${PERFORMED_OUTCOME_SQL('sr')}` : ''}
        AND (sr.service_date < cb.service_date
             OR (sr.service_date = cb.service_date AND sr.created_at < cb.created_at))
        AND sr.service_date >= cb.service_date - CAST(? AS integer)
      WHERE cb.is_callback = true${performedSourcesOnly ? `
        AND cb.status = 'completed'
-       AND COALESCE(cb.structured_notes->>'visitOutcome', '') <> 'customer_declined'` : ''}
+       AND ${PERFORMED_OUTCOME_SQL('cb')}` : ''}
        AND cb.service_date >= ?
        AND cb.service_date <= ?
      ORDER BY cb.id, sr.service_date DESC NULLS LAST, sr.created_at DESC NULLS LAST
@@ -83,4 +91,4 @@ async function callbackCreditByTechnician(conn, { start, endDate, distinctVisits
   return counts;
 }
 
-module.exports = { callbackCreditByTechnician, LOOKBACK_DAYS };
+module.exports = { callbackCreditByTechnician, LOOKBACK_DAYS, PERFORMED_OUTCOME_SQL, VISIT_IS_CALLBACK_SQL };

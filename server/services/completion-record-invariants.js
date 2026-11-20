@@ -460,6 +460,10 @@ function readableTimestamp(raw) {
 // Per record: is the visit exempt from a customer report (project-backed, the canonical sibling does
 // not owe one, or the frozen / catalog rule waives BOTH the report and the notice)? A record with no
 // visit link is judged on its own notes. `ss` is the visit row the shared fragments correlate on.
+const OWN_SNAPSHOT_WAIVES = (requirements) => `EXISTS (
+                       SELECT 1 FROM (SELECT r.structured_notes->'closeoutRequirements' AS snap) canonical
+                        WHERE ${FROZEN_SNAPSHOT_VALID}
+                          AND ${requirements.map((key) => `canonical.snap->>'${key}' = 'false'`).join(' AND ')})`;
 const EVIDENCE_EXEMPT_SQL = `
   SELECT r.id AS record_id, r.scheduled_service_id,
          (${internalTestVisitSql('r')}) OR CASE WHEN ss.id IS NULL THEN
@@ -468,6 +472,7 @@ const EVIDENCE_EXEMPT_SQL = `
                      AND COALESCE(r.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'
                      AND COALESCE(r.structured_notes->>'internalOnlyCompletion', 'false') <> 'true'
                      AND r.completion_source IS DISTINCT FROM 'project_completion')
+                OR ${OWN_SNAPSHOT_WAIVES(['requiresServiceReport', 'requiresCustomerNotice'])}
               ELSE
                 NOT (${VISIT_NOT_PROJECT_BACKED})
                 OR NOT EXISTS (SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
@@ -476,7 +481,13 @@ const EVIDENCE_EXEMPT_SQL = `
                 OR EXISTS (SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
                             WHERE (${CANONICAL_NOT_OWED('requiresServiceReport')}) IS TRUE
                               AND (${CANONICAL_NOT_OWED('requiresCustomerNotice')}) IS TRUE)
-         END AS exempt
+         END AS exempt,
+         -- the REPORT obligation alone is waived (frozen snapshot, else the catalog): a consent-blocked text
+         -- then leaves nothing owed, but a required report email still is
+         CASE WHEN ss.id IS NULL THEN ${OWN_SNAPSHOT_WAIVES(['requiresServiceReport'])}
+              ELSE EXISTS (SELECT 1 FROM (${CANONICAL_SIBLING}) canonical
+                            WHERE (${CANONICAL_NOT_OWED('requiresServiceReport')}) IS TRUE)
+         END AS report_waived
     FROM service_records r
     LEFT JOIN scheduled_services ss ON ss.id = r.scheduled_service_id
    WHERE r.id = ANY(string_to_array(?, ',')::uuid[])`;
@@ -541,11 +552,40 @@ const EVIDENCE_SENDS_SQL = `
   SELECT record_id, 'consent_blocked', NULL::timestamptz, NULL
     FROM sib WHERE structured_notes->>'completionSmsStatus' = 'blocked'`;
 
+// The send time of one evidence row as a Date, or null when it has none readable.
+function evidenceSendTime(row) {
+  if (row.kind === 'completion_text') return readableTimestamp(row.text_at);
+  return row.at ? new Date(row.at) : null;
+}
+
+// Fold the send rows into the per-record entries; returns the id sets the exemption rules need.
+function foldSendRows(rows, out) {
+  const sets = { blocked: new Set(), summaryPair: new Set(), confirmed: new Set() };
+  const pestRecapTexts = new Set(rows.filter((row) => row.kind === 'pest_recap_text').map((row) => String(row.record_id).toLowerCase()));
+  for (const row of rows) {
+    const id = String(row.record_id).toLowerCase();
+    const entry = out.get(id);
+    if (row.kind === 'consent_blocked') { sets.blocked.add(id); continue; }
+    if (row.kind === 'summary_suppressed') { sets.summaryPair.add(id); continue; }
+    sets.confirmed.add(id);
+    if (row.kind === 'recap_text_skipped') {
+      // its time is its audit row's; with no audit row it is a confirmed send of unknown time
+      if (!pestRecapTexts.has(id)) entry.confirmedWithoutTime = true;
+      continue;
+    }
+    const at = evidenceSendTime(row);
+    if (!at) entry.confirmedWithoutTime = true;
+    else if (!entry.firstConfirmedSendAt || at < entry.firstConfirmedSendAt) entry.firstConfirmedSendAt = at;
+  }
+  return sets;
+}
+
 /**
  * Delivery evidence for completed service_records ids. Returns a Map of record id (lowercase) to
  *   { exempt, firstConfirmedSendAt, confirmedWithoutTime }
  *   exempt                 no customer report is owed (see above, internal test customers included), or the
- *                          only outcome is a consent block or a suppressed summary pair (closeout-status: not required)
+ *                          only outcome is a suppressed summary pair (closeout-status: not required), or a consent-blocked text
+ *                          on a visit whose report is waived too (a required report email is still owed)
  *   firstConfirmedSendAt   the earliest readable time of any confirmed send (Date) or null
  *   confirmedWithoutTime   some confirmed send has no readable time (stored time missing or malformed)
  * A record with no evidence at all is { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false }.
@@ -558,28 +598,17 @@ async function deliveryEvidenceForRecords(recordIds, knex = db) {
     knex.raw(EVIDENCE_EXEMPT_SQL, [ids.join(',')]),
     knex.raw(EVIDENCE_SENDS_SQL, [ids.join(',')]),
   ]);
-  for (const row of exempt.rows) out.get(String(row.record_id).toLowerCase()).exempt = row.exempt === true;
-  const blocked = new Set();
-  const confirmed = new Set();
-  for (const row of sends.rows) {
+  const reportWaived = new Set();
+  for (const row of exempt.rows) {
     const id = String(row.record_id).toLowerCase();
-    const entry = out.get(id);
-    if (row.kind === 'consent_blocked' || row.kind === 'summary_suppressed') { blocked.add(id); continue; }
-    confirmed.add(id);
-    const at = row.kind === 'completion_text' ? readableTimestamp(row.text_at)
-      : (row.at ? new Date(row.at) : null);
-    if (row.kind === 'recap_text_skipped') continue; // its time is the audit row's; no row = confirmed without time below
-    if (!at) { entry.confirmedWithoutTime = true; continue; }
-    if (!entry.firstConfirmedSendAt || at < entry.firstConfirmedSendAt) entry.firstConfirmedSendAt = at;
+    out.get(id).exempt = row.exempt === true;
+    if (row.report_waived === true) reportWaived.add(id);
   }
-  // A skipped-recap marker with no audit row of its own to carry the time is a confirmed send of unknown time.
-  for (const row of sends.rows) {
-    const id = String(row.record_id).toLowerCase();
-    if (row.kind === 'recap_text_skipped' && !sends.rows.some((r) => String(r.record_id).toLowerCase() === id && r.kind === 'pest_recap_text')) {
-      out.get(id).confirmedWithoutTime = true;
-    }
-  }
-  for (const id of blocked) if (!confirmed.has(id)) out.get(id).exempt = true;
+  const { blocked, summaryPair, confirmed } = foldSendRows(sends.rows, out);
+  // A suppressed summary pair stands in for the report and the notice (closeout-status: not required). A
+  // consent-blocked text waives only the NOTICE: the record is exempt only if the report is waived too.
+  for (const id of summaryPair) if (!confirmed.has(id)) out.get(id).exempt = true;
+  for (const id of blocked) if (!confirmed.has(id) && reportWaived.has(id)) out.get(id).exempt = true;
   return out;
 }
 

@@ -422,12 +422,19 @@ describe('tech rewards scores input checks', () => {
       ]);
       expect(first.id).toBeTruthy();
       expect(await scores.readOnTime(tech, WINDOW)).toBe(100); // both records of the visit share the recap evidence
-      // a consent-blocked text with no send: not owed
-      await visit(tech, { structured_notes: { completionSmsStatus: 'blocked' } });
-      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
-      // a frozen closeout snapshot that waives BOTH the report and the notice: not owed; waiving only one: owed
       const snap = (report, notice) => ({ v: 1, source: 'catalog', requiresServiceReport: report, requiresApplicationLog: false, requiresCustomerSignature: false,
         requiresCustomerNotice: notice, requiresLicense: false, requiredPhotoCount: 0 });
+      // a consent-blocked text waives the NOTICE only: with the report waived too nothing is owed ...
+      await visit(tech, { structured_notes: { completionSmsStatus: 'blocked', closeoutRequirements: snap(false, true) } });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+      // ... but a required report whose email never went out is still owed, and late
+      const blockedOwed = await visit(tech, { structured_notes: { completionSmsStatus: 'blocked', closeoutRequirements: snap(true, true) } });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(66.67);
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${blockedOwed.id}:primary`, status: 'sent', sent_at: ts('2026-04-10T16:00:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100); // the report email on time credits it
+      await db('email_messages').del();
+      await db('service_records').where({ id: blockedOwed.id }).del();
+      // a frozen closeout snapshot that waives BOTH the report and the notice: not owed; waiving only one: owed
       const waivedSvc = await scheduled(tech);
       await visit(tech, { scheduled_service_id: waivedSvc.id, structured_notes: { closeoutRequirements: snap(false, false) } });
       expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
@@ -461,6 +468,18 @@ describe('tech rewards scores input checks', () => {
       expect(await scores.readOnTime(tech, WINDOW)).toBe(100); // exempt
       await pairVisit(['suppressed', 'failed']); // only one suppressed: still owed, no send, late
       expect(await scores.readOnTime(tech, WINDOW)).toBe(50);
+    });
+
+    test('onTime: an unlinked record (its visit was deleted) honors its own frozen waiver', async () => {
+      const snap = (report, notice) => ({ v: 1, source: 'catalog', requiresServiceReport: report, requiresApplicationLog: false, requiresCustomerSignature: false,
+        requiresCustomerNotice: notice, requiresLicense: false, requiredPhotoCount: 0 });
+      const svc = await scheduled(tech);
+      await visit(tech, { scheduled_service_id: svc.id, structured_notes: { closeoutRequirements: snap(false, false) } });
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull(); // linked: waived
+      await db('service_records').update({ scheduled_service_id: null }); // the visit row was deleted
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull(); // unlinked: still waived by its own snapshot
+      await visit(tech, { structured_notes: { closeoutRequirements: snap(false, true) } }); // only one waived: owed, late
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(0);
     });
 
     test('audit: match share of audited visits in the window months', async () => {
@@ -566,6 +585,35 @@ describe('tech rewards scores input checks', () => {
       // a completed re-service after the incomplete visit is charged to the technician who performed the service
       await visit(other, { customer_id, service_date: '2026-04-20', is_callback: true });
       expect(await scores.readCallbacks(tech, WINDOW)).toBe(0); // 1 callback in 2 visits, clamped
+      expect(await scores.readCallbacks(other, WINDOW)).toBeNull();
+    });
+
+    test('callbacks: inspection-only visits and re-services are not performed, by the shared outcome list', async () => {
+      const customer_id = randomUUID();
+      await visit(tech, { customer_id, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') });
+      await visit(other, { customer_id, service_date: '2026-04-10', created_at: ts('2026-04-10T14:00:00Z'), structured_notes: { visitOutcome: 'inspection_only' } });
+      await visit(tech, { customer_id: randomUUID(), service_date: '2026-04-02', created_at: ts('2026-04-02T14:00:00Z') });
+      await visit(tech, { customer_id: randomUUID(), service_date: '2026-04-03', structured_notes: { visitOutcome: 'inspection_only' } }); // not a visit
+      // an inspection-only re-service is no callback
+      await visit(other, { customer_id, service_date: '2026-04-15', is_callback: true, structured_notes: { visitOutcome: 'inspection_only' } });
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(100);
+      // a performed re-service is charged to the technician who treated, not the one who only inspected
+      await visit(other, { customer_id, service_date: '2026-04-20', is_callback: true });
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0); // 1 callback in 2 performed visits
+      expect(await scores.readCallbacks(other, WINDOW)).toBeNull(); // inspection-only: no visits
+    });
+
+    test('callbacks: a visit with any callback sibling is a callback visit, never a source or a regular visit', async () => {
+      const customer_id = randomUUID();
+      await visit(tech, { customer_id, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') }); // real source
+      await visit(tech, { customer_id: randomUUID(), service_date: '2026-04-02', created_at: ts('2026-04-02T14:00:00Z') });
+      // one scheduled service, two sibling records: a legacy row with NO callback flag, then a flagged callback
+      const svc = await scheduled(other);
+      await visit(other, { customer_id, scheduled_service_id: svc.id, service_date: '2026-04-10', created_at: ts('2026-04-10T14:00:00Z'), is_callback: null });
+      await visit(other, { customer_id, scheduled_service_id: svc.id, service_date: '2026-04-10', created_at: ts('2026-04-10T14:05:00Z'), is_callback: true });
+      // the unflagged sibling is not a source of its own visit (and not a regular visit of other): the callback
+      // goes to tech's April 1 visit: 1 callback in 2 visits -> 0
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0);
       expect(await scores.readCallbacks(other, WINDOW)).toBeNull();
     });
 
