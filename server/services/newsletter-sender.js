@@ -1791,14 +1791,15 @@ async function resumeCampaign(sendId) {
  * approval cleared (the state the owner signed off no longer holds), its
  * calendar week back to 'drafted', and one alert that says why: the week is
  * skipped, nothing went out (owner 2026-10-30, option A). A planned Waves Pest
- * Insider issue's row moves to failed in the same transaction: all of it lands,
- * or nothing does and the row stays scheduled for the next tick, which stops it
- * again. Its alert then comes from settlePlannedIssues, which retries it until it
- * reaches the owner; every other send's alert follows the commit. Never throws
- * (the callers move on to the next row either way): returns whether this tick
- * reverted it.
+ * Insider issue's row moves to failed in the same transaction (to held, with no
+ * alert, when `held`: a verified HOLD reply stopped it): all of it lands, or
+ * nothing does and the row stays scheduled for the next tick, which stops it
+ * again. A failed row's alert then comes from settlePlannedIssues, which retries
+ * it until it reaches the owner; every other send's alert follows the commit.
+ * Never throws (the callers move on to the next row either way): returns whether
+ * this tick reverted it.
  */
-async function revertBlockedScheduledSend(row, reason) {
+async function revertBlockedScheduledSend(row, reason, { held = false } = {}) {
   let reverted;
   try {
     reverted = await db.transaction(async (trx) => {
@@ -1822,8 +1823,13 @@ async function revertBlockedScheduledSend(row, reason) {
       await trx('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
       // A planned Waves Pest Insider issue stopped at send time does not go out:
       // its date has a fixed send time, and the planner never queues it again.
+      // A verified HOLD reply holds it, as the reply handler does (holdAutoQueuedIssue);
+      // any other stop fails it.
+      const [status, issueReason] = held
+        ? ['held', 'HOLD reply from the owner']
+        : ['failed', `stopped at send time: ${reason}`.slice(0, 500)];
       const planned = row.newsletter_type === PEST_INSIDER_TYPE
-        && await moveIssueForSend(row.id, ['drafted', 'scheduled'], 'failed', { reason: `stopped at send time: ${reason}`.slice(0, 500), database: trx });
+        && await moveIssueForSend(row.id, ['drafted', 'scheduled'], status, { reason: issueReason, database: trx });
       return planned ? 'planned' : 'reverted';
     });
   } catch (err) {
@@ -1857,13 +1863,17 @@ async function notifyStoppedAtSendTime(row, reason) {
   }
 }
 
+// The stop a verified HOLD reply makes: it holds the planned issue rather than failing it.
+const HOLD_ON_RECORD = 'a HOLD reply to its FYI copy is in the mailbox';
+
 /**
  * Why an auto-queued Waves Pest Insider send must not go out now, or null
  * when it may: it needs its planned issue (pest_insider_issues), still
  * 'scheduled', with scheduled_for at that issue's 7:00 AM ET send time, now
- * inside the 7:00-10:00 AM ET window of that day, and no HOLD reply to its FYI
- * copy from a verified sender (holdReplyOnRecord). Throws while the mailbox
- * cannot be read: the caller leaves the row scheduled for the next tick.
+ * inside the 7:00-10:00 AM ET window of that day, its FYI copy's token, and no
+ * HOLD reply to that copy from a verified sender (holdReplyOnRecord; then
+ * HOLD_ON_RECORD). Throws while the mailbox cannot be read: the caller leaves
+ * the row scheduled for the next tick.
  */
 async function pestInsiderDispatchStop(row, now = new Date()) {
   const context = await issueContextForSend(row, { now });
@@ -1878,14 +1888,16 @@ async function pestInsiderDispatchStop(row, now = new Date()) {
   // apply when it read it, in the stored inbox and in the mailbox itself. A check that cannot
   // answer in full waits for the next tick, and the window still bounds the wait
   // (settlePlannedIssues tells the owner if it closes).
-  const { holdReplyOnRecord } = require('./newsletter-proof');
+  const { holdReplyOnRecord, isProofToken } = require('./newsletter-proof');
+  // A HOLD reply names its issue by this token, so without it no HOLD can be checked, now or later.
+  if (!isProofToken(row.proof_token)) return 'its FYI copy has no valid token, so a HOLD reply to it cannot be checked';
   let held;
   try {
     held = await holdReplyOnRecord(row, context.issue);
   } catch (err) {
     throw new Error(`the HOLD check could not read the mailbox (${err.message}), so a HOLD reply could be unread`);
   }
-  return held ? 'a HOLD reply to its FYI copy is in the mailbox' : null;
+  return held ? HOLD_ON_RECORD : null;
 }
 
 /**
@@ -1956,7 +1968,7 @@ async function processScheduledSends() {
         }
         if (stop) {
           logger.error(`[newsletter-scheduler] Pest Insider send ${row.id} blocked: ${stop}`);
-          await revertBlockedScheduledSend(row, stop);
+          await revertBlockedScheduledSend(row, stop, { held: stop === HOLD_ON_RECORD });
           continue;
         }
         // The window's end also binds the claim (sendCampaign's expect.notAfter).

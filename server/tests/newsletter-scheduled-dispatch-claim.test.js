@@ -221,7 +221,8 @@ describe('a planned Waves Pest Insider issue the switch queued (GATE_PEST_INSIDE
   // Thursday, December 3, 2026: its 7:00 AM EST send time, and the 10:00 AM end of its window.
   const ISSUE_SEND_AT = new Date('2026-12-03T12:00:00Z');
   const WINDOW_END = new Date('2026-12-03T15:00:00Z');
-  const QUEUED = { ...SEND, id: 'send-pi-2', scheduled_for: ISSUE_SEND_AT, proof_approval_email_id: null };
+  // Queued by the auto-send switch after its FYI copy, whose token a HOLD reply would carry.
+  const QUEUED = { ...SEND, id: 'send-pi-2', scheduled_for: ISSUE_SEND_AT, proof_approval_email_id: null, proof_token: 'ab12cd34', proof_sent_at: new Date('2026-12-02T12:05:00Z') };
   const PLANNED = { id: 'issue-1', issue_date: '2026-12-03', status: 'scheduled', send_id: 'send-pi-2' };
 
   beforeEach(() => {

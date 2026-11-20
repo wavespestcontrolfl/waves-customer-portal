@@ -171,6 +171,8 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
   const AUTO_QUEUED_INSIDER = {
     id: 'send-pi-2', status: 'scheduled', newsletter_type: 'pest-insider-monthly', subject: 'Native termites can swarm in winter',
     scheduled_for: ISSUE_SEND_AT, proof_approved_at: new Date('2026-12-02T12:05:00Z'), proof_approval_email_id: null,
+    // Its FYI copy's token: a HOLD reply names the issue by it.
+    proof_token: 'ab12cd34', proof_sent_at: new Date('2026-12-02T12:05:00Z'),
   };
   const PLANNED = { id: 'issue-1', issue_date: '2026-12-03', status: 'scheduled', send_id: 'send-pi-2' };
 
@@ -179,12 +181,12 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     if (table === 'emails') q.select = jest.fn(async () => replies);
     return q;
   }
-  // The owner's reply from the synced mailbox itself: Gmail labels it SENT, and it reached this inbox.
+  // The owner's reply from the synced mailbox itself, to its Reply-To (this mailbox): Gmail labels it SENT.
   const HOLD_REPLY = {
-    from_address: 'contact@wavespestcontrol.com', subject: 'Re: FYI: [PROOF-ab12cd34] Native termites', body_text: 'HOLD', body_html: null,
+    from_address: 'contact@wavespestcontrol.com', to_address: 'contact@wavespestcontrol.com',
+    subject: 'Re: FYI: [PROOF-ab12cd34] Native termites', body_text: 'HOLD', body_html: null,
     label_ids: ['SENT', 'INBOX'], authentication_results: null,
   };
-  const WITH_TOKEN = { ...AUTO_QUEUED_INSIDER, proof_token: 'ab12cd34', proof_sent_at: new Date('2026-12-02T12:05:00Z'), from_email: 'newsletter@news.wavespestcontrol.com' };
 
   function wireInsider(rows, { issue = PLANNED, updated = 1, inbox } = {}) {
     const updates = [];
@@ -206,6 +208,8 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     // The FYI copy's address (the default) can reply HOLD.
     process.env.NEWSLETTER_PROOF_APPROVERS = 'contact@wavespestcontrol.com';
     delete process.env.NEWSLETTER_PROOF_EMAIL;
+    // The synced mailbox is the default, contact@.
+    delete process.env.GMAIL_USER_EMAIL;
     at('2026-12-03T12:01:00Z');
   });
   afterEach(() => {
@@ -262,26 +266,41 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
   test.each([
     ['the inbox sync stored it', { inbox: { replies: [HOLD_REPLY] } }, []],
     ['only the mailbox itself holds it (the sync never stored it)', {}, [HOLD_REPLY]],
-  ])('a HOLD reply to its FYI copy stops it for good, also one the reply handler could not apply: %s', async (_label, wiring, searched) => {
+  ])('a HOLD reply to its FYI copy holds it, as the reply handler would, also one that handler could not apply: %s', async (_label, wiring, searched) => {
     // Queued only when the search runs: a stored HOLD stops the check before it searches.
     if (searched.length) {
       mockListAllMessages.mockImplementationOnce(async () => ({ messages: searched.map((_, i) => ({ id: `gm-${i}` })), truncated: false }));
       mockGetMessage.mockImplementation(async (id) => searched[Number(id.slice(3))]);
     }
-    const updates = wireInsider([WITH_TOKEN], wiring);
+    const updates = wireInsider([AUTO_QUEUED_INSIDER], wiring);
 
     await processScheduledSends();
 
     expect(mockValidateEventSelection).not.toHaveBeenCalled();
     expect(updates.map(({ table, patch }) => [table, patch.status])).toEqual([
-      ['newsletter_sends', 'draft'], ['newsletter_calendar', 'drafted'], ['pest_insider_issues', 'failed'],
+      ['newsletter_sends', 'draft'], ['newsletter_calendar', 'drafted'], ['pest_insider_issues', 'held'],
     ]);
-    expect(updates[2].patch.reason).toBe('stopped at send time: a HOLD reply to its FYI copy is in the mailbox');
+    // Held, not failed: the same status and reason the reply handler writes, and no failure alert.
+    expect(updates[2].patch.reason).toBe('HOLD reply from the owner');
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
+  test('a queued issue whose FYI copy has no valid token is stopped for good: no HOLD reply to it could be checked', async () => {
+    const updates = wireInsider([{ ...AUTO_QUEUED_INSIDER, proof_token: null }]);
+
+    await processScheduledSends();
+
+    expect(mockListAllMessages).not.toHaveBeenCalled();
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates[2]).toEqual({ table: 'pest_insider_issues', patch: expect.objectContaining({
+      status: 'failed', reason: 'stopped at send time: its FYI copy has no valid token, so a HOLD reply to it cannot be checked',
+    }) });
   });
 
   test('a mailbox Gmail cannot read (not connected) leaves it scheduled for the next tick', async () => {
     mockListAllMessages.mockImplementationOnce(async () => { throw new Error('Gmail not connected. Please authorize via OAuth.'); });
-    const updates = wireInsider([WITH_TOKEN]);
+    const updates = wireInsider([AUTO_QUEUED_INSIDER]);
 
     await processScheduledSends();
 

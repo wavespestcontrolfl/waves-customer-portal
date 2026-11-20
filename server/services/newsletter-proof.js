@@ -244,6 +244,11 @@ function parseProofToken(subject) {
   return m ? m[1].toLowerCase() : null;
 }
 
+/** A token as sendNewsletterProof makes it (8 hex characters), the only form a reply's subject can carry. */
+function isProofToken(token) {
+  return /^[0-9a-f]{8}$/i.test(String(token || ''));
+}
+
 /**
  * Keep only the freshly-typed part of a reply: drop quoted lines and
  * everything below the first reply-quote separator so an "approved" that
@@ -355,16 +360,22 @@ function issueFyiAddress(issue) {
 
 /**
  * Whether a reply's sender may HOLD a planned issue, verified rather than read from the From line
- * a sender types: this mailbox's own account (Gmail's SENT label, which no outside sender can set,
- * on a reply that reached this inbox; a copy this mailbox sent elsewhere, such as a forward, does
- * not count), or an approver or the address the issue's FYI copy went to (`fyiTo`; the current
- * proof address when none was recorded) whose message Gmail itself authenticated for its From
- * domain (aligned DKIM or SPF pass in Google's own Authentication-Results, read strictly:
- * inbox-hygiene.hasAlignedAuth).
+ * a sender types: this mailbox's own account (Gmail's SENT label, which no outside sender can set),
+ * on mail addressed to this mailbox (a reply to the FYI copy goes to its Reply-To, this mailbox; a
+ * forward to someone else does not count; INBOX is not needed, since Send & Archive removes it), or
+ * an approver or the address the issue's FYI copy went to (`fyiTo`; the current proof address when
+ * none was recorded) whose message Gmail itself authenticated for its From domain (aligned DKIM or
+ * SPF pass in Google's own Authentication-Results, read strictly: inbox-hygiene.hasAlignedAuth).
+ * A draft never counts.
  */
 function verifiedHoldSender(email, fyiTo) {
   const labels = labelList(email?.label_ids);
-  if (labels.includes('SENT')) return labels.includes('INBOX') && !labels.includes('DRAFT');
+  if (labels.includes('DRAFT')) return false;
+  if (labels.includes('SENT')) {
+    const { extractEmailAddresses } = require('./email/email-customer-link');
+    return extractEmailAddresses([email.to_address, email.cc_address, email.bcc_address].filter(Boolean).join(','))
+      .includes(syncedApprovalMailbox());
+  }
   const from = normalizeEmail(email?.from_address);
   if (!from || !new Set([...approvalSenders(), fyiTo || proofRecipient()]).has(from)) return false;
   const { hasAlignedAuth } = require('./email/inbox-hygiene');
@@ -386,27 +397,29 @@ const HOLD_SEARCH_CAP = 50;
  * The send-time HOLD check for a planned issue whose FYI copy offered HOLD: is there a HOLD reply
  * to that copy since it went out (an hour of margin), from a verified sender (verifiedHoldSender)?
  * The reply handler applies a HOLD as it reads one; this finds one it could not apply then (the
- * proof gate off, the FYI address outside NEWSLETTER_PROOF_APPROVERS, a write that failed, or
- * mail the inbox sync never stored). It reads two witnesses, the stored inbox (emails) and the
- * mailbox itself (a Gmail search for the copy's token), so a reply counts whether or not the
- * sync stored it, through one rule. A draft never counts. Throws when Gmail cannot answer in full
- * (not connected, an API error, more than HOLD_SEARCH_CAP results), so the send waits for the next
- * minute. `issue`: the planned issue row (its recorded FYI address).
+ * proof gate off, the FYI address outside NEWSLETTER_PROOF_APPROVERS, a write that failed, a
+ * self-reply archived before the sync, which stores it as outbound, or mail the sync never
+ * stored). It reads two witnesses, the stored inbox (emails) and the mailbox itself (a Gmail
+ * search for the copy's token, Spam and Trash included), so a reply counts whether or not the
+ * sync stored it, through one rule. Throws when it cannot answer in full (a send with no valid
+ * token, Gmail not connected, an API error, more than HOLD_SEARCH_CAP results), so it never
+ * answers "no HOLD" without reading. `issue`: the planned issue row (its recorded FYI address).
  */
 async function holdReplyOnRecord(send, issue = null) {
-  const token = String(send?.proof_token || '').toLowerCase();
-  // A token has PROOF_SUBJECT_RE's form, or no reply can carry it; so nothing else reaches the Gmail query.
-  if (!/^[0-9a-f]{8}$/.test(token)) return false;
+  // Only this form can reach the Gmail query, and a reply names the issue by it.
+  if (!isProofToken(send?.proof_token)) throw new Error('its FYI copy has no valid token');
+  const token = send.proof_token.toLowerCase();
   const fyiTo = issueFyiAddress(issue);
   // The token is new with each FYI copy; an hour of margin covers clock differences.
   const since = send.proof_sent_at ? new Date(new Date(send.proof_sent_at).getTime() - 60 * 60 * 1000) : null;
   const stored = db('emails').where('subject', 'ilike', `%[PROOF-${token}]%`);
   if (since) stored.where('received_at', '>=', since);
-  const rows = await stored.select('from_address', 'subject', 'body_text', 'body_html', 'label_ids', 'authentication_results');
+  const rows = await stored.select('from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'label_ids', 'authentication_results');
   if (rows.some((email) => isVerifiedHold(email, token, fyiTo))) return true;
   const gmail = require('./email/gmail-client');
   const query = `subject:"PROOF-${token}"${since ? ` after:${Math.floor(since.getTime() / 1000)}` : ''}`;
-  const { messages, truncated } = await gmail.listAllMessages(query, HOLD_SEARCH_CAP);
+  // Spam and Trash too: a HOLD the spam filter moved, or one deleted after it was sent, still holds.
+  const { messages, truncated } = await gmail.listAllMessages(query, HOLD_SEARCH_CAP, { includeSpamTrash: true });
   if (truncated) throw new Error(`more than ${HOLD_SEARCH_CAP} messages carry its FYI copy's token`);
   const found = await Promise.all((messages || []).map(({ id }) => gmail.getMessage(id)));
   return found.some((email) => isVerifiedHold(email, token, fyiTo));
@@ -1216,6 +1229,7 @@ module.exports = {
   resolveFlagshipCalendarContext,
   maskEmail,
   parseProofToken,
+  isProofToken,
   extractTopReplyText,
   htmlReplyToText,
   isApprovalReply,

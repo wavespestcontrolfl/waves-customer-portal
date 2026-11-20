@@ -862,11 +862,12 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     ...PROOFED_DRAFT, newsletter_type: 'pest-insider-monthly', status: 'scheduled',
     scheduled_for: ISSUE_SEND_AT, proof_approved_at: PROOF_STAMP, proof_approval_email_id: null,
   };
-  // The owner's reply from the synced mailbox itself: Gmail labels it SENT, and it reached this inbox.
+  // The owner's reply from the synced mailbox itself, to its Reply-To (this mailbox): Gmail labels it SENT.
   const HOLD = {
     id: 'email-3',
     subject: 'Re: FYI: [PROOF-ab12cd34] Native termites can swarm in winter',
     from_address: 'contact@wavespestcontrol.com',
+    to_address: 'contact@wavespestcontrol.com',
     body_text: 'hold',
     label_ids: ['SENT', 'INBOX'],
     authentication_results: null,
@@ -1063,10 +1064,10 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     from_email: 'newsletter@news.wavespestcontrol.com',
   };
   const FYI_SUBJECT = 'FYI: [PROOF-ab12cd34] Native termites can swarm in winter';
-  // The owner's reply from the synced mailbox itself: Gmail labels it SENT, and it reached this inbox.
+  // The owner's reply from the synced mailbox itself, to its Reply-To (this mailbox): Gmail labels it SENT.
   const reply = (fields) => ({
-    from_address: 'contact@wavespestcontrol.com', subject: `Re: ${FYI_SUBJECT}`, body_text: 'hold', body_html: null,
-    label_ids: ['SENT', 'INBOX'], authentication_results: null, ...fields,
+    from_address: 'contact@wavespestcontrol.com', to_address: 'Waves Pest Control <contact@wavespestcontrol.com>', cc_address: '', bcc_address: '',
+    subject: `Re: ${FYI_SUBJECT}`, body_text: 'hold', body_html: null, label_ids: ['SENT', 'INBOX'], authentication_results: null, ...fields,
   });
   // A reply that arrived from another mail server, with Gmail's own verdict on it.
   const received = (from, authentication_results, fields = {}) => reply({ from_address: from, label_ids: ['INBOX'], authentication_results, ...fields });
@@ -1093,7 +1094,8 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
   test('a HOLD the inbox sync never stored is found in the mailbox itself: a Gmail search for the token since the FYI copy', async () => {
     wireMailbox({ searched: [received('newsletter@news.wavespestcontrol.com', null, { subject: FYI_SUBJECT }), reply({ body_text: 'HOLD please' })] });
     expect(await holdReplyOnRecord(SEND)).toBe(true);
-    expect(mockListAllMessages).toHaveBeenCalledWith(`subject:"PROOF-ab12cd34" after:${SINCE.getTime() / 1000}`, 50);
+    // Spam and Trash too: a HOLD the spam filter moved, or one deleted after it was sent, still holds.
+    expect(mockListAllMessages).toHaveBeenCalledWith(`subject:"PROOF-ab12cd34" after:${SINCE.getTime() / 1000}`, 50, { includeSpamTrash: true });
     expect(mockGetMessage.mock.calls.map(([id]) => id)).toEqual(['gm-0', 'gm-1']);
   });
 
@@ -1104,6 +1106,14 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     wireMailbox();
     fail();
     await expect(holdReplyOnRecord(SEND)).rejects.toThrow(message);
+  });
+
+  test("the owner's own HOLD archived before the sync read it (Send & Archive: SENT, no INBOX) still counts, stored as outbound or found by the search", async () => {
+    const archived = reply({ label_ids: ['SENT'] });
+    wireMailbox({ stored: [{ ...archived, auto_action: 'outbound_skipped' }] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+    wireMailbox({ searched: [archived] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
   });
 
   test("a HOLD from an approver counts when Gmail authenticated it for the approver's domain", async () => {
@@ -1127,7 +1137,7 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     ["an approver address on mail Gmail authenticated for another domain", received('contact@wavespestcontrol.com', signedBy('evil.example'))],
     ['someone the FYI copy was forwarded to (neither an approver nor the FYI address)', received('neighbor@example.com', signedBy('example.com'))],
     ['a Gmail draft (never sent)', reply({ label_ids: ['DRAFT'] })],
-    ['a copy this mailbox sent elsewhere, such as a forward (it never reached this inbox)', reply({ label_ids: ['SENT'] })],
+    ['a forward this mailbox sent to someone else (this mailbox only in its display name)', reply({ label_ids: ['SENT'], to_address: '"contact@wavespestcontrol.com" <neighbor@example.com>' })],
     ['the FYI copy itself (it quotes the HOLD line, and the newsletter address cannot HOLD)', received('newsletter@news.wavespestcontrol.com', signedBy('news.wavespestcontrol.com'), { subject: FYI_SUBJECT, body_text: 'To skip this issue, reply HOLD by 6:30 AM ET that day' })],
     ['an APPROVED reply that only quotes the HOLD line', reply({ body_text: 'approved\n\nOn Wed, Aug 5 wrote:\n> To skip this issue, reply HOLD by 6:30 AM ET that day' })],
     ['a reply whose subject carries a different token that only starts the same', reply({ subject: 'Re: FYI: [PROOF-ab12cd34x] other' })],
@@ -1136,9 +1146,9 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     expect(await holdReplyOnRecord(SEND)).toBe(false);
   });
 
-  test('a send with no FYI token reads nothing', async () => {
+  test.each([null, '', 'ab12cd34" OR in:anywhere'])('a send with no valid FYI token (%p) throws before it reads anything: it never answers "no HOLD" unread', async (token) => {
     const { emails } = wireMailbox();
-    expect(await holdReplyOnRecord({ ...SEND, proof_token: null })).toBe(false);
+    await expect(holdReplyOnRecord({ ...SEND, proof_token: token })).rejects.toThrow('its FYI copy has no valid token');
     expect(emails.select).not.toHaveBeenCalled();
     expect(mockListAllMessages).not.toHaveBeenCalled();
   });

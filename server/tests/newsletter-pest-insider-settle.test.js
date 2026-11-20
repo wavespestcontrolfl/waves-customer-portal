@@ -230,13 +230,13 @@ test('a send a person scheduled by hand goes at its own time: left alone after t
 });
 
 test("a failed row a send-time stop wrote gets its one alert, in the stop's words; a row already told is left alone", async () => {
-  const stopped = { ...ISSUE, id: 'issue-2', status: 'failed', reason: 'stopped at send time: a HOLD reply to its FYI copy is in the inbox' };
+  const stopped = { ...ISSUE, id: 'issue-2', status: 'failed', reason: 'stopped at send time: scheduled_for is not its issue Thursday (2026-12-03) at 7:00 AM ET' };
   const told = { ...ISSUE, id: 'issue-3', send_id: 'send-3', status: 'failed', reason: 'stopped at send time: x', diagnostics: { outcomeToldAt: '2026-12-03T12:01:00.000Z' } };
   const { writes } = fakeDb({ issues: [stopped, told], sends: [{ ...AUTO_QUEUED, status: 'draft' }] });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger).toHaveBeenCalledTimes(1);
-  expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Stopped at send time: a HOLD reply to its FYI copy is in the inbox']);
+  expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Stopped at send time: scheduled_for is not its issue Thursday (2026-12-03) at 7:00 AM ET']);
   expect(writes).toEqual([{ table: 'pest_insider_issues', conds: [{ id: 'issue-2' }], patch: expect.objectContaining({ status: 'failed', reason: stopped.reason }) }]);
 });
 
