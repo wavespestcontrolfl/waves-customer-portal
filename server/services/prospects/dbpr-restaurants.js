@@ -349,7 +349,10 @@ async function pendingInspections({ cutoff, limit, keys }) {
     .where('detail_attempts', '<', REPORT_MAX_ATTEMPTS)
     .where('event_date', '>=', cutoff)
     // First visits only: the report parser (the next part) answers for no other. A row stored before the visit number
-    // was kept waits until a re-read of the file fills it.
+    // was kept waits until a re-read of the file fills it. The stored visit number is the files' word and only saves
+    // page reads: the state can relabel a visit between files. The page has the last word: the parser answers no page
+    // whose own inspection type names a callback, follow-up or re-inspection, so a callback a file calls visit 1 gets
+    // no answer, and a saved answer came from a page that named a first visit.
     .whereRaw("detail->>'visitNumber' = '1'")
     .orderBy('event_date', 'desc')
     .limit(limit)
