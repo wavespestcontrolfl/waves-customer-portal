@@ -357,6 +357,12 @@ describe('Google Business review sync', () => {
       expect(global.fetch).toHaveBeenCalledTimes(1);
     });
 
+    test('an error body that cannot be read keeps Google\'s status on the error', async () => {
+      global.fetch = jest.fn(async () => ({ ...failRes(403), text: async () => { throw new Error('socket hang up'); } }));
+      await expect(service.getReviews(loc, 'bradenton')).rejects.toMatchObject({ message: 'GBP getReviews 403: (body not read: socket hang up)', googleStatus: 403 });
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
     test('a signal that aborts during the backoff throws and starts no further fetch', async () => {
       service._reviewRetryDelaysMs = [60000, 60000];
       const ac = new AbortController();

@@ -149,13 +149,16 @@ function abortableDelay(ms, signal) {
 }
 
 async function readJsonOrThrow(res, label) {
-  const text = await res.text();
-  const ct = (res.headers.get('content-type') || '').toLowerCase();
   if (!res.ok) {
     // googleStatus (not status/httpStatus): the review-reply runner tells a refusal Google may still
     // accept later (404, 429, 5xx) from a permanent one (400, 403), and an Express handler reads err.status.
-    throw Object.assign(new Error(`${label} ${res.status}: ${text.slice(0, 500)}`), { googleStatus: res.status });
+    // The body is diagnostic only: a body read that fails (the connection reset after the headers) keeps
+    // the status.
+    const body = await res.text().catch((e) => `(body not read: ${e.message})`);
+    throw Object.assign(new Error(`${label} ${res.status}: ${body.slice(0, 500)}`), { googleStatus: res.status });
   }
+  const text = await res.text();
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
   if (!ct.includes('application/json') && !text.trimStart().startsWith('{') && !text.trimStart().startsWith('[')) {
     throw new Error(`${label} returned non-JSON response (status ${res.status}, content-type ${ct || 'unknown'}): ${text.slice(0, 500)}`);
   }
