@@ -1956,12 +1956,13 @@ describe('POST /:token commit', () => {
       expect(bookingArgs.callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
     });
 
-    // Owner rule B per truck (pre-push P1s on e81d7ed7c0 and 3e6fd14320): at the SAME pin, a matched profile with
-    // another city on file books with the profile's own address, as at another stored location. The visit stores no
-    // address of its own, so a later stop read (zone-day-funnel.js zoneStopDays) reads it by the profile's city when it
-    // has no zone stamp; the slot is re-checked, the zone checked and stamped, and a 409's fresh times built, from that
-    // same city, never the typed one (a typed city no zone lists would let the check pass a visit later read as south).
-    test('a matched profile at the same pin with another city on file: the re-check, the booking and a 409\'s fresh times use the profile\'s address', async () => {
+    // Owner rule B per truck (pre-push P1s on e81d7ed7c0, 3e6fd14320 and 2b747741a9): at the SAME pin, a matched profile
+    // with another city on file books with the profile's own address for its zone. The visit stores no address of its
+    // own, so a later stop read (zone-day-funnel.js zoneStopDays) reads it by the profile's city when it has no zone
+    // stamp; the zone is checked and stamped, and a 409's fresh times built, from that same city, never the typed one (a
+    // typed city no zone lists would let the check pass a visit later read as south). The slot is not built again at
+    // the same pin: the check under the date lock refuses a truck that city's zone day does not allow.
+    test('a matched profile at the same pin with another city on file: the booking and a 409\'s fresh times use the profile\'s address', async () => {
       firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -1972,10 +1973,7 @@ describe('POST /:token commit', () => {
       };
       seedPhoneHousehold(existingCustomer);
       listResults.scheduled_services = [];
-      const slotAtPin = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] };
-      mockBuildAvailability
-        .mockResolvedValueOnce(slotAtPin) // pre-lock anti-forgery check, with the typed address
-        .mockResolvedValueOnce(slotAtPin); // the re-check with the profile's address
+      mockBuildAvailability.mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
       mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
 
       const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
@@ -1984,11 +1982,10 @@ describe('POST /:token commit', () => {
       expect(res.body.code).toBe('SLOT_TAKEN');
       const typed = { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' };
       const profile = { zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton' };
-      expect(mockBuildAvailability).toHaveBeenCalledTimes(3);
-      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject(typed); // the anti-forgery rebuild
-      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(profile); // the re-check
+      expect(mockBuildAvailability).toHaveBeenCalledTimes(2);
+      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject(typed); // the anti-forgery rebuild, as the list
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: profile.zoneFunnelAddress, city: 'West Bradenton' });
-      expect(mockBuildAvailability.mock.calls[2][0]).toMatchObject(profile); // the 409's fresh times
+      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(profile); // the 409's fresh times
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its

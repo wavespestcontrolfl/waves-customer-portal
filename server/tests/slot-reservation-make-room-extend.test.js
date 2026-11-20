@@ -267,6 +267,21 @@ describe('extendReservation — a far-south hold per truck (owner rule B)', () =
     expect(update.update).toHaveBeenCalledWith(written);
   });
 
+  // Pre-push P1 on 2b747741a9: at the expiry cap the extend writes no new expiry, but an unstamped hold still takes the
+  // stamp its check read (and only that), or the next booking's stop read misses it; a stamped hold writes nothing.
+  test.each([
+    ['unstamped', null, [[{ zone: 'venice' }]]],
+    ['stamped', 'venice', []],
+  ])('at the expiry cap, an %s hold writes only the stamp its check read', async (_label, zone, writes) => {
+    const mayTake = jest.fn().mockResolvedValue(true);
+    spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+    const capped = { ...LAPSED, zone, _already_lapsed: false, reservation_expires_at: '2027-05-20T13:40:00.000Z', _new_expiry: '2027-05-20T13:40:00.000Z' };
+    const { update } = harness({ hold: capped, destinationProbe: false, estimate: VENICE_ESTIMATE, zones: [VENICE] });
+    await expect(extend()).resolves.toEqual({ scheduledServiceId: 'hold-1', expiresAt: '2027-05-20T13:40:00.000Z' });
+    expect(mayTake).toHaveBeenCalledWith(expect.any(Function), { estimateZone: VENICE, date: DATE, technicianId: 'tech-1' });
+    expect(update.update.mock.calls).toEqual(writes);
+  });
+
   test('gate off (one truck): nothing is asked and the expiry alone is written', async () => {
     const mayTake = jest.fn().mockResolvedValue(false);
     spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(false), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];

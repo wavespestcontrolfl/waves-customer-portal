@@ -877,8 +877,11 @@ async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = nul
 // A hold's zone stamp (zoneSlugOf of the zone reserveSlot resolved) back to its service_zones row, whose cities the
 // stop read matches unstamped rows by. A stamp no row carries any more still names its zone by its slug.
 async function stampedZone(conn, stamp) {
+  const { stampNamesZone } = require('./scheduling/zone-day-funnel');
   const zones = await conn('service_zones').select('id', 'cities', 'zone_name');
-  return zones.find((z) => zoneSlugOf(z) === stamp) || { zone_name: stamp, cities: [] };
+  // The stop read's own rule: a legacy compound stamp ('venice_north_port') names its zone, as the stop read counts it.
+  const slug = String(stamp).toLowerCase();
+  return zones.find((z) => stampNamesZone(slug, zoneSlugOf(z))) || { zone_name: stamp, cities: [] };
 }
 
 // A fresh gate read right before a write. A make-room hold whose gate went off while the locks were waited on is the
@@ -3141,6 +3144,9 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     if (!(new Date(newExpiry).getTime() > new Date(row.reservation_expires_at).getTime())) {
       // Idempotent: the requested extension would not move the expiry
       // forward — hand back the unchanged row rather than no-op-writing.
+      // A stamp the far-south check just gave an unstamped hold is still
+      // written, or the next booking's stop read misses it (owner rule B).
+      if (zoneStamp.zone) await trx('scheduled_services').where({ id: row.id }).update(zoneStamp);
       return { scheduledServiceId: row.id, expiresAt: row.reservation_expires_at };
     }
 

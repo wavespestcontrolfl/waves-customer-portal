@@ -510,9 +510,13 @@ describe('slot reservation helpers', () => {
     });
 
     // A lapsed hold keeps its zone stamp when it revives or graduates, so the stamp decides, not the estimate's address
-    // as it reads now (edited to Sarasota while the Venice hold lapsed).
+    // as it reads now (edited to Sarasota while the Venice hold lapsed). A legacy compound stamp names its zone by the
+    // stop read's own rule (zone-day-funnel.js stampNamesZone; pre-push P1 on 2b747741a9): 'venice_north_port' is
+    // Venice, so its check runs, as the stop read counts that stamp as Venice; the stop read ignores a stamp's case too.
     test.each([
       ['venice', [SARASOTA, VENICE], VENICE],
+      ['venice_north_port', [SARASOTA, VENICE], VENICE],
+      ['Venice', [SARASOTA, VENICE], VENICE],
       ['sarasota', [SARASOTA, VENICE], SARASOTA],
       ['port charlotte', [SARASOTA, VENICE], { zone_name: 'port charlotte', cities: [] }],
     ])('a hold stamped %s: the stamp decides the zone, never the estimate\'s current address', async (stamp, zones, expected) => {

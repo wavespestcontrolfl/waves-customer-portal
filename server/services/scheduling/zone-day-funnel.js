@@ -172,6 +172,12 @@ function fallbackCenterZoneName(city) {
 // A genuine Lakewood Ranch row still stays excluded through the city leg.
 const FALLTHROUGH_ZONE_STAMP = 'lakewood_ranch';
 
+// Does a zone stamp name the zone `zoneSlug`: exactly, or as a legacy backfill compound ('venice_north_port' names
+// 'venice')? The stop read and the hold check (slot-reservation.js stampedZone) read a stamp by this one rule.
+function stampNamesZone(stamp, zoneSlug) {
+  return !!zoneSlug && (stamp === zoneSlug || stamp.startsWith(`${zoneSlug}_`));
+}
+
 // Slug equivalence for stamped rows. Direct/prefix match first; beyond
 // that, every slug in the funnel list names the SAME consolidated south
 // pool (the migration merged the legacy Port Charlotte zone's cities into
@@ -180,7 +186,7 @@ const FALLTHROUGH_ZONE_STAMP = 'lakewood_ranch';
 // slug is cluster evidence for an estimate resolving another.
 function slugMatchesZone(rowZone, zoneSlug) {
   if (!zoneSlug) return false;
-  if (rowZone === zoneSlug || rowZone.startsWith(`${zoneSlug}_`)) return true;
+  if (stampNamesZone(rowZone, zoneSlug)) return true;
   const slugs = funnelZoneSlugs();
   const inFunnel = (s) => slugs.has(s) || [...slugs].some((f) => s.startsWith(`${f}_`));
   return inFunnel(rowZone) && inFunnel(zoneSlug);
@@ -401,6 +407,7 @@ module.exports = {
   perTruckLive,
   funnelOn,
   isFunnelZone,
+  stampNamesZone,
   funnelZoneSlugs,
   fallbackCenterZoneName,
   // Exposed for tests.

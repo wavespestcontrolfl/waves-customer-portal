@@ -7615,9 +7615,10 @@ the booking resolves its zone from the same address the same way
 (`callbackVisit.zoneAddress`; off, from the customer's city as before), so its
 stamp and its check match the list. A matched profile with another city on
 file, at its stored location or at the same pin, books with its own address
-(the slot is checked again with it): a visit with no zone stamp is read later by
-its customer's city. A refused booking's `SLOT_TAKEN` refresh uses the
-address that booking checked. No field, status, error code, limiter or header
+for its zone: a visit with no zone stamp is read later by its customer's city.
+The slot is built again with that address only at the stored location; at the
+same pin the check under the date lock decides. A refused booking's
+`SLOT_TAKEN` refresh uses the address that booking checked. No field, status, error code, limiter or header
 changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
