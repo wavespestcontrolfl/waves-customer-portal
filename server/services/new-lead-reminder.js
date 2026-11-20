@@ -132,7 +132,8 @@ function stampedSince(meta, askedAt) {
 // The writer's mark that it created this bell's lead: the new-lead trigger's payload.createdLead (notification-triggers.js
 // new_lead, metadata.triggerKey: lead-webhook.js, call-recording-processor.js notifyNewCallLead,
 // booking-preferred-time.js), or the quote wizard's own metadata.createdLead (public-quote.js writes its bell straight to
-// notifyAdmin, so it has no triggerKey; it marks its own row, never a repeat filed as a duplicate).
+// notifyAdmin, so it has no triggerKey; it marks its own quote_wizard row, never a repeat filed as a duplicate, nor a
+// call lead the prefill token attached the form to).
 const intakeMarked = (meta) => (meta.triggerKey === 'new_lead' && meta.payload?.createdLead === true)
   || (!meta.triggerKey && meta.createdLead === true);
 
@@ -187,8 +188,9 @@ async function emailReceivedAt(items) {
 // classification that created the lead), and the call that made the lead counts only for it. A wizard row is the visitor's
 // own run: a second run on it inside those 15 minutes is the same inquiry, and a run on it after them is judged from its
 // own bell. Every other bell is a fresh inquiry about a lead already on file, however soon after the lead it came: a
-// repeat form (category lead), a form attached to an open call lead, or a bell written straight to the bell
-// (notifyAdmin('new_lead'): an email follow-up's draft, a wizard repeat filed as a duplicate). Its evidence counts only
+// repeat form (category lead), a form attached to an open call lead (by the webhook, or by the wizard's prefill token),
+// or a bell written straight to the bell (notifyAdmin('new_lead'): an email follow-up's draft, a wizard repeat filed as
+// a duplicate). Its evidence counts only
 // from the bell itself, or, for a bell that names an email (`emailAt`, the message's received_at), from the message. The
 // push deadline stays on the bell.
 function inquiryOf({ askedAt, lead, intakeTrigger = false }, emailAt = null) {

@@ -938,10 +938,11 @@ describe('the writers mark the bell of a lead they created (payload.createdLead)
     expect(src).toMatch(/if \(attached\) \{\s+leadRecord = attached;\s+attachedCallLead = true;\s+\}/);
   });
 
-  test('the quote wizard: its bell marks its own row, never a repeat filed as a duplicate', () => {
+  // Driven for each lead type in public-quote-new-lead-bell.test.js; this pins the repeat filed as a duplicate.
+  test('the quote wizard: its bell marks only its own quote_wizard row, never a repeat filed as a duplicate', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
     expect(src.match(/notifyAdmin\(\s*'new_lead',/g)).toHaveLength(1);
-    expect(src).toMatch(/notifyAdmin\(\s*'new_lead',[\s\S]{0,4000}?metadata: \{ leadId: lead\.id, \.\.\.\(duplicateOfLeadId \? \{ duplicateOfLeadId \} : \{ createdLead: true \}\) \}/);
+    expect(src).toMatch(/notifyAdmin\(\s*'new_lead',[\s\S]{0,4000}?metadata: \{ leadId: lead\.id, \.\.\.\(duplicateOfLeadId \? \{ duplicateOfLeadId \} : \{ createdLead: lead\.lead_type === 'quote_wizard' \}\) \}/);
   });
 
   test('the call processor: every new-lead bell follows a mint, and says so', () => {

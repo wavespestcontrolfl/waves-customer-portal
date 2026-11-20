@@ -657,8 +657,9 @@ like are out), or one with an estimate sent or viewed; the call that made the le
 person (`answered_by = 'human'`; only for the intake bell: the one the new-lead trigger writes for a lead its writer
 created, `metadata.triggerKey` `new_lead` as the relevance sweep's `new_lead` class defines it, with `payload.createdLead`
 set by that writer (the form webhook, the call processor's `notifyNewCallLead`, the /book preferred-time request), or the
-quote wizard's bell for its own row (`public-quote.js` writes it straight to `notifyAdmin`, with `metadata.createdLead`, never
-on a repeat filed as a duplicate), within 15 minutes of the lead's creation; every other bell, such as a repeat form, a form
+quote wizard's bell for its own row (`public-quote.js` writes it straight to `notifyAdmin`, with `metadata.createdLead`, only
+for a `quote_wizard` lead: never on a repeat filed as a duplicate, nor on a voicemail or inbound-call lead the prefill token
+attached the form to), within 15 minutes of the lead's creation; every other bell, such as a repeat form, a form
 attached to an open call lead (`createdLead` false), an email follow-up's draft or a bell written before the mark existed, is
 a fresh inquiry); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone after
 the bell's inquiry began (a text or call tied to another customer never counts, even for a lead with no customer; one tied to

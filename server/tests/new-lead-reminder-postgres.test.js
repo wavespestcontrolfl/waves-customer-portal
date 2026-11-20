@@ -303,8 +303,13 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
       return r;
     };
     const item = (r) => ({ row: r, meta: metaOf(r), leadId, anchor: new Date(r.created_at) });
-    const ungrantedAdvisoryLocks = async () => (await db.real.raw(`SELECT count(*)::int AS n FROM pg_locks l
-      JOIN pg_database d ON d.oid = l.database WHERE l.locktype = 'advisory' AND NOT l.granted AND d.datname = current_database()`)).rows[0].n;
+    // Sessions waiting on this lead's lock (pg_advisory_xact_lock(hashtext(key)): a bigint key, its high and low 32 bits
+    // in classid and objid). The poll runs on the first stamp's own connection, idle while it holds the lock: with the
+    // pool at its floor of 2 (knexfile.js poolConfig), a third connection would wait behind both stamps.
+    const waitingOnLock = async (conn, key) => (await conn.raw(`SELECT count(*)::int AS n FROM pg_locks l
+      WHERE l.locktype = 'advisory' AND NOT l.granted AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND l.objsubid = 1 AND l.classid::bigint = ((hashtext(?)::bigint >> 32) & 4294967295) AND l.objid::bigint = (hashtext(?)::bigint & 4294967295)`,
+    [key, key])).rows[0].n;
     const ids = [];
     let release = () => {};
     const stamps = [];
@@ -318,13 +323,14 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
       const gotLock = new Promise((resolve) => { locked = resolve; });
       const held = new Promise((resolve) => { release = resolve; });
       const claim = leadClaim(item(newer));
-      const holding = { ...claim, taken: async (conn, t) => { const taken = await claim.taken(conn, t); locked(); await held; return taken; } };
+      let holder;
+      const holding = { ...claim, taken: async (conn, t) => { const taken = await claim.taken(conn, t); holder = conn; locked(); await held; return taken; } };
       stamps.push(stampOnce(reminder.PUSH_STAMP, item(newer), () => at, () => true, holding));
       await gotLock;
       stamps.push(stampOnce(reminder.PUSH_STAMP, item(older), () => at, () => true, leadClaim(item(older))));
       let sawWait = false;
       for (let i = 0; i < 100 && !sawWait; i += 1) {
-        sawWait = (await ungrantedAdvisoryLocks()) > 0;
+        sawWait = (await waitingOnLock(holder, claim.key)) > 0;
         if (!sawWait) await new Promise((resolve) => { setTimeout(resolve, 100); });
       }
       expect(sawWait).toBe(true);
