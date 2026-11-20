@@ -1297,7 +1297,7 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
 
       const allocationLock = invoiceQuery.whereRaw.mock.invocationCallOrder[0];
       expect(invoiceQuery.whereRaw).toHaveBeenCalledWith(
-        'id = ? OR (stripe_payment_intent_id = ? AND status NOT IN (?, ?, ?))',
+        'id = ? OR (stripe_payment_intent_id IN (?) AND status NOT IN (?, ?, ?))',
         [invoice.id, invoice.stripe_payment_intent_id, 'paid', 'processing', 'prepaid'],
       );
       expect(invoiceQuery.orderBy).toHaveBeenCalledWith('id', 'asc');

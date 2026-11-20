@@ -14,12 +14,14 @@ jest.mock('../services/receipt-delivery-queue', () => ({ enqueueReceiptDelivery:
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async () => {}) }));
+jest.mock('../services/payment-lifecycle-email', () => ({ sendPaymentFailed: jest.fn() }));
+jest.mock('../services/payment-failure-notifications', () => ({ enqueuePaymentFailureNotification: jest.fn() }));
 
 const {
   _handlePaymentIntentSucceeded: settle,
+  _handlePaymentIntentFailed: handlePaymentIntentFailed,
   _resolveMetadataCanceledSavedCardAttempt: resolveCanceledAttempt,
 } = require('../routes/stripe-webhook');
-const StripeService = require('../services/stripe');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const schema = `auth_settlement_${randomUUID().replaceAll('-', '')}`;
 jest.setTimeout(20000);
@@ -120,28 +122,52 @@ jest.setTimeout(20000);
     });
   }
 
-  test('a failure followed by cancellation keeps $25 applied behind a different live checkout', async () => {
-    const liveCheckout = `pi_live_${attemptId}`;
-    await armFailedSavedCardReservation(liveCheckout);
+  async function deliverSavedCardFailure() {
+    await handlePaymentIntentFailed({
+      ...intent, status: 'requires_payment_method', amount_received: 0,
+      last_payment_error: { code: 'card_declined', payment_method: { id: 'pm_saved', type: 'card' } },
+    }, `evt_failed_${attemptId}`);
+  }
 
-    await expect(StripeService.resolveFailedInvoiceSavedCardChargeAttempt({
-      attemptId,
-      invoiceId,
-      customerId,
-      stripePaymentIntentId: intent.id,
-      failureMessage: 'payment_intent.payment_failed',
-      database: mockDatabase,
-    })).resolves.toBe(true);
+  test('failure and cancellation after a recorded owner merge keep the credit backing the replacement checkout', async () => {
+    const liveCheckout = `pi_live_${attemptId}`;
+    const currentOwnerId = randomUUID();
+    await armFailedSavedCardReservation(liveCheckout);
+    await insertMergeOwner(currentOwnerId, 15);
+    await recordInvoiceMerge(customerId, currentOwnerId);
+    await mockDatabase('invoices').where({ id: invoiceId }).update({ customer_id: currentOwnerId });
+    await mockDatabase('customers').where({ id: customerId }).update({ account_credits: 0 });
+
+    await deliverSavedCardFailure();
     await expect(resolveCanceledAttempt({ ...intent, status: 'canceled' }, mockDatabase)).resolves.toBe(false);
 
     expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
-      status: 'sent', stripe_payment_intent_id: liveCheckout, credit_applied: '25.00',
+      customer_id: currentOwnerId, status: 'sent', stripe_payment_intent_id: liveCheckout, credit_applied: '25.00',
     });
     expect(await mockDatabase('customers').where({ id: customerId }).first())
+      .toMatchObject({ account_credits: '0.00' });
+    expect(await mockDatabase('customers').where({ id: currentOwnerId }).first())
       .toMatchObject({ account_credits: '15.00' });
     expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
     expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
       .toMatchObject({ status: 'failed', stripe_payment_intent_id: intent.id });
+  });
+
+  test('a failure with no recorded owner change leaves the attempt open beside the current checkout', async () => {
+    const currentOwnerId = randomUUID();
+    const liveCheckout = `pi_live_${attemptId}`;
+    await armFailedSavedCardReservation(liveCheckout);
+    await insertMergeOwner(currentOwnerId, 4);
+    await mockDatabase('invoices').where({ id: invoiceId }).update({ customer_id: currentOwnerId });
+
+    await deliverSavedCardFailure();
+
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+      customer_id: currentOwnerId, stripe_payment_intent_id: liveCheckout, credit_applied: '25.00',
+    });
+    expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ status: 'ambiguous', resolved_at: null });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
   });
 
   test('a failure followed by cancellation returns $25 once and clears the checkout its worker canceled', async () => {
@@ -160,14 +186,7 @@ jest.setTimeout(20000);
       stripe_payment_intent_id: canceledCheckout,
     });
 
-    await expect(StripeService.resolveFailedInvoiceSavedCardChargeAttempt({
-      attemptId,
-      invoiceId,
-      customerId,
-      stripePaymentIntentId: intent.id,
-      failureMessage: 'payment_intent.payment_failed',
-      database: mockDatabase,
-    })).resolves.toBe(true);
+    await deliverSavedCardFailure();
     await expect(resolveCanceledAttempt({ ...intent, status: 'canceled' }, mockDatabase)).resolves.toBe(false);
 
     expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({

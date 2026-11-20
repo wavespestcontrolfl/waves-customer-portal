@@ -495,7 +495,7 @@ async function findMatchingSavedCardAttempt(
   }) ? candidate : null;
 }
 
-async function findInvoiceForPaymentIntent(paymentIntent, database = db) {
+async function findInvoiceForPaymentIntent(paymentIntent, database = db, { allowRecordedOwner = false } = {}) {
   const byPaymentIntent = await database('invoices')
     .where({ stripe_payment_intent_id: paymentIntent.id })
     .first();
@@ -513,7 +513,7 @@ async function findInvoiceForPaymentIntent(paymentIntent, database = db) {
     const byMetadata = await database('invoices').where({ id: invoiceId }).first();
     if (byMetadata?.stripe_payment_intent_id
       && String(byMetadata.stripe_payment_intent_id) !== String(paymentIntent.id)) {
-      const savedCardAttempt = await findMatchingSavedCardAttempt(database, byMetadata, paymentIntent);
+      const savedCardAttempt = await findMatchingSavedCardAttempt(database, byMetadata, paymentIntent, { allowRecordedOwner });
       if (savedCardAttempt) return byMetadata;
       const authentication = await findSettlingAuthenticationAttempt(paymentIntent, byMetadata, database);
       if (authentication?.canceled_checkout_payment_intent_id === byMetadata.stripe_payment_intent_id) return byMetadata;
@@ -3273,7 +3273,7 @@ async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = 
   // definitive failure event still carries our signed metadata + immutable
   // saved PM, so use the same exact matcher as succeeded reconciliation to
   // release the attempt, reopen the invoice, and return reserved credit.
-  const failedAttemptInvoice = failedInvoice || await findInvoiceForPaymentIntent(paymentIntent);
+  const failedAttemptInvoice = failedInvoice || await findInvoiceForPaymentIntent(paymentIntent, db, { allowRecordedOwner: true });
   const failedSavedCardAttempt = failedAttemptInvoice
     ? await findMatchingSavedCardAttempt(db, failedAttemptInvoice, paymentIntent, { allowRecordedOwner: true })
     : null;

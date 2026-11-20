@@ -842,6 +842,10 @@ to the invoice, failure or cancellation of the original card attempt keeps that
 credit applied so the replacement checkout still quotes the amount due. When
 the worker recorded that it already canceled the checkout shown on the invoice,
 settlement clears that stale reference and returns the attempt's posted credit.
+It also clears references to that canceled checkout from other collectible
+invoices, including when the target invoice has already moved to a new checkout.
+After a customer merge, recovery verifies the invoice's recorded transfer before
+resolving the original customer's saved-card attempt.
 A legacy ID without worker provenance
 keeps checkout on HTTP 409 even if the supplied intent was canceled. After webhook history expires, an operator can
 verify the PaymentIntent directly using the saved-card cancellation command

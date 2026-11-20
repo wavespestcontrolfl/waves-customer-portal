@@ -719,10 +719,17 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
     const invoiceSnapshot = await trx('invoices').where({ id: invoiceId })
       .first('stripe_payment_intent_id');
+    const attemptAllocationSnapshot = await trx('stripe_invoice_charge_attempts')
+      .where({ id: attemptId, invoice_id: invoiceId })
+      .first('canceled_checkout_payment_intent_id');
+    const canceledCheckoutSnapshot = attemptAllocationSnapshot?.canceled_checkout_payment_intent_id
+      ? String(attemptAllocationSnapshot.canceled_checkout_payment_intent_id)
+      : null;
     const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
     const invoice = await lockInvoicePaymentIntentAllocation(trx, {
       id: invoiceId,
       piId: invoiceSnapshot?.stripe_payment_intent_id || null,
+      additionalPiIds: canceledCheckoutSnapshot ? [canceledCheckoutSnapshot] : [],
       customerId,
       combinedCustomerLocked: true,
       targetForUpdate: true,
@@ -748,7 +755,16 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       .whereNull('resolved_at')
       .forUpdate()
       .first('id', 'status', 'created_at', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'worker_create_timed_out_at', 'payment_method_id', 'amount', 'credit_applied_delta', 'credit_applied_total', 'canceled_checkout_payment_intent_id');
-    if (!attempt || (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId)) return false;
+    if (!attempt) return false;
+    const lockedCanceledCheckout = attempt.canceled_checkout_payment_intent_id
+      ? String(attempt.canceled_checkout_payment_intent_id)
+      : null;
+    if (lockedCanceledCheckout !== canceledCheckoutSnapshot) {
+      throw Object.assign(new Error('Saved-card canceled checkout changed while locking the failure; retry'), {
+        code: 'SAVED_CARD_CANCELED_CHECKOUT_CHANGED',
+      });
+    }
+    if (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId) return false;
     if (attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== stripePaymentIntentId) return false;
     const originalCreateFailed = Boolean(attempt.submitted_at && requestIdempotencyKey
       && attempt.idempotency_key === requestIdempotencyKey);
@@ -793,8 +809,8 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
     const current = Math.max(0, round2(invoice.credit_applied || 0));
     let creditToRelease = Math.min(delta, Math.max(0, round2(current - original)));
     const canceledPredecessor = invoice.stripe_payment_intent_id
-      && attempt.canceled_checkout_payment_intent_id
-      && String(invoice.stripe_payment_intent_id) === String(attempt.canceled_checkout_payment_intent_id);
+      && lockedCanceledCheckout
+      && String(invoice.stripe_payment_intent_id) === lockedCanceledCheckout;
     const replacementCheckout = !canceledPredecessor && invoice.stripe_payment_intent_id
       && String(invoice.stripe_payment_intent_id) !== String(stripePaymentIntentId);
     if (replacementCheckout && creditToRelease > 0) {
@@ -805,14 +821,15 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       // replay-independent outcome without canceling a valid replacement.
       creditToRelease = 0;
     }
-    if (canceledPredecessor) {
+    if (lockedCanceledCheckout) {
       // The saved-card worker canceled this checkout at Stripe before create,
-      // but a later local rollback restored its old pointer. It is not a live
-      // replacement and must not strand the reservation. Allocation rows were
-      // locked above, so clear every collectible sibling stamp atomically with
-      // the credit return and attempt resolution.
-      await PayCombined.clearPaymentIntentStamps(trx, attempt.canceled_checkout_payment_intent_id);
-      invoice.stripe_payment_intent_id = null;
+      // but a later local rollback can restore sibling stamps even when the
+      // ambiguity park already cleared the target pointer. The union of the
+      // target's current allocation and this canceled allocation was locked
+      // above, so clear every stale collectible stamp without touching a live
+      // replacement checkout.
+      await PayCombined.clearPaymentIntentStamps(trx, lockedCanceledCheckout);
+      if (canceledPredecessor) invoice.stripe_payment_intent_id = null;
     }
     if (creditToRelease > 0) {
       await postCreditMovement({

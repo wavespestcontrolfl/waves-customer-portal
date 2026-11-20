@@ -134,6 +134,75 @@ postgres('invoice PaymentIntent allocation locking', () => {
     }
   });
 
+  test('failed saved-card recovery locks and clears a canceled sibling allocation after the target was parked', async () => {
+    const targetId = invoiceIds[1];
+    const siblingId = invoiceIds[0];
+    const attemptId = randomUUID();
+    const failedPiId = `pi_failed_${attemptId.replaceAll('-', '')}`;
+    const idempotencyKey = `saved-card-${attemptId}`;
+    const timedOutAt = new Date('2026-11-19T18:00:00.000Z');
+    await database('customers').where({ id: customerId }).update({ account_credits: 15 });
+    await database('invoices').where({ id: targetId }).update({
+      stripe_payment_intent_id: null,
+      credit_applied: 25,
+    });
+    await database('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: targetId,
+      idempotency_key: idempotencyKey,
+      status: 'ambiguous',
+      stripe_payment_method_id: `pm_failed_${attemptId.replaceAll('-', '')}`,
+      stripe_payment_intent_id: failedPiId,
+      worker_payment_intent_id: null,
+      worker_create_timed_out_at: timedOutAt,
+      canceled_checkout_payment_intent_id: piId,
+      amount: 75,
+      credit_applied_delta: 25,
+      credit_applied_total: 25,
+      submitted_at: timedOutAt,
+    });
+
+    const blocker = await database.transaction();
+    let outcome;
+    try {
+      await blocker('invoices').where({ id: siblingId }).forUpdate().first('id');
+      outcome = StripeService.resolveFailedInvoiceSavedCardChargeAttempt({
+        attemptId,
+        invoiceId: targetId,
+        customerId,
+        stripePaymentIntentId: failedPiId,
+        requestIdempotencyKey: idempotencyKey,
+        failureMessage: 'simulated final saved-card failure',
+        database,
+      });
+      await waitForBlockedBackend(blocker);
+
+      // The union is locked in invoice-id order: while waiting on the lower
+      // canceled-PI sibling, recovery has not skipped ahead to lock the target.
+      await database.transaction(async (probe) => {
+        await probe.raw("SET LOCAL lock_timeout = '250ms'");
+        await expect(probe('invoices').where({ id: targetId }).forUpdate().first('id'))
+          .resolves.toMatchObject({ id: targetId });
+      });
+
+      await blocker.commit();
+      await expect(outcome).resolves.toBe(true);
+      await expect(database('invoices').where({ id: siblingId }).first('stripe_payment_intent_id'))
+        .resolves.toMatchObject({ stripe_payment_intent_id: null });
+      await expect(database('invoices').where({ id: targetId }).first('stripe_payment_intent_id', 'credit_applied'))
+        .resolves.toMatchObject({ stripe_payment_intent_id: null, credit_applied: '0.00' });
+      await expect(database('customers').where({ id: customerId }).first('account_credits'))
+        .resolves.toMatchObject({ account_credits: '40.00' });
+      await expect(database('customer_credit_ledger').where({ invoice_id: targetId }).pluck('delta'))
+        .resolves.toEqual(['25.00']);
+    } finally {
+      await blocker.rollback().catch(() => {});
+      if (outcome) await outcome.catch(() => {});
+      await database('customer_credit_ledger').where({ invoice_id: targetId }).del().catch(() => {});
+      await database('stripe_invoice_charge_attempts').where({ id: attemptId }).del().catch(() => {});
+    }
+  });
+
   test('gate-off setup waits on a stale lower-id PI sibling before locking the target or canceling', async () => {
     const targetId = invoiceIds[1];
     const blocker = await database.transaction();
@@ -188,7 +257,7 @@ postgres('invoice PaymentIntent allocation locking', () => {
     const targetId = invoiceIds[1];
     const methodId = randomUUID();
     await database('payment_methods').insert({ id: methodId, customer_id: customerId, processor: 'stripe',
-      method_type: 'card', stripe_payment_method_id: 'pm_simulated_saved_card' });
+      method_type: 'card', stripe_payment_method_id: `pm_simulated_${methodId.replaceAll('-', '')}` });
     const client = jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_simulated');
     const blocker = await database.transaction();
     let outcome;

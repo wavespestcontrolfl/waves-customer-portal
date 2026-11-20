@@ -163,7 +163,7 @@ test('a shared PI locks target and collectible siblings in ascending id order be
 
   expect(mockCombinedOwnerLock).toHaveBeenCalledWith(db, 'inv-1', 'cust-1');
   expect(update.lockedInvoice.whereRaw).toHaveBeenCalledWith(
-    'id = ? OR (stripe_payment_intent_id = ? AND status NOT IN (?, ?, ?))',
+    'id = ? OR (stripe_payment_intent_id IN (?) AND status NOT IN (?, ?, ?))',
     ['inv-1', 'pi_shared', 'paid', 'processing', 'prepaid'],
   );
   expect(update.lockedInvoice.orderBy).toHaveBeenCalledWith('id', 'asc');

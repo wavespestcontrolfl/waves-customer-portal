@@ -691,6 +691,23 @@ describe('saved-card failed-webhook attempt repair', () => {
     expect(state.ledger).toContainEqual(expect.objectContaining({ delta: 15 }));
   });
 
+  test('a parked target still releases credit for its worker-recorded canceled checkout', async () => {
+    const { database, state } = failedAttemptDb({ invoiceStatus: 'sent' });
+    state.attempt.canceled_checkout_payment_intent_id = 'pi_canceled_combined_checkout';
+
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1',
+      stripePaymentIntentId: 'pi-failed', database,
+    })).resolves.toBe(true);
+
+    expect(state.invoice).toEqual(expect.objectContaining({
+      stripe_payment_intent_id: null,
+      credit_applied: 10,
+    }));
+    expect(state.customer.account_credits).toBe(25);
+    expect(state.ledger).toContainEqual(expect.objectContaining({ delta: 15 }));
+  });
+
   test('does not release a fence beside a terminal invoice', async () => {
     const { database, state } = failedAttemptDb({ invoiceStatus: 'paid' });
 

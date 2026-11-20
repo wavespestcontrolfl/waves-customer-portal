@@ -198,9 +198,10 @@ describe('Schedule prepaid invoice writers share the locked saved-card fence', (
 
   test('the shared allocation helper locks every collectible PI member in canonical order', () => {
     expectInOrder(allocationLockSource, [
-      "if (!piId)",
+      "if (!paymentIntentIds.length)",
       "trx('invoices')",
-      "'id = ? OR (stripe_payment_intent_id = ? AND status NOT IN (?, ?, ?))'",
+      "id = ? OR (stripe_payment_intent_id IN (",
+      "AND status NOT IN (?, ?, ?)",
       ".orderBy('id', 'asc')",
       '.forUpdate()',
     ]);
