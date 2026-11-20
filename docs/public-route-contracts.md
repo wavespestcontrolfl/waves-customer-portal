@@ -7682,7 +7682,9 @@ refused booking's `SLOT_TAKEN` refresh offers times the page's next commit
 admits. With an address typed (the page sends it again), it is built with the
 booking's zone address, and when the booking moved to a matched profile's other
 stored location it keeps only the starts also open at the typed location, which
-the next commit checks first; a failed build answers with no times. With none
+the next commit checks first (read there with the far-south funnel's one-day
+rules on each day, as that one-day check reads them); a failed build answers
+with no times. With none
 typed, it is built with the matched profile's stored address, which the next
 commit resolves first once this one has linked it. No field, status, error code, limiter or header
 changes. `POST /:token/find-slots` is the same natural-language search
