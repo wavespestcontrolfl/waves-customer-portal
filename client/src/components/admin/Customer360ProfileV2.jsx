@@ -6200,7 +6200,7 @@ function CustomerProfileOverview({
       {/* GET/PATCH /admin/requests are owner-only: a technician would only
           see a 403 here. */}
       {isAdmin && <CustomerRequestsPanel customerId={customerId} />}
-      {/* GET /admin/customers/:id/moves is requireAdmin and answers enabled:false while GATE_MOVING_FLOW is dark: the card then renders nothing. */}
+      {/* GET /admin/customers/:id/moves is requireAdmin: the card renders nothing until that read succeeds. */}
       {isAdmin && <CustomerMovingCardV2 customerId={customerId} />}
       {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
