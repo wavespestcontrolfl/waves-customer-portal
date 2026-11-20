@@ -4446,9 +4446,9 @@ Quiz and "Not a quiz lead" (`server/services/lead-funnel.js`).
 no residential draft is priced (under `GATE_UNIT_SCOPE_GUARDRAILS`, as for
 every other commercial signal). The quiz answers are NOT a pricing input:
 `property` never becomes the draft's property type. They are not
-staff-only: the Lead Response Agent may read them. The response is
-unchanged. Safe in either deploy order: a portal without this change
-ignores the unknown key and files an ordinary form lead. The AI triage,
+staff-only: the Lead Response Agent may read them. Safe in either deploy
+order: a portal without this change ignores the unknown key and files an
+ordinary form lead. The AI triage,
 which the webhook starts without waiting, writes a lead this request
 inserted only while the row still holds the intake stage
 (`lead_webhook_received`, checked in the UPDATE's WHERE): once a price page
@@ -4456,6 +4456,43 @@ has continued the lead (the attach token, see
 `/api/public/estimator/property-lookup` below), a late triage answer is
 dropped whole: it never replaces the price page's stage, address verdict or
 profile, re-prices no draft and records no `ai_triage` activity;
+and both accept an OPTIONAL `price_handoff` — the JSON boolean `true`, sent
+by a quiz page whose answers end on a price page and whose browser can
+carry the hand-off there (owner *build* 2026-11-19, "one visitor makes one
+lead"). Any other value (absent, `false`, the string `"true"`, `1`) is a
+no-op; no other form sends it, and a page must leave it out of a request it
+saves to replay later (nobody is there to use the hand-off, and the lead
+would get no draft). The server's own rule must agree (`quizContinuesToPrice`,
+`server/services/lead-quiz.js`: a named problem, `property` `house` |
+`townhome` | `condo`, `timeline` `this_week` | `this_month` | `browsing`),
+and the submission must name no service key (any nonblank `serviceKey` or
+`service_key` value). Such a submission takes the path every form takes,
+unchanged: a keyed lead keeps its catalog label, a well-formed key the
+catalog cannot confirm reaches the draft step, which parks it for review,
+and a value the webhook does not read as a key is drafted from its label. When all hold AND this request INSERTS the `leads` row (never an
+attach to a call lead, never the existing-customer or unverified-hold
+reply, never a row the readiness gate marked commercial), the response
+gains `handoff: { lead_id, token, expires_in }`: an ATTACH token for that
+one lead (see `/api/public/estimator/property-lookup` below), 2 hours. A
+response that carries a `handoff` is sent `Cache-Control: no-store` (the
+shared token-response headers, `server/middleware/no-store.js`). That
+request creates NO `lead_webhook` draft estimate: the price page makes the
+visitor's one estimate, and `/api/public/quote/calculate` refuses its own
+draft while another open estimate sits on the phone. A lead that is handed
+off says so in its activity list (`lead_activities` `price_handoff`, best
+effort). It keeps no draft when the visitor leaves the price page early, or
+never receives this response: the office has the lead, its alert and that
+line, and makes the estimate by hand (a later repeat of the form lands on
+the repeat-form reply, which makes no draft for any form). A submission
+that asked and gets no hand-off gets the usual draft, created after the
+lead step instead of before it (the lead's own
+`automation.draftEstimateAutomation` copy then stays null; the estimate row
+carries the record). Every other submission is unchanged: the draft as
+before, and `{ success, customerId }` with no `handoff`. The texts, the
+bell, the automation enrollment and the ad attribution are the same with or
+without a hand-off. Safe in either deploy order: a portal without this
+change ignores the key and answers with no `handoff`, and the site then
+shows its office-review ending;
 and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
@@ -5226,7 +5263,8 @@ same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
 with identical semantics. On THIS route only, the pair may instead carry
 the quiz hand-off's ATTACH token (`mintLeadAttachToken`,
 `utils/lead-prefill-token.js`: the prefill token's format and secret, HMAC
-purpose `lead-attach`, 2-hour TTL; no route mints one yet). When valid, the
+purpose `lead-attach`, 2-hour TTL; minted ONLY by `/api/webhooks/lead`, for
+the lead that same request inserted, see `price_handoff` there). When valid, the
 lead capture UPDATES the lead the token names with the prefill attach's
 field rules, but only while that lead passes the hand-off's rule
 (`applyQuizHandoffLeadPredicate`, `server/services/lead-statuses.js`: open
@@ -5234,7 +5272,11 @@ by `applyOpenLeadPredicate`, not deleted, not commercial). The lead keeps
 its `form_submission` type, its source and its `quiz` answers
 (`extracted_data` is merged: a key the price page does not send, `timeline`
 included, is kept), and the later `/api/public/quote/calculate` run prices
-that same lead. A wrong, expired or refused attach token is ignored: the
+that same lead. Either attach (prefill or hand-off) writes its service label
+only while the lead has no `service_key`: the price calculation writes a
+key and its catalog name together, so a lookup that runs again on the same
+token leaves that name beside its key. A wrong, expired or refused attach
+token is ignored: the
 lookup inserts its own `quote_wizard` lead as before. The rule is decided
 once, in the attach UPDATE; the same request's later writes (the completion
 stage, the address verdict) follow that lead and merge `extracted_data`

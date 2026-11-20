@@ -12,7 +12,9 @@ const { sendLeadAutoReplyOnce, sendCurrentCustomerQuoteText } = require('../serv
 
 const { aiTriageLead } = require('../services/lead-triage');
 const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
-const { normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizNamesRequest, quizIsCommercial } = require('../services/lead-quiz');
+const {
+  normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizNamesRequest, quizIsCommercial, quizContinuesToPrice,
+} = require('../services/lead-quiz');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
@@ -25,7 +27,8 @@ const { backfillCallLeadAttribution } = require('../services/ads/call-attributio
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
-const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
+const { verifyLeadPrefillToken, mintLeadAttachToken, ATTACH_TTL_SECONDS } = require('../utils/lead-prefill-token');
+const { noStore } = require('../middleware/no-store');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
@@ -753,6 +756,19 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
     }
 
+    // Quiz hand-off (owner *build* 2026-11-19: "one visitor makes one lead").
+    // A quiz page sends `price_handoff: true` when its answers end on a price
+    // page and its browser can carry the hand-off there. The server's own
+    // rule must agree (quizContinuesToPrice: a named problem, at a home,
+    // that can wait). Never for a submission that names a service key
+    // (submitsServiceKey): it takes the path every form takes, unchanged. A
+    // keyed lead's label is its catalog identity (the price page would
+    // rewrite the label beside the key), and a well-formed key the catalog
+    // cannot confirm must reach the draft step, which parks it for review.
+    // No other form sends the flag, and a saved replay never does, so
+    // nothing below changes for them.
+    const quizPriceAsk = body.price_handoff === true && !submitsServiceKey(body) && quizContinuesToPrice(quiz, timeline);
+
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     let createdEstimateId = null;
     let createdEstimateServiceInterest = serviceInterest || null;
@@ -772,78 +788,87 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       serviceKeyInstant: keyedService ? keyedService.instant === true : null,
       serviceKeyUnverified: !!serviceKey && !keyedService,
     };
-    // County home and lot size from the lookup cache (null while
-    // GATE_LEAD_DRAFT_PROPERTY_LOOKUP is off), read BEFORE the phone lock:
-    // the read takes its own pool connection, which must never wait while
-    // the lock's transaction holds one.
-    const draftMeasurements = draftReadiness.ready ? await cachedLeadMeasurements(fullAddress) : null;
-    try {
-      await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {
-        const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phoneFormatted, { database: trx });
+    // The draft step. A form runs it here, before its lead row. A quiz page
+    // that asked to continue on a price page (quizPriceAsk) runs it AFTER
+    // the lead step, and only when that step gave no hand-off: a visitor who
+    // is sent to the price page gets one estimate, the price page's. The
+    // price calculation refuses its own draft while another open estimate
+    // sits on the phone, so a draft here would block that visitor.
+    const createLeadDraftEstimate = async () => {
+      // County home and lot size from the lookup cache (null while
+      // GATE_LEAD_DRAFT_PROPERTY_LOOKUP is off), read BEFORE the phone lock:
+      // the read takes its own pool connection, which must never wait while
+      // the lock's transaction holds one.
+      const draftMeasurements = draftReadiness.ready ? await cachedLeadMeasurements(fullAddress) : null;
+      try {
+        await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {
+          const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phoneFormatted, { database: trx });
 
-        if (duplicateBlock) {
-          logger.info(`[lead-webhook] Estimate creation blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${customer.id}`);
-        } else {
-          automatedDraftEstimate = await buildAutomatedLeadDraftEstimate({
-            intake,
-            customer,
-            body,
-            readiness: draftReadiness,
-            measurements: draftMeasurements,
-          });
-          const crypto = require('crypto');
-          const estimateToken = crypto.randomBytes(16).toString('hex');
-          const estimateData = automatedDraftEstimate?.estimateData || {
-            automation: {
-              leadEstimateAutomation: estimateAutomationReadiness,
-            },
-          };
-          const draftAutomation = automatedDraftEstimate?.automation;
-          const draftAutomationNote = draftAutomation
-            ? ` Draft automation: ${draftAutomation.status}${draftAutomation.unsupportedReason ? ` (${draftAutomation.unsupportedReason})` : ''}.`
-            : '';
-          const [estimateRow] = await trx('estimates').insert({
-            customer_id: customer.id,
-            customer_name: `${firstName} ${lastName}`,
-            customer_phone: phoneFormatted,
-            customer_email: email || null,
-            address: fullAddress || '',
-            monthly_total: automatedDraftEstimate?.monthly || null,
-            annual_total: automatedDraftEstimate?.annual || null,
-            onetime_total: automatedDraftEstimate?.oneTimeTotal || null,
-            status: 'draft',
-            source: 'lead_webhook',
-            // Engine-verified price → explicit SERVER stamp; a parked /
-            // manual-review draft (no engine price) stays unstamped. The lead
-            // auto-send lane fails closed on anything but SERVER (SEC-002).
-            pricing_authority: automatedDraftEstimate?.automation?.status === 'generated' ? 'SERVER' : null,
-            service_interest: serviceInterest || null,
-            lead_source: leadSource.source,
-            lead_source_detail: leadSource.detail,
-            token: estimateToken,
-            estimate_data: JSON.stringify(estimateData),
-            // The draft's own intake record: on a county-sized draft its
-            // review names the county size, not the default.
-            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(draftAutomation?.readiness || estimateAutomationReadiness)}${draftAutomationNote}`,
-          }).returning(['id', 'service_interest']);
-          createdEstimateId = estimateRow?.id || null;
-          createdEstimateServiceInterest = estimateRow?.service_interest || createdEstimateServiceInterest;
-        }
-      });
-      // A draft priced on the default size gets the county's real home and
-      // lot size from one background property lookup, after the row is
-      // committed (GATE_LEAD_DRAFT_PROPERTY_LOOKUP). The rebuild reuses this
-      // submission's own inputs; the website's answer never waits on it.
-      if (createdEstimateId && automatedDraftEstimate?.automation?.sizeSource === 'default') {
-        scheduleLeadDraftPropertyLookup({
-          estimateId: createdEstimateId,
-          address: fullAddress,
-          rebuild: (measurements) => buildAutomatedLeadDraftEstimate({ intake, customer, body, readiness: draftReadiness, measurements }),
+          if (duplicateBlock) {
+            logger.info(`[lead-webhook] Estimate creation blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${customer.id}`);
+          } else {
+            automatedDraftEstimate = await buildAutomatedLeadDraftEstimate({
+              intake,
+              customer,
+              body,
+              readiness: draftReadiness,
+              measurements: draftMeasurements,
+            });
+            const crypto = require('crypto');
+            const estimateToken = crypto.randomBytes(16).toString('hex');
+            const estimateData = automatedDraftEstimate?.estimateData || {
+              automation: {
+                leadEstimateAutomation: estimateAutomationReadiness,
+              },
+            };
+            const draftAutomation = automatedDraftEstimate?.automation;
+            const draftAutomationNote = draftAutomation
+              ? ` Draft automation: ${draftAutomation.status}${draftAutomation.unsupportedReason ? ` (${draftAutomation.unsupportedReason})` : ''}.`
+              : '';
+            const [estimateRow] = await trx('estimates').insert({
+              customer_id: customer.id,
+              customer_name: `${firstName} ${lastName}`,
+              customer_phone: phoneFormatted,
+              customer_email: email || null,
+              address: fullAddress || '',
+              monthly_total: automatedDraftEstimate?.monthly || null,
+              annual_total: automatedDraftEstimate?.annual || null,
+              onetime_total: automatedDraftEstimate?.oneTimeTotal || null,
+              status: 'draft',
+              source: 'lead_webhook',
+              // Engine-verified price → explicit SERVER stamp; a parked /
+              // manual-review draft (no engine price) stays unstamped. The lead
+              // auto-send lane fails closed on anything but SERVER (SEC-002).
+              pricing_authority: automatedDraftEstimate?.automation?.status === 'generated' ? 'SERVER' : null,
+              service_interest: serviceInterest || null,
+              lead_source: leadSource.source,
+              lead_source_detail: leadSource.detail,
+              token: estimateToken,
+              estimate_data: JSON.stringify(estimateData),
+              // The draft's own intake record: on a county-sized draft its
+              // review names the county size, not the default.
+              notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(draftAutomation?.readiness || estimateAutomationReadiness)}${draftAutomationNote}`,
+            }).returning(['id', 'service_interest']);
+            createdEstimateId = estimateRow?.id || null;
+            createdEstimateServiceInterest = estimateRow?.service_interest || createdEstimateServiceInterest;
+          }
         });
+        // A draft priced on the default size gets the county's real home and
+        // lot size from one background property lookup, after the row is
+        // committed (GATE_LEAD_DRAFT_PROPERTY_LOOKUP). The rebuild reuses this
+        // submission's own inputs; the website's answer never waits on it.
+        if (createdEstimateId && automatedDraftEstimate?.automation?.sizeSource === 'default') {
+          scheduleLeadDraftPropertyLookup({
+            estimateId: createdEstimateId,
+            address: fullAddress,
+            rebuild: (measurements) => buildAutomatedLeadDraftEstimate({ intake, customer, body, readiness: draftReadiness, measurements }),
+          });
+        }
+      } catch (estErr) {
+        logger.error(`Lead estimate creation failed: ${estErr.message}`);
       }
-    } catch (estErr) {
-      logger.error(`Lead estimate creation failed: ${estErr.message}`);
-    }
+    };
+    if (!quizPriceAsk) await createLeadDraftEstimate();
 
     // Create leads table record for pipeline tracking
     let leadRecord = null;
@@ -855,7 +880,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     let attachedCallLead = false;
     let attachedVia = null;
     // True only once this submission inserted its own leads row: the new_lead bell below is then that lead's intake
-    // bell (new-lead-reminder.js inquiryOf). An attached form, or a failed insert, leaves it false.
+    // bell (new-lead-reminder.js inquiryOf). An attached form, or a failed insert, leaves it false. The quiz
+    // hand-off reads it too: a token only for a lead this request made (quizHandoffFor).
     let createdLead = false;
     try {
       const webhookStage = {
@@ -941,6 +967,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     } catch (leadErr) {
       logger.error(`Lead record creation failed: ${leadErr.message}`);
     }
+
+    // The price page hand-off for this lead, or null (quizHandoffFor). A quiz
+    // page that asked and gets none (the submission joined a call lead, the
+    // row is commercial, the insert failed) gets the usual draft, made now.
+    // A lead that is handed off says so in its activity list.
+    const handoff = quizHandoffFor({ priceAsk: quizPriceAsk, createdLead, lead: leadRecord });
+    if (handoff) await notePriceHandoff(leadRecord.id);
+    else if (quizPriceAsk) await createLeadDraftEstimate();
 
     // Enroll in the local new_lead automation sequence (SendGrid-backed).
     // Moved here (was originally right after the auto-reply block, before
@@ -1324,7 +1358,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     }
 
     logger.info(`Lead webhook: new customer ${firstName} ${lastName} from ${leadSource.source}`);
-    res.json({ success: true, customerId: customer.id });
+    // A hand-off is a bearer credential for one lead: the reply that carries
+    // it is never cached (the shared token-response headers).
+    if (handoff) noStore(req, res, () => {});
+    res.json({ success: true, customerId: customer.id, ...(handoff ? { handoff } : {}) });
   } catch (err) {
     logger.error(`Lead webhook error: ${err.message}`);
     res.status(500).json({ error: 'Internal error' });
@@ -1334,6 +1371,47 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 // ============================================
 // HELPERS
 // ============================================
+
+// Quiz hand-off (one visitor, one lead). `priceAsk`: the quiz page asked to
+// continue on a price page AND the answers end there (the handler's
+// quizPriceAsk). That submission gets an attach token for the leads row THIS
+// request just inserted. The price page sends it back, and
+// routes/public-property-lookup.js then updates the same lead instead of
+// adding a quote_wizard row beside it.
+// The handler makes no draft estimate for a submission that gets a hand-off,
+// and the usual draft for one that asked and gets none, so the two never
+// exist together for one submission.
+// Never for "Today", "Business" or "Unsure": those end on a call or an office
+// review, and a business must not reach a home price. Never for a row the
+// readiness gate marked commercial on any other signal. Never for an
+// attached call lead or an existing customer: those rows hold someone's
+// earlier data, and the caller has not proved it is theirs. (A submission
+// that names a catalog key never asks: quizPriceAsk.) The token is
+// attach-only and lives 2 hours (utils/lead-prefill-token.js): it cannot be
+// exchanged for the lead's contact fields. null = no hand-off.
+function quizHandoffFor({ priceAsk, createdLead, lead } = {}) {
+  if (priceAsk !== true || createdLead !== true || !lead?.id || lead.is_commercial === true) return null;
+  const token = mintLeadAttachToken(lead.id);
+  return token ? { lead_id: lead.id, token, expires_in: ATTACH_TTL_SECONDS } : null;
+}
+
+// The hand-off's line in the lead's activity list. A lead that is handed
+// off starts with no draft estimate, and stays that way when the visitor
+// leaves the price page early (or never gets the reply): the office reads
+// why here and makes the estimate by hand. Best effort; the hand-off does
+// not wait on it.
+async function notePriceHandoff(leadId) {
+  try {
+    await db('lead_activities').insert({
+      lead_id: leadId,
+      activity_type: 'price_handoff',
+      description: 'The quiz sent this visitor to the price page. The price page makes the estimate, so this lead starts with no draft.',
+      performed_by: 'system',
+    });
+  } catch (err) {
+    logger.error(`[lead-webhook] price hand-off note failed: ${err.code || err.name || 'error'}`);
+  }
+}
 
 // Voicemail text-back prefill attach. A valid lead-prefill token (minted ONLY
 // by the voicemail text-back SMS) UPDATES that existing call-pipeline lead
@@ -1900,6 +1978,16 @@ function normalizeLeadServiceKey(body = {}) {
   return /^[a-z0-9_]{1,80}$/.test(key) ? key : null;
 }
 
+// True when either service key field holds a value: a nonblank string, or
+// anything else that is not null (never coerced, so no JSON value can throw
+// here). Wider than normalizeLeadServiceKey on purpose: a value it drops
+// (malformed), or one a blank `serviceKey` masks, still says the page meant
+// a catalog product, and such a submission keeps the path every form takes
+// (the quiz hand-off).
+function submitsServiceKey(body = {}) {
+  return [body.serviceKey, body.service_key].some((value) => (typeof value === 'string' ? value.trim() !== '' : value != null));
+}
+
 function normalizeLeadServiceInterest(body = {}) {
   const explicit = firstNonEmpty(
     body.service_interest,
@@ -2277,6 +2365,8 @@ module.exports._test = {
   attachVoicemailPrefillLead,
   attachOpenCallLeadByPhone,
   buildLeadWebhookIntake,
+  quizHandoffFor,
+  submitsServiceKey,
   normalizeSignHost,
   SIGN_HOST_MAX_LENGTH,
   TRIAGE_REPLACE_EXTRACTED_SQL,
