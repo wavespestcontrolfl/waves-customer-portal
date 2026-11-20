@@ -83,8 +83,19 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
   test('a time figure in any form withholds the note; the sanctioned wording and days stand', () => {
     // AGENTS.md bans a fixed re-entry or drying time; on a note record each
     // time figure counts, as no word list can tell which one is a re-entry
-    // time (noteRecordCopyViolations).
+    // time (noteRecordCopyViolations). The unit word alone decides, so no
+    // way of writing the figure gets past it.
     for (const text of [
+      'I treated the lanai. Keep pets inside for eighteen minutes after application.',
+      'I treated the lanai. You can re-enter in ½ hour.',
+      'I treated the lanai. Wait 30min before you let the dog out.',
+      'I treated the lanai. Wait ½hr.',
+      'I treated the lanai. Wait 2h.',
+      'I treated the lanai. Give it an hour and a half.',
+      'I treated the lanai. Give it a few minutes.',
+      'I treated the lanai. Keep the dog in for hours.',
+      'I treated the lanai. The dog can go out at 3 o\u2019clock.',
+      'I treated the lanai. The dog can go out at half past three.',
       'I treated the perimeter. The spray dries in 30 minutes.',
       'I treated the perimeter. Allow a 30-minute drying period.',
       'I treated the lanai. Return to the treated area after 30+ minutes.',
@@ -102,6 +113,11 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the lanai. Keep people and pets off treated areas until dry.',
       'I placed bait in the garage. I will check the stations again in 14 days.',
       'I treated the lanai and swept the webs. Have a great day!',
+      // The ordinal, and words that only contain a unit's letters.
+      'This was your second visit. I sealed a gap in the second bathroom.',
+      'I found a black widow with the red hourglass marking and removed it.',
+      'I treated the insect entry points and examined the attic.',
+      'I split the bait, half to the front and half to the back.',
     ]) expect(reportNoteCustomerCopy(stored({ text })).body).toBe(text);
   });
 });
@@ -132,6 +148,24 @@ describe('visitReportCustomerCopy: one rule for a record', () => {
       expect(visitReportCustomerCopy({ ...PEST, is_callback: true, structured_notes: stored(), service_data: outcome(visitOutcome) }).body).toBe(NOTE);
     }
     expect(visitReportCustomerCopy({ ...PEST, technician_notes: TITLED, service_data: outcome('inspection_only') }).body).toContain('We treated');
+  });
+
+  test('service data that is present but cannot be read shows no note; absent data reads as none', () => {
+    // It hides the outcome and the frozen typed cards the note rule checks.
+    for (const service_data of [
+      '{"typedReportSnapshot": {', '  ', 'null', '[]', [], 5,
+      JSON.stringify(JSON.stringify({ protocol: { visitOutcome: 'treated' } })),
+      { protocol: '{"visitOutcome": ' }, { protocol: [] },
+    ]) {
+      const parsed = visitReportCustomerCopy({ ...PEST, technician_notes: TITLED, structured_notes: stored(), service_data });
+      expect(parsed.body).toBeNull();
+      expect(parsed.violations).toEqual(['report_note_unreadable_service_data']);
+    }
+    for (const service_data of [null, undefined, '', {}, '{}', { protocol: null }, { protocol: JSON.stringify({ visitOutcome: 'treated' }) }]) {
+      expect(visitReportCustomerCopy({ ...PEST, structured_notes: stored(), service_data }).body).toBe(NOTE);
+    }
+    // A record with no note keeps its titled report, as on main.
+    expect(visitReportCustomerCopy({ ...PEST, technician_notes: TITLED, service_data: '{"typedReportSnapshot": {' }).body).toContain('We treated');
   });
 
   test('a note stands only on a pest record; a row read without the line column shows none', () => {

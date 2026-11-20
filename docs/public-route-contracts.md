@@ -3092,16 +3092,21 @@ card, primary or companion; and never on a visit whose recorded outcome applied
 nothing, `inspection_only` or `customer_declined`, callback or not, read from
 the stored `service_data` and structured notes as the callback copy reads it,
 since a callback's report leads with the outcome copy and its PDF prints no
-summary there), a `cleaned`
+summary there; and never on a visit whose `service_data` is present but cannot
+be read: a string that does not parse to an object, a value that is not one, or
+a `protocol` inside it that cannot be read, since it hides the outcome and the
+frozen typed cards this rule checks; absent `service_data` reads as none), a `cleaned`
 note signed ` — <first name>` (the identity snapshot's name, never a generic
 label). The note, and every list value and finding field below on such a
 record, passes `noteRecordCopyViolations`: `customerCopyViolations` and any
-time figure (a number with seconds, minutes or hours, joined in any way, such
-as "30+ minutes" or "a 30-minute drying period"; a clock time; overnight,
-tonight, tomorrow, noon or midnight). AGENTS.md bans a fixed re-entry or drying
-time, and no word list can tell a re-entry time from any other time a
-technician writes, so each one withholds the copy. Days stay legal (the next
-visit, when results show). Otherwise it is what the report builds with no free text (the lawn visit
+time a technician can give: any word that names hours, minutes or seconds, with
+or without a figure ("30+ minutes", "eighteen minutes", "½ hour", "a few
+minutes"); a figure with h or m; a clock time ("3:30", "4 pm", "3 o'clock",
+"half past three"); overnight, tonight, tomorrow, noon or midnight. AGENTS.md
+bans a fixed re-entry or drying time, and a figure can be written in more ways
+than any list names, so the unit word alone decides and each match withholds
+the copy. Days stay legal (the next visit, when results show), and so does the
+ordinal "second". Otherwise it is what the report builds with no free text (the lawn visit
 summary, or on a live view a narrative of the typed card under that narrative's
 own gate, which reads an empty recap) or empty, never `customerRecap`. A
 refused or malformed note is no text, and the raw column is never its fallback.

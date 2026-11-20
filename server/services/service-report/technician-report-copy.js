@@ -471,11 +471,18 @@ function reportServiceLine(record) {
 // summary (ServiceReportDocument), and a note can name a treatment the visit
 // did not make. The outcome is the one the callback copy reads
 // (reservice-report.js: the stored service_data and structured notes), on
-// any record, so no reader needs the is_callback column.
+// any record, so no reader needs the is_callback column. service_data that is
+// present but cannot be read (serviceDataUnreadable) shows no note either: it
+// hides the outcome and the frozen typed cards the note rule checks, so no
+// reader can show that the note may stand (the voice reader's parse refused
+// it before; now every reader does). Absent service_data reads as none.
 function visitReportCustomerCopy(record) {
   const note = reportNoteCustomerCopy(record?.structured_notes);
   if (note && !REPORT_NOTE_SERVICE_LINES.has(reportServiceLine(record))) {
     return { body: null, violations: ['report_note_service_line'], source: null };
+  }
+  if (note && serviceDataUnreadable(record || {})) {
+    return { body: null, violations: ['report_note_unreadable_service_data'], source: null };
   }
   // Required here: the callback copy loads the card and asks modules, which
   // the copy rules do not need.
@@ -483,6 +490,31 @@ function visitReportCustomerCopy(record) {
     return { body: null, violations: ['report_note_no_application'], source: null };
   }
   return note || technicianReportCustomerCopy(record?.technician_notes);
+}
+
+// A value stored as an object or as its JSON: { data } when it reads as an
+// object (not an array), { absent: true } when it is null, undefined or an
+// empty string, and null when it cannot be read.
+function readStoredObject(value) {
+  if (value === null || value === undefined || value === '') return { absent: true };
+  let data = value;
+  if (typeof value === 'string') {
+    try { data = JSON.parse(value); } catch { return null; }
+  }
+  return data && typeof data === 'object' && !Array.isArray(data) ? { data } : null;
+}
+
+// Whether a record's service_data is present but cannot be read: a string
+// that does not parse to an object, or any value that is not one (an array,
+// a number, a JSON string inside the column), or an object whose `protocol`
+// (the visit outcome's first source, reservice-report.js outcomeOf, which
+// reads it as JSON too) is present but cannot be read. Production
+// (2026-11-20, read-only): 654 of 654 completed visits store an object, and
+// each protocol is an object or absent.
+function serviceDataUnreadable(service = {}) {
+  const stored = readStoredObject(service?.service_data);
+  if (!stored) return true;
+  return !stored.absent && readStoredObject(stored.data.protocol) === null;
 }
 
 // A record's service_data as an object ({} when absent or unreadable).
@@ -621,29 +653,30 @@ function customerCopyViolations(text) {
 // The copy screen for a record that carries the technician's own note: the
 // note, and every list value and finding field such a record prints
 // (report-data.js buildProtocolPayload, finding-provenance.js). The complete
-// screen above, plus any time figure: a number with seconds, minutes or hours,
-// joined in any way ("30+ minutes", "a 30-minute drying period", "thirty or
-// more minutes", "an hour"), a clock time, or overnight, tonight, tomorrow,
-// noon or midnight. AGENTS.md bans a fixed re-entry or drying time in customer
-// copy, and no word list can tell a technician's re-entry time from any other
-// time they write (each pre-push audit round on this PR found one more form),
-// so on such a record each time figure withholds the copy: a refused note
-// shows nothing, and a refused list value or finding field is left out. Days
-// stay legal: they name the next visit and when results show. A read-only
-// production count (2026-11-20) found a minutes or hours figure in 0 of 474
-// pest customer recaps, a clock time in 1, and days in 61.
-const NOTE_TIME_FIGURE_SRC = '(?:\\d+(?:[.,/]\\d+)?|an?|half|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|couple|few|several)';
-// One step between a figure and its unit: a separator, or a word of a range
-// or a bound ("30 to 45", "30 or more", "thirty-plus", "a half"). Each step
-// takes one character or one whole word, so the match never backtracks far.
-const NOTE_TIME_STEP_SRC = '(?:[\\s+\\u2010-\\u2015/-]|\\b(?:or|more|so|less|plus|to|and|a|an|of|half|full|about|over|under|\\d+)\\b)';
+// screen above, plus any time a technician can give for re-entry or drying:
+// any word that names hours, minutes or seconds, with or without a figure
+// ("30+ minutes", "eighteen minutes", "½ hour", "a few minutes", "30min"); a
+// figure with h or m ("2h"); a clock time ("3:30", "4 pm", "3 o'clock", "half
+// past three"); or overnight, tonight, tomorrow, noon or midnight. AGENTS.md
+// bans a fixed re-entry or drying time in customer copy. A figure can be
+// written in more ways than any list names (each pre-push audit round on this
+// PR found one more: "dries", a hyphen, a plus, a number word, a fraction), so
+// the unit word alone decides, and no figure list exists to miss one. On such
+// a record each match withholds the copy: a refused note shows nothing, and a
+// refused list value or finding field is left out. Days stay legal: they name
+// the next visit and when results show. Singular "second" stays legal: it is
+// the ordinal ("second visit"), and no re-entry time is one second. A
+// read-only production count (2026-11-20): a unit word in 0 of 474 pest
+// customer recaps, a clock time in 2, days in 61.
 const NOTE_RECORD_TIME_RE = new RegExp([
-  `\\b${NOTE_TIME_FIGURE_SRC}${NOTE_TIME_STEP_SRC}*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\\b`,
-  '\\b\\d+\\s*[mh]\\b',
-  '\\b\\d{1,2}:\\d{2}\\b',
-  '\\b\\d{1,2}\\s*[ap]\\.?m\\b',
+  '(?<!\\p{L})(?:half-?|quarter-?)?(?:hours?|minutes?|mins?|hrs?|secs?|seconds)(?!\\p{L})',
+  '\\p{N}\\s*[hm](?!\\p{L})',
+  '(?<!\\p{N})\\p{N}{1,2}\\s*:\\s*\\p{N}{2}(?!\\p{N})',
+  '\\p{N}\\s*[ap]\\.?\\s*m(?!\\p{L})',
+  "(?<!\\p{L})o['\\u2019]?\\s*clock(?!\\p{L})",
+  '\\bhalf\\s+past\\b|\\bquarter\\s+(?:past|to|after|till|til)\\b',
   '\\b(?:overnight|tonight|tomorrow|noon|midnight)\\b',
-].join('|'), 'i');
+].join('|'), 'iu');
 
 function noteRecordCopyViolations(text) {
   const violations = customerCopyViolations(text);

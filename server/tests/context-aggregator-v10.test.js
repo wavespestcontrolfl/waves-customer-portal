@@ -166,6 +166,13 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     expect(customerSafeVisitNotes(own({ structured_notes: { reportNote, visitOutcome: 'customer_declined' } }))).toBeNull();
     expect(customerSafeVisitNotes(own({ structured_notes: { reportNote: { ...reportNote, text: 'I treated the lanai. Keep the dog in for an hour.' } } }))).toBeNull();
     expect(customerSafeVisitNotes(own({ is_callback: true, service_data: { protocol: { visitOutcome: 'treated' } } }))).toBe('I treated the lanai and swept the webs.');
+    // Service data that cannot be read withholds it, as on the web report:
+    // a string that does not parse, a JSON value that is not an object, a
+    // protocol that cannot be read. Absent data reads as none.
+    for (const service_data of ['{"typedReportSnapshot": {', 'null', JSON.stringify(JSON.stringify({ a: 1 })), { protocol: '{bad' }]) {
+      expect(customerSafeVisitNotes(own({ service_data }))).toBeNull();
+    }
+    expect(customerSafeVisitNotes(own({ service_data: null }))).toBe('I treated the lanai and swept the webs.');
     // A record with no note keeps today's rule.
     expect(customerSafeVisitNotes(record({ service_data: { protocol: { visitOutcome: 'inspection_only' } } })))
       .toBe('Treated the exterior perimeter and swept eaves. Light ant activity near the lanai.');

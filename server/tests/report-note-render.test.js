@@ -394,6 +394,34 @@ describe('a visit that applied nothing never takes the note', () => {
   });
 });
 
+describe('service data the reader cannot read withholds the note', () => {
+  // A string that does not parse, or a value that is not an object, hides the
+  // outcome and the frozen typed cards the note rule checks: the page, the
+  // PDF state and the PDF key withhold the note, as the visit notes do
+  // (customerSafeVisitNotes). Absent data reads as none.
+  test('malformed or non-object service data: no summary from the note, the PDF state withheld, no summary in the key', async () => {
+    for (const service_data of [
+      '{"typedReportSnapshot": {', '[]', JSON.stringify(JSON.stringify({ a: 1 })), JSON.stringify({ protocol: '{"visitOutcome": ' }),
+    ]) {
+      const record = { ...SERVICE, service_data };
+      const data = await build({ service_data });
+      expect(data.summarySource).not.toBe('technician_report');
+      expect(data).not.toHaveProperty('summaryIsOwnNote');
+      expect(JSON.stringify(data)).not.toContain('fire ant hill');
+      expect(reportNoteRenderState(record, data)).toBe('withheld');
+      expect(summaryCopySignature(record)).toBe('-rn');
+    }
+  });
+
+  test('absent service data reads as none: the note stands', async () => {
+    for (const service_data of [null, '']) {
+      const data = await build({ service_data });
+      expect(data.summary).toBe(`${NOTE} — Jordan`);
+      expect(data.summaryIsOwnNote).toBe(true);
+    }
+  });
+});
+
 describe('a typed visit never takes the note', () => {
   const companion = (delivery, todaysResult) => ({ ...typedCard(todaysResult), type: 'rodent_trapping', delivery });
 
