@@ -350,6 +350,17 @@ const DAY = 86400000;
         .toMatchObject({ total_earned_cents: 0, pending_earnings_cents: 0 });
     });
 
+    test('two placeholder (0, 0) pins are no map point: $25, never the near $50', async () => {
+      const both = await performed({ memberFields: { latitude: 0, longitude: 0 }, friendFields: { latitude: 0, longitude: 0 } });
+      await firstService(both.friend, both.visit);
+      expect(await amounts(both.member.id)).toEqual([25]);
+      expect(await row(both.ref.id)).toMatchObject({ referrer_reward_reason: 'standard' });
+      // One zero coordinate is a placeholder too.
+      const half = await performed({ memberFields: { latitude: 27.499, longitude: 0 }, friendFields: { latitude: 27.499, longitude: 0 } });
+      await firstService(half.friend, half.visit);
+      expect(await amounts(half.member.id)).toEqual([25]);
+    });
+
     test('a home with no map point pays $25', async () => {
       const { member, friend, visit } = await performed({ memberFields: HOME });
       await firstService(friend, visit);
@@ -446,6 +457,54 @@ const DAY = 86400000;
       expect(await db('customer_credit_ledger').where({ customer_id: member.id }).count('* as n').first()).toEqual({ n: '10' });
       const reasons = (await Promise.all(pairs.map(({ ref }) => row(ref.id)))).map((r) => r.referrer_reward_reason).sort();
       expect(reasons).toEqual(['cap_reached', 'standard']);
+    });
+  });
+
+  describe('the cap year comes from the database transaction clock, not the application clock', () => {
+    test('credits stamped this year still count when the application clock reads the end of last year', async () => {
+      const { member, friend, visit, ref } = await performed();
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: member.id, referee_name: `Prior ${i}`, referee_phone: `+1941560${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      // Only Date is faked (11:59 PM ET, Dec 31 of last year); the ledger's own stamp is the database's now().
+      const { etParts } = require('../utils/datetime-et');
+      const year = etParts(new Date()).year;
+      jest.useFakeTimers({
+        now: new Date(`${year}-01-01T04:59:00Z`), // 11:59 PM ET on Dec 31 of the previous year
+        doNotFake: ['setTimeout', 'setInterval', 'setImmediate', 'clearTimeout', 'clearInterval', 'clearImmediate', 'nextTick', 'queueMicrotask', 'hrtime', 'performance'],
+      });
+      try {
+        expect(await firstService(friend, visit)).toMatchObject({ referrerReason: 'cap_reached', referrerDollars: 0 });
+      } finally {
+        jest.useRealTimers();
+      }
+      expect(await row(ref.id)).toMatchObject({ referrer_reward_reason: 'cap_reached', referrer_credit_cents: 0 });
+      expect(await db('customer_credit_ledger').where({ customer_id: member.id }).count('* as n').first()).toEqual({ n: '10' });
+    });
+  });
+
+  describe('the member offer the portal route returns under the gate', () => {
+    test('amounts, near radius, yearly limit and where the member stands', async () => {
+      const member = await customer();
+      expect(await engine.step2OfferFor(db, member.id, await engine.getSettings())).toEqual({
+        rewardPerReferral: 25, nearReward: 50, nearRadiusMiles: 0.5, annualCap: 10, creditsThisYear: 0, capReached: false,
+      });
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: member.id, referee_name: `Prior ${i}`, referee_phone: `+1941561${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      expect(await engine.step2OfferFor(db, member.id, await engine.getSettings())).toMatchObject({ creditsThisYear: 10, capReached: true });
     });
   });
 

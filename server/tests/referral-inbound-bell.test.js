@@ -4,6 +4,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   referralInboundBellLive: jest.fn(() => true),
+  isEnabled: jest.fn(() => false),
 }));
 jest.mock('../services/referral-inbound', () => ({
   // The service's own rule for the one sure referrer (the Postgres suite runs it on real rows).
@@ -89,6 +90,7 @@ beforeEach(() => {
   mockPromoters = {};
   mockLocks.length = 0;
   gates.referralInboundBellLive.mockReturnValue(true);
+  gates.isEnabled.mockReturnValue(false);
   inbound.listInboundReferrals.mockResolvedValue([]);
   episodes.openAdminAlertKeys.mockResolvedValue([]);
   episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n-1', rang: true });
@@ -350,5 +352,35 @@ describe('a tap', () => {
   test('a row that names no customer runs nothing', async () => {
     await expect(run(DISMISS, { row: { id: 'n-1', metadata: { subject: { type: 'visit', id: AMES } } } })).resolves.toMatchObject({ ok: false, code: 'invalid' });
     expect(inbound.listInboundReferrals).not.toHaveBeenCalled();
+  });
+
+  test('under GATE_REFERRAL_STEP2 a confirm that posted reports the amounts that posted, $50 near and $0 at the limit included', async () => {
+    gates.isEnabled.mockImplementation((gate) => gate === 'referralStep2');
+    inbound.confirmInboundReferral.mockResolvedValue({ referralId: 'r-1', converted: true, creditsNow: true, credited: { referrerDollars: 50, refereeDollars: 25 }, error: null });
+    await expect(run(CONFIRM)).resolves.toMatchObject({
+      ok: true, message: "Lea Quill is confirmed as Ames Fenn's referrer. $50 credited to the member and $25 to the friend for the plan visit that just finished.",
+    });
+    inbound.confirmInboundReferral.mockResolvedValue({ referralId: 'r-2', converted: true, creditsNow: true, credited: { referrerDollars: 0, refereeDollars: 25 }, error: null });
+    await expect(run(CONFIRM)).resolves.toMatchObject({ message: expect.stringContaining('$0 credited to the member and $25 to the friend') });
+  });
+
+  test('under GATE_REFERRAL_STEP2 a confirm with no visit yet states the rule', async () => {
+    gates.isEnabled.mockImplementation((gate) => gate === 'referralStep2');
+    inbound.confirmInboundReferral.mockResolvedValue({ referralId: 'r-1', converted: true, creditsNow: false, credited: null, error: null });
+    await expect(run(CONFIRM)).resolves.toMatchObject({ message: expect.stringContaining('Member: $25, or $50 within half a mile; friend: $25 credit at their first visit.') });
+  });
+});
+
+describe('under GATE_REFERRAL_STEP2 the prompts state the rule, not a flat $25 each', () => {
+  beforeEach(() => gates.isEnabled.mockImplementation((gate) => gate === 'referralStep2'));
+
+  test('the row, the Confirm prompt and the full text', () => {
+    const composed = composeCard(card());
+    const row = composeAdminAlert(composed.spec);
+    expect(row.why).toBe("Came in through Lea Quill's referral link; member $25 ($50 near), friend $25 after the first plan visit.");
+    const [confirm] = composed.spec.buttons.items;
+    expect(confirm.prompt).toBe('Make Lea Quill the referrer of Ames Fenn (member $25 or $50 near; friend $25)?');
+    expect(composed.detail).toContain('Member: $25, or $50 within half a mile; friend: $25 credit at their first visit, at Ames\'s first completed plan visit');
+    expect(`${row.why} ${confirm.prompt} ${composed.detail}`).not.toMatch(/\$25 each|both \$25|Both accounts get the \$25/i);
   });
 });

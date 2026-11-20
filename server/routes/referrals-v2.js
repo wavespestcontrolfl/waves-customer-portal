@@ -10,6 +10,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
+const { isEnabled } = require('../config/feature-gates');
 const { isPromoterPhoneCollision, PHONE_COLLISION_MESSAGE, PHONE_COLLISION_CODE } = require('../services/referral-errors');
 const { sendCustomerMessage, classifyDeliveryCertainty } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -181,6 +182,9 @@ router.get('/', async (req, res, next) => {
         convertedAt: r.converted_at,
       })),
       rewardPerReferral: settings.referrer_reward_cents / 100,
+      // GATE_REFERRAL_STEP2: the member's real offer (amounts, near radius, yearly limit, where the member stands).
+      // Server side only here; PR 2 renders it. rewardPerReferral above keeps its meaning as the standard amount.
+      ...(isEnabled('referralStep2') ? await engine.step2OfferFor(db, promoter.customer_id || req.customerId, settings) : {}),
     });
   } catch (err) { next(err); }
 });

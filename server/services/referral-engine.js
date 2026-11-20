@@ -1275,21 +1275,15 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   };
 }
 
-// Step 2's member credit for the friend's first performed recurring service, inside creditReferralOnFirstService's
-// transaction with the referral row locked. { dollars, reason }: 'near' (both homes have a map point and the
-// straight-line distance is within step2_near_radius_miles), 'standard', or 'cap_reached' (dollars 0: the member
-// already has step2_annual_credit_cap credits this America/New_York calendar year). The member's customer row is
-// locked first, so two friends' first services for one member count one after the other, and the credit posted
-// next (postCreditMovement locks the same row) is inside that count for the next one.
-async function step2MemberCredit(trx, { referral, friendCustomerId, settings, now = new Date() }) {
-  const memberId = referral.referrer_customer_id;
-  if (!memberId) return { dollars: 0, reason: null };
-  await trx('customers').where({ id: memberId }).forUpdate().first('id');
-
-  const { start, end } = step2.etYearBounds(now);
-  // The member's own credits only: a credit that joins the referral to the member as its referrer. The friend
-  // credit a member once got as a friend is not one of the ten.
-  const earned = await trx('customer_credit_ledger as l')
+// How many member credits this member holds in the current America/New_York calendar year. The year is read from
+// the DATABASE's transaction timestamp, the same clock that stamps the ledger row's created_at (its column default),
+// not the application clock: a transaction that began before ET midnight on January 1 stamps its credit in the old
+// year and must count the old year, whenever it gets its locks. Only the member's own credits count: a ledger row
+// whose referral names the member as referrer, so a credit the member once got as a friend is not one of the ten.
+async function memberCreditsThisYear(conn, memberId) {
+  const { rows: [{ now }] } = await conn.raw('SELECT transaction_timestamp() AS now');
+  const { start, end } = step2.etYearBounds(new Date(now));
+  const earned = await conn('customer_credit_ledger as l')
     .join('referrals as r', 'r.id', 'l.referral_id')
     .where('l.customer_id', memberId)
     .where('l.source', 'referral')
@@ -1299,7 +1293,36 @@ async function step2MemberCredit(trx, { referral, friendCustomerId, settings, no
     .where('l.created_at', '<', end)
     .count({ n: 'l.id' })
     .first();
-  if (step2.capReached(Number(earned?.n || 0), settings)) return { dollars: 0, reason: 'cap_reached' };
+  return Number(earned?.n || 0);
+}
+
+// The Step 2 offer as the member's own referral screen will state it (PR 2 renders it; nothing customer-facing
+// changes in this PR): the member's amounts, the near radius, the yearly limit and where the member stands.
+async function step2OfferFor(conn, memberId, settings) {
+  const s = step2.step2Settings(settings);
+  const creditsThisYear = await memberCreditsThisYear(conn, memberId);
+  return {
+    rewardPerReferral: s.step2_referrer_reward_cents / 100,
+    nearReward: s.step2_near_referrer_reward_cents / 100,
+    nearRadiusMiles: s.step2_near_radius_miles,
+    annualCap: s.step2_annual_credit_cap,
+    creditsThisYear,
+    capReached: step2.capReached(creditsThisYear, settings),
+  };
+}
+
+// Step 2's member credit for the friend's first performed recurring service, inside creditReferralOnFirstService's
+// transaction with the referral row locked. { dollars, reason }: 'near' (both homes have a map point and the
+// straight-line distance is within step2_near_radius_miles), 'standard', or 'cap_reached' (dollars 0: the member
+// already has step2_annual_credit_cap credits this America/New_York calendar year). The member's customer row is
+// locked first, so two friends' first services for one member count one after the other, and the credit posted
+// next (postCreditMovement locks the same row) is inside that count for the next one.
+async function step2MemberCredit(trx, { referral, friendCustomerId, settings }) {
+  const memberId = referral.referrer_customer_id;
+  if (!memberId) return { dollars: 0, reason: null };
+  await trx('customers').where({ id: memberId }).forUpdate().first('id');
+
+  if (step2.capReached(await memberCreditsThisYear(trx, memberId), settings)) return { dollars: 0, reason: 'cap_reached' };
 
   const homes = await trx('customers').whereIn('id', [memberId, friendCustomerId]).select('id', 'latitude', 'longitude');
   const homeOf = (id) => homes.find((h) => h.id === id);
@@ -1653,6 +1676,7 @@ module.exports = {
   convertReferral,
   updateReferralStatus,
   creditReferralOnFirstService,
+  step2OfferFor,
   sendDueReferralRewardEmails,
   nextRewardEmailAt,
   recentRewardCreditsQuery,

@@ -447,7 +447,7 @@ async function retryCountyForCustomer(customerId, cutoff, conn) {
   return (await commitReviewedGeocode(conn, context, outcome)) ? !!county.lot : undefined;
 }
 
-module.exports = { reviewEnabled, effectiveCustomer, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
+module.exports = { reviewEnabled, hasPin, effectiveCustomer, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
   attemptReviewedGeocode, excludeReviewedAddresses, excludeMatchingPrimaryPins, excludeCustomerAutomaticGeocodeForId,
   reviewedCustomerLocation, withCustomerReviewWriteFence, effectiveReview, blocksAutomaticGeocode,
   needsCoordinatePairRepair,

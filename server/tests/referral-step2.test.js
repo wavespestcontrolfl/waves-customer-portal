@@ -49,6 +49,14 @@ describe('memberCredit', () => {
     expect(memberCredit(undefined, at(0), {})).toEqual({ cents: 2500, reason: 'standard' });
     expect(memberCredit(member, undefined, {})).toEqual({ cents: 2500, reason: 'standard' });
   });
+  test('a zero latitude or longitude is a placeholder, never a pin: two (0, 0) homes are not zero miles apart', () => {
+    const origin = { latitude: '0.0000000', longitude: '0.0000000' };
+    expect(memberCredit(origin, origin, {})).toEqual({ cents: 2500, reason: 'standard' });
+    expect(memberCredit(origin, { latitude: 0, longitude: 0 }, {})).toEqual({ cents: 2500, reason: 'standard' });
+    expect(memberCredit({ latitude: 0, longitude: -82.57 }, { latitude: 0, longitude: -82.57 }, {})).toEqual({ cents: 2500, reason: 'standard' });
+    expect(memberCredit({ latitude: 27.499, longitude: 0 }, { latitude: 27.499, longitude: 0 }, {})).toEqual({ cents: 2500, reason: 'standard' });
+    expect(memberCredit(member, origin, {})).toEqual({ cents: 2500, reason: 'standard' });
+  });
   test('the same point is near', () => {
     expect(memberCredit(member, member, {})).toEqual({ cents: 5000, reason: 'near' });
   });

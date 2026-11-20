@@ -403,7 +403,7 @@ function inboundConfirmedMessage(result) {
 // One plan customer who came in through a
 // referral link or named a referrer. The office picks the referrer (a
 // suggestion or a search result), then confirms; or marks "not a referral".
-function InboundReferralCard({ item, onDone, flash }) {
+function InboundReferralCard({ item, step2, onDone, flash }) {
   const isMobile = useIsMobile();
   const [chosen, setChosen] = useState(null);
   const [search, setSearch] = useState(item.evidence.spokenName || "");
@@ -539,9 +539,11 @@ function InboundReferralCard({ item, onDone, flash }) {
         >
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
-            {item.creditsNow
-              ? "Both accounts get the $25 credit now. The referrer gets one thank-you email at the next 9:00 AM ET, and no text."
-              : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text.`}{" "}
+            {step2
+              ? `Member: $25, or $50 within half a mile; friend: $25 credit ${item.creditsNow ? "now" : `at ${firstName}'s next completed plan visit`}. The referrer gets one thank-you email at the next 9:00 AM ET, and no text.`
+              : item.creditsNow
+                ? "Both accounts get the $25 credit now. The referrer gets one thank-you email at the next 9:00 AM ET, and no text."
+                : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text.`}{" "}
             A referrer's 3rd, 5th or 10th referral also sends the usual milestone text.
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -786,7 +788,7 @@ export default function ReferralsPageV2() {
       searchSeen.current = "";
       setQueue(q === FAILED ? [] : q.referrals || []);
       setPayouts(pay === FAILED ? [] : pay.payouts || []);
-      setInbound({ items: inb === FAILED ? [] : inb.items || [] });
+      setInbound({ items: inb === FAILED ? [] : inb.items || [], step2: inb !== FAILED && inb.step2 === true });
       setLoading(false);
     });
   }, []);
@@ -1318,13 +1320,14 @@ export default function ReferralsPageV2() {
                 </div>
                 <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                   Plan customers who came in through a referral link or named
-                  a referrer. Confirm the referrer to pay the $25 rewards.
+                  a referrer. Confirm the referrer to pay the {inbound.step2 ? "" : "$25 "}rewards.
                 </div>
               </div>
               {inbound.items.map((item) => (
                 <InboundReferralCard
                   key={item.customerId}
                   item={item}
+                  step2={inbound.step2}
                   onDone={load}
                   flash={flash}
                 />

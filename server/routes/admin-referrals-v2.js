@@ -7,6 +7,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
+const { isEnabled } = require('../config/feature-gates');
 const inbound = require('../services/referral-inbound');
 const { form1099ThresholdCents } = require('../services/form-1099-threshold');
 
@@ -173,7 +174,8 @@ router.get('/inbound', async (req, res, next) => {
     const items = await inbound.listInboundReferrals();
     // `enabled` stays in the answer only for an installed app shell still running a build that reads it
     // (the service worker keeps old builds); the current page ignores it.
-    res.json({ enabled: true, items });
+    // `step2`: GATE_REFERRAL_STEP2 is on, so the confirm prompts state the Step 2 rule instead of a flat $25.
+    res.json({ enabled: true, items, ...(isEnabled('referralStep2') ? { step2: true } : {}) });
   } catch (err) { next(err); }
 });
 

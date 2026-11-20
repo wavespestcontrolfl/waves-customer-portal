@@ -7,6 +7,9 @@
  *   year     the member's credit cap counts a calendar year in America/New_York
  */
 const { haversine } = require('./route-optimizer');
+// The one rule for "this home has a map point" (customer-geocode review): a missing, non-numeric or ZERO latitude or
+// longitude is no pin, so two placeholder (0, 0) homes are never "zero miles apart".
+const { hasPin } = require('./customer-geocode-review');
 const { parseETDateTime, etParts } = require('../utils/datetime-et');
 
 // The owner's numbers, also the values the migration puts on the settings row. A settings row read before that
@@ -29,15 +32,10 @@ function step2Settings(settings = {}) {
   return out;
 }
 
-function hasPoint(home) {
-  if (!home || home.latitude == null || home.longitude == null) return false;
-  return Number.isFinite(Number(home.latitude)) && Number.isFinite(Number(home.longitude));
-}
-
 // The member's credit in cents and why: 'near' or 'standard'. A home without a map point is never near.
 function memberCredit(memberHome, friendHome, settings) {
   const s = step2Settings(settings);
-  if (hasPoint(memberHome) && hasPoint(friendHome)) {
+  if (memberHome && friendHome && hasPin(memberHome) && hasPin(friendHome)) {
     const miles = haversine(
       Number(memberHome.latitude), Number(memberHome.longitude),
       Number(friendHome.latitude), Number(friendHome.longitude),
