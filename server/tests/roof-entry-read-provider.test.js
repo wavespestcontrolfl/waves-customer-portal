@@ -1,8 +1,6 @@
 // Staff roof read: the one-paid-call rule at the PROVIDER boundary. The real dispatcher runs; only fetch (county image,
 // Gemini, OpenAI), the database and the price table are faked. No network, no model, no database.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
-process.env.GEMINI_API_KEY = 'test-gemini-key';
-process.env.OPENAI_API_KEY = 'test-openai-key';
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -47,13 +45,22 @@ const svc = require('../services/roof-entry-read');
 const realFetch = global.fetch;
 let providerCalls;
 let geminiBodies;
+// This suite sets the provider keys itself (the real dispatcher reads them per call) and puts the originals back; it
+// never touches GATE_ROOF_ENTRY_READ (the service does not read it, only the route does) and relies on no other suite's env.
+const KEY_NAMES = ['GEMINI_API_KEY', 'OPENAI_API_KEY'];
+let savedKeys;
+beforeAll(() => { savedKeys = Object.fromEntries(KEY_NAMES.map((k) => [k, process.env[k]])); });
+afterAll(() => {
+  KEY_NAMES.forEach((k) => { if (savedKeys[k] === undefined) delete process.env[k]; else process.env[k] = savedKeys[k]; });
+});
 beforeEach(() => {
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
+  process.env.OPENAI_API_KEY = 'test-openai-key';
   mockRows = [];
   providerCalls = { gemini: 0, openai: 0, image: 0 };
   geminiBodies = [];
   mockPrices.clear();
   mockPrices.set(llmCost.normalizeModelId(MODELS.TEXT_POLICIES.estimateVision.primary.model), { input: 0.3, output: 2.5, cacheRead: null, cacheWrite: null, reasoning: null, tiers: [] });
-  process.env.GATE_ROOF_ENTRY_READ = 'true';
 });
 afterEach(() => { global.fetch = realFetch; });
 

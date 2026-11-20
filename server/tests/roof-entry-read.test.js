@@ -166,7 +166,15 @@ beforeAll(() => {
 afterAll(async () => { await new Promise((r) => server.close(r)); });
 
 const realFetch = global.fetch;
-const savedGate = process.env.GATE_ROOF_ENTRY_READ;
+// This suite owns its gate: the original value is captured before any test runs (never at module load, where another
+// suite's leftovers could be read), set explicitly in beforeEach, deleted by the tests that need it off, and restored
+// after each test and after the file. It relies on no other suite's environment.
+let savedGate;
+const restoreGate = () => {
+  if (savedGate === undefined) delete process.env.GATE_ROOF_ENTRY_READ; else process.env.GATE_ROOF_ENTRY_READ = savedGate;
+};
+beforeAll(() => { savedGate = process.env.GATE_ROOF_ENTRY_READ; });
+afterAll(restoreGate);
 beforeEach(() => {
   process.env.GATE_ROOF_ENTRY_READ = 'true';
   mockRows = [];
@@ -191,7 +199,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   global.fetch = realFetch;
-  if (savedGate === undefined) delete process.env.GATE_ROOF_ENTRY_READ; else process.env.GATE_ROOF_ENTRY_READ = savedGate;
+  restoreGate();
 });
 
 async function call(method, path, { role = 'admin', body } = {}) {
