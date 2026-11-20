@@ -11198,8 +11198,10 @@ const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 //    a call Waves closed on the phone (service not sold, price refused, nothing asked) makes none.
 // 3. The caller did not disclaim the line, with or without another number.
 // 4. The phone Step 4b keys the lead on (`leadPhone`, resolveCallContactPhone with the extracted
-//    number) is the call's own number (`callerId`, resolveCallContactPhone of the call alone). A
-//    dictated number is unverified, and for this lead the phone is the only reachback.
+//    number) is the inbound caller's own number: the call's from_phone when it is an external,
+//    usable number. Never resolveCallContactPhone's fallback, which can be the dialed number when
+//    the caller ID is blocked or internal, and never on an outbound call. A dictated number is
+//    unverified, and for this lead the phone is the only reachback.
 // 5. Neither extractor heard a do-not-contact request (`doNotContact`, the processor's
 //    v2DoNotContact): the V2 hard veto sees only V2's flags.
 // hasWorkableLeadSignal reads the stamp: a live caller who gave only a phone number then makes a
@@ -11208,7 +11210,8 @@ const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 // field reads false (model output can carry any key), so the hard veto, the tech follow-up and the
 // spam/voicemail exits store false, and the ads attribution mirror (phoneSuccessorActuallyLinked)
 // keeps the old verdict for a call the processor never linked.
-function stampCallerIdReachback(extracted, adoptedV2Extraction, { leadPhone = null, callerId = null, doNotContact = false } = {}) {
+function stampCallerIdReachback(extracted, adoptedV2Extraction, { call = null, leadPhone = null, doNotContact = false } = {}) {
+  const callerId = call && !isOutboundCall(call) ? firstExternalPhone(call.from_phone) : null;
   const reachback = !!adoptedV2Extraction
     && !callEndedWithNothingToDo(adoptedV2Extraction)
     && adoptedV2Extraction.caller?.caller_id_disclaimed !== true
@@ -17178,7 +17181,7 @@ const CallRecordingProcessor = {
     // Phone-only reachback (stampCallerIdReachback): stamped after every exit that skips the lead
     // step, before the Step 4 write that stores it and the Step 4b gate that reads it.
     extracted = stampCallerIdReachback(extracted, adoptedV2Extraction, {
-      leadPhone: phone, callerId: contactPhone, doNotContact: v2DoNotContact,
+      call, leadPhone: phone, doNotContact: v2DoNotContact,
     });
 
     // Step 4: Update call log with extraction results.
