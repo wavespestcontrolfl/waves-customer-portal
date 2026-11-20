@@ -499,16 +499,22 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       bothRowsRewritten(db);
     });
 
-    // Earlier migrations add each required column, and the app's own recalculation reads them: without one, inventory is left alone.
-    test.each(['vendor_pricing.approval_status', 'vendor_pricing.expires_at'])('a required column missing (%s): inventory is left alone with a warning', async (column) => {
+    // Earlier migrations add each table and column the inventory recalculation reads or writes: without one, inventory is left alone
+    // and the config rows still move (pre-push audit 26: the eligibility predicate reads price_amount, so a missing one would abort
+    // the whole transaction).
+    test.each([
+      'vendor_pricing.approval_status', 'vendor_pricing.expires_at', 'vendor_pricing.price_amount', 'vendor_pricing.is_best_price',
+      'products_catalog.needs_pricing', 'products_catalog.cost_per_unit', 'vendors.name', 'vendors',
+    ])('a required table or column missing (%s): inventory is left alone with a warning', async (missing) => {
       const db = world({ vendors: [vendorRow(), SECOND_VENDOR] });
-      db.__missingColumns = [column];
+      if (missing.includes('.')) db.__missingColumns = [missing];
+      else delete db[missing];
       const before = JSON.stringify([db.vendor_pricing, db.products_catalog]);
       await migration.up(fakeKnex(db));
       expect(JSON.stringify([db.vendor_pricing, db.products_catalog])).toBe(before);
       expect(db.price_history).toEqual([]);
       expect(inventory.recalcBestPrice).not.toHaveBeenCalled();
-      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/price left alone: a required vendor_pricing columns is missing/);
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toContain(`price left alone: a required table or column is missing: ${missing}`);
       bothRowsRewritten(db);
     });
 
@@ -619,30 +625,43 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.pricing_config_audit).toEqual([]);
     });
 
-    // Pre-push audit 25: with no current quote the recalculation can scale to the catalog (a pack it cannot read, with no per-oz
-    // figure), it keeps the catalog price, marked stale, and job costing reads best_price as it stands. So a catalog it leaves on the
-    // stale $58.42 gets the recalculation's own no-price state; down() puts it back as up() saw it.
+    // Pre-push audits 25 and 26: with no current quote the recalculation can scale to the catalog (a pack it cannot read, with no
+    // per-oz figure), it keeps the catalog price marked stale (needs_pricing), and so does every later one, while job costing reads
+    // best_price as it stands. So a catalog it leaves on the stale price gets the owner's $30.90 per 128 fl oz at its package size,
+    // still marked: job costing reads $0.2414 an oz, and no link reads a marked row. A cleared price would not hold: the next
+    // recalculation would write the case's raw $40 as current. down() puts the catalog back as up() saw it.
     const UNREAD_PACK = {
       id: 'v3', product_id: 'p1', vendor_id: 'ven9', vendor_sku: 'CASE6', price: '40.00', price_amount: '40.0000', quantity: 'case',
       unit_normalized: null, normalized_unit_price: null, price_per_oz: null, landed_unit_price: null, is_active: true, approval_status: 'approved',
       is_best_price: false,
     };
+    const AT_96_OZ = { unit_size_oz: '96.00', best_price: '43.82' };
     test.each([
-      ['the stale quote expires', [vendorRow({ shipping_cost: '5.00' }), UNREAD_PACK], /is expired/],
-      ['no quote offers the stale price', [vendorRow({ is_active: false }), UNREAD_PACK], /is cleared/],
-    ])('%s and the only current quote has a pack the inventory cannot read: the stale catalog price is cleared', async (_name, vendors, changelog) => {
-      const db = world({ vendors });
+      ['the stale quote expires', [vendorRow({ shipping_cost: '5.00' }), UNREAD_PACK], {}, 30.9, /is expired/],
+      ['no quote offers the stale price', [vendorRow({ is_active: false }), UNREAD_PACK], {}, 30.9, /is the owner's \$30\.90 per 128 fl oz, marked needs pricing/],
+      ['a 96 oz catalog row at the stale $43.82 with no quote offering it', [vendorRow({ is_active: false }), UNREAD_PACK], AT_96_OZ, 23.17, /is the owner's/],
+    ])('%s, and the only current quote has a pack the inventory cannot read: the catalog holds the owner\'s price, still marked', async (_name, vendors, catalog, price, changelog) => {
+      const db = world({ vendors, catalog: [catalogRow(catalog)] });
       const knex = fakeKnex(db);
       await migration.up(knex);
       expect(db.vendor_pricing[1]).toEqual(UNREAD_PACK); // its own offer: never expired
-      expectUnpriced(db.products_catalog[0]);
-      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/kept the stale \$58\.42; the catalog price is cleared \(needs pricing\)/);
+      const owners = { best_price: price, best_price_status: 'stale', needs_pricing: true };
+      expect(db.products_catalog[0]).toMatchObject(owners);
+      expect(calculateInventoryCost({ product: db.products_catalog[0], deductedAmount: 16, inventoryUnit: 'fl_oz', amount: 16, amountUnit: 'fl_oz' }))
+        .toMatchObject({ unitCost: 0.2414 });
+      expect(warn.mock.calls.map((c) => c[0]).join('\n'))
+        .toContain(`marked needs pricing. The catalog price is now ${price}, the owner's $30.90 per 128 fl oz at its package size, still marked`);
       const own = db.pricing_config_audit.find((r) => r.config_key === migration.STALE_AUDIT_KEY);
-      expect(JSON.parse(own.new_value)).toMatchObject({ catalog_cleared: true, catalog_recalculated: { best_price: null } });
+      expect(JSON.parse(own.new_value)).toMatchObject({ catalog_repriced: true, catalog_recalculated: { best_price: price, needs_pricing: true } });
       expect(JSON.parse(db.pricing_changelog[0].after_value).bifenthrin).toMatch(changelog);
+      // A later recalculation (an admin's price entry for another vendor runs one) keeps it, marked: never the case's $40 as current.
+      const later = structuredClone(db);
+      await realRecalc('p1', fakeKnex(later));
+      expect(later.products_catalog[0]).toMatchObject(owners);
+      expect(later.vendor_pricing.map((quote) => quote.is_best_price)).toEqual([false, false]);
       await migration.down(knex);
       expect(db.products_catalog[0]).toMatchObject({ best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
-      expect(Number(db.products_catalog[0].best_price)).toBe(58.42);
+      expect(Number(db.products_catalog[0].best_price)).toBe(Number(catalogRow(catalog).best_price));
       expect(db.pricing_config_audit).toEqual([]);
     });
 

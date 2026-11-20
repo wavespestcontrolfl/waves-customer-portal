@@ -48,16 +48,18 @@
  * Another vendor's quote, another item number or another pack price is an independent offer and stays: the catalog follows it
  * (owner 2026-07-10). The inventory recalculation then runs at once: the catalog holds the winner of the current quotes, scaled to
  * its own package size, or none (best_price null, needs_pricing, 'no_valid_price'). When no current quote can be scaled to the
- * catalog, the recalculation keeps the catalog price, marked stale, and job costing reads best_price as it stands
- * (calculateInventoryCost); a catalog it leaves on the stale price that way gets the recalculation's own no-price state instead.
- * The pre-slab and mosquito links read only a priced row backed by an eligible quote, inside their band, so quotes keep the
- * config's or code's 30.90 / 128 for every config shape, and job and service-usage costing follow the catalog. A catalog row that
- * still holds the stale price at its package size with no such quote (a price written without a recalculation, a SiteOne row
- * already at $30.90 included) gets the recalculation alone, and the no-price state if it keeps the stale price: no vendor write,
- * no price history. Entering the price in Inventory (PUT /:productId/pricing) re-approves the quote with no expiry and
- * recalculates; until then a SiteOne auto-order for the product parks as no_price. The deploy log says how to finish. The config
- * rows move either way. With a required inventory column missing (earlier migrations add each one, and the app's own
- * recalculation reads them), inventory is left alone with a warning.
+ * catalog (a pack it cannot read, with no per-oz figure), the recalculation keeps the catalog price marked stale (needs_pricing),
+ * and so does every later one, while job costing reads best_price as it stands (calculateInventoryCost). So a catalog it leaves
+ * on the stale price gets the owner's $30.90 per 128 fl oz at its own package size instead, still marked (pre-push audits 25 and
+ * 26). Clearing it would not hold: with no catalog price, the next recalculation writes that quote's raw pack price as current.
+ * The pre-slab and mosquito links read only a priced row (needs_pricing false) backed by an eligible quote, inside their band, so
+ * quotes keep the config's or code's 30.90 / 128 for every config shape. A catalog row that still holds the stale price at its
+ * package size with no such quote (a price written without a recalculation, a SiteOne row already at $30.90 included) gets the
+ * recalculation alone, then the owner's price if the recalculation keeps the stale one: no vendor write, no price history.
+ * Entering the price in Inventory (PUT /:productId/pricing) re-approves the quote with no expiry and recalculates; until then a
+ * SiteOne auto-order for the product parks as no_price. The deploy log says how to finish. The config rows move either way. With
+ * a table or column the recalculation reads or writes missing (earlier migrations add each one), inventory is left alone with a
+ * warning.
  *
  * pest_service_costs (the admin Pricing Logic panel's Pest Service Cost Breakdown; display only, pestVisitCostModel prices the
  * visit): its Talak line, 4 fl oz a visit at 41.57 / 128, becomes Crosscheck Plus at the engine's 0.97 (4 fl oz at 30.90 / 128) in
@@ -67,13 +69,13 @@
  * on, so a camelCase or bottle alias would win over the snake_case value written here: the rewrite drops those aliases.
  *
  * Ownership: up() writes one pricing_config_audit row (changed_by TAG) for each pricing_config row it rewrote, one for each product
- * Step P priced, one for each product whose stale quotes it expired or whose stale catalog price it cleared, and one
+ * Step P priced, one for each product whose stale quotes it expired or whose stale catalog price it replaced, and one
  * pricing_changelog row when it changed anything; with no pricing_config_audit table it writes nothing (down() could not find its
  * writes). down() restores a product only when this migration's audit row for its row exists AND the product still deep-equals
  * what up() wrote (an admin edit since then is kept); it restores the catalog price only when its audit row exists AND the vendor
  * row still holds exactly what up() wrote, and it restores a stale quote's expiry only while the quote still holds exactly what
  * up() wrote; after either it runs the recalculation again, so the catalog follows the restored rows (a mark up()'s recalculation
- * cleared comes back when the winner up() saw returns); with neither, it puts back a catalog price up() cleared only while the
+ * cleared comes back when the winner up() saw returns); with neither, it puts back a catalog price up() replaced only while the
  * catalog still holds exactly what up() wrote; it restores the pest breakdown only when its audit row exists AND the row still
  * deep-equals what up() wrote; then it deletes this migration's price_history and price_snapshots rows (a restored vendor row
  * links its earlier snapshot again), audit rows and changelog row.
@@ -97,7 +99,7 @@ const CHANGELOG = {
 };
 const CATALOG_AUDIT_KEY = 'inventory:lesco_crosscheck_plus_price';
 const STALE_AUDIT_KEY = 'inventory:lesco_crosscheck_plus_stale';
-const STALE_REASON = 'Owner 2026-11-18: the owner pays $30.90 for LESCO Crosscheck Plus (1 gal); a SiteOne quote still offered the stale $58.42, or the catalog kept it, where the inventory recalculation and the engine catalog links would take it. Expired or cleared until the price is entered.';
+const STALE_REASON = 'Owner 2026-11-18: the owner pays $30.90 for LESCO Crosscheck Plus (1 gal); a SiteOne quote still offered the stale $58.42, which the inventory recalculation and the engine catalog links would take, or the catalog kept it with no quote to replace it, which job costing would read. Expired, or the catalog set to $30.90 per 128 fl oz, until the price is entered.';
 
 const CATALOG_NAME = 'LESCO Crosscheck Plus';
 const STALE_SKU = 'D00001542';
@@ -186,21 +188,23 @@ const SNAPSHOT_COLUMNS = ['product_id', 'vendor_id', 'vendor_pricing_id', 'price
   'normalized_unit', 'landed_unit_price', 'availability_status', 'fetched_at', 'captured_at', 'expires_at', 'source_type', 'price_type',
   'confidence_score', 'source_confidence', 'price_confidence', 'metadata'];
 // The catalog prices a recalculation rewrites.
-const CATALOG_SEEN_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_price_updated_at', 'best_vendor', 'best_vendor_pricing_id',
-  'best_price_vendor_id_cached', 'unit_size_oz'];
+const CATALOG_SEEN_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_price_updated_at', 'best_vendor_pricing_id', 'unit_size_oz'];
 // The catalog's winner, which down() compares to what up() saw before it restores a mark up()'s recalculation cleared.
 const WINNER_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_vendor_pricing_id', 'unit_size_oz'];
-const REQUIRED_VENDOR_COLUMNS = ['product_id', 'vendor_id', 'vendor_sku', 'is_active', 'approval_status', 'price', 'quantity', 'expires_at'];
-const REQUIRED_CATALOG_COLUMNS = ['name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'];
+// Every table and column Step P and the inventory recalculation read or write (recalcBestPriceLocked and the eligibility predicate
+// it runs), so a missing one leaves inventory alone instead of aborting the transaction (pre-push audit 26).
+const REQUIRED_COLUMNS = {
+  vendor_pricing: ['product_id', 'vendor_id', 'vendor_sku', 'is_active', 'approval_status', 'price', 'price_amount', 'quantity',
+    'expires_at', 'is_best_price'],
+  products_catalog: ['name', 'best_price', 'unit_size_oz', 'container_size', 'cost_unit', 'cost_per_unit', 'best_vendor',
+    'best_vendor_pricing_id', 'best_price_amount_cached', 'best_price_vendor_id_cached', 'best_price_updated_at', 'best_price_status',
+    'needs_pricing'],
+  vendors: ['id', 'name'],
+};
 // The mark recalcBestPriceLocked writes on a catalog price it cannot trust or cannot find (routes/admin-inventory.js).
 const MARK_COLUMNS = ['needs_pricing', 'best_price_status'];
 // The audit entries' catalog row before and after the recalculation.
 const CATALOG_AUDIT_COLUMNS = [...CATALOG_SEEN_COLUMNS, ...MARK_COLUMNS];
-// What recalcBestPriceLocked writes when no eligible quote remains (routes/admin-inventory.js): the catalog has no price.
-const NO_PRICE = {
-  best_price: null, best_vendor: null, best_vendor_pricing_id: null, best_price_amount_cached: null, best_price_vendor_id_cached: null,
-  best_price_status: 'no_valid_price', needs_pricing: true,
-};
 // A stale quote's audit entry: its price figures and pack (so down() can tell no price was entered since) and its expiry.
 const QUOTE_COLUMNS = ['price', 'price_amount', 'quantity', 'landed_cost', 'price_per_oz', 'normalized_unit_price', 'landed_unit_price',
   'is_active', 'approval_status', 'expires_at'];
@@ -272,11 +276,12 @@ async function isSiteOneRow(knex, row) {
 }
 
 async function missingColumns(knex) {
-  const missing = [
-    ...(await existingColumns(knex, 'vendor_pricing', REQUIRED_VENDOR_COLUMNS)).length === REQUIRED_VENDOR_COLUMNS.length ? [] : ['vendor_pricing columns'],
-    ...(await existingColumns(knex, 'products_catalog', REQUIRED_CATALOG_COLUMNS)).length === REQUIRED_CATALOG_COLUMNS.length ? [] : ['products_catalog columns'],
-  ];
-  return missing.length ? `a required ${missing.join(' and ')} is missing` : null;
+  const missing = [];
+  for (const [table, columns] of Object.entries(REQUIRED_COLUMNS)) {
+    if (!(await knex.schema.hasTable(table))) missing.push(table);
+    else for (const column of columns) if (!(await knex.schema.hasColumn(table, column))) missing.push(`${table}.${column}`);
+  }
+  return missing.length ? `a required table or column is missing: ${missing.join(', ')}` : null;
 }
 
 async function insertPriceHistory(knex, productId, row) {
@@ -310,11 +315,16 @@ async function insertPriceSnapshot(knex, productId, row, now) {
 // Mirrors PUT /:productId/pricing on the existing SiteOne row for a manual $30.90 entry: the vendor row, its price_history row, then
 // the handler's own recalculation (see the header). Each catalog row named LESCO Crosscheck Plus on its own: every check is about
 // that product's own vendor rows. Returns what moved, one entry for each product that changed: 'priced' (Step P), 'expired' (stale
-// quotes expired, then the recalculation), 'cleared' (the recalculation alone kept the stale price, now cleared) or 'recalculated'
-// (the recalculation alone).
+// quotes expired, then the recalculation), 'repriced' (the recalculation alone kept the stale price, now the owner's) or
+// 'recalculated' (the recalculation alone).
 async function fixCatalogPrice(knex) {
   const moved = [];
   if (!(await knex.schema.hasTable('products_catalog')) || !(await knex.schema.hasTable('vendor_pricing'))) return moved;
+  const missing = await missingColumns(knex);
+  if (missing) {
+    console.warn(`${LOG} ${CATALOG_NAME} price left alone: ${missing}`);
+    return moved;
+  }
   for (const { id } of await knex('products_catalog').where({ name: CATALOG_NAME })) {
     const outcome = await fixProductPrice(knex, id);
     if (outcome) moved.push(outcome);
@@ -324,11 +334,6 @@ async function fixCatalogPrice(knex) {
 
 async function fixProductPrice(knex, productId) {
   await lockProduct(knex, productId);
-  const missing = await missingColumns(knex);
-  if (missing) {
-    console.warn(`${LOG} ${CATALOG_NAME} (${productId}) price left alone: ${missing}`);
-    return null;
-  }
   const product = await knex('products_catalog').where({ id: productId }).forUpdate().first();
   if (!product) return null;
   const rows = await knex('vendor_pricing').where({ product_id: productId }).forUpdate();
@@ -346,23 +351,23 @@ async function fixProductPrice(knex, productId) {
   const expired = await expireQuotes(knex, stale, now);
   before.stale_quotes = expired.before;
   await recalcBestPrice(knex, productId);
-  const cleared = await clearStalePrice(knex, productId, now);
+  const repriced = await repriceKeptStalePrice(knex, productId, now);
 
   const catalogRecalculated = pickColumns(await knex('products_catalog').where({ id: productId }).first(), catalogColumns);
   const best = catalogRecalculated.best_price ?? 'none (needs pricing)';
-  if (!row && !stale.length && !cleared) {
+  if (!row && !stale.length && !repriced) {
     console.info(`${LOG} ${CATALOG_NAME} (${productId}): the catalog still held the stale $${STALE_PRICE.toFixed(2)} with no quote `
       + `offering it; the inventory recalculation set the catalog best price to ${best}`);
     return 'recalculated';
   }
-  const written = { catalog_recalculated: catalogRecalculated, stale_quotes: expired.written, catalog_cleared: cleared };
+  const written = { catalog_recalculated: catalogRecalculated, stale_quotes: expired.written, catalog_repriced: repriced };
   if (row) written.vendor_pricing = pickColumns(await knex('vendor_pricing').where({ id: row.id }).first(), vendorColumns);
   const [configKey, reason] = row ? [CATALOG_AUDIT_KEY, CATALOG_REASON] : [STALE_AUDIT_KEY, STALE_REASON];
   await knex('pricing_config_audit').insert({
     config_key: configKey, old_value: JSON.stringify(before), new_value: JSON.stringify(written), changed_by: TAG, reason,
   });
-  warnPrice(productId, { row, stale, cleared, best });
-  return row ? 'priced' : stale.length ? 'expired' : 'cleared';
+  warnPrice(productId, { row, stale, repriced, best });
+  return row ? 'priced' : stale.length ? 'expired' : 'repriced';
 }
 
 // The SiteOne row Step P corrects, or null with the reason logged. A SiteOne row already at $30.90 (a re-run, or the price entered
@@ -389,15 +394,16 @@ async function staleQuotes(knex, productId, siteOne, now) {
   });
 }
 
-// The recalculation keeps the catalog price, marked stale, when no current quote can be scaled to the catalog (recalcBestPriceLocked),
-// and job costing reads best_price as it stands (calculateInventoryCost). So a catalog it left on the stale price unconfirmed gets
-// the recalculation's own no-price state (pre-push audit 25). A stale-sized price it wrote as current is an independent offer's own
-// price, and stays. True when it cleared one.
-async function clearStalePrice(knex, productId, now) {
+// When no current quote can be scaled to the catalog, the recalculation keeps the catalog price marked stale (needs_pricing), and
+// so does every later one (recalcBestPriceLocked); job costing reads best_price as it stands (calculateInventoryCost). So a catalog
+// it left on the stale price gets the owner's $30.90 per 128 fl oz at its own package size, scaled and rounded as the recalculation
+// scales a quote, with the mark kept: the links still skip it (pre-push audits 25 and 26). A stale-sized price it wrote as current
+// is an independent offer's own price, and stays. True when it replaced one.
+async function repriceKeptStalePrice(knex, productId, now) {
   const catalog = await knex('products_catalog').where({ id: productId }).first();
   if (!catalog || catalog.best_price_status === 'current' || !holdsStalePrice(catalog)) return false;
-  const fields = { ...NO_PRICE, best_price_updated_at: now };
-  await knex('products_catalog').where({ id: productId }).update(pickColumns(fields, await existingColumns(knex, 'products_catalog', Object.keys(fields))));
+  const bestPrice = Math.round((NEW_PRICE / STALE_SIZE_OZ) * num(catalog.unit_size_oz) * 100) / 100;
+  await knex('products_catalog').where({ id: productId }).update({ best_price: bestPrice, best_price_updated_at: now });
   return true;
 }
 
@@ -416,7 +422,7 @@ async function writeNewPrice(knex, productId, row, now, vendorColumns) {
 }
 
 // The deploy log for a product whose price moved: what changed, and how to finish when the price waits on an entry in Inventory.
-function warnPrice(productId, { row, stale, cleared, best }) {
+function warnPrice(productId, { row, stale, repriced, best }) {
   if (row) {
     console.info(`${LOG} ${CATALOG_NAME}: SiteOne price ${STALE_PRICE} -> ${NEW_PRICE} per ${STALE_SIZE_OZ} oz; the inventory `
       + `recalculation set the catalog best price to ${best}`);
@@ -428,10 +434,11 @@ function warnPrice(productId, { row, stale, cleared, best }) {
       + `recalculation or auto-order reads it; the catalog best price is ${best}. Enter the current price for each in Inventory `
       + `($${NEW_PRICE.toFixed(2)}): that re-approves the quote. Until then a SiteOne auto-order for it parks as no_price.`);
   }
-  if (cleared) {
+  if (repriced) {
     console.warn(`${LOG} ${CATALOG_NAME} (${productId}): no current quote could be scaled to the catalog, so the inventory `
-      + `recalculation kept the stale $${STALE_PRICE.toFixed(2)}; the catalog price is cleared (needs pricing) so no job cost reads it. `
-      + 'Enter the current price in Inventory.');
+      + `recalculation kept the stale price ($${STALE_PRICE.toFixed(2)} a gallon), marked needs pricing. The catalog price is now ${best}, the owner's `
+      + `$${NEW_PRICE.toFixed(2)} per ${STALE_SIZE_OZ} fl oz at its package size, still marked, so job costing reads it and no catalog `
+      + 'link does. Enter the current price in Inventory.');
   }
 }
 
@@ -493,12 +500,12 @@ async function restoreProductPrice(knex, before, written) {
     }
   }
   if (restored) await recalcRestoringMark(knex, before.product_id, before.catalog_seen);
-  else if (written.catalog_cleared) await restoreClearedPrice(knex, before.product_id, before.catalog_seen, written.catalog_recalculated);
+  else if (written.catalog_repriced) await restoreRepricedCatalog(knex, before.product_id, before.catalog_seen, written.catalog_recalculated);
 }
 
-// A catalog price up() cleared, with no vendor row restored to recalculate from: the catalog as up() saw it, only while it still holds
-// exactly what up() wrote (a price entered since recalculates the catalog, and is kept).
-async function restoreClearedPrice(knex, productId, seen, wrote) {
+// A catalog price up() replaced, with no vendor row restored to recalculate from: the catalog as up() saw it, only while it still
+// holds exactly what up() wrote (a price entered since recalculates the catalog, and is kept).
+async function restoreRepricedCatalog(knex, productId, seen, wrote) {
   const catalog = await knex('products_catalog').where({ id: productId }).forUpdate().first();
   if (!catalog || !seen || !wrote || !sameColumns(catalog, wrote)) {
     console.warn(`${LOG} down: the ${CATALOG_NAME} catalog price changed since this migration - leaving it alone`);
@@ -711,8 +718,8 @@ function changelogAfter(rewritten, pricesMoved) {
   if (pricesMoved.includes('expired')) {
     return `LESCO Crosscheck Plus: 128 fl oz at $30.90; a SiteOne ${CATALOG_NAME} quote still at the stale $58.42 is expired, so no inventory recalculation picks it until the price is entered in Inventory (see the deploy log)`;
   }
-  if (pricesMoved.includes('cleared')) {
-    return `LESCO Crosscheck Plus: 128 fl oz at $30.90; the ${CATALOG_NAME} catalog price, still the stale $58.42, is cleared until the price is entered in Inventory (see the deploy log)`;
+  if (pricesMoved.includes('repriced')) {
+    return `LESCO Crosscheck Plus: 128 fl oz at $30.90; the ${CATALOG_NAME} catalog price, still at the stale $58.42 a gallon with no quote to replace it, is the owner's $30.90 per 128 fl oz, marked needs pricing until the price is entered in Inventory (see the deploy log)`;
   }
   return 'LESCO Crosscheck Plus: 128 fl oz at $30.90 (pre-slab links to the Crosscheck Plus catalog row)';
 }
