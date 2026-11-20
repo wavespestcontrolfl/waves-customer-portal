@@ -461,7 +461,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
       if (budgetFails) throw new Error('pool down');
       return { usd };
     });
-    const tb = { where: jest.fn(() => tb), whereNot: jest.fn(() => tb), first: spent, update };
+    const tb = { where: jest.fn(() => tb), whereRaw: jest.fn(() => tb), first: spent, update };
     const trx = jest.fn(() => tb);
     trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     db.transaction = jest.fn(async (fn) => fn(trx));
@@ -501,7 +501,9 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     // The budget read and the stamp run under one lock, in one transaction.
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['voice_gpt_live_budget']);
     expect(tb.where).toHaveBeenCalledWith({ source: VOICE_RELAY_SANDBOX_SOURCE });
-    expect(tb.whereNot).toHaveBeenCalledWith({ twilio_call_sid: 'CA-sb-live' });
+    // single-use: the stamp lands only on a row with no gpt_live yet
+    expect(tb.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-sb-live' });
+    expect(tb.whereRaw).toHaveBeenCalledWith("(metadata->'gpt_live') IS NULL");
     // The stamp the WS upgrade later requires, carrying this call's reservation.
     const stamp = JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live;
     expect(stamp).toEqual({ cell: '71', voice: 'marin', started_at: expect.any(String), reserved_usd: PER_CALL_RESERVE_USD });
@@ -542,18 +544,18 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
 
   test('VOICE_GPT_LIVE_TEST_MAX_USD moves the cap; the whole reservation must fit', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    process.env.VOICE_GPT_LIVE_TEST_MAX_USD = '1';
-    primeLive({ usd: 0.2 });
+    process.env.VOICE_GPT_LIVE_TEST_MAX_USD = '2';
+    primeLive({ usd: 0.9 }); // 0.9 + 1.005 fits under 2
     let res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toContain('<Stream');
-    primeLive({ usd: 0.3 });
+    primeLive({ usd: 1.0 }); // 1.0 + 1.005 does not
     res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toContain('budget is used up');
   });
 
-  test('a database error on the budget read or the stamp, or no row to stamp, refuses the call (fail closed)', async () => {
+  test('a database error on the budget read or the stamp, or a call that already claimed a reservation (a repeated cell request), refuses the call (fail closed)', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
     for (const opts of [{ budgetFails: true }, { stampFails: true }, { stampRows: 0 }]) {
       primeLive(opts);

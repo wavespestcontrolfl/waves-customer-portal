@@ -31,32 +31,49 @@ const TOOL_REFUSAL = 'That is not available on this test line.';
 const WS_OPEN = 1;
 const TOOL_TIMEOUT_MS = 8000;
 const SESSION_CAP_MS = 10 * 60 * 1000;
-const CLOSE_WAIT_MS = 3000;
+const CLOSE_WAIT_MS = 5000;
+const START_DEADLINE_MS = 10000; // session.started must arrive within this, or the call ends
 const BARGE_IN_MARGIN_MS = 200;
 const NEW_REPLY_GAP_MS = 250; // model silence before a delta that marks the start of a new reply
 const MULAW_BYTES_PER_MS = 8; // 8000 samples a second, one byte each
 const TRANSCRIPT_MAX_CHARS = 20000;
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
 
-// ── Spend accounting for the owner's $5 cap (OpenAI pricing page, read 2026-11-19) ──
-// GPT-Live-1.1 bills $0.05 an active minute, counted per second. The delegated
-// backend model (gpt-5.6-luna: $0.20 per 1M input tokens, $1.20 per 1M output)
-// bills on top. One backend unit = one delegation OpenAI starts, one
-// response.create this bridge sends, or one tool run (find_slots can call a
-// model to read the caller's date words). $0.01 a unit is about three times an
-// 8k-token-in, 1k-token-out Luna reply.
+// ── Spend accounting for the owner's $5 cap (OpenAI pricing page and GPT-Live
+// reference, read 2026-11-19/20) ──
+// GPT-Live-1.1 bills $0.05 an active minute, counted per second; the final
+// seconds are confirmed only by session.closed. The delegated backend bills on
+// top. Its model is the CODE default of OPENAI_FAST_INTERACTIVE (gpt-5.6-luna
+// on that date: $0.20 per 1M input tokens, $1.20 per 1M output); the env
+// override is ignored here because these prices are for that model. The docs
+// give no backend input cap and no documented token-usage event, so a backend
+// unit is charged at its worst case: a full 128,000-token GPT-Live context in
+// ($0.0256) plus max_output_tokens 1,024 out ($0.0012), rounded up to $0.03.
+// One unit = one delegation OpenAI starts, one response.create this bridge
+// sends, or one tool run (find_slots can call a model to read the date words).
 const LIVE_USD_PER_MINUTE = 0.05;
-const BACKEND_USD_PER_UNIT = 0.01;
-const MAX_BACKEND_UNITS = 20;
+const BACKEND_USD_PER_UNIT = 0.03;
+const BACKEND_USD_PER_INPUT_TOKEN = 0.20 / 1e6;
+const BACKEND_USD_PER_OUTPUT_TOKEN = 1.20 / 1e6;
+const BACKEND_MAX_OUTPUT_TOKENS = 1024;
+const MAX_BACKEND_UNITS = 15;
+// Past this much reported backend token cost the call ends too.
+const BACKEND_RESERVE_USD = (MAX_BACKEND_UNITS + 1) * BACKEND_USD_PER_UNIT;
+const round4 = (n) => Math.round(n * 10000) / 10000;
 // The most one call can cost: the session cap plus 30 s of close wait and
 // clock skew, and the backend cap plus the one unit that can cross it. The cell
-// route reserves this much of the cap before it issues a stream token.
-const PER_CALL_RESERVE_USD = Math.round(
-  (((SESSION_CAP_MS + 30000) / 60000) * LIVE_USD_PER_MINUTE + (MAX_BACKEND_UNITS + 1) * BACKEND_USD_PER_UNIT) * 10000,
-) / 10000;
+// route reserves this much of the cap before it issues a stream token, and a
+// call keeps it unless session.closed confirms the final usage.
+const PER_CALL_RESERVE_USD = round4(((SESSION_CAP_MS + 30000) / 60000) * LIVE_USD_PER_MINUTE + BACKEND_RESERVE_USD);
 
-function callCostUsd(usageSeconds, backendUnits) {
-  return Math.round(((usageSeconds / 60) * LIVE_USD_PER_MINUTE + backendUnits * BACKEND_USD_PER_UNIT) * 10000) / 10000;
+function backendTokenUsd(inputTokens, outputTokens) {
+  return inputTokens * BACKEND_USD_PER_INPUT_TOKEN + outputTokens * BACKEND_USD_PER_OUTPUT_TOKEN;
+}
+
+// Voice seconds, plus the larger of the worst-case unit charge and any token
+// usage OpenAI reported.
+function callCostUsd(usageSeconds, backendUnits, tokenUsd = 0) {
+  return round4((usageSeconds / 60) * LIVE_USD_PER_MINUTE + Math.max(backendUnits * BACKEND_USD_PER_UNIT, tokenUsd));
 }
 
 const TRIAL_LIMITS = [
@@ -101,7 +118,7 @@ function buildBackendTools() {
 }
 
 function buildSessionStart({ instructions, tools, voice }) {
-  const { OPENAI_VOICE_LIVE, OPENAI_FAST_INTERACTIVE } = require('../../config/models');
+  const { OPENAI_VOICE_LIVE, DEFAULTS } = require('../../config/models');
   return {
     type: 'session.start',
     session: {
@@ -114,12 +131,13 @@ function buildSessionStart({ instructions, tools, voice }) {
       delegation: {
         type: 'responses',
         responses: {
-          model: OPENAI_FAST_INTERACTIVE,
+          // The priced code default, never the env override (see the spend notes).
+          model: DEFAULTS.OPENAI_FAST_INTERACTIVE,
           instructions: BACKEND_INSTRUCTIONS,
           tools,
           tool_choice: 'auto',
           parallel_tool_calls: false,
-          max_output_tokens: 1024,
+          max_output_tokens: BACKEND_MAX_OUTPUT_TOKENS,
         },
       },
       store: false,
@@ -178,6 +196,7 @@ function defaultDeps() {
     toolTimeoutMs: TOOL_TIMEOUT_MS,
     sessionCapMs: SESSION_CAP_MS,
     closeWaitMs: CLOSE_WAIT_MS,
+    startDeadlineMs: START_DEADLINE_MS,
   };
 }
 
@@ -191,6 +210,7 @@ class LiveBridge {
     this.openai = null;
     this.streamSid = null;
     this.ready = false; // session.started seen: caller audio may flow
+    this.startSeen = false; // the Twilio start frame is handled once, whatever it holds
 
     this.startedAt = this.deps.now();
     this.inputStartWall = null;
@@ -208,6 +228,9 @@ class LiveBridge {
     this.handledCalls = new Set();
     this.delegations = new Set();
     this.backendUnits = 0;
+    this.backendInputTokens = 0;
+    this.backendOutputTokens = 0;
+    this.usageConfirmed = false; // session.closed carried the final usage
 
     this.usageSeconds = null;
     this.closeReason = null;
@@ -215,6 +238,7 @@ class LiveBridge {
     this.wakeClose = null;
     this._finalizing = null;
     this.capTimer = null;
+    this.startTimer = null;
   }
 
   // ── plumbing ─────────────────────────────────────────────────────────────
@@ -255,15 +279,20 @@ class LiveBridge {
     else if (msg.event === 'stop') void this.finalize('twilio_stop');
   }
 
+  // Startup runs once: a later start frame never opens a second paid session.
+  // The paid socket opens only for this call's CallSid with a stream to answer on.
   onTwilioStart(start) {
-    if (this.streamSid || this._finalizing) return; // a duplicate start changes nothing
-    if (start.callSid !== this.callSid) {
-      logger.warn(`[voice-live] start frame names another call — closing callSid=${this.callSid}`);
-      this.noteError('callsid_mismatch');
-      void this.finalize('callsid_mismatch');
+    if (this.startSeen || this._finalizing) return;
+    this.startSeen = true;
+    const streamSid = typeof start.streamSid === 'string' ? start.streamSid.trim() : '';
+    const bad = start.callSid !== this.callSid ? 'callsid_mismatch' : (!streamSid ? 'no_stream_sid' : null);
+    if (bad) {
+      logger.warn(`[voice-live] bad start frame (${bad}) — closing callSid=${this.callSid}`);
+      this.noteError(bad);
+      void this.finalize(bad);
       return;
     }
-    this.streamSid = start.streamSid || null;
+    this.streamSid = streamSid;
     this.openOpenAi();
   }
 
@@ -292,6 +321,14 @@ class LiveBridge {
       return;
     }
     this.openai = this.deps.openaiFactory({ url: OPENAI_LIVE_URL, headers: { Authorization: `Bearer ${apiKey}` } });
+    // No session.started in time = a refused or stuck start: end the call
+    // rather than leave the caller on a silent line.
+    this.startTimer = setTimeout(() => {
+      if (this.ready) return;
+      this.noteError('start_timeout');
+      void this.finalize('start_timeout');
+    }, this.deps.startDeadlineMs);
+    if (this.startTimer.unref) this.startTimer.unref();
     this.openai.on('open', () => this.toOpenAi(startMsg));
     this.openai.on('message', (raw) => this.onOpenAiMessage(raw));
     this.openai.on('close', () => this.onOpenAiGone());
@@ -317,6 +354,7 @@ class LiveBridge {
       'session.input_transcript.delta': () => this.onInputTranscript(msg),
       'session.output_transcript.delta': () => this.addTranscript('sandy', msg.delta),
       'response.event': () => this.onResponseEvent(msg),
+      'session.delegation.created': () => this.countDelegation(msg.delegation && msg.delegation.id),
       'session.usage.updated': () => this.noteUsage(msg.usage),
       'session.closed': () => this.onSessionClosed(msg),
       error: () => this.onOpenAiError(msg),
@@ -327,6 +365,7 @@ class LiveBridge {
 
   onSessionStarted() {
     this.ready = true;
+    clearTimeout(this.startTimer);
     this.toOpenAi({ type: 'session.commentary.append', delegation_id: null, content: this.deps.greeting() });
   }
 
@@ -388,6 +427,7 @@ class LiveBridge {
 
   onSessionClosed(msg) {
     this.noteUsage(msg.usage);
+    if (msg.usage && Number.isFinite(msg.usage.seconds)) this.usageConfirmed = true;
     this.closeReason = typeof msg.reason === 'string' ? msg.reason : this.closeReason;
     this.openaiGone = true;
     if (this.wakeClose) this.wakeClose();
@@ -398,17 +438,16 @@ class LiveBridge {
     // Code and type only: the message can echo input.
     this.noteError(`${e.code || 'error'}${e.type ? `:${e.type}` : ''}`);
     logger.warn(`[voice-live] openai error code=${String(e.code || '')} type=${String(e.type || '')} callSid=${this.callSid}`);
+    // Before session.started, an error is a refused start: end the call. After
+    // it, errors such as responses_validation_failed are nonfatal (OpenAI docs).
+    if (!this.ready) void this.finalize('setup_rejected');
   }
 
   // ── tools ────────────────────────────────────────────────────────────────
   onResponseEvent(msg) {
-    // Each delegation OpenAI starts is a paid backend call: count it once.
-    const delegationId = typeof msg.delegation_id === 'string' ? msg.delegation_id : null;
-    if (delegationId && !this.delegations.has(delegationId)) {
-      this.delegations.add(delegationId);
-      this.addBackendUnit();
-    }
+    this.countDelegation(msg.delegation_id);
     const ev = msg.event;
+    if (ev && ev.type === 'response.completed') this.noteBackendTokens(ev.response && ev.response.usage);
     if (!ev || ev.type !== 'response.output_item.done') return;
     const item = ev.item;
     if (!item || item.type !== 'function_call' || item.status !== 'completed') return;
@@ -455,6 +494,29 @@ class LiveBridge {
     }
   }
 
+  // Each delegation OpenAI starts is a paid backend call: count it once, from
+  // session.delegation.created or the first response.event that names it.
+  countDelegation(id) {
+    if (typeof id !== 'string' || !id || this.delegations.has(id)) return;
+    this.delegations.add(id);
+    this.addBackendUnit();
+  }
+
+  // Token usage, if a forwarded response.completed carries it (the reference
+  // does not document the shape). It can only raise the settled cost, and past
+  // the backend reserve it ends the call.
+  noteBackendTokens(usage) {
+    if (!usage || typeof usage !== 'object') return;
+    const inTok = Number(usage.input_tokens);
+    const outTok = Number(usage.output_tokens);
+    if (Number.isFinite(inTok) && inTok > 0) this.backendInputTokens += inTok;
+    if (Number.isFinite(outTok) && outTok > 0) this.backendOutputTokens += outTok;
+    if (backendTokenUsd(this.backendInputTokens, this.backendOutputTokens) > BACKEND_RESERVE_USD) {
+      this.noteError('backend_cap');
+      void this.finalize('backend_cap');
+    }
+  }
+
   // One more paid backend unit. Past MAX_BACKEND_UNITS the call ends: GPT-Live
   // starts delegations on its own, so ending the session is the only stop.
   // Returns false when the unit would cross the cap (the caller then skips it).
@@ -477,6 +539,7 @@ class LiveBridge {
 
   async runFinalize(reason) {
     clearTimeout(this.capTimer);
+    clearTimeout(this.startTimer);
     await this.closeOpenAi();
     try { this.twilio.close(); } catch { /* already closed */ }
     try {
@@ -517,10 +580,14 @@ class LiveBridge {
     const errors = [...this.errors];
     let usage = this.usageSeconds;
     if (usage === null) {
-      // OpenAI never reported usage: bill the wall clock so the 30-day budget still counts the call.
       usage = Math.max(0, Math.round((this.deps.now() - this.startedAt) / 1000));
       errors.push('usage_missing');
     }
+    // Without session.closed the final usage is unconfirmed (OpenAI: a close
+    // without it "does not confirm successful finalization"), so no cost is
+    // settled and the call keeps its full reservation.
+    if (!this.usageConfirmed) errors.push('usage_unconfirmed');
+    const tokenUsd = backendTokenUsd(this.backendInputTokens, this.backendOutputTokens);
     // Card numbers and access codes are scrubbed before storage, across turns
     // (a number read in pieces), with the relay transcript's own scrubber.
     // It returns null when it cannot run: then no text is stored at all.
@@ -532,8 +599,11 @@ class LiveBridge {
     }
     return {
       usage_seconds: usage,
+      usage_confirmed: this.usageConfirmed,
       backend_units: this.backendUnits,
-      cost_usd: callCostUsd(usage, this.backendUnits),
+      backend_input_tokens: this.backendInputTokens,
+      backend_output_tokens: this.backendOutputTokens,
+      ...(this.usageConfirmed ? { cost_usd: callCostUsd(usage, this.backendUnits, tokenUsd) } : {}),
       close_reason: this.closeReason || reason,
       turns: this.latencies,
       latency_p50_ms: median(sorted),
@@ -577,5 +647,6 @@ module.exports = {
   INSTRUCTIONS_MAX_CHARS,
   PER_CALL_RESERVE_USD,
   MAX_BACKEND_UNITS,
+  BACKEND_USD_PER_UNIT,
   callCostUsd,
 };

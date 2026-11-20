@@ -2608,6 +2608,7 @@ const GPT_LIVE_BUDGET_LOCK = 'voice_gpt_live_budget';
 // never landed (a crash, a failed write) keeps its reservation for good.
 const GPT_LIVE_SPENT_SQL = "COALESCE(SUM(COALESCE((metadata->'gpt_live'->>'cost_usd')::numeric, "
   + "(metadata->'gpt_live'->>'reserved_usd')::numeric, 0)), 0) AS usd";
+const GPT_LIVE_UNCLAIMED_SQL = "(metadata->'gpt_live') IS NULL";
 
 function gptLiveCellFor(digits) {
   if (!GPT_LIVE_CELLS.has(digits)) return null;
@@ -2625,9 +2626,11 @@ function gptLiveMaxUsd() {
 // the 10 minute cap plus the backend cap) BEFORE a stream token exists, and
 // stamp the row the WS upgrade requires. One transaction-scoped lock makes the
 // read and the stamp one step, so two calls cannot both spend the same balance.
-// This call's own row is left out of the sum (a repeated cell request replaces
-// its stamp). Returns false when the reservation does not fit under the cap;
-// a database error throws, and the caller refuses the call (fail closed).
+// The stamp is single-use per CallSid: it lands only on a row with no gpt_live
+// yet, so a repeated cell request never mints a second token or overwrites a
+// settled cost. Returns false when the reservation does not fit under the cap;
+// a database error, or a call already claimed, throws and the caller refuses
+// the call (fail closed).
 async function reserveGptLiveCall(callSid, { cell, voice }) {
   const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
   const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
@@ -2635,14 +2638,14 @@ async function reserveGptLiveCall(callSid, { cell, voice }) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [GPT_LIVE_BUDGET_LOCK]);
     const row = await trx('call_log')
       .where({ source: VOICE_RELAY_SANDBOX_SOURCE })
-      .whereNot({ twilio_call_sid: callSid })
       .first(trx.raw(GPT_LIVE_SPENT_SQL));
     if (Number(row && row.usd) + PER_CALL_RESERVE_USD > gptLiveMaxUsd()) return false;
     const stamp = { gpt_live: { cell, voice, started_at: new Date().toISOString(), reserved_usd: PER_CALL_RESERVE_USD } };
-    const updated = await trx('call_log').where({ twilio_call_sid: callSid }).update({
-      metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stamp)]),
-    });
-    if (!updated) throw new Error('no call_log row to stamp');
+    const updated = await trx('call_log')
+      .where({ twilio_call_sid: callSid })
+      .whereRaw(GPT_LIVE_UNCLAIMED_SQL)
+      .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stamp)]) });
+    if (!updated) throw new Error('call already claimed a GPT-Live reservation, or no row');
     return true;
   });
 }
