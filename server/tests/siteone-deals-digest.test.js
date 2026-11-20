@@ -374,9 +374,14 @@ describe('runSiteOneDealsDigest', () => {
       expect(mockReadEndDates).not.toHaveBeenCalled();
       expect(calls.claims).toEqual([]);
       expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual(PATTERN_NOTES);
+      // As today: a rerun rewrites the week's bell.
+      expect(notify.mock.calls[0][2].refreshOnDedupe).toBe(true);
     });
 
-    test('gate on, but not the Monday run (no aiEndDates): no AI read, the date patterns decide', async () => {
+    // Pre-push audit on 69adaa08d8 (P1): a catch-up after a Monday run that saved its bell but not
+    // its job_health stamp rewrote the AI dates with pattern-only lines. It now adds a bell only
+    // when none was saved this week.
+    test('gate on, but not the Monday run (no aiEndDates): no AI read, the date patterns decide, a saved bell stays', async () => {
       process.env[GATE] = 'true';
       const { db, calls } = fakeDb({ emails: gateEmails() });
       const notify = jest.fn().mockResolvedValue({ id: 1 });
@@ -384,6 +389,7 @@ describe('runSiteOneDealsDigest', () => {
       expect(mockReadEndDates).not.toHaveBeenCalled();
       expect(calls.claims).toEqual([]);
       expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual(PATTERN_NOTES);
+      expect(notify.mock.calls[0][2]).toMatchObject({ dedupeKey: 'siteone-deals:2026-11-02', refreshOnDedupe: false });
     });
 
     test('gate on: an AI date shows with its words, an AI "no end" wins over a pattern date, a failed read keeps the pattern', async () => {

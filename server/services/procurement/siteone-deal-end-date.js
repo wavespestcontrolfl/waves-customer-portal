@@ -135,15 +135,16 @@ const comparable = (s) => String(s || '')
 // A quote's own edges may gain or lose a period, an asterisk or quote marks.
 const EDGE_MARKS = /^[\s"'.,;:!?*()-]+|[\s"'.,;:!?*()-]+$/g;
 
-/** The first JSON object in the reply, or null. */
+/**
+ * The reply as one JSON object, or null. A Markdown code fence may wrap it; any other text, an
+ * array or a second object is not the JSON asked for.
+ */
 function parseAnswer(reply) {
-  const body = String(reply || '');
-  const start = body.indexOf('{');
-  const end = body.lastIndexOf('}');
-  if (start === -1 || end <= start) return null;
+  let body = String(reply || '').trim();
+  if (body.length > 6 && body.startsWith('```') && body.endsWith('```')) body = body.slice(0, -3).replace(/^```(?:json)?/i, '').trim();
+  if (!body.startsWith('{')) return null;
   try {
-    const answer = JSON.parse(body.slice(start, end + 1));
-    return answer && typeof answer === 'object' && !Array.isArray(answer) ? answer : null;
+    return JSON.parse(body);
   } catch {
     return null;
   }
@@ -166,9 +167,17 @@ const NUMERIC_DATE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?\b/g;
 const ISO_DATE = /\b(20\d{2})-(\d{2})-(\d{2})\b/g;
 const MONTH_KEYS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-// The first day of "March 1 - April 30", "11/1-11/30", "Monday through Friday" or "today through
-// Sunday" opens a range: not an end.
-const RANGE_JOIN = /^ ?(?:-|to|through|thru|until|till) ?$/;
+// The first day of a range is not an end. A date or day word opens one when a dash or a range
+// word comes right before the next date or day word, in the same sentence and at most RANGE_GAP
+// characters on: "March 1 - April 30", "11/1-11/30", "Monday through Friday", "today through
+// Sunday". Anything may sit before the join ("March 1 (Sunday) at 12:01 a.m. ET – April 30"),
+// and a weekday after it ("3/2 through Thu., 4/30"). It leans to "range": a refused answer
+// keeps the date-pattern line.
+const RANGE_GAP = 48;
+const RANGE_JOIN = /(?:-|\b(?:to|through|thru|until|till)\b)[ ,.]*(?:\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?)(?:day)?\b[ ,.]*)?$/;
+const SENTENCE_END = /[.!?;] [a-z]/;
+// A day word right after a date labels it: "March 1 (Sunday)", "March 1, Sunday".
+const LABEL_GAP = /^ ?[(,]? ?$/;
 // Words that name a day without a date.
 const DAY_WORD = /\b(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|today|tonight|tomorrow)\b/g;
 
@@ -190,10 +199,15 @@ function dayMarks(text) {
   return [...quoteDates(text), ...words].sort((a, b) => a.at - b.at);
 }
 
-/** True when a range join and another date or day word follow mark d in the text. */
+/** True when mark d opens a range (see RANGE_JOIN). A day word that labels d is stepped over. */
 const opensRange = (text, d, marks) => {
-  const next = marks.find((n) => n.at >= d.end);
-  return Boolean(next) && RANGE_JOIN.test(text.slice(d.end, next.at));
+  const i = marks.findIndex((n) => n.at >= d.end);
+  const labelled = i !== -1 && Boolean(marks[i].word) && LABEL_GAP.test(text.slice(d.end, marks[i].at));
+  const next = marks[labelled ? i + 1 : i];
+  if (!next || next.at - d.end > RANGE_GAP) return false;
+  // "a.m." and "p.m." do not end a sentence.
+  const gap = text.slice(d.end, next.at).replace(/\b([ap])\.m\./g, '$1m');
+  return !SENTENCE_END.test(gap) && RANGE_JOIN.test(gap);
 };
 
 /**
@@ -219,8 +233,8 @@ function quoteNamesDay({ text, wordsEnd }, endDate, away) {
 const WORD_CHAR = /[a-z0-9]/;
 // A year the email writes right after a quoted day: "April 30" + ", 2027", "5/15" + "/27".
 const YEAR_AFTER = /^(?:,? ?20\d{2}\b|\/(?:\d{4}|\d{2})\b)/;
-// Room after the words for a range join and the date it runs to (" through September 30th, 2026").
-const AFTER_CHARS = 40;
+// Room after the words for a range's join, what may sit before it, and the date it runs to.
+const AFTER_CHARS = RANGE_GAP + 24;
 
 /**
  * Where the quoted words sit in the email, or null: { text, wordsEnd }, the words as the

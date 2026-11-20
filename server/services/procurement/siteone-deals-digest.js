@@ -17,14 +17,16 @@
  * run takes each deal's end date from one Claude Haiku read of the whole email, shown with
  * the email's own words (siteone-deal-end-date.js; at most 20 reads, about $0.04 a week);
  * a read that fails keeps the date-pattern deadline, and the catch-up reruns use the date
- * patterns only. It writes nothing but the bell and, with the gate on, the week's AI-pass
- * claim (one ops_email_send_state row; see claimAiPass).
+ * patterns only (and, with the gate on, leave a bell saved that week as it is). It writes
+ * nothing but the bell and, with the gate on, the week's AI-pass claim (one
+ * ops_email_send_state row; see claimAiPass).
  *
  * The bell follows docs/admin-notifications.md: it is raised through
  * raiseAdminAlert (headline and why inside the copy rules), and the one-line-
  * per-deal list lives in `detail` ("Show full text" on the bell). One bell per
  * ET week (dedupeKey siteone-deals:<Monday>), rewritten in place when a rerun
- * finds a different list.
+ * finds a different list (with the gate on, only by the run that holds the week's
+ * AI pass).
  */
 const logger = require('../logger');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
@@ -382,14 +384,16 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify, aiEndDates 
     logger.warn(`[siteone-deals] product names not read: ${err.message}`);
   }
 
-  // Gate off, or not the Monday run: no model call, and every line keeps its date-pattern deadline.
-  // Gate on, Monday run, but this week's AI pass is not this run's (another run claimed it, or
-  // the claim failed): no model call, and the bell that pass saved keeps its AI dates. The run
-  // only adds a bell when none was saved this week, so a duplicate run never rewrites them.
+  // Gate off: no model call, every line keeps its date-pattern deadline, and a rerun rewrites
+  // the week's bell as it does today. Gate on: only the scheduled Monday run that holds this ET
+  // week's AI pass reads, and only it may rewrite a bell saved this week. Any other run (a
+  // catch-up after a run that saved its bell but not its job_health stamp, a duplicate Monday
+  // run, a claim that failed) makes no model call and adds a bell only when none was saved, so
+  // the AI dates a paid pass saved stay.
   let endDates = new Map();
   let keepSavedBell = false;
-  if (aiEndDates === true && require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true) {
-    if (await claimAiPass(conn, now)) endDates = await require('./siteone-deal-end-date').readDealEndDates(conn, deals);
+  if (require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true) {
+    if (aiEndDates === true && await claimAiPass(conn, now)) endDates = await require('./siteone-deal-end-date').readDealEndDates(conn, deals);
     else keepSavedBell = true;
   }
 
@@ -466,7 +470,9 @@ async function weekIsMissing(opts = {}) {
  * a tick that finished while this one waited for the lock is not run twice. That
  * second read throws on failure (see readWeekMissing), so the run is recorded as failed.
  * It never asks for AI end dates (no aiEndDates): the Monday run may already have paid
- * for them, so this bell keeps the date-pattern deadlines.
+ * for them, so this bell keeps the date-pattern deadlines. With the gate on it adds a bell
+ * only when none was saved this week: a Monday run that saved its bell but stopped before
+ * job_health recorded the run keeps its AI dates.
  */
 async function runSiteOneDealsCatchUp({ now = new Date(), db, notify } = {}) {
   if (!(await readWeekMissing({ now, db }))) return { skipped: 'already_ran' };

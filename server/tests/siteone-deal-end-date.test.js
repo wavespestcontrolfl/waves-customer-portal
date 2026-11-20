@@ -177,6 +177,23 @@ describe('checkAnswer', () => {
     expect(read('2026-04-24', 'Hat sale ends Friday').ok).toBe(true);
   });
 
+  // Pre-push audit on 69adaa08d8 (P1): a weekday beside the first day hid the range join.
+  test('a range ends on its last day when a weekday or a time sits between its first day and the join', () => {
+    const february = new Date('2026-02-16T15:00:00Z');
+    const promo = 'Subject\nOffers valid March 1 (Sunday) – April 30, 2026. Rebates run 3/2/2026 12:00 a.m. ET through Thu., 4/30/2026. '
+      + 'Order ends March 31 - pick up by April 5. Spring sale ends March 20. Monday through Friday only.';
+    const read = (endDate, quote) => checkAnswer({ end_date: endDate, quote }, promo, february);
+    const refused = { ok: false, reason: 'quote_date_mismatch' };
+    expect(read('2026-03-01', 'Offers valid March 1 (Sunday) – April 30, 2026')).toEqual(refused);
+    expect(read('2026-03-01', 'Offers valid March 1')).toEqual(refused);
+    expect(read('2026-04-30', 'Offers valid March 1 (Sunday) – April 30, 2026').ok).toBe(true);
+    expect(read('2026-03-02', 'Rebates run 3/2/2026 12:00 a.m. ET')).toEqual(refused);
+    expect(read('2026-04-30', 'Rebates run 3/2/2026 12:00 a.m. ET through Thu., 4/30/2026').ok).toBe(true);
+    // A dash before other words, or a range in the next sentence, is not a range from this day.
+    expect(read('2026-03-31', 'Order ends March 31').ok).toBe(true);
+    expect(read('2026-03-20', 'Spring sale ends March 20').ok).toBe(true);
+  });
+
   test('a long run of marks in the quote is refused fast', () => {
     const started = Date.now();
     expect(checkAnswer({ end_date: '2026-04-30', quote: `a${'.'.repeat(8000)}a` }, email, received)).toEqual({ ok: false, reason: 'no_quote' });
@@ -185,12 +202,21 @@ describe('checkAnswer', () => {
 });
 
 describe('parseAnswer', () => {
-  test('reads the JSON object in a reply, with or without a code fence', () => {
+  test('reads a reply that is one JSON object, with or without a code fence', () => {
     expect(parseAnswer('```json\n{"end_date": null, "quote": null}\n```')).toEqual({ end_date: null, quote: null });
-    expect(parseAnswer('Here: {"end_date": "2026-04-30", "quote": "x"}')).toEqual({ end_date: '2026-04-30', quote: 'x' });
+    expect(parseAnswer('```\n{"end_date": "2026-04-30", "quote": "x"}\n```')).toEqual({ end_date: '2026-04-30', quote: 'x' });
+    expect(parseAnswer(' {"end_date": "2026-04-30", "quote": "x"}\n')).toEqual({ end_date: '2026-04-30', quote: 'x' });
     expect(parseAnswer('no json')).toBeNull();
     expect(parseAnswer('{not json}')).toBeNull();
     expect(parseAnswer('[1, 2]')).toBeNull();
+    expect(parseAnswer('```')).toBeNull();
+  });
+
+  // Pre-push audit on 69adaa08d8 (P1): a slice from the first "{" to the last "}" made an object of other replies.
+  test('text around the object, an array or two objects is not the JSON asked for', () => {
+    expect(parseAnswer('Here: {"end_date": "2026-04-30", "quote": "x"}')).toBeNull();
+    expect(parseAnswer('[{"end_date": null, "quote": null}]')).toBeNull();
+    expect(parseAnswer('{"end_date": null, "quote": null} {"end_date": "2026-04-30", "quote": "x"}')).toBeNull();
   });
 });
 

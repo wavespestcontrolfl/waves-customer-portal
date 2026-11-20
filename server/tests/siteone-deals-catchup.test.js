@@ -3,7 +3,8 @@
  * Monday/Tuesday catch-up reads job_health.last_success_at to learn whether this ET week's
  * run finished, and when it did not it reads the SAME 7-day window the Monday tick would
  * have read. With GATE_SITEONE_DEAL_AI_END_DATE on it still asks for no AI end dates: the
- * Monday run may already have paid for them, so a week's reads stay at one run's cap.
+ * Monday run may already have paid for them, so a week's reads stay at one run's cap. And it
+ * adds a bell only when none was saved this week, so a saved bell keeps its AI dates.
  * Fakes only: no network, no database. All names and addresses are synthetic.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -118,6 +119,8 @@ describe('runSiteOneDealsCatchUp', () => {
     const [, , opts] = notify.mock.calls[0];
     expect(opts.dedupeKey).toBe('siteone-deals:2026-11-02');
     expect(opts.metadata.emailIds).toEqual([10]);
+    // Gate off, as today: the catch-up rewrites a bell saved this week.
+    expect(opts.refreshOnDedupe).toBe(true);
   });
 
   test('a Monday catch-up and a Tuesday catch-up read the identical window', async () => {
@@ -130,7 +133,9 @@ describe('runSiteOneDealsCatchUp', () => {
     expect(reads[0]).toEqual(reads[1]);
   });
 
-  test('gate on: the catch-up rings with the date patterns and asks for no AI end dates', async () => {
+  // Pre-push audit on 69adaa08d8 (P1): a Monday run can save its bell and stop before job_health
+  // records it; the catch-up then rewrote the AI dates with pattern-only lines.
+  test('gate on: the catch-up rings with the date patterns, asks for no AI end dates and leaves a saved bell as it is', async () => {
     process.env.GATE_SITEONE_DEAL_AI_END_DATE = 'true';
     try {
       const { db } = fakeDb({ emails: emails() });
@@ -138,6 +143,7 @@ describe('runSiteOneDealsCatchUp', () => {
       expect(await runSiteOneDealsCatchUp({ now: TUESDAY_CATCH_UP, db, notify })).toEqual({ scanned: 1, deals: 1, notified: true });
       expect(mockReadEndDates).not.toHaveBeenCalled();
       expect(notify.mock.calls[0][2].detail).toContain('deadline not stated');
+      expect(notify.mock.calls[0][2].refreshOnDedupe).toBe(false);
     } finally {
       delete process.env.GATE_SITEONE_DEAL_AI_END_DATE;
     }
