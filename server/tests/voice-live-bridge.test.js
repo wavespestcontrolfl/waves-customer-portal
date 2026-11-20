@@ -57,18 +57,20 @@ function setup({ executeTool, closeReply = true, deps = {} } = {}) {
       }
     },
   });
-  const update = jest.fn().mockResolvedValue(1);
+  const update = jest.fn().mockResolvedValue(1); // call_log
   const where = jest.fn(() => ({ update }));
-  const db = jest.fn(() => ({ where }));
+  const ledgerUpdate = jest.fn().mockResolvedValue(1); // voice_gpt_live_spend
+  const ledgerWhere = jest.fn(() => ({ update: ledgerUpdate }));
+  const db = jest.fn((table) => (table === 'voice_gpt_live_spend' ? { where: ledgerWhere } : { where }));
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   const openaiFactory = jest.fn(() => openai);
-  const exec = executeTool || jest.fn(async () => 'Open times: Tuesday at 9 AM.');
+  const exec = executeTool || jest.fn(async () => 'Waves offers: Pest Control, Lawn Care.');
   const bridge = runLiveBridge(twilio, { callSid: CALL_SID, voice: 'marin', cell: '71' }, {
     openaiFactory,
     now: () => clock,
     executeTool: exec,
     buildInstructions: () => 'INSTRUCTIONS',
-    buildTools: () => [{ type: 'function', name: 'get_availability', description: 'd', parameters: { type: 'object' } }],
+    buildTools: () => [{ type: 'function', name: 'get_services_catalog', description: 'd', parameters: { type: 'object' } }],
     greeting: () => 'Waves, this is Sandy.',
     scrubTurns: (turns) => turns.map((turn) => ({ ...turn })), // the real scrubber has its own test
     db: () => db,
@@ -76,7 +78,7 @@ function setup({ executeTool, closeReply = true, deps = {} } = {}) {
     ...deps,
   });
   return {
-    twilio, openai, bridge, update, where, db, openaiFactory, exec,
+    twilio, openai, bridge, update, where, ledgerUpdate, ledgerWhere, db, openaiFactory, exec,
     advance: (ms) => { clock += ms; },
     tick: () => clock,
     twilioStart: (callSid = CALL_SID) => twilio.emit('message', JSON.stringify({ event: 'start', start: { callSid, streamSid: STREAM_SID } })),
@@ -208,6 +210,7 @@ describe('session setup and caller audio', () => {
     const s = summaryOf(t);
     expect(s).toMatchObject({ openai_contacted: false, usage_seconds: 0, cost_usd: 0 });
     expect(s.errors).not.toContain('usage_unconfirmed');
+    expect(t.ledgerUpdate).toHaveBeenCalledWith({ cost_usd: 0, settled_at: expect.any(Date) }); // frees the reservation
   });
 
   test('a socket that throws at construction ends the call, settled at zero, without an uncaught error', async () => {
@@ -311,6 +314,22 @@ describe('model audio, barge-in and latency', () => {
     expect(s.latency_max_ms).toBe(1200);
   });
 
+  test('a late transcript of words the last reply already answered does not time the next reply', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    t.advance(2000);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // a short reply starts at t0 + 2000
+    t.advance(500);
+    // the transcript of speech that ended at t0 + 1900 arrives after the reply's last chunk
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'thanks', start_ms: 1500, end_ms: 1900 });
+    t.advance(3000);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // the model speaks again, unprompted
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([]);
+  });
+
   test('a late first caller packet does not shift speech timing: it counts from session.started', async () => {
     const t = setup();
     await t.ready(); // session time 0 = t0
@@ -352,19 +371,18 @@ describe('tools', () => {
   test('an allowlisted call runs executeTool with a sandbox ctx, then answers with the output and one response.create', async () => {
     const t = setup();
     await t.ready();
-    t.openai.receive(call('c1', 'get_availability', JSON.stringify({ city: ' Bradenton ', zip: '34202', address_line1: '1 Main St' })));
+    t.openai.receive(call('c1', 'get_services_catalog', JSON.stringify({ anything: 'the model sent' })));
     await flush();
     expect(t.exec).toHaveBeenCalledTimes(1);
     const [name, input, ctx] = t.exec.mock.calls[0];
-    expect(name).toBe('get_availability');
-    // the city alone: a street or ZIP would reach Google's paid geocoder
-    expect(input).toEqual({ city: 'Bradenton' });
+    expect(name).toBe('get_services_catalog');
+    expect(input).toEqual({}); // nothing the model sent is passed on
     expect(ctx).toMatchObject({ sandbox: true, callSid: CALL_SID, customerId: null, callerVerified: false });
     const tail = t.openai.sent.slice(-2);
-    expect(tail[0]).toEqual({ type: 'response.item.create', item: { type: 'function_call_output', call_id: 'c1', output: 'Open times: Tuesday at 9 AM.' } });
+    expect(tail[0]).toEqual({ type: 'response.item.create', item: { type: 'function_call_output', call_id: 'c1', output: 'Waves offers: Pest Control, Lawn Care.' } });
     expect(tail[1]).toEqual({ type: 'response.create' });
     // a replayed done event for the same call_id answers nothing twice
-    t.openai.receive(call('c1', 'get_availability', '{"city":"Bradenton"}'));
+    t.openai.receive(call('c1', 'get_services_catalog', '{}'));
     await flush();
     expect(t.exec).toHaveBeenCalledTimes(1);
     expect(t.openai.sent.filter((m) => m.type === 'response.create')).toHaveLength(1);
@@ -373,9 +391,9 @@ describe('tools', () => {
   test('only a completed function_call item is acted on', async () => {
     const t = setup();
     await t.ready();
-    t.openai.receive(call('c2', 'get_availability', '{"city":"Venice"}', { status: 'in_progress' }));
+    t.openai.receive(call('c2', 'get_services_catalog', '{}', { status: 'in_progress' }));
     t.openai.receive({ type: 'response.event', event: { type: 'response.output_item.done', item: { type: 'message', call_id: 'c3', status: 'completed' } } });
-    t.openai.receive({ type: 'response.event', event: { type: 'response.output_item.added', item: { type: 'function_call', call_id: 'c4', name: 'get_availability', arguments: '{"city":"Venice"}', status: 'completed' } } });
+    t.openai.receive({ type: 'response.event', event: { type: 'response.output_item.added', item: { type: 'function_call', call_id: 'c4', name: 'get_services_catalog', arguments: '{}', status: 'completed' } } });
     await flush();
     expect(t.exec).not.toHaveBeenCalled();
     expect(t.openai.types()).not.toContain('response.create');
@@ -384,9 +402,10 @@ describe('tools', () => {
   test.each([
     ['a name outside the allowlist', 'capture_lead', '{"call_summary":"x"}'],
     ['a write tool', 'request_booking', '{}'],
-    ['find_slots (its date words go to a paid model)', 'find_slots', '{"when":"tomorrow"}'],
-    ['bad JSON arguments', 'get_availability', '{not json'],
-    ['arguments that are not an object', 'get_availability', '[1,2]'],
+    ['find_slots (booking engine + a paid date model)', 'find_slots', '{"when":"tomorrow"}'],
+    ['get_availability (the booking engine can buy Google lookups)', 'get_availability', '{"city":"Venice"}'],
+    ['bad JSON arguments', 'get_services_catalog', '{not json'],
+    ['arguments that are not an object', 'get_services_catalog', '[1,2]'],
   ])('%s gets the refusal text and executeTool is never called', async (_label, name, args) => {
     const t = setup();
     await t.ready();
@@ -410,7 +429,7 @@ describe('tools', () => {
   test('a tool that outlives its bound answers with the refusal', async () => {
     const t = setup({ executeTool: jest.fn(() => new Promise(() => {})), deps: { toolTimeoutMs: 20 } });
     await t.ready();
-    t.openai.receive(call('c6', 'get_availability', '{"city":"Venice"}'));
+    t.openai.receive(call('c6', 'get_services_catalog', '{}'));
     await waitFor(() => t.openai.sent.some((m) => m.type === 'response.item.create'));
     expect(t.openai.sent.slice(-2)[0].item.output).toBe(TOOL_REFUSAL);
     t.twilioStop();
@@ -418,36 +437,14 @@ describe('tools', () => {
     expect(summaryOf(t).errors).toContain('tool_timeout');
   });
 
-  test('the allowlist is two read-only tools in the OpenAI function shape; open times take a city only', () => {
-    expect(BACKEND_TOOL_NAMES).toEqual(['get_availability', 'get_services_catalog']);
+  test('the allowlist is the services list alone, in the OpenAI function shape', () => {
+    expect(BACKEND_TOOL_NAMES).toEqual(['get_services_catalog']);
     const tools = bridgeMod.buildBackendTools();
     expect(tools.map((x) => x.name)).toEqual(BACKEND_TOOL_NAMES);
     for (const tool of tools) {
       expect(tool).toEqual({ type: 'function', name: tool.name, description: expect.any(String), parameters: expect.objectContaining({ type: 'object' }) });
       expect(tool.input_schema).toBeUndefined();
     }
-    expect(Object.keys(tools[0].parameters.properties)).toEqual(['city']);
-    expect(tools[0].parameters.additionalProperties).toBe(false);
-  });
-
-  test('open times with no city ask for one and run nothing', async () => {
-    const t = setup();
-    await t.ready();
-    t.openai.receive(call('c7', 'get_availability', '{"zip":"34202"}'));
-    await flush();
-    expect(t.exec).not.toHaveBeenCalled();
-    expect(t.openai.sent.slice(-2)[0].item.output).toMatch(/which city/);
-  });
-
-  test('a city outside the service zones gets the trial\'s own text, never an ask for a street or ZIP', async () => {
-    const exec = jest.fn(async () => 'Could not determine the service location. Ask the caller for their street address or ZIP code, then call this tool again.');
-    const t = setup({ executeTool: exec });
-    await t.ready();
-    t.openai.receive(call('c8', 'get_availability', '{"city":"Atlanta"}'));
-    await flush();
-    const out = t.openai.sent.slice(-2)[0].item.output;
-    expect(out).toMatch(/not one this test line can check/);
-    expect(out).not.toMatch(/ZIP/);
   });
 });
 
@@ -491,6 +488,27 @@ describe('finish', () => {
     expect(t.twilio.close).toHaveBeenCalled();
   });
 
+  test('a confirmed close settles the cost in the spend ledger, apart from call_log', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioStop();
+    await waitFor(() => t.update.mock.calls.length > 0);
+    expect(t.ledgerWhere).toHaveBeenCalledWith({ call_sid: CALL_SID });
+    expect(t.ledgerUpdate).toHaveBeenCalledTimes(1);
+    expect(t.ledgerUpdate).toHaveBeenCalledWith({ cost_usd: 0.0375, settled_at: expect.any(Date) });
+  });
+
+  test('a failed ledger write logs a code only, keeps the reservation, and the call record is still written', async () => {
+    const t = setup();
+    t.ledgerUpdate.mockRejectedValue(Object.assign(new Error('caller words 4111'), { code: '40001' }));
+    await t.ready();
+    t.twilioStop();
+    await waitFor(() => t.update.mock.calls.length > 0);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/ledger settle failed callSid=CA-live-1 code=40001$/));
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('4111');
+    expect(t.update).toHaveBeenCalledTimes(1);
+  });
+
   test('when session.closed never comes, finalize waits the bound and then writes with the running usage', async () => {
     const t = setup({ closeReply: false, deps: { closeWaitMs: 30 } });
     await t.ready();
@@ -505,6 +523,7 @@ describe('finish', () => {
     expect(s.usage_confirmed).toBe(false);
     expect(s).not.toHaveProperty('cost_usd');
     expect(s.errors).toContain('usage_unconfirmed');
+    expect(t.ledgerUpdate).not.toHaveBeenCalled(); // the reservation stands
   });
 
   test('a session OpenAI ends itself (expired) ends the call even while its socket stays open', async () => {
@@ -645,6 +664,20 @@ describe('spend cap', () => {
     expect(s.cost_usd).toBe(bridgeMod.callCostUsd(45, bridgeMod.MAX_BACKEND_UNITS + 1));
   });
 
+  test('a delegation OpenAI starts while the call is closing is still counted in the settled cost', async () => {
+    const t = setup({ closeReply: false, deps: { closeWaitMs: 5000 } });
+    await t.ready();
+    t.twilioStop();
+    await waitFor(() => t.openai.sent.some((m) => m.type === 'session.close'));
+    t.openai.receive(delegation('d-late')); // already under way at OpenAI
+    t.openai.receive({ type: 'session.closed', reason: 'close_requested', session: {}, usage: { seconds: 45 } });
+    await waitFor(() => t.update.mock.calls.length > 0);
+    const s = summaryOf(t);
+    expect(s.backend_units).toBe(1);
+    expect(s.cost_usd).toBe(bridgeMod.callCostUsd(45, 1));
+    expect(t.openai.sent.some((m) => m.type === 'response.create')).toBe(false);
+  });
+
   test('session.delegation.created and response.event for the same delegation count once', async () => {
     const t = setup();
     await t.ready();
@@ -686,7 +719,7 @@ describe('spend cap', () => {
     t.openai.receive({
       type: 'response.event',
       delegation_id: 'd-last',
-      event: { type: 'response.output_item.done', item: { type: 'function_call', call_id: 'c9', name: 'get_availability', arguments: '{"city":"Venice"}', status: 'completed' } },
+      event: { type: 'response.output_item.done', item: { type: 'function_call', call_id: 'c9', name: 'get_services_catalog', arguments: '{}', status: 'completed' } },
     });
     await waitFor(() => t.update.mock.calls.length > 0);
     expect(t.exec).toHaveBeenCalledTimes(1); // a local read, free
@@ -704,7 +737,7 @@ describe('instructions', () => {
     // Sandy's own prompt builder output is the unchanged prefix.
     expect(text.startsWith(buildBasePrompt(isContextEnabled(), null, { officeOpen: null }))).toBe(true);
     expect(text.endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
-    expect(bridgeMod.TRIAL_LIMITS.replace(/\s+/g, ' ')).toMatch(/You cannot search a specific day, book, take a lead, send a text, transfer the call/);
+    expect(bridgeMod.TRIAL_LIMITS.replace(/\s+/g, ' ')).toMatch(/You cannot look up open appointment times, book, take a lead, send a text, transfer the call/);
     expect(bridgeMod.TRIAL_LIMITS).toMatch(/call or text the Waves office/);
     expect(bridgeMod.TRIAL_LIMITS).not.toMatch(/will call (them|you) back/);
   });

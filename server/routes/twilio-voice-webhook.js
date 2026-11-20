@@ -2604,10 +2604,12 @@ const GPT_LIVE_CELLS = new Map([['71', 'marin'], ['72', 'delta']]);
 const GPT_LIVE_TIME_LIMIT_S = 600;
 const GPT_LIVE_DEFAULT_MAX_USD = 5; // the owner's spend yes, 2026-11-19: $5 of OpenAI charges in all
 const GPT_LIVE_BUDGET_LOCK = 'voice_gpt_live_budget';
-// A row counts its settled cost, else its reservation: a call whose summary
-// never landed (a crash, a failed write) keeps its reservation for good.
-const GPT_LIVE_SPENT_SQL = "COALESCE(SUM(COALESCE((metadata->'gpt_live'->>'cost_usd')::numeric, "
-  + "(metadata->'gpt_live'->>'reserved_usd')::numeric, 0)), 0) AS usd";
+// The spend ledger is its own table (migration 20261120010000), never call_log:
+// call_log rows can be deleted (spam disposition, orphan cleanup), and a
+// deleted row must not give back billed spend. A row counts its settled cost,
+// else its reservation: a call whose summary never landed keeps it for good.
+const GPT_LIVE_LEDGER = 'voice_gpt_live_spend';
+const GPT_LIVE_SPENT_SQL = 'COALESCE(SUM(COALESCE(cost_usd, reserved_usd)), 0) AS usd';
 const GPT_LIVE_UNCLAIMED_SQL = "(metadata->'gpt_live') IS NULL";
 
 function gptLiveCellFor(digits) {
@@ -2624,29 +2626,32 @@ function gptLiveMaxUsd() {
 
 // Reserve one call's worst-case OpenAI cost (live-bridge PER_CALL_RESERVE_USD:
 // the 10 minute cap plus the backend cap) BEFORE a stream token exists, and
-// stamp the row the WS upgrade requires. One transaction-scoped lock makes the
-// read and the stamp one step, so two calls cannot both spend the same balance.
-// The stamp is single-use per CallSid: it lands only on a row with no gpt_live
-// yet, so a repeated cell request never mints a second token or overwrites a
-// settled cost. Returns false when the reservation does not fit under the cap;
-// a database error, or a call already claimed, throws and the caller refuses
-// the call (fail closed).
+// stamp the call_log row the WS upgrade requires. One transaction-scoped lock
+// makes the ledger read, the ledger claim and the stamp one step, so two calls
+// cannot both spend the same balance. The claim is single-use per CallSid (the
+// ledger's primary key, and a stamp only on a row with no gpt_live yet), so a
+// repeated cell request never mints a second token. Returns false when the
+// reservation does not fit under the cap; a database error, or a call already
+// claimed, throws and the caller refuses the call (fail closed).
 async function reserveGptLiveCall(callSid, { cell, voice, token }) {
-  const { VOICE_RELAY_SANDBOX_SOURCE, callTokenDigest } = require('../services/voice-agent/relay-protocol');
+  const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
   const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [GPT_LIVE_BUDGET_LOCK]);
-    const row = await trx('call_log')
-      .where({ source: VOICE_RELAY_SANDBOX_SOURCE })
-      .first(trx.raw(GPT_LIVE_SPENT_SQL));
+    const row = await trx(GPT_LIVE_LEDGER).first(trx.raw(GPT_LIVE_SPENT_SQL));
     if (Number(row && row.usd) + PER_CALL_RESERVE_USD > gptLiveMaxUsd()) return false;
+    const claimed = await trx(GPT_LIVE_LEDGER)
+      .insert({ call_sid: callSid, reserved_usd: PER_CALL_RESERVE_USD })
+      .onConflict('call_sid').ignore()
+      .returning('call_sid');
+    if (!claimed || !claimed.length) throw new Error('call already claimed a GPT-Live reservation');
     // stream_token_sha256 binds the reservation to the one token issued here.
     const stamp = { gpt_live: { cell, voice, started_at: new Date().toISOString(), reserved_usd: PER_CALL_RESERVE_USD, stream_token_sha256: callTokenDigest(token) } };
     const updated = await trx('call_log')
       .where({ twilio_call_sid: callSid })
       .whereRaw(GPT_LIVE_UNCLAIMED_SQL)
       .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stamp)]) });
-    if (!updated) throw new Error('call already claimed a GPT-Live reservation, or no row');
+    if (!updated) throw new Error('no unstamped call_log row for this call');
     return true;
   });
 }

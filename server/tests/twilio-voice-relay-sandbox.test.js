@@ -11,6 +11,15 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/voice-agent/relay-server', () => ({ isRelayAttached: jest.fn(() => true) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), voiceGptLiveTestLive: () => process.env.GATE_VOICE_GPT_LIVE_TEST === 'true' }));
 jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
+// The REST client is a fake (the TwiML builder stays real), so a run with real
+// Twilio credentials in the environment can never call the API.
+const mockCallUpdate = jest.fn(() => Promise.resolve({}));
+const mockCalls = jest.fn(() => ({ update: mockCallUpdate }));
+jest.mock('twilio', () => {
+  const actual = jest.requireActual('twilio');
+  const client = jest.fn(() => ({ calls: mockCalls }));
+  return Object.assign(client, actual);
+});
 
 const db = require('../models/db');
 const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
@@ -451,21 +460,27 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
   // production path stamps with db `update` = prodUpdate), then ONE transaction
   // for GPT-Live: the budget lock, the spent read (`whereNot(...).first(raw)`
   // answers `usd`) and the reservation stamp (trx `update`).
-  function primeLive({ usd = 0, budgetFails = false, stampFails = false, stampRows = 1 } = {}) {
+  // The ledger (voice_gpt_live_spend): the spent read (`first(raw)` answers
+  // `usd`) and the claim (`insert().onConflict().ignore().returning()`,
+  // [] = already claimed). call_log in the same transaction: the stamp.
+  function primeLive({ usd = 0, budgetFails = false, stampFails = false, stampRows = 1, claimed = true } = {}) {
     const prodUpdate = jest.fn(() => Promise.resolve(1));
     const builder = { where: jest.fn(() => builder), first: jest.fn(async () => ({ source: VOICE_RELAY_SANDBOX_SOURCE })), update: prodUpdate };
     db.mockImplementation(() => builder);
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
-    const update = jest.fn(() => (stampFails ? Promise.reject(new Error('pool down')) : Promise.resolve(stampRows)));
     const spent = jest.fn(async () => {
       if (budgetFails) throw new Error('pool down');
       return { usd };
     });
-    const tb = { where: jest.fn(() => tb), whereRaw: jest.fn(() => tb), first: spent, update };
-    const trx = jest.fn(() => tb);
+    const insert = jest.fn(() => ledger);
+    const returning = jest.fn(async () => (claimed ? [{ call_sid: 'CA-sb-live' }] : []));
+    const ledger = { first: spent, insert, onConflict: jest.fn(() => ledger), ignore: jest.fn(() => ledger), returning };
+    const update = jest.fn(() => (stampFails ? Promise.reject(new Error('pool down')) : Promise.resolve(stampRows)));
+    const tb = { where: jest.fn(() => tb), whereRaw: jest.fn(() => tb), update };
+    const trx = jest.fn((table) => (table === 'voice_gpt_live_spend' ? ledger : tb));
     trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     db.transaction = jest.fn(async (fn) => fn(trx));
-    return { update, prodUpdate, spent, tb, trx };
+    return { update, prodUpdate, spent, insert, ledger, tb, trx };
   }
   const cell = (digits, CallSid = 'CA-sb-live') => ({ body: { CallSid, To: SANDBOX, Digits: digits }, headers: {} });
 
@@ -489,18 +504,25 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
 
   test('gate on: 71 plays the disclosure, then connects a Stream with the CallSid and token as path segments and no query string', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    const { update, trx, tb } = primeLive();
+    process.env.TWILIO_ACCOUNT_SID = 'AC-test';
+    process.env.TWILIO_AUTH_TOKEN = 'test-token';
+    const { update, trx, tb, insert, ledger } = primeLive();
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    // Twilio's own stop at 600 s, on the fake client
+    expect(mockCalls).toHaveBeenCalledWith('CA-sb-live');
+    expect(mockCallUpdate).toHaveBeenCalledWith({ timeLimit: 600 });
     expect(res.body).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Play>https:\/\/[^<]+\.mp3<\/Play><Connect action="\/api\/webhooks\/twilio\/relay-sandbox\/live-complete">/);
     const url = res.body.match(/<Stream url="([^"]+)"/)[1];
     expect(url).toMatch(/^wss:\/\/portal\.example\.com\/ws\/voice-live\/CA-sb-live\/[0-9a-z]+\.\d+\.[0-9a-f]{16}\.[0-9a-f]+$/);
     expect(url).not.toContain('?');
     expect(res.body).not.toContain('<ConversationRelay');
     expect(res.body).not.toContain('shh-secret-123');
-    // The budget read and the stamp run under one lock, in one transaction.
+    // The ledger read, the ledger claim and the stamp run under one lock, in one transaction.
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['voice_gpt_live_budget']);
-    expect(tb.where).toHaveBeenCalledWith({ source: VOICE_RELAY_SANDBOX_SOURCE });
+    expect(trx).toHaveBeenCalledWith('voice_gpt_live_spend');
+    expect(insert).toHaveBeenCalledWith({ call_sid: 'CA-sb-live', reserved_usd: PER_CALL_RESERVE_USD });
+    expect(ledger.onConflict).toHaveBeenCalledWith('call_sid');
     // single-use: the stamp lands only on a row with no gpt_live yet
     expect(tb.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-sb-live' });
     expect(tb.whereRaw).toHaveBeenCalledWith("(metadata->'gpt_live') IS NULL");
@@ -513,6 +535,8 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
       stream_token_sha256: callTokenDigest(url.split('/').pop()),
     });
     expect(update.mock.calls[0][0].metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+    delete process.env.TWILIO_ACCOUNT_SID;
+    delete process.env.TWILIO_AUTH_TOKEN;
   });
 
   test('gate on: 72 selects the delta voice', async () => {
@@ -542,9 +566,8 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(res.body).toContain('<Hangup/>');
     expect(res.body).not.toContain('<Stream');
     expect(update).not.toHaveBeenCalled();
-    const sum = spent.mock.calls[0][0].sql;
-    expect(sum).toContain("metadata->'gpt_live'->>'cost_usd'");
-    expect(sum).toContain("metadata->'gpt_live'->>'reserved_usd'");
+    // the ledger table, never call_log (whose rows can be deleted): settled cost, else the reservation
+    expect(spent.mock.calls[0][0].sql).toBe('COALESCE(SUM(COALESCE(cost_usd, reserved_usd)), 0) AS usd');
   });
 
   test('VOICE_GPT_LIVE_TEST_MAX_USD moves the cap; the whole reservation must fit', async () => {
@@ -562,7 +585,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
 
   test('a database error on the budget read or the stamp, or a call that already claimed a reservation (a repeated cell request), refuses the call (fail closed)', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    for (const opts of [{ budgetFails: true }, { stampFails: true }, { stampRows: 0 }]) {
+    for (const opts of [{ budgetFails: true }, { stampFails: true }, { stampRows: 0 }, { claimed: false }]) {
       primeLive(opts);
       const res = mockRes();
       await handlerFor('/relay-sandbox/cell')(cell('71'), res);
