@@ -22,7 +22,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { DISPOSITIONS, dispositionGroup, dispositionFromDeclineReason, expiredDispositionFor } = require('./estimate-disposition');
 const { inferEstimateServiceLines, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
-const { countableViewAtSql } = require('./self-serve-estimates');
+const { SELF_SERVE_ESTIMATE_SOURCES, isUndeliveredSelfServe, countableViewAtSql } = require('./self-serve-estimates');
 
 const RESOLVED_STATUSES = ['accepted', 'declined', 'expired'];
 
@@ -207,7 +207,7 @@ function sentCohorts(rows, { days, nowMs }) {
     // (countableViewAtSql) is the earliest open since delivery in the open log
     // or the row, so a later reopen never stands in for their first view
     // (codex pre-push P1); for any other row it is viewed_at.
-    const isCtaMint = ['service_report_cta', 'plan_restart', 'plan_start'].includes(String(row.source || ''));
+    const isCtaMint = SELF_SERVE_ESTIMATE_SOURCES.includes(String(row.source || ''));
     const viewCandidates = [ms(row.countable_view_at), ms(row.viewed_at), ms(row.last_viewed_at)]
       .filter((ts) => ts != null && (!isCtaMint || ts >= sentAt));
     const firstView = viewCandidates.length ? Math.min(...viewCandidates) : null;
@@ -265,7 +265,13 @@ function sentAnchorMs(row) {
   // deliveryState.firstDeliveredAt — the one witness a resend can't move
   // (GH codex P1: an unopened resend must keep its original cohort age).
   const firstDelivered = ms(data?.deliveryState?.firstDeliveredAt);
-  if (['service_report_cta', 'plan_restart', 'plan_start'].includes(String(row.source || ''))) return firstDelivered;
+  // A self-serve mint anchors where the Intelligence Bar dates its send
+  // (self-serve-estimates.js deliveredAtSql, codex pre-push P1): its first
+  // delivery, sent_at when the stamp is there but unreadable, none while
+  // undelivered.
+  if (SELF_SERVE_ESTIMATE_SOURCES.includes(String(row.source || ''))) {
+    return isUndeliveredSelfServe(row.source, data) ? null : (firstDelivered ?? ms(row.sent_at));
+  }
   const candidates = [firstDelivered, ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
     .filter((ts) => ts != null);
   return candidates.length ? Math.min(...candidates) : null;
