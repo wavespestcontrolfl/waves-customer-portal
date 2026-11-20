@@ -110,12 +110,12 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
   }
 
   // One open phone-yes card as the sweep files and keeps it: a customer, the estimates it names (each { hours } until it
-  // expires, and its status; made `madeHoursAgo` hours ago and sent two days ago), the call with the yes a day ago
+  // expires, and its status; made `madeHoursAgo` hours ago and sent `sentHoursAgo` hours ago), the call with the yes a day ago
   // (`yes`; none when false), the booking call two hours ago and the pest visit it booked (`visitDays` from today). One
   // estimate is the card's own; two or more are a card that names several. A call that booked several visits files its
   // card with no visit of its own (`cardVisit` false); `moreVisits` are the call's other visits.
   async function phoneYesCard({
-    estimates = [{ hours: 5 * 24 }], visitDays = 5, cardVisit = true, moreVisits = [], yes = true, madeHoursAgo = 72,
+    estimates = [{ hours: 5 * 24 }], visitDays = 5, cardVisit = true, moreVisits = [], yes = true, madeHoursAgo = 72, sentHoursAgo = 48,
   } = {}) {
     seq += 1;
     const customerId = randomUUID();
@@ -127,7 +127,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       const [row] = await trx('estimates').insert({
         customer_id: customerId, status: estimateStatus, token: randomUUID().replace(/-/g, ''), customer_name: 'Pat Sampleton',
         address: '100 Example Lane, Sampleton, FL 34200', monthly_total: 15, annual_total: 180, onetime_total: 0, category: 'RESIDENTIAL',
-        created_at: new Date(Date.now() - madeHoursAgo * HOUR), sent_at: new Date(Date.now() - 2 * DAY), expires_at: new Date(Date.now() + hours * HOUR),
+        created_at: new Date(Date.now() - madeHoursAgo * HOUR), sent_at: new Date(Date.now() - sentHoursAgo * HOUR), expires_at: new Date(Date.now() + hours * HOUR),
       }).returning('id');
       estimateIds.push(String(row.id || row));
     }
@@ -575,6 +575,25 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     }
   });
 
+  test('a visit already under way or done does not make time short; an expiry still does', async () => {
+    const card = await phoneYesCard();
+    await pass();
+    // A technician started early: the visit's start is still to come, but it is under way. Then it is done.
+    for (const status of ['on_site', 'completed']) {
+      await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1), status });
+      await keepCurrent(card.id);
+      expect(await trx('triage_items').where({ id: card.id }).first('status')).toEqual({ status: 'open' });
+      await pass();
+      expect(await bellsOf(card.id)).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
+    }
+    // The one time-short bell is still there for the estimate.
+    const expiresAt = new Date(Date.now() + 20 * HOUR);
+    await trx('estimates').whereIn('id', card.estimateIds).update({ expires_at: expiresAt });
+    await pass();
+    expect((await bellsOf(card.id)).due.body).toBe(`The estimate expires ${formatETDayDate(expiresAt)} and is not accepted yet.`);
+    expect(bannersFor(card.id)).toBe(2);
+  });
+
   test("urgency is read by the clock after the card's lock, not the sweep's start", async () => {
     // By a clock two days old (a long scan, a long wait for the lock), a visit that began yesterday at 3:00 PM would
     // start within 48 hours, and one tomorrow at 3:00 PM would not.
@@ -623,6 +642,10 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       ['a re-read of the call with the yes, on an estimate whose send is dated before its row was made', { madeHoursAgo: 0 }, reRead],
       // The customer's numbers decide which unlinked calls are theirs (and so which still owe a read).
       ['a new phone number on the customer', {}, (card) => ['customers', card.customerId, { phone: '+19415559876' }]],
+      // The card's check reads the booking call by id (whose call it is), also when a resend moved the window past it:
+      // here the estimate went out again an hour ago, after the call. Any write to the row stands for a relink.
+      ['a write to the booking call, which a resend left before the word window', { sentHoursAgo: 1 },
+        (card) => ['call_log', card.callLogId, { answered_by: 'human' }]],
       // The catalog decides which visits are pest visits; the ring holds it as the tap does (the whole table, so any
       // catalog write, here one that leaves the row as it was).
       ['a catalog edit', {}, () => ['services', catalogRowId, { name: pool.raw('name') }]],

@@ -52,6 +52,8 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // A visit still on the calendar keeps the card: every status but cancelled and skipped. A visit waiting for its new
 // slot (rescheduled) and a done visit keep it too (the plan was still never accepted), so the gap never closes by itself.
 const CALENDAR_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'];
+// A visit already under way or done: still on the calendar (it keeps a card open), but no time to ring for.
+const STARTED_VISIT_STATUSES = ['on_site', 'completed'];
 const OPEN_ESTIMATE_STATUSES = ['sent', 'viewed'];
 // The statuses that settle an estimate for good (with an archive or a deleted row). Any other status keeps the card
 // naming it: open, lapsed (the office can extend it and accept), being sent again (a resend claims 'sending' and then
@@ -782,13 +784,14 @@ async function openCardNow(trx, listed) {
 // The rows a ring reads, held FOR SHARE to its commit, as the tap holds them: the customer's row (its phone numbers
 // decide which unlinked calls are theirs), the customer's estimates (the tap's own lock, which also refuses while one is
 // being sent), the customer's calls in the word's window (cardEstimatesOf's `since`, the window cardState reads: the
-// yes, any later word, the booking call), the service catalog (the tap's catalog lock, scheduling/catalog-lock.js,
-// taken before the visit rows as the tap takes it: a visit's catalog row decides whether it is a pest visit) and every
-// visit the call booked. A change to one (a new number, an accept, a decline, an extension, a re-read, a catalog edit, a
-// visit moved) either landed before, and the reads after the lock see it, or waits for the ring's commit, so the ring
-// says what was true when it committed. Returns { since }, or null for a change in flight right now: the card rings
-// nothing this run (NOWAIT, in a savepoint, so the bell never waits on a row and its transaction stays usable). A call
-// or a visit inserted meanwhile has no row to hold; the next run reads it.
+// yes, any later word, the booking call), by id the booking call and the call the card's yes came from (cardState reads
+// both by id, also when a resend moved the window past them), the service catalog (the tap's catalog lock,
+// scheduling/catalog-lock.js, taken before the visit rows as the tap takes it: a visit's catalog row decides whether it
+// is a pest visit) and every visit the call booked. A change to one (a new number, an accept, a decline, an extension,
+// a re-read, a relink, a catalog edit, a visit moved) either landed before, and the reads after the lock see it, or
+// waits for the ring's commit, so the ring says what was true when it committed. Returns { since }, or null for a
+// change in flight right now: the card rings nothing this run (NOWAIT, in a savepoint, so the bell never waits on a row
+// and its transaction stays usable). A call or a visit inserted meanwhile has no row to hold; the next run reads it.
 async function holdCardRows(trx, card) {
   const customerId = card.related_customer_id;
   try {
@@ -797,6 +800,8 @@ async function holdCardRows(trx, card) {
       await lockCustomerEstimates(sp, customerId);
       const { since } = await cardEstimatesOf(card, sp);
       if (since) await Word.lockCallsSince(sp, { customerId, since });
+      await sp('call_log').whereIn('id', [card.call_log_id, parseJson(card.payload).yes_call_log_id].filter(Boolean))
+        .orderBy('id').forShare().noWait().select('id');
       await sp.raw(`${require('./scheduling/catalog-lock').CATALOG_SHARE_LOCK_SQL} NOWAIT`);
       await visitsCallBooked(sp, card.call_log_id, customerId).orderBy('id').forShare().noWait().select('id');
       return { since };
@@ -809,8 +814,9 @@ async function holdCardRows(trx, card) {
 
 // The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and the
 // soonest visit to come among the ones that keep the card open (booked by the call, on the calendar, not linked to an
-// estimate, pest). Both are read under the card's customer, as its moot check reads them. A call that booked several
-// visits files its card with no visit of its own, so the call's visits are read, not the card's.
+// estimate, pest), not yet under way or done (STARTED_VISIT_STATUSES). Both are read under the card's customer, as its
+// moot check reads them. A call that booked several visits files its card with no visit of its own, so the call's
+// visits are read, not the card's.
 async function cardTimes(conn, card, now) {
   const { visitStart } = require('./call-phone-yes-bell');
   const ids = cardEstimateIds(card);
@@ -820,7 +826,7 @@ async function cardTimes(conn, card, now) {
       .orderBy('expires_at').first('expires_at')
     : null;
   const upcoming = (await callVisitsOnCalendar(conn, card.call_log_id, card.related_customer_id))
-    .filter((v) => !v.source_estimate_id && visitStart(v) > now)
+    .filter((v) => !v.source_estimate_id && !STARTED_VISIT_STATUSES.includes(v.status) && visitStart(v) > now)
     .sort((a, b) => visitStart(a) - visitStart(b));
   let visit = null;
   for (const candidate of upcoming) {
