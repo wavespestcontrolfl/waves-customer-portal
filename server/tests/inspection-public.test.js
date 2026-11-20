@@ -3801,6 +3801,27 @@ describe('profileAffirmativelyDiffers unit coverage (Codex P2, PR #5064, :1168 "
   });
 });
 
+// Phase 1's review rule (provisionLinkedCustomer), shared since pre-push P1 on 756cfc2628 with a refused booking's
+// refresh (nextCommitRefresh): a blocked profile books only a typed address that is affirmatively another property
+// than the address on file. A profile with no street on file has nothing to differ from, whatever its ZIP; an address
+// the page did not type (the profile's own, or the lead's form address) is never another property.
+describe('reviewRefusesBooking (phase 1\'s review rule)', () => {
+  const { reviewRefusesBooking } = inspectionPublicRouter._test;
+  const onFile = { address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+  const other = { line1: '9 Home St', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+  const same = { line1: '5 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+  test.each([
+    ['a profile no review blocks', false, false, onFile, { source: 'supplied', address: same }],
+    ['a typed address that is another property', false, true, onFile, { source: 'supplied', address: other }],
+    ['a typed copy of the address on file', true, true, onFile, { source: 'supplied', address: same }],
+    ['a typed address, a ZIP but no street on file', true, true, { address_line1: null, zip: '34205' }, { source: 'supplied', address: other }],
+    ['the lead\'s form address, another property', true, true, onFile, { source: 'lead', address: other }],
+    ['the profile\'s own address', true, true, onFile, { source: 'customer', address: same }],
+  ])('%s: refused %s', (_label, expected, blocked, row, resolved) => {
+    expect(reviewRefusesBooking({ ...row, geocode_review_blocked: blocked }, row, resolved)).toBe(expected);
+  });
+});
+
 // Codex P1 (PR #5064, :1446 "Fail closed when the reviewed pin cannot be
 // mirrored"): reuseMatchedProfile's comms-fence-busy fallback used to always
 // return the raw matched profile + the provider-resolved location, even

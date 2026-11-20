@@ -3022,6 +3022,7 @@ router._test = {
   profileMatchesOrQuarantined,
   resolveOrLinkCustomerForLead,
   nextCommitRefresh,
+  reviewRefusesBooking,
 };
 
 module.exports = router;
