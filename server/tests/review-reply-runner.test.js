@@ -609,6 +609,7 @@ describe('processDueAutoReplies — state machine', () => {
       row({ id: 'old-q', review_created_at: stale }),
       row({ id: 'old-f', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_error: 'GBP 404', auto_reply_due_at: '2026-08-27T16:00:00Z' }),
       row({ id: 'old-f-held', review_created_at: stale, auto_reply_status: 'failed', auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
+      row({ id: 'old-f-gone', review_created_at: stale, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, missing_since: stale }),
       row({ id: 'old-held', review_created_at: stale, auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
       row({ id: 'old-parked', review_created_at: stale, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' }),
       row({ id: 'fresh' }),
@@ -624,6 +625,8 @@ describe('processDueAutoReplies — state machine', () => {
     expect(expiredBells).toHaveLength(1);
     expect(expiredBells[0][3].metadata).toMatchObject({ reviewId: 'old-f', needsAction: true });
     expect(expiredBells[0][2]).toContain('ran out of time to post it. The draft is saved on the review.');
+    // A pending retry whose review is gone from Google needs no one: it leaves silently, with no bell.
+    expect(state.rows.find((r) => r.id === 'old-f-gone')).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null });
     // A live claim and a park are someone else's / a person's: untouched.
     expect(state.rows.find((r) => r.id === 'old-f-held')).toMatchObject({ auto_reply_status: 'failed', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
     expect(state.rows.find((r) => r.id === 'old-held')).toMatchObject({ auto_reply_status: 'queued', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
