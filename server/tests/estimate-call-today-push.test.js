@@ -48,7 +48,7 @@ beforeEach(() => {
   claimed = new Set();
   mockLastCalled.mockResolvedValue(new Map());
   mockDb.raw.mockImplementation((sql, bindings) => {
-    if (!bindings) return { raw: sql }; // a select expression (the undelivered self-serve flag)
+    if (!bindings) return { raw: sql }; // a select expression (the self-serve flag and first delivery)
     const [key] = bindings;
     if (claimed.has(key)) return Promise.resolve({ rows: [] });
     claimed.add(key);
@@ -109,6 +109,25 @@ describe('the count is the page list', () => {
     expect(shared.isCallTodayEstimate(callTodayFields(estimateRows[1]), NOW.getTime())).toBe(true);
   });
 
+  test('a delivered self-serve quote counts only touches since its first delivery, in the push and on the page (codex pre-push P1)', async () => {
+    const { selfServeDeliveredAtSql } = require('../services/self-serve-estimates');
+    // Both opened 5 h ago from the portal; staff first sent one 3 h ago (after the look), the other 8 h ago.
+    estimateRows = [
+      row('looked-then-sent', 5, { self_serve_delivered_at: new Date(ago(3)) }),
+      row('opened-after-send', 5, { self_serve_delivered_at: new Date(ago(8)) }),
+    ];
+    expect(await countCallToday(NOW.getTime())).toBe(1);
+    const selects = estimateCalls.filter(([name]) => name === 'select').map(([, arg]) => arg);
+    expect(selects).toContainEqual({ raw: `${selfServeDeliveredAtSql('estimates')} AS self_serve_delivered_at` });
+    // The page judges the rows the same way: the list route passes the same value to the same mapping.
+    const judged = estimateRows.map((r) => shared.isCallTodayEstimate(
+      callTodayFields(r, { selfServeDeliveredAt: r.self_serve_delivered_at }), NOW.getTime()));
+    expect(judged).toEqual([false, true]);
+    // A tap on the sent link is a touch since the send.
+    clickRows = [{ entity_id: 'looked-then-sent', last_clicked_at: ago(2.5) }];
+    expect(await countCallToday(NOW.getTime())).toBe(2);
+  });
+
   test('a row never sent has no views, so only a tap can put it on the list (the page rule)', async () => {
     estimateRows = [row('unsent', 5, { sent_at: null })];
     expect(await countCallToday(NOW.getTime())).toBe(0);
@@ -147,7 +166,7 @@ describe('the count is the page list', () => {
     const route = fs.readFileSync(path.join(repo, 'server/routes/admin-estimates.js'), 'utf8');
     const push = fs.readFileSync(path.join(repo, 'server/services/estimate-call-today-push.js'), 'utf8');
     expect(route).toMatch(/estimateListQuery\(db, \{/);
-    expect(push).toMatch(/estimateListQuery\(db, \{ sentOnly: true \}\)\.clearSelect\(\)\.select\(CALL_TODAY_COLUMNS\)\s*\.select\(undeliveredSelfServe\)\.limit\(ESTIMATE_LIST_LIMIT\)/);
+    expect(push).toMatch(/estimateListQuery\(db, \{ sentOnly: true \}\)\.clearSelect\(\)\.select\(CALL_TODAY_COLUMNS\)\s*\.select\(undeliveredSelfServe\)\.select\(selfServeDeliveredAt\)\.limit\(ESTIMATE_LIST_LIMIT\)/);
     expect(route).not.toMatch(/db\('estimates'\)\s*\.leftJoin\('technicians'/);
   });
 

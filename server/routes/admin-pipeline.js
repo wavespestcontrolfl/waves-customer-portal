@@ -1145,17 +1145,19 @@ async function fetchEstimates({ search, source, ownerId }) {
     .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
     .select('estimates.*', 'technicians.name as created_by_name')
     .whereNull('estimates.archived_at')
-    // Customer self-serve mints — plan_restart, plan_start
-    // (GATE_PORTAL_PLAN_START) and the report card's service_report_cta, under
-    // the same contract (SELF_SERVE_ESTIMATE_SOURCES) — are not sales
-    // opportunities (codex GH r19 P1 on #3671): their synthetic sent/viewed
-    // state would derive "Follow up" next-actions despite the mint's
-    // zero-delivery / no-follow-up contract, prompting an operator to
-    // contact a customer nobody quoted. Acceptance converts on its own.
-    // NULL-aware (codex GH r20 P2): legacy/imported rows carry source NULL,
-    // which a bare NOT IN would drop.
-    .where(function notSelfServeMint() {
-      this.whereNull('estimates.source').orWhereNotIn('estimates.source', require('../services/self-serve-estimates').SELF_SERVE_ESTIMATE_SOURCES);
+    // A customer self-serve mint (SELF_SERVE_ESTIMATE_SOURCES: plan restart,
+    // plan start, the report card's quote) is no sales opportunity until staff
+    // deliver it (codex GH r19 P1 on #3671): its synthetic sent/viewed state
+    // would derive "Follow up" next-actions despite the mint's zero-delivery /
+    // no-follow-up contract, prompting an operator to contact a customer nobody
+    // quoted. A delivered one is a real quote and stays listed (codex pre-push
+    // P1). A plan restart quote stays off even once delivered, as before:
+    // acceptance converts on its own, and cancel/restart state lives on the
+    // customer-intel surfaces. NULL-aware (codex GH r20 P2): legacy/imported
+    // rows carry source NULL, which a bare <> would drop.
+    .where(require('../services/self-serve-estimates').whereNotUndeliveredSelfServe('estimates'))
+    .where(function notPlanRestart() {
+      this.whereNull('estimates.source').orWhereNot('estimates.source', 'plan_restart');
     })
     .orderBy('estimates.created_at', 'desc')
     .limit(MAX_CANDIDATES + 1);
@@ -1371,6 +1373,7 @@ module.exports.__private = {
   dismissDuplicateRisk,
   fetchDismissedDuplicatePairs,
   fetchDismissedLeadIdsForEstimate,
+  fetchEstimates,
   filterDismissedCandidates,
   filterReopenedLinkedHistory,
   getLinkCandidateLeads,

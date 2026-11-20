@@ -11,7 +11,9 @@
  * (a send count or funnel, a staff follow-up prompt) leaves such a row out,
  * unless staff really delivered it later: the admin send path stamps
  * estimate_data.deliveryState.firstDeliveredAt. A reader that dates a send or a
- * view reads sentAtSql / countableViewAtSql. Customer comms use the separate
+ * view reads sentAtSql / countableViewAtSql, and one that times follow-up by
+ * the customer's last touch counts touches from selfServeDeliveredAt (or its
+ * SQL form). Customer comms use the separate
  * noEngagementAutomation rule (estimate-comms-eligibility.js).
  *
  * A leaf module (no requires), so any reader can load it with no cycle.
@@ -80,21 +82,40 @@ function sentAtSql(alias) {
 // The instant a row counts as viewed. A self-serve quote is opened in the
 // portal before any send, so a later staff send must not turn that look into
 // a viewed send (codex pre-push r15): only a view at or after its first
-// delivery counts. The first such view comes from the per-open log
-// (estimate_views), so a later open never moves it to a later period (codex
-// pre-push P1). A row with no logged open since then (legacy rows predate
-// the log) falls back to the earlier of viewed_at and last_viewed_at at or
-// after the delivery, as estimate-winloss.js reads them.
+// delivery counts. The first such view is the earliest one known at or after
+// the delivery: the per-open log (estimate_views), viewed_at and
+// last_viewed_at (LEAST skips a NULL). A later open then never moves it to a
+// later period (codex pre-push P1), also when the view handler stamped
+// viewed_at but its log insert failed, and a legacy row the log predates
+// still counts.
 function countableViewAtSql(alias) {
   const delivered = firstDeliveredAtSql(alias);
   const firstLoggedOpen = `(SELECT MIN(ev.viewed_at) FROM estimate_views ev WHERE ev.estimate_id = ${alias}.id AND ev.viewed_at >= ${delivered})`;
   const fromDelivery = (column) => `CASE WHEN ${alias}.${column} >= ${delivered} THEN ${alias}.${column} END`;
   return selfServeOr(alias,
-    `COALESCE(${firstLoggedOpen}, LEAST(${fromDelivery('viewed_at')}, ${fromDelivery('last_viewed_at')}))`,
+    `LEAST(${firstLoggedOpen}, ${fromDelivery('viewed_at')}, ${fromDelivery('last_viewed_at')})`,
     `${alias}.viewed_at`);
+}
+
+// A delivered self-serve quote's first delivery: the instant its customer
+// engagement counts from, for a reader that times follow-up by the last touch
+// (the Call today rule, shared/estimate-call-today.cjs). The customer opened
+// the quote in the portal before staff sent it, and that look is no response
+// to the send (codex pre-push P1). Null for any other row, and for a stamp
+// that is absent or unreadable (then every touch counts, as sent_at stays
+// the send for sentAtSql). selfServeDeliveredAtSql is the same value in SQL,
+// for a reader that does not load estimate_data.
+function selfServeDeliveredAt(source, estimateData) {
+  if (!SELF_SERVE_ESTIMATE_SOURCES.includes(String(source || ''))) return null;
+  const stamp = estimateData?.deliveryState?.firstDeliveredAt;
+  const ms = typeof stamp === 'string' ? Date.parse(stamp) : NaN;
+  return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+}
+function selfServeDeliveredAtSql(alias) {
+  return selfServeOr(alias, firstDeliveredAtSql(alias), 'NULL');
 }
 
 module.exports = {
   SELF_SERVE_ESTIMATE_SOURCES, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
-  sentAtSql, countableViewAtSql,
+  sentAtSql, countableViewAtSql, selfServeDeliveredAt, selfServeDeliveredAtSql,
 };
