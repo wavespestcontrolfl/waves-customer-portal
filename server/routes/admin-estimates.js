@@ -4517,7 +4517,6 @@ router.get('/', async (req, res, next) => {
           // staff, so the card opens the staff PDF instead.
           staffPreviewable: staffPreviewableIds.has(e.id),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
-          sentAt: e.sent_at,
           acceptedAt: e.accepted_at,
           scheduledAt: e.scheduled_at,
           expiresAt: e.expires_at,
@@ -4526,11 +4525,14 @@ router.get('/', async (req, res, next) => {
           viewCount: hasBeenSent ? e.view_count || 0 : 0,
           clickCount: parseInt(clickStats.get(e.id)?.click_count || 0, 10),
           createdAt: e.created_at,
-          // The "Call today" rule's fields (status, phone, archivedAt, views, click, follow-up, newest answered call):
-          // one mapping shared with the 9 AM push (services/estimate-call-list.js callTodayFields).
+          // The follow-up fields (status, phone, archivedAt, sentAt, views, click, follow-up, newest answered
+          // call): one mapping shared with the 9 AM push (services/estimate-call-list.js callTodayFields).
+          // undeliveredSelfServe also keeps the quote out of Going cold and Follow-up overdue, and its
+          // mint stamp out of sentAt.
           ...callTodayFields(e, {
             lastClickedAt: clickStats.get(e.id)?.last_clicked_at,
             lastCalledAt: lastCalledById.get(e.id),
+            undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
           }),
           source: e.source || 'manual',
           serviceInterest,

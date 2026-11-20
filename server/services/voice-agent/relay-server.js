@@ -105,8 +105,11 @@ function resumedSessionBudgetMs(row, { now = Date.now() } = {}) {
 // and fail-closed: past the deadline the socket is destroyed, Twilio takes the
 // call to the fallback, and nobody waits on a database that is not answering.
 const TOKEN_BURN_DEADLINE_MS = 2500;
+// The live upgrade's whole database budget (stamp read + burn): under
+// Engine.IO's 1000 ms destroyUpgradeTimeout (sockets/index.js keeps the default).
+const LIVE_UPGRADE_AUTH_MS = 800;
 
-async function burnCallToken(token, callSid) {
+async function burnCallToken(token, callSid, deadlineMs = TOKEN_BURN_DEADLINE_MS) {
   const tokenHash = require('crypto').createHash('sha256').update(String(token)).digest('hex');
   try {
     const db = require('../../models/db');
@@ -124,8 +127,8 @@ async function burnCallToken(token, callSid) {
     let deadlineTimer;
     const deadline = new Promise((_, reject) => {
       deadlineTimer = setTimeout(
-        () => reject(new Error(`token burn exceeded ${TOKEN_BURN_DEADLINE_MS}ms`)),
-        TOKEN_BURN_DEADLINE_MS,
+        () => reject(new Error(`token burn exceeded ${deadlineMs}ms`)),
+        deadlineMs,
       );
       deadlineTimer.unref?.();
     });
@@ -150,6 +153,135 @@ async function burnCallToken(token, callSid) {
   } catch (e) {
     logger.warn(`[voice-relay] token burn failed — refusing the upgrade (fail-closed): ${e.message}`);
     return false;
+  }
+}
+
+// ── GPT-Live trial upgrade (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19) ─────
+// /ws/voice-live/{callSid}/{token}: Twilio Media Streams does not allow a
+// query string on a <Stream> url, so the CallSid and the per-call token ride
+// as path segments. Same door as /ws/voice-agent, in the same order: verify
+// the token for THIS CallSid, read the call_log row, require the sandbox
+// source AND the gpt_live stamp the cell route wrote AND the gate, then burn
+// the token. Twilio's handshake signature is checked first, and the token must
+// be signed for this path (LIVE_TOKEN_AUDIENCE). The bridge admits the call's
+// reservation after the handshake. The socket goes to its own WebSocketServer, created at the first
+// live upgrade, and to live-bridge.js. Any failure destroys the socket.
+const { LIVE_WS_PREFIX } = require('./relay-protocol');
+let liveWss = null;
+
+function destroySocket(socket) {
+  try { socket.destroy(); } catch { /* socket already gone */ }
+}
+
+function parseLivePath(pathname) {
+  const parts = String(pathname || '').slice(LIVE_WS_PREFIX.length).split('/');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  try {
+    return { callSid: decodeURIComponent(parts[0]).trim(), token: parts[1] };
+  } catch {
+    return null; // malformed percent-encoding
+  }
+}
+
+// The stamp the cell route wrote on a sandbox-sourced row, or null.
+// The stamp read is bounded: a stalled pool must not leave the handshake
+// pending (the bridge's own start deadline only begins once the socket is
+// accepted). Past it the upgrade is refused before any token burn.
+async function readLiveStamp(callSid, deadlineMs) {
+  const db = require('../../models/db');
+  // Materialized once (a Knex builder re-runs on every .then()).
+  const read = Promise.resolve(db('call_log').where({ twilio_call_sid: callSid }).first('source', 'metadata'));
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`stamp read exceeded ${deadlineMs}ms`)), deadlineMs);
+    timer.unref?.();
+  });
+  let row;
+  try {
+    row = await Promise.race([read, deadline]);
+  } finally {
+    clearTimeout(timer);
+    read.catch(() => {}); // a late loser never surfaces as unhandled
+  }
+  if (!row || row.source !== VOICE_RELAY_SANDBOX_SOURCE) return null;
+  let meta = row.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  const live = meta && meta.gpt_live;
+  if (!live || typeof live !== 'object') return null;
+  return { voice: String(live.voice || ''), cell: String(live.cell || ''), tokenDigest: String(live.stream_token_sha256 || '') };
+}
+
+// Twilio signs the Media Streams handshake: X-Twilio-Signature over the exact
+// wss URL the cell route rendered (a GET: no params), or that URL with a
+// trailing slash (Twilio's signature guidance names both forms). Checked
+// before any database read or token burn, so a forged request leaves the token
+// usable for Twilio's own connect. No auth token, no header or a bad one: refused.
+function liveSignatureValid(req, callSid, token) {
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const headers = (req && req.headers) || {};
+  const signature = headers['x-twilio-signature'];
+  if (!authToken || typeof signature !== 'string' || !signature) return false;
+  const { publicWsHost, liveStreamUrl } = require('./relay-protocol');
+  const url = liveStreamUrl(publicWsHost(headers.host), callSid, token);
+  const { validateRequest } = require('twilio');
+  return validateRequest(authToken, signature, url, {}) || validateRequest(authToken, signature, `${url}/`, {});
+}
+
+// Only the token the cell route issued (and stamped by digest) opens the paid
+// bridge: another valid token for this CallSid, such as the greeting's relay
+// token, must not open a second session on the same reservation.
+function isStampedToken(stamp, token) {
+  const want = Buffer.from(stamp.tokenDigest, 'utf8');
+  const got = Buffer.from(require('./relay-protocol').callTokenDigest(token), 'utf8');
+  return want.length === got.length && require('crypto').timingSafeEqual(want, got);
+}
+
+async function handleLiveUpgrade(req, socket, head, pathname) {
+  const parsed = parseLivePath(pathname);
+  // The raw request target must be the exact canonical path the cell route
+  // rendered (no query string, the CallSid encoded the one way), so the
+  // signature below covers exactly what was requested.
+  const canonical = parsed && `${LIVE_WS_PREFIX}${encodeURIComponent(parsed.callSid)}/${parsed.token}`;
+  if (!parsed || (req && req.url) !== canonical || !liveSignatureValid(req, parsed.callSid, parsed.token)) {
+    logger.warn('[voice-live] rejected ws upgrade: missing/invalid Twilio signature');
+    return destroySocket(socket);
+  }
+  if (!verifyCallToken(parsed.token, parsed.callSid, { audience: require('./relay-protocol').LIVE_TOKEN_AUDIENCE })) {
+    logger.warn('[voice-live] rejected ws upgrade: missing/invalid per-call token');
+    return destroySocket(socket);
+  }
+  const { callSid, token } = parsed;
+  // Socket.IO shares this HTTP server, and Engine.IO ends an upgrade on any
+  // other path that has written nothing after 1 s (destroyUpgradeTimeout).
+  // The stamp read and the burn share one budget under that, so a slow
+  // database refuses the call here instead of after Engine.IO ended the socket.
+  const authEnds = Date.now() + LIVE_UPGRADE_AUTH_MS;
+  try {
+    const stamp = await readLiveStamp(callSid, LIVE_UPGRADE_AUTH_MS);
+    if (!stamp || !require('../../config/feature-gates').voiceGptLiveTestLive()) {
+      logger.warn(`[voice-live] rejected ws upgrade: not a stamped sandbox call, or gate off callSid=${callSid}`);
+      return destroySocket(socket);
+    }
+    if (!isStampedToken(stamp, token)) {
+      logger.warn(`[voice-live] rejected ws upgrade: not the token the cell route issued callSid=${callSid}`);
+      return destroySocket(socket);
+    }
+    const burnBudget = authEnds - Date.now();
+    if (burnBudget <= 0 || !(await burnCallToken(token, callSid, burnBudget))) {
+      logger.warn(`[voice-live] rejected ws upgrade: token already used, or past the auth budget callSid=${callSid}`);
+      return destroySocket(socket);
+    }
+    if (!liveWss) {
+      const { WebSocketServer } = require('ws');
+      liveWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
+    }
+    const { runLiveBridge } = require('./live-bridge');
+    return liveWss.handleUpgrade(req, socket, head, (ws) => runLiveBridge(ws, { callSid, voice: stamp.voice, cell: stamp.cell }));
+  } catch (e) {
+    logger.warn(`[voice-live] rejected ws upgrade: ${e.message} callSid=${callSid}`);
+    return destroySocket(socket);
   }
 }
 
@@ -195,6 +327,10 @@ function attachVoiceRelay(httpServer) {
       url = new URL(req.url, 'http://internal');
     } catch {
       return; // malformed — leave it for other listeners / Node default
+    }
+    if (url.pathname.startsWith(LIVE_WS_PREFIX)) {
+      handleLiveUpgrade(req, socket, head, url.pathname).catch(() => destroySocket(socket));
+      return;
     }
     if (url.pathname !== RELAY_WS_PATH) return; // NOT ours — do not touch the socket
     // Authenticate BEFORE accepting the upgrade — this endpoint can spend

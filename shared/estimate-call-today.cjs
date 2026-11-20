@@ -26,8 +26,12 @@ function lastEngagementMs(estimate) {
 // offer whose last customer touch was 2h–48h ago and that nobody has phoned or followed up on since.
 // The upper edge is inclusive and isGoingColdEstimate starts strictly past 48h, so the two never
 // share an offer (and the 7d+ overdue bucket sits further out still). Needs a phone to call.
+// Never a self-serve quote nobody delivered (undeliveredSelfServe: plan restart, plan start, report
+// card). The list route and the 9 AM push both set it through callTodayFields, from one rule
+// (server/services/self-serve-estimates.js): the customer opened it from the portal, and the
+// mint promises no follow-up.
 function isCallTodayEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== 'viewed' || estimate.archivedAt) return false;
+  if (estimate?.status !== 'viewed' || estimate.archivedAt || estimate.undeliveredSelfServe) return false;
   if (!String(estimate.customerPhone || '').trim()) return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;

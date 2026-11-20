@@ -133,9 +133,14 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
       && String(g.comment || '').trim() === rText;
   });
   if (candidates.length === 1 && candidates[0].name) {
-    // The match stands even when saving it fails: the next publish looks it up again.
-    await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name })
-      .catch((e) => logger.warn(`GBP resource name not saved for review ${review.id}: ${e.message}`));
+    // The match is saved before any Google write: Retract finds the reply by
+    // this name. A failed save posts nothing (null: NO_RESOURCE, retried).
+    try {
+      await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name });
+    } catch (e) {
+      logger.warn(`GBP resource name not saved for review ${review.id}: ${require('../notification-service').safeErrorSummary(e)}`);
+      return null;
+    }
     return candidates[0].name;
   }
   if (candidates.length > 1) logger.warn(`GBP resource name lookup ambiguous for review ${review.id} (${candidates.length} candidates) — not resolved`);

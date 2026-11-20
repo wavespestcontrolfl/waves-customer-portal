@@ -748,6 +748,19 @@ describe('publishReviewReply', () => {
     expect(state.rows[0].review_reply).toBeNull();
   });
 
+  test('a matched review whose GBP name cannot be saved posts nothing: no match, retried (Retract finds the reply by that name)', async () => {
+    state.rows[0].gbp_review_name = null;
+    state.rows[0].review_created_at = '2026-08-20T10:00:00Z';
+    mockGbp.getAllLocationReviews.mockResolvedValueOnce([
+      { name: 'accounts/1/locations/2/reviews/77', reviewer: { displayName: 'Dana W.' }, createTime: '2026-08-20T11:00:00Z', starRating: 'FIVE', comment: 'Great' },
+    ]);
+    state.failNextUpdate = true;
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.NO_RESOURCE });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].gbp_review_name).toBeNull();
+  });
+
   test('location without credentials → NOT_CONFIGURED', async () => {
     mockGbp.isLocationConfigured.mockResolvedValueOnce(false);
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'admin' } }))

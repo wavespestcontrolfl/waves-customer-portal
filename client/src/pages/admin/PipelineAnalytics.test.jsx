@@ -626,6 +626,38 @@ describe("PipelineAnalytics", () => {
     expect(onFilterChange).toHaveBeenNthCalledWith(2, "sent_group");
   });
 
+  // A self-serve quote nobody delivered waits under Awaiting Response but is no
+  // send: the Sent tile and its "awaiting" line leave it out (codex pre-push P1).
+  // One staff scheduled to send counts either way, as scheduled.
+  it.each([
+    ["staff quotes (control)", false, { sent: "4", sub: "2 awaiting · 1 viewed · 1 scheduled" }],
+    ["self-serve quotes nobody delivered", true, { sent: "2", sub: "1 awaiting · 0 viewed · 1 scheduled" }],
+  ])("counts %s in the Sent tile", (_label, flagged, expected) => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "staff" }),
+        estimate({ id: "portal-sent", source: "plan_start", undeliveredSelfServe: flagged }),
+        estimate({
+          id: "portal-viewed",
+          status: "viewed",
+          viewedAt: daysAgo(1),
+          source: "plan_restart",
+          undeliveredSelfServe: flagged,
+        }),
+        estimate({
+          id: "portal-scheduled",
+          status: "scheduled",
+          source: "plan_start",
+          undeliveredSelfServe: true,
+        }),
+      ],
+    });
+
+    const tile = screen.getByRole("button", { name: /Sent/i });
+    expect(tile).toHaveTextContent(expected.sub);
+    expect(tile.querySelector(".u-nums").textContent).toBe(expected.sent);
+  });
+
   it("clears the active analytics filter", () => {
     const { onFilterChange } = renderAnalytics({
       estimates: kpiFixture(),
@@ -874,6 +906,20 @@ describe("isCallTodayEstimate", () => {
     expect(isCallTodayEstimate(viewedOffer(10, { archivedAt: hoursAgo(1) }), NOW_MS)).toBe(false);
     expect(isCallTodayEstimate(viewedOffer(10, { status: "sent" }), NOW_MS)).toBe(false);
     expect(isCallTodayEstimate(estimate({ status: "viewed", customerPhone: "+19415550101" }), NOW_MS)).toBe(false);
+  });
+
+  it("lists no self-serve quote nobody delivered, in any follow-up bucket (zero-follow-up contract, codex pre-push P1)", () => {
+    // One offer per bucket; each lands there until the server flags it an undelivered self-serve quote.
+    const cases = [
+      [isCallTodayEstimate, viewedOffer(10)],
+      [isGoingColdEstimate, viewedOffer(72)],
+      [isFollowUpOverdueEstimate, viewedOffer(8 * 24)],
+      [isFollowUpOverdueEstimate, estimate({ status: "sent", sentAt: hoursAgo(80) })],
+    ];
+    for (const [bucket, offer] of cases) {
+      expect(bucket(offer, NOW_MS)).toBe(true);
+      expect(bucket({ ...offer, undeliveredSelfServe: true }, NOW_MS)).toBe(false);
+    }
   });
 
   it("never shares an offer with Going cold or Follow-up overdue", () => {
