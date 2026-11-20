@@ -16,6 +16,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: (g) => !!mockGates[g],
   // GATE_REVIEW_ASK_AFTER_REPORT: the call-time reader, driven by the same flags object.
   reviewAskAfterReportLive: () => mockGates.reviewAskAfterReport === true,
+  reviewYearlyAskLive: () => mockGates.reviewYearlyAsk === true,
   gates: mockGates,
 }));
 // Personalized-ask drafter (own suite: review-ask-drafter.test.js). Default
@@ -191,6 +192,7 @@ beforeEach(() => {
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
   mockGates.reviewAskAfterReport = false;
+  mockGates.reviewYearlyAsk = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
   mockDraftTechVoice.mockReset().mockResolvedValue(null);
@@ -8332,6 +8334,70 @@ describe('the drafter\'s date is the day the visit was worked (review-visit-day.
 
     expect(mockDraftEmailIntro).toHaveBeenCalledTimes(1);
     expect(etCalendarDayOf(mockDraftEmailIntro.mock.calls[0][0].serviceDate)).toBe(etCalendarDayOf(arrived));
+  });
+});
+
+// Yearly review ask (started_by 'yearly', services/review-yearly-ask.js): dispatch-time rules.
+describe('Yearly review ask at dispatch', () => {
+  const DAY = 86400000;
+  const yearly = (customerId, startedBy = 'yearly') => ({ id: `seq-y-${customerId}`, customer_id: customerId, status: 'active', current_step: 0, touches_sent: 0,
+    started_by: startedBy, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+    started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) });
+  const cust = (id, extra = {}) => ({ id, first_name: 'Yo', last_name: 'T', phone: '+19410000199', email: 'yo@x.com', nearest_location_id: 'bradenton', ...extra });
+  const tap = (customerId) => ({ id: `rr-y-${customerId}`, customer_id: customerId, channel: 'sms', status: 'opened',
+    sms_sent_at: new Date(Date.now() - 41 * DAY), redirected_at: new Date(Date.now() - 40 * DAY), redirected_to_google: true });
+
+  test('gate on: a queued yearly row sends by text', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const mock = makeMock({ customers: [cust('y-1')], review_sequences: [yearly('y-1')] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate off: the queued yearly row is retired with no send', async () => {
+    const mock = makeMock({ customers: [cust('y-2')], review_sequences: [yearly('y-2')] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0]).toMatchObject({ status: 'stopped', stop_reason: 'yearly_gate_off' });
+  });
+
+  test('a post_service row does not read the yearly gate', async () => {
+    const mock = makeMock({ customers: [cust('y-3')], review_sequences: [yearly('y-3', 'post_service')] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a tap 40 days ago retires the yearly row with no send', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const mock = makeMock({ customers: [cust('y-4')], review_sequences: [yearly('y-4')], review_requests: [tap('y-4')] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('tap_pause');
+  });
+
+  test('texts off: no email fallback, the row is retired', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const mock = makeMock({ customers: [cust('y-5')], review_sequences: [yearly('y-5')],
+      notification_prefs: [{ customer_id: 'y-5', sms_enabled: false, email_enabled: true, review_request: true }] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0].status).toBe('stopped');
+  });
+
+  test('no phone: no email fallback, the row is retired', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const mock = makeMock({ customers: [cust('y-6', { phone: null })], review_sequences: [yearly('y-6')],
+      notification_prefs: [{ customer_id: 'y-6', sms_enabled: true, email_enabled: true, review_request: true }] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('no_contact');
   });
 });
 

@@ -121,10 +121,10 @@ describe('who is picked', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('lookup failed'));
   });
 
-  test('a failed candidate read sends nothing', async () => {
+  test('a failed candidate read throws, so cron health records a failure, and sends nothing', async () => {
     const w = makeWorld();
-    const out = await run(w, [], { live: true, loadCustomers: async () => { throw new Error('db down'); } });
-    expect(out.error).toBe('candidate_read_failed');
+    await expect(run(w, [], { live: true, loadCustomers: async () => { throw new Error('db down'); } }))
+      .rejects.toThrow('candidate read failed');
     expect(w.started).toHaveLength(0);
   });
 
@@ -194,5 +194,27 @@ describe('default reads', () => {
     expect(calls).toContainEqual(['where', { customer_id: 'c', started_by: 'yearly' }]);
     const since = calls.find((c) => c[0] === 'where' && c[1] === 'started_at')[3];
     expect(Math.round((NOW - since) / DAY)).toBe(365);
+  });
+});
+
+describe('dispatchStopReason', () => {
+  const { dispatchStopReason } = require('../services/review-yearly-ask');
+  const seq = { id: 's1', customer_id: 'c' };
+  const gates = require('../config/feature-gates');
+  afterEach(() => { delete process.env.GATE_REVIEW_YEARLY_ASK; });
+
+  test('gate off retires the row without reading the tap', async () => {
+    const ClickGuard = { tapPauseActive: jest.fn() };
+    expect(await dispatchStopReason(seq, { ClickGuard })).toBe('yearly_gate_off');
+    expect(ClickGuard.tapPauseActive).not.toHaveBeenCalled();
+    expect(gates.reviewYearlyAskLive()).toBe(false);
+  });
+  test.each([
+    [async () => true, 'tap_pause'],
+    [async () => false, null],
+    [async () => { throw new Error('x'); }, 'lookup_failed'],
+  ])('gate on, tap lookup %#', async (tapPauseActive, expected) => {
+    process.env.GATE_REVIEW_YEARLY_ASK = 'true';
+    expect(await dispatchStopReason(seq, { ClickGuard: { tapPauseActive } })).toBe(expected);
   });
 });

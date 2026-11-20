@@ -181,6 +181,18 @@ async function enrollPicked(picked, { now, services, summary }) {
   }
 }
 
+// Checked by the cadence runner at dispatch for a started_by 'yearly' sequence: the retire
+// reason ('yearly_gate_off', 'tap_pause'), 'lookup_failed' (defer, send nothing) or null.
+async function dispatchStopReason(seq, { ClickGuard = require('./review-click-guard') } = {}) {
+  if (!gateLive()) return 'yearly_gate_off';
+  try {
+    return (await ClickGuard.tapPauseActive(seq.customer_id)) ? 'tap_pause' : null;
+  } catch (err) {
+    logger.warn(`[review-yearly-ask] tap-pause lookup failed (sequenceId=${seq.id}): ${err.message}`);
+    return 'lookup_failed';
+  }
+}
+
 /**
  * One daily pass. Returns the summary it logs. Gate off (or review sequences off, where an
  * enrolled ask would never send): counts only, no writes.
@@ -207,7 +219,9 @@ async function runYearlyReviewAsk({ now = new Date(), deps = {} } = {}) {
     rows = await loadCustomers(todayYmd);
   } catch (err) {
     logger.error(`[review-yearly-ask] candidate read failed, nothing sent: ${err.message}`);
-    return { ...summary, error: 'candidate_read_failed' };
+    // Thrown, not returned: inside runExclusive a returned summary records a successful run
+    // even though nobody was evaluated.
+    throw Object.assign(new Error(`review-yearly-ask candidate read failed: ${err.message}`), { cause: err });
   }
   summary.tenured = rows.length;
 
@@ -244,6 +258,7 @@ module.exports = {
   runYearlyReviewAsk,
   anniversaryWindow,
   exclusionReason,
+  dispatchStopReason,
   YEARLY_STARTED_BY,
   ANNIVERSARY_WINDOW_DAYS,
   MAX_ENROLL_PER_RUN,

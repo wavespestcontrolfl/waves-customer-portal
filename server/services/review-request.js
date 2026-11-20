@@ -4729,6 +4729,9 @@ const ReviewService = {
     // the channel, so an unavailable channel is a refusal, never a swap to
     // the other one. Default false keeps the cadence's cross-channel fallback.
     strictChannel = false,
+    // The yearly review ask (started_by 'yearly') goes by text only: no email leg, no swap to
+    // email when the phone is missing, suppressed or opted out. Those end the cadence instead.
+    smsOnly = false,
   }) {
     if (!customer || !customer.id) return { ok: false, reason: "no_customer", terminal: true };
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
@@ -4900,9 +4903,10 @@ const ReviewService = {
     // step working. 'both' / unset allow either with fallback.
     const prefChannel = prefs && prefs.review_request_channel;
     const allowSms = canSms && (noLinkSend || prefChannel !== "email");
-    const allowEmail = canEmail && !noLinkSend;
+    const allowEmail = canEmail && !noLinkSend && !smsOnly;
     let intended = noLinkSend ? "sms" : channel === "email" ? "email" : "sms";
     if (!noLinkSend && prefChannel === "email") intended = "email";
+    if (smsOnly) intended = "sms";
 
     // The intended channel when allowed; else the other one unless the
     // operator chose the channel (strictChannel — Quick Links Email-only,
@@ -7250,6 +7254,14 @@ const ReviewService = {
 
     if (manualAskRecent) return stop("manual_ask_recent");
 
+    // Yearly review ask: its gate is a live kill (off retires the row) and the 180-day tap pause
+    // applies at dispatch too (services/review-yearly-ask.js dispatchStopReason).
+    if (seq.started_by === "yearly") {
+      const yearlyStop = await require("./review-yearly-ask").dispatchStopReason(seq);
+      if (yearlyStop === "lookup_failed") askLookupFailed = true;
+      else if (yearlyStop) return stop(yearlyStop);
+    }
+
     // Tap pause (owner 2026-11-02, D3): an automatic cadence stands down when the customer
     // tapped a tracked review link in the last 180 days (a tap on this cadence stopped it above). A
     // cadence a person started, or one the customer asked for (its own stamp or its visit record),
@@ -7351,6 +7363,7 @@ const ReviewService = {
         sequenceStep: seq.current_step,
         triggeredBy: "sequence",
         manageRetryVia: "sequence",
+        smsOnly: seq.started_by === "yearly",
       });
     } catch (err) {
       // The drafted touch repeats an earlier one: held, never reworded (owner
