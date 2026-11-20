@@ -9,42 +9,73 @@ const constants = require('../services/pricing-engine/constants');
 const { calculateInventoryCost } = require('../services/inventory-cost');
 const { costLineFromUsage } = require('../services/product-costing');
 
-// The inventory price handler's recalculation (routes/admin-inventory recalcBestPrice), which Step P runs after it corrects the
-// SiteOne row. Simulated on the fake rows, all 1 gal packs: the cheapest active, approved or auto-approved, unexpired row wins,
-// scaled to the catalog size, with its flags and status; with none, the catalog has no valid price (best_price null, needs_pricing,
-// 'no_valid_price'). The real one needs Postgres.
-jest.mock('../routes/admin-inventory', () => ({ recalcBestPrice: jest.fn() }));
+// The inventory route module itself: its recalculation (routes/admin-inventory recalcBestPrice, which Step P runs after it corrects
+// the SiteOne row) and the per-oz price it ranks a quote by, run on the fake rows below (pre-push audit 25: a test model of the
+// recalculation had no branch for a catalog price it keeps). Wrapped so a test can count the calls.
+jest.mock('../routes/admin-inventory', () => {
+  const actual = jest.requireActual('../routes/admin-inventory');
+  return { recalcBestPrice: jest.fn(actual.recalcBestPrice), vendorRowPricePerOz: actual.vendorRowPricePerOz };
+});
 const inventory = require('../routes/admin-inventory');
-async function simulatedRecalc(productId, knex) {
-  const product = await knex('products_catalog').where({ id: productId }).first();
-  const now = Date.now();
-  const eligible = (await knex('vendor_pricing').where({ product_id: productId })).filter((v) => v.is_active === true
-    && ['approved', 'auto_approved'].includes(v.approval_status) && !(v.expires_at && new Date(v.expires_at).getTime() <= now));
-  const [best] = eligible.sort((a, b) => Number(a.price) - Number(b.price));
-  if (!best) {
-    await knex('products_catalog').where({ id: productId }).update({
-      best_price: null, best_vendor: null, best_vendor_pricing_id: null, best_price_amount_cached: null, best_price_updated_at: new Date(),
-      best_price_status: 'no_valid_price', needs_pricing: true,
-    });
-    await knex('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
-    return;
-  }
-  await knex('products_catalog').where({ id: productId }).update({
-    best_price: Math.round((Number(best.price) / 128) * Number(product.unit_size_oz) * 100) / 100, best_price_amount_cached: Number(best.price),
-    best_vendor_pricing_id: best.id, best_price_updated_at: new Date(), best_price_status: 'current', needs_pricing: false,
-  });
-  await knex('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
-  await knex('vendor_pricing').where({ id: best.id }).update({ is_best_price: true });
-}
+const { recalcBestPrice: realRecalc } = jest.requireActual('../routes/admin-inventory');
 
+// A knex stand-in over plain rows, for the query shapes the migration and the real recalculation use (vendor-pricing-eligibility's
+// predicate, the vendors join and its select); any other shape throws, so a test never passes on a query the stand-in ignored.
+const ELIGIBLE_PRICE_SQL = 'COALESCE(vendor_pricing.price_amount, vendor_pricing.price) > 0';
+const bare = (column) => String(column).replace(/^\w+\./, '');
+const later = (column, op, value) => {
+  if (op !== '>') throw new Error(`fakeKnex: unsupported operator ${op}`);
+  return (r) => r[bare(column)] != null && new Date(r[bare(column)]).getTime() > new Date(value).getTime();
+};
 function fakeKnex(db) {
   let idSeq = 1000;
   const knex = (table) => {
-    let cond = {};
-    const match = (r) => Object.entries(cond).every(([k, v]) => r[k] === v);
-    const rows = () => (db[table] || []).filter(match).map((r) => ({ ...r }));
+    const tests = [];
+    const joins = [];
+    const aliases = [];
+    const match = (r) => tests.every((test) => test(r));
+    const rows = () => (db[table] || []).filter(match).flatMap((r) => {
+      const row = { ...r };
+      for (const join of joins) {
+        const partner = (db[join.table] || []).find((other) => other[join.on] === r[join.key]);
+        if (!partner) return []; // an inner join
+        for (const alias of aliases.filter((a) => a.table === join.table)) row[alias.as] = partner[alias.column];
+      }
+      return [row];
+    });
     const q = {
-      where(c) { cond = { ...cond, ...c }; return q; },
+      where(a, b, c) {
+        if (typeof a === 'function') {
+          const group = [];
+          const sub = {
+            whereNull(column) { group.push((r) => r[bare(column)] == null); return sub; },
+            orWhere(column, op, value) { group.push(later(column, op, value)); return sub; },
+          };
+          a.call(sub);
+          tests.push((r) => group.some((test) => test(r)));
+        } else if (typeof a === 'object') {
+          tests.push((r) => Object.entries(a).every(([k, v]) => r[bare(k)] === v));
+        } else if (c === undefined) {
+          tests.push((r) => r[bare(a)] === b);
+        } else {
+          tests.push(later(a, b, c));
+        }
+        return q;
+      },
+      whereIn(column, values) { tests.push((r) => values.includes(r[bare(column)])); return q; },
+      whereRaw(sql) {
+        if (sql !== ELIGIBLE_PRICE_SQL) throw new Error(`fakeKnex: unsupported whereRaw ${sql}`);
+        tests.push((r) => Number(r.price_amount ?? r.price) > 0);
+        return q;
+      },
+      join(other, left, right) { joins.push({ table: other, key: bare(left), on: bare(right) }); return q; },
+      select(...columns) {
+        for (const column of columns.flat()) {
+          const alias = /^(\w+)\.(\w+) as (\w+)$/i.exec(column);
+          if (alias) aliases.push({ table: alias[1], column: alias[2], as: alias[3] });
+        }
+        return q;
+      },
       forUpdate() { return q; },
       first: async () => rows()[0],
       update: async (patch) => { db[table] = db[table].map((r) => (match(r) ? { ...r, ...patch } : r)); },
@@ -186,7 +217,7 @@ beforeEach(() => {
   warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'info').mockImplementation(() => {});
   inventory.recalcBestPrice.mockReset();
-  inventory.recalcBestPrice.mockImplementation(simulatedRecalc);
+  inventory.recalcBestPrice.mockImplementation(realRecalc);
 });
 // The recalculation ran for p1, on the migration's own connection (its transaction).
 const expectRecalculated = (knex, times = 1) => {
@@ -392,7 +423,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       const pricedAtRecalc = [];
       inventory.recalcBestPrice.mockImplementation(async (id, conn) => {
         pricedAtRecalc.push((await conn('vendor_pricing').where({ id: 'v1' }).first()).price);
-        return simulatedRecalc(id, conn);
+        return realRecalc(id, conn);
       });
       await migration.up(knex);
       expect(db.vendor_pricing.map((v) => v.price)).toEqual([30.9, '70.00']);
@@ -414,29 +445,44 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(inventory.recalcBestPrice).toHaveBeenCalledTimes(1);
     });
 
-    // The other quote still offers the stale $58.42: it keeps its price and expires, so no later recalculation picks it (audit 24).
-    test('the same item number at another vendor too: only the SiteOne row is corrected; the other stale quote keeps its price and expires', async () => {
+    // Another vendor listing the same item number is its own offer (pre-push audit 25): only the SiteOne row is corrected, and the
+    // other quote stays current. The corrected $30.90 is cheaper per oz, so the recalculation picks it.
+    test('the same item number at another vendor too: only the SiteOne row is corrected; the other vendor\'s quote stays', async () => {
       const elsewhere = vendorRow({ id: 'v2', vendor_id: 'ven2', is_best_price: false });
       const db = world({ vendors: [vendorRow(), elsewhere] });
       const knex = fakeKnex(db);
       await migration.up(knex);
       expect(db.vendor_pricing.map((v) => v.price)).toEqual([30.9, '58.42']);
-      expect({ ...db.vendor_pricing[1], is_best_price: false }).toEqual({ ...elsewhere, expires_at: expect.any(Date) });
-      expectExpired(db.vendor_pricing[1]);
-      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(STALE_WARNING);
+      expect(db.vendor_pricing[1]).toEqual(elsewhere);
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).not.toMatch(STALE_WARNING);
       const price = db.pricing_config_audit.find((r) => r.config_key === migration.CATALOG_AUDIT_KEY);
-      expect(JSON.parse(price.old_value).stale_quotes).toEqual([{ vendor_pricing_id: 'v2', columns: expect.objectContaining({ expires_at: null }) }]);
-      expect(JSON.parse(db.pricing_changelog[0].after_value).bifenthrin).toMatch(/still at the stale \$58\.42 is expired/);
+      expect(JSON.parse(price.old_value).stale_quotes).toEqual([]);
+      expect(JSON.parse(db.pricing_changelog[0].after_value).bifenthrin).not.toMatch(/is expired/);
       expect(db.price_history).toHaveLength(1);
       expect(db.price_history[0]).toMatchObject({ vendor_id: 'ven1' });
       expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
       bothRowsRewritten(db);
-      // down() restores both quotes as up() saw them (the other one open again), then recalculates.
       await migration.down(knex);
       expect(db.vendor_pricing[0]).toMatchObject({ price: '58.42', price_amount: '58.4200' });
-      expect(db.vendor_pricing[1]).toMatchObject({ price: '58.42', expires_at: null });
+      expect(db.vendor_pricing[1]).toMatchObject({ price: '58.42' });
+      expect(db.vendor_pricing[1].expires_at).toBeUndefined();
       expect(db.price_history).toEqual([]);
       expect(db.pricing_config_audit).toEqual([]);
+    });
+
+    // Pre-push audit 25: another vendor's $58.42 for 2.5 gal is $23.37 a gallon, a real offer below the corrected $30.90. It stays
+    // current, and the recalculation picks it by its own per-oz price.
+    test('another vendor\'s $58.42 for 2.5 gal ($23.37 a gallon) is its own offer: it stays, and the catalog takes it', async () => {
+      const bulk = vendorRow({
+        id: 'v2', vendor_id: 'ven9', vendor_sku: 'BULK25', quantity: '2.5 gal', landed_cost: '58.42', price_per_oz: '0.1826',
+        normalized_unit_price: '0.1826', landed_unit_price: '0.1826', is_best_price: false,
+      });
+      const db = world({ vendors: [vendorRow(), bulk] });
+      await migration.up(fakeKnex(db));
+      expect(db.vendor_pricing[0]).toMatchObject({ price: 30.9, price_amount: 30.9 });
+      expect(db.vendor_pricing[1]).toEqual({ ...bulk, is_best_price: true });
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).not.toMatch(STALE_WARNING);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 23.37, best_vendor_pricing_id: 'v2', needs_pricing: false, best_price_status: 'current' });
     });
 
     // p2 has no quote of its own, so its $58.42 is no current price: the recalculation alone leaves it with none.
@@ -513,28 +559,33 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(rowOf(db, 'onetime_preslab')).toEqual({ ...preslabRow(), talstar_p: PROD_PRESLAB_PRODUCT, bifen_it: edited });
     });
 
-    // Step P leaves each of these prices alone. An eligible quote still offering the stale $58.42 (any vendor, any pack) expires and
-    // the recalculation runs; an ineligible one is already out of every recalculation, and the recalculation still runs for the catalog
-    // that holds its $58.42. Either way the catalog ends with no current price, and no price, history row or snapshot is written.
+    // Step P leaves each of these prices alone (pre-push audits 24 and 25):
+    // - expired: an eligible SiteOne D00001542 quote the recalculation would still read as $58.42 a gallon expires, then the
+    //   recalculation runs and finds no current quote;
+    // - unpriced: a quote out of the recalculation already (ineligible, or its vendor not on file) stays as it is, and the
+    //   recalculation still runs for the catalog holding its $58.42;
+    // - offer: another SKU, vendor or price for the pack is an independent offer; it stays current, and the catalog follows it at
+    //   the price the recalculation reads (owner 2026-07-10).
+    // No price, history row or snapshot is written either way.
     test.each([
-      ['a different SKU', { vendors: [vendorRow({ vendor_sku: 'OTHER' })] }, true],
-      ['the same item number at another vendor', { vendors: [vendorRow({ vendor_id: 'ven2' })] }, true],
-      ['a vendor row whose vendor is not on file', { vendors: [vendorRow({ vendor_id: 'gone' })] }, true],
-      ['an inactive vendor row', { vendors: [vendorRow({ is_active: false })] }, false],
-      ['an unapproved vendor row', { vendors: [vendorRow({ approval_status: 'pending' })] }, false],
-      ['an expired vendor quote', { vendors: [vendorRow({ expires_at: new Date('2026-11-01T00:00:00.000Z') })] }, false],
-      ['an expired vendor quote (string date)', { vendors: [vendorRow({ expires_at: '2026-11-01T00:00:00.000Z' })] }, false],
-      ['an auto-approved vendor row (eligible, but not the approved row Step P corrects)', { vendors: [vendorRow({ approval_status: 'auto_approved' })] }, true],
-      ['a vendor row whose price_amount an admin changed', { vendors: [vendorRow({ price_amount: '32.0000' })] }, true],
-      ['a vendor pack that is not 1 gal', { vendors: [vendorRow({ quantity: '2.5 gal' })] }, true],
-      ['a vendor row not priced per oz', { vendors: [vendorRow({ unit_normalized: 'count' })] }, true],
-      ['a vendor row with shipping (the landed cost would need it)', { vendors: [vendorRow({ shipping_cost: '5.00' })] }, true],
-      ['a vendor row with tax (the landed cost would need it)', { vendors: [vendorRow({ tax_rate: '0.07' })] }, true],
-      ['a vendor row with a shipping estimate', { vendors: [vendorRow({ shipping_estimate: '5.00' })] }, true],
+      ['a different SKU', { vendors: [vendorRow({ vendor_sku: 'OTHER' })] }, 'offer', 58.42],
+      ['the same item number at another vendor', { vendors: [vendorRow({ vendor_id: 'ven2' })] }, 'offer', 58.42],
+      ['a vendor row whose price_amount an admin changed', { vendors: [vendorRow({ price_amount: '32.0000' })] }, 'offer', 32],
+      ['a vendor pack that is not 1 gal', { vendors: [vendorRow({ quantity: '2.5 gal' })] }, 'offer', 23.37],
+      ['a vendor row whose vendor is not on file', { vendors: [vendorRow({ vendor_id: 'gone' })] }, 'unpriced', null],
+      ['an inactive vendor row', { vendors: [vendorRow({ is_active: false })] }, 'unpriced', null],
+      ['an unapproved vendor row', { vendors: [vendorRow({ approval_status: 'pending' })] }, 'unpriced', null],
+      ['an expired vendor quote', { vendors: [vendorRow({ expires_at: new Date('2026-11-01T00:00:00.000Z') })] }, 'unpriced', null],
+      ['an expired vendor quote (string date)', { vendors: [vendorRow({ expires_at: '2026-11-01T00:00:00.000Z' })] }, 'unpriced', null],
+      ['an auto-approved vendor row (eligible, but not the approved row Step P corrects)', { vendors: [vendorRow({ approval_status: 'auto_approved' })] }, 'expired', null],
+      ['a vendor row not priced per oz', { vendors: [vendorRow({ unit_normalized: 'count' })] }, 'expired', null],
+      ['a vendor row with shipping (the landed cost would need it)', { vendors: [vendorRow({ shipping_cost: '5.00' })] }, 'expired', null],
+      ['a vendor row with tax (the landed cost would need it)', { vendors: [vendorRow({ tax_rate: '0.07' })] }, 'expired', null],
+      ['a vendor row with a shipping estimate', { vendors: [vendorRow({ shipping_estimate: '5.00' })] }, 'expired', null],
       // The price sync can store freight in landed_unit_price with no shipping column (pre-push audit 11).
-      ['a vendor row whose landed unit price holds freight', { vendors: [vendorRow({ landed_unit_price: '0.5000' })] }, true],
-      ['a vendor row whose landed cost is not its price', { vendors: [vendorRow({ landed_cost: '63.42' })] }, true],
-    ])('%s: the price is left alone with a warning, and the catalog keeps no stale price', async (_name, overrides, expired) => {
+      ['a vendor row whose landed unit price holds freight', { vendors: [vendorRow({ landed_unit_price: '0.5000' })] }, 'expired', null],
+      ['a vendor row whose landed cost is not its price', { vendors: [vendorRow({ landed_cost: '63.42' })] }, 'expired', null],
+    ])('%s: the price is left alone with a warning (%s)', async (_name, overrides, outcome, offerPrice) => {
       const db = world(overrides);
       const prices = () => JSON.stringify([db.vendor_pricing.map(({ expires_at: _e, is_best_price: _b, ...quote }) => quote), db.price_history]);
       const before = prices();
@@ -545,8 +596,12 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(warnings).toMatch(/price left alone/);
       expect(auditKeys(db)).not.toContain('inventory:lesco_crosscheck_plus_price');
       expectRecalculated(knex);
-      expectUnpriced(db.products_catalog[0]);
-      if (expired) {
+      if (outcome === 'offer') {
+        expect(db.products_catalog[0]).toMatchObject({ best_price: offerPrice, best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
+      } else {
+        expectUnpriced(db.products_catalog[0]);
+      }
+      if (outcome === 'expired') {
         expect(warnings).toMatch(STALE_WARNING);
         expectExpired(db.vendor_pricing[0]);
         expect(auditKeys(db)).toContain('inventory:lesco_crosscheck_plus_stale');
@@ -561,6 +616,33 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       await migration.down(knex);
       expect(prices()).toBe(before);
       expect(db.vendor_pricing[0].expires_at ?? null).toEqual(overrides.vendors[0].expires_at ?? null);
+      expect(db.pricing_config_audit).toEqual([]);
+    });
+
+    // Pre-push audit 25: with no current quote the recalculation can scale to the catalog (a pack it cannot read, with no per-oz
+    // figure), it keeps the catalog price, marked stale, and job costing reads best_price as it stands. So a catalog it leaves on the
+    // stale $58.42 gets the recalculation's own no-price state; down() puts it back as up() saw it.
+    const UNREAD_PACK = {
+      id: 'v3', product_id: 'p1', vendor_id: 'ven9', vendor_sku: 'CASE6', price: '40.00', price_amount: '40.0000', quantity: 'case',
+      unit_normalized: null, normalized_unit_price: null, price_per_oz: null, landed_unit_price: null, is_active: true, approval_status: 'approved',
+      is_best_price: false,
+    };
+    test.each([
+      ['the stale quote expires', [vendorRow({ shipping_cost: '5.00' }), UNREAD_PACK], /is expired/],
+      ['no quote offers the stale price', [vendorRow({ is_active: false }), UNREAD_PACK], /is cleared/],
+    ])('%s and the only current quote has a pack the inventory cannot read: the stale catalog price is cleared', async (_name, vendors, changelog) => {
+      const db = world({ vendors });
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(db.vendor_pricing[1]).toEqual(UNREAD_PACK); // its own offer: never expired
+      expectUnpriced(db.products_catalog[0]);
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/kept the stale \$58\.42; the catalog price is cleared \(needs pricing\)/);
+      const own = db.pricing_config_audit.find((r) => r.config_key === migration.STALE_AUDIT_KEY);
+      expect(JSON.parse(own.new_value)).toMatchObject({ catalog_cleared: true, catalog_recalculated: { best_price: null } });
+      expect(JSON.parse(db.pricing_changelog[0].after_value).bifenthrin).toMatch(changelog);
+      await migration.down(knex);
+      expect(db.products_catalog[0]).toMatchObject({ best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
+      expect(Number(db.products_catalog[0].best_price)).toBe(58.42);
       expect(db.pricing_config_audit).toEqual([]);
     });
 
@@ -755,13 +837,13 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       await knex('vendor_pricing').where({ id: 'v2' }).update({
         price: '64.00', price_amount: '64.0000', landed_cost: '64.00', price_per_oz: '0.5', normalized_unit_price: '0.5', landed_unit_price: '0.5',
       });
-      await simulatedRecalc('p1', knex);
+      await realRecalc('p1', knex);
       expectExpired(db.vendor_pricing[0]);
       expect(db.products_catalog[0]).toMatchObject({ best_price: 64, best_vendor_pricing_id: 'v2', needs_pricing: false });
       expect(await linkedQuotes(db)).toEqual([743, 743]); // $64.00 is 2.07x: the config's $30.90 prices the slab
       // The expiry is what holds it: open again, the same recalculation picks $58.42 and the slab is $1,023.
       db.vendor_pricing[0] = { ...db.vendor_pricing[0], expires_at: null };
-      await simulatedRecalc('p1', knex);
+      await realRecalc('p1', knex);
       expect(db.products_catalog[0]).toMatchObject({ best_price: 58.42, best_vendor_pricing_id: 'v1' });
       expect(await linkedQuotes(db)).toEqual([1023, 1023]);
     });
@@ -777,7 +859,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(await linkedQuotes(db)).toEqual([743, 743]);
       // Open again, the recalculation writes $43.82 on the 96 oz row and the link takes it.
       db.vendor_pricing[0] = { ...db.vendor_pricing[0], expires_at: null };
-      await simulatedRecalc('p1', knex);
+      await realRecalc('p1', knex);
       expect(db.products_catalog[0]).toMatchObject({ best_price: 43.82, needs_pricing: false });
       expect((await linkedQuotes(db))[0]).toBeGreaterThan(993);
     });
@@ -798,11 +880,11 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expectExpired(db.vendor_pricing[0]);
       expectUnpriced(db.products_catalog[0]);
       expect(await linkedQuotes(db)).toEqual(quotes);
-      await simulatedRecalc('p1', knex);
+      await realRecalc('p1', knex);
       expect(await linkedQuotes(db)).toEqual(quotes);
       // The expiry is what keeps it out: open again, the recalculation picks it, and every shape links to the stale price.
       db.vendor_pricing[0] = { ...db.vendor_pricing[0], expires_at: null };
-      await simulatedRecalc('p1', knex);
+      await realRecalc('p1', knex);
       expect(await linkedQuotes(db)).toEqual([1023, 1023]);
     });
 
