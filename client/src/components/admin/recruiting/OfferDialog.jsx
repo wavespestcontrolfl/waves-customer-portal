@@ -218,6 +218,8 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
   const fields = { ...base, ...edits };
   const { startError, fieldsOk } = fieldChecks(fields);
   const dirty = !pinned || FIELD_KEYS.some((k) => fields[k] !== base[k]);
+  // Send needs the letter preview of this exact draft on screen: what the owner reads is what goes out.
+  const sendReady = data.viewer?.ownerActions === true && Boolean(pinned?.draftHash) && Boolean(letterFor(data, pinned)) && !dirty && fieldsOk && data.termsIssued && !locked;
   return {
     base,
     fields,
@@ -226,8 +228,8 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
     startError,
     fieldsOk,
     dirty,
-    // Send needs the letter preview of this exact draft on screen: what the owner reads is what goes out.
-    canSend: data.viewer?.ownerActions === true && Boolean(pinned?.draftHash) && Boolean(letterFor(data, pinned)) && !dirty && fieldsOk && data.termsIssued && !busy && !locked,
+    sendReady,
+    canSend: sendReady && !busy,
   };
 }
 
@@ -301,7 +303,12 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   const { newer, changed, locked } = formLock({ data, draftId, pinned, needRead, conflict });
   // A refused write's sentence shows once, in the read-only notice (after the re-read).
   const notice = conflict ? error : null;
-  const { base, fields, firstName, sendTo, startError, fieldsOk, dirty, canSend } = formView({ edits, pinned, data, contact, busy, locked });
+  const { base, fields, firstName, sendTo, startError, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
+  // A read that changes the draft, or locks the form, while the Send question is open closes
+  // the question: Send carries only the hash of the draft whose letter is on screen.
+  useEffect(() => {
+    if (confirming && !busy && !sendReady) setConfirming(false);
+  }, [confirming, busy, sendReady]);
   const ownerActions = data.viewer?.ownerActions === true;
   const sends = sendChannels(contact);
   const letter = letterFor(data, pinned);
@@ -475,7 +482,8 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
           ))}
         </DialogBody>
         <DialogFooter>
-          <Button size="sm" onClick={onClose}>
+          {/* Off until the read after the send lands, so the card behind never shows the sent draft as open. */}
+          <Button size="sm" onClick={onClose} disabled={busy}>
             Close
           </Button>
         </DialogFooter>
@@ -535,7 +543,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
           setConfirming(false);
           setError(null);
         }}
-        onConfirm={send}
+        onConfirm={() => (sendReady ? send() : setConfirming(false))}
       />
     </>
   );

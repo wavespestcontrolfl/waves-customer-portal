@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React, { useState } from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import OfferDialog from "./OfferDialog";
 import { saveOfferDraft, sendOffer } from "./offerApi";
@@ -9,7 +9,8 @@ import { stepDateFor } from "./offerLogic";
 
 vi.mock("./offerApi", () => ({ saveOfferDraft: vi.fn(), sendOffer: vi.fn() }));
 
-const START = "2031-01-06"; // a Monday years ahead, so the start date stays in the future
+const NOW = new Date("2026-11-19T15:00:00Z"); // the clock is frozen here (see beforeEach)
+const START = "2027-01-04"; // a Monday after NOW
 const STEP = stepDateFor(START);
 const CONTACT = { name: "Jordan Rivera", phone: "+19415550142", email: "jordan.rivera@example.com" };
 
@@ -53,10 +54,12 @@ function panel(current) {
 const offersOff = () => Object.assign(new Error("Not found"), { status: 404, body: { enabled: false } });
 
 // Holds the panel read as the offer flow does: a read that works replaces it (a read with offers off closes the
-// form), and a failed read keeps the data on screen and answers null.
-function Harness({ initial, reads }) {
+// form), and a failed read keeps the data on screen and answers null. `outside.read(next)` is a read the form did
+// not ask for (another screen's write, a stage change).
+function Harness({ initial, reads, onSent = async () => {}, outside = {} }) {
   const [data, setData] = useState(initial);
   const [open, setOpen] = useState(true);
+  outside.read = setData;
   const onChanged = async () => {
     const next = reads.shift();
     if (!next) return null;
@@ -73,7 +76,7 @@ function Harness({ initial, reads }) {
       draft={null}
       onClose={() => setOpen(false)}
       onChanged={onChanged}
-      onSent={async () => {}}
+      onSent={onSent}
     />
   );
 }
@@ -81,12 +84,15 @@ function Harness({ initial, reads }) {
 const rate = () => screen.getByLabelText("Hourly rate ($)");
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
   saveOfferDraft.mockReset();
   sendOffer.mockReset();
 });
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   document.body.style.overflow = "";
 });
 
@@ -147,6 +153,35 @@ describe("OfferDialog", () => {
     expect(await screen.findByText(/The offer could not be loaded after your last change/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
     expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
+    expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1");
+  });
+
+  // Send carries the hash of the draft whose letter is on screen, so a read that changes the draft while the Send
+  // question is open closes the question; the form shows the draft as changed.
+  it("closes the Send question when a read changes the draft while it is open, and sends nothing", async () => {
+    const outside = {};
+    render(<Harness initial={panel(draftRow())} reads={[]} outside={outside} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    expect(await screen.findByRole("dialog", { name: "Send offer" })).toBeInTheDocument();
+    act(() => outside.read(panel(draftRow({ hourlyRate: 26, draftHash: "hash-3" }))));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Send offer" })).toBeNull());
+    expect(screen.getByText("This draft changed. Review the new version.")).toBeInTheDocument();
+    expect(sendOffer).not.toHaveBeenCalled();
+  });
+
+  // The send's result shows at once, but the card behind still shows the draft until the read after the send lands.
+  it("keeps Close off until the read after a send lands", async () => {
+    let landed;
+    const onSent = vi.fn(() => new Promise((resolve) => { landed = resolve; }));
+    sendOffer.mockResolvedValueOnce({ comms: {}, offer: { status: "sent" } });
+    render(<Harness initial={panel(draftRow())} reads={[]} onSent={onSent} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    const ask = await screen.findByRole("dialog", { name: "Send offer" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
+    await waitFor(() => expect(onSent).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("button", { name: "Close" })).toBeDisabled();
+    await act(async () => landed());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Close" })).toBeEnabled());
     expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1");
   });
 
