@@ -191,6 +191,14 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(await svc.raiseVisits([])).toBe(0);
   });
 
+  test('an uncited callback stored first holds its visit number when a later file lists the visit as a cited first visit', async () => {
+    await svc.upsertRecords([rec(40, { event_date: '2026-11-15', detail: { disposition: 'Warning Issued', violation35: 0, visitNumber: 2 } })]);
+    await svc.upsertRecords([rec(40, { event_date: '2026-11-15', detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 1 } })]);
+    const [row] = await rows().where({ source_key: key(40) });
+    expect([row.detail.violation35, row.detail.visitNumber]).toEqual([1, 2]);
+    expect(await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100, keys: [key(40)] })).toEqual([]);
+  });
+
   test('saveReport does not overwrite an answer already written', async () => {
     await svc.upsertRecords([rec(3)]);
     const [row] = await rows().where({ source_key: key(3) });

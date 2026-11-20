@@ -140,7 +140,9 @@ describe('parseInspectionRows', () => {
 
   test('every copy of a visit, cited or not, raises its visit number: a callback listed twice is never a first visit', () => {
     const withVisit = (line, number) => line.replace('"34208","1","1","Food"', `"34208","1","${number}","Food"`);
-    const visits = (lines) => svc.parseInspectionRows(parseDbprCsv(inspCsv(lines))).map((r) => [r.source_key, r.detail.visitNumber]);
+    // The cited record's visit number (an uncited callback copy is kept too, as its own record: below).
+    const visits = (lines) => svc.parseInspectionRows(parseDbprCsv(inspCsv(lines)))
+      .filter((r) => r.detail.violation35 > 0).map((r) => [r.source_key, r.detail.visitNumber]);
     const cited = inspRow({ visit: '9020' });
     const uncited = (number, options = {}) => withVisit(inspRow({ visit: '9020', v35: 0, ...options }), number);
     expect(uncited('2')).toContain('"34208","1","2","Food"');
@@ -154,6 +156,11 @@ describe('parseInspectionRows', () => {
     expect(visits([withVisit(cited, ''), uncited('1')])).toEqual([['9020', 1]]);
     expect(visits([withVisit(cited, ''), uncited('')])).toEqual([['9020', null]]);
     expect(visits([cited, withVisit(inspRow({ visit: '9021', v35: 0 }), '2')])).toEqual([['9020', 1]]);
+    // An uncited later visit is kept as its own record, so its visit number holds in the store; an uncited first
+    // visit is not kept.
+    const kept = (lines) => svc.parseInspectionRows(parseDbprCsv(inspCsv(lines)))
+      .map((r) => [r.source_key, r.detail.violation35, r.detail.visitNumber]);
+    expect(kept([uncited('2'), uncited('1'), withVisit(inspRow({ visit: '9022', v35: 0 }), '1')])).toEqual([['9020', 0, 2]]);
   });
 });
 
@@ -312,8 +319,9 @@ describe('syncRestaurantProspects', () => {
     }
   });
 
-  test('a visit the file names as a later visit only by a copy it keeps no record of still goes to the store to raise', async () => {
-    // An uncited callback copy, and one outside the area (a visit id names one visit statewide): no record, a raise.
+  test('an uncited callback is kept as a row; a later visit outside the area still goes to the store to raise', async () => {
+    // An uncited callback copy is kept (visit 2, no citation); one outside the area (a visit id names one visit
+    // statewide) has no record and is raised.
     const callback = (line) => line.replace('"34208","1","1","Food"', '"34208","1","2","Food"');
     const away = callback(inspRow({ visit: '9004', v35: 0, county: 'Hillsborough' }));
     expect(away).toContain('"34208","1","2","Food"');
@@ -321,7 +329,8 @@ describe('syncRestaurantProspects', () => {
     const lines = [callback(inspRow({ visit: '9001', v35: 0 })), away, inspRow({ visit: '9003' })];
     const result = await sync({ fetchText: makeFetch({ '7fdinspi.csv': () => inspCsv(lines) }), store });
     expect(result.failures).toBe(0);
-    expect(upserts.filter((r) => r.kind === 'inspection').map((r) => r.source_key)).toEqual(['9003']);
+    expect(upserts.filter((r) => r.kind === 'inspection').map((r) => [r.source_key, r.detail.violation35, r.detail.visitNumber]))
+      .toEqual([['9001', 0, 2], ['9003', 1, 1]]);
     expect(raised).toEqual([['9001', 2], ['9004', 2]]);
     // A file with no later visit makes no raise call.
     store = makeStore();

@@ -3,7 +3,8 @@
  * 2026-11-19). Backend only: it fills `restaurant_prospects` and sends nothing to anyone, calls no AI.
  *
  *   7fdinspi.csv      district 7 inspections, current fiscal year. Kept: visits that cited violation 35 in
- *                     Manatee, Sarasota or Charlotte, outside Punta Gorda (not served; excluded-localities.js).
+ *                     Manatee, Sarasota or Charlotte, outside Punta Gorda (not served; excluded-localities.js),
+ *                     and later visits there (callbacks), cited or not, so their visit numbers hold.
  *   newfood.csv       new licenses statewide. Kept: the three counties, outside Punta Gorda.
  *   chgownr_food.csv  ownership changes statewide. Kept: the same places. In this file the values under
  *                     "Primary Phone Number" and "Mailing County Code" arrive swapped, so a phone is picked by shape.
@@ -150,6 +151,9 @@ function hasEveryColumn(row, kind) {
   return REQUIRED_COLUMNS[kind].every((column) => column in row);
 }
 
+// An inspection row is kept when it cited violation 35, or when it is a later visit (a callback), cited or not.
+const keepsInspection = (cited, visitNumber) => cited > 0 || visitNumber > 1;
+
 // Notes a copy's visit number against its visit: the highest one any copy gives wins.
 function noteHighest(highest, key, number) {
   if (key && number) highest.set(key, Math.max(highest.get(key) || 0, number));
@@ -162,7 +166,9 @@ function raiseVisit(record, visits) {
 }
 
 /**
- * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row cut short, or a row
+ * Inspection rows -> one record per visit in the three counties that cited violation 35 or is a later visit (a
+ * callback, cited or not: kept so its visit number holds in the store when another file lists the same visit as a
+ * first visit; nothing reads or lists it). A row cut short, or a row
  * in the area with a bad report id, date (or one after `today`, when given), violation-35 count or visit number, is
  * skipped and counted in counts.malformed; a row in the area that passes counts in counts.valid, cited or not.
  * Every copy of a visit whose visit number reads, in the area or not (a visit id names one visit statewide), cited
@@ -199,7 +205,7 @@ function parseInspectionRows(rows, counts = {}, today = null, visits = new Map()
       continue;
     }
     counts.valid += 1;
-    if (!(cited > 0)) continue;
+    if (!keepsInspection(cited, visitNumber)) continue;
     out.push({
       kind: 'inspection',
       source_key: sourceKey,
