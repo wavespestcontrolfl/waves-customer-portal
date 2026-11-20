@@ -82,8 +82,17 @@ async function eachDbprCsvRow(text, onRow) {
     let end = Math.min(at + DBPR_SLICE_CHARS, source.length);
     // Each write is encoded on its own: keep the two halves of a character outside the BMP together.
     if (end < source.length && /[\uDC00-\uDFFF]/.test(source[end])) end -= 1;
-    parser.write(source.slice(at, end));
+    const flowing = parser.write(source.slice(at, end));
     at = end;
+    // A slow async onRow holds the parser back: once the parser's buffer is full, the next slice waits until it
+    // drains, or closes on a failure. So the parser holds a few slices at most, never the whole file.
+    if (!flowing && !parser.destroyed) {
+      await new Promise((resolve) => {
+        const done = () => { parser.off('drain', done); parser.off('close', done); resolve(); };
+        parser.on('drain', done);
+        parser.on('close', done);
+      });
+    }
     await new Promise((resolve) => { setImmediate(resolve); });
   }
   if (!parser.destroyed) parser.end();

@@ -103,7 +103,40 @@ describe('eachDbprCsvRow', () => {
     await eachDbprCsvRow(big, async (row) => { await new Promise((resolve) => { setImmediate(resolve); }); seen.push(row); });
     expect(seen).toHaveLength(900);
     await expect(eachDbprCsvRow(big, async () => { throw new Error('store down'); })).rejects.toThrow('store down');
+    await expect(eachDbprCsvRow(big, () => { throw new Error('bad row'); })).rejects.toThrow('bad row');
   }, 30000);
+
+  test('a slow async onRow holds the slices back: the reader never runs far ahead of it', async () => {
+    const { Transform } = require('stream');
+    // About 14 slices. Each record ends with \r\n (the break inside the address is a bare \n), so a slice's
+    // \r\n count is the rows it completes.
+    const text = csv(Array.from({ length: 3000 }, (_, i) => ({
+      'Business Name': `TEST DINER ${i}`, 'Location Street Address': `${i} TEST ST\nSUITE ${i}`,
+    })));
+    let written = -1; // the header line is not a row
+    let seen = 0;
+    let mostAhead = 0;
+    const original = Transform.prototype.write;
+    const write = jest.spyOn(Transform.prototype, 'write').mockImplementation(function recordWrite(chunk, ...rest) {
+      if (this.constructor.name === 'Parser') {
+        written += (String(chunk).match(/\r\n/g) || []).length;
+        mostAhead = Math.max(mostAhead, written - seen);
+      }
+      return original.call(this, chunk, ...rest);
+    });
+    try {
+      await eachDbprCsvRow(text, async () => {
+        await new Promise((resolve) => { setImmediate(resolve); });
+        seen += 1;
+      });
+    } finally {
+      write.mockRestore();
+    }
+    expect(seen).toBe(3000);
+    // A slice is about 220 rows, and the parser takes one or two before the reader waits. Without that wait
+    // every slice goes in at once, nearly 3,000 rows ahead.
+    expect(mostAhead).toBeLessThan(1000);
+  }, 60000);
 
   test('an empty file has no header and no rows; an unclosed quote rejects', async () => {
     const rows = [];
