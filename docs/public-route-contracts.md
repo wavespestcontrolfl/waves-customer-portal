@@ -2133,7 +2133,9 @@ error reads "This account changed since this estimate was created — please go 
 for a current price.") and writes nothing. The same code, with "This estimate changed since it was
 created", refuses an estimate that has the one-time option or invoice billing on: the mint sets
 neither and staff can no longer turn either on, so such a row was changed by staff before that rule.
-The re-check judges the row the accept read, before any lock or read of its own. A re-check that cannot read its state, or that finds the
+The accept answers this refusal before its slot and payment checks, so an invoice-mode quote, whose
+page sends no slot, gets it rather than `plan_start_slot_required`; the re-check answers it again,
+judging the row the accept read before any lock or read of its own. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never
 waits on it while it holds the comms key), answers 409
 `{ error, code: 'PLAN_START_RECHECK_RETRY' }` with a retry line and writes nothing; the estimate page

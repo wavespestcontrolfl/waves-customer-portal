@@ -2356,6 +2356,7 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     }];
     const res = await putAccept('tok-restart-7-x0123456789');
     expect(res.status).toBe(409);
+    expect(res.data.code).toBe('RESTART_STATE_CHANGED');
     expect(res.data.error).toMatch(/restart quote changed since it was created/);
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().price_locked_at == null).toBe(true);
@@ -4817,6 +4818,20 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     db.__state.tables.customers = [leadCustomer()];
     const res = await putAccept('tok-plan-start-7-x012345', heldSlot('est-plan-start-7'));
     expect(res.status).toBe(409);
+    expect(res.data.code).toBe('PLAN_START_STATE_CHANGED');
+    expect(res.data.error).toMatch(/This estimate changed since it was created/);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('an invoice-mode old link sends no slot (invoice mode skips the pick) and still gets the changed refusal, never the slot prompt (codex pre-push P1)', async () => {
+    resetStore(planStartEstimate({ id: 'est-plan-start-8', token: 'tok-plan-start-8-x012345', bill_by_invoice: true }));
+    db.__state.tables.customers = [leadCustomer()];
+    const res = await putAccept('tok-plan-start-8-x012345');
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('PLAN_START_STATE_CHANGED');
     expect(res.data.error).toMatch(/This estimate changed since it was created/);
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().price_locked_at == null).toBe(true);

@@ -1098,6 +1098,19 @@ function staffChangedDeliveryOptions(estimate) {
   return !!(estimate?.show_one_time_option || estimate?.bill_by_invoice);
 }
 
+// The refusal such a quote gets, by source, or null. The accept route answers it before its slot and
+// payment checks: invoice mode skips the slot pick, so the slot check would ask for a visit time
+// instead of sending the customer back to the portal (codex pre-push P1). Both locked re-checks
+// answer it again.
+const STAFF_CHANGED_REFUSALS = Object.freeze({
+  plan_restart: Object.freeze({ code: 'RESTART_STATE_CHANGED', message: 'This restart quote changed since it was created — please reopen "Restart my plan" for a current quote.' }),
+  plan_start: Object.freeze({ code: 'PLAN_START_STATE_CHANGED', message: 'This estimate changed since it was created — please go back to your portal for a current price.' }),
+});
+function staffChangedQuoteRefusal(estimate, source = estimate?.source) {
+  if (!staffChangedDeliveryOptions(estimate)) return null;
+  return STAFF_CHANGED_REFUSALS[String(source || '')] || null;
+}
+
 // Returns the live quote's { estimateId, token, url, reused: true }, or null.
 async function reuseLiveQuote(mint, {
   priorRows, offer, estimateData, primaryStreet, premisesStamp,
@@ -1593,9 +1606,8 @@ async function assertRestartAcceptEligible(trx, estimate) {
     return err;
   };
   const changed = () => refuse('This account changed since this restart quote was created — please reopen "Restart my plan" for a current quote.');
-  if (staffChangedDeliveryOptions(estimate)) {
-    throw refuse('This restart quote changed since it was created — please reopen "Restart my plan" for a current quote.');
-  }
+  const staffChanged = staffChangedQuoteRefusal(estimate, 'plan_restart');
+  if (staffChanged) throw refuse(staffChanged.message);
   let state;
   try {
     state = await readRestartAcceptState(trx, estimate);
@@ -1660,9 +1672,8 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     err.code = 'PLAN_START_STATE_CHANGED';
     return err;
   };
-  if (staffChangedDeliveryOptions(estimate)) {
-    throw refuse('This estimate changed since it was created — please go back to your portal for a current price.');
-  }
+  const staffChanged = staffChangedQuoteRefusal(estimate, 'plan_start');
+  if (staffChanged) throw refuse(staffChanged.message);
   let quoted;
   let quotedStreet;
   let pricedHome;
@@ -1739,5 +1750,6 @@ module.exports = {
   TURF_PRICED_KEYS,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
+  staffChangedQuoteRefusal,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },
 };

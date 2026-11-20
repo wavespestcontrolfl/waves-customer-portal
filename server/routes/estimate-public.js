@@ -10740,6 +10740,12 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // resolveEstimateInvoiceMode): no visit to book, so accept creates the
     // invoice directly with no slot, no card hold, no booking SMS.
     const billByInvoice = resolveEstimateInvoiceMode(estimate);
+    // A customer's own plan quote that staff changed (the one-time option or invoice billing on)
+    // answers its re-check's 409 here, before the slot and payment checks below, so the page sends
+    // the customer back to the portal instead of asking for a visit time (codex pre-push P1). The
+    // locked re-check refuses it again.
+    const staffChangedQuote = require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal(estimate);
+    if (staffChangedQuote) return res.status(409).json({ error: staffChangedQuote.message, code: staffChangedQuote.code });
     if (annualPrepaySelected && billByInvoice) {
       return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
     }
