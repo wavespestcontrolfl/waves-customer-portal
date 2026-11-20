@@ -1,8 +1,8 @@
-// pestOnlyRecurringPriceIsFromRows against real PostgreSQL (one rolled-back transaction per test): the REAL bridge on
-// the REAL pricing_config rows of the migrated schema. The unit suite (pricing-engine-pest-price-rows.test.js)
-// builds its rows by hand. This one proves what only the database can: the rows the migrations seed carry every
-// required input of the recurring pest price, and a row that loses one is refused by a worker that just started
-// and by a warm one. No network, no spend, no customer.
+// standardPestPriceRowsAreComplete against real PostgreSQL (one rolled-back transaction per test): the REAL
+// bridge on the REAL pricing_config rows of the migrated schema. The unit suite
+// (pricing-engine-pest-price-rows.test.js) builds its rows by hand. This one proves what only the database can:
+// the rows the migrations seed carry every required input of the standard pest price, and a row that loses one
+// is refused by a worker that just started and by a warm one. No network, no spend, no customer.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -65,9 +65,9 @@ postgres('recurring pest price rows (live Postgres)', () => {
   test('the migrated schema carries the five rows, and a worker that just started proves them', async () => {
     expect((await trx('pricing_config').whereIn('config_key', PRICE_ROWS).pluck('config_key')).sort()).toEqual([...PRICE_ROWS].sort());
     const worker = freshWorker();
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     await expect(refresh(worker)).resolves.toBe(true);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   test.each(PRICE_ROWS)('without the %s row the refresh still succeeds, and the answer is no', async (key) => {
@@ -75,7 +75,7 @@ postgres('recurring pest price rows (live Postgres)', () => {
     await refresh(worker);
     expect(await trx('pricing_config').where({ config_key: key }).del()).toBe(1);
     await expect(refresh(worker)).resolves.toBe(true);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   // One field of each row. A warm worker (it loaded the full rows first) and a worker that starts after the
@@ -90,14 +90,14 @@ postgres('recurring pest price rows (live Postgres)', () => {
   ])('%s without %j: refused by a warm worker and by one that just started', async (row, path) => {
     const warm = freshWorker();
     await refresh(warm);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     expect((await dropField(row, path)).rowCount).toBe(1);
     await expect(refresh(warm)).resolves.toBe(true);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(false);
 
     const cold = freshWorker();
     await expect(refresh(cold)).resolves.toBe(true);
-    expect(cold.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(cold.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   test('a field saved as text is refused by both workers, though the refresh takes it', async () => {
@@ -105,10 +105,10 @@ postgres('recurring pest price rows (live Postgres)', () => {
     await refresh(warm);
     await trx.raw("UPDATE pricing_config SET data = jsonb_set(data, '{indoor}', to_jsonb((data->>'indoor')::text)) WHERE config_key = 'pest_features'");
     await expect(refresh(warm)).resolves.toBe(true);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     const cold = freshWorker();
     await expect(refresh(cold)).resolves.toBe(true);
-    expect(cold.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(cold.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   // The optional field of the features row: left out by the schema. A row that carries it must carry a number.
@@ -118,15 +118,15 @@ postgres('recurring pest price rows (live Postgres)', () => {
     await refresh(warm);
     expect((await setGarage('7')).rowCount).toBe(1);
     await expect(refresh(warm)).resolves.toBe(true);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(true);
 
     await setGarage('true');
     await expect(refresh(warm)).resolves.toBe(true);
     expect(warm.constants.PEST.additionalAdjustments.attachedGarage).toBe(Math.round(warm.constants.PROCESSING_ADJUSTMENT));
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     const cold = freshWorker();
     await expect(refresh(cold)).resolves.toBe(true);
-    expect(cold.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(cold.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   // min_services must be the count the engine's tier picker uses. The Pricing Logic route saves any whole number
@@ -136,18 +136,18 @@ postgres('recurring pest price rows (live Postgres)', () => {
     const warm = freshWorker();
     await refresh(warm);
     expect(warm.constants.WAVEGUARD.tiers.silver.minServices).toBe(2);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     expect((await setSilver(1)).rowCount).toBe(1);
     await expect(refresh(warm)).resolves.toBe(true);
     expect(warm.constants.WAVEGUARD.tiers.silver.minServices).toBe(1);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     const cold = freshWorker();
     await expect(refresh(cold)).resolves.toBe(true);
-    expect(cold.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(cold.bridge.standardPestPriceRowsAreComplete()).toBe(false);
 
     await setSilver(2);
     await expect(refresh(warm)).resolves.toBe(true);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   // The optional floor switch of the base row. The seeded row carries it as a boolean (the migration that
@@ -159,19 +159,19 @@ postgres('recurring pest price rows (live Postgres)', () => {
     expect((await setSwitch('true')).rowCount).toBe(1);
     await expect(refresh(warm)).resolves.toBe(true);
     expect(warm.constants.PEST.enforceFloorPostDiscount).toBe(true);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(true);
 
     await setSwitch('"true"');
     await expect(refresh(warm)).resolves.toBe(true);
     expect(warm.constants.PEST.enforceFloorPostDiscount).toBe(false);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     const cold = freshWorker();
     await expect(refresh(cold)).resolves.toBe(true);
-    expect(cold.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(cold.bridge.standardPestPriceRowsAreComplete()).toBe(false);
 
     await dropField('pest_base', ['enforce_floor_post_discount']);
     await expect(refresh(warm)).resolves.toBe(true);
     expect(warm.constants.PEST.enforceFloorPostDiscount).toBe(false);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 });

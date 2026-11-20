@@ -14,7 +14,7 @@ const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c =
 // removes from the DB row reverts to the code default on the NEXT sync
 // instead of lingering until a process restart.
 const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.PEST.pestInitialRoach.display));
-// Pristine in-code values for pestOnlyRecurringPriceIsFromRows (below), read
+// Pristine in-code values for standardPestPriceRowsAreComplete (below), read
 // before any sync changes the constants: the value of the one optional pest
 // field, the property types and the tiers the engine knows, and the service
 // count that earns each tier.
@@ -783,19 +783,19 @@ function syncBedBugPricingConfig(bedBugConfig) {
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
 
-// Did the recurring pest price inputs come from their pricing_config rows?
+// Are the rows of the standard pest price complete?
 // A sync keeps what the engine had for a row or a field that is missing: the
 // in-code default on a cold start, an earlier value on a warm process (two
 // processes can then hold different prices). That is the answer every
 // surface a person reads shows. A price that nobody watches must come from
-// the rows, so that caller asks pestOnlyRecurringPriceIsFromRows() (same idea as
-// mistingRefillPriceIsFromRow).
+// the rows, so that caller asks standardPestPriceRowsAreComplete() (same
+// idea as mistingRefillPriceIsFromRow).
 //
-// The rows are every pricing_config row the recurring pest price reads: the
-// four pest rows and the tier row (the frequency discounts, the roach
-// modifiers and the home-age steps are in-code only). The answer is yes when
-// the rows of the last SUCCESSFUL sync carried EVERY required field as a
-// number:
+// The rows are every pricing_config row that the engine's standard pest price
+// reads (the footprint ladder, pricePestControl): the four pest rows and the
+// tier row. The frequency discounts, the roach modifiers and the home-age
+// steps are in-code only. The answer is yes when the rows of the last
+// SUCCESSFUL sync carried EVERY required field as a number:
 //   pest_base           base and floor, each above 0
 //   pest_footprint      breakpoints: a list, each entry with sqft and adj
 //   pest_features       each field the sync reads but attached_garage
@@ -814,13 +814,23 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 // (a silver threshold of 1: the engine quotes one pest service at bronze, the
 // converter starts it at silver). Such a row does not state the price the
 // engine quotes, so the answer is no for it.
-// The answer is about a quote of pest control ALONE, for a home with no
-// other service: one qualifying service, so the bronze tier. A bundle reads
-// more rows than these: the other service's own rows, and the rodent rows
-// that say whether rodent bait counts toward the tier (rodent_waveguard, or
-// rodent_rules). Those decide the tier discount the pest line of a bundle
-// gets, and this answer does not judge them. A caller that prices a bundle,
-// or a home that already has a service, must not use it.
+// The answer is about ROWS and the CONSTANTS they feed: the constants of the
+// standard pest price and of the tier table are what the rows state. It is
+// not about a quote. A quote can get its pest price in a way these rows do
+// not decide, and a caller that vouches for a quote must check the path that
+// quote took:
+// - another price source: a trusted bedroom band (trustedUnitBand; the
+//   ladder never runs for that line) or the commercial pricer;
+// - an input of the ladder that the quote overrides: a saved quote's own
+//   floor (pestProgramFloorArmed, pestProgramFloorPerVisit) or an explicit
+//   legacy pricing version;
+// - a bundle, or a home that already has a service: the other service's own
+//   rows, and the rodent rows that say whether rodent bait counts toward the
+//   tier (rodent_waveguard, or rodent_rules), which decide the tier discount
+//   of the pest line.
+// The first caller (the pricer's strict option) prices pest control alone on
+// the standard ladder with no override, for a home with no other service,
+// and checks that itself.
 // The answer is a function of the rows of that ONE sync. It does not depend
 // on what an earlier sync of the process loaded, so a process that just
 // started and a warm one answer the same for the same rows.
@@ -893,9 +903,9 @@ function rowsStateRecurringPestPrice(config) {
     && PEST_OPTIONAL_FEATURE_ROW_FIELDS.every((field) => features[field] == null || isRowNumber(features[field]))
     && (floorSwitch == null || typeof floorSwitch === 'boolean');
 }
-let _pestPriceIsFromRows = false; // the answer of the last successful sync
-function pestOnlyRecurringPriceIsFromRows() {
-  return _pestPriceIsFromRows && !isSyncInFlight();
+let _pestPriceRowsComplete = false; // the answer of the last successful sync
+function standardPestPriceRowsAreComplete() {
+  return _pestPriceRowsComplete && !isSyncInFlight();
 }
 
 // ── Pre-slab inventory-price link (owner decision 2026-07-10) ─────────────
@@ -1374,7 +1384,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // carried it). It rebases to its in-code value on EVERY sync, like the
     // flag above: a process that took a value from a row must not keep it
     // after the row loses the field, and then price differently from a
-    // process that just started (pestOnlyRecurringPriceIsFromRows).
+    // process that just started (standardPestPriceRowsAreComplete).
     constants.PEST.additionalAdjustments.attachedGarage = PEST_ATTACHED_GARAGE_DEFAULT;
     if (config.pest_features) {
       const f = config.pest_features;
@@ -2433,7 +2443,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
 
     assertValidPestPricingConfig(constants);
 
-    _pestPriceIsFromRows = rowsStateRecurringPestPrice(config);
+    _pestPriceRowsComplete = rowsStateRecurringPestPrice(config);
     _lastSync = Date.now();
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
@@ -2470,7 +2480,7 @@ module.exports = {
   readRodentAdditionalCheckPriceFromCatalog,
   needsSync,
   invalidatePricingConfigCache,
-  pestOnlyRecurringPriceIsFromRows,
+  standardPestPriceRowsAreComplete,
   validatePestPricingConfig,
   assertValidPestPricingConfig,
 };

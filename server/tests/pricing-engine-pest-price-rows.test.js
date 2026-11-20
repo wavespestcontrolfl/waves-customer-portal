@@ -1,4 +1,5 @@
-// pestOnlyRecurringPriceIsFromRows: did the recurring pest price inputs come from their pricing_config rows?
+// standardPestPriceRowsAreComplete: did the rows of the standard pest price (the footprint ladder and the tier
+// table) carry every input the sync loads from them?
 //
 // The REAL bridge on a fake pricing_config. A sync answers true when the table holds any row at all. For a row
 // or a field that is missing it keeps what the engine had: the in-code default on a cold start, an earlier value
@@ -74,15 +75,15 @@ async function answers(change) {
   const coldConfig = fullRows(cold.constants);
   change(coldConfig, cold.constants);
   const coldSynced = await sync(cold, coldConfig);
-  const coldAnswer = cold.bridge.pestOnlyRecurringPriceIsFromRows();
+  const coldAnswer = cold.bridge.standardPestPriceRowsAreComplete();
 
   const warm = freshWorker();
   await sync(warm, fullRows(warm.constants));
-  const warmBefore = warm.bridge.pestOnlyRecurringPriceIsFromRows();
+  const warmBefore = warm.bridge.standardPestPriceRowsAreComplete();
   const warmConfig = fullRows(warm.constants);
   change(warmConfig, warm.constants);
   const warmSynced = await sync(warm, warmConfig);
-  return { coldSynced, coldAnswer, warmBefore, warmSynced, warmAnswer: warm.bridge.pestOnlyRecurringPriceIsFromRows(), cold, warm };
+  return { coldSynced, coldAnswer, warmBefore, warmSynced, warmAnswer: warm.bridge.standardPestPriceRowsAreComplete(), cold, warm };
 }
 const REFUSED_BY_BOTH = { coldSynced: true, coldAnswer: false, warmBefore: true, warmSynced: true, warmAnswer: false };
 // Rows the bridge's own validation refuses, so the whole sync fails: every required field is there as a number,
@@ -107,20 +108,20 @@ afterEach(() => { warnSpy.mockRestore(); errorSpy.mockRestore(); logSpy.mockRest
 
 describe('the answer after one sync', () => {
   test('no before any sync', () => {
-    expect(freshWorker().bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(freshWorker().bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   test('no after a first sync that fails, though its rows carried every required field', async () => {
     const worker = freshWorker();
     await expect(sync(worker, refusedRows(worker.constants))).resolves.toBe(false);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   test('yes after a sync of the five rows as the schema seeds them', async () => {
     const worker = freshWorker();
     expect(Object.keys(fullRows(worker.constants)).sort()).toEqual([...ROW_KEYS].sort());
     await expect(sync(worker, fullRows(worker.constants))).resolves.toBe(true);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   test('pricing_config with rows, none of them a pest row: the sync succeeds, the engine prices from its in-code base price, and the answer is no', async () => {
@@ -128,7 +129,7 @@ describe('the answer after one sync', () => {
     const base = worker.constants.PEST.base;
     await expect(sync(worker, {})).resolves.toBe(true);
     expect(worker.constants.PEST.base).toBe(base);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   // The answer counts a field only when the sync also puts its value into the engine.
@@ -149,7 +150,7 @@ describe('the answer after one sync', () => {
     TIERS.forEach((tier, index) => { config.waveguard_tiers[tier] = { discount: discounts[index], min_services: counts[index] }; });
 
     await expect(sync(worker, config)).resolves.toBe(true);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     expect(constants.PEST.base).toBe(expected.base);
     expect(constants.PEST.floor).toBe(expected.floor);
     expect(constants.PEST.footprintBrackets).toEqual([{ sqft: 1000, adj: -7 }, { sqft: 2000, adj: 4 }, { sqft: 3000, adj: 11 }]);
@@ -241,14 +242,14 @@ describe('rows that lack a required input are refused by a cold worker and by a 
       delete config.pest_property_type.duplex;
       await expect(sync(worker, config)).resolves.toBe(true);
       expect(worker.constants.PROPERTY_TYPE_ADJ.duplex).toBe(inCode + 41);
-      expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+      expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     }
     const restarted = freshWorker();
     const config = fullRows(restarted.constants);
     delete config.pest_property_type.duplex;
     await expect(sync(restarted, config)).resolves.toBe(true);
     expect(restarted.constants.PROPERTY_TYPE_ADJ.duplex).toBe(inCode);
-    expect(restarted.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(restarted.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   test('a tier discount of 0 from the row counts (Bronze)', async () => {
@@ -256,7 +257,7 @@ describe('rows that lack a required input are refused by a cold worker and by a 
     const config = fullRows(worker.constants);
     config.waveguard_tiers.bronze = { discount: 0, min_services: 1 };
     await expect(sync(worker, config)).resolves.toBe(true);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   // An empty breakpoints list is not a partial config: the bridge's own validation refuses it.
@@ -264,7 +265,7 @@ describe('rows that lack a required input are refused by a cold worker and by a 
     const worker = freshWorker();
     await expect(sync(worker, { ...fullRows(worker.constants), pest_footprint: { breakpoints: [] } })).resolves.toBe(false);
     expect(worker.constants.PEST.footprintBrackets.length).toBeGreaterThan(0);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 });
 
@@ -277,7 +278,7 @@ describe('the optional field (pest_features.attached_garage) has an explicit def
     config.pest_features.attached_garage = 9;
     await sync(worker, config);
     expect(worker.constants.PEST.additionalAdjustments.attachedGarage).toBe(9);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   // The sync applies what its arithmetic can read, so each of these reaches the engine as a finite number and
@@ -311,13 +312,13 @@ describe('the optional field (pest_features.attached_garage) has an explicit def
     const config = fullRows(worker.constants);
     config.pest_features.attached_garage = 9;
     await sync(worker, config);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     config.pest_features.attached_garage = true;
     await sync(worker, config);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     config.pest_features.attached_garage = 9;
     await sync(worker, config);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   test('a row without the field: a cold worker and a warm worker hold the same in-code value, and both answer yes', async () => {
@@ -326,7 +327,7 @@ describe('the optional field (pest_features.attached_garage) has an explicit def
     expect(Number.isFinite(inCode)).toBe(true);
     await sync(cold, fullRows(cold.constants));
     expect(cold.constants.PEST.additionalAdjustments.attachedGarage).toBe(inCode);
-    expect(cold.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(cold.bridge.standardPestPriceRowsAreComplete()).toBe(true);
 
     const warm = freshWorker();
     const first = fullRows(warm.constants);
@@ -335,7 +336,7 @@ describe('the optional field (pest_features.attached_garage) has an explicit def
     expect(warm.constants.PEST.additionalAdjustments.attachedGarage).toBe(inCode + 4);
     await sync(warm, fullRows(warm.constants));
     expect(warm.constants.PEST.additionalAdjustments.attachedGarage).toBe(inCode);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   test('a config with no features row at all also resets the field (the answer is no for the missing row)', async () => {
@@ -348,7 +349,7 @@ describe('the optional field (pest_features.attached_garage) has an explicit def
     delete config.pest_features;
     await sync(warm, config);
     expect(warm.constants.PEST.additionalAdjustments.attachedGarage).toBe(inCode);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 });
 
@@ -392,14 +393,14 @@ describe('the optional floor switch (pest_base.enforce_floor_post_discount) is a
     config.pest_base.enforce_floor_post_discount = true;
     await sync(worker, config);
     expect(worker.constants.PEST.enforceFloorPostDiscount).toBe(true);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     config.pest_base.enforce_floor_post_discount = 'true';
     await sync(worker, config);
     expect(worker.constants.PEST.enforceFloorPostDiscount).toBe(false);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     config.pest_base.enforce_floor_post_discount = true;
     await sync(worker, config);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 });
 
@@ -444,7 +445,7 @@ describe('the tier thresholds are the ones the engine\'s tier picker uses', () =
     expect(estimate.waveGuard.tier).toBe('bronze');
     expect(line.annual).toBeGreaterThan(0);
     expect(line.annualAfterDiscount).toBe(line.annual);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   test('the same row with the picker\'s threshold: the same bronze quote, and the answer is yes', async () => {
@@ -454,20 +455,20 @@ describe('the tier thresholds are the ones the engine\'s tier picker uses', () =
     await expect(sync(worker, config)).resolves.toBe(true);
     const estimate = require('../services/pricing-engine').generateEstimate(ONE_PEST_SERVICE);
     expect(estimate.waveGuard.tier).toBe('bronze');
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   test('a warm worker that held the picker\'s thresholds refuses a row with another one, and answers yes again when it is back', async () => {
     const warm = freshWorker();
     await sync(warm, fullRows(warm.constants));
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     const config = fullRows(warm.constants);
     config.waveguard_tiers.gold.min_services = 2;
     await expect(sync(warm, config)).resolves.toBe(true);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     config.waveguard_tiers.gold.min_services = 3;
     await expect(sync(warm, config)).resolves.toBe(true);
-    expect(warm.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(warm.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 });
 
@@ -532,7 +533,7 @@ describe('a sync that fails leaves the answer of the last good sync', () => {
     config.pest_property_type = { duplex: duplex + 41 };
     await expect(sync(worker, config)).resolves.toBe(false);
     expect(worker.constants.PROPERTY_TYPE_ADJ.duplex).toBe(duplex);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   test('no stays no, also when the failed sync carried every required field', async () => {
@@ -540,9 +541,9 @@ describe('a sync that fails leaves the answer of the last good sync', () => {
     const partial = fullRows(worker.constants);
     delete partial.pest_property_type;
     await sync(worker, partial);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     await expect(sync(worker, refusedRows(worker.constants))).resolves.toBe(false);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   test('the next good sync decides again', async () => {
@@ -550,9 +551,9 @@ describe('a sync that fails leaves the answer of the last good sync', () => {
     const partial = fullRows(worker.constants);
     delete partial.waveguard_tiers;
     await sync(worker, partial);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     await sync(worker, fullRows(worker.constants));
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 });
 
@@ -580,7 +581,7 @@ describe('while a sync is in flight the answer is no', () => {
     const worker = freshWorker();
     await sync(worker, fullRows(worker.constants));
     expect(worker.bridge.isSyncInFlight()).toBe(false);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
     return worker;
   };
 
@@ -594,11 +595,11 @@ describe('while a sync is in flight the answer is no', () => {
     const refresh = await pausedSync(worker, partial);
     expect(worker.bridge.isSyncInFlight()).toBe(true);
     expect(worker.constants.PEST.base).toBe(base + 5);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
 
     await expect(refresh.finish()).resolves.toBe(true);
     expect(worker.bridge.isSyncInFlight()).toBe(false);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
   });
 
   test('a refresh of complete rows: no until it is over, then yes', async () => {
@@ -609,11 +610,11 @@ describe('while a sync is in flight the answer is no', () => {
 
     const refresh = await pausedSync(worker, complete);
     expect(worker.constants.PEST.base).toBe(base + 5);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
 
     await expect(refresh.finish()).resolves.toBe(true);
     expect(worker.constants.PEST.base).toBe(base + 5);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   test('a refresh the validation refuses: no while the engine holds its rows, and yes again when the constants are back', async () => {
@@ -624,41 +625,41 @@ describe('while a sync is in flight the answer is no', () => {
 
     const refresh = await pausedSync(worker, refused);
     expect(worker.constants.PEST.base).toBe(base + 5);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
 
     await expect(refresh.finish()).resolves.toBe(false);
     expect(worker.constants.PEST.base).toBe(base);
     expect(worker.bridge.isSyncInFlight()).toBe(false);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 
   test('the first sync of a worker: no while it runs, yes when its complete rows are in', async () => {
     const worker = freshWorker();
     const refresh = await pausedSync(worker, fullRows(worker.constants));
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(false);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(false);
     await expect(refresh.finish()).resolves.toBe(true);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
   });
 });
 
-// The five rows are every pricing_config row that a quote of pest control ALONE reads. A bundle reads more: the
-// other service's own rows, and the rodent rows that say whether rodent bait counts toward the tier
-// (rodent_waveguard, or rodent_rules). The answer does not judge those. So it is about a pest-only quote, and
-// its name says so.
-describe('the answer is about a quote of pest control alone', () => {
+// The answer is about ROWS and the constants they feed (the standard pest price, the tier table). It is not about a
+// quote. The first test is the rows' side: on the standard ladder, pest alone reads nothing but the five rows.
+// Each test after it is a quote that gets its pest price in a way those rows do not decide, with the answer at
+// yes. That is why the name speaks of rows, and why a caller that vouches for a quote checks the quote's path.
+describe('the answer is about the rows of the standard pest price, not about a quote', () => {
   const PEST_ALONE = {
     homeSqFt: 2200, lotSqFt: 8000, stories: 1, propertyType: 'single_family', features: {},
     services: { pest: { frequency: 'quarterly' } },
   };
   const WITH_RODENT_BAIT = { ...PEST_ALONE, services: { ...PEST_ALONE.services, rodentBait: {} } };
-  // The full rows plus the rodent rows of one case, loaded by a worker that just started: the real engine's quote.
-  const quoted = async (rodentRows, input) => {
+  // The full rows plus the rows of one case, loaded by a worker that just started: the real engine's quote.
+  const quoted = async (moreRows, input) => {
     const worker = freshWorker();
-    await expect(sync(worker, { ...fullRows(worker.constants), ...rodentRows })).resolves.toBe(true);
-    expect(worker.bridge.pestOnlyRecurringPriceIsFromRows()).toBe(true);
-    const estimate = require('../services/pricing-engine').generateEstimate(input);
+    await expect(sync(worker, { ...fullRows(worker.constants), ...moreRows })).resolves.toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
+    const estimate = require('../services/pricing-engine').generateEstimate(typeof input === 'function' ? input(worker) : input);
     const line = estimate.lineItems.find((item) => item.service === 'pest_control');
-    return { tier: estimate.waveGuard.tier, annual: line.annual, annualAfterDiscount: line.annualAfterDiscount };
+    return { tier: estimate.waveGuard.tier, perApp: line.perApp, annual: line.annual, annualAfterDiscount: line.annualAfterDiscount, line };
   };
   const RODENT_ROWS = [
     ['no rodent row', {}],
@@ -668,20 +669,63 @@ describe('the answer is about a quote of pest control alone', () => {
     ['the qualifier is saved as text', { rodent_waveguard: { tier_qualifier: 'false' } }],
   ];
 
-  test('pest alone is one qualifying service, at the same price, whatever the rodent rows say', async () => {
+  test('pest alone on the standard ladder is one qualifying service, at the same price, whatever the rodent rows say', async () => {
     const quotes = [];
-    for (const [label, rodentRows] of RODENT_ROWS) quotes.push([label, await quoted(rodentRows, PEST_ALONE)]);
+    for (const [label, rodentRows] of RODENT_ROWS) {
+      const { line: _line, ...quote } = await quoted(rodentRows, PEST_ALONE);
+      quotes.push([label, quote]);
+    }
     const [, first] = quotes[0];
     expect(first.tier).toBe('bronze');
     expect(first.annual).toBeGreaterThan(0);
     for (const [label, quote] of quotes) expect([label, quote]).toEqual([label, first]);
   });
 
-  // The reason for the limit. With rodent bait in the quote, the tier (and with it the discount of the pest line)
-  // follows a row the answer does not judge, while the answer is yes in both cases.
-  test('a bundle is outside the answer: with rodent bait in the quote, the tier follows the rodent row', async () => {
+  test('a bundle: with rodent bait in the quote, the tier follows the rodent row', async () => {
     const counts = await quoted({ rodent_waveguard: { tier_qualifier: true } }, WITH_RODENT_BAIT);
     const doesNotCount = await quoted({ rodent_waveguard: { tier_qualifier: false } }, WITH_RODENT_BAIT);
     expect([counts.tier, doesNotCount.tier]).toEqual(['silver', 'bronze']);
+  });
+
+  test('a trusted bedroom band: the price is the band\'s, and the ladder never runs for that line', async () => {
+    const saved = process.env.PRICING_SNAPSHOT_SECRET;
+    process.env.PRICING_SNAPSHOT_SECRET = 'pest-price-rows-test';
+    try {
+      const ADDRESS = '1400 Example Test Dr Apt 7109, Sarasota, FL 34240';
+      const band = {
+        serviceCode: 'pest', frequency: 'quarterly', intentFrequency: 'quarterly', band: 'one_bedroom',
+        initialPrice: 85, recurringPrice: 85, includedScope: 'interior_unit_general_pest',
+        oversizeSqftThreshold: 2200, effectiveDate: '2026-08-13', scopeExclusions: [], scopeNote: null,
+      };
+      const banded = await quoted({}, () => {
+        const { signUnitBandSnapshot } = require('../services/pricing-engine/unit-band-pricing');
+        return {
+          services: { pest: { frequency: 'quarterly' } }, propertyType: 'unknown', stories: 1, isCommercial: false,
+          address: ADDRESS, unitBandPricing: { pest: { ...band, ...signUnitBandSnapshot(band, ADDRESS) } },
+        };
+      });
+      expect(banded.line.quoteRequired).toBeFalsy();
+      expect(banded.perApp).toBe(85);
+      // The same home with no band is priced on the ladder, at another price.
+      const onLadder = await quoted({}, { services: { pest: { frequency: 'quarterly' } }, propertyType: 'unknown', stories: 1, isCommercial: false, address: ADDRESS });
+      expect(onLadder.perApp).toBeGreaterThan(0);
+      expect(onLadder.perApp).not.toBe(85);
+    } finally {
+      if (saved === undefined) delete process.env.PRICING_SNAPSHOT_SECRET;
+      else process.env.PRICING_SNAPSHOT_SECRET = saved;
+    }
+  });
+
+  test('a saved quote with its own floor: the price follows that floor, not the row\'s', async () => {
+    const standard = await quoted({}, PEST_ALONE);
+    const pinned = await quoted({}, (worker) => ({ ...PEST_ALONE, pestProgramFloorPerVisit: worker.constants.PEST.floor + 400 }));
+    expect(pinned.perApp).toBeGreaterThan(standard.perApp);
+  });
+
+  test('an explicit legacy pricing version: the cadence curve is the quote\'s, not the live one', async () => {
+    const monthly = { ...PEST_ALONE, services: { pest: { frequency: 'monthly' } } };
+    const live = await quoted({}, monthly);
+    const legacy = await quoted({}, { ...monthly, services: { pest: { frequency: 'monthly', version: 'v1' } } });
+    expect(legacy.annual).not.toBe(live.annual);
   });
 });
