@@ -542,9 +542,10 @@ module.exports = {
   cardSummary,
   previewTokenOf,
   lastStepInAccept,
-  // Shared with call-phone-yes-accept.js (the pay-per-application yes): the same visits-of-a-call read and the same
-  // termite rule.
+  // Shared with call-phone-yes-accept.js (the pay-per-application yes): the same visits-of-a-call read, the same
+  // termite rule and the same booked-row rules.
   callCreatedSourceActions,
   liveVisitsOfCall,
   termiteEstimate,
+  BOOKED_ROW_RULES,
 };

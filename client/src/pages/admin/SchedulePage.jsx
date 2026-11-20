@@ -129,6 +129,7 @@ import {
 } from "../../lib/tree-shrub-pest-check";
 import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
+import { holdForRecapUpload } from "../../lib/recapUploads";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
@@ -12298,6 +12299,9 @@ export function StationMarkingStep({
 function RecapCapture({ serviceId, onChange }) {
   const [items, setItems] = useState([]);
   const [pendingFile, setPendingFile] = useState(null);
+  // A picked clip waiting for its tag is only in this page: it holds the
+  // reload until it is tagged (the upload then holds) or closed.
+  useEffect(() => (pendingFile ? holdForRecapUpload() : undefined), [pendingFile]);
   const rolePickerRef = useModalFocus(!!pendingFile, () => setPendingFile(null));
   const [showMore, setShowMore] = useState(false);
   const [uploading, setUploading] = useState(0);
@@ -12323,6 +12327,7 @@ function RecapCapture({ serviceId, onChange }) {
     if (!file) return;
     setUploading((n) => n + 1);
     setErr(null);
+    const uploadEnded = holdForRecapUpload();
     try {
       const mediaType = file.type.startsWith("image/") ? "image" : "video";
       const durationMs = mediaType === "video" ? await readVideoDurationMs(file) : null;
@@ -12340,7 +12345,7 @@ function RecapCapture({ serviceId, onChange }) {
       // Surface the server reason (e.g. unsupported iPhone HEVC/MOV or HEIC) instead of
       // silently dropping the clip; closeout stays unblocked either way.
       setErr(e?.message || "Couldn’t add that clip — use an MP4 video or JPEG photo.");
-    } finally { setUploading((n) => Math.max(0, n - 1)); }
+    } finally { uploadEnded(); setUploading((n) => Math.max(0, n - 1)); }
   };
 
   const remove = async (id) => {

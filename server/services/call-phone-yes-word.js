@@ -231,6 +231,23 @@ async function unreadCallSince(conn, { customerId, since }) {
     .first('id'));
 }
 
+// Locks FOR SHARE, NOWAIT, every call with the customer (whereWithCustomer) logged since `since`, sandbox calls aside: a
+// superset of the calls callerWord and unreadCallSince read for that window (a call begins at or before its row's insert). Held to the commit,
+// a re-read of any of them (a reprocess that changes or takes back a quote) waits for it; a write in flight right now
+// fails at once with 55P03 instead of waiting, so the caller never waits on a call row while it holds other locks.
+async function lockCallsSince(conn, { customerId, since }) {
+  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+  const keys = await customerPhoneKeys(conn, customerId);
+  return conn('call_log')
+    .modify(whereWithCustomer, customerId, keys)
+    .where('call_log.created_at', '>=', since)
+    .modify((qb) => whereNotSandboxCall(qb))
+    .orderBy('call_log.id')
+    .forShare()
+    .noWait()
+    .select('call_log.id');
+}
+
 // What stands between the caller's word and the call that booked the visit (`booking`, a CALL_COLUMNS row), or null:
 //   yes_after_booking    the yes came on a later call than the booking (the visit was not booked for the plan);
 //   booking_call_unread  the booking call's last read did not finish (a failed re-read or an invalid extraction may
@@ -279,14 +296,27 @@ async function callerWord(conn, { customerId, since, until = null }) {
   return { yes: { callLogId: word.callLogId, at: word.at, quote: word.quote }, noYes: null };
 }
 
+// Whether a call's own last read names annual prepay as the billing choice, on the prepay card's own filing rule
+// (call-prepay-choice.js files its card for a booked call whose extraction, a real conversation, names it). It reads the
+// call alone, not the customer's latest word: a later call (a cancel, a one-time ask) never hides that the booking call
+// itself belongs to the prepay card. row: CALL_COLUMNS.
+function choseAnnualPrepay(row) {
+  const { parseExtraction, isRealConversation } = require('./call-held-visits');
+  const extraction = row && parseExtraction(row.ai_extraction_enriched);
+  return !!extraction && isRealConversation(row, extraction)
+    && require('./call-prepay-choice').billingChoiceOf(extraction) === 'annual_prepay';
+}
+
 module.exports = {
   CALL_COLUMNS,
   WORD_COLUMNS,
+  choseAnnualPrepay,
   owedReadSql,
   callerWordsOf,
   wordOfCall,
   latestBillingChoice,
   unreadCallSince,
+  lockCallsSince,
   laterWordProblem,
   callerWord,
 };

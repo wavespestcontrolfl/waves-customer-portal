@@ -62,6 +62,9 @@ describe('buildReferralShareForCustomer', () => {
     expect(share.smsBody).toContain('$25 off');
     expect(share.smsBody).toContain('wavespestcontrol.com/r/WAVES-TEST01');
     expect(share.smsBody).not.toContain('https://');
+    // Texts say "Waves" (owner 2026-11-04); the email keeps the full name.
+    expect(share.smsBody).toMatch(/^We use Waves and /);
+    expect(share.smsBody).not.toContain('Waves Pest Control');
     expect(share.emailBody).toContain('https://wavespestcontrol.com/r/WAVES-TEST01');
     expect(share.emailSubject).toBe('$25 off Waves Pest Control');
     expect(/\p{Extended_Pictographic}/u.test(share.smsBody + share.emailBody)).toBe(false);

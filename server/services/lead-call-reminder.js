@@ -1,5 +1,5 @@
 /**
- * Lead call-back reminder banner (GATE_LEAD_CALL_REMINDER, owner 2026-11-05, "remind").
+ * Lead call-back reminder banner (owner 2026-11-05, "remind").
  *
  * A lead who replies CALL to our lead text rings the owner's cell with press 1 (lead-call-reply-ring.js). A ring
  * nobody answers raises ONE "Missed call request" bell (dedupeKey `lead-call-reply-missed:<callLogId>`), and a night
@@ -8,7 +8,7 @@
  * the portal bell: no phone banner, and nothing prompts the owner again. In production (Oct 27 to Nov 5) the owner's
  * cell answered 0 of 3 daytime rings, and 2 of 5 CALL leads were never reached.
  *
- * With the gate on, an OPEN bell of those two kinds that is one business hour old and whose lead nobody has reached
+ * An OPEN bell of those two kinds that is one business hour old and whose lead nobody has reached
  * since sends ONE phone banner: trigger lead_call_reminder, pushOnly, admin users only, with the row's own title and
  * body led by "Reminder: nobody has reached this lead yet." The row itself is not rewritten. It is stamped
  * metadata.leadCallReminderAt in one statement fenced on the row being open and unchanged since it was read, so a row
@@ -18,7 +18,7 @@
  *   and 8 PM ET, from the bell's latest event (admin-alert-relevance.js bellEventAt). A 7:30 PM bell is due at
  *   8:30 AM the next day.
  * - Banners go out only between 8 AM and 8 PM ET, judged when the sweep runs; the stamp is written only then.
- * - Only bells of the last 24 hours, so turning the gate on cannot burst old bells.
+ * - Only bells of the last 24 hours, so an old bell never bursts out when the sweep first runs.
  * - "Reached" is the shared contact witnesses (admin-alert-contact-witnesses.js) after the bell's latest event: a
  *   person's text, a call a person placed and spoke on, an inbound call a person answered, a person's Gmail send to
  *   the lead's customer's own address, or a visit booked for that customer; or an estimate handed off to that
@@ -55,15 +55,6 @@ const uuidOrNull = (value) => {
   const text = value == null ? '' : String(value).trim();
   return UUID_RE.test(text) ? text.toLowerCase() : null;
 };
-
-// The gate, read at call time. A missing reader (a test that mocks feature-gates) or a throw reads as off.
-function reminderLive() {
-  try {
-    return require('../config/feature-gates').leadCallReminderLive?.() === true;
-  } catch {
-    return false;
-  }
-}
 
 // True from 8:00 AM up to 8:00 PM Eastern. The hour is read in America/New_York for the instant given (etParts),
 // never from a fixed UTC offset, so the daylight-saving change moves nothing.
@@ -210,7 +201,6 @@ async function sendReminder({ row, customerId }) {
  * never awaited here (tests await them). Throws only when the first page cannot be read; the sweep catches it.
  */
 async function runLeadCallReminder({ now = new Date(), pageSize = PAGE_SIZE } = {}) {
-  if (!reminderLive()) return { skipped: true, reason: 'gate_off' };
   if (!inSendHours(now)) return { skipped: true, reason: 'quiet_hours' };
   const since = new Date(now.getTime() - WINDOW_MS);
   const total = { due: 0, reminded: 0 };
