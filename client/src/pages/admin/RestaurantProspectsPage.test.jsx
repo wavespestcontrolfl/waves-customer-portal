@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
 vi.mock("../../lib/adminFetch", () => ({ adminFetch }));
 
-import RestaurantProspectsPage, { headlineText, stateText, summaryText } from "./RestaurantProspectsPage";
+import RestaurantProspectsPage, { headlineText, statusText, summaryText } from "./RestaurantProspectsPage";
 
 const reply = (body, { ok = true, status = 200 } = {}) => Promise.resolve({ ok, status, json: async () => body });
 
@@ -105,22 +105,40 @@ it("a success answer whose body cannot be read shows Try again, and recovers", a
   expect(await screen.findByText("SAMPLE GRILL")).toBeInTheDocument();
 });
 
-it("before the first full read, with no rows, it says not every file has been read, and claims no counts", async () => {
+it("before any full read, with no rows, the line says so, with no counts and no empty claim", async () => {
   route({ "/admin/prospects/restaurants?days=30": () => reply({ ...LIST30, readAt: null, counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [] }) });
   renderPage();
-  expect(await screen.findByText("Not every state file has been read yet.")).toBeInTheDocument();
-  expect(screen.queryByText(/new restaurants?,/)).toBeNull();
+  expect(await screen.findByText("No weekly read has read every state file yet, so this list may be missing restaurants.")).toBeInTheDocument();
+  expect(screen.queryByText(/new restaurants? and/)).toBeNull();
+  expect(screen.queryByText(/^Nothing in/)).toBeNull();
   expect(screen.queryByRole("table")).toBeNull();
 });
 
-it("rows from a first run that did not read every file show with a not-complete line and no counts", async () => {
-  // The license file was read and the inspection file failed: one new restaurant, and pest findings not known.
+it("rows from before any full read show with a not-complete line and no counts", async () => {
+  // A first run read the license file and stopped: one new restaurant.
   route({ "/admin/prospects/restaurants?days=30": () => reply({ ...LIST30, readAt: null, counts: { new_restaurant: 1, new_owner: 0, pest_finding: 0 }, rows: [LIST30.rows[0]] }) });
   renderPage();
-  expect(await screen.findByText("Not every state file has been read yet, so this list may be missing restaurants.")).toBeInTheDocument();
+  expect(await screen.findByText("No weekly read has read every state file yet, so this list may be missing restaurants.")).toBeInTheDocument();
   expect(screen.queryByText(/new restaurants? and/)).toBeNull();
   expect(rowOf(screen.getByRole("table", { name: "Restaurants" }), "SAMPLE GRILL")).toBeInTheDocument();
-  expect(screen.queryByText("Not every state file has been read yet.")).toBeNull();
+});
+
+const FAILED_FIRST = { ...LIST30, readAt: null, readFailedAt: "2026-11-23T15:40:00.000Z" };
+const FAILED_FIRST_LINE = "The weekly read on Nov 23, 2026 failed, so this list may be missing restaurants. No weekly read has read every state file yet.";
+
+it("a failed first read names its day beside its rows, so a broken read never looks like one not run yet", async () => {
+  route({ "/admin/prospects/restaurants?days=30": () => reply({ ...FAILED_FIRST, counts: { new_restaurant: 1, new_owner: 0, pest_finding: 0 }, rows: [LIST30.rows[0]] }) });
+  renderPage();
+  expect(await screen.findByText(FAILED_FIRST_LINE)).toBeInTheDocument();
+  expect(rowOf(screen.getByRole("table", { name: "Restaurants" }), "SAMPLE GRILL")).toBeInTheDocument();
+});
+
+it("a failed first read with no rows names its day too, with no empty claim", async () => {
+  route({ "/admin/prospects/restaurants?days=30": () => reply({ ...FAILED_FIRST, counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [] }) });
+  renderPage();
+  expect(await screen.findByText(FAILED_FIRST_LINE)).toBeInTheDocument();
+  expect(screen.queryByText(/^Nothing in/)).toBeNull();
+  expect(screen.queryByRole("table")).toBeNull();
 });
 
 it("while a weekly read has not finished the rows show with a not-finished line and no counts", async () => {
@@ -148,13 +166,14 @@ it("a read with nothing in the window shows the zero counts and an empty message
   expect(screen.queryByRole("table")).toBeNull();
 });
 
-it("a good read from before the period names its day beside the counts, so no count reads as a period it never saw", async () => {
-  // The weekly job stopped a month ago: its last good read is Oct 19, before this period starts.
+it("a last full read from before the period claims no counts and no empty result for it", async () => {
+  // The weekly job stopped a month ago: its last full read is Oct 19, before this period starts on Oct 21.
   const stale = { ...LIST30, readAt: "2026-10-19T15:40:00.000Z", counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [] };
   route({ "/admin/prospects/restaurants?days=30": () => reply(stale) });
   renderPage();
-  expect(await screen.findByText("0 new restaurants and 0 new owners from Oct 21 to Nov 19, as of the state files read on Oct 19, 2026.")).toBeInTheDocument();
-  expect(screen.queryByText(/^0 new restaurants and 0 new owners from Oct 21 to Nov 19\.$/)).toBeNull();
+  expect(await screen.findByText("The state files were last read on Oct 19, 2026, before this period began, so this list may be missing restaurants.")).toBeInTheDocument();
+  expect(screen.queryByText(/new restaurants? and/)).toBeNull();
+  expect(screen.queryByText(/^Nothing in/)).toBeNull();
 });
 
 it("a late answer for the period the owner left never replaces the list shown now", async () => {
@@ -178,16 +197,33 @@ it("summaryText says one or many per reason and names the Eastern day of the rea
   // 11:30 PM on Nov 16 Eastern is already Nov 17 in UTC: the day named is Nov 16.
   expect(summaryText({ from: "2026-10-21", through: "2026-11-19", readAt: "2026-11-17T04:30:00.000Z", counts: { new_restaurant: 2, new_owner: 1, pest_finding: 1 } }))
     .toBe("2 new restaurants and 1 new owner from Oct 21 to Nov 19, as of the state files read on Nov 16, 2026.");
-  expect(stateText({ readAt: "2026-11-17T04:30:00.000Z", readFailedAt: "2026-11-24T04:30:00.000Z" }))
-    .toBe("The weekly read on Nov 23, 2026 failed, so this list may be missing restaurants. The state files were last read in full on Nov 16, 2026.");
-  // A run that has not finished is named first, even after an earlier failure.
-  expect(stateText({ readAt: "2026-11-17T04:30:00.000Z", readUnfinishedSince: "2026-11-24T04:30:00.000Z", readFailedAt: "2026-11-17T05:30:00.000Z" }))
+});
+
+it("statusText lets the counts show only after a full read that reached the period, with no unfinished or failed run after it", () => {
+  const good = { from: "2026-10-21", readAt: "2026-11-17T04:30:00.000Z", readUnfinishedSince: null, readFailedAt: null };
+  expect(statusText(good)).toBeNull();
+  // A run that has not finished is named first, even after an earlier failure; then a failure; then no full read.
+  expect(statusText({ ...good, readUnfinishedSince: "2026-11-24T04:30:00.000Z", readFailedAt: "2026-11-17T05:30:00.000Z" }))
     .toBe("The weekly read that started on Nov 23, 2026 has not finished, so this list may be missing restaurants. The state files were last read in full on Nov 16, 2026.");
-  // headlineText claims counts only after a full read, and says when the list stops short of them.
+  expect(statusText({ ...good, readFailedAt: "2026-11-24T04:30:00.000Z" }))
+    .toBe("The weekly read on Nov 23, 2026 failed, so this list may be missing restaurants. The state files were last read in full on Nov 16, 2026.");
+  expect(statusText({ ...good, readAt: null, readUnfinishedSince: "2026-11-24T04:30:00.000Z" }))
+    .toBe("The weekly read that started on Nov 23, 2026 has not finished, so this list may be missing restaurants. No weekly read has read every state file yet.");
+  expect(statusText({ ...good, readAt: null, readFailedAt: "2026-11-24T04:30:00.000Z" }))
+    .toBe("The weekly read on Nov 23, 2026 failed, so this list may be missing restaurants. No weekly read has read every state file yet.");
+  expect(statusText({ ...good, readAt: null })).toBe("No weekly read has read every state file yet, so this list may be missing restaurants.");
+  // A full read reaches the period from its first day, by the Eastern day: 11:30 PM on Oct 20 Eastern (daylight
+  // time) is already Oct 21 in UTC, and 12:30 AM on Oct 21 is the first day.
+  expect(statusText({ ...good, readAt: "2026-10-21T03:30:00.000Z" }))
+    .toBe("The state files were last read on Oct 20, 2026, before this period began, so this list may be missing restaurants.");
+  expect(statusText({ ...good, readAt: "2026-10-21T04:30:00.000Z" })).toBeNull();
+});
+
+it("headlineText shows the counts only when statusText allows, and says when the list stops short of them", () => {
   const counts = { new_restaurant: 2, new_owner: 0, pest_finding: 0 };
   const window = { from: "2026-10-21", through: "2026-11-19", counts, readUnfinishedSince: null, readFailedAt: null, rows: [LIST30.rows[0], LIST30.rows[0]] };
   expect(headlineText({ ...window, readAt: null }))
-    .toBe("Not every state file has been read yet, so this list may be missing restaurants.");
+    .toBe("No weekly read has read every state file yet, so this list may be missing restaurants.");
   expect(headlineText({ ...window, readAt: "2026-11-17T04:30:00.000Z" }))
     .toBe("2 new restaurants and 0 new owners from Oct 21 to Nov 19, as of the state files read on Nov 16, 2026.");
   expect(headlineText({ ...window, counts: { new_restaurant: 1500, new_owner: 2, pest_finding: 1 }, readAt: "2026-11-17T04:30:00.000Z" }))
@@ -195,6 +231,4 @@ it("summaryText says one or many per reason and names the Eastern day of the rea
   // After a failed run: no counts, and no cut line either.
   expect(headlineText({ ...window, counts: { new_restaurant: 1500, new_owner: 2, pest_finding: 1 }, readAt: "2026-11-17T04:30:00.000Z", readFailedAt: "2026-11-24T04:30:00.000Z" }))
     .toBe("The weekly read on Nov 23, 2026 failed, so this list may be missing restaurants. The state files were last read in full on Nov 16, 2026.");
-  expect(headlineText({ ...window, readAt: "2026-11-17T04:30:00.000Z", readUnfinishedSince: "2026-11-23T15:36:00.000Z" }))
-    .toBe("The weekly read that started on Nov 23, 2026 has not finished, so this list may be missing restaurants. The state files were last read in full on Nov 16, 2026.");
 });

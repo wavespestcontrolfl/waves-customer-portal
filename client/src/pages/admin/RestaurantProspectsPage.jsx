@@ -5,7 +5,7 @@ import {
   ActionFeedback, Badge, Button, Card, CardBody, Table, THead, TBody, TR, TH, TD, UiSurface,
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
-import { formatETDate, formatETDateOnly } from "../../lib/timezone";
+import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
 
 // Restaurants (admin only, read only). New restaurants, new owners and inspections that found pests, from the state's
 // public restaurant files, so the owner can choose who to pitch. Nothing here is sent to anyone and no AI is used.
@@ -48,23 +48,31 @@ export function summaryText(data) {
   return `${plural(counts.new_restaurant, "new restaurant")} and ${plural(counts.new_owner, "new owner")} from ${shortDay(from)} to ${shortDay(through)}, as of the state files read on ${readDay(readAt)}.`;
 }
 
-// While a weekly run has not finished (readUnfinishedSince), or after one failed (readFailedAt), the job may have
-// committed some files and not others: the rows may mix two reads.
-export function stateText(data) {
-  const full = `The state files were last read in full on ${readDay(data.readAt)}.`;
+// What the weekly job's state lets the page claim: a sentence when it limits what the rows prove, or null when the
+// counts and an empty list may show. The job commits each state file on its own, so the rows prove a period only
+// after a full read (readAt) that reached the period and that no unfinished (readUnfinishedSince) or failed
+// (readFailedAt) run has followed. A read from before the period's first day (by the Eastern day) saw none of it.
+// The line and the empty view both use this one answer.
+export function statusText(data) {
+  const lastFull = data.readAt
+    ? `The state files were last read in full on ${readDay(data.readAt)}.`
+    : "No weekly read has read every state file yet.";
   if (data.readUnfinishedSince) {
-    return `The weekly read that started on ${readDay(data.readUnfinishedSince)} has not finished, so this list may be missing restaurants. ${full}`;
+    return `The weekly read that started on ${readDay(data.readUnfinishedSince)} has not finished, so this list may be missing restaurants. ${lastFull}`;
   }
-  return `The weekly read on ${readDay(data.readFailedAt)} failed, so this list may be missing restaurants. ${full}`;
+  if (data.readFailedAt) return `The weekly read on ${readDay(data.readFailedAt)} failed, so this list may be missing restaurants. ${lastFull}`;
+  if (!data.readAt) return "No weekly read has read every state file yet, so this list may be missing restaurants.";
+  if (etDateString(new Date(data.readAt)) < data.from) {
+    return `The state files were last read on ${readDay(data.readAt)}, before this period began, so this list may be missing restaurants.`;
+  }
+  return null;
 }
 
-// The line above the list. Before the first run that read all three files (readAt null), while a run has not finished
-// (readUnfinishedSince) or after one failed (readFailedAt), the rows may come from one file or mix two reads: counts
-// would claim what the state has not answered, so the line says the list may be missing restaurants. The counts cover
-// the whole period; the list stops at its newest 1,000 rows, and then says so.
+// The line above the list: the job's state when it limits what the rows prove (statusText), else the counts. The
+// counts cover the whole period; the list stops at its newest 1,000 rows, and then says so.
 export function headlineText(data) {
-  if (!data.readAt) return "Not every state file has been read yet, so this list may be missing restaurants.";
-  if (data.readUnfinishedSince || data.readFailedAt) return stateText(data);
+  const status = statusText(data);
+  if (status) return status;
   const total = data.counts.new_restaurant + data.counts.new_owner + data.counts.pest_finding;
   const cut = data.rows.length < total ? `The list shows the newest ${countText(data.rows.length)}.` : "";
   return [summaryText(data), cut].filter(Boolean).join(" ");
@@ -156,16 +164,15 @@ export default function RestaurantProspectsPage({ embedded = false }) {
 
       {loading && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading restaurants…</div>}
       {error && <ActionFeedback error onRetry={load} className="mb-3">{error}</ActionFeedback>}
-      {/* Before the first full read there is no window to claim counts for; a first run may have read one file. */}
-      {data && !data.readAt && data.rows.length === 0 && (
-        <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Not every state file has been read yet.</div>
-      )}
-      {data && (data.readAt || data.rows.length > 0) && (
+      {/* The line says what the job's state lets the page claim (statusText). An empty list reads as nothing found
+          only when the counts show too: otherwise it proves nothing about the period. */}
+      {data && (
         <>
           <p className="mb-3 text-ui-body text-zinc-900">{headlineText(data)}</p>
-          {data.rows.length === 0
-            ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()} so far.</div>
-            : <RestaurantTable rows={data.rows} />}
+          {data.rows.length > 0 && <RestaurantTable rows={data.rows} />}
+          {data.rows.length === 0 && !statusText(data) && (
+            <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()} so far.</div>
+          )}
         </>
       )}
     </UiSurface>
