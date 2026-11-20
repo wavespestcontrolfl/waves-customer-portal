@@ -802,7 +802,10 @@ describe('InspectionPage: an address race without availability refreshes at the 
     fireEvent.click(screen.getByRole('button', { name: 'Different address?' }));
     fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '9 Gulf Dr, Sarasota, FL 34231' } });
     fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
-    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i }));
+    const newTime = await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i });
+    // The reload warning was the old address's (pre-push P1 on a488a185ee).
+    expect(screen.queryByText(/couldn't load the latest open times/i)).not.toBeInTheDocument();
+    fireEvent.click(newTime);
     expect(screen.getByLabelText('Search for a service date or time')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     await waitFor(() => expect(commitBodies).toHaveLength(2));
@@ -1391,12 +1394,23 @@ describe('InspectionPage: an address race without availability refreshes at the 
   // Pre-push P1 on 4e9d76bcb1: a refusal that is not SLOT_TAKEN (here the
   // review's `address_unresolved`) supersedes a running search too, so its
   // late times never replace the calendar or clear the address message.
-  it('a search still running when an address_unresolved refusal lands → its late times never show', async () => {
+  // The search card stays, and the cancelled search ends quietly, whether it
+  // answers late or its fetch rejects on the abort as a browser's does
+  // (pre-push P1 on a488a185ee).
+  it.each([
+    ['answers late', false],
+    ['rejects on the abort', true],
+  ])('a search still running when an address_unresolved refusal lands (%s) → its late times never show, and it ends quietly', async (_label, rejectOnAbort) => {
     let finishSearch;
     const fetchMock = vi.fn((url, opts = {}) => {
       const u = String(url);
       if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
-      if (u.includes('/find-slots')) return new Promise((resolve) => { finishSearch = resolve; });
+      if (u.includes('/find-slots')) {
+        return new Promise((resolve, reject) => {
+          finishSearch = resolve;
+          if (rejectOnAbort) opts.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+        });
+      }
       if (opts.method === 'POST') return Promise.resolve(jsonResponse({ error: 'address_unresolved' }, 422));
       return Promise.resolve(jsonResponse(okPayload()));
     });
@@ -1417,6 +1431,8 @@ describe('InspectionPage: an address race without availability refreshes at the 
 
     expect(screen.queryByRole('button', { name: /Choose 3:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
     expect(screen.getByText(/We couldn't verify that address/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Search for a service date or time')).toBeInTheDocument();
+    expect(screen.queryByText(/I couldn't search right now/i)).not.toBeInTheDocument();
   });
 });
 

@@ -340,7 +340,10 @@ function AskCard({ onSearch, aiFiltered, onShowAll, closed }) {
     try {
       const res = await onSearch(q);
       setNotice(res?.summary ? { text: res.summary, isError: false } : null);
-    } catch {
+    } catch (err) {
+      // A search the page cancelled (a change of address, a booking's
+      // answer) ends quietly: it did not fail (pre-push P1 on a488a185ee).
+      if (err?.name === 'AbortError') return;
       setNotice({ text: `I couldn't search right now. Text or call ${WAVES_SUPPORT_PHONE_DISPLAY} and we'll find a time.`, isError: true });
     } finally {
       setAsking(false);
@@ -2190,7 +2193,8 @@ function ScheduleFlowPage({ flow }) {
       signal,
     });
     const body = await res.json().catch(() => ({}));
-    if (signal?.aborted) throw new Error('search superseded');
+    // A superseded search fails as the browser's own abort does (AskCard).
+    if (signal?.aborted) throw new DOMException('search superseded', 'AbortError');
     if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
       showReserviceLocationReview();
       return { summary: null };
@@ -2477,6 +2481,8 @@ function ScheduleFlowPage({ flow }) {
           // fresh controller for the requests that follow.
           supersedeSearches();
           setSearchClosed(false);
+          // A reload warning belongs to the old address (pre-push P1 on a488a185ee).
+          setSubmitError(null);
           setAiFiltered(false);
           setSelectedSlot(null);
           // The emailed time was offered for the old address.
