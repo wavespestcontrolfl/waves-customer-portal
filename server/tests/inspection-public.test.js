@@ -2180,6 +2180,27 @@ describe('POST /:token commit', () => {
       expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, { estimateZone: zone, date: FUTURE_DATE, technicianId: 'tech-2' });
     });
 
+    // A matching profile with no city on file has no name to keep: phase 1 writes the typed city, as main did.
+    test('a typed address that matches a profile with no city on file: phase 1 writes the typed city', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101',
+        address_line1: '123 Palm Ave', address_line2: null, city: null, state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5,
+      });
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-2' }] }] });
+
+      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Venice, FL 34209' });
+
+      expect(booked.statusCode).toBe(200);
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(['Venice']);
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({ id: 'cust-9', city: 'Venice' });
+    });
+
     // Pre-push P1 on 7a682696f6: phase 1's write stays when the booking is then refused (owner ruling 2026-09-24), so a
     // typed city in no zone on the profile made the refusal's fresh times and the retry read no zone: they could offer,
     // and book, another truck's hour on the zone day. Phase 1 keeps the profile's city for an address that matches it,
@@ -2243,18 +2264,28 @@ describe('POST /:token commit', () => {
     // Pre-push P1 on 850a6a79f0: phase 1 corrects the flow's own prospect (no visits yet) in place to a typed address on
     // another street, so it writes the typed city (Laurel, in no zone), while the list read the prospect's city on file
     // (Nokomis). The booking keeps the city its first build read for this commit, so it checks and stamps the zone its
-    // list offered, for the truck that list gave the hour.
-    test('phase 1 corrects its own prospect in place to a typed city in no zone: the booking keeps the city its list read', async () => {
+    // list offered, for the truck that list gave the hour. A staff-verified pin for the old street is not kept: the
+    // typed address is another street.
+    test.each([
+      ['', false],
+      [', past a staff-verified pin for its old street', true],
+    ])('phase 1 corrects its own prospect in place to a typed city in no zone%s: the booking keeps the city its list read', async (_label, reviewed) => {
       Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
       listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
       firstResults.leads = { ...LEAD_ROW, customer_id: null };
       firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
       listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-prospect' }) }];
-      firstResults.customers = {
-        id: 'cust-prospect', account_id: 'acct-p', phone: '9415550101',
-        address_line1: '1 Typo St', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34275', latitude: 27.4, longitude: -82.5,
-      };
+      const old = { address_line1: '1 Typo St', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34275', latitude: 27.4, longitude: -82.5 };
+      firstResults.customers = { id: 'cust-prospect', account_id: 'acct-p', phone: '9415550101', ...old };
       listResults.customers = [firstResults.customers];
+      if (reviewed) {
+        gateState.reviewLive = true;
+        firstResults.customer_properties = { id: 'property-p', customer_id: 'cust-prospect', active: true, is_primary: true, ...old };
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-prospect', status: 'verified', reason: 'staff_verified',
+          address_snapshot: ['1 Typo St', null, 'Nokomis', 'FL', '34275'], latitude: 27.4, longitude: -82.5,
+        };
+      }
       firstResults.call_log = null;
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       listResults.scheduled_services = [];
