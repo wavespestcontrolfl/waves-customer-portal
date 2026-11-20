@@ -190,7 +190,8 @@ async function getPolicy(conn = db) {
 // stored row, and so on every payment read.
 const POLICY_FIELD_CHECKS = {
   enabled: (v) => typeof v === 'boolean',
-  amountCents: (v) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0,
+  // Upper bound = the payout amount_cents column (PG integer).
+  amountCents: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 2147483647,
   currency: (v) => typeof v === 'string' && /^[A-Za-z]{3}$/.test(v),
   eligibleSources: (v) => Array.isArray(v) && v.every((source) => typeof source === 'string'),
   minRating: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5,
@@ -299,7 +300,12 @@ async function savePolicy(rawPatch = {}, conn = db, { key = POLICY_KEY } = {}) {
   // 2026-11-20 D4). A failed read must not overwrite a stored cap with the defaults. While the stored
   // row is unreadable a partial patch is refused: only an explicit full replacement (replace: true
   // with every field) overwrites it.
-  const { replace = false, ...rawFields } = rawPatch || {};
+  // The body must be a plain object before anything is read from it (an array or scalar would otherwise
+  // spread into fields); nothing is read or written otherwise.
+  if (!rawPatch || typeof rawPatch !== 'object' || Array.isArray(rawPatch)) {
+    throw operationalError('The review bonus settings must be an object', 422, 'review_policy_invalid');
+  }
+  const { replace = false, ...rawFields } = rawPatch;
   // A bad field is refused (422) before anything is read or written: the stored row stays as it was.
   const policyPatch = checkPolicyFields(rawFields);
   return conn.transaction(async (trx) => {

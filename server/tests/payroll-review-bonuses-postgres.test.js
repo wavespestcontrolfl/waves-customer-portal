@@ -556,6 +556,19 @@ postgres('payroll review bonus import', () => {
       expect((await payoutRow(bonus)).status).toBe('earned');
     });
 
+    it('savePolicy refuses a body that is not a plain object, reading and writing nothing', async () => {
+      await storePolicy(JSON.stringify({ enabled: true, amountCents: 1500, monthlyCapCount: 15 }));
+      const stored = async () => (await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value;
+      const before = await stored();
+      for (const body of [[{ monthlyCapCount: 1 }], Object.assign([], { monthlyCapCount: 1 }), null, 'x', 5]) {
+        await expect(savePolicy(body, trx)).rejects.toMatchObject({ code: 'review_policy_invalid', statusCode: 422 });
+      }
+      await expect(savePolicy({ amountCents: 2147483648 }, trx)).rejects.toMatchObject({ code: 'review_policy_invalid' });
+      expect(await savePolicy({ amountCents: 2147483647 }, trx)).toMatchObject({ amountCents: 2147483647, monthlyCapCount: 15 });
+      expect(JSON.parse(await stored()).monthlyCapCount).toBe(15);
+      expect(before).toContain('"monthlyCapCount":15');
+    });
+
     it('the dashboard and the CSV export fail when the policy cannot be read', async () => {
       await readyTech('Sample Alpha');
       await trx.raw('alter table system_settings rename to system_settings_unreadable');

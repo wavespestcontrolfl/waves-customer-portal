@@ -1580,7 +1580,7 @@ describe('monthly cap policy (owner 2026-11-20 D4)', () => {
     const { validatePolicyStrict } = ReviewIncentives;
     const bad = {
       enabled: ['true', 1, {}, []],
-      amountCents: ['500', {}, [], NaN, Infinity, -1, 2.5, '12abc'],
+      amountCents: ['500', {}, [], NaN, Infinity, -1, 2.5, '12abc', 2147483648, Number.MAX_SAFE_INTEGER],
       currency: [5, {}, 'US', 'USDX'],
       eligibleSources: ['google_review', {}, [1]],
       minRating: ['3', {}, 0, 6, 2.5, NaN],
@@ -1598,6 +1598,8 @@ describe('monthly cap policy (owner 2026-11-20 D4)', () => {
     expect(validatePolicyStrict({ monthlyCapCount: 15, programStartsAt: '2026-01-01T00:00:00Z', note: 'kept' }))
       .toMatchObject({ monthlyCapCount: 15, amountCents: 500, programStartsAt: '2026-01-01T00:00:00.000Z', note: 'kept' });
     expect(validatePolicyStrict({ monthlyCapCount: null, programStartsAt: null }).monthlyCapCount).toBeNull();
+    expect(validatePolicyStrict({ amountCents: 2147483647 }).amountCents).toBe(2147483647);
+    expect(validatePolicyStrict({ amountCents: 0, minRating: 5, monthlyCapCount: 1000 })).toMatchObject({ amountCents: 0, minRating: 5, monthlyCapCount: 1000 });
     expect(() => validatePolicyStrict([])).toThrow(expect.objectContaining({ code: 'review_policy_invalid' }));
   });
 
