@@ -755,10 +755,11 @@ const TAP_UNAVAILABLE = {
   call_still_processing: 'A call since the estimate was sent is still being read. Reload in a few minutes.',
   chose_annual_prepay: 'The caller chose annual prepay on the booking call. Use the annual prepay card.',
   estimate_not_on_card: 'The estimate it would accept is not one this card names. Accept it from the estimate.',
-  card_out_of_date: "The card's details changed since it was last updated. It updates within 10 minutes. Reload then.",
+  // An open card is rewritten by the next sweep (every 10 minutes); a claimed (in_progress) card is never swept.
+  card_out_of_date: "The card's details changed since it was last updated. An open card updates within 10 minutes, then reload. A claimed card does not update: accept it from the estimate.",
   card_changed: 'The card changed or was closed since it loaded. Reload and look again.',
   word_changed: "The caller's word changed since the card loaded. Reload and look again.",
-  word_not_current: "The caller's words on the card are not the latest word about this estimate. Reload in 10 minutes, or accept it from the estimate.",
+  word_not_current: "The caller's words on the card are not the latest word about this estimate. An open card updates within 10 minutes, then reload. A claimed card does not update: accept it from the estimate.",
   catalog_busy: 'The service catalog is being updated. Try again in a minute.',
   plan_not_shown: "The plan's visits or per-visit price would not be the ones the card showed. Accept it from the estimate instead.",
   customer_busy: 'Another change to this customer is being saved. Try again in a minute.',

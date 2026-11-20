@@ -466,7 +466,8 @@ export function CallPrepayEvidence({ payload, callPrepay, isOpenView, isAdmin, b
 // when the card was filed. The server reads what the tap can do right now (can_accept, visit_date, message), so this
 // screen holds no copy of the rule. The list carries no tap state: an open card an admin can tap (tapUrl) asks the
 // server when it shows, and again on each list load (tapFor). phoneYes, when given, is that state already read. The tap runs the office's own accept, as Mark accepted does: the visit the
-// call booked becomes the plan's first visit, and the customer gets what Mark accepted sends (the membership email).
+// call booked becomes the plan's first visit, and the customer gets what Mark accepted sends (the membership email, if the
+// customer can get email: the sender skips a customer with no address or email turned off).
 export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = false, phoneYes = null, tapUrl = null, tapFor = null, onAcceptPhoneYes = null }) {
   const p = parsePayload(payload) || {};
   const [read, setRead] = useState(null);
@@ -526,7 +527,7 @@ export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = 
       {tap === "accept" && (
         <>
           <div className="mt-1 text-14 text-ink-secondary">
-            {`${acceptsNth >= 0 ? `It accepts estimate ${acceptsNth + 1}. ` : ""}The visit on ${live.visit_date} becomes the plan's first visit, and the plan's next visits are booked. The customer gets what Mark accepted sends (the membership email). No text goes out.`}
+            {`${acceptsNth >= 0 ? `It accepts estimate ${acceptsNth + 1}. ` : ""}The visit on ${live.visit_date} becomes the plan's first visit, and the plan's next visits are booked. The customer gets what Mark accepted sends: the membership email, if the customer can get email. No text goes out.`}
           </div>
           {/* The plan and its per-visit price as the accept bills them (the accept refuses any other price). */}
           {live.plan && live.per_visit != null && <div className="mt-1 text-14 text-zinc-900">{`${live.plan} at ${fmtMoney(live.per_visit)} a visit.`}</div>}

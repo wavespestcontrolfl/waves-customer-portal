@@ -1467,7 +1467,7 @@ describe('call_phone_yes card tap', () => {
     render(<TriageInboxTabV2 isAdmin />);
     const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
     expect(await within(el).findByText(/The visit on 2026-12-01 becomes the plan's first visit/)).toBeInTheDocument();
-    expect(within(el).getByText(/The customer gets what Mark accepted sends \(the membership email\)\. No text goes out\./)).toBeInTheDocument();
+    expect(within(el).getByText(/The customer gets what Mark accepted sends: the membership email, if the customer can get email\. No text goes out\./)).toBeInTheDocument();
     fireEvent.click(within(el).getByRole('button', { name: 'Accept as pay per application' }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/py/accept-call-phone-yes', {
       method: 'POST', body: JSON.stringify({ expected_updated_at: tapCard.updated_at, preview_token: 'tok-py-1' }),

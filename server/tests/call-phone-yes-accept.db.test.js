@@ -1564,27 +1564,36 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
           mockConn = perTest;
         }
         const lock = (conn) => PhoneYesPrivate.lockCustomerEstimatesForTest(conn, made.customerId);
+        // Each write with the update that puts its row back, so each case starts from the same rows.
         const writes = [
-          (conn) => conn('estimates').where({ id: draft.id }).update({ status: 'sending' }),
-          (conn) => conn('estimates').where({ id: archived.id }).update({ archived_at: null }),
+          [draft.id, { status: 'sending' }, { status: 'draft' }],
+          [archived.id, { archived_at: null }, { archived_at: archived.archived_at }],
         ];
-        for (const write of writes) {
+        for (const [id, change, undo] of writes) {
+          const write = (conn) => conn('estimates').where({ id }).update(change);
           // The write in flight on another connection (not committed): the lock refuses at once.
           const other = await pool.transaction();
-          await write(other);
           let accept = await pool.transaction();
-          await expect(lock(accept)).rejects.toMatchObject({ phoneYesRefusal: 'estimate_being_sent' });
-          await accept.rollback();
-          await other.rollback();
-          // The tap's lock first: the write after it waits for the accept's commit.
+          try {
+            await write(other);
+            await expect(lock(accept)).rejects.toMatchObject({ phoneYesRefusal: 'estimate_being_sent' });
+          } finally {
+            await accept.rollback();
+            await other.rollback();
+          }
+          // The tap's lock first: the write after it waits until the accept ends.
           accept = await pool.transaction();
-          await lock(accept);
-          await expect(pool.transaction(async (later) => {
-            await later.raw("SET LOCAL lock_timeout = '300ms'");
-            await write(later);
-          })).rejects.toMatchObject({ code: '55P03' });
-          await accept.commit();
+          try {
+            await lock(accept);
+            await expect(pool.transaction(async (later) => {
+              await later.raw("SET LOCAL lock_timeout = '300ms'");
+              await write(later);
+            })).rejects.toMatchObject({ code: '55P03' });
+          } finally {
+            await accept.rollback();
+          }
           await expect(write(pool)).resolves.toBe(1);
+          await pool('estimates').where({ id }).update(undo);
         }
       });
 
