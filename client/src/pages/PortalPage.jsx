@@ -8664,8 +8664,8 @@ const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationWaterSource', 'irrigationIssues',
 ]);
 
-// The sprinkler timer, and the same as one comparable value: the card calls the timer on screen "On file" only when
-// it is the one the server last returned.
+// The sprinkler timer, and the same as one comparable value: a save response compares the server's timer with the
+// one it held before.
 const SPRINKLER_TIMER_FIELDS = ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'];
 const sprinklerTimerOf = (p) => Object.fromEntries(SPRINKLER_TIMER_FIELDS.map((field) => [field, p?.[field] ?? null]));
 const sprinklerTimerKey = (p) => SPRINKLER_TIMER_FIELDS.map((field) => p?.[field] ?? '').join('|');
@@ -8793,8 +8793,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   const awayWatchPairRevision = useRef(0);
   const [wateringPlanRevision, setWateringPlanRevision] = useState(0);
   const [savedWateringRevision, setSavedWateringRevision] = useState(0);
-  // The sprinkler timer the server holds: the load, then every save response (sprinklerTimerKey).
-  const [savedTimerKey, setSavedTimerKey] = useState(null);
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
@@ -8804,7 +8802,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         setPrefs(d.preferences);
         lastSavedRef.current = d.preferences;
         screenStampRef.current = d.preferences?.irrigationHomeChangedAt ?? null;
-        setSavedTimerKey(sprinklerTimerKey(d.preferences));
         // Server-side lawn eligibility (tier / turf type OR recurring lawn
         // service evidence) — the same test the PUT applies to Weekly
         // Inches, so the field never renders and then drops on save.
@@ -8877,7 +8874,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             const timerBefore = sprinklerTimerKey(lastSavedRef.current);
             const timerNow = sprinklerTimerKey(result.preferences);
             lastSavedRef.current = result.preferences;
-            setSavedTimerKey(timerNow);
             if (timerNow !== timerBefore && !SPRINKLER_TIMER_FIELDS.some((field) => field in pendingRef.current)) {
               setPrefs((prev) => (sprinklerTimerKey(prev) === timerBefore ? { ...prev, ...sprinklerTimerOf(result.preferences) } : prev));
             }
@@ -9519,7 +9515,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         brand={prefs.irrigationControllerBrand}
         model={prefs.irrigationControllerModel}
         app={prefs.irrigationControllerApp}
-        saved={sprinklerTimerKey(prefs) === savedTimerKey}
         error={fieldErrors.irrigationControllerBrand || fieldErrors.irrigationControllerModel || fieldErrors.irrigationControllerApp}
         onChange={(fields) => Object.entries(fields).forEach(([field, value]) => updateField(field, value))}
       />}

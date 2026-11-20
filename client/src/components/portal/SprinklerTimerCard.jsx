@@ -125,14 +125,13 @@ function Picker({ startBrand, onPick, onCancel }) {
   );
 }
 
-function OnFile({ timer, status, appQuestion, app, onApp, onChangeTimer }) {
+// The chosen timer. It carries no saved / not-saved label: the Property tab's save banner reports every save, and a
+// refusal shows its reason under the card. A label here would be a guess about the server across queued saves,
+// retries and lost answers (four pre-push rounds on part 3 found a new gap in each version of one).
+function ChosenTimer({ timer, appQuestion, app, onApp, onChangeTimer }) {
   return (
     <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-        <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 999, background: '#94A3B8', flexShrink: 0 }} />
-        <span style={{ fontWeight: 700 }}>{timer.name}</span>
-        <span style={meta}>{status}</span>
-      </div>
+      <div style={{ fontWeight: 700, marginBottom: 16 }}>{timer.name}</div>
       <p style={prose}>{timer.line}</p>
       {appQuestion && (
         <div role="group" aria-label={appQuestion} style={{ marginBottom: 16 }}>
@@ -155,9 +154,8 @@ function OnFile({ timer, status, appQuestion, app, onApp, onChangeTimer }) {
   );
 }
 
-// `saved`: the timer shown is the one the server last returned. Until then it is not on file: still to save, or
-// refused (`error`, the server's reason).
-export default function SprinklerTimerCard({ brand = null, model = null, app = null, saved = false, error = '', onChange }) {
+// `error`: the server's reason when it refused the timer.
+export default function SprinklerTimerCard({ brand = null, model = null, app = null, error = '', onChange }) {
   const [picking, setPicking] = useState(false);
   const timer = timerOnFile(brand, model);
   // Only a Hunter has a model on the list.
@@ -166,12 +164,11 @@ export default function SprinklerTimerCard({ brand = null, model = null, app = n
   const save = (nextBrand, nextModel, nextApp) => onChange({
     irrigationControllerBrand: nextBrand, irrigationControllerModel: nextModel, irrigationControllerApp: nextApp,
   });
-  // A new timer is a new box: the app answer on file was about the old one. The same timer keeps its answer, and is
-  // sent again while it is not on file (the retry after a failed save).
+  // A new timer is a new box: the app answer was about the old one. The same timer keeps its answer, and picking it
+  // again sends it again: the retry after a failed save (a repeat of a saved timer writes the same values).
   const pick = (nextBrand, nextModel) => {
     setPicking(false);
     const same = nextBrand === brand && nextModel === modelOnFile;
-    if (same && saved) return;
     save(nextBrand, nextModel, same ? app : null);
   };
   return (
@@ -179,7 +176,7 @@ export default function SprinklerTimerCard({ brand = null, model = null, app = n
       <h2 style={{ fontSize: 20, margin: '0 0 8px' }}>Your sprinkler timer</h2>
       {timer && !picking
         ? (
-          <OnFile timer={timer} status={error ? 'Not saved' : saved ? 'On file' : 'Not saved yet'} appQuestion={controllerAsksAboutApp(brand, modelOnFile) ? APP_QUESTIONS[brand] : null}
+          <ChosenTimer timer={timer} appQuestion={controllerAsksAboutApp(brand, modelOnFile) ? APP_QUESTIONS[brand] : null}
             app={app} onApp={(next) => save(brand, modelOnFile, next)} onChangeTimer={() => setPicking(true)} />
         )
         : <Picker startBrand={brand} onPick={pick} onCancel={timer ? () => setPicking(false) : null} />}

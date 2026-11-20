@@ -49,14 +49,13 @@ it('asks the phone-app question for exactly the timers the server takes an answe
   }
 });
 
-it('calls the timer on file only once the server holds it, and says why when it was refused', () => {
+it('says why when the server refused the timer, and makes no claim about the save otherwise', () => {
   const { rerender } = render(<SprinklerTimerCard brand="hunter" model="x2" error="The home on this account changed. Reload, then set the sprinkler timer again." onChange={vi.fn()} />);
   expect(screen.getByRole('alert')).toHaveTextContent('We could not save your timer. The home on this account changed.');
-  expect(screen.getByText('Not saved')).toBeInTheDocument();
   rerender(<SprinklerTimerCard brand="hunter" model="x2" onChange={vi.fn()} />);
-  expect(screen.getByText('Not saved yet')).toBeInTheDocument();
-  rerender(<SprinklerTimerCard brand="hunter" model="x2" saved onChange={vi.fn()} />);
-  expect(screen.getByText('On file')).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  // The tab's save banner reports saves; the card cannot know the server's state across queued saves and retries.
+  expect(screen.queryByText(/on file|saved/i)).not.toBeInTheDocument();
 });
 
 it('asks no phone-app question for a timer that has no app, or for another brand', () => {
@@ -74,21 +73,18 @@ it('asks a Rain Bird owner about the Rain Bird app', () => {
   expect(screen.getByRole('link', { name: 'How to run it on a Rain Bird' })).toHaveAttribute('href', 'https://www.wavespestcontrol.com/sprinkler-timers/rain-bird/');
 });
 
-it('keeps the timer on file when the customer backs out or picks the same one, and sends it again while not on file', () => {
+it('keeps the timer when the customer backs out, and picking the same timer sends it again with its answer', () => {
   const onChange = vi.fn();
-  const { rerender } = render(<SprinklerTimerCard brand="hunter" model="x2" app="yes" saved onChange={onChange} />);
+  render(<SprinklerTimerCard brand="hunter" model="x2" app="yes" onChange={onChange} />);
   fireEvent.click(screen.getByRole('button', { name: 'Change my timer' }));
   fireEvent.click(screen.getByRole('button', { name: 'Keep my timer' }));
   expect(screen.getByText('Hunter X2')).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'Change my timer' }));
-  fireEvent.click(screen.getByRole('button', { name: /^X2/ }));
   expect(onChange).not.toHaveBeenCalled();
-  expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'true');
-  // A failed save leaves the timer not on file: picking it again is the retry, and keeps its answer.
-  rerender(<SprinklerTimerCard brand="hunter" model="x2" app="yes" onChange={onChange} />);
+  // The same timer again is the retry after a failed save: it keeps its answer.
   fireEvent.click(screen.getByRole('button', { name: 'Change my timer' }));
   fireEvent.click(screen.getByRole('button', { name: /^X2/ }));
   expect(onChange).toHaveBeenCalledWith({ irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' });
+  expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'true');
 });
 
 it('opens the model list for a Hunter that staff recorded without a model', () => {
