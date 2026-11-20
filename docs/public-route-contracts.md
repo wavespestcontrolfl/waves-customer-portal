@@ -7733,15 +7733,18 @@ resolver and trusted customer as its next commit. A booking moved to a matched
 profile's other stored location also answers `address_changed: true` when that
 profile is the trusted customer the next commit loads and still has the stored
 pin and address phase one adopted: the page drops the typed address, so its
-reload and its retry read that profile's stored location and address. When the
+reload and its retry read that profile's stored location and address. An
+`address_changed` answer with no times (this one, or the account-change one)
+reloads the whole page: one GET brings the address on file with its times, and
+when it fails the page shows its load-error card ("Try again"), never the typed
+address over times or a search for another one. When the
 next commit would load another profile, staff changed that profile's pin or
 address since phase one, or that read fails, the typed address stays. A failed build answers with no times too.
 When a `SLOT_TAKEN` answer carries no times and the page's own reload then fails,
 or answers 200 with no list (its build failed), the page clears its times, the
 emailed time included, and asks the customer to reload the page: nothing vouches
-for the old ones, and the address behind them can have changed (`address_changed`,
-this answer's or the account-change one's, or phase one linked a profile at another
-address). A terminal state, the address form, or the GET's own no-times answers
+for the old ones, and the address behind them can have changed (phase one linked a
+profile at another address). A terminal state, the address form, or the GET's own no-times answers
 (`service_area_unavailable`, `booking_unavailable`) in that answer still replace the
 page. Any answer but a booking also drops a search still running, so its late times
 never land over the page. The reload runs under the page's request controller: a

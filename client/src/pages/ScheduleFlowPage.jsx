@@ -2123,12 +2123,11 @@ export default function ScheduleFlowPage({ flow }) {
   // address) would re-answer needs_address:true for an addressless lead
   // and yank the picker back to a blank address form mid-session. When the
   // lead already has an address on file (no resolvedAddress held), the
-  // plain GET is correct and unchanged — same as every other flow.
-  // ignoreHeldAddress: the held address was just invalidated (an address
-  // race — Codex #4737 r10 pre-push P1); this call's closure still holds
-  // it, so the plain GET (the customer's current address) is used instead.
-  const refreshInspectionAvailability = useCallback(async ({ signal, ignoreHeldAddress = false } = {}) => {
-    if (flow === 'inspection' && resolvedAddress && !ignoreHeldAddress) {
+  // plain GET is correct and unchanged — same as every other flow. A
+  // refusal that drops the held address reloads the whole page instead
+  // (confirm's load()), so this call never sees a dropped address.
+  const refreshInspectionAvailability = useCallback(async ({ signal } = {}) => {
+    if (flow === 'inspection' && resolvedAddress) {
       const { res, body } = await postInspectionAvailability(token, resolvedAddress, { signal });
       if (signal?.aborted) return;
       if (!res.ok) throw new Error(body.error || 'availability refresh failed');
@@ -2304,14 +2303,18 @@ export default function ScheduleFlowPage({ flow }) {
         // drop the held supplied address so the next confirm doesn't
         // resubmit the stale one, and show the address actually on file.
         // A refused booking that moved to the matched profile's address on
-        // file says so too, with no address (the reload brings it).
+        // file says so too, with no address. With no times, such an answer
+        // reloads the whole page (load() below): one GET brings the address
+        // and its times together, and a failure shows the load-error card,
+        // never the typed address over times, or a search, for another one
+        // (pre-push P1 on dda1a52814).
         if (flow === 'inspection' && body.address_changed) {
           setResolvedAddress('');
           if (body.lead) mergeData({ lead: body.lead });
         }
         if (body.availability) {
           setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
-        } else if (inspectionLike) {
+        } else if (inspectionLike && !body.address_changed) {
           // The server's own refresh attempt came back empty — fall back
           // to a client-side refresh through the SAME address-aware helper
           // showAllTimes uses, never the bare load()/GET below: an
@@ -2320,16 +2323,15 @@ export default function ScheduleFlowPage({ flow }) {
           // fails too, the page clears its times (the emailed pick follows
           // the calendar) and asks for a reload: this answer carried no
           // times, so nothing vouches for the old ones. The address behind
-          // them can have changed (`address_changed`, or phase one linked a
-          // profile at another address), and the next confirm books what
-          // the server resolves now (pre-push P1s on 979f0dbec9 and
-          // 8f40c19990).
+          // them can have changed (phase one linked a profile at another
+          // address), and the next confirm books what the server resolves
+          // now (pre-push P1s on 979f0dbec9 and 8f40c19990).
           // The reload runs under the current request controller, so a
           // change of address meanwhile supersedes it: it applies no list,
           // clears nothing and says nothing, as the new address's own list
           // replaces the page (pre-push P1 on 4e9d76bcb1).
           const { signal } = loadAbortRef.current;
-          const done = await refreshInspectionAvailability({ signal, ignoreHeldAddress: Boolean(body.address_changed) })
+          const done = await refreshInspectionAvailability({ signal })
             .then(() => signal.aborted, () => {
               if (!signal.aborted) {
                 mergeData({ availability: null });

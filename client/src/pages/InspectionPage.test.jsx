@@ -733,12 +733,15 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(availabilityPosts).toHaveLength(1); // only the gate's own resolve, never a refresh with the stale address
   });
 
-  // Pre-push P1s on 979f0dbec9 and 8f40c19990: a refusal with no times leaves
-  // nothing that vouches for the old calendar. Here the page dropped the
-  // typed address, so the next confirm books the address on file. When the
-  // reload fails, no old time stays bookable, and the page asks for a reload.
-  it('address_changed + a failed reload → the old times are cleared, with a reload message', async () => {
-    let commitCalls = 0;
+  // Pre-push P1s on 979f0dbec9 and dda1a52814: a booking moved to the
+  // matched profile's address on file answers address_changed with no times
+  // and no address. The page drops the typed address, so its next confirm
+  // books the address on file, and only a full reload shows that address
+  // with its times. When the reload fails, the page shows the load-error
+  // card: no old times, no search and no Book under the typed address.
+  // "Try again" then reloads the address and its times together.
+  it('address_changed with no address + a failed reload → the load-error card; "Try again" shows the address on file and books it', async () => {
+    const commitBodies = [];
     let getCalls = 0;
     const fetchMock = vi.fn((url, opts = {}) => {
       const u = String(url);
@@ -747,8 +750,18 @@ describe('InspectionPage: an address race without availability refreshes at the 
         return Promise.resolve(jsonResponse({ availability: okPayload().availability, needs_address: false }));
       }
       if (opts.method === 'POST') {
-        commitCalls += 1;
-        return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', address_changed: true, availability: null }, 409));
+        commitBodies.push(JSON.parse(opts.body));
+        if (commitBodies.length === 1) {
+          return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', address_changed: true, availability: null }, 409));
+        }
+        return Promise.resolve(jsonResponse({
+          success: true,
+          state: 'ok',
+          visit: { date: '2026-07-13', window: { start: '09:00', end: '09:30' } },
+          startLabel: '9:00 AM',
+          endLabel: '9:30 AM',
+          rescheduleUrl: '/reschedule/feedface',
+        }));
       }
       getCalls += 1;
       if (getCalls === 1) {
@@ -758,7 +771,11 @@ describe('InspectionPage: an address race without availability refreshes at the 
           lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
         })));
       }
-      return Promise.resolve(jsonResponse({ error: 'unavailable' }, 503));
+      if (getCalls === 2) return Promise.resolve(jsonResponse({ error: 'unavailable' }, 503));
+      return Promise.resolve(jsonResponse(okPayload({
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '456 Stored St, Sarasota 34231' },
+        availability: mondayAvailability('09:00', '9:00 AM'),
+      })));
     });
     vi.stubGlobal('fetch', fetchMock);
     renderPage();
@@ -767,12 +784,20 @@ describe('InspectionPage: an address race without availability refreshes at the 
     fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
-    await waitFor(() => expect(commitCalls).toBe(1));
 
-    expect(await screen.findByText(/couldn't load the latest open times\. Please reload this page/i)).toBeInTheDocument();
+    expect(await screen.findByText(/couldn't load your consultation options/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Book /i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+    expect(screen.queryByText(/123 Palm Ave/i)).not.toBeInTheDocument();
     expect(getCalls).toBe(2);
+
+    fireEvent.click(screen.getByRole('button', { name: /Try again/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i }));
+    expect(screen.getByText(/456 Stored St/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(commitBodies).toHaveLength(2));
+    expect(commitBodies[1]).not.toHaveProperty('address');
   });
 
   // Pre-push P1 on 8f40c19990: with no address typed, phase one can link a
