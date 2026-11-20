@@ -40,7 +40,7 @@ const HOLD_TEXT = {
   'text-draft': 'A text draft is not saved in this tab.',
   'estimate-send': 'Send is locked on an estimate in this tab. A reload unlocks it.',
   'schedule-notice': 'A schedule notice is still open.',
-  'recap-upload': 'A recap clip is still uploading.',
+  'recap-upload': 'A recap clip is not uploaded yet.',
   'ask-draft': 'An Ask Waves question is not sent yet.',
 };
 

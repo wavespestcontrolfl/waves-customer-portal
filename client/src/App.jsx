@@ -299,7 +299,8 @@ function showReloadToast() {
 // Rendered when a lazy chunk still fails after the one automatic reload —
 // a friendly retry beats the blank screen the rethrow used to produce.
 function ChunkLoadFallback() {
-  const operatorPath = /^\/(admin|tech)(\/|$)/.test(window.location.pathname);
+  // Case-insensitive, as React Router matches /ADMIN/... too.
+  const operatorPath = /^\/(admin|tech)(\/|$)/i.test(window.location.pathname);
   // Held work can be why this staff tab kept its old code: Retry names it first.
   const { named, heldText, tryReload } = useHoldAwareReload(null, clearChunkReloadFlag);
   if (!operatorPath) {
@@ -357,10 +358,11 @@ function RouteFallback({ label = 'Loading...' }) {
   );
 }
 
-// The error for a page chunk the live build no longer serves. "Unable to
-// preload CSS" is Vite's error for a page stylesheet gone the same way.
+// The error for a page chunk the live build no longer serves, in Chrome,
+// Safari and Firefox. "Unable to preload CSS" is Vite's error for a page
+// stylesheet gone the same way.
 function isChunkError(err) {
-  return /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError|Unable to preload CSS/i.test(String(err?.message || ''));
+  return /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|ChunkLoadError|Unable to preload CSS/i.test(String(err?.message || ''));
 }
 
 export function lazyWithRetry(factory) {

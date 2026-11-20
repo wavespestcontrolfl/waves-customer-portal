@@ -167,6 +167,7 @@ test('held work on a staff page keeps the tab: the preload error neither reloads
 
 test.each([
   ['code', 'Failed to fetch dynamically imported module: /assets/Gone-abc123.js'],
+  ['code (Firefox)', 'error loading dynamically imported module: /assets/Gone-abc123.js'],
   ['stylesheet', 'Unable to preload CSS for /assets/Gone-abc123.css'],
 ])('held work on a staff page gets the retry screen for a page whose %s is gone, with no reload', async (_part, message) => {
   window.history.pushState({}, '', '/admin/communications');
@@ -190,8 +191,8 @@ test('held work on a staff page: a nested chunk that plain React.lazy loads gets
   expect(reported.calls).toHaveLength(0);
 });
 
-test('the held retry screen names the held work before it reloads', async () => {
-  window.history.pushState({}, '', '/admin/communications');
+test.each(['/admin/communications', '/ADMIN/Communications'])('the held retry screen on %s names the held work before it reloads', async (path) => {
+  window.history.pushState({}, '', path);
   const reload = vi.fn();
   vi.stubGlobal('location', { ...window.location, reload });
   holding = true;
