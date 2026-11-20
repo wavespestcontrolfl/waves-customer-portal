@@ -64,7 +64,10 @@ const { randomUUID } = require('crypto');
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
-afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
+// The hooks carry their own time limit: on a busy machine the route modules
+// load, and this suite's rows are removed, slower than Jest's 5 s default.
+const HOOK_MS = 60000;
+afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); }, HOOK_MS);
 
 maybeDescribe('quiz hand-off: the price page continues the lead an attach token names (live Postgres)', () => {
   let db;
@@ -94,7 +97,7 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     app.use('/api/public/estimator', require('../routes/public-property-lookup'));
     app.use('/api/public/quote', require('../routes/public-quote'));
     server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}`; done(); });
-  });
+  }, HOOK_MS);
 
   afterAll(async () => {
     if (prevSecret === undefined) delete process.env.LEAD_PREFILL_SECRET;
@@ -116,7 +119,7 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     await quietly(db('leads').whereIn('id', leadIds).del());
     await quietly(db('customers').whereIn('id', customerIds).del());
     await quietly(db('customer_accounts').whereIn('id', customers.map((row) => row.account_id).filter(Boolean)).del());
-  });
+  }, HOOK_MS);
 
   // Area code 999 is unassigned; the exchange never starts with 0 or 1.
   const syntheticPhone = () => {
