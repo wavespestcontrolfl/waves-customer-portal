@@ -1169,7 +1169,7 @@ describe('same-start visits (class 5)', () => {
     '2 visits start at 11 AM on Aug 10; split them so they run back to back.',
     { customer_id: customerId, itemKeys: ['2026-08-10'] },
     { link: `/admin/dispatch?tab=schedule&date=2026-08-10&appointment=visit-${customerId}`, detail: 'Aug 10 at 11 AM: Lawn and Pest.',
-      refreshOnDedupe: true, ringOnRefresh: () => false },
+      refreshOnDedupe: true, bumpOnRefresh: true, ringOnRefresh: () => false },
   ];
   const openKeysByPrefix = (byPrefix) => episodeHelpers.openAdminAlertKeys.mockImplementation(async (_conn, prefix) => byPrefix[prefix] || []);
   const closedBy = () => Object.fromEntries(episodeHelpers.closeAdminAlertKeys.mock.calls.map(([, keys, reason]) => [reason, keys]));
@@ -1197,9 +1197,11 @@ describe('same-start visits (class 5)', () => {
     expect(body).toBe('2 visits start at 11 AM on Aug 10; split them so they run back to back.');
     expect(opts).toMatchObject({
       link: '/admin/dispatch?tab=schedule&date=2026-08-10&appointment=visit-cust-pair-1', detail: 'Aug 10 at 11 AM: Lawn and Pest.',
-      bell: true, dedupeKey: 'same-start-visits:cust-pair-1', refreshOnDedupe: true,
+      bell: true, dedupeKey: 'same-start-visits:cust-pair-1', refreshOnDedupe: true, bumpOnRefresh: true,
       metadata: { dedupeKey: 'same-start-visits:cust-pair-1', customer_id: 'cust-pair-1', itemKeys: ['2026-08-10'] },
     });
+    // ringAlert forwards the bump only when the alert asks for it: the other classes keep their place.
+    expect(calls.map((c) => c[3].bumpOnRefresh === true)).toEqual([false, false, true]);
     expect(result).toMatchObject({ sameStartVisits: 1, sameStartCheckFailed: false, sameStartUndelivered: 0, alerted: 3 });
   });
 
@@ -1262,6 +1264,8 @@ describe('same-start visits (class 5)', () => {
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: 2 });
     expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey))
       .toEqual(['unpriced-series:ss-parent-1', 'same-start-visits:cust-pair-1']);
+    // Killed too, only the same-start bell asks notifyAdmin for the bump.
+    expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].bumpOnRefresh === true)).toEqual([false, true]);
     expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 

@@ -281,6 +281,10 @@ function sameStartAlert(finding, todayET) {
       link: copy.link,
       detail: copy.detail,
       refreshOnDedupe: true,
+      // A ring (a new day) moves the bell to the top of the newest-first list,
+      // as the unassigned-visit bell does; notifyAdmin bumps only a refresh
+      // that rings, so a quiet update keeps its place.
+      bumpOnRefresh: true,
       ringOnRefresh: (_existing, existingMeta) => {
         const known = new Set(Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys : []);
         return dates.some((date) => !known.has(date));

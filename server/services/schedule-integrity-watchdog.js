@@ -880,7 +880,7 @@ async function runInner({ now = new Date() } = {}) {
 
 // One finding to the bell: [dedupeKey, title, body, metadata, options].
 // Returns the notification result; realRing says whether it was a real ring.
-async function ringAlert(episodes, dedupeKey, title, body, metadata, { link = '/admin/dispatch', detail, refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) {
+async function ringAlert(episodes, dedupeKey, title, body, metadata, { link = '/admin/dispatch', detail, refreshOnDedupe, bumpOnRefresh, ringOnRefresh, dedupeVersion } = {}) {
   // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
   // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
   // site-level tag these money-loss pages would return a suppressed
@@ -895,6 +895,8 @@ async function ringAlert(episodes, dedupeKey, title, body, metadata, { link = '/
     bell: true,
     dedupeKey,
     ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
+    // Only the same-start class asks for it: its ringing refresh moves to the top.
+    ...(bumpOnRefresh ? { bumpOnRefresh: true } : {}),
     ...(ringOnRefresh ? { ringOnRefresh } : {}),
     ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
     metadata: { dedupeKey, ...metadata },

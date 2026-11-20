@@ -187,8 +187,12 @@ postgres('same-start visits check on Postgres', () => {
       subject: { type: 'customer', id: customerId }, doneWhen: 'visits_start_apart', who: 'person',
     });
 
-    // 2. A day the bell did not list joins: the same row rings again.
+    // 2. A day the bell did not list joins: the same row rings again, and moves to the top of
+    // the newest-first bell (bumpOnRefresh). now() is fixed inside this test's transaction,
+    // so the row is backdated first.
     await markRead(new Date('2040-01-10T17:00:00Z'));
+    const beforeRing = new Date('2026-01-01T12:00:00Z');
+    await trx('notifications').where({ id: raised.id }).update({ created_at: beforeRing });
     const [jan22Lawn, jan22Pest] = await pair(customerId, { scheduled_date: '2040-01-22', window_start: '11:00', window_end: '12:00', technician_id: tech });
     await runInner({ now });
     const [rang, ...extra2] = await bells();
@@ -197,10 +201,13 @@ postgres('same-start visits check on Postgres', () => {
     expect(rang.read_at).toBeNull();
     expect(rang.body).toBe('2 days have visits at the same time, first Jan 15 at 10 AM; split each so they run back to back.');
     expect(rang.metadata.itemKeys).toEqual(['2040-01-15', '2040-01-22']);
+    expect(new Date(rang.created_at).getTime()).toBeGreaterThan(beforeRing.getTime());
 
-    // 3. One day is split: the bell updates quietly (read state and last ring kept).
+    // 3. One day is split: the bell updates quietly (read state, last ring and place kept).
     const readAt = new Date('2040-01-10T18:00:00Z');
     await markRead(readAt);
+    const beforeQuiet = new Date('2026-02-01T12:00:00Z');
+    await trx('notifications').where({ id: raised.id }).update({ created_at: beforeQuiet });
     await trx('scheduled_services').where({ id: jan15Pest.id }).update({ window_start: '11:00', window_end: '12:00' });
     await runInner({ now });
     const [quiet] = await bells();
@@ -211,6 +218,7 @@ postgres('same-start visits check on Postgres', () => {
     expect(quiet.metadata.rungAt).toBe(rang.metadata.rungAt);
     expect(quiet.metadata.itemKeys).toEqual(['2040-01-22']);
     expect(quiet.done_at).toBeNull();
+    expect(new Date(quiet.created_at).toISOString()).toBe(beforeQuiet.toISOString());
 
     // 3b. A visit on the listed day is replaced (cancelled, the same service booked again at that
     // start): only the visits change (itemSetHash), and the bell updates them quietly.

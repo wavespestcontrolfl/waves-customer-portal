@@ -43,6 +43,8 @@ test('two visits at one start make one bell: who, when, the visit to move, the d
   expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-12-03&appointment=visit-b');
   expect(opts.detail).toBe('Dec 3 at 11 AM: Lawn Care Service and Pest Control Service.');
   expect(opts.refreshOnDedupe).toBe(true);
+  // A ring moves the bell to the top; notifyAdmin never bumps a quiet update.
+  expect(opts.bumpOnRefresh).toBe(true);
   expect(metadata).toEqual({
     customer_id: 'cust-1', first_date: '2026-12-03', day_count: 1, itemKeys: ['2026-12-03'], visit_ids: ['visit-a', 'visit-b'],
     itemSetHash: expect.stringMatching(/^[0-9a-f]{64}$/), area: 'Schedule', severity: 'needs-you', subject: { type: 'customer', id: 'cust-1' }, doneWhen: 'visits_start_apart', who: 'person',
